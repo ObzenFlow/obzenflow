@@ -1,2 +1,4 @@
-events.log
+.DS_Store
+*.log
 /target
+.claude

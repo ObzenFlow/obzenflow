@@ -4,15 +4,12 @@ use serde_json::Value;
 use ulid::Ulid;
 use chrono::{DateTime, Utc};
 use async_trait::async_trait;
-use tokio::sync::mpsc::{Receiver, Sender};
 use std::error::Error;
-use std::time::{Duration, Instant};
-use std::sync::{Arc, Mutex};
-use std::sync::atomic::{AtomicU64, Ordering};
+use crate::monitoring::Taxonomy;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChainEvent {
-    pub ulid: String,
+    pub ulid: Ulid,
     pub event_type: String,
     pub timestamp: DateTime<Utc>,
     pub payload: Value,
@@ -21,7 +18,7 @@ pub struct ChainEvent {
 impl ChainEvent {
     pub fn new(event_type: &str, payload: Value) -> Self {
         ChainEvent {
-            ulid: Ulid::new().to_string(),
+            ulid: Ulid::new(),
             event_type: event_type.to_string(),
             timestamp: Utc::now(),
             payload,
@@ -31,40 +28,38 @@ impl ChainEvent {
 
 pub type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
 
-/// Core trait for pipeline steps that process events
+/// Step type in the pipeline topology
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StepType {
+    /// Source: () → Events (generates/reads data, pushes downstream)
+    Source,
+    /// Stage: Events → Events (receives input, processes, pushes output)
+    Stage,
+    /// Sink: Events → () (receives input, persists/outputs, no downstream)
+    Sink,
+}
+
+/// Core trait for all pipeline steps (Sources, Stages, Sinks)
 #[async_trait]
-pub trait PipelineStep: Send + Sync {
-    /// Legacy batch processing (for backward compatibility)
+pub trait Step: Send + Sync {
+    /// The taxonomy this step uses for monitoring
+    /// Must be explicitly specified - no defaults!
+    type Taxonomy: Taxonomy;
+    
+    /// Get the taxonomy instance for this step
+    fn taxonomy(&self) -> &Self::Taxonomy;
+    
+    /// Get the metrics instance for this step
+    fn metrics(&self) -> &<Self::Taxonomy as Taxonomy>::Metrics;
+    
+    /// Indicate what type of step this is for proper runtime topology
+    fn step_type(&self) -> StepType {
+        StepType::Stage // Default to stage for backward compatibility
+    }
+    /// Process an event and produce zero or more output events
+    /// This is the ONLY processing method!
     fn handle(&self, event: ChainEvent) -> Vec<ChainEvent> {
         vec![event] // Default passthrough
-    }
-
-    /// Streaming interface - this is the new primary interface
-    async fn process_stream(
-        &mut self,
-        input: Receiver<ChainEvent>,
-        output: Sender<ChainEvent>,
-        metrics: StepMetrics,
-    ) -> Result<()> {
-        // Default implementation uses the batch interface
-        let mut input = input;
-        while let Some(event) = input.recv().await {
-            let start = Instant::now();
-            let results = self.handle(event);
-            let duration = start.elapsed();
-
-            metrics.record_processing_time(duration);
-            metrics.increment_processed(1);
-
-            for result in results {
-                if output.send(result).await.is_err() {
-                    metrics.increment_errors(1);
-                    return Err("Output channel closed".into());
-                }
-                metrics.increment_emitted(1);
-            }
-        }
-        Ok(())
     }
 
     /// Called before processing starts
@@ -76,88 +71,5 @@ pub trait PipelineStep: Send + Sync {
     async fn shutdown(&mut self) -> Result<()> {
         Ok(())
     }
-}
 
-/// Metrics collected per pipeline step
-#[derive(Clone)]
-pub struct StepMetrics {
-    name: String,
-    // We'll use atomic counters for lock-free updates
-    processed: Arc<AtomicU64>,
-    emitted: Arc<AtomicU64>,
-    errors: Arc<AtomicU64>,
-    processing_time_us: Arc<AtomicU64>,
-
-    // For percentile calculations
-    latencies: Arc<Mutex<hdrhistogram::Histogram<u64>>>,
-}
-
-impl StepMetrics {
-    pub fn new(name: impl Into<String>) -> Self {
-        Self {
-            name: name.into(),
-            processed: Arc::new(AtomicU64::new(0)),
-            emitted: Arc::new(AtomicU64::new(0)),
-            errors: Arc::new(AtomicU64::new(0)),
-            processing_time_us: Arc::new(AtomicU64::new(0)),
-            latencies: Arc::new(Mutex::new(
-                hdrhistogram::Histogram::new(3).unwrap()
-            )),
-        }
-    }
-
-    pub fn record_processing_time(&self, duration: Duration) {
-        let us = duration.as_micros() as u64;
-        self.processing_time_us.fetch_add(us, Ordering::Relaxed);
-
-        if let Ok(mut hist) = self.latencies.lock() {
-            let _ = hist.record(us);
-        }
-    }
-
-    pub fn increment_processed(&self, count: u64) {
-        self.processed.fetch_add(count, Ordering::Relaxed);
-    }
-
-    pub fn increment_emitted(&self, count: u64) {
-        self.emitted.fetch_add(count, Ordering::Relaxed);
-    }
-
-    pub fn increment_errors(&self, count: u64) {
-        self.errors.fetch_add(count, Ordering::Relaxed);
-    }
-
-    /// Get a snapshot of current metrics
-    pub fn snapshot(&self) -> MetricsSnapshot {
-        let latencies = self.latencies.lock().unwrap();
-
-        MetricsSnapshot {
-            name: self.name.clone(),
-            processed: self.processed.load(Ordering::Relaxed),
-            emitted: self.emitted.load(Ordering::Relaxed),
-            errors: self.errors.load(Ordering::Relaxed),
-            total_processing_time_us: self.processing_time_us.load(Ordering::Relaxed),
-            p50_latency_us: latencies.value_at_percentile(50.0),
-            p95_latency_us: latencies.value_at_percentile(95.0),
-            p99_latency_us: latencies.value_at_percentile(99.0),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct MetricsSnapshot {
-    pub name: String,
-    pub processed: u64,
-    pub emitted: u64,
-    pub errors: u64,
-    pub total_processing_time_us: u64,
-    pub p50_latency_us: u64,
-    pub p95_latency_us: u64,
-    pub p99_latency_us: u64,
-}
-
-impl MetricsSnapshot {
-    pub fn throughput(&self, duration: Duration) -> f64 {
-        self.processed as f64 / duration.as_secs_f64()
-    }
 }

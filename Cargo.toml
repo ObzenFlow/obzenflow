@@ -3,11 +3,12 @@ name = "flowstate_rs"
 version = "0.1.0"
 edition = "2021"
 
+
 [dependencies]
 # Core dependencies
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-ulid = "1.0"
+ulid = { version = "1.0", features = ["serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 
 # Async runtime
@@ -16,6 +17,7 @@ async-trait = "0.1"
 
 # Metrics and monitoring
 hdrhistogram = "7.5"
+thiserror = "1.0"
 
 # Optional metrics exporters
 prometheus = { version = "0.13", optional = true }
@@ -33,6 +35,10 @@ warp = { version = "0.3", optional = true }
 tokio-test = "0.4"
 proptest = "1.0"
 criterion = { version = "0.5", features = ["async_tokio"] }
+fastrand = "2.0"
+sysinfo = "0.29"
+tempfile = "3.8"
+futures = "0.3"
 
 [features]
 default = ["metrics-prometheus"]
@@ -43,3 +49,73 @@ full = ["metrics-prometheus", "metrics-statsd"]
 [profile.release]
 lto = true
 codegen-units = 1
+
+[[bench]]
+name = "per_event_latency"
+path = "bench/performance/per_event_latency.rs"
+harness = false
+
+[[bench]]
+name = "pipeline_execution"
+path = "bench/performance/pipeline_execution.rs"
+harness = false
+
+[[bench]]
+name = "pipeline_throughput"
+path = "bench/performance/pipeline_throughput.rs"
+harness = false
+
+[[bench]]
+name = "idle_cpu_usage"
+path = "bench/performance/idle_cpu_usage.rs"
+harness = false
+
+[[bench]]
+name = "per_event_latency_single"
+path = "bench/performance/per_event_latency_single.rs"
+harness = false
+
+[[bench]]
+name = "per_event_latency_3_stage"
+path = "bench/performance/per_event_latency_3_stage.rs"
+harness = false
+
+[[bench]]
+name = "per_event_latency_5_stage"
+path = "bench/performance/per_event_latency_5_stage.rs"
+harness = false
+
+[[bench]]
+name = "per_event_latency_1_stage"
+path = "bench/performance/per_event_latency_1_stage.rs"
+harness = false
+
+[[bench]]
+name = "per_event_latency_2_stage"
+path = "bench/performance/per_event_latency_2_stage.rs"
+harness = false
+
+[[bench]]
+name = "per_event_latency_4_stage"
+path = "bench/performance/per_event_latency_4_stage.rs"
+harness = false
+
+[[bench]]
+name = "per_event_latency_20_stage"
+path = "bench/performance/per_event_latency_20_stage.rs"
+harness = false
+
+[[bench]]
+name = "per_event_latency_100_stage"
+path = "bench/performance/per_event_latency_100_stage.rs"
+harness = false
+
+[[bench]]
+name = "tokio_worker_3_stage_experiment"
+path = "bench/performance/tokio_worker_3_stage_experiment.rs"
+harness = false
+
+[[bench]]
+name = "tokio_channel_benchmark"
+path = "bench/performance/tokio_channel_benchmark.rs"
+harness = false
