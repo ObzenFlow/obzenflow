@@ -199,109 +199,18 @@ macro_rules! flow {
         ( $src:expr, $src_tax:expr )
         $( |> ( $st:expr, $st_tax:expr ) )*
     } => {{
-        async {
-            use $crate::prelude::*;
-            use $crate::event_sourcing::{EventSourcedStage, FlowHandle};
-            use $crate::monitoring::{Taxonomy, TaxonomyMetrics};
-            use $crate::topology::{PipelineBuilder, StageId, PipelineTopology, PipelineLifecycle};
-            use tokio::task::JoinHandle;
-            use std::sync::Arc;
-            type FlowResult = $crate::step::Result<()>;
-            
-            let store = $store;
-            let _flow_taxonomy = stringify!($flow_tax);
-            
-            // Phase 1: Build pipeline topology with auto-generated names
-            let mut builder = PipelineBuilder::new();
-            let mut stage_ids = Vec::new();
-            
-            // Add source stage to topology (None = auto-generate name)
-            let src_id = builder.add_stage(None);
-            stage_ids.push(src_id);
-            
-            $(
-                let stage_id = builder.add_stage(None);
-                stage_ids.push(stage_id);
-                let _ = &$st; // Reference the stage to satisfy macro hygiene
-            )*
-            
-            // Build and validate topology
-            let topology = Arc::new(builder.build()
-                .map_err(|e| format!("Failed to build pipeline topology: {}", e))?);
-            
-            // Create pipeline lifecycle coordinator
-            let pipeline_lifecycle = Arc::new(PipelineLifecycle::new(topology.clone()));
-            
-            // Phase 2: Create event-sourced stages
-            let mut handles: Vec<JoinHandle<FlowResult>> = vec![];
-            
-            // Create source stage
-            {
-                let store_clone = Arc::clone(&store);
-                let topology_clone = Arc::clone(&topology);
-                let lifecycle_clone = Arc::clone(&pipeline_lifecycle);
-                
-                let monitored = $crate::stages::Monitor::step($src, $src_tax);
-                
-                // Get auto-generated name from topology
-                let src_name = topology_clone.stage_name(src_id)
-                    .ok_or("Source stage not found in topology")?
-                    .to_string();
-                
-                let mut event_stage = EventSourcedStage::builder()
-                    .with_step(monitored)
-                    .with_topology(src_id, src_name, topology_clone)
-                    .with_store(store_clone)
-                    .with_pipeline_lifecycle(lifecycle_clone)
-                    .build()
-                    .await?;
-                
-                let handle = tokio::spawn(async move {
-                    event_stage.run().await
-                });
-                
-                handles.push(handle);
-            }
-            
-            // Create remaining stages using collected stage IDs
-            let mut stage_id_iter = stage_ids.into_iter().skip(1); // Skip source ID
-            $(
-                {
-                    let store_clone = Arc::clone(&store);
-                    let topology_clone = Arc::clone(&topology);
-                    let lifecycle_clone = Arc::clone(&pipeline_lifecycle);
-                    
-                    // Get the stage ID that was assigned during topology building
-                    let stage_id = stage_id_iter.next()
-                        .ok_or("Stage ID iterator exhausted")?;
-                    
-                    // Get stage name from topology (for debugging only)
-                    let stage_name = topology.stage_name(stage_id)
-                        .ok_or("Stage not found in topology")?
-                        .to_string();
-                    
-                    let monitored = $crate::stages::Monitor::step($st, $st_tax);
-                    
-                    let mut event_stage = EventSourcedStage::builder()
-                        .with_step(monitored)
-                        .with_topology(stage_id, stage_name, topology_clone)
-                        .with_store(store_clone)
-                        .with_pipeline_lifecycle(lifecycle_clone)
-                        .build()
-                        .await?;
-                    
-                    let handle = tokio::spawn(async move {
-                        event_stage.run().await
-                    });
-                    
-                    handles.push(handle);
-                }
-            )*
-            
-            Ok::<FlowHandle, Box<dyn std::error::Error + Send + Sync>>(
-                FlowHandle::new(handles, pipeline_lifecycle)
-            )
-        }.await
+        // Count stages to generate names
+        let mut _stage_counter = 0;
+        
+        // Delegate to flow_internal! with generated names
+        $crate::flow_internal! {
+            store: $store,
+            flow_taxonomy: $flow_tax,
+            stages: [
+                ({_stage_counter += 1; format!("stage_{}", _stage_counter)}, $src, $src_tax)
+                $(, ({_stage_counter += 1; format!("stage_{}", _stage_counter)}, $st, $st_tax))*
+            ]
+        }
     }};
 }
 
