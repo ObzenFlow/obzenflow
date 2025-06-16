@@ -51,11 +51,6 @@ lto = true
 codegen-units = 1
 
 [[bench]]
-name = "per_event_latency"
-path = "bench/performance/per_event_latency.rs"
-harness = false
-
-[[bench]]
 name = "pipeline_execution"
 path = "bench/performance/pipeline_execution.rs"
 harness = false
@@ -71,8 +66,8 @@ path = "bench/performance/idle_cpu_usage.rs"
 harness = false
 
 [[bench]]
-name = "per_event_latency_single"
-path = "bench/performance/per_event_latency_single.rs"
+name = "per_event_latency_1_stage"
+path = "bench/performance/per_event_latency_1_stage.rs"
 harness = false
 
 [[bench]]
@@ -83,11 +78,6 @@ harness = false
 [[bench]]
 name = "per_event_latency_5_stage"
 path = "bench/performance/per_event_latency_5_stage.rs"
-harness = false
-
-[[bench]]
-name = "per_event_latency_1_stage"
-path = "bench/performance/per_event_latency_1_stage.rs"
 harness = false
 
 [[bench]]
