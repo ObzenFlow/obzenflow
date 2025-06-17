@@ -22,4 +22,4 @@ pub use reader::EventReader;
 pub use subscription::{EventSubscription, SubscriptionFilter, EventNotification};
 pub use writer_id::WriterId;
 pub use types::{EventEnvelope, IsolationMode, EventStoreConfig, RetentionPolicy};
-pub use store::EventStore;
+pub use store::{EventStore, EventStoreStatistics};

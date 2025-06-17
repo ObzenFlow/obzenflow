@@ -8,11 +8,9 @@
 use flowstate_rs::prelude::*;
 use flowstate_rs::flow;
 use serde_json::json;
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::collections::VecDeque;
-use tempfile::tempdir;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -43,18 +41,9 @@ async fn main() -> Result<()> {
     let neutral_count = Arc::new(AtomicU64::new(0));
     
     // Create temporary directory for event store
-    let temp_dir = tempdir()?;
-    let store_path = temp_dir.path().join("social_sentiment_events");
-    
-    // Create event store for the flow
-    let event_store = EventStore::new(EventStoreConfig {
-        path: store_path,
-        max_segment_size: 1024 * 1024, // 1MB segments
-    }).await?;
-    
     // HERE'S THE BEAUTIFUL DSL SYNTAX WITH EVENTSTORE!
     let handle = flow! {
-        store: event_store,
+        name: "social_sentiment",
         flow_taxonomy: GoldenSignals,
         ("post_generator" => SocialPostGenerator::new(sample_posts), RED)
         |> ("text_preprocessor" => TextPreprocessor::new(), USE)

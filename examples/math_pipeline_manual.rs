@@ -330,7 +330,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error + Send + Sy
     }
 
     // Create flow handle
-    let flow_handle = flowstate_rs::event_sourcing::FlowHandle::new(handles, lifecycle);
+    let flow_handle = flowstate_rs::event_sourcing::FlowHandle::new(handles, lifecycle, store);
 
     println!("\nPipeline running...");
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;

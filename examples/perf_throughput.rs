@@ -7,7 +7,7 @@
 //! cargo run --example perf_throughput
 
 use flowstate_rs::prelude::*;
-use flowstate_rs::monitoring::{GoldenSignals, RED, USE, Taxonomy};
+use flowstate_rs::monitoring::{RED, USE, Taxonomy};
 use flowstate_rs::flow;
 use serde_json::json;
 use std::sync::atomic::{AtomicU64, Ordering};

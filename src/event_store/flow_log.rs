@@ -203,6 +203,11 @@ impl FlowEventLog {
             .filter(|e| e.writer_id.stage_id() == stage_id)
             .collect())
     }
+    
+    /// Get the total number of events in the log
+    pub async fn total_events(&self) -> u64 {
+        self.index.read().await.len() as u64
+    }
 }
 
 impl Clone for FlowEventLog {

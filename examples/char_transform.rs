@@ -5,13 +5,9 @@
 
 use flowstate_rs::prelude::*;
 use flowstate_rs::flow;
-use flowstate_rs::event_types::EventType;
 use serde_json::json;
-use std::fs;
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU64, Ordering};
-use tempfile::tempdir;
 
 // ────────────────────────────────────────────────────────────────
 // SOURCE
@@ -139,24 +135,23 @@ impl Step for DigitWordStage {
 }
 
 // ────────────────────────────────────────────────────────────────
-// SINK – identical to previous version, but left here for completeness
-struct FileAssemblerSink {
+// SINK – collects output fragments into a string buffer
+struct TextCollectorSink {
     buf: Arc<Mutex<String>>,
-    out_path: PathBuf,
     metrics: <SAAFE as Taxonomy>::Metrics,
 }
 
-impl FileAssemblerSink {
-    fn new(out_path: PathBuf) -> (Self, Arc<Mutex<String>>) {
+impl TextCollectorSink {
+    fn new() -> (Self, Arc<Mutex<String>>) {
         let buf = Arc::new(Mutex::new(String::new()));
         (
-            Self { buf: buf.clone(), out_path, metrics: SAAFE::create_metrics("FileAssemblerSink") },
+            Self { buf: buf.clone(), metrics: SAAFE::create_metrics("TextCollectorSink") },
             buf,
         )
     }
 }
 
-impl Step for FileAssemblerSink {
+impl Step for TextCollectorSink {
     type Taxonomy = SAAFE;
     fn taxonomy(&self) -> &Self::Taxonomy { &SAAFE }
     fn metrics (&self) -> &<Self::Taxonomy as Taxonomy>::Metrics { &self.metrics }
@@ -180,21 +175,13 @@ async fn main() -> Result<()> {
     println!("🚀 FlowState RS - Character Transform Demo (newline & 2-stage)");
     println!("============================================================\n");
 
-    let temp_dir   = tempdir()?;
-    let store_path = temp_dir.path().join("char_transform_store");
-
-    let event_store = EventStore::new(EventStoreConfig {
-        path: store_path,
-        max_segment_size: 1024 * 1024,
-    }).await?;
-
-    let output_file          = temp_dir.path().join("output.txt");
-    let (sink, final_buffer) = FileAssemblerSink::new(output_file.clone());
+    // Create sink that collects output in memory
+    let (sink, final_buffer) = TextCollectorSink::new();
 
     println!("⏳ Initializing pipeline...");
 
     let handle = flow! {
-        store: event_store,
+        name: "char_transform",
         flow_taxonomy: GoldenSignals,
         ("source"   => TextCharSource::new(), RED)
         |> ("cap"   => CapStage::new(),       USE)
@@ -206,12 +193,10 @@ async fn main() -> Result<()> {
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
     handle.shutdown().await?;
 
-    println!("\n✅ Pipeline completed, writing output...\n");
+    println!("\n✅ Pipeline completed!\n");
 
     let result = final_buffer.lock().unwrap().clone();
-    fs::write(&output_file, &result)?;
-    println!("📄 Result written to: {}", output_file.display());
-    println!("\n🔍 Final text:\n{}", result);
+    println!("🔍 Final text:\n{}", result);
 
     Ok(())
 }

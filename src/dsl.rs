@@ -167,7 +167,7 @@ macro_rules! flow_internal {
             
             // Return a FlowHandle for graceful shutdown
             Ok::<FlowHandle, Box<dyn std::error::Error + Send + Sync>>(
-                FlowHandle::new(handles, pipeline_lifecycle)
+                FlowHandle::new(handles, pipeline_lifecycle, store)
             )
         }.await
     }};
@@ -175,7 +175,46 @@ macro_rules! flow_internal {
 
 #[macro_export]
 macro_rules! flow {
-    // EventStore-based flow with flow-level monitoring and named stages
+    // Flow with name (no explicit store) - uses EventStore::for_flow()
+    {
+        name: $flow_name:expr,
+        ( $src_name:literal => $src:expr, $src_tax:expr )
+        $( |> ( $st_name:literal => $st:expr, $st_tax:expr ) )*
+    } => {{
+        async {
+            let store = $crate::event_store::EventStore::for_flow($flow_name).await?;
+            $crate::flow_internal! {
+                store: store,
+                flow_taxonomy: $crate::monitoring::GoldenSignals,
+                stages: [
+                    ($src_name.to_string(), $src, $src_tax)
+                    $(, ($st_name.to_string(), $st, $st_tax))*
+                ]
+            }
+        }.await
+    }};
+    
+    // Flow with name and taxonomy
+    {
+        name: $flow_name:expr,
+        flow_taxonomy: $flow_tax:ty,
+        ( $src_name:literal => $src:expr, $src_tax:expr )
+        $( |> ( $st_name:literal => $st:expr, $st_tax:expr ) )*
+    } => {{
+        async {
+            let store = $crate::event_store::EventStore::for_flow($flow_name).await?;
+            $crate::flow_internal! {
+                store: store,
+                flow_taxonomy: $flow_tax,
+                stages: [
+                    ($src_name.to_string(), $src, $src_tax)
+                    $(, ($st_name.to_string(), $st, $st_tax))*
+                ]
+            }
+        }.await
+    }};
+    
+    // EventStore-based flow with flow-level monitoring and named stages (backward compat)
     {
         store: $store:expr,
         flow_taxonomy: $flow_tax:ty,
@@ -190,6 +229,27 @@ macro_rules! flow {
                 $(, ($st_name.to_string(), $st, $st_tax))*
             ]
         }
+    }};
+    
+    // Flow with name (auto-generated stage names)
+    {
+        name: $flow_name:expr,
+        ( $src:expr, $src_tax:expr )
+        $( |> ( $st:expr, $st_tax:expr ) )*
+    } => {{
+        async {
+            let store = $crate::event_store::EventStore::for_flow($flow_name).await?;
+            let mut _stage_counter = 0;
+            
+            $crate::flow_internal! {
+                store: store,
+                flow_taxonomy: $crate::monitoring::GoldenSignals,
+                stages: [
+                    ({_stage_counter += 1; format!("stage_{}", _stage_counter)}, $src, $src_tax)
+                    $(, ({_stage_counter += 1; format!("stage_{}", _stage_counter)}, $st, $st_tax))*
+                ]
+            }
+        }.await
     }};
     
     // EventStore-based flow with flow-level monitoring (auto-generated names)

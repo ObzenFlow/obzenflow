@@ -405,6 +405,8 @@ pub struct FlowHandle {
     lifecycle: Arc<PipelineLifecycle>,
     /// Track if shutdown has been called
     shutdown_called: Arc<std::sync::atomic::AtomicBool>,
+    /// Event store for statistics on shutdown
+    event_store: Arc<EventStore>,
 }
 
 impl FlowHandle {
@@ -412,11 +414,13 @@ impl FlowHandle {
     pub fn new(
         stage_handles: Vec<tokio::task::JoinHandle<Result<()>>>,
         lifecycle: Arc<PipelineLifecycle>,
+        event_store: Arc<EventStore>,
     ) -> Self {
         Self {
             stage_handles,
             lifecycle,
             shutdown_called: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            event_store,
         }
     }
 
@@ -445,6 +449,14 @@ impl FlowHandle {
             }
         }
 
+        // Print event store statistics before returning
+        let stats = self.event_store.get_statistics().await;
+        println!("\n📊 Event log summary:");
+        println!("   Location: {}", stats.path.display());
+        println!("   Segments: {}", stats.segment_count);
+        println!("   Total size: {:.2} MB", stats.total_size_bytes as f64 / (1024.0 * 1024.0));
+        println!("   Events written: {}", stats.event_count);
+        
         if errors.is_empty() {
             Ok(())
         } else {

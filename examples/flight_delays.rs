@@ -7,13 +7,10 @@
 
 use flowstate_rs::prelude::*;
 use flowstate_rs::flow;
-use flowstate_rs::event_types::EventType;
 use serde_json::json;
-use std::path::PathBuf;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use tempfile::tempdir;
 
 /// Source that generates flight data
 struct FlightDataSource {
@@ -234,21 +231,13 @@ async fn main() -> Result<()> {
     println!("FlowState RS - Flight Delay Analysis");
     println!("======================================");
 
-    let temp_dir = tempdir()?;
-    let store_path = temp_dir.path().join("flight_delays_store");
-    
-    let event_store = EventStore::new(EventStoreConfig {
-        path: store_path,
-        max_segment_size: 1024 * 1024,
-    }).await?;
-    
     let aggregator = CarrierAggregator::new();
     let stats = aggregator.carrier_stats.clone();
 
     println!("\nRunning delay analysis pipeline...");
 
     let handle = flow! {
-        store: event_store,
+        name: "flight_delays",
         flow_taxonomy: GoldenSignals,
         ("source" => FlightDataSource::new(), RED)
         |> ("validator" => FlightValidator::new(), USE)

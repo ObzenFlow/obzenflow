@@ -6,11 +6,9 @@
 use flowstate_rs::prelude::*;
 use flowstate_rs::flow;
 use serde_json::json;
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use chrono;
-use tempfile::tempdir;
 
 /// Generates realistic cryptocurrency market data
 struct CryptoMarketSource {
@@ -283,19 +281,11 @@ async fn main() -> Result<()> {
     println!("📊 Simulating cryptocurrency market...");
     println!("");
     
-    let temp_dir = tempdir()?;
-    let store_path = temp_dir.path().join("crypto_market_store");
-    
-    let event_store = EventStore::new(EventStoreConfig {
-        path: store_path,
-        max_segment_size: 1024 * 1024,
-    }).await?;
-    
     let (aggregator, stats) = MarketAggregator::new();
     
     // Run the flow
     let handle = flow! {
-        store: event_store,
+        name: "crypto_market",
         flow_taxonomy: GoldenSignals,
         ("market" => CryptoMarketSource::new(100), RED)  // 100 market events
         |> ("analyzer" => PriceAnalyzer::new(), GoldenSignals)

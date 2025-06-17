@@ -4,6 +4,7 @@ use crate::step::Result;
 use crate::event_store::constants::*;
 use crate::event_store::{EventEnvelope, EventWriter, EventReader, EventSubscription, SubscriptionFilter, EventNotification, WriterId};
 use crate::event_store::flow_log::FlowEventLog;
+use crate::event_types::new_flow_id;
 use crate::topology::StageId;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -11,6 +12,7 @@ use tokio::sync::{RwLock, mpsc};
 use std::collections::{HashMap, VecDeque};
 use std::time::Instant;
 use ulid::Ulid;
+use serde_json::json;
 
 /// Writer registry for tracking active writers
 /// RwLock is appropriate here because:
@@ -30,6 +32,15 @@ pub(crate) struct WriterInfo {
     pub worker_index: Option<u32>,
     pub created_at: Instant,
     pub semantics: StageSemantics,
+}
+
+/// Event store statistics for shutdown summary
+#[derive(Debug, Clone)]
+pub struct EventStoreStatistics {
+    pub segment_count: usize,
+    pub total_size_bytes: u64,
+    pub event_count: u64,
+    pub path: PathBuf,
 }
 
 /// Subscription management
@@ -109,27 +120,26 @@ impl EventStore {
         Self::new(EventStoreConfig::default()).await.expect("Failed to create default EventStore")
     }
     
-    /// Create EventStore for testing with automatic cleanup
+    /// Create EventStore for testing - uses target/test-flows/ directory
     pub async fn for_testing() -> Arc<Self> {
         let test_id = ulid::Ulid::new().to_string();
-        let store_path = std::env::temp_dir()
-            .join("flowstate_tests")
-            .join(&test_id);
+        let store_path = PathBuf::from("target/test-flows")
+            .join(&test_id)
+            .join("event_store");
         
         // Ensure store directory exists
-        std::fs::create_dir_all(&store_path).ok();
+        std::fs::create_dir_all(&store_path).expect("Failed to create test event store directory");
         
         // Create flow log
         let flow_id = test_id.clone();
         let flow_log = Arc::new(FlowEventLog::new(store_path.clone(), &flow_id).await.expect("Failed to create test flow log"));
         
+        println!("📁 Test event log: {}", store_path.display());
+        
         let store = Arc::new(Self {
             store_path: store_path.clone(),
             isolation_mode: IsolationMode::Isolated,
-            retention_policy: RetentionPolicy {
-                auto_cleanup: true,
-                ..Default::default()
-            },
+            retention_policy: RetentionPolicy::default(), // No auto-cleanup!
             writer_registry: Arc::new(RwLock::new(WriterRegistry {
                 writers: HashMap::new(),
                 stage_workers: HashMap::new(),
@@ -142,6 +152,37 @@ impl EventStore {
         store.clone().spawn_cleanup_task();
         
         store
+    }
+    
+    /// Create EventStore for a named flow
+    /// Automatically creates event log in target/flows/{flow_name}_{ulid}/event_store/
+    pub async fn for_flow(flow_name: &str) -> Result<Arc<Self>> {
+        let flow_id = new_flow_id(flow_name);
+        let flow_dir = PathBuf::from("target/flows").join(&flow_id);
+        let store_path = flow_dir.join("event_store");
+        
+        // Create event store directory
+        std::fs::create_dir_all(&store_path)?;
+        
+        // Save event store metadata
+        let metadata = json!({
+            "flow_id": flow_id,
+            "flow_name": flow_name,
+            "started_at": chrono::Utc::now().to_rfc3339(),
+            "event_store_version": "1.0"
+        });
+        std::fs::write(
+            store_path.join("metadata.json"), 
+            serde_json::to_string_pretty(&metadata)?
+        )?;
+        
+        println!("📁 Event log: {}", store_path.display());
+        
+        // Create EventStore - it will NEVER auto-delete
+        Self::new(EventStoreConfig {
+            path: store_path,
+            max_segment_size: 10 * 1024 * 1024, // 10MB segments
+        }).await
     }
     
     /// Create a writer for a single-worker stage
@@ -187,6 +228,39 @@ impl EventStore {
     /// Create a reader
     pub fn reader(&self) -> EventReader {
         EventReader::new(self.flow_log.clone())
+    }
+    
+    /// Get the event store path
+    pub fn path(&self) -> &PathBuf {
+        &self.store_path
+    }
+    
+    /// Get event store statistics for shutdown summary
+    pub async fn get_statistics(&self) -> EventStoreStatistics {
+        // Get segment files
+        let mut segment_count = 0;
+        let mut total_size = 0u64;
+        
+        if let Ok(entries) = std::fs::read_dir(&self.store_path) {
+            for entry in entries.flatten() {
+                if let Ok(metadata) = entry.metadata() {
+                    if metadata.is_file() && entry.path().extension().map_or(false, |ext| ext == "log") {
+                        segment_count += 1;
+                        total_size += metadata.len();
+                    }
+                }
+            }
+        }
+        
+        // Get event count from flow log
+        let event_count = self.flow_log.total_events().await;
+        
+        EventStoreStatistics {
+            segment_count,
+            total_size_bytes: total_size,
+            event_count,
+            path: self.store_path.clone(),
+        }
     }
     
     /// Get current writer count for a stage

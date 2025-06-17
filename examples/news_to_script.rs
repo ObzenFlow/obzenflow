@@ -8,11 +8,9 @@
 use flowstate_rs::prelude::*;
 use flowstate_rs::{flow, event_sourcing::FlowHandle};
 use serde_json::json;
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use chrono;
-use tempfile::tempdir;
 
 /// Source that generates news items
 struct NewsSource {
@@ -345,21 +343,13 @@ async fn main() -> Result<()> {
     println!("========================================");
     println!("📰 Creating sample news data...");
     
-    let temp_dir = tempdir()?;
-    let store_path = temp_dir.path().join("news_to_script_store");
-    
-    let event_store = EventStore::new(EventStoreConfig {
-        path: store_path,
-        max_segment_size: 1024 * 1024,
-    }).await?;
-    
     let (sink, scripts) = ScriptCollectorSink::new();
     
     println!("\n🎬 Running news-to-script pipeline...");
     
     // HERE'S THE BEAUTIFUL DSL SYNTAX! 🎉
     let handle: FlowHandle = flow! {
-        store: event_store,
+        name: "news_to_script",
         flow_taxonomy: GoldenSignals,
         ("news" => NewsSource::new(), RED)
         |> ("extractor" => ContentExtractor::new(), USE) 
