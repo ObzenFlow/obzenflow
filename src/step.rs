@@ -1,30 +1,8 @@
 // src/step.rs
-use serde::{Serialize, Deserialize};
-use serde_json::Value;
-use ulid::Ulid;
-use chrono::{DateTime, Utc};
 use async_trait::async_trait;
 use std::error::Error;
+pub use crate::chain_event::ChainEvent;
 use crate::monitoring::Taxonomy;
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ChainEvent {
-    pub ulid: Ulid,
-    pub event_type: String,
-    pub timestamp: DateTime<Utc>,
-    pub payload: Value,
-}
-
-impl ChainEvent {
-    pub fn new(event_type: &str, payload: Value) -> Self {
-        ChainEvent {
-            ulid: Ulid::new(),
-            event_type: event_type.to_string(),
-            timestamp: Utc::now(),
-            payload,
-        }
-    }
-}
 
 pub type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
 

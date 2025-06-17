@@ -1,4 +1,6 @@
 // src/lib.rs
+pub mod event_types;
+pub mod chain_event;
 pub mod step;
 pub mod monitoring;
 pub mod stages;
@@ -16,7 +18,8 @@ pub mod dsl;
 
 // Re-export commonly used types
 pub mod prelude {
-    pub use crate::step::{ChainEvent, Step, StepType, Result};
+    pub use crate::chain_event::ChainEvent;
+    pub use crate::step::{Step, StepType, Result};
     pub use crate::monitoring::{Taxonomy, TaxonomyMetrics, RED, USE, GoldenSignals, SAAFE};
     pub use crate::stages::{Source, Stage, Sink, monitored::Monitor};
     pub use crate::event_store::{EventStore, EventStoreConfig};

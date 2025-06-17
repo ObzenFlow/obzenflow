@@ -134,6 +134,50 @@ impl PipelineTopology {
             .collect()
     }
     
+    /// Get flow name (derived from source stage if single source)
+    pub fn flow_name(&self) -> String {
+        let sources = self.source_stages();
+        if sources.len() == 1 {
+            if let Some(stage_info) = self.stages.get(&sources[0]) {
+                return format!("{}_flow", stage_info.name);
+            }
+        }
+        "multi_source_flow".to_string()
+    }
+    
+    /// Get flow ID (unique identifier for this flow instance)
+    pub fn flow_id(&self) -> crate::event_types::FlowId {
+        use crate::event_types::FlowId;
+        // Generate flow ID from topology structure
+        // In production, this would be set during flow construction
+        let flow_name = self.flow_name();
+        crate::event_types::new_flow_id(&flow_name)
+    }
+    
+    /// Get source stage name (assumes single source)
+    pub fn source_stage_name(&self) -> crate::event_types::StageName {
+        use crate::event_types::StageName;
+        let sources = self.source_stages();
+        if sources.len() == 1 {
+            if let Some(stage_info) = self.stages.get(&sources[0]) {
+                return stage_info.name.clone();
+            }
+        }
+        "unknown_source".to_string()
+    }
+    
+    /// Get sink stage name (assumes single sink)
+    pub fn sink_stage_name(&self) -> crate::event_types::StageName {
+        use crate::event_types::StageName;
+        let sinks = self.sink_stages();
+        if sinks.len() == 1 {
+            if let Some(stage_info) = self.stages.get(&sinks[0]) {
+                return stage_info.name.clone();
+            }
+        }
+        "unknown_sink".to_string()
+    }
+    
     /// Get topology metrics for debugging and optimization
     pub fn metrics(&self) -> TopologyMetrics {
         TopologyMetrics {

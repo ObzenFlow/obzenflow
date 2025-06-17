@@ -4,7 +4,8 @@
 //! AI providers without needing domain-specific implementations.
 
 use super::Transform;
-use crate::step::{ChainEvent, Result};
+use crate::chain_event::ChainEvent;
+use crate::step::Result;
 use std::collections::HashMap;
 use serde_json::Value;
 
@@ -253,7 +254,7 @@ impl AsyncLLMTransform {
 // Implement Stage for LLMTransform
 #[async_trait::async_trait]
 impl crate::stages::Stage for LLMTransform {
-    fn handle(&self, mut event: crate::step::ChainEvent) -> Vec<crate::step::ChainEvent> {
+    fn handle(&self, mut event: crate::chain_event::ChainEvent) -> Vec<crate::chain_event::ChainEvent> {
         // For now, just pass through the event with a placeholder transformation
         // In a real implementation, this would call the LLM API
         event.payload["llm_processed"] = serde_json::json!(true);

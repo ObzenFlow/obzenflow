@@ -53,7 +53,8 @@
 //! - `DatabaseSink` for relational database storage
 //! - `ApiSink` for external API integration
 
-use crate::step::{ChainEvent, Result};
+use crate::chain_event::ChainEvent;
+use crate::step::Result;
 use async_trait::async_trait;
 
 // Submodules

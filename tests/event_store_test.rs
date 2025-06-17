@@ -22,7 +22,7 @@ async fn test_event_store_basic_operations() {
     
     assert_eq!(envelope.writer_id.stage_id(), stage_id);
     assert_eq!(envelope.sequence, 1);
-    assert_eq!(envelope.event.event_type, "TestEvent");
+    assert!(envelope.event.event_type == "TestEvent");
     
     // Create a reader
     let reader = store.reader();
@@ -30,7 +30,7 @@ async fn test_event_store_basic_operations() {
     // Read all events
     let events = reader.read_causal_order().await.unwrap();
     assert_eq!(events.len(), 1);
-    assert_eq!(events[0].event.event_type, "TestEvent");
+    assert!(events[0].event.event_type == "TestEvent");
 }
 
 #[tokio::test]

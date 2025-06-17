@@ -61,7 +61,8 @@
 //! }
 //! ```
 
-use crate::step::{ChainEvent, Result};
+use crate::chain_event::ChainEvent;
+use crate::step::Result;
 use async_trait::async_trait;
 use std::collections::HashMap;
 use chrono::{DateTime, Utc};

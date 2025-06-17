@@ -7,6 +7,7 @@
 
 use flowstate_rs::prelude::*;
 use flowstate_rs::flow;
+use flowstate_rs::event_types::EventType;
 use serde_json::json;
 use std::path::PathBuf;
 use std::collections::HashMap;

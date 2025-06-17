@@ -2,7 +2,8 @@
 //! 
 //! Provides optimal sequential writes and natural event ordering
 
-use crate::step::{Result, ChainEvent};
+use crate::chain_event::ChainEvent;
+use crate::step::Result;
 use crate::event_store::{EventEnvelope, VectorClock, WriterId};
 use crate::topology::StageId;
 use std::path::PathBuf;

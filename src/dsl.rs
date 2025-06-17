@@ -224,7 +224,8 @@ macro_rules! count_stages {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::step::{Step, StepType, ChainEvent};
+    use crate::step::{Step, StepType};
+    use crate::chain_event::ChainEvent;
     use crate::monitoring::{RED, Taxonomy};
     use serde_json::json;
     

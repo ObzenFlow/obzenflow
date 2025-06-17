@@ -4,7 +4,8 @@
 //! without needing domain-specific implementations.
 
 use super::{ApiSink, ApiSinkConfig};
-use crate::step::{ChainEvent, Result, StepType};
+use crate::chain_event::ChainEvent;
+use crate::step::{Result, StepType};
 use crate::stages::Sink;
 use async_trait::async_trait;
 use std::collections::HashMap;
@@ -220,8 +221,8 @@ impl PayloadFormatter for JsonFormatter {
         // Add metadata if requested
         if self.include_metadata {
             payload["ulid"] = Value::String(event.ulid.to_string());
-            payload["event_type"] = Value::String(event.event_type.clone());
-            payload["timestamp"] = Value::String(event.timestamp.to_rfc3339());
+            payload["event_type"] = serde_json::to_value(&event.event_type).unwrap();
+            payload["event_time_ms"] = Value::Number(serde_json::Number::from(event.processing_info.event_time_ms));
         }
         
         // Add custom fields

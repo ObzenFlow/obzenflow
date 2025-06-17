@@ -1,6 +1,7 @@
 // tests/advanced_tests.rs
 use flowstate_rs::prelude::*;
 use flowstate_rs::flow;
+use flowstate_rs::event_types::EventType;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::path::PathBuf;

@@ -16,7 +16,7 @@
 //! 
 //! Each category provides traits that make it easy to add new implementations.
 
-use crate::step::{ChainEvent};
+use crate::chain_event::ChainEvent;
 use tokio::time::{Duration, Instant};
 use std::collections::VecDeque;
 use std::future::Future;

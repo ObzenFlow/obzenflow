@@ -313,7 +313,7 @@ async fn test_event_log_shows_exact_transformations() -> Result<()> {
     
     // Verify the transformation chain for each input
     for (i, event) in events.iter().enumerate() {
-        assert_eq!(event.event_type, "Validated");
+        assert!(event.event_type == "Validated");
         
         let final_value = event.payload["final_value"].as_u64().unwrap();
         let expected = ((i as u64 * 2) + 10).pow(2);

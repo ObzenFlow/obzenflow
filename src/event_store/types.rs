@@ -1,6 +1,6 @@
 //! Common types for the event store module
 
-use crate::step::ChainEvent;
+use crate::chain_event::ChainEvent;
 use crate::event_store::{VectorClock, WriterId};
 use chrono::{DateTime, Utc};
 use serde::{Serialize, Deserialize};

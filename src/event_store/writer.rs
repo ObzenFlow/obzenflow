@@ -1,4 +1,5 @@
-use crate::step::{ChainEvent, Result};
+use crate::chain_event::ChainEvent;
+use crate::step::Result;
 use crate::event_store::{EventEnvelope, EventStore, WriterId};
 use crate::event_store::flow_log::FlowEventLog;
 use std::sync::{Arc, Weak};

@@ -31,7 +31,7 @@
 //! - `Rag` for context retrieval  
 //! - `Generator` for content creation
 
-use crate::step::ChainEvent;
+use crate::chain_event::ChainEvent;
 use std::collections::HashMap;
 
 // Submodules

@@ -1,4 +1,5 @@
-use crate::step::{ChainEvent, StepType};
+use crate::chain_event::ChainEvent;
+use crate::step::StepType;
 
 /// Base trait for stages
 /// With EventStore, all stages just implement Step trait

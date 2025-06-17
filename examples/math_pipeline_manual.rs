@@ -1,6 +1,7 @@
 use flowstate_rs::prelude::*;
 use flowstate_rs::monitoring::{RED, USE, SAAFE, Taxonomy};
 use flowstate_rs::step::{Step, StepType, ChainEvent};
+use flowstate_rs::event_types::EventType;
 use flowstate_rs::event_sourcing::EventSourcedStage;
 use flowstate_rs::topology::{PipelineBuilder, PipelineLifecycle};
 use flowstate_rs::stages::Monitor;

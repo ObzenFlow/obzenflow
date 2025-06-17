@@ -1,4 +1,5 @@
-use crate::step::{Step, ChainEvent, StepType, Result};
+use crate::chain_event::ChainEvent;
+use crate::step::{Step, StepType, Result};
 use crate::monitoring::Taxonomy;
 use async_trait::async_trait;
 use std::marker::PhantomData;

@@ -9,8 +9,8 @@
 
 use flowstate_rs::prelude::*;
 use flowstate_rs::flow;
+use flowstate_rs::event_types::EventType;
 use serde_json::json;
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::time::Duration;
