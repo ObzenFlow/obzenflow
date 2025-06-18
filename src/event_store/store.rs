@@ -328,7 +328,6 @@ impl EventStore {
                     let notification = EventNotification {
                         event_id: envelope.event.ulid,
                         stage_id,
-                        sequence: envelope.sequence,
                     };
                     
                     // Try to send notification

@@ -1,6 +1,6 @@
 use crate::chain_event::ChainEvent;
 use crate::step::Result;
-use crate::event_store::{EventEnvelope, EventStore, WriterId};
+use crate::event_store::{EventEnvelope, EventStore, WriterId, VectorClock};
 use crate::event_store::flow_log::FlowEventLog;
 use std::sync::{Arc, Weak};
 
@@ -9,8 +9,8 @@ use std::sync::{Arc, Weak};
 pub struct EventWriter {
     /// Stage/writer ID
     writer_id: WriterId,
-    /// Local sequence counter - not shared since each writer is single-threaded
-    next_sequence: u64,
+    /// Last vector clock used by this writer - ensures monotonic incrementing
+    last_vector_clock: VectorClock,
     /// Reference to the shared flow log
     flow_log: Arc<FlowEventLog>,
     /// Weak reference to EventStore for notifications
@@ -21,7 +21,7 @@ impl EventWriter {
     pub(crate) fn new(writer_id: WriterId, flow_log: Arc<FlowEventLog>, store: Weak<EventStore>) -> Self {
         Self {
             writer_id,
-            next_sequence: 1,
+            last_vector_clock: VectorClock::new(),
             flow_log,
             store,
         }
@@ -39,12 +39,17 @@ impl EventWriter {
         event: ChainEvent,
         parent: Option<&EventEnvelope>
     ) -> Result<EventEnvelope> {
-        // Use and increment local sequence
-        let sequence = self.next_sequence;
-        self.next_sequence += 1;
+        // Append to the shared flow log, passing our last vector clock
+        let envelope = self.flow_log.append(
+            &self.writer_id, 
+            event.clone(), 
+            parent,
+            &self.last_vector_clock
+        ).await?;
         
-        // Append to the shared flow log
-        let envelope = self.flow_log.append(&self.writer_id, sequence, event.clone(), parent).await?;
+        // Update our last vector clock to maintain state
+        self.last_vector_clock = envelope.vector_clock.clone();
+        
         tracing::debug!("Writer {:?} appended event {} type '{}'", self.writer_id, envelope.event.ulid, event.event_type);
         
         // Notify subscribers inline - try_send is non-blocking
@@ -63,8 +68,4 @@ impl EventWriter {
         &self.writer_id
     }
     
-    /// Get the last sequence number written by this writer
-    pub fn last_sequence(&self) -> u64 {
-        self.next_sequence - 1
-    }
 }

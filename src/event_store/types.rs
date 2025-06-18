@@ -9,8 +9,6 @@ use std::path::PathBuf;
 /// Event envelope with vector clock for causal ordering
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EventEnvelope {
-    /// Sequence number within writer's segment
-    pub sequence: u64,
     /// Writer that created this event
     #[serde(serialize_with = "serialize_writer_id", deserialize_with = "deserialize_writer_id")]
     pub writer_id: WriterId,

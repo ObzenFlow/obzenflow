@@ -31,7 +31,6 @@ pub struct EventSubscription {
 pub struct EventNotification {
     pub event_id: Ulid,
     pub stage_id: StageId,
-    pub sequence: u64,
 }
 
 impl EventSubscription {

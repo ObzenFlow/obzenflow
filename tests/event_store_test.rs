@@ -21,7 +21,6 @@ async fn test_event_store_basic_operations() {
     let envelope = writer.append(event.clone(), None).await.unwrap();
     
     assert_eq!(envelope.writer_id.stage_id(), stage_id);
-    assert_eq!(envelope.sequence, 1);
     assert!(envelope.event.event_type == "TestEvent");
     
     // Create a reader

@@ -22,7 +22,6 @@ use std::io::SeekFrom;
 #[derive(Debug, Serialize, Deserialize)]
 struct LogRecord {
     event_id: Ulid,
-    sequence: u64,
     writer_id: String,  // Keep as string for serialization compatibility
     vector_clock: VectorClock,
     timestamp: DateTime<Utc>,
@@ -64,21 +63,23 @@ impl FlowEventLog {
     
     /// Append an event from a specific writer
     /// Each writer opens its own file handle - no shared state!
-    pub async fn append(&self, writer_id: &WriterId, sequence: u64, event: ChainEvent, parent: Option<&EventEnvelope>) -> Result<EventEnvelope> {
+    pub async fn append(&self, writer_id: &WriterId, event: ChainEvent, parent: Option<&EventEnvelope>, last_vector_clock: &VectorClock) -> Result<EventEnvelope> {
         // Create vector clock
         let vector_clock = if let Some(parent) = parent {
-            let mut clock = parent.vector_clock.clone();
+            // Start with the writer's last clock to preserve our component
+            let mut clock = last_vector_clock.clone();
+            // Update with parent's clock (this will merge and increment)
             clock.update(writer_id, &parent.vector_clock);
             clock
         } else {
-            let mut clock = VectorClock::new();
+            // Use the writer's last vector clock and increment
+            let mut clock = last_vector_clock.clone();
             clock.tick(writer_id);
             clock
         };
         
         // Create envelope
         let envelope = EventEnvelope {
-            sequence,
             writer_id: writer_id.clone(),
             vector_clock: vector_clock.clone(),
             timestamp: Utc::now(),
@@ -88,7 +89,6 @@ impl FlowEventLog {
         // Create log record
         let record = LogRecord {
             event_id: event.ulid,
-            sequence,
             writer_id: writer_id.to_string(),  // String for serialization
             vector_clock,
             timestamp: envelope.timestamp,
@@ -154,7 +154,6 @@ impl FlowEventLog {
             let writer_id = WriterId::from_string(&record.writer_id)
                 .ok_or_else(|| format!("Invalid writer ID in log: {}", record.writer_id))?;
             Ok(Some(EventEnvelope {
-                sequence: record.sequence,
                 writer_id,
                 vector_clock: record.vector_clock,
                 timestamp: record.timestamp,
@@ -184,7 +183,6 @@ impl FlowEventLog {
                 let writer_id = WriterId::from_string(&record.writer_id)
                     .ok_or_else(|| format!("Invalid writer ID in log: {}", record.writer_id))?;
                 events.push(EventEnvelope {
-                    sequence: record.sequence,
                     writer_id,
                     vector_clock: record.vector_clock,
                     timestamp: record.timestamp,
