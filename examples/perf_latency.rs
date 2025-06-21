@@ -28,11 +28,9 @@ struct TimestampedSource {
 }
 
 impl Step for TimestampedSource {
-    type Taxonomy = RED;
-    
-    fn taxonomy(&self) -> &Self::Taxonomy { &RED }
-    fn metrics(&self) -> &<Self::Taxonomy as flowstate_rs::monitoring::Taxonomy>::Metrics { &self.metrics }
-    fn step_type(&self) -> StepType { StepType::Source }
+    fn step_type(&self) -> StepType {
+        StepType::Source
+    }
     
     fn handle(&self, _event: ChainEvent) -> Vec<ChainEvent> {
         if !self.running.load(Ordering::Relaxed) {
@@ -71,25 +69,20 @@ struct TimestampedSink {
 }
 
 impl Step for TimestampedSink {
-    type Taxonomy = RED;
-    
-    fn taxonomy(&self) -> &Self::Taxonomy { &RED }
-    fn metrics(&self) -> &<Self::Taxonomy as flowstate_rs::monitoring::Taxonomy>::Metrics { &self.metrics }
-    fn step_type(&self) -> StepType { StepType::Sink }
+    fn step_type(&self) -> StepType {
+        StepType::Sink
+    }
     
     fn handle(&self, event: ChainEvent) -> Vec<ChainEvent> {
         if let Some(emit_time_nanos) = event.payload.get("emit_time_nanos").and_then(|v| v.as_u64()) {
-            // Get current time with same method as source
+            // Calculate latency from embedded timestamp
             let receive_time_nanos = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_nanos() as u64;
             
-            // Calculate latency
             if receive_time_nanos > emit_time_nanos {
-                let latency_nanos = receive_time_nanos - emit_time_nanos;
-                let latency = Duration::from_nanos(latency_nanos);
-                
+                let latency = Duration::from_nanos(receive_time_nanos - emit_time_nanos);
                 let latencies = self.latencies.clone();
                 tokio::spawn(async move {
                     latencies.lock().await.push(latency);
@@ -159,8 +152,8 @@ async fn main() -> flowstate_rs::step::Result<()> {
     let handle = flow! {
         store: store,
         flow_taxonomy: GoldenSignals,
-        ("source" => source, RED)
-        |> ("sink" => sink, RED)
+        ("source" => source, [RED::monitoring()])
+        |> ("sink" => sink, [RED::monitoring()])
     }?;
     
     // Allow pipeline to initialize

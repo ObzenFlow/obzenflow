@@ -1,40 +1,27 @@
 use flowstate_rs::prelude::*;
-use flowstate_rs::monitoring::{RED, USE, SAAFE, Taxonomy};
+use flowstate_rs::monitoring::{RED, USE, SAAFE};
 use flowstate_rs::step::{Step, StepType, ChainEvent};
-use flowstate_rs::event_types::EventType;
 use flowstate_rs::event_sourcing::EventSourcedStage;
 use flowstate_rs::topology::{PipelineBuilder, PipelineLifecycle};
-use flowstate_rs::stages::Monitor;
+use flowstate_rs::middleware::{StepExt, MonitoringMiddleware};
 use serde_json::json;
 use std::sync::Arc;
 use std::path::PathBuf;
 
 // Source: Emits 1
 struct NumberSource {
-    metrics: <RED as Taxonomy>::Metrics,
     count: std::sync::atomic::AtomicU32,
 }
 
 impl NumberSource {
     fn new() -> Self {
         Self {
-            metrics: RED::create_metrics("number_source"),
             count: std::sync::atomic::AtomicU32::new(0),
         }
     }
 }
 
 impl Step for NumberSource {
-    type Taxonomy = RED;
-    
-    fn taxonomy(&self) -> &Self::Taxonomy {
-        &RED
-    }
-    
-    fn metrics(&self) -> &<Self::Taxonomy as Taxonomy>::Metrics {
-        &self.metrics
-    }
-    
     fn step_type(&self) -> StepType {
         StepType::Source
     }
@@ -51,29 +38,15 @@ impl Step for NumberSource {
 }
 
 // Stage 1: Doubles the value
-struct Doubler {
-    metrics: <USE as Taxonomy>::Metrics,
-}
+struct Doubler;
 
 impl Doubler {
     fn new() -> Self {
-        Self {
-            metrics: USE::create_metrics("doubler"),
-        }
+        Self
     }
 }
 
 impl Step for Doubler {
-    type Taxonomy = USE;
-    
-    fn taxonomy(&self) -> &Self::Taxonomy {
-        &USE
-    }
-    
-    fn metrics(&self) -> &<Self::Taxonomy as Taxonomy>::Metrics {
-        &self.metrics
-    }
-    
     fn step_type(&self) -> StepType {
         StepType::Stage
     }
@@ -91,29 +64,15 @@ impl Step for Doubler {
 }
 
 // Stage 2: Adds 1
-struct Incrementer {
-    metrics: <USE as Taxonomy>::Metrics,
-}
+struct Incrementer;
 
 impl Incrementer {
     fn new() -> Self {
-        Self {
-            metrics: USE::create_metrics("incrementer"),
-        }
+        Self
     }
 }
 
 impl Step for Incrementer {
-    type Taxonomy = USE;
-    
-    fn taxonomy(&self) -> &Self::Taxonomy {
-        &USE
-    }
-    
-    fn metrics(&self) -> &<Self::Taxonomy as Taxonomy>::Metrics {
-        &self.metrics
-    }
-    
     fn step_type(&self) -> StepType {
         StepType::Stage
     }
@@ -131,29 +90,15 @@ impl Step for Incrementer {
 }
 
 // Stage 3: Doubles again
-struct FinalDoubler {
-    metrics: <SAAFE as Taxonomy>::Metrics,
-}
+struct FinalDoubler;
 
 impl FinalDoubler {
     fn new() -> Self {
-        Self {
-            metrics: SAAFE::create_metrics("final_doubler"),
-        }
+        Self
     }
 }
 
 impl Step for FinalDoubler {
-    type Taxonomy = SAAFE;
-    
-    fn taxonomy(&self) -> &Self::Taxonomy {
-        &SAAFE
-    }
-    
-    fn metrics(&self) -> &<Self::Taxonomy as Taxonomy>::Metrics {
-        &self.metrics
-    }
-    
     fn step_type(&self) -> StepType {
         StepType::Stage
     }
@@ -171,29 +116,15 @@ impl Step for FinalDoubler {
 }
 
 // Sink: Prints final result
-struct ResultSink {
-    metrics: <RED as Taxonomy>::Metrics,
-}
+struct ResultSink;
 
 impl ResultSink {
     fn new() -> Self {
-        Self {
-            metrics: RED::create_metrics("result_sink"),
-        }
+        Self
     }
 }
 
 impl Step for ResultSink {
-    type Taxonomy = RED;
-    
-    fn taxonomy(&self) -> &Self::Taxonomy {
-        &RED
-    }
-    
-    fn metrics(&self) -> &<Self::Taxonomy as Taxonomy>::Metrics {
-        &self.metrics
-    }
-    
     fn step_type(&self) -> StepType {
         StepType::Sink
     }
@@ -246,7 +177,10 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error + Send + Sy
 
     // Source
     {
-        let monitored = Monitor::step(NumberSource::new(), RED);
+        let monitored = NumberSource::new()
+            .middleware()
+            .with(MonitoringMiddleware::<RED>::new("source"))
+            .build();
         let mut source = EventSourcedStage::builder()
             .with_step(monitored)
             .with_topology(source_id, "source".to_string(), topology.clone())
@@ -263,7 +197,10 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error + Send + Sy
 
     // Doubler
     {
-        let monitored = Monitor::step(Doubler::new(), USE);
+        let monitored = Doubler::new()
+            .middleware()
+            .with(MonitoringMiddleware::<USE>::new("doubler"))
+            .build();
         let mut doubler = EventSourcedStage::builder()
             .with_step(monitored)
             .with_topology(doubler_id, "doubler".to_string(), topology.clone())
@@ -280,7 +217,10 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error + Send + Sy
 
     // Incrementer
     {
-        let monitored = Monitor::step(Incrementer::new(), USE);
+        let monitored = Incrementer::new()
+            .middleware()
+            .with(MonitoringMiddleware::<USE>::new("incrementer"))
+            .build();
         let mut incrementer = EventSourcedStage::builder()
             .with_step(monitored)
             .with_topology(incrementer_id, "incrementer".to_string(), topology.clone())
@@ -297,7 +237,10 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error + Send + Sy
 
     // Final Doubler
     {
-        let monitored = Monitor::step(FinalDoubler::new(), SAAFE);
+        let monitored = FinalDoubler::new()
+            .middleware()
+            .with(MonitoringMiddleware::<SAAFE>::new("final_doubler"))
+            .build();
         let mut final_doubler = EventSourcedStage::builder()
             .with_step(monitored)
             .with_topology(final_doubler_id, "final_doubler".to_string(), topology.clone())
@@ -314,7 +257,10 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error + Send + Sy
 
     // Sink
     {
-        let monitored = Monitor::step(ResultSink::new(), RED);
+        let monitored = ResultSink::new()
+            .middleware()
+            .with(MonitoringMiddleware::<RED>::new("sink"))
+            .build();
         let mut sink = EventSourcedStage::builder()
             .with_step(monitored)
             .with_topology(sink_id, "sink".to_string(), topology.clone())

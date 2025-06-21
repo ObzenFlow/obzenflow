@@ -5,20 +5,18 @@
 
 use flowstate_rs::prelude::*;
 use flowstate_rs::flow;
+use flowstate_rs::lifecycle::{EventHandler, ProcessingMode};
 use serde_json::json;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-// ────────────────────────────────────────────────────────────────
-// SOURCE
-// Emits one `Char` event per character from sample sentences.
+// Source -- Emits one `Char` event per character from sample sentences.
 struct TextCharSource {
     sentences: Vec<String>,
     chars: Vec<char>,
     start_idx: Vec<usize>,
     announced: AtomicU64,
     emitted:   AtomicU64,
-    metrics: <RED as Taxonomy>::Metrics,
 }
 
 impl TextCharSource {
@@ -48,21 +46,16 @@ impl TextCharSource {
             start_idx,
             announced: AtomicU64::new(0),
             emitted:   AtomicU64::new(0),
-            metrics:   RED::create_metrics("TextCharSource"),
         }
     }
 }
 
-impl Step for TextCharSource {
-    type Taxonomy = RED;
-
-    fn taxonomy(&self) -> &Self::Taxonomy { &RED }
-    fn metrics (&self) -> &<Self::Taxonomy as Taxonomy>::Metrics { &self.metrics }
-    fn step_type(&self) -> StepType { StepType::Source }
-
-    fn handle(&self, _event: ChainEvent) -> Vec<ChainEvent> {
+impl EventHandler for TextCharSource {
+    fn transform(&self, _event: ChainEvent) -> Vec<ChainEvent> {
         let idx = self.emitted.fetch_add(1, Ordering::Relaxed) as usize;
-        if idx >= self.chars.len() { return vec![]; }
+        if idx >= self.chars.len() { 
+            return vec![]; // No more characters to emit
+        }
 
         // Announce sentence start (console progress)
         let next = self.announced.load(Ordering::Relaxed) as usize;
@@ -74,21 +67,19 @@ impl Step for TextCharSource {
         let ch = self.chars[idx];
         vec![ChainEvent::new("Char", json!({ "ch": ch.to_string() }))]
     }
+    
+    fn processing_mode(&self) -> ProcessingMode {
+        ProcessingMode::Transform
+    }
 }
 
-// ────────────────────────────────────────────────────────────────
-// STAGE 1 – Capitalize letters
-struct CapStage { metrics: <USE as Taxonomy>::Metrics }
+// First Stage – Capitalize letters
+struct CapStage;
 
-impl CapStage { fn new() -> Self { Self { metrics: USE::create_metrics("CapStage") } } }
+impl CapStage { fn new() -> Self { Self } }
 
-impl Step for CapStage {
-    type Taxonomy = USE;
-    fn taxonomy(&self) -> &Self::Taxonomy { &USE }
-    fn metrics (&self) -> &<Self::Taxonomy as Taxonomy>::Metrics { &self.metrics }
-    fn step_type(&self) -> StepType { StepType::Stage }
-
-    fn handle(&self, event: ChainEvent) -> Vec<ChainEvent> {
+impl EventHandler for CapStage {
+    fn transform(&self, event: ChainEvent) -> Vec<ChainEvent> {
         if event.event_type == "Char" {
             if let Some(ch) = event.payload["ch"].as_str().and_then(|s| s.chars().next()) {
                 let out = if ch.is_ascii_alphabetic() { ch.to_ascii_uppercase() } else { ch };
@@ -97,10 +88,13 @@ impl Step for CapStage {
         }
         vec![]
     }
+    
+    fn processing_mode(&self) -> ProcessingMode {
+        ProcessingMode::Transform
+    }
 }
 
-// ────────────────────────────────────────────────────────────────
-// STAGE 2 – Digit → word
+// Second Stage -- Digit → Word
 fn digit_word(d: char) -> &'static str {
     match d {
         '0' => "zero",  '1' => "one",   '2' => "two",  '3' => "three", '4' => "four",
@@ -109,17 +103,12 @@ fn digit_word(d: char) -> &'static str {
     }
 }
 
-struct DigitWordStage { metrics: <USE as Taxonomy>::Metrics }
+struct DigitWordStage;
 
-impl DigitWordStage { fn new() -> Self { Self { metrics: USE::create_metrics("DigitWordStage") } } }
+impl DigitWordStage { fn new() -> Self { Self } }
 
-impl Step for DigitWordStage {
-    type Taxonomy = USE;
-    fn taxonomy(&self) -> &Self::Taxonomy { &USE }
-    fn metrics (&self) -> &<Self::Taxonomy as Taxonomy>::Metrics { &self.metrics }
-    fn step_type(&self) -> StepType { StepType::Stage }
-
-    fn handle(&self, event: ChainEvent) -> Vec<ChainEvent> {
+impl EventHandler for DigitWordStage {
+    fn transform(&self, event: ChainEvent) -> Vec<ChainEvent> {
         if event.event_type == "Char" {
             if let Some(ch) = event.payload["ch"].as_str().and_then(|s| s.chars().next()) {
                 let frag = if ch.is_ascii_digit() {
@@ -132,46 +121,51 @@ impl Step for DigitWordStage {
         }
         vec![]
     }
+    
+    fn processing_mode(&self) -> ProcessingMode {
+        ProcessingMode::Transform
+    }
 }
 
-// ────────────────────────────────────────────────────────────────
-// SINK – collects output fragments into a string buffer
+// Sink – collects output fragments into a string buffer
 struct TextCollectorSink {
     buf: Arc<Mutex<String>>,
-    metrics: <SAAFE as Taxonomy>::Metrics,
 }
 
 impl TextCollectorSink {
     fn new() -> (Self, Arc<Mutex<String>>) {
         let buf = Arc::new(Mutex::new(String::new()));
         (
-            Self { buf: buf.clone(), metrics: SAAFE::create_metrics("TextCollectorSink") },
+            Self { buf: buf.clone() },
             buf,
         )
     }
 }
 
-impl Step for TextCollectorSink {
-    type Taxonomy = SAAFE;
-    fn taxonomy(&self) -> &Self::Taxonomy { &SAAFE }
-    fn metrics (&self) -> &<Self::Taxonomy as Taxonomy>::Metrics { &self.metrics }
-    fn step_type(&self) -> StepType { StepType::Sink }
-
-    fn handle(&self, event: ChainEvent) -> Vec<ChainEvent> {
+impl EventHandler for TextCollectorSink {
+    fn transform(&self, event: ChainEvent) -> Vec<ChainEvent> {
         if event.event_type == "OutFragment" {
             if let Some(frag) = event.payload["frag"].as_str() {
                 let mut b = self.buf.lock().unwrap();
                 b.push_str(frag);
             }
         }
-        vec![]
+        vec![] // Sinks consume events
+    }
+    
+    fn processing_mode(&self) -> ProcessingMode {
+        ProcessingMode::Transform
     }
 }
 
-// ────────────────────────────────────────────────────────────────
-// MAIN
+// Example goes brrr!
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Enable debug logging to see what's happening
+    tracing_subscriber::fmt()
+        .with_env_filter("flowstate_rs=debug")
+        .init();
+
     println!("🚀 FlowState RS - Character Transform Demo (newline & 2-stage)");
     println!("============================================================\n");
 
@@ -183,14 +177,22 @@ async fn main() -> Result<()> {
     let handle = flow! {
         name: "char_transform",
         flow_taxonomy: GoldenSignals,
-        ("source"   => TextCharSource::new(), RED)
-        |> ("cap"   => CapStage::new(),       USE)
-        |> ("digit" => DigitWordStage::new(), USE)
-        |> ("sink"  => sink,                 SAAFE)
+        ("source"   => TextCharSource::new(), [RED::monitoring()])
+        |> ("cap"   => CapStage::new(),       [USE::monitoring()])
+        |> ("digit" => DigitWordStage::new(), [USE::monitoring()])
+        |> ("sink"  => sink,                 [SAAFE::monitoring()])
     }?;
+    
+    println!("📌 Flow handle created, pipeline should be running...");
+    
+    // TODO: Remove this sleep once FLOWIP-026 is implemented
+    // Currently needed because transient sources can't signal completion
+    println!("⏳ Waiting for pipeline to process all characters...");
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    
+    println!("📌 Now calling shutdown...");
 
-    // let the source wind down
-    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+    // Gracefully shut down the flow (waits for all events to drain)
     handle.shutdown().await?;
 
     println!("\n✅ Pipeline completed!\n");
@@ -198,5 +200,5 @@ async fn main() -> Result<()> {
     let result = final_buffer.lock().unwrap().clone();
     println!("🔍 Final text:\n{}", result);
 
-    Ok(())
+    Ok(()) // The grooviest!
 }

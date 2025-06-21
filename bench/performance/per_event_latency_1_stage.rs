@@ -23,7 +23,6 @@ const TEST_EVENT_COUNT: u64 = 100;
 struct TimestampedSource {
     total_events: u64,
     emitted: AtomicU64,
-    metrics: <RED as Taxonomy>::Metrics,
 }
 
 impl TimestampedSource {
@@ -31,16 +30,11 @@ impl TimestampedSource {
         Self {
             total_events,
             emitted: AtomicU64::new(0),
-            metrics: RED::create_metrics("TimestampedSource"),
         }
     }
 }
 
 impl Step for TimestampedSource {
-    type Taxonomy = RED;
-
-    fn taxonomy(&self) -> &Self::Taxonomy { &RED }
-    fn metrics(&self) -> &<Self::Taxonomy as Taxonomy>::Metrics { &self.metrics }
     fn step_type(&self) -> StepType { StepType::Source }
 
     fn handle(&self, _event: ChainEvent) -> Vec<ChainEvent> {
@@ -65,7 +59,6 @@ struct LatencySink {
     expected_count: u64,
     received: Arc<AtomicU64>,
     latencies: Arc<tokio::sync::Mutex<Vec<Duration>>>,
-    metrics: Arc<<RED as Taxonomy>::Metrics>,
 }
 
 impl LatencySink {
@@ -75,16 +68,11 @@ impl LatencySink {
             expected_count,
             received: Arc::new(AtomicU64::new(0)),
             latencies: latencies.clone(),
-            metrics: Arc::new(RED::create_metrics("LatencySink")),
         }, latencies)
     }
 }
 
 impl Step for LatencySink {
-    type Taxonomy = RED;
-
-    fn taxonomy(&self) -> &Self::Taxonomy { &RED }
-    fn metrics(&self) -> &<Self::Taxonomy as Taxonomy>::Metrics { &*self.metrics }
     fn step_type(&self) -> StepType { StepType::Sink }
 
     fn handle(&self, event: ChainEvent) -> Vec<ChainEvent> {
@@ -131,8 +119,8 @@ async fn run_1_stage_pipeline() -> Result<Duration> {
     let handle = flow! {
         store: event_store,
         flow_taxonomy: GoldenSignals,
-        ("source" => source, RED)
-        |> ("sink" => sink, RED)
+        ("source" => source, [RED::monitoring()])
+        |> ("sink" => sink, [RED::monitoring()])
     }?;
 
     // Wait for completion

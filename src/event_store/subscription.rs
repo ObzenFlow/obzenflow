@@ -16,6 +16,15 @@ pub struct SubscriptionFilter {
     // Future: merge_strategy, routing_key, group_id
 }
 
+impl SubscriptionFilter {
+    /// Create a filter that subscribes to all events (from all stages)
+    pub fn all() -> Self {
+        Self {
+            upstream_stages: vec![], // Empty means all stages
+        }
+    }
+}
+
 /// Push-based event subscription with causal ordering
 pub struct EventSubscription {
     pub(crate) id: Ulid,

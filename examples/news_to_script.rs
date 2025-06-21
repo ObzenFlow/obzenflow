@@ -16,7 +16,7 @@ use chrono;
 struct NewsSource {
     news_items: Vec<(String, String, String)>,
     emitted: AtomicU64,
-    metrics: <RED as Taxonomy>::Metrics,
+    
 }
 
 impl NewsSource {
@@ -42,21 +42,14 @@ impl NewsSource {
         Self {
             news_items,
             emitted: AtomicU64::new(0),
-            metrics: RED::create_metrics("NewsSource"),
+            
         }
     }
 }
 
 impl Step for NewsSource {
-    type Taxonomy = RED;
     
-    fn taxonomy(&self) -> &Self::Taxonomy {
-        &RED
-    }
     
-    fn metrics(&self) -> &<Self::Taxonomy as Taxonomy>::Metrics {
-        &self.metrics
-    }
     
     fn step_type(&self) -> StepType {
         StepType::Source
@@ -82,27 +75,20 @@ impl Step for NewsSource {
 
 /// Extract and clean content from news items
 struct ContentExtractor {
-    metrics: <USE as Taxonomy>::Metrics,
+    
 }
 
 impl ContentExtractor {
     fn new() -> Self {
         Self {
-            metrics: USE::create_metrics("ContentExtractor"),
+            
         }
     }
 }
 
 impl Step for ContentExtractor {
-    type Taxonomy = USE;
     
-    fn taxonomy(&self) -> &Self::Taxonomy {
-        &USE
-    }
     
-    fn metrics(&self) -> &<Self::Taxonomy as Taxonomy>::Metrics {
-        &self.metrics
-    }
     
     fn step_type(&self) -> StepType {
         StepType::Stage
@@ -145,13 +131,13 @@ impl Step for ContentExtractor {
 
 /// Generates YouTube scripts from news with quality scoring
 struct ScriptGenerator {
-    metrics: <GoldenSignals as Taxonomy>::Metrics,
+    
 }
 
 impl ScriptGenerator {
     fn new() -> Self {
         Self {
-            metrics: GoldenSignals::create_metrics("ScriptGenerator"),
+            
         }
     }
     
@@ -206,15 +192,8 @@ impl ScriptGenerator {
 }
 
 impl Step for ScriptGenerator {
-    type Taxonomy = GoldenSignals;
     
-    fn taxonomy(&self) -> &Self::Taxonomy {
-        &GoldenSignals
-    }
     
-    fn metrics(&self) -> &<Self::Taxonomy as Taxonomy>::Metrics {
-        &self.metrics
-    }
     
     fn step_type(&self) -> StepType {
         StepType::Stage
@@ -253,28 +232,21 @@ impl Step for ScriptGenerator {
 /// Filter scripts based on quality score
 struct QualityFilter {
     min_score: f64,
-    metrics: <USE as Taxonomy>::Metrics,
+    
 }
 
 impl QualityFilter {
     fn min_score(min_score: f64) -> Self {
         Self { 
             min_score,
-            metrics: USE::create_metrics("QualityFilter"),
+            
         }
     }
 }
 
 impl Step for QualityFilter {
-    type Taxonomy = USE;
     
-    fn taxonomy(&self) -> &Self::Taxonomy {
-        &USE
-    }
     
-    fn metrics(&self) -> &<Self::Taxonomy as Taxonomy>::Metrics {
-        &self.metrics
-    }
     
     fn step_type(&self) -> StepType {
         StepType::Stage
@@ -298,7 +270,7 @@ impl Step for QualityFilter {
 /// Sink that collects and displays scripts
 struct ScriptCollectorSink {
     scripts: Arc<tokio::sync::Mutex<Vec<ChainEvent>>>,
-    metrics: <SAAFE as Taxonomy>::Metrics,
+    
 }
 
 impl ScriptCollectorSink {
@@ -306,21 +278,14 @@ impl ScriptCollectorSink {
         let scripts = Arc::new(tokio::sync::Mutex::new(Vec::new()));
         (Self {
             scripts: scripts.clone(),
-            metrics: SAAFE::create_metrics("ScriptCollectorSink"),
+            
         }, scripts)
     }
 }
 
 impl Step for ScriptCollectorSink {
-    type Taxonomy = SAAFE;
     
-    fn taxonomy(&self) -> &Self::Taxonomy {
-        &SAAFE
-    }
     
-    fn metrics(&self) -> &<Self::Taxonomy as Taxonomy>::Metrics {
-        &self.metrics
-    }
     
     fn step_type(&self) -> StepType {
         StepType::Sink
@@ -351,11 +316,11 @@ async fn main() -> Result<()> {
     let handle: FlowHandle = flow! {
         name: "news_to_script",
         flow_taxonomy: GoldenSignals,
-        ("news" => NewsSource::new(), RED)
-        |> ("extractor" => ContentExtractor::new(), USE) 
-        |> ("generator" => ScriptGenerator::new(), GoldenSignals)
-        |> ("filter" => QualityFilter::min_score(0.6), USE)
-        |> ("output" => sink, SAAFE)
+        ("news" => NewsSource::new(), [RED::monitoring()])
+        |> ("extractor" => ContentExtractor::new(), [USE::monitoring()]) 
+        |> ("generator" => ScriptGenerator::new(), [GoldenSignals::monitoring()])
+        |> ("filter" => QualityFilter::min_score(0.6), [USE::monitoring()])
+        |> ("output" => sink, [SAAFE::monitoring()])
     }?;
     
     // Allow time for pipeline to initialize

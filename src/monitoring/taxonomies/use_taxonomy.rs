@@ -132,6 +132,13 @@ impl TaxonomyMetrics for USEMetrics {
 /// USE taxonomy definition
 pub struct USE;
 
+impl USE {
+    /// Create monitoring middleware for this taxonomy
+    pub fn monitoring() -> Box<dyn crate::middleware::Middleware> {
+        Box::new(crate::middleware::MonitoringMiddleware::<Self>::new(""))
+    }
+}
+
 impl Taxonomy for USE {
     const NAME: &'static str = "USE";
     const DESCRIPTION: &'static str = "Utilization, Saturation, Errors - ideal for resource-constrained systems";

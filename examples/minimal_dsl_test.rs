@@ -1,6 +1,5 @@
 use flowstate_rs::prelude::*;
 use flowstate_rs::flow;
-use flowstate_rs::monitoring::{RED, Taxonomy};
 use flowstate_rs::step::{Step, StepType, ChainEvent};
 use serde_json::json;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -8,23 +7,17 @@ use std::sync::atomic::{AtomicU32, Ordering};
 // Minimal source
 struct MinimalSource {
     count: AtomicU32,
-    metrics: <RED as Taxonomy>::Metrics,
 }
 
 impl MinimalSource {
     fn new() -> Self {
         Self {
             count: AtomicU32::new(0),
-            metrics: RED::create_metrics("minimal_source"),
         }
     }
 }
 
 impl Step for MinimalSource {
-    type Taxonomy = RED;
-    
-    fn taxonomy(&self) -> &Self::Taxonomy { &RED }
-    fn metrics(&self) -> &<Self::Taxonomy as Taxonomy>::Metrics { &self.metrics }
     fn step_type(&self) -> StepType { StepType::Source }
     
     fn handle(&self, _event: ChainEvent) -> Vec<ChainEvent> {
@@ -39,23 +32,15 @@ impl Step for MinimalSource {
 }
 
 // Minimal sink
-struct MinimalSink {
-    metrics: <RED as Taxonomy>::Metrics,
-}
+struct MinimalSink;
 
 impl MinimalSink {
     fn new() -> Self {
-        Self {
-            metrics: RED::create_metrics("minimal_sink"),
-        }
+        Self
     }
 }
 
 impl Step for MinimalSink {
-    type Taxonomy = RED;
-    
-    fn taxonomy(&self) -> &Self::Taxonomy { &RED }
-    fn metrics(&self) -> &<Self::Taxonomy as Taxonomy>::Metrics { &self.metrics }
     fn step_type(&self) -> StepType { StepType::Sink }
     
     fn handle(&self, event: ChainEvent) -> Vec<ChainEvent> {
@@ -80,8 +65,8 @@ async fn main() -> flowstate_rs::step::Result<()> {
     let handle = flow! {
         store: store,
         flow_taxonomy: RED,
-        ("source" => MinimalSource::new(), RED)
-        |> ("sink" => MinimalSink::new(), RED)
+        ("source" => MinimalSource::new(), [RED::monitoring()])
+        |> ("sink" => MinimalSink::new(), [RED::monitoring()])
     }?;
     
     println!("Flow created, waiting...");

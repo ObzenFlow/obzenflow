@@ -85,6 +85,10 @@ pub struct EventStore {
     pub(crate) subscriptions: Arc<RwLock<SubscriptionManager>>,
     /// Single log per flow execution
     pub(crate) flow_log: Arc<FlowEventLog>,
+    /// Flow ID for this store
+    pub(crate) flow_id: String,
+    /// Flow name (if available)
+    pub(crate) flow_name: Option<String>,
 }
 
 impl EventStore {
@@ -107,6 +111,8 @@ impl EventStore {
             })),
             subscriptions: Arc::new(RwLock::new(SubscriptionManager::new())),
             flow_log,
+            flow_id,
+            flow_name: None,
         });
         
         // Spawn cleanup task
@@ -146,6 +152,8 @@ impl EventStore {
             })),
             subscriptions: Arc::new(RwLock::new(SubscriptionManager::new())),
             flow_log,
+            flow_id,
+            flow_name: Some("test".to_string()),
         });
         
         // Spawn cleanup task
@@ -178,11 +186,37 @@ impl EventStore {
         
         println!("📁 Event log: {}", store_path.display());
         
-        // Create EventStore - it will NEVER auto-delete
-        Self::new(EventStoreConfig {
-            path: store_path,
-            max_segment_size: 10 * 1024 * 1024, // 10MB segments
-        }).await
+        // Create flow log
+        let flow_log = Arc::new(FlowEventLog::new(store_path.clone(), &flow_id).await?);
+        
+        let store = Arc::new(Self {
+            store_path: store_path,
+            isolation_mode: IsolationMode::Named(flow_name.to_string()),
+            retention_policy: RetentionPolicy::default(),
+            writer_registry: Arc::new(RwLock::new(WriterRegistry {
+                writers: HashMap::new(),
+                stage_workers: HashMap::new(),
+            })),
+            subscriptions: Arc::new(RwLock::new(SubscriptionManager::new())),
+            flow_log,
+            flow_id,
+            flow_name: Some(flow_name.to_string()),
+        });
+        
+        // Spawn cleanup task
+        store.clone().spawn_cleanup_task();
+        
+        Ok(store)
+    }
+    
+    /// Get the flow ID for this store
+    pub fn flow_id(&self) -> crate::event_types::FlowId {
+        crate::event_types::FlowId::from(self.flow_id.clone())
+    }
+    
+    /// Get the flow name for this store (if available)
+    pub fn flow_name(&self) -> &str {
+        self.flow_name.as_deref().unwrap_or("unnamed")
     }
     
     /// Create a writer for a single-worker stage

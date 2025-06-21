@@ -7,7 +7,8 @@ pub mod stages;
 pub mod event_sourcing;
 pub mod event_store;
 pub mod topology;
-
+pub mod middleware;
+pub mod lifecycle;
 
 // Include macros
 #[macro_use]
@@ -21,7 +22,8 @@ pub mod prelude {
     pub use crate::chain_event::ChainEvent;
     pub use crate::step::{Step, StepType, Result};
     pub use crate::monitoring::{Taxonomy, TaxonomyMetrics, RED, USE, GoldenSignals, SAAFE};
-    pub use crate::stages::{Source, Stage, Sink, monitored::Monitor};
+    pub use crate::stages::{Source, Stage, Sink};
+    pub use crate::middleware::{StepExt, MonitoringMiddleware, Middleware};
     pub use crate::event_store::{EventStore, EventStoreConfig};
     pub use crate::event_sourcing::EventSourcedStage;
 

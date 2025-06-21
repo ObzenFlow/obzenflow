@@ -116,6 +116,13 @@ impl TaxonomyMetrics for SAAFEMetrics {
 /// SAAFE taxonomy definition
 pub struct SAAFE;
 
+impl SAAFE {
+    /// Create monitoring middleware for this taxonomy
+    pub fn monitoring() -> Box<dyn crate::middleware::Middleware> {
+        Box::new(crate::middleware::MonitoringMiddleware::<Self>::new(""))
+    }
+}
+
 impl Taxonomy for SAAFE {
     const NAME: &'static str = "SAAFE";
     const DESCRIPTION: &'static str = "Saturation, Amendments, Anomalies, Failures, Errors - comprehensive infrastructure monitoring";

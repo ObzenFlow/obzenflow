@@ -1,20 +1,21 @@
-//! Simple Cryptocurrency Market Simulator
+//! Cryptocurrency Market Simulator Example with Prometheus Export
 //! 
-//! This example simulates a crypto trading market,
-//! analyzing prices and detecting patterns using the new EventStore architecture.
+//! This example shows a FlowState pipeline that:
+//! 1. Generates simulated crypto market data 
+//! 2. Analyzes price movements with different taxonomies
+//! 3. Demonstrates the monitoring system architecture
 
 use flowstate_rs::prelude::*;
 use flowstate_rs::flow;
+use flowstate_rs::lifecycle::{EventHandler, ProcessingMode};
 use serde_json::json;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use chrono;
 
-/// Generates realistic cryptocurrency market data
+/// Source that generates crypto market data
 struct CryptoMarketSource {
     total_events: u64,
     emitted: AtomicU64,
-    metrics: <RED as Taxonomy>::Metrics,
 }
 
 impl CryptoMarketSource {
@@ -22,7 +23,6 @@ impl CryptoMarketSource {
         Self {
             total_events,
             emitted: AtomicU64::new(0),
-            metrics: RED::create_metrics("CryptoMarketSource"),
         }
     }
     
@@ -48,13 +48,12 @@ impl CryptoMarketSource {
         
         // Generate volume with occasional whale activity
         let base_volume = match coin {
-            "BTC" => 1000000.0,
-            "ETH" => 500000.0,
-            _ => 100000.0,
+            "BTC" => 0.1,
+            "ETH" => 1.0,
+            _ => 10.0,
         };
-        // Create whale events approximately every 15-20 ticks
-        let whale_multiplier = if (tick * 7) % 17 == 0 { 8.0 } else { 1.0 };
-        let volume = base_volume * (1.0 + ((tick * 13) % 50) as f64 / 100.0) * whale_multiplier;
+        let is_whale = tick % 37 == 0;
+        let volume = if is_whale { base_volume * 100.0 } else { base_volume * (1.0 + volatility.abs() * 10.0) };
         
         ChainEvent::new("MarketTick", json!({
             "coin": coin,
@@ -68,22 +67,8 @@ impl CryptoMarketSource {
     }
 }
 
-impl Step for CryptoMarketSource {
-    type Taxonomy = RED;
-    
-    fn taxonomy(&self) -> &Self::Taxonomy {
-        &RED
-    }
-    
-    fn metrics(&self) -> &<Self::Taxonomy as Taxonomy>::Metrics {
-        &self.metrics
-    }
-    
-    fn step_type(&self) -> StepType {
-        StepType::Source
-    }
-    
-    fn handle(&self, _event: ChainEvent) -> Vec<ChainEvent> {
+impl EventHandler for CryptoMarketSource {
+    fn transform(&self, _event: ChainEvent) -> Vec<ChainEvent> {
         let tick = self.emitted.fetch_add(1, Ordering::Relaxed);
         if tick < self.total_events {
             // Show progress
@@ -100,126 +85,99 @@ impl Step for CryptoMarketSource {
             vec![]
         }
     }
+    
+    fn processing_mode(&self) -> ProcessingMode {
+        ProcessingMode::Transform
+    }
 }
 
 /// Analyzes price movements
-struct PriceAnalyzer {
-    metrics: <GoldenSignals as Taxonomy>::Metrics,
-}
+struct PriceAnalyzer;
 
 impl PriceAnalyzer {
     fn new() -> Self {
-        Self {
-            metrics: GoldenSignals::create_metrics("PriceAnalyzer"),
-        }
+        Self
     }
 }
 
-impl Step for PriceAnalyzer {
-    type Taxonomy = GoldenSignals;
-    
-    fn taxonomy(&self) -> &Self::Taxonomy {
-        &GoldenSignals
-    }
-    
-    fn metrics(&self) -> &<Self::Taxonomy as Taxonomy>::Metrics {
-        &self.metrics
-    }
-    
-    fn step_type(&self) -> StepType {
-        StepType::Stage
-    }
-    
-    fn handle(&self, mut event: ChainEvent) -> Vec<ChainEvent> {
+impl EventHandler for PriceAnalyzer {
+    fn transform(&self, mut event: ChainEvent) -> Vec<ChainEvent> {
         if event.event_type == "MarketTick" {
-            if let Some(price) = event.payload.get("price").and_then(|v| v.as_f64()) {
-                // Simple price analysis
-                let category = if price > 10000.0 {
-                    "high"
-                } else if price > 100.0 {
-                    "medium"
-                } else {
-                    "low"
-                };
-                event.payload["price_category"] = json!(category);
+            // Calculate price movement indicators
+            if let (Some(coin), Some(price)) = (
+                event.payload.get("coin").and_then(|v| v.as_str()),
+                event.payload.get("price").and_then(|v| v.as_f64())
+            ) {
+                // Simulate simple moving average comparison
+                let ma_factor = ((event.payload["tick"].as_u64().unwrap_or(0) * 13) % 20) as f64 / 10.0 - 1.0;
+                let trend = if ma_factor > 0.5 { "bullish" } else if ma_factor < -0.5 { "bearish" } else { "neutral" };
                 
-                // Print significant price movements
-                if let Some(tick) = event.payload.get("tick").and_then(|v| v.as_u64()) {
-                    if tick % 20 == 0 {
-                        println!("📈 {} @ ${:.2} ({})", 
-                            event.payload.get("coin").and_then(|v| v.as_str()).unwrap_or("???"),
-                            price,
-                            category
-                        );
-                    }
-                }
+                // Add analysis results
+                event.payload["trend"] = json!(trend);
+                event.payload["strength"] = json!(ma_factor.abs());
+                event.payload["signal"] = json!(if ma_factor.abs() > 0.8 { "strong" } else { "weak" });
                 
-                // Record successful processing
-                self.metrics.record_success(std::time::Duration::from_micros(100));
+                // Calculate RSI-like indicator
+                let rsi = 50.0 + ma_factor * 30.0;
+                event.payload["rsi"] = json!(rsi);
+                event.payload["oversold"] = json!(rsi < 30.0);
+                event.payload["overbought"] = json!(rsi > 70.0);
             }
         }
         vec![event]
     }
+    
+    fn processing_mode(&self) -> ProcessingMode {
+        ProcessingMode::Transform
+    }
 }
 
-/// Detects volume anomalies
+/// Detects volume spikes
 struct VolumeDetector {
-    metrics: <USE as Taxonomy>::Metrics,
+    average_volume: f64,
 }
 
 impl VolumeDetector {
     fn new() -> Self {
         Self {
-            metrics: USE::create_metrics("VolumeDetector"),
+            average_volume: 0.03, // 3% baseline volume ratio
         }
     }
 }
 
-impl Step for VolumeDetector {
-    type Taxonomy = USE;
-    
-    fn taxonomy(&self) -> &Self::Taxonomy {
-        &USE
-    }
-    
-    fn metrics(&self) -> &<Self::Taxonomy as Taxonomy>::Metrics {
-        &self.metrics
-    }
-    
-    fn step_type(&self) -> StepType {
-        StepType::Stage
-    }
-    
-    fn handle(&self, mut event: ChainEvent) -> Vec<ChainEvent> {
+impl EventHandler for VolumeDetector {
+    fn transform(&self, mut event: ChainEvent) -> Vec<ChainEvent> {
         if event.event_type == "MarketTick" {
             if let Some(volume) = event.payload.get("volume").and_then(|v| v.as_f64()) {
-                // Detect high volume (potential whale activity)
-                let is_high_volume = volume > 5000000.0;
-                event.payload["high_volume"] = json!(is_high_volume);
+                // Detect volume anomalies
+                let volume_ratio = volume / (event.payload["price"].as_f64().unwrap_or(1.0) * self.average_volume);
+                let is_spike = volume_ratio > 10.0;
                 
-                if is_high_volume {
-                    println!("🐋 Whale alert! {} volume: ${:.0} (tick #{})", 
-                        event.payload.get("coin").and_then(|v| v.as_str()).unwrap_or("???"),
-                        volume,
-                        event.payload.get("tick").and_then(|v| v.as_u64()).unwrap_or(0)
-                    );
-                }
+                event.payload["volume_ratio"] = json!(volume_ratio);
+                event.payload["high_volume"] = json!(is_spike);
                 
-                // Track utilization based on volume processing
-                self.metrics.start_work();
-                // Simulate some work
-                std::thread::sleep(std::time::Duration::from_micros(10));
-                self.metrics.end_work();
+                // Classify volume pattern
+                let volume_type = match volume_ratio {
+                    r if r > 50.0 => "whale_activity",
+                    r if r > 10.0 => "high_volume", 
+                    r if r > 2.0 => "above_average",
+                    r if r < 0.5 => "low_volume",
+                    _ => "normal"
+                };
+                event.payload["volume_type"] = json!(volume_type);
             }
         }
         vec![event]
+    }
+    
+    fn processing_mode(&self) -> ProcessingMode {
+        ProcessingMode::Transform
     }
 }
 
 /// Aggregates market statistics
 struct MarketAggregator {
     stats: Arc<tokio::sync::Mutex<MarketStats>>,
-    metrics: <SAAFE as Taxonomy>::Metrics,
 }
 
 #[derive(Default)]
@@ -234,27 +192,12 @@ impl MarketAggregator {
         let stats = Arc::new(tokio::sync::Mutex::new(MarketStats::default()));
         (Self {
             stats: stats.clone(),
-            metrics: SAAFE::create_metrics("MarketAggregator"),
         }, stats)
     }
 }
 
-impl Step for MarketAggregator {
-    type Taxonomy = SAAFE;
-    
-    fn taxonomy(&self) -> &Self::Taxonomy {
-        &SAAFE
-    }
-    
-    fn metrics(&self) -> &<Self::Taxonomy as Taxonomy>::Metrics {
-        &self.metrics
-    }
-    
-    fn step_type(&self) -> StepType {
-        StepType::Sink
-    }
-    
-    fn handle(&self, event: ChainEvent) -> Vec<ChainEvent> {
+impl EventHandler for MarketAggregator {
+    fn transform(&self, event: ChainEvent) -> Vec<ChainEvent> {
         if event.event_type == "MarketTick" {
             let stats = self.stats.clone();
             tokio::spawn(async move {
@@ -270,13 +213,17 @@ impl Step for MarketAggregator {
                 }
             });
         }
-        vec![] // Sinks don't emit
+        vec![] // Sink consumes events
+    }
+    
+    fn processing_mode(&self) -> ProcessingMode {
+        ProcessingMode::Transform
     }
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    println!("🪙 FlowState RS - Crypto Market Simulator");
+    println!("🪙 FlowState RS - Crypto Market Analysis");
     println!("=========================================");
     println!("📊 Simulating cryptocurrency market...");
     println!("");
@@ -287,10 +234,10 @@ async fn main() -> Result<()> {
     let handle = flow! {
         name: "crypto_market",
         flow_taxonomy: GoldenSignals,
-        ("market" => CryptoMarketSource::new(100), RED)  // 100 market events
-        |> ("analyzer" => PriceAnalyzer::new(), GoldenSignals)
-        |> ("detector" => VolumeDetector::new(), USE) 
-        |> ("aggregator" => aggregator, SAAFE)
+        ("market" => CryptoMarketSource::new(100), [RED::monitoring()])  // 100 market events
+        |> ("analyzer" => PriceAnalyzer::new(), [GoldenSignals::monitoring()])
+        |> ("detector" => VolumeDetector::new(), [USE::monitoring()]) 
+        |> ("aggregator" => aggregator, [SAAFE::monitoring()])
     }?;
     
     // CRITICAL: Allow time for subscriptions to be established

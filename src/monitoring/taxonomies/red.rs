@@ -101,6 +101,13 @@ impl TaxonomyMetrics for REDMetrics {
 /// RED taxonomy definition
 pub struct RED;
 
+impl RED {
+    /// Create monitoring middleware for this taxonomy
+    pub fn monitoring() -> Box<dyn crate::middleware::Middleware> {
+        Box::new(crate::middleware::MonitoringMiddleware::<Self>::new(""))
+    }
+}
+
 impl Taxonomy for RED {
     const NAME: &'static str = "RED";
     const DESCRIPTION: &'static str = "Rate, Errors, Duration - ideal for request/response systems";

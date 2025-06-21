@@ -23,7 +23,6 @@ const TEST_EVENT_COUNT: u64 = 100;
 struct TimestampedSource {
     total_events: u64,
     emitted: AtomicU64,
-    metrics: <RED as Taxonomy>::Metrics,
 }
 
 impl TimestampedSource {
@@ -31,16 +30,11 @@ impl TimestampedSource {
         Self {
             total_events,
             emitted: AtomicU64::new(0),
-            metrics: RED::create_metrics("TimestampedSource"),
         }
     }
 }
 
 impl Step for TimestampedSource {
-    type Taxonomy = RED;
-
-    fn taxonomy(&self) -> &Self::Taxonomy { &RED }
-    fn metrics(&self) -> &<Self::Taxonomy as Taxonomy>::Metrics { &self.metrics }
     fn step_type(&self) -> StepType { StepType::Source }
 
     fn handle(&self, _event: ChainEvent) -> Vec<ChainEvent> {
@@ -62,23 +56,17 @@ impl Step for TimestampedSource {
 /// Passthrough stage
 struct PassthroughStage {
     name: String,
-    metrics: <USE as Taxonomy>::Metrics,
 }
 
 impl PassthroughStage {
     fn new(name: &str) -> Self {
         Self {
             name: name.to_string(),
-            metrics: USE::create_metrics(name),
         }
     }
 }
 
 impl Step for PassthroughStage {
-    type Taxonomy = USE;
-
-    fn taxonomy(&self) -> &Self::Taxonomy { &USE }
-    fn metrics(&self) -> &<Self::Taxonomy as Taxonomy>::Metrics { &self.metrics }
     fn step_type(&self) -> StepType { StepType::Stage }
 
     fn handle(&self, event: ChainEvent) -> Vec<ChainEvent> {
@@ -92,7 +80,6 @@ struct LatencySink {
     expected_count: u64,
     received: Arc<AtomicU64>,
     latencies: Arc<tokio::sync::Mutex<Vec<Duration>>>,
-    metrics: Arc<<RED as Taxonomy>::Metrics>,
 }
 
 impl LatencySink {
@@ -102,16 +89,11 @@ impl LatencySink {
             expected_count,
             received: Arc::new(AtomicU64::new(0)),
             latencies: latencies.clone(),
-            metrics: Arc::new(RED::create_metrics("LatencySink")),
         }, latencies)
     }
 }
 
 impl Step for LatencySink {
-    type Taxonomy = RED;
-
-    fn taxonomy(&self) -> &Self::Taxonomy { &RED }
-    fn metrics(&self) -> &<Self::Taxonomy as Taxonomy>::Metrics { &*self.metrics }
     fn step_type(&self) -> StepType { StepType::Sink }
 
     fn handle(&self, event: ChainEvent) -> Vec<ChainEvent> {
@@ -158,27 +140,27 @@ async fn run_20_stage_pipeline() -> Result<Duration> {
     let handle = flow! {
         store: event_store,
         flow_taxonomy: GoldenSignals,
-        ("source" => source, RED)
-        |> ("stage1" => PassthroughStage::new("stage1"), USE)
-        |> ("stage2" => PassthroughStage::new("stage2"), USE)
-        |> ("stage3" => PassthroughStage::new("stage3"), USE)
-        |> ("stage4" => PassthroughStage::new("stage4"), USE)
-        |> ("stage5" => PassthroughStage::new("stage5"), USE)
-        |> ("stage6" => PassthroughStage::new("stage6"), USE)
-        |> ("stage7" => PassthroughStage::new("stage7"), USE)
-        |> ("stage8" => PassthroughStage::new("stage8"), USE)
-        |> ("stage9" => PassthroughStage::new("stage9"), USE)
-        |> ("stage10" => PassthroughStage::new("stage10"), USE)
-        |> ("stage11" => PassthroughStage::new("stage11"), USE)
-        |> ("stage12" => PassthroughStage::new("stage12"), USE)
-        |> ("stage13" => PassthroughStage::new("stage13"), USE)
-        |> ("stage14" => PassthroughStage::new("stage14"), USE)
-        |> ("stage15" => PassthroughStage::new("stage15"), USE)
-        |> ("stage16" => PassthroughStage::new("stage16"), USE)
-        |> ("stage17" => PassthroughStage::new("stage17"), USE)
-        |> ("stage18" => PassthroughStage::new("stage18"), USE)
-        |> ("stage19" => PassthroughStage::new("stage19"), USE)
-        |> ("sink" => sink, RED)
+        ("source" => source, [RED::monitoring()])
+        |> ("stage1" => PassthroughStage::new("stage1"), [USE::monitoring()])
+        |> ("stage2" => PassthroughStage::new("stage2"), [USE::monitoring()])
+        |> ("stage3" => PassthroughStage::new("stage3"), [USE::monitoring()])
+        |> ("stage4" => PassthroughStage::new("stage4"), [USE::monitoring()])
+        |> ("stage5" => PassthroughStage::new("stage5"), [USE::monitoring()])
+        |> ("stage6" => PassthroughStage::new("stage6"), [USE::monitoring()])
+        |> ("stage7" => PassthroughStage::new("stage7"), [USE::monitoring()])
+        |> ("stage8" => PassthroughStage::new("stage8"), [USE::monitoring()])
+        |> ("stage9" => PassthroughStage::new("stage9"), [USE::monitoring()])
+        |> ("stage10" => PassthroughStage::new("stage10"), [USE::monitoring()])
+        |> ("stage11" => PassthroughStage::new("stage11"), [USE::monitoring()])
+        |> ("stage12" => PassthroughStage::new("stage12"), [USE::monitoring()])
+        |> ("stage13" => PassthroughStage::new("stage13"), [USE::monitoring()])
+        |> ("stage14" => PassthroughStage::new("stage14"), [USE::monitoring()])
+        |> ("stage15" => PassthroughStage::new("stage15"), [USE::monitoring()])
+        |> ("stage16" => PassthroughStage::new("stage16"), [USE::monitoring()])
+        |> ("stage17" => PassthroughStage::new("stage17"), [USE::monitoring()])
+        |> ("stage18" => PassthroughStage::new("stage18"), [USE::monitoring()])
+        |> ("stage19" => PassthroughStage::new("stage19"), [USE::monitoring()])
+        |> ("sink" => sink, [RED::monitoring()])
     }?;
 
     // Wait for completion

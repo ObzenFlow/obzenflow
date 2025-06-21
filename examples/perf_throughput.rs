@@ -18,7 +18,6 @@ use std::time::Instant;
 struct TestSource {
     total_events: u64,
     emitted: Arc<AtomicU64>,
-    metrics: <RED as Taxonomy>::Metrics,
 }
 
 impl Clone for TestSource {
@@ -26,15 +25,11 @@ impl Clone for TestSource {
         Self {
             total_events: self.total_events,
             emitted: self.emitted.clone(),
-            metrics: RED::create_metrics("TestSource"),
         }
     }
 }
 
 impl Step for TestSource {
-    type Taxonomy = RED;
-    fn taxonomy(&self) -> &Self::Taxonomy { &RED }
-    fn metrics(&self) -> &<Self::Taxonomy as Taxonomy>::Metrics { &self.metrics }
     fn step_type(&self) -> StepType { StepType::Source }
     
     fn handle(&self, _event: ChainEvent) -> Vec<ChainEvent> {
@@ -57,7 +52,6 @@ impl Step for TestSource {
 /// Passthrough stage
 struct PassthroughStage {
     name: String,
-    metrics: <USE as Taxonomy>::Metrics,
     processed: Arc<AtomicU64>,
 }
 
@@ -65,7 +59,6 @@ impl Clone for PassthroughStage {
     fn clone(&self) -> Self {
         Self {
             name: self.name.clone(),
-            metrics: USE::create_metrics(&self.name),
             processed: self.processed.clone(),
         }
     }
@@ -75,16 +68,12 @@ impl PassthroughStage {
     fn new(name: &str) -> Self {
         Self {
             name: name.to_string(),
-            metrics: USE::create_metrics(name),
             processed: Arc::new(AtomicU64::new(0)),
         }
     }
 }
 
 impl Step for PassthroughStage {
-    type Taxonomy = USE;
-    fn taxonomy(&self) -> &Self::Taxonomy { &USE }
-    fn metrics(&self) -> &<Self::Taxonomy as Taxonomy>::Metrics { &self.metrics }
     fn step_type(&self) -> StepType { StepType::Stage }
     
     fn handle(&self, event: ChainEvent) -> Vec<ChainEvent> {
@@ -101,7 +90,6 @@ impl Step for PassthroughStage {
 struct TestSink {
     expected_count: u64,
     received: Arc<AtomicU64>,
-    metrics: Arc<<RED as Taxonomy>::Metrics>,
 }
 
 impl Clone for TestSink {
@@ -109,15 +97,11 @@ impl Clone for TestSink {
         Self {
             expected_count: self.expected_count,
             received: self.received.clone(),
-            metrics: Arc::new(RED::create_metrics("TestSink")),
         }
     }
 }
 
 impl Step for TestSink {
-    type Taxonomy = RED;
-    fn taxonomy(&self) -> &Self::Taxonomy { &RED }
-    fn metrics(&self) -> &<Self::Taxonomy as Taxonomy>::Metrics { &*self.metrics }
     fn step_type(&self) -> StepType { StepType::Sink }
     
     fn handle(&self, event: ChainEvent) -> Vec<ChainEvent> {
@@ -150,13 +134,11 @@ async fn main() -> Result<()> {
         let source = TestSource {
             total_events: event_count,
             emitted: emitted_count.clone(),
-            metrics: RED::create_metrics("TestSource"),
         };
         
         let sink = TestSink {
             expected_count: event_count,
             received: Arc::new(AtomicU64::new(0)),
-            metrics: Arc::new(RED::create_metrics("TestSink")),
         };
         let sink_clone = sink.clone();
         
@@ -165,30 +147,30 @@ async fn main() -> Result<()> {
                 flow! {
                     store: store,
                     flow_taxonomy: GoldenSignals,
-                    ("source" => source, RED)
-                    |> ("sink" => sink, RED)
+                    ("source" => source, [RED::monitoring()])
+                    |> ("sink" => sink, [RED::monitoring()])
                 }?
             }
             3 => {
                 flow! {
                     store: store,
                     flow_taxonomy: GoldenSignals,
-                    ("source" => source, RED)
-                    |> ("stage1" => PassthroughStage::new("stage1"), USE)
-                    |> ("stage2" => PassthroughStage::new("stage2"), USE)
-                    |> ("sink" => sink, RED)
+                    ("source" => source, [RED::monitoring()])
+                    |> ("stage1" => PassthroughStage::new("stage1"), [USE::monitoring()])
+                    |> ("stage2" => PassthroughStage::new("stage2"), [USE::monitoring()])
+                    |> ("sink" => sink, [RED::monitoring()])
                 }?
             }
             5 => {
                 flow! {
                     store: store,
                     flow_taxonomy: GoldenSignals,
-                    ("source" => source, RED)
-                    |> ("stage1" => PassthroughStage::new("stage1"), USE)
-                    |> ("stage2" => PassthroughStage::new("stage2"), USE)
-                    |> ("stage3" => PassthroughStage::new("stage3"), USE)
-                    |> ("stage4" => PassthroughStage::new("stage4"), USE)
-                    |> ("sink" => sink, RED)
+                    ("source" => source, [RED::monitoring()])
+                    |> ("stage1" => PassthroughStage::new("stage1"), [USE::monitoring()])
+                    |> ("stage2" => PassthroughStage::new("stage2"), [USE::monitoring()])
+                    |> ("stage3" => PassthroughStage::new("stage3"), [USE::monitoring()])
+                    |> ("stage4" => PassthroughStage::new("stage4"), [USE::monitoring()])
+                    |> ("sink" => sink, [RED::monitoring()])
                 }?
             }
             _ => unreachable!(),

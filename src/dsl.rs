@@ -7,12 +7,23 @@
 //! With FLOWIP-019, the DSL internally uses PipelineBuilder for strong stage
 //! identification, but maintains the same user-friendly API.
 
-/// Helper macro to create a monitored step
+/// Helper macro to create a stage with middleware
 #[macro_export]
 macro_rules! stage {
-    // Stage with explicit taxonomy
-    ($stage:expr, $taxonomy:expr) => {{
-        $crate::stages::Monitor::step($stage, $taxonomy)
+    // Stage with monitoring middleware
+    ($stage:expr, $taxonomy:ty) => {{
+        {
+            use $crate::middleware::{StepExt, MonitoringMiddleware};
+            use $crate::monitoring::Taxonomy;
+            let stage_name = stringify!($stage)
+                .split("::").last()
+                .unwrap_or("stage")
+                .split("(").next()
+                .unwrap_or("stage");
+            $stage.middleware()
+                .with(MonitoringMiddleware::<$taxonomy>::new(stage_name))
+                .build()
+        }
     }};
 }
 
@@ -54,22 +65,46 @@ macro_rules! stage {
 /// handle.abort("reason");    // Immediate abort
 /// ```
 
+/// Helper to apply middleware array to a step
+/// Stage name is passed in for monitoring middleware
+#[macro_export]
+macro_rules! apply_middleware {
+    ($handler:expr, $stage_name:expr, []) => {
+        $handler
+    };
+    ($handler:expr, $stage_name:expr, [$mw:expr]) => {{
+        use $crate::middleware::EventHandlerExt;
+        let middleware = $mw;
+        $handler.middleware().with(middleware).build()
+    }};
+    ($handler:expr, $stage_name:expr, [$mw:expr, $($rest:expr),+]) => {{
+        use $crate::middleware::{EventHandlerExt, MonitoringMiddleware};
+        let middleware = $mw;
+        // Check if this is a MonitoringMiddleware and inject stage name
+        // For now, we just apply the middleware as-is
+        // TODO: Implement stage name injection once we have set_stage_name method
+        let handler_with_mw = $handler.middleware().with(middleware).build();
+        $crate::apply_middleware!(handler_with_mw, $stage_name, [$($rest),+])
+    }};
+}
+
 /// Internal helper macro for common flow logic using PipelineBuilder
 #[macro_export]
 macro_rules! flow_internal {
+    // Pattern with flow middleware array (FLOWIP-055)
     {
         store: $store:expr,
-        flow_taxonomy: $flow_tax:ty,
+        flow_middleware: [$($flow_mw:expr),*],
         stages: [
-            ($src_name:expr, $src:expr, $src_tax:expr)
-            $(, ($st_name:expr, $st:expr, $st_tax:expr))*
+            ($src_name:expr, $src:expr, [$($src_mw:expr),*])
+            $(, ($st_name:expr, $st:expr, [$($st_mw:expr),*]))*
         ]
     } => {{
         async {
             use $crate::prelude::*;
             use $crate::event_sourcing::{EventSourcedStage, FlowHandle};
             use $crate::monitoring::{Taxonomy, TaxonomyMetrics};
-            use $crate::topology::{PipelineBuilder, StageId, PipelineTopology, PipelineLifecycle};
+            use $crate::topology::{PipelineBuilder, StageId, PipelineTopology, LayeredPipelineLifecycle, StageLayerAdapter, ObserverLayerAdapter};
             use tokio::task::JoinHandle;
             use std::sync::Arc;
             use std::collections::HashMap;
@@ -77,9 +112,8 @@ macro_rules! flow_internal {
             
             // The event store is already an Arc
             let store = $store;
-            
-            // FLOWIP-005 Integration Point: Flow-level monitoring taxonomy
-            let _flow_taxonomy = stringify!($flow_tax);  // Placeholder for FLOWIP-005
+            let flow_name = store.flow_name();
+            let flow_id = store.flow_id();
             
             // Phase 1: Build pipeline topology using PipelineBuilder
             let mut builder = PipelineBuilder::new();
@@ -99,32 +133,73 @@ macro_rules! flow_internal {
             
             tracing::debug!("Built topology with {} stages", topology.num_stages());
             
-            // Create pipeline lifecycle coordinator
-            let pipeline_lifecycle = Arc::new(PipelineLifecycle::new(topology.clone()));
+            // Create layered pipeline lifecycle coordinator
+            let mut pipeline_lifecycle = LayeredPipelineLifecycle::new(topology.clone());
             
             // Phase 2: Create event-sourced stages with monitoring
             let mut handles: Vec<JoinHandle<FlowResult>> = vec![];
+            
+            // Phase 2a: Prepare flow-level middleware (if any) for Layer B
+            let flow_middleware_vec = vec![$($flow_mw),*];
+            if !flow_middleware_vec.is_empty() {
+                use $crate::middleware::{FlowObserver, apply_middleware_vec};
+                use $crate::lifecycle::GenericEventProcessor;
+                use $crate::event_store::SubscriptionFilter;
+                use $crate::topology::{ComponentType, ObserverLayerAdapter};
+                
+                // Three-layer architecture as per FLOWIP-026:
+                
+                // 1. Create the FlowObserver (business logic)
+                let flow_observer = FlowObserver::new(flow_name.clone());
+                
+                // 2. Apply middleware if any
+                let handler = apply_middleware_vec(flow_observer, flow_middleware_vec);
+                
+                // 3. Create processor (with Arc internally, so it's cloneable)
+                let processor = GenericEventProcessor::new(
+                    format!("flow_monitor_{}", flow_name),
+                    handler,
+                    Arc::clone(&store),
+                    SubscriptionFilter::all(), // Subscribe to all flow events
+                    ComponentType::FlowObserver,
+                );
+                
+                // 4. Create observer adapter and register with Layer B
+                let observer_adapter = ObserverLayerAdapter::new(
+                    format!("flow_monitor_{}", flow_name),
+                    processor,
+                );
+                pipeline_lifecycle.register_component(observer_adapter).await?;
+            }
             
             // Create source stage
             {
                 let store_clone = Arc::clone(&store);
                 let topology_clone = Arc::clone(&topology);
-                let lifecycle_clone = Arc::clone(&pipeline_lifecycle);
+                let stage_id = stage_ids[0];
                 
-                // Create monitored step
-                let monitored = $crate::stages::Monitor::step($src, $src_tax);
+                // Register stage adapter with Layer A
+                let stage_adapter = StageLayerAdapter::new(stage_id, $src_name.clone());
+                pipeline_lifecycle.register_component(stage_adapter).await?;
+                
+                // Apply user's middleware array to the EventHandler
+                let handler_with_middleware = $crate::apply_middleware!($src, &$src_name, [$($src_mw),*]);
+                
+                // Get stage lifecycle handle from layered lifecycle
+                let stage_lifecycle = pipeline_lifecycle.stage_lifecycle(stage_id).await?;
                 
                 // Build event-sourced stage using builder pattern
                 let mut event_stage = EventSourcedStage::builder()
-                    .with_step(monitored)
-                    .with_topology(src_id, $src_name.clone(), topology_clone)
+                    .with_handler(handler_with_middleware)
+                    .with_topology(stage_id, $src_name.clone(), topology_clone)
                     .with_store(store_clone)
-                    .with_pipeline_lifecycle(lifecycle_clone)
+                    .with_stage_lifecycle_handle(stage_lifecycle)
+                    .is_source(true)  // This is a source stage
                     .build()
                     .await?;
                 
                 // Spawn stage task
-                tracing::debug!("Spawning source stage with ID {:?}", src_id);
+                tracing::debug!("Spawning source stage with ID {:?}", stage_id);
                 let handle = tokio::spawn(async move {
                     event_stage.run().await
                 });
@@ -138,21 +213,27 @@ macro_rules! flow_internal {
                 {
                     let store_clone = Arc::clone(&store);
                     let topology_clone = Arc::clone(&topology);
-                    let lifecycle_clone = Arc::clone(&pipeline_lifecycle);
                     
                     // Get the stage ID that was assigned during topology building
                     let stage_id = stage_iter.next()
                         .ok_or("Stage ID iterator exhausted")?;
                     
-                    // Create monitored step
-                    let monitored = $crate::stages::Monitor::step($st, $st_tax);
+                    // Register stage adapter with Layer A
+                    let stage_adapter = StageLayerAdapter::new(stage_id, $st_name.clone());
+                    pipeline_lifecycle.register_component(stage_adapter).await?;
+                    
+                    // Apply user's middleware array to the EventHandler
+                    let handler_with_middleware = $crate::apply_middleware!($st, &$st_name, [$($st_mw),*]);
+                    
+                    // Get stage lifecycle handle from layered lifecycle
+                    let stage_lifecycle = pipeline_lifecycle.stage_lifecycle(stage_id).await?;
                     
                     // Build event-sourced stage using builder pattern
                     let mut event_stage = EventSourcedStage::builder()
-                        .with_step(monitored)
+                        .with_handler(handler_with_middleware)
                         .with_topology(stage_id, $st_name.clone(), topology_clone)
                         .with_store(store_clone)
-                        .with_pipeline_lifecycle(lifecycle_clone)
+                        .with_stage_lifecycle_handle(stage_lifecycle)
                         .build()
                         .await?;
                     
@@ -165,68 +246,75 @@ macro_rules! flow_internal {
                 }
             )*
             
+            // Phase 3: Initialize all layers in order (stages first, then observers)
+            let lifecycle_arc = Arc::new(pipeline_lifecycle);
+            lifecycle_arc.initialize().await
+                .map_err(|e| format!("Failed to initialize layers: {}", e))?;
+            
             // Return a FlowHandle for graceful shutdown
             Ok::<FlowHandle, Box<dyn std::error::Error + Send + Sync>>(
-                FlowHandle::new(handles, pipeline_lifecycle, store)
+                FlowHandle::new(handles, lifecycle_arc, store)
             )
         }.await
     }};
+    
 }
 
 #[macro_export]
 macro_rules! flow {
+    // Flow with name and middleware array (FLOWIP-055)
+    {
+        name: $flow_name:expr,
+        middleware: [$($flow_mw:expr),*],
+        ( $src_name:literal => $src:expr, [$($src_mw:expr),*] )
+        $( |> ( $st_name:literal => $st:expr, [$($st_mw:expr),*] ) )*
+    } => {{
+        async {
+            let store = $crate::event_store::EventStore::for_flow($flow_name).await?;
+            $crate::flow_internal! {
+                store: store,
+                flow_middleware: [$($flow_mw),*],
+                stages: [
+                    ($src_name.to_string(), $src, [$($src_mw),*])
+                    $(, ($st_name.to_string(), $st, [$($st_mw),*]))*
+                ]
+            }
+        }.await
+    }};
+    
     // Flow with name (no explicit store) - uses EventStore::for_flow()
     {
         name: $flow_name:expr,
-        ( $src_name:literal => $src:expr, $src_tax:expr )
-        $( |> ( $st_name:literal => $st:expr, $st_tax:expr ) )*
+        ( $src_name:literal => $src:expr, [$($src_mw:expr),*] )
+        $( |> ( $st_name:literal => $st:expr, [$($st_mw:expr),*] ) )*
     } => {{
         async {
             let store = $crate::event_store::EventStore::for_flow($flow_name).await?;
             $crate::flow_internal! {
                 store: store,
-                flow_taxonomy: $crate::monitoring::GoldenSignals,
+                flow_middleware: [],
                 stages: [
-                    ($src_name.to_string(), $src, $src_tax)
-                    $(, ($st_name.to_string(), $st, $st_tax))*
+                    ($src_name.to_string(), $src, [$($src_mw),*])
+                    $(, ($st_name.to_string(), $st, [$($st_mw),*]))*
                 ]
             }
         }.await
     }};
     
-    // Flow with name and taxonomy
-    {
-        name: $flow_name:expr,
-        flow_taxonomy: $flow_tax:ty,
-        ( $src_name:literal => $src:expr, $src_tax:expr )
-        $( |> ( $st_name:literal => $st:expr, $st_tax:expr ) )*
-    } => {{
-        async {
-            let store = $crate::event_store::EventStore::for_flow($flow_name).await?;
-            $crate::flow_internal! {
-                store: store,
-                flow_taxonomy: $flow_tax,
-                stages: [
-                    ($src_name.to_string(), $src, $src_tax)
-                    $(, ($st_name.to_string(), $st, $st_tax))*
-                ]
-            }
-        }.await
-    }};
     
-    // EventStore-based flow with flow-level monitoring and named stages (backward compat)
+    // EventStore-based flow with flow-level monitoring and named stages
     {
         store: $store:expr,
-        flow_taxonomy: $flow_tax:ty,
-        ( $src_name:literal => $src:expr, $src_tax:expr )
-        $( |> ( $st_name:literal => $st:expr, $st_tax:expr ) )*
+        middleware: [$($flow_mw:expr),*],
+        ( $src_name:literal => $src:expr, [$($src_mw:expr),*] )
+        $( |> ( $st_name:literal => $st:expr, [$($st_mw:expr),*] ) )*
     } => {{
         $crate::flow_internal! {
             store: $store,
-            flow_taxonomy: $flow_tax,
+            flow_middleware: [$($flow_mw),*],
             stages: [
-                ($src_name.to_string(), $src, $src_tax)
-                $(, ($st_name.to_string(), $st, $st_tax))*
+                ($src_name.to_string(), $src, [$($src_mw),*])
+                $(, ($st_name.to_string(), $st, [$($st_mw),*]))*
             ]
         }
     }};
@@ -234,8 +322,8 @@ macro_rules! flow {
     // Flow with name (auto-generated stage names)
     {
         name: $flow_name:expr,
-        ( $src:expr, $src_tax:expr )
-        $( |> ( $st:expr, $st_tax:expr ) )*
+        ( $src:expr, [$($src_mw:expr),*] )
+        $( |> ( $st:expr, [$($st_mw:expr),*] ) )*
     } => {{
         async {
             let store = $crate::event_store::EventStore::for_flow($flow_name).await?;
@@ -243,10 +331,10 @@ macro_rules! flow {
             
             $crate::flow_internal! {
                 store: store,
-                flow_taxonomy: $crate::monitoring::GoldenSignals,
+                flow_middleware: [],
                 stages: [
-                    ({_stage_counter += 1; format!("stage_{}", _stage_counter)}, $src, $src_tax)
-                    $(, ({_stage_counter += 1; format!("stage_{}", _stage_counter)}, $st, $st_tax))*
+                    ({_stage_counter += 1; format!("stage_{}", _stage_counter)}, $src, [$($src_mw),*])
+                    $(, ({_stage_counter += 1; format!("stage_{}", _stage_counter)}, $st, [$($st_mw),*]))*
                 ]
             }
         }.await
@@ -255,9 +343,9 @@ macro_rules! flow {
     // EventStore-based flow with flow-level monitoring (auto-generated names)
     {
         store: $store:expr,
-        flow_taxonomy: $flow_tax:ty,
-        ( $src:expr, $src_tax:expr )
-        $( |> ( $st:expr, $st_tax:expr ) )*
+        middleware: [$($flow_mw:expr),*],
+        ( $src:expr, [$($src_mw:expr),*] )
+        $( |> ( $st:expr, [$($st_mw:expr),*] ) )*
     } => {{
         // Count stages to generate names
         let mut _stage_counter = 0;
@@ -265,10 +353,10 @@ macro_rules! flow {
         // Delegate to flow_internal! with generated names
         $crate::flow_internal! {
             store: $store,
-            flow_taxonomy: $flow_tax,
+            flow_middleware: [$($flow_mw),*],
             stages: [
-                ({_stage_counter += 1; format!("stage_{}", _stage_counter)}, $src, $src_tax)
-                $(, ({_stage_counter += 1; format!("stage_{}", _stage_counter)}, $st, $st_tax))*
+                ({_stage_counter += 1; format!("stage_{}", _stage_counter)}, $src, [$($src_mw),*])
+                $(, ({_stage_counter += 1; format!("stage_{}", _stage_counter)}, $st, [$($st_mw),*]))*
             ]
         }
     }};
@@ -289,30 +377,14 @@ mod tests {
     use crate::monitoring::{RED, Taxonomy};
     use serde_json::json;
     
-    // Simple test stages using RED taxonomy
-    struct TestSource {
-        metrics: <RED as Taxonomy>::Metrics,
-    }
+    // Simple test stages - no taxonomy requirements
+    struct TestSource;
     
-    struct TestTransform {
-        metrics: <RED as Taxonomy>::Metrics,
-    }
+    struct TestTransform;
     
-    struct TestSink {
-        metrics: <RED as Taxonomy>::Metrics,
-    }
+    struct TestSink;
     
     impl Step for TestSource {
-        type Taxonomy = RED;
-        
-        fn taxonomy(&self) -> &Self::Taxonomy {
-            &RED
-        }
-        
-        fn metrics(&self) -> &<Self::Taxonomy as Taxonomy>::Metrics {
-            &self.metrics
-        }
-        
         fn step_type(&self) -> StepType {
             StepType::Source
         }
@@ -323,16 +395,6 @@ mod tests {
     }
     
     impl Step for TestTransform {
-        type Taxonomy = RED;
-        
-        fn taxonomy(&self) -> &Self::Taxonomy {
-            &RED
-        }
-        
-        fn metrics(&self) -> &<Self::Taxonomy as Taxonomy>::Metrics {
-            &self.metrics
-        }
-        
         fn step_type(&self) -> StepType {
             StepType::Stage
         }
@@ -343,16 +405,6 @@ mod tests {
     }
     
     impl Step for TestSink {
-        type Taxonomy = RED;
-        
-        fn taxonomy(&self) -> &Self::Taxonomy {
-            &RED
-        }
-        
-        fn metrics(&self) -> &<Self::Taxonomy as Taxonomy>::Metrics {
-            &self.metrics
-        }
-        
         fn step_type(&self) -> StepType {
             StepType::Sink
         }
@@ -365,9 +417,9 @@ mod tests {
     #[test]
     fn test_flow_macro_compiles() {
         // Test that we can create stages
-        let _source = TestSource { metrics: RED::create_metrics("test_source") };
-        let _transform = TestTransform { metrics: RED::create_metrics("test_transform") };
-        let _sink = TestSink { metrics: RED::create_metrics("test_sink") };
+        let _source = TestSource;
+        let _transform = TestTransform;
+        let _sink = TestSink;
         
         // The flow! macro is tested in integration tests
         // since it requires async runtime

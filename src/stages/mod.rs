@@ -163,7 +163,7 @@ pub mod transforms;
 pub mod sinks;
 
 pub use base::{Source, Stage, Sink};
-pub use monitored::{Monitor, MonitoredStep, MonitoredSource, MonitoredStage, MonitoredSink, MonitorSource, MonitorStage, MonitorSink};
+// Monitoring has moved to middleware - see src/middleware/monitoring.rs
 
 // Re-export key traits and types for convenience
 pub use sources::{Fetcher, FetchedItem, HttpSource, JsonParser, XmlParser, ResponseParser};

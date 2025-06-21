@@ -2,7 +2,7 @@
 //! 
 //! Handles both initialization and shutdown in a symmetric way
 
-use crate::topology::{PipelineTopology, StageId};
+use crate::topology::{PipelineTopology, StageId, Drainable};
 use std::sync::Arc;
 use tokio::sync::{Barrier, RwLock, broadcast, Semaphore};
 use std::collections::{HashMap, HashSet};
@@ -23,6 +23,8 @@ pub struct PipelineLifecycle {
     shutdown_tx: broadcast::Sender<ShutdownSignal>,
     /// Drain completion semaphore
     drain_semaphore: Arc<Semaphore>,
+    /// All drainable components (stages, observers, writers, etc.)
+    drainables: Arc<RwLock<HashMap<String, Box<dyn Drainable>>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -52,6 +54,8 @@ impl PipelineLifecycle {
         let total_stages = topology.num_stages();
         let (shutdown_tx, _) = broadcast::channel(16);
         
+        tracing::info!("PipelineLifecycle: Creating with {} stages", total_stages);
+        
         // Initialize in-flight counters
         let mut in_flight_map = HashMap::new();
         for stage in topology.stages() {
@@ -66,6 +70,7 @@ impl PipelineLifecycle {
             in_flight: Arc::new(RwLock::new(in_flight_map)),
             shutdown_tx,
             drain_semaphore: Arc::new(Semaphore::new(0)),
+            drainables: Arc::new(RwLock::new(HashMap::new())),
         }
     }
     
@@ -83,10 +88,41 @@ impl PipelineLifecycle {
         }
     }
     
+    /// Get a shutdown receiver for non-stage components (observers, exporters, etc.)
+    /// These components don't participate in the initialization barrier
+    pub fn shutdown_receiver(&self) -> broadcast::Receiver<ShutdownSignal> {
+        self.shutdown_tx.subscribe()
+    }
+    
+    /// Register a drainable component
+    pub async fn register_drainable<D: Drainable + 'static>(&self, component: D) {
+        let id = component.id().to_string();
+        let component_type = component.component_type();
+        
+        tracing::info!(
+            "Registering drainable component '{}' of type {:?}", 
+            id, component_type
+        );
+        
+        let mut drainables = self.drainables.write().await;
+        drainables.insert(id, Box::new(component));
+    }
+    
     /// Begin graceful shutdown
     pub async fn begin_shutdown(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         tracing::info!("Beginning graceful pipeline shutdown");
+        
+        // First broadcast the signal
         self.shutdown_tx.send(ShutdownSignal::BeginDrain)?;
+        
+        // Then tell all drainables to begin draining
+        let drainables = self.drainables.read().await;
+        for (id, drainable) in drainables.iter() {
+            tracing::debug!("Beginning drain for component '{}'", id);
+            // Note: We can't call begin_drain here because it requires &mut
+            // This will be handled by each component's select! loop
+        }
+        
         Ok(())
     }
     
@@ -149,6 +185,42 @@ impl PipelineLifecycle {
             undrained_stages,
             elapsed: start.elapsed(),
         })
+    }
+    
+    /// Wait for all drainable components to finish draining
+    pub async fn wait_for_all_drained(&self, timeout: Duration) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        
+        loop {
+            let mut all_drained = true;
+            let mut pending_components = Vec::new();
+            
+            {
+                let drainables = self.drainables.read().await;
+                for (id, drainable) in drainables.iter() {
+                    if !drainable.is_drained() {
+                        all_drained = false;
+                        pending_components.push(id.clone());
+                    }
+                }
+            }
+            
+            if all_drained {
+                tracing::info!("All drainable components have completed draining");
+                return Ok(true);
+            }
+            
+            if tokio::time::Instant::now() > deadline {
+                tracing::warn!(
+                    "Timeout waiting for components to drain. Still pending: {:?}", 
+                    pending_components
+                );
+                return Ok(false);
+            }
+            
+            // Small delay before checking again
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
     }
 }
 

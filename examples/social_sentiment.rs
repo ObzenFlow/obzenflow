@@ -45,16 +45,16 @@ async fn main() -> Result<()> {
     let handle = flow! {
         name: "social_sentiment",
         flow_taxonomy: GoldenSignals,
-        ("post_generator" => SocialPostGenerator::new(sample_posts), RED)
-        |> ("text_preprocessor" => TextPreprocessor::new(), USE)
-        |> ("sentiment_analyzer" => SentimentAnalyzer::new(), GoldenSignals)
-        |> ("trend_detector" => TrendDetector::new(), SAAFE)
+        ("post_generator" => SocialPostGenerator::new(sample_posts), [RED::monitoring()])
+        |> ("text_preprocessor" => TextPreprocessor::new(), [USE::monitoring()])
+        |> ("sentiment_analyzer" => SentimentAnalyzer::new(), [GoldenSignals::monitoring()])
+        |> ("trend_detector" => TrendDetector::new(), [SAAFE::monitoring()])
         |> ("sentiment_counter" => SentimentCounter::new(
             positive_count.clone(),
             negative_count.clone(),
             neutral_count.clone()
-        ), RED)
-        |> ("results_logger" => ResultsLogger::new(), USE)
+        ), [RED::monitoring()])
+        |> ("results_logger" => ResultsLogger::new(), [USE::monitoring()])
     }?;
     
     // Let the flow process all events
@@ -93,7 +93,6 @@ async fn main() -> Result<()> {
 struct SocialPostGenerator {
     posts: VecDeque<(&'static str, &'static str)>,
     emitted: std::sync::atomic::AtomicBool,
-    metrics: <RED as Taxonomy>::Metrics,
 }
 
 impl SocialPostGenerator {
@@ -101,21 +100,11 @@ impl SocialPostGenerator {
         Self {
             posts: posts.into_iter().collect(),
             emitted: std::sync::atomic::AtomicBool::new(false),
-            metrics: RED::create_metrics("SocialPostGenerator"),
         }
     }
 }
 
 impl Step for SocialPostGenerator {
-    type Taxonomy = RED;
-    
-    fn taxonomy(&self) -> &Self::Taxonomy {
-        &RED
-    }
-    
-    fn metrics(&self) -> &<Self::Taxonomy as Taxonomy>::Metrics {
-        &self.metrics
-    }
     
     fn step_type(&self) -> StepType {
         StepType::Source
@@ -140,7 +129,6 @@ impl Step for SocialPostGenerator {
             events.push(event);
         }
         
-        self.metrics.record_success(std::time::Duration::from_micros(100));
         println!("  📤 Generated {} social media posts", events.len());
         
         events
@@ -148,28 +136,15 @@ impl Step for SocialPostGenerator {
 }
 
 /// Clean and preprocess text data
-struct TextPreprocessor {
-    metrics: <USE as Taxonomy>::Metrics,
-}
+struct TextPreprocessor;
 
 impl TextPreprocessor {
     fn new() -> Self {
-        Self {
-            metrics: USE::create_metrics("TextPreprocessor"),
-        }
+        Self
     }
 }
 
 impl Step for TextPreprocessor {
-    type Taxonomy = USE;
-    
-    fn taxonomy(&self) -> &Self::Taxonomy {
-        &USE
-    }
-    
-    fn metrics(&self) -> &<Self::Taxonomy as Taxonomy>::Metrics {
-        &self.metrics
-    }
     
     fn handle(&self, mut event: ChainEvent) -> Vec<ChainEvent> {
         if let Some(text) = event.payload["text"].as_str() {
@@ -202,28 +177,15 @@ impl Step for TextPreprocessor {
 }
 
 /// Analyze sentiment using keyword-based approach
-struct SentimentAnalyzer {
-    metrics: <GoldenSignals as Taxonomy>::Metrics,
-}
+struct SentimentAnalyzer;
 
 impl SentimentAnalyzer {
     fn new() -> Self {
-        Self {
-            metrics: GoldenSignals::create_metrics("SentimentAnalyzer"),
-        }
+        Self
     }
 }
 
 impl Step for SentimentAnalyzer {
-    type Taxonomy = GoldenSignals;
-    
-    fn taxonomy(&self) -> &Self::Taxonomy {
-        &GoldenSignals
-    }
-    
-    fn metrics(&self) -> &<Self::Taxonomy as Taxonomy>::Metrics {
-        &self.metrics
-    }
     
     fn handle(&self, mut event: ChainEvent) -> Vec<ChainEvent> {
         if let Some(text) = event.payload["cleaned_text"].as_str() {
@@ -240,28 +202,15 @@ impl Step for SentimentAnalyzer {
 }
 
 /// Detect trending topics and themes
-struct TrendDetector {
-    metrics: <SAAFE as Taxonomy>::Metrics,
-}
+struct TrendDetector;
 
 impl TrendDetector {
     fn new() -> Self {
-        Self {
-            metrics: SAAFE::create_metrics("TrendDetector"),
-        }
+        Self
     }
 }
 
 impl Step for TrendDetector {
-    type Taxonomy = SAAFE;
-    
-    fn taxonomy(&self) -> &Self::Taxonomy {
-        &SAAFE
-    }
-    
-    fn metrics(&self) -> &<Self::Taxonomy as Taxonomy>::Metrics {
-        &self.metrics
-    }
     
     fn handle(&self, mut event: ChainEvent) -> Vec<ChainEvent> {
         if let Some(text) = event.payload["cleaned_text"].as_str() {
@@ -281,7 +230,6 @@ struct SentimentCounter {
     positive: Arc<AtomicU64>,
     negative: Arc<AtomicU64>,
     neutral: Arc<AtomicU64>,
-    metrics: <RED as Taxonomy>::Metrics,
 }
 
 impl SentimentCounter {
@@ -290,21 +238,11 @@ impl SentimentCounter {
             positive, 
             negative, 
             neutral,
-            metrics: RED::create_metrics("SentimentCounter"),
         }
     }
 }
 
 impl Step for SentimentCounter {
-    type Taxonomy = RED;
-    
-    fn taxonomy(&self) -> &Self::Taxonomy {
-        &RED
-    }
-    
-    fn metrics(&self) -> &<Self::Taxonomy as Taxonomy>::Metrics {
-        &self.metrics
-    }
     
     fn handle(&self, event: ChainEvent) -> Vec<ChainEvent> {
         if let Some(sentiment) = event.payload["sentiment"].as_str() {
@@ -364,28 +302,15 @@ fn detect_trends(text: &str) -> Vec<String> {
 }
 
 /// Log results to console
-struct ResultsLogger {
-    metrics: <USE as Taxonomy>::Metrics,
-}
+struct ResultsLogger;
 
 impl ResultsLogger {
     fn new() -> Self {
-        Self {
-            metrics: USE::create_metrics("ResultsLogger"),
-        }
+        Self
     }
 }
 
 impl Step for ResultsLogger {
-    type Taxonomy = USE;
-    
-    fn taxonomy(&self) -> &Self::Taxonomy {
-        &USE
-    }
-    
-    fn metrics(&self) -> &<Self::Taxonomy as Taxonomy>::Metrics {
-        &self.metrics
-    }
     
     fn step_type(&self) -> StepType {
         StepType::Sink

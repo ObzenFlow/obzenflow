@@ -49,6 +49,9 @@ pub type EventType = String;
 /// Strong typing for correlation IDs (traces related events through the pipeline)
 pub type CorrelationId = String;
 
+/// Strong typing for event IDs (unique identifier for each event)
+pub type EventId = String;
+
 /// Helper function to create a new correlation ID
 pub fn new_correlation_id() -> CorrelationId {
     Ulid::new().to_string()

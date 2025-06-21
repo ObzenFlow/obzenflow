@@ -1,6 +1,6 @@
 use flowstate_rs::prelude::*;
 use flowstate_rs::flow;
-use flowstate_rs::monitoring::{RED, Taxonomy};
+use flowstate_rs::monitoring::RED;
 use flowstate_rs::step::{Step, StepType, ChainEvent};
 use serde_json::json;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -11,19 +11,17 @@ use std::time::Instant;
 struct TestSource {
     total_events: u64,
     emitted: Arc<AtomicU64>,
-    metrics: <RED as Taxonomy>::Metrics,
 }
 
 impl Step for TestSource {
-    type Taxonomy = RED;
-    fn taxonomy(&self) -> &Self::Taxonomy { &RED }
-    fn metrics(&self) -> &<Self::Taxonomy as Taxonomy>::Metrics { &self.metrics }
-    fn step_type(&self) -> StepType { StepType::Source }
+    fn step_type(&self) -> StepType {
+        StepType::Source
+    }
     
     fn handle(&self, _event: ChainEvent) -> Vec<ChainEvent> {
         let current = self.emitted.fetch_add(1, Ordering::Relaxed);
         if current < self.total_events {
-            vec![ChainEvent::new("test", json!({"index": current}))]
+            vec![ChainEvent::new("test_event", json!({ "index": current }))]
         } else {
             vec![]
         }
@@ -34,22 +32,15 @@ impl Step for TestSource {
 struct TestSink {
     expected_count: u64,
     received: Arc<AtomicU64>,
-    metrics: <RED as Taxonomy>::Metrics,
 }
 
 impl Step for TestSink {
-    type Taxonomy = RED;
-    fn taxonomy(&self) -> &Self::Taxonomy { &RED }
-    fn metrics(&self) -> &<Self::Taxonomy as Taxonomy>::Metrics { &self.metrics }
-    fn step_type(&self) -> StepType { StepType::Sink }
+    fn step_type(&self) -> StepType {
+        StepType::Sink
+    }
     
-    fn handle(&self, event: ChainEvent) -> Vec<ChainEvent> {
-        if let Some(index) = event.payload.get("index").and_then(|v| v.as_u64()) {
-            let count = self.received.fetch_add(1, Ordering::Relaxed) + 1;
-            if count % 10 == 0 || count == self.expected_count {
-                println!("Sink: received event {} of {} (index={})", count, self.expected_count, index);
-            }
-        }
+    fn handle(&self, _event: ChainEvent) -> Vec<ChainEvent> {
+        self.received.fetch_add(1, Ordering::Relaxed);
         vec![]
     }
 }
@@ -66,21 +57,19 @@ async fn main() -> flowstate_rs::step::Result<()> {
     let source = TestSource {
         total_events: event_count,
         emitted: emitted_count.clone(),
-        metrics: RED::create_metrics("TestSource"),
     };
     
     let sink = TestSink {
         expected_count: event_count,
         received: Arc::new(AtomicU64::new(0)),
-        metrics: RED::create_metrics("TestSink"),
     };
     let sink_clone = sink.received.clone();
     
     let handle = flow! {
         store: store,
         flow_taxonomy: RED,
-        ("source" => source, RED)
-        |> ("sink" => sink, RED)
+        ("source" => source, [RED::monitoring()])
+        |> ("sink" => sink, [RED::monitoring()])
     }?;
     
     // Give pipeline time to initialize before monitoring

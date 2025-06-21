@@ -110,6 +110,13 @@ impl TaxonomyMetrics for GoldenSignalsMetrics {
 /// Golden Signals taxonomy definition
 pub struct GoldenSignals;
 
+impl GoldenSignals {
+    /// Create monitoring middleware for this taxonomy
+    pub fn monitoring() -> Box<dyn crate::middleware::Middleware> {
+        Box::new(crate::middleware::MonitoringMiddleware::<Self>::new(""))
+    }
+}
+
 impl Taxonomy for GoldenSignals {
     const NAME: &'static str = "GoldenSignals";
     const DESCRIPTION: &'static str = "Latency, Traffic, Errors, Saturation - Google's SRE approach";

@@ -23,7 +23,7 @@ const STAGE_COUNTS: &[usize] = &[1, 3, 5, 10, 20, 100];
 struct TimestampedSource {
     total_events: u64,
     emitted: AtomicU64,
-    metrics: <RED as Taxonomy>::Metrics,
+    
 }
 
 impl TimestampedSource {
@@ -31,21 +31,14 @@ impl TimestampedSource {
         Self {
             total_events,
             emitted: AtomicU64::new(0),
-            metrics: RED::create_metrics("TimestampedSource"),
+            
         }
     }
 }
 
 impl Step for TimestampedSource {
-    type Taxonomy = RED;
 
-    fn taxonomy(&self) -> &Self::Taxonomy {
-        &RED
-    }
 
-    fn metrics(&self) -> &<Self::Taxonomy as Taxonomy>::Metrics {
-        &self.metrics
-    }
 
     fn step_type(&self) -> StepType {
         StepType::Source
@@ -73,28 +66,21 @@ impl Step for TimestampedSource {
 /// Passthrough stage that just forwards events
 struct PassthroughStage {
     name: String,
-    metrics: <USE as Taxonomy>::Metrics,
+    
 }
 
 impl PassthroughStage {
     fn new(name: &str) -> Self {
         Self {
             name: name.to_string(),
-            metrics: USE::create_metrics(name),
+            
         }
     }
 }
 
 impl Step for PassthroughStage {
-    type Taxonomy = USE;
 
-    fn taxonomy(&self) -> &Self::Taxonomy {
-        &USE
-    }
 
-    fn metrics(&self) -> &<Self::Taxonomy as Taxonomy>::Metrics {
-        &self.metrics
-    }
 
     fn step_type(&self) -> StepType {
         StepType::Stage
@@ -128,15 +114,8 @@ impl TimestampedSink {
 }
 
 impl Step for TimestampedSink {
-    type Taxonomy = RED;
 
-    fn taxonomy(&self) -> &Self::Taxonomy {
-        &RED
-    }
 
-    fn metrics(&self) -> &<Self::Taxonomy as Taxonomy>::Metrics {
-        &*self.metrics
-    }
 
     fn step_type(&self) -> StepType {
         StepType::Sink
@@ -230,181 +209,181 @@ async fn test_pipeline_latency(stage_count: usize) -> Result<LatencyStats> {
             flow! {
                 store: event_store,
                 flow_taxonomy: GoldenSignals,
-                ("source" => source, RED)
-                |> ("sink" => sink.clone(), RED)
+                ("source" => source, [RED::monitoring()])
+                |> ("sink" => sink.clone(), [RED::monitoring()])
             }?
         }
         3 => {
             flow! {
                 store: event_store,
                 flow_taxonomy: GoldenSignals,
-                ("source" => source, RED)
-                |> ("stage1" => PassthroughStage::new("stage1"), USE)
-                |> ("stage2" => PassthroughStage::new("stage2"), USE)
-                |> ("sink" => sink.clone(), RED)
+                ("source" => source, [RED::monitoring()])
+                |> ("stage1" => PassthroughStage::new("stage1"), [USE::monitoring()])
+                |> ("stage2" => PassthroughStage::new("stage2"), [USE::monitoring()])
+                |> ("sink" => sink.clone(), [RED::monitoring()])
             }?
         }
         5 => {
             flow! {
                 store: event_store,
                 flow_taxonomy: GoldenSignals,
-                ("source" => source, RED)
-                |> ("stage1" => PassthroughStage::new("stage1"), USE)
-                |> ("stage2" => PassthroughStage::new("stage2"), USE)
-                |> ("stage3" => PassthroughStage::new("stage3"), USE)
-                |> ("stage4" => PassthroughStage::new("stage4"), USE)
-                |> ("sink" => sink.clone(), RED)
+                ("source" => source, [RED::monitoring()])
+                |> ("stage1" => PassthroughStage::new("stage1"), [USE::monitoring()])
+                |> ("stage2" => PassthroughStage::new("stage2"), [USE::monitoring()])
+                |> ("stage3" => PassthroughStage::new("stage3"), [USE::monitoring()])
+                |> ("stage4" => PassthroughStage::new("stage4"), [USE::monitoring()])
+                |> ("sink" => sink.clone(), [RED::monitoring()])
             }?
         }
         10 => {
             flow! {
                 store: event_store,
                 flow_taxonomy: GoldenSignals,
-                ("source" => source, RED)
-                |> ("stage1" => PassthroughStage::new("stage1"), USE)
-                |> ("stage2" => PassthroughStage::new("stage2"), USE)
-                |> ("stage3" => PassthroughStage::new("stage3"), USE)
-                |> ("stage4" => PassthroughStage::new("stage4"), USE)
-                |> ("stage5" => PassthroughStage::new("stage5"), USE)
-                |> ("stage6" => PassthroughStage::new("stage6"), USE)
-                |> ("stage7" => PassthroughStage::new("stage7"), USE)
-                |> ("stage8" => PassthroughStage::new("stage8"), USE)
-                |> ("stage9" => PassthroughStage::new("stage9"), USE)
-                |> ("sink" => sink.clone(), RED)
+                ("source" => source, [RED::monitoring()])
+                |> ("stage1" => PassthroughStage::new("stage1"), [USE::monitoring()])
+                |> ("stage2" => PassthroughStage::new("stage2"), [USE::monitoring()])
+                |> ("stage3" => PassthroughStage::new("stage3"), [USE::monitoring()])
+                |> ("stage4" => PassthroughStage::new("stage4"), [USE::monitoring()])
+                |> ("stage5" => PassthroughStage::new("stage5"), [USE::monitoring()])
+                |> ("stage6" => PassthroughStage::new("stage6"), [USE::monitoring()])
+                |> ("stage7" => PassthroughStage::new("stage7"), [USE::monitoring()])
+                |> ("stage8" => PassthroughStage::new("stage8"), [USE::monitoring()])
+                |> ("stage9" => PassthroughStage::new("stage9"), [USE::monitoring()])
+                |> ("sink" => sink.clone(), [RED::monitoring()])
             }?
         }
         20 => {
             flow! {
                 store: event_store,
                 flow_taxonomy: GoldenSignals,
-                ("source" => source, RED)
-                |> ("stage1" => PassthroughStage::new("stage1"), USE)
-                |> ("stage2" => PassthroughStage::new("stage2"), USE)
-                |> ("stage3" => PassthroughStage::new("stage3"), USE)
-                |> ("stage4" => PassthroughStage::new("stage4"), USE)
-                |> ("stage5" => PassthroughStage::new("stage5"), USE)
-                |> ("stage6" => PassthroughStage::new("stage6"), USE)
-                |> ("stage7" => PassthroughStage::new("stage7"), USE)
-                |> ("stage8" => PassthroughStage::new("stage8"), USE)
-                |> ("stage9" => PassthroughStage::new("stage9"), USE)
-                |> ("stage10" => PassthroughStage::new("stage10"), USE)
-                |> ("stage11" => PassthroughStage::new("stage11"), USE)
-                |> ("stage12" => PassthroughStage::new("stage12"), USE)
-                |> ("stage13" => PassthroughStage::new("stage13"), USE)
-                |> ("stage14" => PassthroughStage::new("stage14"), USE)
-                |> ("stage15" => PassthroughStage::new("stage15"), USE)
-                |> ("stage16" => PassthroughStage::new("stage16"), USE)
-                |> ("stage17" => PassthroughStage::new("stage17"), USE)
-                |> ("stage18" => PassthroughStage::new("stage18"), USE)
-                |> ("stage19" => PassthroughStage::new("stage19"), USE)
-                |> ("sink" => sink.clone(), RED)
+                ("source" => source, [RED::monitoring()])
+                |> ("stage1" => PassthroughStage::new("stage1"), [USE::monitoring()])
+                |> ("stage2" => PassthroughStage::new("stage2"), [USE::monitoring()])
+                |> ("stage3" => PassthroughStage::new("stage3"), [USE::monitoring()])
+                |> ("stage4" => PassthroughStage::new("stage4"), [USE::monitoring()])
+                |> ("stage5" => PassthroughStage::new("stage5"), [USE::monitoring()])
+                |> ("stage6" => PassthroughStage::new("stage6"), [USE::monitoring()])
+                |> ("stage7" => PassthroughStage::new("stage7"), [USE::monitoring()])
+                |> ("stage8" => PassthroughStage::new("stage8"), [USE::monitoring()])
+                |> ("stage9" => PassthroughStage::new("stage9"), [USE::monitoring()])
+                |> ("stage10" => PassthroughStage::new("stage10"), [USE::monitoring()])
+                |> ("stage11" => PassthroughStage::new("stage11"), [USE::monitoring()])
+                |> ("stage12" => PassthroughStage::new("stage12"), [USE::monitoring()])
+                |> ("stage13" => PassthroughStage::new("stage13"), [USE::monitoring()])
+                |> ("stage14" => PassthroughStage::new("stage14"), [USE::monitoring()])
+                |> ("stage15" => PassthroughStage::new("stage15"), [USE::monitoring()])
+                |> ("stage16" => PassthroughStage::new("stage16"), [USE::monitoring()])
+                |> ("stage17" => PassthroughStage::new("stage17"), [USE::monitoring()])
+                |> ("stage18" => PassthroughStage::new("stage18"), [USE::monitoring()])
+                |> ("stage19" => PassthroughStage::new("stage19"), [USE::monitoring()])
+                |> ("sink" => sink.clone(), [RED::monitoring()])
             }?
         }
         100 => {
             flow! {
                 store: event_store,
                 flow_taxonomy: GoldenSignals,
-                ("source" => source, RED)
-                |> ("stage1" => PassthroughStage::new("stage1"), USE)
-                |> ("stage2" => PassthroughStage::new("stage2"), USE)
-                |> ("stage3" => PassthroughStage::new("stage3"), USE)
-                |> ("stage4" => PassthroughStage::new("stage4"), USE)
-                |> ("stage5" => PassthroughStage::new("stage5"), USE)
-                |> ("stage6" => PassthroughStage::new("stage6"), USE)
-                |> ("stage7" => PassthroughStage::new("stage7"), USE)
-                |> ("stage8" => PassthroughStage::new("stage8"), USE)
-                |> ("stage9" => PassthroughStage::new("stage9"), USE)
-                |> ("stage10" => PassthroughStage::new("stage10"), USE)
-                |> ("stage11" => PassthroughStage::new("stage11"), USE)
-                |> ("stage12" => PassthroughStage::new("stage12"), USE)
-                |> ("stage13" => PassthroughStage::new("stage13"), USE)
-                |> ("stage14" => PassthroughStage::new("stage14"), USE)
-                |> ("stage15" => PassthroughStage::new("stage15"), USE)
-                |> ("stage16" => PassthroughStage::new("stage16"), USE)
-                |> ("stage17" => PassthroughStage::new("stage17"), USE)
-                |> ("stage18" => PassthroughStage::new("stage18"), USE)
-                |> ("stage19" => PassthroughStage::new("stage19"), USE)
-                |> ("stage20" => PassthroughStage::new("stage20"), USE)
-                |> ("stage21" => PassthroughStage::new("stage21"), USE)
-                |> ("stage22" => PassthroughStage::new("stage22"), USE)
-                |> ("stage23" => PassthroughStage::new("stage23"), USE)
-                |> ("stage24" => PassthroughStage::new("stage24"), USE)
-                |> ("stage25" => PassthroughStage::new("stage25"), USE)
-                |> ("stage26" => PassthroughStage::new("stage26"), USE)
-                |> ("stage27" => PassthroughStage::new("stage27"), USE)
-                |> ("stage28" => PassthroughStage::new("stage28"), USE)
-                |> ("stage29" => PassthroughStage::new("stage29"), USE)
-                |> ("stage30" => PassthroughStage::new("stage30"), USE)
-                |> ("stage31" => PassthroughStage::new("stage31"), USE)
-                |> ("stage32" => PassthroughStage::new("stage32"), USE)
-                |> ("stage33" => PassthroughStage::new("stage33"), USE)
-                |> ("stage34" => PassthroughStage::new("stage34"), USE)
-                |> ("stage35" => PassthroughStage::new("stage35"), USE)
-                |> ("stage36" => PassthroughStage::new("stage36"), USE)
-                |> ("stage37" => PassthroughStage::new("stage37"), USE)
-                |> ("stage38" => PassthroughStage::new("stage38"), USE)
-                |> ("stage39" => PassthroughStage::new("stage39"), USE)
-                |> ("stage40" => PassthroughStage::new("stage40"), USE)
-                |> ("stage41" => PassthroughStage::new("stage41"), USE)
-                |> ("stage42" => PassthroughStage::new("stage42"), USE)
-                |> ("stage43" => PassthroughStage::new("stage43"), USE)
-                |> ("stage44" => PassthroughStage::new("stage44"), USE)
-                |> ("stage45" => PassthroughStage::new("stage45"), USE)
-                |> ("stage46" => PassthroughStage::new("stage46"), USE)
-                |> ("stage47" => PassthroughStage::new("stage47"), USE)
-                |> ("stage48" => PassthroughStage::new("stage48"), USE)
-                |> ("stage49" => PassthroughStage::new("stage49"), USE)
-                |> ("stage50" => PassthroughStage::new("stage50"), USE)
-                |> ("stage51" => PassthroughStage::new("stage51"), USE)
-                |> ("stage52" => PassthroughStage::new("stage52"), USE)
-                |> ("stage53" => PassthroughStage::new("stage53"), USE)
-                |> ("stage54" => PassthroughStage::new("stage54"), USE)
-                |> ("stage55" => PassthroughStage::new("stage55"), USE)
-                |> ("stage56" => PassthroughStage::new("stage56"), USE)
-                |> ("stage57" => PassthroughStage::new("stage57"), USE)
-                |> ("stage58" => PassthroughStage::new("stage58"), USE)
-                |> ("stage59" => PassthroughStage::new("stage59"), USE)
-                |> ("stage60" => PassthroughStage::new("stage60"), USE)
-                |> ("stage61" => PassthroughStage::new("stage61"), USE)
-                |> ("stage62" => PassthroughStage::new("stage62"), USE)
-                |> ("stage63" => PassthroughStage::new("stage63"), USE)
-                |> ("stage64" => PassthroughStage::new("stage64"), USE)
-                |> ("stage65" => PassthroughStage::new("stage65"), USE)
-                |> ("stage66" => PassthroughStage::new("stage66"), USE)
-                |> ("stage67" => PassthroughStage::new("stage67"), USE)
-                |> ("stage68" => PassthroughStage::new("stage68"), USE)
-                |> ("stage69" => PassthroughStage::new("stage69"), USE)
-                |> ("stage70" => PassthroughStage::new("stage70"), USE)
-                |> ("stage71" => PassthroughStage::new("stage71"), USE)
-                |> ("stage72" => PassthroughStage::new("stage72"), USE)
-                |> ("stage73" => PassthroughStage::new("stage73"), USE)
-                |> ("stage74" => PassthroughStage::new("stage74"), USE)
-                |> ("stage75" => PassthroughStage::new("stage75"), USE)
-                |> ("stage76" => PassthroughStage::new("stage76"), USE)
-                |> ("stage77" => PassthroughStage::new("stage77"), USE)
-                |> ("stage78" => PassthroughStage::new("stage78"), USE)
-                |> ("stage79" => PassthroughStage::new("stage79"), USE)
-                |> ("stage80" => PassthroughStage::new("stage80"), USE)
-                |> ("stage81" => PassthroughStage::new("stage81"), USE)
-                |> ("stage82" => PassthroughStage::new("stage82"), USE)
-                |> ("stage83" => PassthroughStage::new("stage83"), USE)
-                |> ("stage84" => PassthroughStage::new("stage84"), USE)
-                |> ("stage85" => PassthroughStage::new("stage85"), USE)
-                |> ("stage86" => PassthroughStage::new("stage86"), USE)
-                |> ("stage87" => PassthroughStage::new("stage87"), USE)
-                |> ("stage88" => PassthroughStage::new("stage88"), USE)
-                |> ("stage89" => PassthroughStage::new("stage89"), USE)
-                |> ("stage90" => PassthroughStage::new("stage90"), USE)
-                |> ("stage91" => PassthroughStage::new("stage91"), USE)
-                |> ("stage92" => PassthroughStage::new("stage92"), USE)
-                |> ("stage93" => PassthroughStage::new("stage93"), USE)
-                |> ("stage94" => PassthroughStage::new("stage94"), USE)
-                |> ("stage95" => PassthroughStage::new("stage95"), USE)
-                |> ("stage96" => PassthroughStage::new("stage96"), USE)
-                |> ("stage97" => PassthroughStage::new("stage97"), USE)
-                |> ("stage98" => PassthroughStage::new("stage98"), USE)
-                |> ("stage99" => PassthroughStage::new("stage99"), USE)
-                |> ("sink" => sink.clone(), RED)
+                ("source" => source, [RED::monitoring()])
+                |> ("stage1" => PassthroughStage::new("stage1"), [USE::monitoring()])
+                |> ("stage2" => PassthroughStage::new("stage2"), [USE::monitoring()])
+                |> ("stage3" => PassthroughStage::new("stage3"), [USE::monitoring()])
+                |> ("stage4" => PassthroughStage::new("stage4"), [USE::monitoring()])
+                |> ("stage5" => PassthroughStage::new("stage5"), [USE::monitoring()])
+                |> ("stage6" => PassthroughStage::new("stage6"), [USE::monitoring()])
+                |> ("stage7" => PassthroughStage::new("stage7"), [USE::monitoring()])
+                |> ("stage8" => PassthroughStage::new("stage8"), [USE::monitoring()])
+                |> ("stage9" => PassthroughStage::new("stage9"), [USE::monitoring()])
+                |> ("stage10" => PassthroughStage::new("stage10"), [USE::monitoring()])
+                |> ("stage11" => PassthroughStage::new("stage11"), [USE::monitoring()])
+                |> ("stage12" => PassthroughStage::new("stage12"), [USE::monitoring()])
+                |> ("stage13" => PassthroughStage::new("stage13"), [USE::monitoring()])
+                |> ("stage14" => PassthroughStage::new("stage14"), [USE::monitoring()])
+                |> ("stage15" => PassthroughStage::new("stage15"), [USE::monitoring()])
+                |> ("stage16" => PassthroughStage::new("stage16"), [USE::monitoring()])
+                |> ("stage17" => PassthroughStage::new("stage17"), [USE::monitoring()])
+                |> ("stage18" => PassthroughStage::new("stage18"), [USE::monitoring()])
+                |> ("stage19" => PassthroughStage::new("stage19"), [USE::monitoring()])
+                |> ("stage20" => PassthroughStage::new("stage20"), [USE::monitoring()])
+                |> ("stage21" => PassthroughStage::new("stage21"), [USE::monitoring()])
+                |> ("stage22" => PassthroughStage::new("stage22"), [USE::monitoring()])
+                |> ("stage23" => PassthroughStage::new("stage23"), [USE::monitoring()])
+                |> ("stage24" => PassthroughStage::new("stage24"), [USE::monitoring()])
+                |> ("stage25" => PassthroughStage::new("stage25"), [USE::monitoring()])
+                |> ("stage26" => PassthroughStage::new("stage26"), [USE::monitoring()])
+                |> ("stage27" => PassthroughStage::new("stage27"), [USE::monitoring()])
+                |> ("stage28" => PassthroughStage::new("stage28"), [USE::monitoring()])
+                |> ("stage29" => PassthroughStage::new("stage29"), [USE::monitoring()])
+                |> ("stage30" => PassthroughStage::new("stage30"), [USE::monitoring()])
+                |> ("stage31" => PassthroughStage::new("stage31"), [USE::monitoring()])
+                |> ("stage32" => PassthroughStage::new("stage32"), [USE::monitoring()])
+                |> ("stage33" => PassthroughStage::new("stage33"), [USE::monitoring()])
+                |> ("stage34" => PassthroughStage::new("stage34"), [USE::monitoring()])
+                |> ("stage35" => PassthroughStage::new("stage35"), [USE::monitoring()])
+                |> ("stage36" => PassthroughStage::new("stage36"), [USE::monitoring()])
+                |> ("stage37" => PassthroughStage::new("stage37"), [USE::monitoring()])
+                |> ("stage38" => PassthroughStage::new("stage38"), [USE::monitoring()])
+                |> ("stage39" => PassthroughStage::new("stage39"), [USE::monitoring()])
+                |> ("stage40" => PassthroughStage::new("stage40"), [USE::monitoring()])
+                |> ("stage41" => PassthroughStage::new("stage41"), [USE::monitoring()])
+                |> ("stage42" => PassthroughStage::new("stage42"), [USE::monitoring()])
+                |> ("stage43" => PassthroughStage::new("stage43"), [USE::monitoring()])
+                |> ("stage44" => PassthroughStage::new("stage44"), [USE::monitoring()])
+                |> ("stage45" => PassthroughStage::new("stage45"), [USE::monitoring()])
+                |> ("stage46" => PassthroughStage::new("stage46"), [USE::monitoring()])
+                |> ("stage47" => PassthroughStage::new("stage47"), [USE::monitoring()])
+                |> ("stage48" => PassthroughStage::new("stage48"), [USE::monitoring()])
+                |> ("stage49" => PassthroughStage::new("stage49"), [USE::monitoring()])
+                |> ("stage50" => PassthroughStage::new("stage50"), [USE::monitoring()])
+                |> ("stage51" => PassthroughStage::new("stage51"), [USE::monitoring()])
+                |> ("stage52" => PassthroughStage::new("stage52"), [USE::monitoring()])
+                |> ("stage53" => PassthroughStage::new("stage53"), [USE::monitoring()])
+                |> ("stage54" => PassthroughStage::new("stage54"), [USE::monitoring()])
+                |> ("stage55" => PassthroughStage::new("stage55"), [USE::monitoring()])
+                |> ("stage56" => PassthroughStage::new("stage56"), [USE::monitoring()])
+                |> ("stage57" => PassthroughStage::new("stage57"), [USE::monitoring()])
+                |> ("stage58" => PassthroughStage::new("stage58"), [USE::monitoring()])
+                |> ("stage59" => PassthroughStage::new("stage59"), [USE::monitoring()])
+                |> ("stage60" => PassthroughStage::new("stage60"), [USE::monitoring()])
+                |> ("stage61" => PassthroughStage::new("stage61"), [USE::monitoring()])
+                |> ("stage62" => PassthroughStage::new("stage62"), [USE::monitoring()])
+                |> ("stage63" => PassthroughStage::new("stage63"), [USE::monitoring()])
+                |> ("stage64" => PassthroughStage::new("stage64"), [USE::monitoring()])
+                |> ("stage65" => PassthroughStage::new("stage65"), [USE::monitoring()])
+                |> ("stage66" => PassthroughStage::new("stage66"), [USE::monitoring()])
+                |> ("stage67" => PassthroughStage::new("stage67"), [USE::monitoring()])
+                |> ("stage68" => PassthroughStage::new("stage68"), [USE::monitoring()])
+                |> ("stage69" => PassthroughStage::new("stage69"), [USE::monitoring()])
+                |> ("stage70" => PassthroughStage::new("stage70"), [USE::monitoring()])
+                |> ("stage71" => PassthroughStage::new("stage71"), [USE::monitoring()])
+                |> ("stage72" => PassthroughStage::new("stage72"), [USE::monitoring()])
+                |> ("stage73" => PassthroughStage::new("stage73"), [USE::monitoring()])
+                |> ("stage74" => PassthroughStage::new("stage74"), [USE::monitoring()])
+                |> ("stage75" => PassthroughStage::new("stage75"), [USE::monitoring()])
+                |> ("stage76" => PassthroughStage::new("stage76"), [USE::monitoring()])
+                |> ("stage77" => PassthroughStage::new("stage77"), [USE::monitoring()])
+                |> ("stage78" => PassthroughStage::new("stage78"), [USE::monitoring()])
+                |> ("stage79" => PassthroughStage::new("stage79"), [USE::monitoring()])
+                |> ("stage80" => PassthroughStage::new("stage80"), [USE::monitoring()])
+                |> ("stage81" => PassthroughStage::new("stage81"), [USE::monitoring()])
+                |> ("stage82" => PassthroughStage::new("stage82"), [USE::monitoring()])
+                |> ("stage83" => PassthroughStage::new("stage83"), [USE::monitoring()])
+                |> ("stage84" => PassthroughStage::new("stage84"), [USE::monitoring()])
+                |> ("stage85" => PassthroughStage::new("stage85"), [USE::monitoring()])
+                |> ("stage86" => PassthroughStage::new("stage86"), [USE::monitoring()])
+                |> ("stage87" => PassthroughStage::new("stage87"), [USE::monitoring()])
+                |> ("stage88" => PassthroughStage::new("stage88"), [USE::monitoring()])
+                |> ("stage89" => PassthroughStage::new("stage89"), [USE::monitoring()])
+                |> ("stage90" => PassthroughStage::new("stage90"), [USE::monitoring()])
+                |> ("stage91" => PassthroughStage::new("stage91"), [USE::monitoring()])
+                |> ("stage92" => PassthroughStage::new("stage92"), [USE::monitoring()])
+                |> ("stage93" => PassthroughStage::new("stage93"), [USE::monitoring()])
+                |> ("stage94" => PassthroughStage::new("stage94"), [USE::monitoring()])
+                |> ("stage95" => PassthroughStage::new("stage95"), [USE::monitoring()])
+                |> ("stage96" => PassthroughStage::new("stage96"), [USE::monitoring()])
+                |> ("stage97" => PassthroughStage::new("stage97"), [USE::monitoring()])
+                |> ("stage98" => PassthroughStage::new("stage98"), [USE::monitoring()])
+                |> ("stage99" => PassthroughStage::new("stage99"), [USE::monitoring()])
+                |> ("sink" => sink.clone(), [RED::monitoring()])
             }?
         }
         _ => panic!("Unsupported stage count"),
@@ -461,9 +440,9 @@ async fn test_throughput() -> Result<f64> {
     let handle = flow! {
         store: event_store,
         flow_taxonomy: GoldenSignals,
-        ("source" => source, RED)
-        |> ("transform" => PassthroughStage::new("transform"), USE)
-        |> ("sink" => sink, RED)
+        ("source" => source, [RED::monitoring()])
+        |> ("transform" => PassthroughStage::new("transform"), [USE::monitoring()])
+        |> ("sink" => sink, [RED::monitoring()])
     }?;
 
     let start = Instant::now();
@@ -500,14 +479,9 @@ async fn test_idle_cpu() -> Result<f64> {
     }).await?;
 
     // Source that never emits
-    struct IdleSource {
-        metrics: <RED as Taxonomy>::Metrics,
-    }
+    struct IdleSource;
 
     impl Step for IdleSource {
-        type Taxonomy = RED;
-        fn taxonomy(&self) -> &Self::Taxonomy { &RED }
-        fn metrics(&self) -> &<Self::Taxonomy as Taxonomy>::Metrics { &self.metrics }
         fn step_type(&self) -> StepType { StepType::Source }
         fn handle(&self, _: ChainEvent) -> Vec<ChainEvent> { vec![] }
     }
@@ -515,8 +489,8 @@ async fn test_idle_cpu() -> Result<f64> {
     let handle = flow! {
         store: event_store,
         flow_taxonomy: GoldenSignals,
-        ("source" => IdleSource { metrics: RED::create_metrics("IdleSource") }, RED)
-        |> ("sink" => TimestampedSink::new(0).0.clone(), RED)
+        ("source" => IdleSource, [RED::monitoring()])
+        |> ("sink" => TimestampedSink::new(0).0.clone(), [RED::monitoring()])
     }?;
 
     // Let it stabilize
