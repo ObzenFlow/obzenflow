@@ -4,11 +4,13 @@
 //! different components have different initialization dependencies and
 //! should not share a single synchronization barrier.
 
-use crate::topology::{PipelineTopology, StageId, Drainable, ComponentType, ShutdownSignal};
+use crate::topology::{PipelineTopology, StageId, ShutdownSignal};
 use crate::step::Result;
+use crate::event_store::EventStore;
 use std::sync::Arc;
-use tokio::sync::{Barrier, RwLock, broadcast};
-use std::collections::HashMap;
+use tokio::sync::{Barrier, RwLock, broadcast, Notify};
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use async_trait::async_trait;
 
 /// Hierarchical initialization model with distinct layers
@@ -407,7 +409,17 @@ impl InitializationLayer {
 pub struct StageLifecycleHandle {
     stage_id: StageId,
     init_barrier: Arc<Barrier>,
-    shutdown_rx: Option<broadcast::Receiver<ShutdownSignal>>,
+    shutdown_rx: Arc<RwLock<Option<broadcast::Receiver<ShutdownSignal>>>>,
+    /// Track completed upstream stages (FLOWIP-058)
+    completed_upstreams: Arc<RwLock<HashSet<StageId>>>,
+    /// Count of in-flight events being processed
+    in_flight_count: Arc<AtomicUsize>,
+    /// Notify when drain conditions are met
+    drain_ready_notify: Arc<Notify>,
+    /// Reference to topology for upstream lookups
+    topology: Arc<PipelineTopology>,
+    /// Reference to event store for checking unprocessed events
+    event_store: Option<Arc<EventStore>>,
 }
 
 impl StageLifecycleHandle {
@@ -416,11 +428,18 @@ impl StageLifecycleHandle {
         stage_id: StageId,
         init_barrier: Arc<Barrier>,
         shutdown_tx: broadcast::Sender<ShutdownSignal>,
+        topology: Arc<PipelineTopology>,
+        event_store: Option<Arc<EventStore>>,
     ) -> Self {
         Self {
             stage_id,
             init_barrier,
-            shutdown_rx: Some(shutdown_tx.subscribe()),
+            shutdown_rx: Arc::new(RwLock::new(Some(shutdown_tx.subscribe()))),
+            completed_upstreams: Arc::new(RwLock::new(HashSet::new())),
+            in_flight_count: Arc::new(AtomicUsize::new(0)),
+            drain_ready_notify: Arc::new(Notify::new()),
+            topology,
+            event_store,
         }
     }
     
@@ -432,8 +451,109 @@ impl StageLifecycleHandle {
     }
     
     /// Get shutdown receiver
-    pub fn shutdown_receiver(&mut self) -> Option<broadcast::Receiver<ShutdownSignal>> {
-        self.shutdown_rx.take()
+    pub async fn shutdown_receiver(&self) -> Option<broadcast::Receiver<ShutdownSignal>> {
+        let mut rx = self.shutdown_rx.write().await;
+        rx.take()
+    }
+    
+    /// Check if this stage has any pending work (FLOWIP-058)
+    pub async fn has_pending_work(&self) -> bool {
+        // In-flight events currently being processed
+        let in_flight = self.in_flight_count.load(Ordering::SeqCst) > 0;
+        
+        // Unprocessed events in EventStore for this stage
+        let has_unprocessed = if let Some(ref store) = self.event_store {
+            // For now, we'll consider there are no unprocessed events
+            // In a real implementation, EventStore would track this
+            false
+        } else {
+            false
+        };
+        
+        // Any upstream stages still active (not drained)
+        let upstreams_active = self.any_upstream_active().await;
+        
+        in_flight || has_unprocessed || upstreams_active
+    }
+    
+    /// Wait for drain conditions to be met (FLOWIP-058)
+    pub async fn wait_for_drain_ready(&self) {
+        // Notified when:
+        // 1. All in-flight events complete
+        // 2. All upstream stages signal EOF
+        // 3. No unprocessed events remain
+        self.drain_ready_notify.notified().await
+    }
+    
+    /// Check if any upstream is still active (FLOWIP-058)
+    pub async fn any_upstream_active(&self) -> bool {
+        let completed = self.completed_upstreams.read().await;
+        let upstream_stages = self.topology.upstream_stages(self.stage_id);
+        
+        // If we have upstreams and not all are completed, some are active
+        !upstream_stages.is_empty() && completed.len() < upstream_stages.len()
+    }
+    
+    /// Mark an upstream stage as completed (FLOWIP-058)
+    pub async fn mark_upstream_complete(&self, stage_id: StageId) {
+        let mut completed = self.completed_upstreams.write().await;
+        completed.insert(stage_id);
+        
+        // Check if all upstreams are now complete
+        let upstream_stages = self.topology.upstream_stages(self.stage_id);
+        if completed.len() == upstream_stages.len() && self.in_flight_count.load(Ordering::SeqCst) == 0 {
+            // All conditions met, notify drain ready
+            self.drain_ready_notify.notify_waiters();
+        }
+    }
+    
+    /// Get count of active upstream stages (FLOWIP-058)
+    pub async fn active_upstream_count(&self) -> usize {
+        let completed = self.completed_upstreams.read().await;
+        let upstream_stages = self.topology.upstream_stages(self.stage_id);
+        upstream_stages.len() - completed.len()
+    }
+    
+    /// Increment in-flight count when processing starts
+    pub fn increment_in_flight(&self) {
+        self.in_flight_count.fetch_add(1, Ordering::SeqCst);
+    }
+    
+    /// Decrement in-flight count when processing completes
+    pub fn decrement_in_flight(&self) {
+        let previous = self.in_flight_count.fetch_sub(1, Ordering::SeqCst);
+        
+        // If this was the last in-flight event and all upstreams are done, notify
+        if previous == 1 {
+            // Check drain conditions asynchronously
+            let handle = self.clone();
+            tokio::spawn(async move {
+                if !handle.any_upstream_active().await {
+                    handle.drain_ready_notify.notify_waiters();
+                }
+            });
+        }
+    }
+    
+    /// Signal that this stage has drained
+    pub async fn signal_drained(&self) {
+        tracing::info!("Stage {:?} signaling drained", self.stage_id);
+        // In the future, this could update layer state
+    }
+}
+
+impl Clone for StageLifecycleHandle {
+    fn clone(&self) -> Self {
+        Self {
+            stage_id: self.stage_id,
+            init_barrier: self.init_barrier.clone(),
+            shutdown_rx: self.shutdown_rx.clone(),
+            completed_upstreams: self.completed_upstreams.clone(),
+            in_flight_count: self.in_flight_count.clone(),
+            drain_ready_notify: self.drain_ready_notify.clone(),
+            topology: self.topology.clone(),
+            event_store: self.event_store.clone(),
+        }
     }
 }
 
@@ -454,6 +574,32 @@ impl LayeredPipelineLifecycle {
             stage_id,
             barrier,
             self.shutdown_tx.clone(),
+            self.topology.clone(),
+            None, // EventStore will be set later if available
+        ))
+    }
+    
+    /// Create a stage lifecycle handle with event store
+    pub async fn stage_lifecycle_with_store(
+        &self, 
+        stage_id: StageId, 
+        event_store: Arc<EventStore>
+    ) -> Result<StageLifecycleHandle> {
+        // Get the stage layer
+        let stage_layer = &self.layers[LayerType::Stage as usize];
+        
+        // Get the barrier
+        let barrier_opt = stage_layer.barrier.read().await;
+        let barrier = barrier_opt.as_ref()
+            .ok_or("Stage layer barrier not initialized")?
+            .clone();
+        
+        Ok(StageLifecycleHandle::new(
+            stage_id,
+            barrier,
+            self.shutdown_tx.clone(),
+            self.topology.clone(),
+            Some(event_store),
         ))
     }
 }

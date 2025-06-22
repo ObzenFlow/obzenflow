@@ -6,25 +6,37 @@
 use flowstate_rs::prelude::*;
 use flowstate_rs::flow;
 use flowstate_rs::lifecycle::{EventHandler, ProcessingMode};
+use flowstate_rs::topology::StageId;
 use serde_json::json;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicBool, Ordering};
 use std::sync::Arc;
 
 /// Source that generates events
 struct EventGenerator {
     count: Arc<AtomicU64>,
     max_events: u64,
+    stage_id: StageId,
+    completion_sent: Arc<AtomicBool>,
 }
 
 impl EventHandler for EventGenerator {
     fn transform(&self, _event: ChainEvent) -> Vec<ChainEvent> {
-        let current = self.count.fetch_add(1, Ordering::Relaxed);
+        let current = self.count.load(Ordering::Relaxed);
+        
         if current < self.max_events {
+            // Generate normal events
+            self.count.fetch_add(1, Ordering::Relaxed);
             vec![ChainEvent::new("generated", json!({
                 "id": current,
                 "timestamp": chrono::Utc::now().to_string()
             }))]
+        } else if !self.completion_sent.load(Ordering::Relaxed) {
+            // Emit completion event exactly once
+            self.completion_sent.store(true, Ordering::Relaxed);
+            println!("Generator: Emitting source completion event");
+            vec![ChainEvent::source_complete(self.stage_id, true)]
         } else {
+            // Already sent completion, return empty
             vec![]
         }
     }
@@ -33,6 +45,7 @@ impl EventHandler for EventGenerator {
         ProcessingMode::Transform
     }
 }
+
 
 /// Processing stage
 struct DataProcessor;
@@ -77,9 +90,16 @@ async fn main() -> Result<()> {
     println!();
     
     // Create step instances
+    let count = Arc::new(AtomicU64::new(0));
+    let max_events = 5;
+    
+    // Note: We need a way to get the stage_id. For now, we'll use a placeholder.
+    // In a real implementation, the stage would be injected with its ID during initialization.
     let generator = EventGenerator {
-        count: Arc::new(AtomicU64::new(0)),
-        max_events: 5,
+        count: count.clone(),
+        max_events,
+        stage_id: StageId::from_u32(0), // Source is typically stage 0
+        completion_sent: Arc::new(AtomicBool::new(false)),
     };
     
     let processor = DataProcessor;
@@ -109,10 +129,10 @@ async fn main() -> Result<()> {
     
     println!("Pipeline created, waiting for processing...");
     
-    // Let it run
+    // Let it run - but the flow might complete naturally first!
     tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
     
-    // Shutdown
+    // Shutdown (this will detect if stages already completed naturally)
     handle.shutdown().await?;
     
     println!();

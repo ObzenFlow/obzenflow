@@ -11,8 +11,8 @@
 
 use crate::chain_event::ChainEvent;
 use crate::step::Result;
-use crate::lifecycle::{EventHandler, ProcessingMode};
-use crate::event_store::{EventStore, EventWriter, EventEnvelope, StageSemantics, EventSubscription, SubscriptionFilter};
+use crate::lifecycle::{EventHandler, ProcessingMode, BehaviorCondition, HandlerState};
+use crate::event_store::{EventStore, EventWriter, EventEnvelope, StageSemantics, EventSubscription, SubscriptionFilter, SubscriptionEvent};
 use crate::event_store::constants::SOURCE_IDLE_SLEEP;
 use crate::event_types::{
     FlowContext, StageType as EventStageType,
@@ -30,9 +30,10 @@ use ulid::Ulid;
 /// State machine for stage execution
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StageState {
-    Running,   // Normal operation
-    Draining,  // Received shutdown, processing remaining events
-    Drained,   // No more events, ready to exit
+    Running,        // Normal operation
+    Draining,       // Shutdown requested, still processing
+    ReadyToDrain,   // All upstreams done, waiting for in-flight
+    Drained,        // Complete, ready to exit
 }
 
 /// Event sourced stage that reads from EventStore with causal consistency
@@ -58,12 +59,25 @@ pub struct EventSourcedStage<H: EventHandler> {
     processing_mode: ProcessingMode,
     /// Whether this stage acts as a source (generates events without input)
     is_source: bool,
+    /// Reference to event store for signaling completion (FLOWIP-058)
+    event_store: Arc<EventStore>,
+    /// Track if this stage completed naturally (FLOWIP-058)
+    natural_completion: bool,
 }
 
 impl<H: EventHandler> EventSourcedStage<H> {
     /// Create a new builder for constructing an EventSourcedStage
     pub fn builder() -> EventSourcedStageBuilder<H> {
         EventSourcedStageBuilder::new()
+    }
+    
+    /// Check if source handler has naturally completed
+    /// For now returns false - actual behavior checking happens in process_new_events
+    /// where we have mutable access via interior mutability patterns
+    fn check_source_complete(&self) -> bool {
+        // BehaviorEventHandler checking is handled in process_new_events
+        // where we can properly handle the behavior update cycle
+        false
     }
     
     /// Enrich a ChainEvent with all metadata inline
@@ -190,21 +204,21 @@ impl<H: EventHandler> EventSourcedStage<H> {
         // Process subscribed events if we have a subscription
         if let Some(ref mut subscription) = self.subscription {
             // Get shutdown receiver from lifecycle handle
-            let mut shutdown_rx = self.lifecycle.shutdown_receiver();
+            let mut shutdown_rx = self.lifecycle.shutdown_receiver().await;
             
-            // Use select! to handle both events and shutdown
-            let events = if let Some(ref mut rx) = shutdown_rx {
+            // Use recv_with_eof for deterministic shutdown (FLOWIP-058)
+            let subscription_event = if let Some(ref mut rx) = shutdown_rx {
                 tokio::select! {
-                    // Normal event processing
-                    events = subscription.recv_causal_batch() => events?,
+                    // Normal event/EOF processing
+                    event = subscription.recv_with_eof() => event?,
                     
                     // Shutdown signal received
                     signal = rx.recv() => {
                         match signal {
                             Ok(ShutdownSignal::BeginDrain) => {
                                 *state = StageState::Draining;
-                                // Return empty to check if we can drain immediately
-                                vec![]
+                                // Continue to process normally
+                                subscription.recv_with_eof().await?
                             }
                             Ok(ShutdownSignal::ForceShutdown(reason)) => {
                                 return Err(format!("Force shutdown: {}", reason).into());
@@ -212,18 +226,19 @@ impl<H: EventHandler> EventSourcedStage<H> {
                             Err(_) => {
                                 // Channel closed, treat as drain
                                 *state = StageState::Draining;
-                                vec![]
+                                subscription.recv_with_eof().await?
                             }
                         }
                     }
                 }
             } else {
                 // No shutdown receiver, just get events normally
-                subscription.recv_causal_batch().await?
+                subscription.recv_with_eof().await?
             };
             
-            
-            for envelope in events {
+            match subscription_event {
+                SubscriptionEvent::Events(events) => {
+                    for envelope in events {
                 // Skip already processed
                 if self.processed.contains_key(&envelope.event.ulid) {
                     continue;
@@ -231,6 +246,10 @@ impl<H: EventHandler> EventSourcedStage<H> {
                 
                 // Track event entering this stage
                 // TODO: Add metrics via middleware instead
+                
+                // Note: Source completion events are not processed or forwarded.
+                // Sources detect their own completion when emitting (see source generation section).
+                // Downstream stages receive EOF signals through SubscriptionEvent::EndOfStream.
                 
                 // Check for shutdown event
                 if envelope.event.event_type == "_shutdown" {
@@ -251,20 +270,26 @@ impl<H: EventHandler> EventSourcedStage<H> {
                 // Track processing start time
                 let start_time = std::time::Instant::now();
                 
-                // Process based on handler mode
-                let results = match self.processing_mode {
-                    ProcessingMode::Transform => {
-                        self.handler.transform(envelope.event.clone())
-                    }
-                    ProcessingMode::Observe => {
-                        // Observers don't produce output events
-                        self.handler.observe(&envelope.event)?;
-                        vec![]
-                    }
-                    ProcessingMode::Aggregate => {
-                        // TODO: Aggregate mode not yet supported with Arc<H>
-                        tracing::warn!("Aggregate mode not yet supported in EventSourcedStage");
-                        vec![]
+                // Don't process source completion events through handlers
+                let results = if envelope.event.event_type == "flowstate.source.complete" {
+                    // Just mark as processed, don't forward
+                    vec![]
+                } else {
+                    // Process normal events based on handler mode
+                    match self.processing_mode {
+                        ProcessingMode::Transform => {
+                            self.handler.transform(envelope.event.clone())
+                        }
+                        ProcessingMode::Observe => {
+                            // Observers don't produce output events
+                            self.handler.observe(&envelope.event)?;
+                            vec![]
+                        }
+                        ProcessingMode::Aggregate => {
+                            // TODO: Aggregate mode not yet supported with Arc<H>
+                            tracing::warn!("Aggregate mode not yet supported in EventSourcedStage");
+                            vec![]
+                        }
                     }
                 };
                 
@@ -284,8 +309,40 @@ impl<H: EventHandler> EventSourcedStage<H> {
                 self.processed.insert(envelope.event.ulid.clone(), envelope);
                 processed_count += 1;
                 
-                // Event completed
-                // TODO: Add metrics via middleware instead
+                        // Event completed
+                        // TODO: Add metrics via middleware instead
+                    }
+                }
+                
+                SubscriptionEvent::EndOfStream { stage_id, natural_completion, .. } => {
+                    tracing::info!(
+                        "Stage '{}' received EOF from upstream stage {:?} (natural: {})", 
+                        self.stage_name, stage_id, natural_completion
+                    );
+                    // Mark upstream as complete in lifecycle handle
+                    self.lifecycle.mark_upstream_complete(stage_id).await;
+                    // Continue processing - other upstreams might have events
+                }
+                
+                SubscriptionEvent::AllUpstreamsComplete => {
+                    tracing::info!(
+                        "Stage '{}' received EOF from all upstream stages", 
+                        self.stage_name
+                    );
+                    // All upstreams are done - transition to draining
+                    match *state {
+                        StageState::Running => {
+                            tracing::info!("Stage '{}' transitioning to Draining (all upstreams complete)", self.stage_name);
+                            *state = StageState::Draining;
+                        }
+                        StageState::Draining => {
+                            *state = StageState::ReadyToDrain;
+                        }
+                        _ => {
+                            // Already draining or drained
+                        }
+                    }
+                }
             }
         }
         
@@ -316,13 +373,32 @@ impl<H: EventHandler> EventSourcedStage<H> {
                 }
             };
             
-            // Enrich all results first (before borrowing writer)
+            // Check results BEFORE enrichment to detect our own completion
+            for result in &results {
+                if result.event_type == "flowstate.source.complete" {
+                    if let Some(stage_id_str) = result.payload.get("stage_id").and_then(|v| v.as_str()) {
+                        if stage_id_str == self.stage_id.to_string() {
+                            // We're emitting our own completion - transition immediately!
+                            let natural = result.payload.get("natural")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false);
+                            tracing::info!("Source '{}' emitting completion event (natural: {})", 
+                                self.stage_name, natural);
+                            self.natural_completion = natural;
+                            *state = StageState::Draining;
+                            // Continue to write the event for audit trail
+                        }
+                    }
+                }
+            }
+            
+            // Enrich all results (including completion event)
             let enriched_results: Vec<ChainEvent> = results
                 .into_iter()
                 .map(|result| self.enrich_event(result, None, start_time))
                 .collect();
             
-            // Now write the enriched results
+            // Write all enriched results to EventStore
             let writer = self.writer.as_mut().ok_or("Writer not initialized")?;
             for enriched in enriched_results {
                 tracing::debug!("Source '{}' writing event type '{}'", self.stage_name, enriched.event_type);
@@ -359,11 +435,20 @@ impl<H: EventHandler> EventSourcedStage<H> {
                                 continue;
                             }
                             
-                            // For sources, prevent tight loop when no events generated
+                            // Sources need to sleep when they have no events to avoid busy-waiting.
+                            // This is critical for:
+                            // - Infinite sources with bursty traffic (e.g., Kafka consumers, HTTP endpoints)
+                            // - Rate-limited sources waiting for their next allowed emission
+                            // - Sources polling external systems that may temporarily have no data
+                            // - File watchers waiting for new data to be written
+                            // 
+                            // This sleep is NOT about completion detection - completed sources will have
+                            // already emitted a flowstate.source.complete event and transitioned to Draining.
+                            // This is purely about CPU efficiency during temporary "no data" periods.
                             if self.is_source {
                                 tokio::time::sleep(SOURCE_IDLE_SLEEP).await;
                             }
-                            // For other stages, recv_causal_batch() blocks naturally
+                            // For other stages, recv_with_eof() blocks naturally
                         }
                         Ok(count) => {
                             if count > 0 {
@@ -389,27 +474,17 @@ impl<H: EventHandler> EventSourcedStage<H> {
                     // We're draining - try to process any remaining events
                     match self.process_new_events(&mut state).await {
                         Ok(0) => {
-                            // No events processed
-                            // Since we can't check in-flight count without the full lifecycle,
-                            // we'll wait a bit to see if more events arrive
-                            // If still no events after wait, assume we're drained
-                            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                            
-                            // Try one more time
-                            match self.process_new_events(&mut state).await {
-                                Ok(0) => {
-                                    // Still no events, we're drained
-                                    state = StageState::Drained;
-                                }
-                                Ok(count) => {
-                                    tracing::debug!("Stage '{}' found {} more events to drain", self.stage_name, count);
-                                }
-                                Err(e) => {
-                                    tracing::error!("Stage '{}' error during final drain check: {}", self.stage_name, e);
-                                    // Transition to drained anyway on error
-                                    state = StageState::Drained;
-                                }
+                            // No events processed - check if we can drain
+                            if self.is_source && self.subscription.is_none() {
+                                // Source with no upstreams - can drain immediately
+                                tracing::info!("Source '{}' transitioning to Drained (no upstreams)", self.stage_name);
+                                state = StageState::Drained;
+                            } else if !self.lifecycle.has_pending_work().await {
+                                // Stage with upstreams - check pending work
+                                tracing::info!("Stage '{}' transitioning to Drained (no pending work)", self.stage_name);
+                                state = StageState::Drained;
                             }
+                            // No sleep needed! recv_with_eof will be notified of new events
                         }
                         Ok(count) => {
                             tracing::debug!(
@@ -424,15 +499,28 @@ impl<H: EventHandler> EventSourcedStage<H> {
                         }
                         Err(e) => {
                             tracing::error!("Stage '{}' error during drain: {}", self.stage_name, e);
-                            // On error, sleep before retry
-                            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                            // Continue without sleep - errors shouldn't delay drain
                         }
                     }
                 }
                 
+                StageState::ReadyToDrain => {
+                    // All upstreams complete, wait for in-flight to finish
+                    self.lifecycle.wait_for_drain_ready().await;
+                    state = StageState::Drained;
+                }
+                
                 StageState::Drained => {
-                    // We're drained, exit
-                    // TODO: Signal drained state to stage adapter via some mechanism
+                    // Use the tracked natural completion status
+                    let natural = self.natural_completion;
+                    
+                    // Signal completion to EventStore (FLOWIP-058)
+                    tracing::info!("Stage '{}' signaling completion to EventStore (natural: {})", self.stage_name, natural);
+                    self.event_store.signal_stage_complete(self.stage_id, natural).await?;
+                    
+                    // Signal completion to lifecycle
+                    self.lifecycle.signal_drained().await;
+                    
                     tracing::info!("Stage '{}' cleanly shut down", self.stage_name);
                     return Ok(());
                 }
@@ -477,11 +565,100 @@ impl FlowHandle {
         }
     }
 
+    /// Wait for natural completion of all stages
+    ///
+    /// Returns when all stage tasks have exited naturally (without shutdown signal)
+    pub async fn wait_for_completion(&mut self) -> Result<()> {
+        use std::sync::atomic::Ordering;
+
+        // Check if already shutting down
+        if self.shutdown_called.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+
+        // Take ownership of handles to consume them
+        let handles = std::mem::take(&mut self.stage_handles);
+        
+        // Wait for all stage tasks to complete naturally
+        let mut errors = Vec::new();
+        for handle in handles {
+            match handle.await {
+                Ok(Ok(())) => {
+                    // Stage completed naturally
+                },
+                Ok(Err(e)) => errors.push(e.to_string()),
+                Err(e) if e.is_cancelled() => {},
+                Err(e) => errors.push(format!("Task panic: {}", e)),
+            }
+        }
+        
+        // Mark that shutdown happened naturally
+        self.shutdown_called.store(true, Ordering::SeqCst);
+        
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(format!("Flow completion errors: {}", errors.join(", ")).into())
+        }
+    }
+
     /// Gracefully shutdown the flow
     ///
     /// Allows stages to finish processing current events before shutting down.
-    pub async fn shutdown(self) -> Result<()> {
+    pub async fn shutdown(mut self) -> Result<()> {
         use std::sync::atomic::Ordering;
+
+        // First check if stages have already completed or might complete naturally
+        if !self.stage_handles.is_empty() {
+            // Check if any stages have already exited
+            let all_completed = self.stage_handles.iter().all(|h| h.is_finished());
+            
+            if all_completed {
+                // All stages already completed! Just collect the results
+                let result = self.wait_for_completion().await;
+                match result {
+                    Ok(()) => {
+                        // Print statistics and return
+                        let stats = self.event_store.get_statistics().await;
+                        println!("\n📊 Event log summary:");
+                        println!("   Location: {}", stats.path.display());
+                        println!("   Segments: {}", stats.segment_count);
+                        println!("   Total size: {:.2} MB", stats.total_size_bytes as f64 / (1024.0 * 1024.0));
+                        println!("   Events written: {}", stats.event_count);
+                        println!("\n✅ Flow completed naturally!");
+                        return Ok(());
+                    }
+                    Err(e) => return Err(e),
+                }
+            } else {
+                // Give stages a brief chance to complete naturally
+                let wait_for_natural = self.wait_for_completion();
+                
+                tokio::select! {
+                    result = wait_for_natural => {
+                        // Stages completed naturally during our wait!
+                        match result {
+                            Ok(()) => {
+                                // Print statistics and return
+                                let stats = self.event_store.get_statistics().await;
+                                println!("\n📊 Event log summary:");
+                                println!("   Location: {}", stats.path.display());
+                                println!("   Segments: {}", stats.segment_count);
+                                println!("   Total size: {:.2} MB", stats.total_size_bytes as f64 / (1024.0 * 1024.0));
+                                println!("   Events written: {}", stats.event_count);
+                                println!("\n✅ Flow completed naturally!");
+                                return Ok(());
+                            }
+                            Err(e) => return Err(e),
+                        }
+                    }
+                    // If natural completion doesn't happen quickly, proceed with shutdown
+                    _ = tokio::time::sleep(tokio::time::Duration::from_millis(200)) => {
+                        // Continue with explicit shutdown
+                    }
+                }
+            }
+        }
 
         // Ensure shutdown is only called once
         if self.shutdown_called.swap(true, Ordering::SeqCst) {
@@ -680,6 +857,8 @@ impl<H: EventHandler> EventSourcedStageBuilder<H> {
             current_correlation_id: None,  // Will be set for source stages
             processing_mode,
             is_source,
+            event_store: store,
+            natural_completion: false,
         })
     }
 }

@@ -19,7 +19,7 @@ pub use vector_clock::VectorClock;
 pub use stage_semantics::*;
 pub use writer::EventWriter;
 pub use reader::EventReader;
-pub use subscription::{EventSubscription, SubscriptionFilter, EventNotification};
+pub use subscription::{EventSubscription, SubscriptionFilter, EventNotification, SubscriptionEvent, EofNotification};
 pub use writer_id::WriterId;
 pub use types::{EventEnvelope, IsolationMode, EventStoreConfig, RetentionPolicy};
 pub use store::{EventStore, EventStoreStatistics};

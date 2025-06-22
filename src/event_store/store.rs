@@ -2,14 +2,14 @@
 
 use crate::step::Result;
 use crate::event_store::constants::*;
-use crate::event_store::{EventEnvelope, EventWriter, EventReader, EventSubscription, SubscriptionFilter, EventNotification, WriterId};
+use crate::event_store::{EventEnvelope, EventWriter, EventReader, EventSubscription, SubscriptionFilter, EventNotification, EofNotification, WriterId};
 use crate::event_store::flow_log::FlowEventLog;
 use crate::event_types::new_flow_id;
 use crate::topology::StageId;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{RwLock, mpsc};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Instant;
 use ulid::Ulid;
 use serde_json::json;
@@ -56,6 +56,8 @@ pub(crate) struct Subscription {
     filter: SubscriptionFilter,
     /// Bounded channel to prevent memory issues
     sender: mpsc::Sender<EventNotification>,
+    /// Channel for EOF notifications (FLOWIP-058)
+    eof_sender: mpsc::Sender<EofNotification>,
     created_at: Instant,
 }
 
@@ -316,12 +318,14 @@ impl EventStore {
     /// Create a subscription for push-based delivery
     pub async fn subscribe(&self, filter: SubscriptionFilter) -> Result<EventSubscription> {
         let (tx, rx) = mpsc::channel(SUBSCRIPTION_CHANNEL_SIZE);
+        let (eof_tx, eof_rx) = mpsc::channel(SUBSCRIPTION_CHANNEL_SIZE);
         let id = Ulid::new();
         
         let sub = Subscription {
             id,
             filter: filter.clone(),
             sender: tx,
+            eof_sender: eof_tx,
             created_at: Instant::now(),
         };
         
@@ -343,6 +347,9 @@ impl EventStore {
             receiver: rx,
             pending_buffer: VecDeque::with_capacity(PENDING_BUFFER_CAPACITY),
             reader: self.reader(),
+            filter,
+            completed_upstreams: HashSet::new(),
+            eof_receiver: eof_rx,
         })
     }
     
@@ -385,6 +392,60 @@ impl EventStore {
         }
     }
     
+    /// Signal that a stage has completed (FLOWIP-058)
+    pub async fn signal_stage_complete(&self, stage_id: StageId, natural: bool) -> Result<()> {
+        // Get the final sequence number for this stage
+        let final_sequence = self.get_final_sequence_for(stage_id).await?;
+        
+        // Notify all subscribers of this stage
+        let manager = self.subscriptions.read().await;
+        
+        if let Some(sub_ids) = manager.stage_subscriptions.get(&stage_id) {
+            tracing::info!(
+                "Notifying {} subscribers that stage {:?} has completed (natural: {})",
+                sub_ids.len(), stage_id, natural
+            );
+            
+            for sub_id in sub_ids {
+                if let Some(sub) = manager.subscriptions.get(sub_id) {
+                    let eof_notification = EofNotification {
+                        stage_id,
+                        final_sequence,
+                        natural_completion: natural,
+                    };
+                    
+                    // Send EOF notification
+                    match sub.eof_sender.try_send(eof_notification) {
+                        Ok(_) => {
+                            tracing::debug!(
+                                "Sent EOF notification for stage {:?} to subscription {}",
+                                stage_id, sub_id
+                            );
+                        }
+                        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                            tracing::error!(
+                                "Subscription {} EOF channel full - cannot send EOF for stage {:?}",
+                                sub_id, stage_id
+                            );
+                        }
+                        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                            tracing::debug!("Subscription {} closed", sub_id);
+                        }
+                    }
+                }
+            }
+        }
+        
+        Ok(())
+    }
+    
+    /// Get the final sequence number for a stage
+    async fn get_final_sequence_for(&self, stage_id: StageId) -> Result<u64> {
+        // For now, we'll use the current event count as the sequence
+        // In a real implementation, this would track per-stage sequences
+        Ok(self.flow_log.total_events().await)
+    }
+
     /// Clean up dead subscriptions periodically
     async fn cleanup_subscriptions(&self) {
         let mut manager = self.subscriptions.write().await;

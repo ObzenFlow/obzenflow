@@ -119,4 +119,5 @@ impl EventHandler for MiddlewareEventHandlerDyn {
     fn processing_mode(&self) -> crate::lifecycle::ProcessingMode {
         self.inner.processing_mode()
     }
+    
 }

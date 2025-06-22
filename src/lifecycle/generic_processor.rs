@@ -3,7 +3,7 @@
 //! This eliminates duplicate code across components by providing a standard
 //! implementation for event subscription, processing, and graceful shutdown.
 
-use crate::event_store::{EventStore, EventSubscription, SubscriptionFilter};
+use crate::event_store::{EventStore, EventSubscription, SubscriptionFilter, SubscriptionEvent};
 use crate::step::Result;
 use crate::topology::{ShutdownSignal, ComponentType, Drainable};
 use crate::lifecycle::{EventHandler, ProcessingMode};
@@ -155,17 +155,18 @@ impl<H: EventHandler> GenericEventProcessor<H> {
                             }
                         }
                         
-                        // Process events with shutdown handling
-                        let events = if let Some(ref mut rx) = shutdown_rx {
+                        // Process events with shutdown and EOF handling
+                        let subscription_event = if let Some(ref mut rx) = shutdown_rx {
                             tokio::select! {
-                                events = subscription.recv_causal_batch() => events?,
+                                event = subscription.recv_with_eof() => event?,
                                 signal = rx.recv() => {
                                     match signal {
                                         Ok(ShutdownSignal::BeginDrain) => {
                                             let mut state = state_ref.write().await;
                                             *state = ProcessorState::Draining;
                                             tracing::info!("Processor '{}' beginning drain", name);
-                                            vec![] // Continue to check for remaining events
+                                            // Still need to receive events or EOF
+                                            subscription.recv_with_eof().await?
                                         }
                                         Ok(ShutdownSignal::ForceShutdown(reason)) => {
                                             let mut state = state_ref.write().await;
@@ -177,13 +178,34 @@ impl<H: EventHandler> GenericEventProcessor<H> {
                                             // Channel closed, treat as drain
                                             let mut state = state_ref.write().await;
                                             *state = ProcessorState::Draining;
-                                            vec![]
+                                            subscription.recv_with_eof().await?
                                         }
                                     }
                                 }
                             }
                         } else {
-                            subscription.recv_causal_batch().await?
+                            subscription.recv_with_eof().await?
+                        };
+                        
+                        // Handle the subscription event
+                        let events = match subscription_event {
+                            SubscriptionEvent::Events(events) => events,
+                            SubscriptionEvent::EndOfStream { stage_id, natural_completion, .. } => {
+                                tracing::info!(
+                                    "Processor '{}' received EOF from stage {:?} (natural: {})", 
+                                    name, stage_id, natural_completion
+                                );
+                                vec![] // Continue to process other upstreams
+                            }
+                            SubscriptionEvent::AllUpstreamsComplete => {
+                                tracing::info!("Processor '{}' all upstreams complete", name);
+                                // Transition to drained if we're draining
+                                if current_state == ProcessorState::Draining {
+                                    let mut state = state_ref.write().await;
+                                    *state = ProcessorState::Drained;
+                                }
+                                break;
+                            }
                         };
                         
                         if events.is_empty() {
@@ -276,10 +298,15 @@ impl<H: EventHandler + 'static> Drainable for GenericEventProcessor<H> {
     }
     
     fn is_drained(&self) -> bool {
-        let state = self.state.blocking_read();
+        // Note: This is called from async context, so we can't use blocking_read
+        // We'll try_read and default to false if we can't get the lock
         let pending = self.pending_events.load(Ordering::SeqCst);
         
-        matches!(*state, ProcessorState::Drained) && pending == 0
+        if let Ok(state) = self.state.try_read() {
+            matches!(*state, ProcessorState::Drained) && pending == 0
+        } else {
+            false // If we can't read the state, assume not drained
+        }
     }
     
     fn pending_count(&self) -> usize {

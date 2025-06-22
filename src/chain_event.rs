@@ -85,4 +85,24 @@ impl ChainEvent {
             extensions: EventExtensions::default(),
         }
     }
+    
+    /// Create a source completion event
+    /// This is emitted by sources when they have no more data to produce
+    pub fn source_complete(stage_id: crate::topology::StageId, natural: bool) -> Self {
+        let now = chrono::Utc::now();
+        Self::new(
+            "flowstate.source.complete",
+            serde_json::json!({
+                "stage_id": stage_id.to_string(),
+                "natural": natural,
+                "timestamp": now.to_rfc3339(),
+                "final": true,  // Indicates no more events will follow
+                "message": if natural { 
+                    "Source naturally completed" 
+                } else { 
+                    "Source stopped due to shutdown" 
+                }
+            })
+        )
+    }
 }

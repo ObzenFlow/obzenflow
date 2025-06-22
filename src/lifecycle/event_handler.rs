@@ -2,6 +2,7 @@
 
 use crate::chain_event::ChainEvent;
 use crate::step::Result;
+use crate::lifecycle::behavior::BehaviorCondition;
 
 /// Core trait defining HOW a component processes events
 pub trait EventHandler: Send + Sync {
@@ -27,6 +28,12 @@ pub trait EventHandler: Send + Sync {
     /// The GenericEventProcessor uses this to call the right method
     fn processing_mode(&self) -> ProcessingMode {
         ProcessingMode::Transform
+    }
+    
+    /// Check if this handler has any behavior conditions to report
+    /// Called periodically by EventSourcedStage to detect completion, state changes, etc.
+    fn check_behaviors(&mut self) -> Option<BehaviorCondition> {
+        None // Default: no behaviors
     }
 }
 
@@ -57,5 +64,9 @@ impl EventHandler for Box<dyn EventHandler> {
     
     fn processing_mode(&self) -> ProcessingMode {
         (**self).processing_mode()
+    }
+    
+    fn check_behaviors(&mut self) -> Option<BehaviorCondition> {
+        (**self).check_behaviors()
     }
 }
