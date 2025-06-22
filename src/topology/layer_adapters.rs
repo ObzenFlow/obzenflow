@@ -87,7 +87,7 @@ pub struct ObserverLayerAdapter<H: EventHandler> {
     pub name: String,
     pub processor: Arc<GenericEventProcessor<H>>,
     pub handle: Arc<tokio::sync::Mutex<Option<JoinHandle<Result<()>>>>>,
-    pub barrier: Option<Arc<tokio::sync::Barrier>>,
+    // FLOWIP-075: No barrier participation - adapters are passive observers
 }
 
 impl<H: EventHandler + 'static> ObserverLayerAdapter<H> {
@@ -96,7 +96,6 @@ impl<H: EventHandler + 'static> ObserverLayerAdapter<H> {
             name,
             processor: Arc::new(processor),
             handle: Arc::new(tokio::sync::Mutex::new(None)),
-            barrier: None,
         }
     }
     
@@ -120,14 +119,8 @@ impl<H: EventHandler + 'static> LayerComponent for ObserverLayerAdapter<H> {
     }
     
     async fn start(&self) -> Result<()> {
-        // Participate in barrier coordination like Stage components
-        if let Some(ref barrier) = self.barrier {
-            tracing::info!("Observer '{}' waiting at barrier", self.name);
-            barrier.wait().await;
-            tracing::info!("Observer '{}' passed barrier", self.name);
-        }
-        
-        // NOW we start the processor, after stages are running
+        // FLOWIP-075: No barrier coordination - observers start immediately
+        // Stages are already running when we get here
         tracing::info!("Starting observer '{}' (stages are running)", self.name);
         
         let handle = self.processor.start().await?;
@@ -163,7 +156,5 @@ impl<H: EventHandler + 'static> LayerComponent for ObserverLayerAdapter<H> {
         self
     }
     
-    fn set_barrier(&mut self, barrier: Arc<tokio::sync::Barrier>) {
-        self.barrier = Some(barrier);
-    }
+    // FLOWIP-075: Removed set_barrier - adapters don't participate in coordination
 }

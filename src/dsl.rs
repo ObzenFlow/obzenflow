@@ -197,6 +197,7 @@ macro_rules! flow_internal {
                     .with_stage_lifecycle_handle(stage_lifecycle)
                     .with_adapter_drained_flag(adapter_drained_flag)
                     .is_source(true)  // This is a source stage
+                    .with_run_signal(pipeline_lifecycle.run_signal())  // FLOWIP-075 materialize/run pattern
                     .build()
                     .await?;
                 

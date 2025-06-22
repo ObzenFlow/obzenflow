@@ -18,6 +18,8 @@ pub struct LayeredPipelineLifecycle {
     topology: Arc<PipelineTopology>,
     layers: Vec<InitializationLayer>,
     shutdown_tx: broadcast::Sender<ShutdownSignal>,
+    /// Run signal for source stages (materialize/run pattern)
+    run_signal: Arc<Notify>,
 }
 
 /// A single initialization layer with its own barrier and components
@@ -75,11 +77,6 @@ pub trait LayerComponent: Send + Sync {
     
     /// Allow downcasting for specific operations
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
-    
-    /// Set barrier for dynamic layers (no-op for stages)
-    fn set_barrier(&mut self, _barrier: Arc<tokio::sync::Barrier>) {
-        // Default implementation does nothing
-    }
 }
 
 /// Types of initialization layers
@@ -103,8 +100,9 @@ impl LayeredPipelineLifecycle {
         tracing::info!("Creating LayeredPipelineLifecycle with {} stages", topology.num_stages());
         
         // Create layers in order
+        // FLOWIP-075: Stages handle their own coordination - no layer barriers
         let layers = vec![
-            InitializationLayer::new("Stage Layer", LayerType::Stage, 0), // No barrier - stages coordinate themselves
+            InitializationLayer::new("Stage Layer", LayerType::Stage, 0), // No barrier - stages self-coordinate
             InitializationLayer::new("Observer Layer", LayerType::Observer, 0), // Dynamic size
             InitializationLayer::new("Control Layer", LayerType::Control, 0),   // Dynamic size
         ];
@@ -113,6 +111,7 @@ impl LayeredPipelineLifecycle {
             topology,
             layers,
             shutdown_tx,
+            run_signal: Arc::new(Notify::new()),
         }
     }
     
@@ -134,20 +133,7 @@ impl LayeredPipelineLifecycle {
         let component_count = components.len();
         drop(components);
         
-        // Update barrier size for dynamic layers and set barrier on component
-        if layer.layer_type != LayerType::Stage {
-            let barrier = Arc::new(Barrier::new(component_count));
-            
-            // Set barrier on the component using the trait method
-            let mut components_mut = layer.components.write().await;
-            if let Some(last_component) = components_mut.last_mut() {
-                last_component.set_barrier(barrier.clone());
-            }
-            drop(components_mut);
-            
-            let mut barrier_lock = layer.barrier.write().await;
-            *barrier_lock = Some(barrier);
-        }
+        // FLOWIP-075: No barrier coordination - components handle their own lifecycle
         
         tracing::info!(
             "Registered component '{}' in {} (now {} components)",
@@ -159,10 +145,14 @@ impl LayeredPipelineLifecycle {
         Ok(())
     }
     
-    /// Initialize all layers in order (inside-out)
+    /// Initialize all layers using materialize/run pattern
     pub async fn initialize(&self) -> Result<()> {
-        tracing::info!("Starting layered initialization");
+        tracing::info!("Starting initialization with materialize/run pattern");
         
+        // Phase 1: Materialize everything
+        self.materialize_all().await?;
+        
+        // Phase 2: Start the layers (stages will wait for run signal)
         for (index, layer) in self.layers.iter().enumerate() {
             // Check if previous layer is running (dependency check)
             if index > 0 {
@@ -188,7 +178,7 @@ impl LayeredPipelineLifecycle {
                 }
             }
             
-            tracing::info!("Initializing layer {}: {}", index, layer.name);
+            tracing::info!("Starting layer {}: {}", index, layer.name);
             
             // Update state
             {
@@ -228,11 +218,9 @@ impl LayeredPipelineLifecycle {
                 continue;
             }
             
-            // Wait at barrier for this layer
-            if let Some(ref barrier) = *barrier_opt {
-                tracing::info!("{} waiting at barrier ({} components)", layer.name, components.len());
-                barrier.wait().await;
-            }
+            // FLOWIP-075: No barrier coordination
+            // Stages handle their own coordination internally
+            // Observers start when ready without coordination
             
             // Mark layer as ready
             {
@@ -269,6 +257,10 @@ impl LayeredPipelineLifecycle {
         }
         
         tracing::info!("All layers initialized and running");
+        
+        // Phase 3: Fire the starting gun for sources
+        self.run_sources().await?;
+        
         Ok(())
     }
     
@@ -666,5 +658,77 @@ impl LayeredPipelineLifecycle {
             self.topology.clone(),
             Some(event_store),
         ))
+    }
+    
+    /// Get the run signal for source stages
+    pub fn run_signal(&self) -> Arc<Notify> {
+        self.run_signal.clone()
+    }
+    
+    /// Phase 1 of materialize/run pattern: Set up all components
+    pub async fn materialize_all(&self) -> Result<()> {
+        tracing::info!("Starting materialize phase");
+        
+        // Materialize stages first (they're the foundation)
+        self.materialize_stages().await?;
+        
+        // Then materialize auxiliary layers (observers, middleware, control)
+        self.materialize_auxiliary_layers().await?;
+        
+        tracing::info!("Materialize phase complete");
+        Ok(())
+    }
+    
+    /// Materialize stage layer
+    async fn materialize_stages(&self) -> Result<()> {
+        tracing::info!("Materializing stage layer");
+        
+        let stage_layer = &self.layers[LayerType::Stage as usize];
+        let components = stage_layer.components.read().await;
+        
+        // Initialize all stage components
+        for component in components.iter() {
+            tracing::debug!("Materializing stage component '{}'", component.id());
+            component.initialize().await?;
+        }
+        
+        tracing::info!("Stage layer materialized with {} components", components.len());
+        Ok(())
+    }
+    
+    /// Materialize auxiliary layers (observers, control)
+    async fn materialize_auxiliary_layers(&self) -> Result<()> {
+        tracing::info!("Materializing auxiliary layers");
+        
+        // Skip stage layer (index 0) and materialize the rest
+        for (index, layer) in self.layers.iter().enumerate().skip(1) {
+            let components = layer.components.read().await;
+            
+            if components.is_empty() {
+                tracing::debug!("Skipping empty layer: {}", layer.name);
+                continue;
+            }
+            
+            tracing::info!("Materializing {} with {} components", layer.name, components.len());
+            
+            for component in components.iter() {
+                tracing::debug!("Materializing component '{}' in {}", component.id(), layer.name);
+                component.initialize().await?;
+            }
+        }
+        
+        tracing::info!("Auxiliary layers materialized");
+        Ok(())
+    }
+    
+    /// Phase 2 of materialize/run pattern: Start event generation
+    pub async fn run_sources(&self) -> Result<()> {
+        tracing::info!("Firing the starting gun for sources! 🔫");
+        
+        // Notify all waiting sources to start generating events
+        self.run_signal.notify_waiters();
+        
+        tracing::info!("Sources notified to start");
+        Ok(())
     }
 }

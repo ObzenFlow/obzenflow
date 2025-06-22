@@ -25,6 +25,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::collections::HashMap;
 use ulid::Ulid;
+use tokio::sync::Notify;
 
 // ShutdownSignal moved to topology::shutdown module
 
@@ -66,6 +67,8 @@ pub struct EventSourcedStage<H: EventHandler> {
     natural_completion: bool,
     /// Shared flag to mark adapter as drained (FLOWIP-074)
     adapter_drained_flag: Option<Arc<AtomicBool>>,
+    /// Run signal for source stages (FLOWIP-075 materialize/run pattern)
+    run_signal: Option<Arc<Notify>>,
 }
 
 impl<H: EventHandler> EventSourcedStage<H> {
@@ -418,10 +421,16 @@ impl<H: EventHandler> EventSourcedStage<H> {
         // Signal that this stage is ready (subscriptions are set up)
         self.lifecycle.signal_ready().await;
         
-        // Sources must wait for ALL stages to be ready before emitting
+        // Sources must wait for run signal (FLOWIP-075 materialize/run pattern)
         if self.is_source {
-            tracing::info!("Source '{}' synchronized - all stages ready", self.stage_name);
-            // The signal_ready() call above already includes the barrier wait
+            if let Some(ref run_signal) = self.run_signal {
+                tracing::info!("Source '{}' waiting for run signal...", self.stage_name);
+                run_signal.notified().await;
+                tracing::info!("Source '{}' received run signal - starting event generation", self.stage_name);
+            } else {
+                // Legacy mode: wait for all stages
+                tracing::info!("Source '{}' synchronized - all stages ready", self.stage_name);
+            }
         }
         
         // State machine for stage lifecycle
@@ -779,6 +788,7 @@ pub struct EventSourcedStageBuilder<H: EventHandler> {
     is_source: bool,
     processing_mode: Option<ProcessingMode>,
     adapter_drained_flag: Option<Arc<AtomicBool>>,
+    run_signal: Option<Arc<Notify>>,
 }
 
 impl<H: EventHandler> EventSourcedStageBuilder<H> {
@@ -794,6 +804,7 @@ impl<H: EventHandler> EventSourcedStageBuilder<H> {
             is_source: false,
             processing_mode: None,
             adapter_drained_flag: None,
+            run_signal: None,
         }
     }
     
@@ -913,6 +924,12 @@ impl<H: EventHandler> EventSourcedStageBuilder<H> {
             event_store: store,
             natural_completion: false,
             adapter_drained_flag: self.adapter_drained_flag,
+            run_signal: self.run_signal,
         })
+    }
+    
+    pub fn with_run_signal(mut self, signal: Arc<Notify>) -> Self {
+        self.run_signal = Some(signal);
+        self
     }
 }
