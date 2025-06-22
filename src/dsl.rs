@@ -180,6 +180,7 @@ macro_rules! flow_internal {
                 
                 // Register stage adapter with Layer A
                 let stage_adapter = StageLayerAdapter::new(stage_id, $src_name.clone());
+                let adapter_drained_flag = stage_adapter.is_drained.clone();
                 pipeline_lifecycle.register_component(stage_adapter).await?;
                 
                 // Apply user's middleware array to the EventHandler
@@ -194,6 +195,7 @@ macro_rules! flow_internal {
                     .with_topology(stage_id, $src_name.clone(), topology_clone)
                     .with_store(store_clone)
                     .with_stage_lifecycle_handle(stage_lifecycle)
+                    .with_adapter_drained_flag(adapter_drained_flag)
                     .is_source(true)  // This is a source stage
                     .build()
                     .await?;
@@ -220,6 +222,7 @@ macro_rules! flow_internal {
                     
                     // Register stage adapter with Layer A
                     let stage_adapter = StageLayerAdapter::new(stage_id, $st_name.clone());
+                    let adapter_drained_flag = stage_adapter.is_drained.clone();
                     pipeline_lifecycle.register_component(stage_adapter).await?;
                     
                     // Apply user's middleware array to the EventHandler
@@ -234,6 +237,7 @@ macro_rules! flow_internal {
                         .with_topology(stage_id, $st_name.clone(), topology_clone)
                         .with_store(store_clone)
                         .with_stage_lifecycle_handle(stage_lifecycle)
+                        .with_adapter_drained_flag(adapter_drained_flag)
                         .build()
                         .await?;
                     

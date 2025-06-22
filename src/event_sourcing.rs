@@ -22,6 +22,7 @@ use crate::topology::{StageId, PipelineTopology, ShutdownSignal, StageLifecycleH
 // Monitoring is now handled by middleware
 // Removed broadcast - using StageShutdownHandle instead
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::collections::HashMap;
 use ulid::Ulid;
 
@@ -63,6 +64,8 @@ pub struct EventSourcedStage<H: EventHandler> {
     event_store: Arc<EventStore>,
     /// Track if this stage completed naturally (FLOWIP-058)
     natural_completion: bool,
+    /// Shared flag to mark adapter as drained (FLOWIP-074)
+    adapter_drained_flag: Option<Arc<AtomicBool>>,
 }
 
 impl<H: EventHandler> EventSourcedStage<H> {
@@ -521,6 +524,12 @@ impl<H: EventHandler> EventSourcedStage<H> {
                     // Signal completion to lifecycle
                     self.lifecycle.signal_drained().await;
                     
+                    // Also mark the adapter as drained if we have the flag (FLOWIP-074)
+                    if let Some(ref flag) = self.adapter_drained_flag {
+                        flag.store(true, Ordering::SeqCst);
+                        tracing::debug!("Stage '{}' marked adapter as drained", self.stage_name);
+                    }
+                    
                     tracing::info!("Stage '{}' cleanly shut down", self.stage_name);
                     return Ok(());
                 }
@@ -548,6 +557,8 @@ pub struct FlowHandle {
     shutdown_called: Arc<std::sync::atomic::AtomicBool>,
     /// Event store for statistics on shutdown
     event_store: Arc<EventStore>,
+    /// Handle to the natural completion monitor (FLOWIP-074)
+    completion_monitor: Option<tokio::task::JoinHandle<Result<()>>>,
 }
 
 impl FlowHandle {
@@ -557,11 +568,20 @@ impl FlowHandle {
         lifecycle: Arc<LayeredPipelineLifecycle>,
         event_store: Arc<EventStore>,
     ) -> Self {
+        // Spawn natural completion monitor (FLOWIP-074)
+        let monitor_handle = {
+            let lifecycle = lifecycle.clone();
+            tokio::spawn(async move {
+                lifecycle.monitor_completion().await
+            })
+        };
+        
         Self {
             stage_handles,
             lifecycle,
             shutdown_called: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             event_store,
+            completion_monitor: Some(monitor_handle),
         }
     }
 
@@ -578,6 +598,7 @@ impl FlowHandle {
 
         // Take ownership of handles to consume them
         let handles = std::mem::take(&mut self.stage_handles);
+        let monitor_handle = self.completion_monitor.take();
         
         // Wait for all stage tasks to complete naturally
         let mut errors = Vec::new();
@@ -589,6 +610,21 @@ impl FlowHandle {
                 Ok(Err(e)) => errors.push(e.to_string()),
                 Err(e) if e.is_cancelled() => {},
                 Err(e) => errors.push(format!("Task panic: {}", e)),
+            }
+        }
+        
+        // Also wait for the completion monitor (FLOWIP-074)
+        if let Some(monitor) = monitor_handle {
+            match monitor.await {
+                Ok(Ok(())) => {
+                    tracing::info!("Natural completion monitor finished successfully");
+                },
+                Ok(Err(e)) => {
+                    tracing::warn!("Completion monitor error: {}", e);
+                    errors.push(format!("Monitor error: {}", e));
+                },
+                Err(e) if e.is_cancelled() => {},
+                Err(e) => errors.push(format!("Monitor panic: {}", e)),
             }
         }
         
@@ -668,6 +704,11 @@ impl FlowHandle {
         // Send graceful shutdown signal
         let _ = self.lifecycle.begin_shutdown().await;
 
+        // Cancel the completion monitor since we're doing explicit shutdown (FLOWIP-074)
+        if let Some(monitor) = self.completion_monitor.take() {
+            monitor.abort();
+        }
+
         // Wait for all stages to complete
         let mut errors = Vec::new();
         for handle in self.stage_handles {
@@ -695,7 +736,7 @@ impl FlowHandle {
     }
 
     /// Immediately abort the flow
-    pub fn abort(self, reason: &str) {
+    pub fn abort(mut self, reason: &str) {
         use std::sync::atomic::Ordering;
 
         if self.shutdown_called.swap(true, Ordering::SeqCst) {
@@ -712,6 +753,11 @@ impl FlowHandle {
         // Cancel all tasks
         for handle in self.stage_handles {
             handle.abort();
+        }
+        
+        // Also cancel the completion monitor (FLOWIP-074)
+        if let Some(monitor) = self.completion_monitor.take() {
+            monitor.abort();
         }
     }
 }
@@ -732,6 +778,7 @@ pub struct EventSourcedStageBuilder<H: EventHandler> {
     stage_lifecycle_handle: Option<StageLifecycleHandle>,
     is_source: bool,
     processing_mode: Option<ProcessingMode>,
+    adapter_drained_flag: Option<Arc<AtomicBool>>,
 }
 
 impl<H: EventHandler> EventSourcedStageBuilder<H> {
@@ -746,6 +793,7 @@ impl<H: EventHandler> EventSourcedStageBuilder<H> {
             stage_lifecycle_handle: None,
             is_source: false,
             processing_mode: None,
+            adapter_drained_flag: None,
         }
     }
     
@@ -778,6 +826,11 @@ impl<H: EventHandler> EventSourcedStageBuilder<H> {
     
     pub fn with_stage_lifecycle_handle(mut self, handle: StageLifecycleHandle) -> Self {
         self.stage_lifecycle_handle = Some(handle);
+        self
+    }
+    
+    pub fn with_adapter_drained_flag(mut self, flag: Arc<AtomicBool>) -> Self {
+        self.adapter_drained_flag = Some(flag);
         self
     }
     
@@ -859,6 +912,7 @@ impl<H: EventHandler> EventSourcedStageBuilder<H> {
             is_source,
             event_store: store,
             natural_completion: false,
+            adapter_drained_flag: self.adapter_drained_flag,
         })
     }
 }

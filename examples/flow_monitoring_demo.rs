@@ -110,7 +110,7 @@ async fn main() -> Result<()> {
     
     // Create flow with flow-level monitoring middleware
     // This demonstrates the new FLOWIP-055 syntax
-    let handle = flow! {
+    let mut handle = flow! {
         name: "flow_monitoring_demo",
         middleware: [GoldenSignals::monitoring()],        // Flow-level monitoring
         ("source" => generator, [RED::monitoring()])      // Stage monitoring
@@ -127,13 +127,10 @@ async fn main() -> Result<()> {
     println!("This demonstrates how flow-level metrics are independent from stage metrics!");
     println!();
     
-    println!("Pipeline created, waiting for processing...");
+    println!("Pipeline created, waiting for natural completion...");
     
-    // Let it run - but the flow might complete naturally first!
-    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-    
-    // Shutdown (this will detect if stages already completed naturally)
-    handle.shutdown().await?;
+    // Wait for natural completion (FLOWIP-074)
+    handle.wait_for_completion().await?;
     
     println!();
     println!("✅ Flow completed successfully!");

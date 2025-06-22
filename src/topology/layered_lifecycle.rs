@@ -104,7 +104,7 @@ impl LayeredPipelineLifecycle {
         
         // Create layers in order
         let layers = vec![
-            InitializationLayer::new("Stage Layer", LayerType::Stage, topology.num_stages()),
+            InitializationLayer::new("Stage Layer", LayerType::Stage, 0), // No barrier - stages coordinate themselves
             InitializationLayer::new("Observer Layer", LayerType::Observer, 0), // Dynamic size
             InitializationLayer::new("Control Layer", LayerType::Control, 0),   // Dynamic size
         ];
@@ -385,6 +385,65 @@ impl LayeredPipelineLifecycle {
         
         Ok(())
     }
+    
+    /// Wait for all stages to drain (FLOWIP-074)
+    async fn wait_for_all_stages_drained(&self) -> Result<()> {
+        let stage_layer = &self.layers[LayerType::Stage as usize];
+        
+        loop {
+            // Check if all stage components are drained
+            let components = stage_layer.components.read().await;
+            let all_drained = components.iter().all(|c| c.is_drained());
+            
+            if all_drained && !components.is_empty() {
+                tracing::info!("All {} stages have drained", components.len());
+                return Ok(());
+            }
+            
+            // Brief sleep before checking again
+            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        }
+    }
+    
+    /// Notify observers to begin draining but don't wait (FLOWIP-074)
+    async fn begin_observer_drain(&self) -> Result<()> {
+        let observer_layer = &self.layers[LayerType::Observer as usize];
+        let mut components = observer_layer.components.write().await;
+        
+        if components.is_empty() {
+            tracing::debug!("No observers to drain");
+            return Ok(());
+        }
+        
+        tracing::info!("Notifying {} observers to begin draining", components.len());
+        
+        // Tell everyone to start draining
+        for component in components.iter_mut() {
+            tracing::debug!("Notifying observer '{}' to drain", component.id());
+            if let Err(e) = component.begin_drain().await {
+                tracing::warn!("Observer '{}' drain notification failed: {}", component.id(), e);
+                // Continue anyway - fire and forget
+            }
+        }
+        
+        // But DON'T WAIT - let them drain on their own time
+        tracing::info!("Observer drain notifications sent (fire-and-forget)");
+        Ok(())
+    }
+    
+    /// Monitor for natural completion (FLOWIP-074)
+    pub async fn monitor_completion(&self) -> Result<()> {
+        tracing::info!("Monitoring for natural flow completion");
+        
+        // Wait for all stages to complete
+        self.wait_for_all_stages_drained().await?;
+        
+        // Notify observers to start draining (fire and forget)
+        self.begin_observer_drain().await?;
+        
+        tracing::info!("Natural flow completion detected and observers notified");
+        Ok(())
+    }
 }
 
 impl InitializationLayer {
@@ -564,11 +623,14 @@ impl LayeredPipelineLifecycle {
         // Get the stage layer
         let stage_layer = &self.layers[LayerType::Stage as usize];
         
-        // Get the barrier
+        // Get the barrier if one exists (stages don't use layer barriers)
         let barrier_opt = stage_layer.barrier.read().await;
-        let barrier = barrier_opt.as_ref()
-            .ok_or("Stage layer barrier not initialized")?
-            .clone();
+        let barrier = if let Some(ref b) = *barrier_opt {
+            b.clone()
+        } else {
+            // Stages coordinate themselves, create a dummy barrier that's already satisfied
+            Arc::new(Barrier::new(0))
+        };
         
         Ok(StageLifecycleHandle::new(
             stage_id,
@@ -588,11 +650,14 @@ impl LayeredPipelineLifecycle {
         // Get the stage layer
         let stage_layer = &self.layers[LayerType::Stage as usize];
         
-        // Get the barrier
+        // Get the barrier if one exists (stages don't use layer barriers)
         let barrier_opt = stage_layer.barrier.read().await;
-        let barrier = barrier_opt.as_ref()
-            .ok_or("Stage layer barrier not initialized")?
-            .clone();
+        let barrier = if let Some(ref b) = *barrier_opt {
+            b.clone()
+        } else {
+            // Stages coordinate themselves, create a dummy barrier that's already satisfied
+            Arc::new(Barrier::new(0))
+        };
         
         Ok(StageLifecycleHandle::new(
             stage_id,
