@@ -354,13 +354,15 @@ impl EventStore {
     }
     
     
-    /// Notify subscribers - async all the way down
-    pub(crate) async fn notify_subscribers(&self, envelope: &EventEnvelope) {
+    /// Notify subscribers - returns true if ANY notification was delivered
+    pub(crate) async fn notify_subscribers(&self, envelope: &EventEnvelope) -> bool {
         // Read lock - multiple notifiers can run concurrently
         let manager = self.subscriptions.read().await;
         
         // Get stage_id from writer_id
         let stage_id = envelope.writer_id.stage_id();
+        
+        let mut any_alive = false;
         
         if let Some(sub_ids) = manager.stage_subscriptions.get(&stage_id) {
             tracing::debug!("Notifying {} subscribers for stage {:?}", sub_ids.len(), stage_id);
@@ -376,20 +378,26 @@ impl EventStore {
                     match sub.sender.try_send(notification) {
                         Ok(_) => {
                             tracing::trace!("Sent notification for event {} to subscription {}", envelope.event.ulid, sub_id);
+                            any_alive = true;
                         },
                         Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
                             tracing::error!(
                                 "Subscription {} channel full - subscriber too slow! Dropping event {}",
                                 sub_id, envelope.event.ulid
                             );
+                            // Channel is full but subscriber is still alive
+                            any_alive = true;
                         }
                         Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
                             tracing::debug!("Subscription {} closed", sub_id);
+                            // Dead subscriber - don't count
                         }
                     }
                 }
             }
         }
+        
+        any_alive
     }
     
     /// Signal that a stage has completed (FLOWIP-058)

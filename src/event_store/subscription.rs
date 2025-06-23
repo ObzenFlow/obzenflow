@@ -103,13 +103,21 @@ impl EventSubscription {
                 // We got a notification, fetch the event
                 let mut events = vec![];
                 
-                // Try to get the event
+                // Try to get the event - must succeed (architectural honesty)
                 match self.reader.read_event(&notification.event_id).await {
                     Ok(envelope) => {
                         events.push(envelope);
                     }
                     Err(e) => {
-                        tracing::error!("Failed to fetch event {}: {}", notification.event_id, e);
+                        // Protocol violation - notified but can't read
+                        tracing::error!(
+                            "Protocol violation in recv_with_eof: Cannot read event {}: {}",
+                            notification.event_id, e
+                        );
+                        return Err(format!(
+                            "Read failed after notification for event {} - protocol violation",
+                            notification.event_id
+                        ).into());
                     }
                 }
                 
@@ -120,7 +128,15 @@ impl EventSubscription {
                             match self.reader.read_event(&notification.event_id).await {
                                 Ok(envelope) => events.push(envelope),
                                 Err(e) => {
-                                    tracing::error!("Failed to fetch event {}: {}", notification.event_id, e);
+                                    // Protocol violation - notified but can't read
+                                    tracing::error!(
+                                        "Protocol violation in batching: Cannot read event {}: {}",
+                                        notification.event_id, e
+                                    );
+                                    return Err(format!(
+                                        "Read failed after notification for event {} - protocol violation",
+                                        notification.event_id
+                                    ).into());
                                 }
                             }
                         }
@@ -185,33 +201,25 @@ impl EventSubscription {
             }
         }
         
-        // Fetch full events with retry
+        // Fetch full events - NO RETRIES (architectural honesty)
         let mut events = Vec::with_capacity(notifications.len());
         for notification in notifications {
-            // Retry up to 3 times with small delay
-            let mut retry_count = 0;
-            loop {
-                match self.reader.read_event(&notification.event_id).await {
-                    Ok(envelope) => {
-                        events.push(envelope);
-                        break;
-                    }
-                    Err(e) if retry_count < 3 => {
-                        retry_count += 1;
-                        tracing::debug!(
-                            "Retry {} reading event {}: {}", 
-                            retry_count, notification.event_id, e
-                        );
-                        tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
-                    }
-                    Err(e) => {
-                        tracing::error!(
-                            "Failed to fetch event {} after {} retries: {} - EVENT LOST!", 
-                            notification.event_id, retry_count, e
-                        );
-                        // THIS IS WHERE EVENTS ARE LOST - notification received but event not readable
-                        break; // Give up after retries
-                    }
+            match self.reader.read_event(&notification.event_id).await {
+                Ok(envelope) => {
+                    events.push(envelope);
+                }
+                Err(e) => {
+                    // This is a protocol violation - we were notified but can't read
+                    // According to FLOWIP-075a, this should NEVER happen with proper write-before-notify
+                    tracing::error!(
+                        "Protocol violation: Notified about event {} but cannot read it. Error: {}",
+                        notification.event_id, e
+                    );
+                    // Don't silently lose events - fail honestly
+                    return Err(format!(
+                        "Read failed after notification for event {} - protocol violation",
+                        notification.event_id
+                    ).into());
                 }
             }
         }
