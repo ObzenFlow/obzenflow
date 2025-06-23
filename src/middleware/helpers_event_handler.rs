@@ -1,7 +1,7 @@
 //! Helper functions for applying middleware to EventHandlers
 
 use crate::lifecycle::EventHandler;
-use crate::middleware::{Middleware, MiddlewareEventHandler};
+use crate::middleware::Middleware;
 
 /// Apply a vector of middleware to an EventHandler.
 /// 

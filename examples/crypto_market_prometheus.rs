@@ -8,21 +8,26 @@
 use flowstate_rs::prelude::*;
 use flowstate_rs::flow;
 use flowstate_rs::lifecycle::{EventHandler, ProcessingMode};
+use flowstate_rs::topology::StageId;
 use serde_json::json;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicBool, Ordering};
 use std::sync::Arc;
 
 /// Source that generates crypto market data
 struct CryptoMarketSource {
     total_events: u64,
     emitted: AtomicU64,
+    stage_id: StageId,
+    completion_sent: Arc<AtomicBool>,
 }
 
 impl CryptoMarketSource {
-    fn new(total_events: u64) -> Self {
+    fn new(total_events: u64, stage_id: StageId) -> Self {
         Self {
             total_events,
             emitted: AtomicU64::new(0),
+            stage_id,
+            completion_sent: Arc::new(AtomicBool::new(false)),
         }
     }
     
@@ -69,8 +74,11 @@ impl CryptoMarketSource {
 
 impl EventHandler for CryptoMarketSource {
     fn transform(&self, _event: ChainEvent) -> Vec<ChainEvent> {
-        let tick = self.emitted.fetch_add(1, Ordering::Relaxed);
+        let tick = self.emitted.load(Ordering::Relaxed);
+        
         if tick < self.total_events {
+            // Generate normal events
+            self.emitted.fetch_add(1, Ordering::Relaxed);
             // Show progress
             if tick == 0 {
                 println!("🚀 Market data generation started!");
@@ -78,10 +86,14 @@ impl EventHandler for CryptoMarketSource {
                 println!("📊 Generated {} market events...", tick);
             }
             vec![self.generate_market_event(tick)]
+        } else if !self.completion_sent.load(Ordering::Relaxed) {
+            // Send completion event once
+            self.completion_sent.store(true, Ordering::Relaxed);
+            println!("✨ Market data generation complete! {} events", self.total_events);
+            println!("CryptoMarketSource: Emitting source completion event");
+            vec![ChainEvent::source_complete(self.stage_id, true)]
         } else {
-            if tick == self.total_events {
-                println!("✨ Market data generation complete! {} events", self.total_events);
-            }
+            // Already sent completion
             vec![]
         }
     }
@@ -104,7 +116,7 @@ impl EventHandler for PriceAnalyzer {
     fn transform(&self, mut event: ChainEvent) -> Vec<ChainEvent> {
         if event.event_type == "MarketTick" {
             // Calculate price movement indicators
-            if let (Some(coin), Some(price)) = (
+            if let (Some(_coin), Some(_price)) = (
                 event.payload.get("coin").and_then(|v| v.as_str()),
                 event.payload.get("price").and_then(|v| v.as_f64())
             ) {
@@ -177,7 +189,7 @@ impl EventHandler for VolumeDetector {
 
 /// Aggregates market statistics
 struct MarketAggregator {
-    stats: Arc<tokio::sync::Mutex<MarketStats>>,
+    stats: Arc<std::sync::Mutex<MarketStats>>,
 }
 
 #[derive(Default)]
@@ -188,8 +200,8 @@ struct MarketStats {
 }
 
 impl MarketAggregator {
-    fn new() -> (Self, Arc<tokio::sync::Mutex<MarketStats>>) {
-        let stats = Arc::new(tokio::sync::Mutex::new(MarketStats::default()));
+    fn new() -> (Self, Arc<std::sync::Mutex<MarketStats>>) {
+        let stats = Arc::new(std::sync::Mutex::new(MarketStats::default()));
         (Self {
             stats: stats.clone(),
         }, stats)
@@ -199,19 +211,26 @@ impl MarketAggregator {
 impl EventHandler for MarketAggregator {
     fn transform(&self, event: ChainEvent) -> Vec<ChainEvent> {
         if event.event_type == "MarketTick" {
+            // Process synchronously to avoid race conditions
             let stats = self.stats.clone();
-            tokio::spawn(async move {
-                let mut stats = stats.lock().await;
-                stats.events_processed += 1;
+            let volume = event.payload.get("volume").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let is_high_volume = event.payload.get("high_volume").and_then(|v| v.as_bool()).unwrap_or(false);
+            
+            // Use blocking lock since this is quick
+            if let Ok(mut stats_guard) = self.stats.lock() {
+                stats_guard.events_processed += 1;
+                stats_guard.total_volume += volume;
                 
-                if let Some(volume) = event.payload.get("volume").and_then(|v| v.as_f64()) {
-                    stats.total_volume += volume;
+                if is_high_volume {
+                    stats_guard.high_volume_events += 1;
                 }
                 
-                if event.payload.get("high_volume").and_then(|v| v.as_bool()).unwrap_or(false) {
-                    stats.high_volume_events += 1;
+                // Debug: print first few volume updates
+                if stats_guard.events_processed <= 5 {
+                    println!("DEBUG: Event {}: volume={}, total_volume={}", 
+                        stats_guard.events_processed, volume, stats_guard.total_volume);
                 }
-            });
+            }
         }
         vec![] // Sink consumes events
     }
@@ -229,30 +248,28 @@ async fn main() -> Result<()> {
     println!("");
     
     let (aggregator, stats) = MarketAggregator::new();
+    let source_stage_id = StageId::from_u32(0);
     
     // Run the flow
-    let handle = flow! {
+    let mut handle = flow! {
         name: "crypto_market",
-        flow_taxonomy: GoldenSignals,
-        ("market" => CryptoMarketSource::new(100), [RED::monitoring()])  // 100 market events
+        middleware: [GoldenSignals::monitoring()],
+        ("market" => CryptoMarketSource::new(100, source_stage_id), [RED::monitoring()])  // 100 market events
         |> ("analyzer" => PriceAnalyzer::new(), [GoldenSignals::monitoring()])
         |> ("detector" => VolumeDetector::new(), [USE::monitoring()]) 
         |> ("aggregator" => aggregator, [SAAFE::monitoring()])
     }?;
     
-    // CRITICAL: Allow time for subscriptions to be established
-    // This prevents the race condition where events are emitted before stages subscribe
-    println!("⏳ Initializing market data pipeline...");
+    println!("⏳ Pipeline created, waiting for natural completion...");
+    
+    // Wait for natural completion
+    handle.wait_for_completion().await?;
+    
+    // Small delay to ensure all stats are updated
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
     
-    // Let it run
-    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
-    
-    // Shutdown gracefully
-    handle.shutdown().await?;
-    
     // Print final statistics
-    let final_stats = stats.lock().await;
+    let final_stats = stats.lock().unwrap();
     println!("\n✅ Market simulation completed!");
     println!("📊 Statistics:");
     println!("   - Events processed: {}", final_stats.events_processed);

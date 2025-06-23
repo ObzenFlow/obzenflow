@@ -1,5 +1,5 @@
 //! Example demonstrating FLOWIP-055: Flow as a Monitored Resource
-//! 
+//!
 //! This shows how flows can have their own middleware for monitoring,
 //! separate from stage monitoring.
 
@@ -22,7 +22,7 @@ struct EventGenerator {
 impl EventHandler for EventGenerator {
     fn transform(&self, _event: ChainEvent) -> Vec<ChainEvent> {
         let current = self.count.load(Ordering::Relaxed);
-        
+
         if current < self.max_events {
             // Generate normal events
             self.count.fetch_add(1, Ordering::Relaxed);
@@ -40,12 +40,11 @@ impl EventHandler for EventGenerator {
             vec![]
         }
     }
-    
+
     fn processing_mode(&self) -> ProcessingMode {
         ProcessingMode::Transform
     }
 }
-
 
 /// Processing stage
 struct DataProcessor;
@@ -56,7 +55,7 @@ impl EventHandler for DataProcessor {
         event.payload["process_time"] = json!(chrono::Utc::now().to_string());
         vec![event]
     }
-    
+
     fn processing_mode(&self) -> ProcessingMode {
         ProcessingMode::Transform
     }
@@ -73,7 +72,7 @@ impl EventHandler for EventLogger {
         println!("Event #{}: {:?}", count, event.payload);
         vec![] // Sinks consume events
     }
-    
+
     fn processing_mode(&self) -> ProcessingMode {
         ProcessingMode::Transform
     }
@@ -84,15 +83,15 @@ async fn main() -> Result<()> {
     // Enable debug logging for initialization
     std::env::set_var("RUST_LOG", "flowstate_rs=debug");
     tracing_subscriber::fmt::init();
-    
+
     println!("🚀 FLOWIP-055 Demo: Flow-level Monitoring");
     println!("=========================================");
     println!();
-    
+
     // Create step instances
     let count = Arc::new(AtomicU64::new(0));
     let max_events = 5;
-    
+
     // Note: We need a way to get the stage_id. For now, we'll use a placeholder.
     // In a real implementation, the stage would be injected with its ID during initialization.
     let generator = EventGenerator {
@@ -101,13 +100,13 @@ async fn main() -> Result<()> {
         stage_id: StageId::from_u32(0), // Source is typically stage 0
         completion_sent: Arc::new(AtomicBool::new(false)),
     };
-    
+
     let processor = DataProcessor;
-    
+
     let logger = EventLogger {
         received: Arc::new(AtomicU64::new(0)),
     };
-    
+
     // Create flow with flow-level monitoring middleware
     // This demonstrates the new FLOWIP-055 syntax
     let mut handle = flow! {
@@ -117,7 +116,7 @@ async fn main() -> Result<()> {
         |> ("processor" => processor, [USE::monitoring()]) // Stage monitoring
         |> ("sink" => logger, [RED::monitoring()])        // Stage monitoring
     }?;
-    
+
     println!("📊 Flow Monitoring Configuration:");
     println!("  - Flow: GoldenSignals (latency, traffic, errors, saturation)");
     println!("  - Source Stage: RED (rate, errors, duration)");
@@ -126,12 +125,12 @@ async fn main() -> Result<()> {
     println!();
     println!("This demonstrates how flow-level metrics are independent from stage metrics!");
     println!();
-    
+
     println!("Pipeline created, waiting for natural completion...");
-    
+
     // Wait for natural completion (FLOWIP-074)
     handle.wait_for_completion().await?;
-    
+
     println!();
     println!("✅ Flow completed successfully!");
     println!();
@@ -139,6 +138,6 @@ async fn main() -> Result<()> {
     println!("  - End-to-end latency (not sum of stage latencies)");
     println!("  - Flow success rate");
     println!("  - Business-level SLAs");
-    
+
     Ok(())
 }

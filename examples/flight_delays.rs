@@ -7,20 +7,24 @@
 
 use flowstate_rs::prelude::*;
 use flowstate_rs::flow;
-use flowstate_rs::{EventHandler, ProcessingMode};
+use flowstate_rs::lifecycle::{EventHandler, ProcessingMode};
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use flowstate_rs::topology::StageId;
 
 /// Source that generates flight data
 struct FlightDataSource {
     flights: Vec<(String, String, String, String, u32, u32)>,
     emitted: AtomicU64,
+    stage_id: StageId,
+    completion_sent: Arc<AtomicBool>,
 }
 
 impl FlightDataSource {
-    fn new() -> Self {
+    fn new(stage_id: StageId) -> Self {
         let flights = vec![
             ("AA".to_string(), "2023-12-01".to_string(), "LAX".to_string(), "JFK".to_string(), 120, 15), // American Airlines, 15 min delay
             ("DL".to_string(), "2023-12-01".to_string(), "ATL".to_string(), "ORD".to_string(), 90, 0),   // Delta, on time
@@ -35,6 +39,8 @@ impl FlightDataSource {
         Self {
             flights,
             emitted: AtomicU64::new(0),
+            stage_id,
+            completion_sent: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -54,7 +60,13 @@ impl EventHandler for FlightDataSource {
                 "flight_number": format!("{}{}", carrier, 1000 + current * 100),
             }))]
         } else {
-            vec![]
+            // Emit completion event when all flights have been processed
+            if !self.completion_sent.load(Ordering::Relaxed) {
+                self.completion_sent.store(true, Ordering::Relaxed);
+                vec![ChainEvent::source_complete(self.stage_id, true)]
+            } else {
+                vec![]
+            }
         }
     }
     
@@ -185,20 +197,20 @@ async fn main() -> Result<()> {
 
     println!("\nRunning delay analysis pipeline...");
 
-    let handle = flow! {
+    // Create source stage ID (sources are typically stage 0)
+    let source_stage_id = StageId::from_u32(0);
+
+    let mut handle = flow! {
         name: "flight_delays",
-        flow_taxonomy: GoldenSignals,
-        ("source" => FlightDataSource::new(), [RED::monitoring()])
+        middleware: [GoldenSignals::monitoring()],
+        ("source" => FlightDataSource::new(source_stage_id), [RED::monitoring()])
         |> ("validator" => FlightValidator::new(), [USE::monitoring()])
         |> ("calculator" => DelayCalculator::new(), [GoldenSignals::monitoring()])
         |> ("aggregator" => aggregator, [SAAFE::monitoring()])
     }?;
     
-    // Let it run
-    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-    
-    // Shutdown gracefully
-    handle.shutdown().await?;
+    // Wait for natural completion based on source EOF
+    handle.wait_for_completion().await?;
 
     println!("Analysis pipeline completed!");
 

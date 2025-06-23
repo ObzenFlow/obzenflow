@@ -9,7 +9,7 @@ use crate::step::Result;
 use crate::event_store::EventStore;
 use std::sync::Arc;
 use tokio::sync::{Barrier, RwLock, broadcast, Notify};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use async_trait::async_trait;
 

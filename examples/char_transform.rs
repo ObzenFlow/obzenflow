@@ -6,9 +6,10 @@
 use flowstate_rs::prelude::*;
 use flowstate_rs::flow;
 use flowstate_rs::lifecycle::{EventHandler, ProcessingMode};
+use flowstate_rs::topology::StageId;
 use serde_json::json;
 use std::sync::{Arc, Mutex};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicBool, Ordering};
 
 // Source -- Emits one `Char` event per character from sample sentences.
 struct TextCharSource {
@@ -17,10 +18,12 @@ struct TextCharSource {
     start_idx: Vec<usize>,
     announced: AtomicU64,
     emitted:   AtomicU64,
+    stage_id: StageId,
+    completion_sent: Arc<AtomicBool>,
 }
 
 impl TextCharSource {
-    fn new() -> Self {
+    fn new(stage_id: StageId) -> Self {
         let sentences = vec![
             "Hello, FlowState!".to_string(),
             "Rust makes systems programming fun.".to_string(),
@@ -46,16 +49,19 @@ impl TextCharSource {
             start_idx,
             announced: AtomicU64::new(0),
             emitted:   AtomicU64::new(0),
+            stage_id,
+            completion_sent: Arc::new(AtomicBool::new(false)),
         }
     }
 }
 
 impl EventHandler for TextCharSource {
     fn transform(&self, _event: ChainEvent) -> Vec<ChainEvent> {
-        let idx = self.emitted.fetch_add(1, Ordering::Relaxed) as usize;
-        if idx >= self.chars.len() { 
-            return vec![]; // No more characters to emit
-        }
+        let idx = self.emitted.load(Ordering::Relaxed) as usize;
+        
+        if idx < self.chars.len() {
+            // Generate normal events
+            self.emitted.fetch_add(1, Ordering::Relaxed);
 
         // Announce sentence start (console progress)
         let next = self.announced.load(Ordering::Relaxed) as usize;
@@ -64,8 +70,17 @@ impl EventHandler for TextCharSource {
             self.announced.fetch_add(1, Ordering::Relaxed);
         }
 
-        let ch = self.chars[idx];
-        vec![ChainEvent::new("Char", json!({ "ch": ch.to_string() }))]
+            let ch = self.chars[idx];
+            vec![ChainEvent::new("Char", json!({ "ch": ch.to_string() }))]
+        } else if !self.completion_sent.load(Ordering::Relaxed) {
+            // Send completion event once
+            self.completion_sent.store(true, Ordering::Relaxed);
+            println!("TextCharSource: Emitting source completion event");
+            vec![ChainEvent::source_complete(self.stage_id, true)]
+        } else {
+            // Already sent completion
+            vec![]
+        }
     }
     
     fn processing_mode(&self) -> ProcessingMode {
@@ -171,29 +186,23 @@ async fn main() -> Result<()> {
 
     // Create sink that collects output in memory
     let (sink, final_buffer) = TextCollectorSink::new();
+    let source_stage_id = StageId::from_u32(0);
 
     println!("⏳ Initializing pipeline...");
 
-    let handle = flow! {
+    let mut handle = flow! {
         name: "char_transform",
-        flow_taxonomy: GoldenSignals,
-        ("source"   => TextCharSource::new(), [RED::monitoring()])
+        middleware: [GoldenSignals::monitoring()],
+        ("source"   => TextCharSource::new(source_stage_id), [RED::monitoring()])
         |> ("cap"   => CapStage::new(),       [USE::monitoring()])
         |> ("digit" => DigitWordStage::new(), [USE::monitoring()])
         |> ("sink"  => sink,                 [SAAFE::monitoring()])
     }?;
     
-    println!("📌 Flow handle created, pipeline should be running...");
+    println!("📌 Pipeline created, waiting for natural completion...");
     
-    // TODO: Remove this sleep once FLOWIP-026 is implemented
-    // Currently needed because transient sources can't signal completion
-    println!("⏳ Waiting for pipeline to process all characters...");
-    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-    
-    println!("📌 Now calling shutdown...");
-
-    // Gracefully shut down the flow (waits for all events to drain)
-    handle.shutdown().await?;
+    // Wait for natural completion
+    handle.wait_for_completion().await?;
 
     println!("\n✅ Pipeline completed!\n");
 

@@ -147,7 +147,7 @@ impl PipelineTopology {
     
     /// Get flow ID (unique identifier for this flow instance)
     pub fn flow_id(&self) -> crate::event_types::FlowId {
-        use crate::event_types::FlowId;
+        
         // Generate flow ID from topology structure
         // In production, this would be set during flow construction
         let flow_name = self.flow_name();
@@ -156,7 +156,7 @@ impl PipelineTopology {
     
     /// Get source stage name (assumes single source)
     pub fn source_stage_name(&self) -> crate::event_types::StageName {
-        use crate::event_types::StageName;
+        
         let sources = self.source_stages();
         if sources.len() == 1 {
             if let Some(stage_info) = self.stages.get(&sources[0]) {
@@ -168,7 +168,7 @@ impl PipelineTopology {
     
     /// Get sink stage name (assumes single sink)
     pub fn sink_stage_name(&self) -> crate::event_types::StageName {
-        use crate::event_types::StageName;
+        
         let sinks = self.sink_stages();
         if sinks.len() == 1 {
             if let Some(stage_info) = self.stages.get(&sinks[0]) {

@@ -11,7 +11,6 @@ use std::time::{Duration, Instant};
 use std::collections::HashMap;
 use tokio::sync::RwLock;
 use crate::event_types::FlowId;
-use ulid::Ulid;
 
 /// Simple event ID type for tracking
 type EventId = String;

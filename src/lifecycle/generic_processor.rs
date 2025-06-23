@@ -3,7 +3,7 @@
 //! This eliminates duplicate code across components by providing a standard
 //! implementation for event subscription, processing, and graceful shutdown.
 
-use crate::event_store::{EventStore, EventSubscription, SubscriptionFilter, SubscriptionEvent};
+use crate::event_store::{EventStore, SubscriptionFilter, SubscriptionEvent};
 use crate::step::Result;
 use crate::topology::{ShutdownSignal, ComponentType, Drainable};
 use crate::lifecycle::{EventHandler, ProcessingMode};

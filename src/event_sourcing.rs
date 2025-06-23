@@ -11,7 +11,7 @@
 
 use crate::chain_event::ChainEvent;
 use crate::step::Result;
-use crate::lifecycle::{EventHandler, ProcessingMode, BehaviorCondition, HandlerState};
+use crate::lifecycle::{EventHandler, ProcessingMode};
 use crate::event_store::{EventStore, EventWriter, EventEnvelope, StageSemantics, EventSubscription, SubscriptionFilter, SubscriptionEvent};
 use crate::event_store::constants::SOURCE_IDLE_SLEEP;
 use crate::event_types::{
