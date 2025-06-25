@@ -1,0 +1,32 @@
+[package]
+name = "obzenflow_adapters"
+version = "0.1.0"
+edition = "2021"
+description = "Adapters layer for ObzenFlow - interfaces and monitoring"
+
+[dependencies]
+# Internal dependencies
+obzenflow_core = { path = "../obzenflow_core" }
+obzenflow_topology_services = { path = "../obzenflow_topology_services" }
+obzenflow_runtime_services = { path = "../obzenflow_runtime_services" }
+
+# Adapter layer dependencies
+tokio = { version = "1", features = ["full"] }
+async-trait = "0.1"
+tracing = "0.1"
+hdrhistogram = "7.5"
+thiserror = "1.0"
+ulid = "1.0"
+
+# Optional adapters
+prometheus = { version = "0.13", optional = true }
+statsd = { version = "0.16", optional = true }
+warp = { version = "0.3", optional = true }
+
+[features]
+default = []
+metrics-prometheus = ["prometheus", "warp"]
+metrics-statsd = ["statsd"]
+
+[dev-dependencies]
+tokio-test = "0.4"

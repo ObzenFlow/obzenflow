@@ -3,17 +3,29 @@
 //! This demonstrates how to build real-time data analytics pipelines
 //! using FlowState RS's clean and powerful EventStore architecture.
 //!
-//! Run with: cargo run --example flight_delays_simple
+//! Run with: cargo run --example flight_delays
 
-use flowstate_rs::prelude::*;
-use flowstate_rs::flow;
-use flowstate_rs::lifecycle::{EventHandler, ProcessingMode};
+use obzenflow_dsl_infra::prelude::*;
+use obzenflow_dsl_infra::flow;
+use obzenflow_runtime_services::control_plane::stage_supervisor::event_handler::{EventHandler, ProcessingMode};
+use obzenflow_infra::journal::DiskJournal;
+use obzenflow_core::event::event_id::EventId;
+use obzenflow_core::event::chain_event::ChainEvent;
+use obzenflow_core::journal::writer_id::WriterId;
+use obzenflow_topology_services::stages::StageId;
+use obzenflow_adapters::monitoring::taxonomies::{
+    golden_signals::GoldenSignals,
+    red::RED,
+    use_taxonomy::USE,
+    saafe::SAAFE,
+};
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use flowstate_rs::topology::StageId;
+use anyhow::{Result, Context};
+use tempfile;
 
 /// Source that generates flight data
 struct FlightDataSource {
@@ -21,6 +33,7 @@ struct FlightDataSource {
     emitted: AtomicU64,
     stage_id: StageId,
     completion_sent: Arc<AtomicBool>,
+    writer_id: WriterId,
 }
 
 impl FlightDataSource {
@@ -41,6 +54,7 @@ impl FlightDataSource {
             emitted: AtomicU64::new(0),
             stage_id,
             completion_sent: Arc::new(AtomicBool::new(false)),
+            writer_id: WriterId::new(),
         }
     }
 }
@@ -50,20 +64,30 @@ impl EventHandler for FlightDataSource {
         let current = self.emitted.fetch_add(1, Ordering::Relaxed) as usize;
         if current < self.flights.len() {
             let (carrier, date, origin, dest, duration, delay) = &self.flights[current];
-            vec![ChainEvent::new("FlightRecord", json!({
-                "carrier": carrier,
-                "date": date,
-                "origin": origin,
-                "destination": dest,
-                "scheduled_duration": duration,
-                "delay_minutes": delay,
-                "flight_number": format!("{}{}", carrier, 1000 + current * 100),
-            }))]
+            vec![ChainEvent::new(
+                EventId::new(),
+                self.writer_id,
+                "FlightRecord", 
+                json!({
+                    "carrier": carrier,
+                    "date": date,
+                    "origin": origin,
+                    "destination": dest,
+                    "scheduled_duration": duration,
+                    "delay_minutes": delay,
+                    "flight_number": format!("{}{}", carrier, 1000 + current * 100),
+                })
+            )]
         } else {
             // Emit completion event when all flights have been processed
             if !self.completion_sent.load(Ordering::Relaxed) {
                 self.completion_sent.store(true, Ordering::Relaxed);
-                vec![ChainEvent::source_complete(self.stage_id, true)]
+                vec![ChainEvent::source_complete(
+                    EventId::new(),
+                    self.writer_id,
+                    &self.stage_id.to_string(),
+                    true
+                )]
             } else {
                 vec![]
             }
@@ -189,6 +213,14 @@ impl EventHandler for CarrierAggregator {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Initialize tracing for better error messages
+    tracing_subscriber::fmt()
+        .with_env_filter("obzenflow=debug,flight_delays=debug")
+        .with_file(true)
+        .with_line_number(true)
+        .with_thread_ids(true)
+        .init();
+    
     println!("FlowState RS - Flight Delay Analysis");
     println!("======================================");
 
@@ -200,17 +232,26 @@ async fn main() -> Result<()> {
     // Create source stage ID (sources are typically stage 0)
     let source_stage_id = StageId::from_u32(0);
 
-    let mut handle = flow! {
-        name: "flight_delays",
+    // Create a temporary journal for the flow
+    let temp_dir = tempfile::tempdir()?;
+    let journal_path = temp_dir.path().to_path_buf();
+    let journal = Arc::new(DiskJournal::new(journal_path, "flight_delays").await?);
+
+    let handle = flow! {
+        journal: journal,
         middleware: [GoldenSignals::monitoring()],
         ("source" => FlightDataSource::new(source_stage_id), [RED::monitoring()])
         |> ("validator" => FlightValidator::new(), [USE::monitoring()])
         |> ("calculator" => DelayCalculator::new(), [GoldenSignals::monitoring()])
         |> ("aggregator" => aggregator, [SAAFE::monitoring()])
-    }?;
+    }.map_err(|e| anyhow::anyhow!("Failed to create flow with DSL: {:?}", e))?;
     
-    // Wait for natural completion based on source EOF
-    handle.wait_for_completion().await?;
+    // Start the pipeline
+    handle.run().await
+        .map_err(|e| anyhow::anyhow!("Failed to run pipeline - check if supervisor/FSM initialization is working: {:?}", e))?;
+    
+    // Wait a bit for processing to complete
+    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
 
     println!("Analysis pipeline completed!");
 

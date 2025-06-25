@@ -1,0 +1,20 @@
+[package]
+name = "obzenflow_dsl_infra"
+version = "0.1.0"
+edition = "2021"
+description = "DSL and infrastructure layer for ObzenFlow - flow! macro and high-level orchestration"
+
+[dependencies]
+# Internal dependencies - all layers needed for DSL (except infra)
+obzenflow_core = { path = "../obzenflow_core" }
+obzenflow_topology_services = { path = "../obzenflow_topology_services" }
+obzenflow_runtime_services = { path = "../obzenflow_runtime_services" }
+obzenflow_adapters = { path = "../obzenflow_adapters" }
+
+# Core dependencies
+tokio = { version = "1", features = ["full"] }
+async-trait = "0.1"
+tracing = "0.1"
+
+[dev-dependencies]
+tokio-test = "0.4"

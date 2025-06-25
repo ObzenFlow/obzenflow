@@ -1,0 +1,11 @@
+//! DSL and infrastructure layer for ObzenFlow
+//!
+//! This crate provides the high-level DSL (flow! macro) that serves as the primary
+//! API for building ObzenFlow pipelines. It orchestrates across all other layers
+//! to provide a declarative interface for flow construction.
+
+pub mod dsl;
+pub mod prelude;
+
+// Re-export modules
+pub use dsl::*;

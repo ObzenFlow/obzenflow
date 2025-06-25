@@ -1,0 +1,23 @@
+/// Journal errors (domain-level, not I/O specific)
+#[derive(Debug, thiserror::Error)]
+pub enum JournalError {
+    #[error("Journal is full")]
+    Full,
+    
+    #[error("Event not found: {0}")]
+    EventNotFound(String),
+    
+    #[error("Writer not authorized")]
+    Unauthorized,
+    
+    #[error("Causal ordering violation")]
+    CausalityViolation,
+    
+    /// Generic implementation error with source
+    #[error("Implementation error: {message}")]
+    Implementation {
+        message: String,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+}

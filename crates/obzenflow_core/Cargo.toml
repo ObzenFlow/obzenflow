@@ -1,0 +1,17 @@
+[package]
+name = "obzenflow_core"
+version = "0.1.0"
+edition = "2021"
+description = "Core domain layer for ObzenFlow - pure abstractions with minimal dependencies"
+
+[dependencies]
+# Core domain dependencies - minimal
+ulid = { version = "1.0", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1.0"
+async-trait = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "macros"] }
