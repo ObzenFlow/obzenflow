@@ -16,9 +16,6 @@ pub struct FsmMessageBus {
     /// Broadcast commands to all stages
     stage_commands: broadcast::Sender<StageCommand>,
     
-    /// Stage events routed to pipeline
-    stage_events_tx: mpsc::Sender<(StageId, StageNotification)>,
-    stage_events_rx: Option<mpsc::Receiver<(StageId, StageNotification)>>,
 }
 
 impl FsmMessageBus {
@@ -26,26 +23,17 @@ impl FsmMessageBus {
     pub fn new() -> Self {
         let (pipeline_inbox_tx, pipeline_inbox_rx) = mpsc::channel(100);
         let (stage_commands, _) = broadcast::channel(16);
-        let (stage_events_tx, stage_events_rx) = mpsc::channel(100);
         
         Self {
             pipeline_inbox_tx,
             pipeline_inbox_rx: Some(pipeline_inbox_rx),
             stage_commands,
-            stage_events_tx,
-            stage_events_rx: Some(stage_events_rx),
         }
     }
     
     /// Take the pipeline inbox receiver (can only be called once)
     pub fn take_pipeline_inbox_receiver(&mut self) -> Result<mpsc::Receiver<PipelineInternalEvent>, MessageBusError> {
         self.pipeline_inbox_rx.take()
-            .ok_or(MessageBusError::ReceiverAlreadyTaken)
-    }
-    
-    /// Take the stage events receiver (can only be called once)
-    pub fn take_stage_events_receiver(&mut self) -> Result<mpsc::Receiver<(StageId, StageNotification)>, MessageBusError> {
-        self.stage_events_rx.take()
             .ok_or(MessageBusError::ReceiverAlreadyTaken)
     }
     
@@ -67,24 +55,6 @@ impl FsmMessageBus {
                 MessageBusError::NoStageReceivers
             })?;
         Ok(())
-    }
-    
-    /// Send an event from a stage to the pipeline
-    #[track_caller]
-    pub async fn send_stage_notification(
-        &self, 
-        stage_id: StageId, 
-        notification: StageNotification
-    ) -> Result<(), MessageBusError> {
-        self.stage_events_tx.send((stage_id, notification)).await
-            .map_err(|_| {
-                tracing::error!(
-                    location = %std::panic::Location::caller(),
-                    stage_id = %stage_id,
-                    "Pipeline receiver dropped while sending stage notification"
-                );
-                MessageBusError::PipelineReceiverDropped
-            })
     }
     
     /// Send an internal event to the pipeline
@@ -112,25 +82,6 @@ pub enum PipelineInternalEvent {
     
     /// Drain progress update
     DrainProgress { completed: usize, total: usize },
-}
-
-/// Events that stages send to pipeline
-#[derive(Clone, Debug)]
-pub enum StageNotification {
-    /// Stage has been initialized
-    Initialized,
-    
-    /// Stage has started processing
-    Started,
-    
-    /// Stage has completed (natural completion or EOF)
-    Completed { natural: bool },
-    
-    /// Stage encountered a fatal error
-    Failed { error: String },
-    
-    /// Drain progress update
-    DrainProgress { in_flight: usize },
 }
 
 /// Commands that pipeline sends to stages

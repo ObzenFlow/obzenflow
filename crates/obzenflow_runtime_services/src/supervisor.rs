@@ -5,19 +5,19 @@
 //! - Message bus for inter-FSM communication
 //! - Clean separation between supervision and business logic
 
-use crate::control_plane::pipeline_supervisor::pipeline::pipeline::Pipeline;
-use crate::control_plane::pipeline_supervisor::pipeline_fsm::{
-    PipelineState, PipelineEvent, PipelineAction, PipelineContext, PipelineFsm, build_pipeline_fsm
+use crate::control_plane::pipeline::{
+    Pipeline, PipelineState, PipelineEvent, PipelineAction, 
+    pipeline_fsm::{PipelineContext, PipelineFsm, build_pipeline_fsm}
 };
-use crate::control_plane::stage_supervisor::stage_supervisor::{StageSupervisor, StageConfig};
-use crate::control_plane::stage_supervisor::stage_fsm::StageEvent;
+use crate::control_plane::stages::BoxedStageHandle;
 use crate::data_plane::journal_subscription::ReactiveJournal;
-use crate::message_bus::{FsmMessageBus, PipelineInternalEvent, StageNotification};
+use crate::message_bus::FsmMessageBus;
 use crate::errors::{FlowError, PipelineSupervisorError};
 use obzenflow_topology_services::stages::StageId;
-use std::collections::HashMap;
+use obzenflow_core::{ChainEvent, EventId};
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::RwLock;
 
 /// Pipeline supervisor - manages the lifecycle of a pipeline
 pub struct PipelineSupervisor {
@@ -31,7 +31,7 @@ pub struct PipelineSupervisor {
     message_bus: Arc<FsmMessageBus>,
     
     /// Stage supervisors by ID
-    stage_supervisors: HashMap<StageId, Arc<RwLock<StageSupervisor>>>,
+    stage_supervisors: HashMap<StageId, BoxedStageHandle>,
     
     /// Pipeline configuration
     pipeline: Pipeline,
@@ -39,32 +39,15 @@ pub struct PipelineSupervisor {
     /// Reactive journal wrapper
     reactive_journal: Arc<ReactiveJournal>,
     
-    /// Message routing task handle
-    router_handle: Option<tokio::task::JoinHandle<()>>,
-    
-    /// Receivers from message bus (taken during construction)
-    pipeline_inbox_rx: Option<mpsc::Receiver<PipelineInternalEvent>>,
-    stage_events_rx: Option<mpsc::Receiver<(StageId, StageNotification)>>,
+    /// Completion tracker task handle
+    completion_tracker_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl PipelineSupervisor {
     /// Create a new pipeline supervisor
     pub fn new(pipeline: Pipeline) -> Result<Self, PipelineSupervisorError> {
-        // Create message bus and take receivers before Arc
-        let mut message_bus = FsmMessageBus::new();
-        let pipeline_inbox_rx = message_bus.take_pipeline_inbox_receiver()
-            .map_err(|e| PipelineSupervisorError::MessageBus {
-                operation: "take pipeline inbox receiver".to_string(),
-                source: e,
-            })?;
-        let stage_events_rx = message_bus.take_stage_events_receiver()
-            .map_err(|e| PipelineSupervisorError::MessageBus {
-                operation: "take stage events receiver".to_string(),
-                source: e,
-            })?;
-        
-        // Now wrap in Arc
-        let message_bus = Arc::new(message_bus);
+        // Create message bus
+        let message_bus = Arc::new(FsmMessageBus::new());
         
         // Create reactive journal wrapper
         let reactive_journal = Arc::new(ReactiveJournal::new(pipeline.journal.clone()));
@@ -87,16 +70,14 @@ impl PipelineSupervisor {
             stage_supervisors: HashMap::new(),
             pipeline,
             reactive_journal,
-            router_handle: None,
-            pipeline_inbox_rx: Some(pipeline_inbox_rx),
-            stage_events_rx: Some(stage_events_rx),
+            completion_tracker_handle: None,
         })
     }
     
     /// Materialize the pipeline (creates stages)
     pub async fn materialize(&mut self) -> Result<(), String> {
-        // Start message router
-        self.start_message_router().await;
+        // Start completion tracker
+        self.start_completion_tracker().await?;
         
         // Trigger FSM to materialize
         let actions = self.pipeline_fsm.handle(
@@ -133,6 +114,13 @@ impl PipelineSupervisor {
             self.handle_action(action).await?;
         }
         
+        // Wait for completion - the completion tracker writes to journal when all stages complete
+        // For finite sources, we need to wait for all stages to complete naturally
+        if let Some(handle) = self.completion_tracker_handle.take() {
+            // The completion tracker exits when all stages complete
+            let _ = handle.await;
+        }
+        
         Ok(())
     }
     
@@ -161,8 +149,8 @@ impl PipelineSupervisor {
             self.handle_action(action).await?;
         }
         
-        // Stop message router
-        if let Some(handle) = self.router_handle.take() {
+        // Stop completion tracker
+        if let Some(handle) = self.completion_tracker_handle.take() {
             handle.abort();
         }
         
@@ -181,11 +169,9 @@ impl PipelineSupervisor {
                 self.create_all_stages().await?;
             }
             PipelineAction::NotifyStagesStart => {
-                // Start all non-source stages
-                // For now, send to all stages but sources will ignore if in WaitingForGun state
-                self.message_bus.send_stage_command(
-                    crate::message_bus::StageCommand::Start
-                ).await.map_err(|e| format!("Failed to send start command: {:?}", e))?;
+                // Non-source stages now start automatically when initialized and ready
+                // This action is a no-op since stages handle their own lifecycle
+                tracing::debug!("NotifyStagesStart: Non-source stages start automatically");
             }
             PipelineAction::NotifySourceStart => {
                 // Find the source stage (stage with no upstreams) and trigger FSM transition
@@ -196,10 +182,9 @@ impl PipelineSupervisor {
                 if let Some(source_id) = source_id {
                     tracing::info!("Starting source stage: {:?}", source_id);
                     
-                    // Get the source supervisor and send Start event through FSM
-                    if let Some(supervisor_arc) = self.stage_supervisors.get(&source_id) {
-                        let mut supervisor = supervisor_arc.write().await;
-                        supervisor.process_event(StageEvent::Start).await
+                    // Get the source supervisor and send Start event
+                    if let Some(stage) = self.stage_supervisors.get_mut(&source_id) {
+                        stage.start().await
                             .map_err(|e| format!("Failed to start source stage: {}", e))?;
                     }
                 }
@@ -216,114 +201,160 @@ impl PipelineSupervisor {
         Ok(())
     }
     
-    /// Create all stage supervisors
+    /// Initialize all stage supervisors
     async fn create_all_stages(&mut self) -> Result<(), String> {
-        use crate::control_plane::stage_supervisor::stage_supervisor::{StageSupervisor, StageConfig};
-        use crate::control_plane::stage_supervisor::stage_fsm::StageEvent;
-        use crate::control_plane::pipeline_supervisor::in_flight_tracker::InFlightTracker;
+        // Stages are already created as BoxedStageHandle instances
+        // We just need to move them into our supervisor map and initialize them
         
-        // Create in-flight tracker for all stages
-        let stage_ids: Vec<StageId> = self.pipeline.stages.iter()
-            .map(|s| s.stage_id)
-            .collect();
-        let in_flight_tracker = Arc::new(InFlightTracker::new(stage_ids));
-        
-        // Create start barrier for source synchronization
-        let source_count = self.pipeline.stages.iter()
-            .filter(|s| s.is_source)
-            .count();
-        let start_barrier = if source_count > 0 {
-            Some(Arc::new(tokio::sync::Barrier::new(source_count)))
-        } else {
-            None
-        };
-        
-        // Create each stage supervisor
-        for stage_config in &self.pipeline.stages {
-            tracing::info!("Creating stage supervisor for: {} (id: {:?})", 
-                stage_config.name, stage_config.stage_id);
+        for mut stage in self.pipeline.stages.drain(..) {
+            let stage_id = stage.stage_id();
+            let stage_name = stage.stage_name().to_string();
             
-            // Create stage configuration
-            let config = StageConfig {
-                stage_id: stage_config.stage_id,
-                stage_name: stage_config.name.clone(),
-                handler: stage_config.handler.clone(),
-                topology: self.pipeline.topology.clone(),
-                journal: self.reactive_journal.clone(),
-                in_flight_tracker: in_flight_tracker.clone(),
-                message_bus: self.message_bus.clone(),
-                start_barrier: if stage_config.is_source { 
-                    start_barrier.clone() 
-                } else { 
-                    None 
-                },
-            };
-            
-            // Create supervisor
-            let mut supervisor = StageSupervisor::new(config);
+            tracing::info!("Initializing stage: {} (id: {:?})", stage_name, stage_id);
             
             // Initialize the stage
-            supervisor.process_event(StageEvent::Initialize).await
-                .map_err(|e| format!("Failed to initialize stage {}: {}", stage_config.name, e))?;
-            
-            // Mark as ready
-            supervisor.process_event(StageEvent::Ready).await
-                .map_err(|e| format!("Failed to mark stage {} as ready: {}", stage_config.name, e))?;
+            stage.initialize().await
+                .map_err(|e| format!("Failed to initialize stage {}: {}", stage_name, e))?;
             
             // Store supervisor
-            self.stage_supervisors.insert(
-                stage_config.stage_id, 
-                Arc::new(RwLock::new(supervisor))
-            );
+            self.stage_supervisors.insert(stage_id, stage);
             
-            tracing::info!("Stage {} created and initialized", stage_config.name);
+            tracing::info!("Stage {} initialized", stage_name);
         }
         
-        tracing::info!("All {} stages created successfully", self.stage_supervisors.len());
+        tracing::info!("All {} stages initialized successfully", self.stage_supervisors.len());
         Ok(())
     }
     
-    /// Start the message router task
-    async fn start_message_router(&mut self) {
-        // Take the receiver from self
-        let stage_events_rx = self.stage_events_rx.take()
-            .expect("Stage events receiver already taken");
+    /// Start journal-based completion tracking
+    async fn start_completion_tracker(&mut self) -> Result<(), String> {
+        // Create subscription for system control events
+        let filter = crate::data_plane::journal_subscription::SubscriptionFilter {
+            upstream_stages: vec![], // All stages
+            // TODO add proper event types, similar to EOF
+            event_types: Some(vec![
+                "system.stage.completed".to_string(),
+                "system.stage.failed".to_string(),
+            ]),
+        };
+        
+        let mut subscription = self.reactive_journal.subscribe(filter).await
+            .map_err(|e| format!("Failed to create control subscription: {:?}", e))?;
             
         let pipeline_context = self.pipeline_context.clone();
-        let message_bus = self.message_bus.clone();
+        let reactive_journal = self.reactive_journal.clone();
         
         let handle = tokio::spawn(async move {
-            let mut stage_events_rx = stage_events_rx;
-            while let Some((stage_id, notification)) = stage_events_rx.recv().await {
-                // Route stage notifications to pipeline FSM
-                match notification {
-                    StageNotification::Completed { .. } => {
-                        // Check if all stages completed
-                        let mut completed = pipeline_context.completed_stages.write().await;
-                        completed.push(stage_id);
-                        
-                        let total_stages = pipeline_context.topology.stages().count();
-                        if completed.len() >= total_stages {
-                            // All stages completed - send event via message bus
-                            let _ = message_bus.send_pipeline_event(
-                                PipelineInternalEvent::AllStagesReady
-                            ).await;
+            // Get all stage IDs from topology
+            let expected_stages: std::collections::HashSet<StageId> = pipeline_context.topology.stages()
+                .map(|info| info.id)
+                .collect();
+            let total_stages = expected_stages.len();
+            
+            tracing::info!("Pipeline completion tracker started - expecting {} stages to complete: {:?}", 
+                total_stages, expected_stages);
+            
+            loop {
+                match subscription.recv_batch().await {
+                    Ok(events) if !events.is_empty() => {
+                        tracing::debug!("Completion tracker received {} events", events.len());
+                        for envelope in events {
+                            let event = envelope.event;
+                            tracing::debug!("Completion tracker processing event type: {}", event.event_type);
+                            match event.event_type.as_str() {
+                                // TODO add proper event types, similar to EOF
+                                "system.stage.completed" => {
+                                    if let Some(stage_id_str) = event.payload.get("stage_id")
+                                        .and_then(|v| v.as_str()) {
+                                        
+                                        // Parse stage ID (for now, just track completion)
+                                        let stage_name = event.payload.get("stage_name")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("unknown");
+                                            
+                                        // Parse stage ID from string (format: "stage_N")
+                                        if let Some(stage_num_str) = stage_id_str.strip_prefix("stage_") {
+                                            if let Ok(stage_id_num) = stage_num_str.parse::<u32>() {
+                                                let stage_id = StageId::from_u32(stage_id_num);
+                                                
+                                                tracing::info!("Stage completed: {} ({}, id={})", stage_name, stage_id_str, stage_id_num);
+                                            
+                                            // Add to completed stages
+                                            let mut completed = pipeline_context.completed_stages.write().await;
+                                            if !completed.contains(&stage_id) {
+                                                completed.push(stage_id);
+                                            }
+                                            
+                                            // Check if this stage was expected
+                                            if !expected_stages.contains(&stage_id) {
+                                                tracing::warn!("Received completion for unexpected stage: {} ({})", stage_name, stage_id_str);
+                                            }
+                                            
+                                            // For now, just check if we have enough completions
+                                            // This works around the stage ID mismatch issue
+                                            tracing::debug!("Completion tracker: {} stages completed. Expected count: {}, Expected IDs: {:?}, Completed IDs: {:?}", 
+                                                completed.len(), total_stages, expected_stages, completed);
+                                                
+                                            if completed.len() >= total_stages {
+                                                tracing::info!("All {} stages have completed (by count)!", total_stages);
+                                                
+                                                // Write pipeline completion event to journal
+                                                let writer_id = reactive_journal.register_writer(StageId::from_u32(0), None)
+                                                    .await
+                                                    .unwrap_or_else(|e| panic!("FATAL: Failed to register pipeline writer: {:?}", e));
+                                                
+                                                let pipeline_completed = ChainEvent::new(
+                                                    EventId::new(),
+                                                    writer_id.clone(),
+                                                    "system.pipeline.completed",
+                                                    serde_json::json!({
+                                                        "timestamp": chrono::Utc::now().to_rfc3339(),
+                                                        "completed_stages": completed.len(),
+                                                    })
+                                                );
+                                                
+                                                if let Err(e) = reactive_journal.write(&writer_id, pipeline_completed, None).await {
+                                                    panic!("FATAL: Failed to write pipeline completion event: {}", e);
+                                                }
+                                                
+                                                break;
+                                            }
+                                            }
+                                        }
+                                    }
+                                }
+                                // TODO add proper event types, similar to EOF
+                                "system.stage.failed" => {
+                                    let stage_name = event.payload.get("stage_name")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("unknown");
+                                    let error = event.payload.get("error")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("Unknown error");
+                                        
+                                    // No recovery from stage failure - panic immediately
+                                    panic!("FATAL: Stage '{}' failed: {}", stage_name, error);
+                                }
+                                _ => {}
+                            }
                         }
                     }
-                    StageNotification::Failed { error: _ } => {
-                        // Send error event via message bus
-                        let _ = message_bus.send_pipeline_event(
-                            PipelineInternalEvent::StageReady { stage_id }
-                        ).await;
+                    Ok(_) => {
+                        // Empty batch
+                        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
                     }
-                    _ => {
-                        // Other notifications can be logged or handled as needed
+                    Err(e) => {
+                        // Fatal error - can't monitor completion without subscription
+                        panic!("FATAL: Control subscription error - pipeline cannot track completion: {}", e);
                     }
                 }
             }
+            
+            tracing::info!("Pipeline completion tracker exited");
         });
         
-        self.router_handle = Some(handle);
+        self.completion_tracker_handle = Some(handle);
+        Ok(())
     }
 }
 

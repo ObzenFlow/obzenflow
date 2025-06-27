@@ -5,14 +5,14 @@
 //!
 //! Run with: cargo run --example flight_delays
 
-use obzenflow_dsl_infra::prelude::*;
-use obzenflow_dsl_infra::flow;
-use obzenflow_runtime_services::control_plane::stage_supervisor::event_handler::{EventHandler, ProcessingMode};
+use obzenflow_dsl_infra::{flow, source, transform, sink};
+use obzenflow_runtime_services::control_plane::stages::handler_traits::{
+    FiniteSourceHandler, TransformHandler, SinkHandler
+};
 use obzenflow_infra::journal::DiskJournal;
 use obzenflow_core::event::event_id::EventId;
 use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::journal::writer_id::WriterId;
-use obzenflow_topology_services::stages::StageId;
 use obzenflow_adapters::monitoring::taxonomies::{
     golden_signals::GoldenSignals,
     red::RED,
@@ -21,23 +21,19 @@ use obzenflow_adapters::monitoring::taxonomies::{
 };
 use serde_json::json;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
-use anyhow::{Result, Context};
-use tempfile;
+use anyhow::Result;
+use async_trait::async_trait;
 
 /// Source that generates flight data
 struct FlightDataSource {
     flights: Vec<(String, String, String, String, u32, u32)>,
-    emitted: AtomicU64,
-    stage_id: StageId,
-    completion_sent: Arc<AtomicBool>,
+    current_index: usize,
     writer_id: WriterId,
 }
 
 impl FlightDataSource {
-    fn new(stage_id: StageId) -> Self {
+    fn new() -> Self {
         let flights = vec![
             ("AA".to_string(), "2023-12-01".to_string(), "LAX".to_string(), "JFK".to_string(), 120, 15), // American Airlines, 15 min delay
             ("DL".to_string(), "2023-12-01".to_string(), "ATL".to_string(), "ORD".to_string(), 90, 0),   // Delta, on time
@@ -48,26 +44,25 @@ impl FlightDataSource {
             ("UA".to_string(), "2023-12-01".to_string(), "EWR".to_string(), "SFO".to_string(), 300, 0),  // United, on time
             ("AA".to_string(), "2023-12-01".to_string(), "ORD".to_string(), "LAX".to_string(), 240, 25), // American Airlines, 25 min delay
         ];
-        
+
         Self {
             flights,
-            emitted: AtomicU64::new(0),
-            stage_id,
-            completion_sent: Arc::new(AtomicBool::new(false)),
+            current_index: 0,
             writer_id: WriterId::new(),
         }
     }
 }
 
-impl EventHandler for FlightDataSource {
-    fn transform(&self, _event: ChainEvent) -> Vec<ChainEvent> {
-        let current = self.emitted.fetch_add(1, Ordering::Relaxed) as usize;
-        if current < self.flights.len() {
-            let (carrier, date, origin, dest, duration, delay) = &self.flights[current];
-            vec![ChainEvent::new(
+impl FiniteSourceHandler for FlightDataSource {
+    fn next(&mut self) -> Option<ChainEvent> {
+        if self.current_index < self.flights.len() {
+            let (carrier, date, origin, dest, duration, delay) = &self.flights[self.current_index];
+            self.current_index += 1;
+            
+            Some(ChainEvent::new(
                 EventId::new(),
-                self.writer_id,
-                "FlightRecord", 
+                self.writer_id.clone(),
+                "FlightRecord",
                 json!({
                     "carrier": carrier,
                     "date": date,
@@ -75,27 +70,16 @@ impl EventHandler for FlightDataSource {
                     "destination": dest,
                     "scheduled_duration": duration,
                     "delay_minutes": delay,
-                    "flight_number": format!("{}{}", carrier, 1000 + current * 100),
+                    "flight_number": format!("{}{}", carrier, 1000 + self.current_index * 100),
                 })
-            )]
+            ))
         } else {
-            // Emit completion event when all flights have been processed
-            if !self.completion_sent.load(Ordering::Relaxed) {
-                self.completion_sent.store(true, Ordering::Relaxed);
-                vec![ChainEvent::source_complete(
-                    EventId::new(),
-                    self.writer_id,
-                    &self.stage_id.to_string(),
-                    true
-                )]
-            } else {
-                vec![]
-            }
+            None
         }
     }
-    
-    fn processing_mode(&self) -> ProcessingMode {
-        ProcessingMode::Transform
+
+    fn is_complete(&self) -> bool {
+        self.current_index >= self.flights.len()
     }
 }
 
@@ -108,14 +92,14 @@ impl FlightValidator {
     }
 }
 
-impl EventHandler for FlightValidator {
-    fn transform(&self, event: ChainEvent) -> Vec<ChainEvent> {
+impl TransformHandler for FlightValidator {
+    fn process(&self, event: ChainEvent) -> Vec<ChainEvent> {
         if event.event_type == "FlightRecord" {
             // Validate that all required fields are present
             let valid = event.payload.get("carrier").is_some() &&
                         event.payload.get("delay_minutes").is_some() &&
                         event.payload.get("scheduled_duration").is_some();
-            
+
             if valid {
                 vec![event]
             } else {
@@ -125,10 +109,6 @@ impl EventHandler for FlightValidator {
         } else {
             vec![]
         }
-    }
-    
-    fn processing_mode(&self) -> ProcessingMode {
-        ProcessingMode::Transform
     }
 }
 
@@ -141,8 +121,8 @@ impl DelayCalculator {
     }
 }
 
-impl EventHandler for DelayCalculator {
-    fn transform(&self, mut event: ChainEvent) -> Vec<ChainEvent> {
+impl TransformHandler for DelayCalculator {
+    fn process(&self, mut event: ChainEvent) -> Vec<ChainEvent> {
         if event.event_type == "FlightRecord" {
             if let Some(delay) = event.payload.get("delay_minutes").and_then(|v| v.as_u64()) {
                 // Categorize delay
@@ -155,16 +135,12 @@ impl EventHandler for DelayCalculator {
                 } else {
                     "severe_delay"
                 };
-                
+
                 event.payload["delay_category"] = json!(delay_category);
                 // Success metrics would be recorded by middleware
             }
         }
         vec![event]
-    }
-    
-    fn processing_mode(&self) -> ProcessingMode {
-        ProcessingMode::Transform
     }
 }
 
@@ -187,8 +163,9 @@ impl CarrierAggregator {
     }
 }
 
-impl EventHandler for CarrierAggregator {
-    fn transform(&self, event: ChainEvent) -> Vec<ChainEvent> {
+#[async_trait]
+impl SinkHandler for CarrierAggregator {
+    fn consume(&mut self, event: ChainEvent) -> obzenflow_core::Result<()> {
         if event.event_type == "FlightRecord" {
             let stats = self.carrier_stats.clone();
             tokio::spawn(async move {
@@ -203,11 +180,7 @@ impl EventHandler for CarrierAggregator {
                 }
             });
         }
-        vec![] // Sinks don't emit
-    }
-    
-    fn processing_mode(&self) -> ProcessingMode {
-        ProcessingMode::Transform
+        Ok(())
     }
 }
 
@@ -220,7 +193,7 @@ async fn main() -> Result<()> {
         .with_line_number(true)
         .with_thread_ids(true)
         .init();
-    
+
     println!("FlowState RS - Flight Delay Analysis");
     println!("======================================");
 
@@ -229,49 +202,53 @@ async fn main() -> Result<()> {
 
     println!("\nRunning delay analysis pipeline...");
 
-    // Create source stage ID (sources are typically stage 0)
-    let source_stage_id = StageId::from_u32(0);
-
-    // Create a temporary journal for the flow
-    let temp_dir = tempfile::tempdir()?;
-    let journal_path = temp_dir.path().to_path_buf();
+    // Create a journal for the flow
+    let journal_path = std::path::PathBuf::from("target/flight-delays-logs");
+    std::fs::create_dir_all(&journal_path)?;
     let journal = Arc::new(DiskJournal::new(journal_path, "flight_delays").await?);
 
+    // Create the flow using the new flow! macro
     let handle = flow! {
         journal: journal,
         middleware: [GoldenSignals::monitoring()],
-        ("source" => FlightDataSource::new(source_stage_id), [RED::monitoring()])
-        |> ("validator" => FlightValidator::new(), [USE::monitoring()])
-        |> ("calculator" => DelayCalculator::new(), [GoldenSignals::monitoring()])
-        |> ("aggregator" => aggregator, [SAAFE::monitoring()])
-    }.map_err(|e| anyhow::anyhow!("Failed to create flow with DSL: {:?}", e))?;
-    
+        
+        stages: {
+            src = source!("source" => FlightDataSource::new(), [RED::monitoring()]);
+            val = transform!("validator" => FlightValidator::new(), [USE::monitoring()]);
+            calc = transform!("calculator" => DelayCalculator::new(), [GoldenSignals::monitoring()]);
+            agg = sink!("aggregator" => aggregator, [SAAFE::monitoring()]);
+        },
+        
+        topology: {
+            src |> val;
+            val |> calc;
+            calc |> agg;
+        }
+    }.await.map_err(|e| anyhow::anyhow!("Failed to create flow with DSL: {:?}", e))?;
+
     // Start the pipeline
     handle.run().await
         .map_err(|e| anyhow::anyhow!("Failed to run pipeline - check if supervisor/FSM initialization is working: {:?}", e))?;
-    
-    // Wait a bit for processing to complete
-    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
 
     println!("Analysis pipeline completed!");
 
     // Show the results
     println!("\nFlight Delay Analysis Results:");
     let final_stats = stats.lock().await;
-    
+
     for (carrier, stats) in final_stats.iter() {
         let avg_delay = if stats.flight_count > 0 {
             stats.total_delay as f64 / stats.flight_count as f64
         } else {
             0.0
         };
-        
+
         let status = if avg_delay < 10.0 { "🟢" } else if avg_delay < 30.0 { "🟡" } else { "🔴" };
         println!("  {} {}: {:.1} min avg delay ({} flights)",
             status, carrier, avg_delay, stats.flight_count);
     }
-    
+
     // Cleanup
-    // Cleanup handled by tempdir
+    println!("\nJournal written to: target/flight-delays-logs/flight_delays.log");
     Ok(())
 }

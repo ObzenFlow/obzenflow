@@ -4,6 +4,7 @@
 
 // Core types
 pub use obzenflow_core::event::chain_event::ChainEvent;
+pub use obzenflow_core::journal::writer_id::WriterId;
 
 // Supervision
 pub use obzenflow_runtime_services::supervisor::{PipelineSupervisor, FlowHandle};
@@ -18,15 +19,20 @@ pub use obzenflow_topology_services::topology::Topology;
 
 // Middleware
 pub use obzenflow_adapters::middleware::{
-    EventHandlerExt, MonitoringMiddleware,
-    FlowObserver, apply_middleware_vec
+    MonitoringMiddleware,
+    TransformHandlerExt, FiniteSourceHandlerExt, InfiniteSourceHandlerExt, SinkHandlerExt,
 };
 
-// Re-export EventHandler for convenience
-pub use obzenflow_runtime_services::control_plane::stage_supervisor::event_handler::EventHandler;
+// Handler traits
+pub use obzenflow_runtime_services::control_plane::stages::handler_traits::{
+    FiniteSourceHandler, InfiniteSourceHandler, TransformHandler, SinkHandler
+};
+
+// Supervisor config
+pub use obzenflow_runtime_services::control_plane::stages::supervisors::StageConfig;
 
 // Monitoring
 pub use obzenflow_adapters::monitoring::{Taxonomy, TaxonomyMetrics};
 
 // Pipeline
-pub use obzenflow_runtime_services::control_plane::pipeline_supervisor::pipeline::pipeline::Pipeline;
+pub use obzenflow_runtime_services::control_plane::pipeline::Pipeline;

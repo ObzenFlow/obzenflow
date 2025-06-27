@@ -8,29 +8,10 @@ pub mod supervisor;
 pub mod message_bus;
 pub mod errors;
 
-// Control plane - lifecycle and state management
+// Control plane - state management
 pub mod control_plane {
-    pub mod pipeline_supervisor {
-        pub mod pipeline_fsm;
-        pub mod drainable;
-        pub mod in_flight_tracker;
-
-        pub mod pipeline {
-            pub mod pipeline;
-            pub mod pipeline_ext;
-            pub mod stage_config;
-            pub mod observer_config;
-        }
-    }
-
-    pub mod stage_supervisor {
-        pub mod stage_fsm;
-        pub mod stage_supervisor;
-        pub mod event_handler;
-        pub mod drainable;
-        pub mod completable;
-        pub mod resource_managed;
-    }
+    pub mod pipeline;
+    pub mod stages;
 }
 
 // Data plane - event flow and routing
@@ -48,21 +29,19 @@ pub mod prelude {
     
     // Supervision
     pub use crate::supervisor::{PipelineSupervisor, FlowHandle};
-    pub use crate::control_plane::pipeline_supervisor::pipeline_fsm::{PipelineState, PipelineEvent};
-    pub use crate::message_bus::{FsmMessageBus, StageCommand, StageNotification};
+    pub use crate::control_plane::pipeline::{PipelineState, PipelineEvent};
+    pub use crate::message_bus::{FsmMessageBus, StageCommand};
     
-    // Control plane
-    pub use crate::control_plane::pipeline_supervisor::{
-        drainable::Drainable,
-        in_flight_tracker::InFlightTracker,
+    // Control plane - handler traits (from stages)
+    pub use crate::control_plane::stages::handler_traits::{
+        ResourceManaged, HealthStatus, ResourceInfo,
     };
 
-    pub use crate::control_plane::stage_supervisor::{
-        stage_supervisor::StageSupervisor,
-        stage_fsm::{StageHandle, StageState, StageEvent},
-        event_handler::EventHandler,
-        completable::Completable,
-        resource_managed::ResourceManaged,
+    // Control plane - stage
+    pub use crate::control_plane::stages::{
+        StageSupervisor, StageConfig, 
+        StageEvent, StageHandle, BoxedStageHandle,
+        FiniteSourceSupervisor, TransformSupervisor,
     };
 
     // Data plane

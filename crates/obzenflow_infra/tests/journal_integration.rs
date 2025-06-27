@@ -13,7 +13,7 @@ use obzenflow_infra::journal::MemoryJournal;
 
 #[tokio::test]
 async fn test_journal_causal_ordering() {
-    let mut journal = MemoryJournal::new();
+    let journal = MemoryJournal::new();
     
     // Simulate a simple pipeline: source -> transform -> sink
     let source_writer = WriterId::new();
@@ -71,7 +71,7 @@ async fn test_journal_causal_ordering() {
     ).await.expect("Failed to append sink event");
     
     // Read all events
-    let all_events = journal.read_after(None).await.expect("Failed to read events");
+    let all_events = journal.read_causally_ordered().await.expect("Failed to read events");
     assert_eq!(all_events.len(), 3);
     
     // Verify event types in order
@@ -80,7 +80,7 @@ async fn test_journal_causal_ordering() {
     assert_eq!(all_events[2].event.event_type, "data.stored");
     
     // Read events after the source event
-    let after_source = journal.read_after(Some(source_envelope.event.id))
+    let after_source = journal.read_causally_after(&source_envelope.event.id)
         .await
         .expect("Failed to read after source");
     assert_eq!(after_source.len(), 2);
@@ -89,7 +89,7 @@ async fn test_journal_causal_ordering() {
 
 #[tokio::test]
 async fn test_journal_parallel_writers() {
-    let mut journal = MemoryJournal::new();
+    let journal = MemoryJournal::new();
     
     // Simulate parallel workers processing in parallel
     let worker1 = WriterId::new();
@@ -119,9 +119,9 @@ async fn test_journal_parallel_writers() {
     );
     
     // Append in parallel (in practice these would be concurrent)
-    let envelope1 = journal.append(&worker1, event1, None).await.unwrap();
+    let _envelope1 = journal.append(&worker1, event1, None).await.unwrap();
     let envelope2 = journal.append(&worker2, event2, None).await.unwrap();
-    let envelope3 = journal.append(&worker3, event3, None).await.unwrap();
+    let _envelope3 = journal.append(&worker3, event3, None).await.unwrap();
     
     // Worker 2 finishes first and emits result
     let result_event = ChainEvent::new(
@@ -135,7 +135,7 @@ async fn test_journal_parallel_writers() {
         .await.unwrap();
     
     // Read all events
-    let all_events = journal.read_after(None).await.unwrap();
+    let all_events = journal.read_causally_ordered().await.unwrap();
     assert_eq!(all_events.len(), 4);
     
     // Count events by type
@@ -152,7 +152,7 @@ async fn test_journal_parallel_writers() {
 
 #[tokio::test]
 async fn test_journal_event_chain() {
-    let mut journal = MemoryJournal::new();
+    let journal = MemoryJournal::new();
     let writer = WriterId::new();
     
     // Create a chain of events
@@ -177,7 +177,7 @@ async fn test_journal_event_chain() {
     }
     
     // Read entire chain
-    let chain = journal.read_after(None).await.unwrap();
+    let chain = journal.read_causally_ordered().await.unwrap();
     assert_eq!(chain.len(), 5);
     
     // Verify sequence
@@ -187,7 +187,7 @@ async fn test_journal_event_chain() {
     }
     
     // Read from middle of chain
-    let mid_chain = journal.read_after(Some(chain[2].event.id)).await.unwrap();
+    let mid_chain = journal.read_causally_after(&chain[2].event.id).await.unwrap();
     assert_eq!(mid_chain.len(), 2);
     assert_eq!(mid_chain[0].event.payload["sequence"], 3);
     assert_eq!(mid_chain[1].event.payload["sequence"], 4);

@@ -1,40 +1,63 @@
 //! # Middleware Architecture for FlowState
 //! 
-//! This module provides a composable middleware system for wrapping EventHandler behavior
+//! This module provides a composable middleware system for wrapping handler behavior
 //! with cross-cutting concerns like monitoring, logging, retry logic, and circuit breaking.
 //! 
-//! ## Example
+//! ## Example with New Handler Types
 //! 
 //! ```rust
-//! use flowstate::middleware::{Middleware, EventHandlerExt};
+//! use flowstate::middleware::{TransformHandlerExt, LoggingMiddleware, logging, retry};
 //! 
-//! // Apply middleware to any event handler
-//! let handler = MyEventHandler::new()
+//! // Apply middleware to transform handler - using concrete LoggingMiddleware
+//! let transform = MyTransformHandler::new()
 //!     .middleware()
 //!     .with(LoggingMiddleware::new())
-//!     .with(RetryMiddleware::new(3))
+//!     .with(retry::fixed_delay(3, Duration::from_millis(100)))
+//!     .build();
+//! 
+//! // Apply to source handler (needs writer_id) - using builder pattern
+//! let source = MySourceHandler::new()
+//!     .middleware(writer_id)
+//!     .with(logging::debug().with_metadata().build())
+//!     .build();
+//! 
+//! // Apply to sink handler - with custom prefix
+//! let sink = MySinkHandler::new()
+//!     .middleware()
+//!     .with(LoggingMiddleware::with_prefix("SINK WAZ HERE!"))
+//!     .with(retry::exponential(5).with_jitter().build())
 //!     .build();
 //! ```
 
-mod middleware_event_handler;
-mod event_handler_builder;
+// Handler-specific middleware adapters
+mod transform_middleware;
+mod source_middleware;
+mod sink_middleware;
+
+// Common middleware utilities
 mod function;
 pub mod monitoring;
-mod helpers_event_handler;
 pub mod common;
 pub mod flow_boundary;
-pub mod flow_observer;
+mod logging_middleware;
 #[macro_use]
 mod macros;
 
-pub use middleware_event_handler::MiddlewareEventHandler;
-pub use event_handler_builder::{EventHandlerMiddlewareBuilder, EventHandlerExt};
+// Handler-specific exports
+pub use transform_middleware::{MiddlewareTransform, TransformHandlerExt, TransformMiddlewareBuilder};
+pub use source_middleware::{
+    MiddlewareFiniteSource, MiddlewareInfiniteSource,
+    FiniteSourceHandlerExt, InfiniteSourceHandlerExt,
+    FiniteSourceMiddlewareBuilder, InfiniteSourceMiddlewareBuilder
+};
+pub use sink_middleware::{MiddlewareSink, SinkHandlerExt, SinkMiddlewareBuilder};
+
+// Common utilities
 pub use function::{FnMiddleware, middleware_fn};
 pub use monitoring::{MetricRecorder, MonitoringMiddleware};
 pub use common::{rate_limit, timeout, logging, retry};
 pub use flow_boundary::{FlowBoundaryTracker, BoundaryTrackingMiddleware, BoundaryConfig, FlowMetrics};
-pub use flow_observer::FlowObserver;
-pub use helpers_event_handler::apply_middleware_vec;
+pub use logging_middleware::LoggingMiddleware;
 // monitoring! macro is exported at crate root
 
 use obzenflow_core::event::chain_event::ChainEvent;

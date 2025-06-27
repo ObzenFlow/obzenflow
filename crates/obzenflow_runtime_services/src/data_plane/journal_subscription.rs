@@ -52,13 +52,6 @@ pub struct EventNotification {
     pub stage_id: StageId,
 }
 
-/// EOF notification sent when a stage completes
-#[derive(Debug, Clone)]
-pub struct EofNotification {
-    pub stage_id: StageId,
-    pub final_sequence: u64,
-    pub natural_completion: bool,
-}
 
 /// Filter for subscriptions
 #[derive(Debug, Clone)]
@@ -75,8 +68,6 @@ struct Subscription {
     filter: SubscriptionFilter,
     /// Channel for event notifications
     sender: mpsc::Sender<EventNotification>,
-    /// Channel for EOF notifications
-    eof_sender: mpsc::Sender<EofNotification>,
     created_at: Instant,
 }
 
@@ -101,7 +92,6 @@ impl SubscriptionManager {
 pub struct JournalSubscription {
     pub id: Ulid,
     receiver: mpsc::Receiver<EventNotification>,
-    eof_receiver: mpsc::Receiver<EofNotification>,
     pending_buffer: VecDeque<EventEnvelope>,
     filter: SubscriptionFilter,
     completed_upstreams: HashSet<StageId>,
@@ -109,91 +99,62 @@ pub struct JournalSubscription {
 }
 
 impl JournalSubscription {
-    /// Receive next batch of events (with EOF handling)
-    pub async fn recv_batch(&mut self) -> Result<SubscriptionEvent> {
+    /// Receive next batch of events
+    /// Returns empty vec when no events are immediately available
+    pub async fn recv_batch(&mut self) -> Result<Vec<EventEnvelope>> {
         // Check for pending events first
         if !self.pending_buffer.is_empty() {
             let events: Vec<EventEnvelope> = self.pending_buffer.drain(..).collect();
-            return Ok(SubscriptionEvent::Events(events));
+            return Ok(events);
         }
 
         // Wait for notifications
-        tokio::select! {
-            notification = self.receiver.recv() => {
-                match notification {
-                    Some(notif) => {
-                        // Read initial event
-                        // Read specific event
-                        let event = self.journal.read_event(&notif.event_id).await?;
-                        let mut events = if let Some(event) = event {
-                            vec![event]
-                        } else {
-                            vec![]
-                        };
-                        
-                        // Try to batch more events if available (up to max_batch_size)
-                        const MAX_BATCH_SIZE: usize = 100;
-                        while events.len() < MAX_BATCH_SIZE {
-                            // Try to receive more notifications without blocking
-                            match self.receiver.try_recv() {
-                                Ok(next_notif) => {
-                                    // Read the next event
-                                    if let Some(event) = self.journal.read_event(&next_notif.event_id).await? {
-                                        events.push(event);
-                                    }
+        match self.receiver.recv().await {
+            Some(notif) => {
+                // Read initial event
+                let event = self.journal.read_event(&notif.event_id).await?;
+                let mut events = if let Some(event) = event {
+                    // Track EOF events internally
+                    if event.event.is_eof() {
+                        // Extract stage_id from writer registry would be needed here
+                        // For now, we'll let the stage handle tracking its upstreams
+                        tracing::debug!("Subscription {} received EOF event", self.id);
+                    }
+                    vec![event]
+                } else {
+                    vec![]
+                };
+                
+                // Try to batch more events if available (up to max_batch_size)
+                const MAX_BATCH_SIZE: usize = 100;
+                while events.len() < MAX_BATCH_SIZE {
+                    // Try to receive more notifications without blocking
+                    match self.receiver.try_recv() {
+                        Ok(next_notif) => {
+                            // Read the next event
+                            if let Some(event) = self.journal.read_event(&next_notif.event_id).await? {
+                                if event.event.is_eof() {
+                                    tracing::debug!("Subscription {} received EOF event in batch", self.id);
                                 }
-                                Err(_) => break, // No more notifications available
+                                events.push(event);
                             }
                         }
-                        // Events are already returned in the order we read them
-                        // The journal handles causal ordering internally
-                        
-                        Ok(SubscriptionEvent::Events(events))
+                        Err(_) => break, // No more notifications available
                     }
-                    None => Ok(SubscriptionEvent::AllUpstreamsComplete)
                 }
+                // Events are already returned in the order we read them
+                // The journal handles causal ordering internally
+                
+                Ok(events)
             }
-            
-            eof = self.eof_receiver.recv() => {
-                match eof {
-                    Some(eof_notif) => {
-                        self.completed_upstreams.insert(eof_notif.stage_id);
-                        
-                        // Check if all upstreams are complete
-                        let all_complete = self.filter.upstream_stages.iter()
-                            .all(|stage| self.completed_upstreams.contains(stage));
-                            
-                        if all_complete {
-                            Ok(SubscriptionEvent::AllUpstreamsComplete)
-                        } else {
-                            Ok(SubscriptionEvent::EndOfStream {
-                                stage_id: eof_notif.stage_id,
-                                final_sequence: eof_notif.final_sequence,
-                                natural_completion: eof_notif.natural_completion,
-                            })
-                        }
-                    }
-                    None => Ok(SubscriptionEvent::AllUpstreamsComplete)
-                }
+            None => {
+                // Channel closed, return empty vec
+                Ok(vec![])
             }
         }
     }
 }
 
-/// Events returned by subscriptions
-#[derive(Debug)]
-pub enum SubscriptionEvent {
-    /// Regular events
-    Events(Vec<EventEnvelope>),
-    /// A specific upstream has completed
-    EndOfStream {
-        stage_id: StageId,
-        final_sequence: u64,
-        natural_completion: bool,
-    },
-    /// All upstreams have completed
-    AllUpstreamsComplete,
-}
 
 /// Journal wrapper that adds pub/sub capabilities
 pub struct ReactiveJournal {
@@ -259,14 +220,12 @@ impl ReactiveJournal {
     /// Create a subscription
     pub async fn subscribe(&self, filter: SubscriptionFilter) -> Result<JournalSubscription> {
         let (tx, rx) = mpsc::channel(SUBSCRIPTION_CHANNEL_SIZE);
-        let (eof_tx, eof_rx) = mpsc::channel(SUBSCRIPTION_CHANNEL_SIZE);
         let id = Ulid::new();
 
         let sub = Subscription {
             id,
             filter: filter.clone(),
             sender: tx,
-            eof_sender: eof_tx,
             created_at: Instant::now(),
         };
 
@@ -286,7 +245,6 @@ impl ReactiveJournal {
         Ok(JournalSubscription {
             id,
             receiver: rx,
-            eof_receiver: eof_rx,
             pending_buffer: VecDeque::with_capacity(PENDING_BUFFER_CAPACITY),
             filter,
             completed_upstreams: HashSet::new(),
@@ -328,32 +286,6 @@ impl ReactiveJournal {
         }
     }
 
-    /// Signal that a stage has completed
-    pub async fn signal_stage_complete(&self, stage_id: StageId, natural: bool) -> Result<()> {
-        let manager = self.subscriptions.read().await;
-
-        if let Some(sub_ids) = manager.stage_subscriptions.get(&stage_id) {
-            tracing::info!(
-                "Notifying {} subscribers that stage {:?} has completed (natural: {})",
-                sub_ids.len(), stage_id, natural
-            );
-
-            for sub_id in sub_ids {
-                if let Some(sub) = manager.subscriptions.get(sub_id) {
-                    let eof_notification = EofNotification {
-                        stage_id,
-                        final_sequence: 0, // TODO: Track sequences
-                        natural_completion: natural,
-                    };
-
-                    // Send EOF notification
-                    let _ = sub.eof_sender.try_send(eof_notification);
-                }
-            }
-        }
-
-        Ok(())
-    }
 
     /// Clean up dead subscriptions
     pub async fn cleanup_subscriptions(&self) {

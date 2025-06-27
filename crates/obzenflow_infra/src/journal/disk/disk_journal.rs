@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::{RwLock, Mutex};
 use tokio::io::{AsyncWriteExt, AsyncBufReadExt, AsyncSeekExt, BufReader};
-use tokio::fs::{File, OpenOptions};
+use tokio::fs::File;
 use std::collections::HashMap;
 use ulid::Ulid;
 use chrono::{DateTime, Utc};
@@ -174,12 +174,13 @@ impl Journal for DiskJournal {
         parent: Option<&EventEnvelope>
     ) -> Result<EventEnvelope, JournalError> {
         // Get or create vector clock for this writer
-        let writer_clocks = self.writer_clocks.write().await;
-        let mut vector_clock = writer_clocks
-            .get(writer_id)
-            .cloned()
-            .unwrap_or_else(VectorClock::new);
-        drop(writer_clocks);
+        let mut vector_clock = {
+            let writer_clocks = self.writer_clocks.read().await;
+            writer_clocks
+                .get(writer_id)
+                .cloned()
+                .unwrap_or_else(VectorClock::new)
+        };
 
         // Update vector clock based on parent
         if let Some(parent_envelope) = parent {
@@ -223,7 +224,7 @@ impl Journal for DiskJournal {
         self.write_offset.fetch_add(bytes.len() as u64, Ordering::SeqCst);
 
         // Write to file
-        let mut file = OpenOptions::new()
+        let mut file = tokio::fs::OpenOptions::new()
             .append(true)
             .create(true)
             .open(&self.path)
@@ -344,13 +345,15 @@ impl Journal for DiskJournal {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use uuid::Uuid;
 
     #[tokio::test]
     async fn test_basic_append_and_read() {
-        let test_dir = std::path::PathBuf::from("target/test-logs/test_basic_append_and_read");
+        let test_id = Uuid::new_v4();
+        let test_dir = std::path::PathBuf::from(format!("target/test-logs/test_basic_append_and_read_{}", test_id));
         std::fs::create_dir_all(&test_dir).unwrap();
         let flow_id = "test_flow_1";
-        let log = DiskJournal::new(test_dir, flow_id).await.unwrap();
+        let log = DiskJournal::new(test_dir.clone(), flow_id).await.unwrap();
 
         let writer_id = WriterId::new();
         let event = ChainEvent::new(
@@ -373,14 +376,18 @@ mod tests {
         let event_by_id = log.read_event(&envelope.event.id).await.unwrap();
         assert!(event_by_id.is_some());
         assert_eq!(event_by_id.unwrap().event.id, envelope.event.id);
+        
+        // Cleanup
+        std::fs::remove_dir_all(&test_dir).ok();
     }
 
     #[tokio::test]
     async fn test_causal_ordering() {
-        let test_dir = std::path::PathBuf::from("target/test-logs/test_causal_ordering");
+        let test_id = Uuid::new_v4();
+        let test_dir = std::path::PathBuf::from(format!("target/test-logs/test_causal_ordering_{}", test_id));
         std::fs::create_dir_all(&test_dir).unwrap();
         let flow_id = "test_flow_2";
-        let log = DiskJournal::new(test_dir, flow_id).await.unwrap();
+        let log = DiskJournal::new(test_dir.clone(), flow_id).await.unwrap();
 
         let writer1 = WriterId::new();
         let writer2 = WriterId::new();
@@ -416,14 +423,18 @@ mod tests {
         // Verify causal order
         assert_eq!(events[0].event.id, envelope1.event.id);
         assert_eq!(events[1].event.id, envelope2.event.id);
+        
+        // Cleanup
+        std::fs::remove_dir_all(&test_dir).ok();
     }
 
     #[tokio::test]
     async fn test_concurrent_writers() {
-        let test_dir = std::path::PathBuf::from("target/test-logs/test_concurrent_writers");
+        let test_id = Uuid::new_v4();
+        let test_dir = std::path::PathBuf::from(format!("target/test-logs/test_concurrent_writers_{}", test_id));
         std::fs::create_dir_all(&test_dir).unwrap();
         let flow_id = "test_flow_3";
-        let log = Arc::new(DiskJournal::new(test_dir, flow_id).await.unwrap());
+        let log = Arc::new(DiskJournal::new(test_dir.clone(), flow_id).await.unwrap());
 
         // Spawn multiple concurrent writers
         let mut handles = vec![];
@@ -456,5 +467,8 @@ mod tests {
         let writer_ids: std::collections::HashSet<_> =
             events.iter().map(|e| e.writer_id.to_string()).collect();
         assert_eq!(writer_ids.len(), 5);
+        
+        // Cleanup
+        std::fs::remove_dir_all(&test_dir).ok();
     }
 }

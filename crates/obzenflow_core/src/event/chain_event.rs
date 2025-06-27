@@ -47,6 +47,14 @@ pub struct ChainEvent {
 }
 
 impl ChainEvent {
+    // Control event types that flow through the journal
+    /// Standard event type for EOF events
+    pub const EOF_EVENT_TYPE: &'static str = "flowstate.eof";
+    /// Standard event type for watermark events (future)
+    pub const WATERMARK_EVENT_TYPE: &'static str = "flowstate.watermark";
+    /// Standard event type for barrier events (future)
+    pub const BARRIER_EVENT_TYPE: &'static str = "flowstate.barrier";
+    
     /// Create a new ChainEvent with minimal fields (for backward compatibility)
     /// Note: This creates an incomplete event - you should use StageWriter for proper events
     pub fn new(
@@ -67,32 +75,48 @@ impl ChainEvent {
         }
     }
 
-    /// Create a source completion event
-    /// This is emitted by sources when they have no more data to produce
-    pub fn source_complete(
+    /// Create an EOF event - used by ALL stages when they're done processing
+    /// WriterId already identifies the stage/worker, no need for stage_id
+    pub fn eof(
         id: EventId,
         writer_id: WriterId,
-        stage_id: &str, 
         natural: bool
     ) -> Self {
         Self::new(
             id,
             writer_id,
-            "flowstate.source.complete",
+            Self::EOF_EVENT_TYPE,
             serde_json::json!({
-                "stage_id": stage_id,
-                "natural": natural,
-                "timestamp": std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_millis() as u64,
-                "final": true,  // Indicates no more events will follow
-                "message": if natural {
-                    "Source naturally completed"
-                } else {
-                    "Source stopped due to shutdown"
-                }
+                "natural": natural,  // true = natural completion, false = drain/error
+                "timestamp": Self::current_timestamp(),
             })
         )
+    }
+    
+    /// Check if this event is an EOF event
+    pub fn is_eof(&self) -> bool {
+        self.event_type == Self::EOF_EVENT_TYPE
+    }
+    
+    /// Check if this is a control event (vs data event)
+    pub fn is_control(&self) -> bool {
+        self.event_type.starts_with("flowstate.")
+    }
+    
+    /// Helper for stage processing loops - returns control event type if this is a control event
+    pub fn as_control_type(&self) -> Option<&str> {
+        if self.is_control() {
+            Some(&self.event_type)
+        } else {
+            None
+        }
+    }
+    
+    /// Get current timestamp in milliseconds since epoch
+    fn current_timestamp() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
     }
 }
