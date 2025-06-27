@@ -61,9 +61,8 @@ impl<H: SinkHandler + 'static> SinkSupervisor<H> {
                 
                 // Create subscription to upstreams (provided by pipeline)
                 if !self.upstream_stages.is_empty() {
-                    let filter = crate::data_plane::journal_subscription::SubscriptionFilter {
-                        upstream_stages: self.upstream_stages.clone(),
-                        event_types: None,
+                    let filter = crate::data_plane::journal_subscription::SubscriptionFilter::UpstreamStages {
+                        stages: self.upstream_stages.clone(),
                     };
                     
                     let subscription = self.context.journal.subscribe(filter).await

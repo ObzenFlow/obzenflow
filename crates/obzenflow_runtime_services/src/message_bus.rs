@@ -3,38 +3,23 @@
 //! Provides type-safe channels for communication between Pipeline and Stage FSMs
 //! without creating circular dependencies.
 
-use obzenflow_topology_services::stages::StageId;
-use tokio::sync::{mpsc, broadcast};
+use tokio::sync::broadcast;
 use crate::errors::MessageBusError;
 
 /// Message bus for FSM communication
 pub struct FsmMessageBus {
-    /// Pipeline FSM receives these events
-    pipeline_inbox_tx: mpsc::Sender<PipelineInternalEvent>,
-    pipeline_inbox_rx: Option<mpsc::Receiver<PipelineInternalEvent>>,
-    
     /// Broadcast commands to all stages
     stage_commands: broadcast::Sender<StageCommand>,
-    
 }
 
 impl FsmMessageBus {
     /// Create a new message bus
     pub fn new() -> Self {
-        let (pipeline_inbox_tx, pipeline_inbox_rx) = mpsc::channel(100);
         let (stage_commands, _) = broadcast::channel(16);
         
         Self {
-            pipeline_inbox_tx,
-            pipeline_inbox_rx: Some(pipeline_inbox_rx),
             stage_commands,
         }
-    }
-    
-    /// Take the pipeline inbox receiver (can only be called once)
-    pub fn take_pipeline_inbox_receiver(&mut self) -> Result<mpsc::Receiver<PipelineInternalEvent>, MessageBusError> {
-        self.pipeline_inbox_rx.take()
-            .ok_or(MessageBusError::ReceiverAlreadyTaken)
     }
     
     /// Get a stage command receiver (for stages to subscribe)
@@ -56,32 +41,6 @@ impl FsmMessageBus {
             })?;
         Ok(())
     }
-    
-    /// Send an internal event to the pipeline
-    #[track_caller]
-    pub async fn send_pipeline_event(&self, event: PipelineInternalEvent) -> Result<(), MessageBusError> {
-        self.pipeline_inbox_tx.send(event).await
-            .map_err(|_| {
-                tracing::error!(
-                    location = %std::panic::Location::caller(),
-                    "Pipeline inbox dropped while sending event"
-                );
-                MessageBusError::PipelineInboxDropped
-            })
-    }
-}
-
-/// Internal events for the pipeline FSM
-#[derive(Clone, Debug)]
-pub enum PipelineInternalEvent {
-    /// A stage has been created and initialized
-    StageReady { stage_id: StageId },
-    
-    /// All stages are ready
-    AllStagesReady,
-    
-    /// Drain progress update
-    DrainProgress { completed: usize, total: usize },
 }
 
 /// Commands that pipeline sends to stages
@@ -106,11 +65,7 @@ mod tests {
     
     #[tokio::test]
     async fn test_message_bus_creation() {
-        let mut bus = FsmMessageBus::new();
-        
-        // Can take receivers once
-        let _pipeline_rx = bus.take_pipeline_inbox_receiver();
-        let _stage_rx = bus.take_stage_events_receiver();
+        let bus = FsmMessageBus::new();
         
         // Can subscribe multiple times to broadcasts
         let _sub1 = bus.subscribe_to_stage_commands();

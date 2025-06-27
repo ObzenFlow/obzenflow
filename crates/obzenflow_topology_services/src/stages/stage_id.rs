@@ -1,24 +1,23 @@
-use std::sync::atomic::{AtomicU32, Ordering};
+use ulid::Ulid;
 
-/// Strongly typed stage identifier - used for all lookups and references
+/// Strongly typed stage identifier - globally unique
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct StageId(u32);
+pub struct StageId(Ulid);
 
 impl StageId {
-    /// Generate next stage ID (atomic counter)
-    pub fn next() -> Self {
-        static COUNTER: AtomicU32 = AtomicU32::new(0);
-        StageId(COUNTER.fetch_add(1, Ordering::Relaxed))
+    /// Generate a new unique stage ID
+    pub fn new() -> Self {
+        StageId(Ulid::new())
     }
     
-    /// Get the underlying u32 value (for serialization/debugging)
-    pub fn as_u32(&self) -> u32 {
+    /// Create from a specific ULID (mainly for testing/deserialization)
+    pub fn from_ulid(ulid: Ulid) -> Self {
+        StageId(ulid)
+    }
+    
+    /// Get the underlying ULID
+    pub fn as_ulid(&self) -> Ulid {
         self.0
-    }
-    
-    /// Create from raw u32 (use with caution - mainly for deserialization)
-    pub fn from_u32(value: u32) -> Self {
-        StageId(value)
     }
 }
 
@@ -34,15 +33,15 @@ mod tests {
     
     #[test]
     fn test_stage_id_generation() {
-        let id1 = StageId::next();
-        let id2 = StageId::next();
+        let id1 = StageId::new();
+        let id2 = StageId::new();
         assert_ne!(id1, id2);
-        assert!(id1 < id2);
     }
     
     #[test]
     fn test_stage_id_display() {
-        let id = StageId::from_u32(42);
-        assert_eq!(format!("{}", id), "stage_42");
+        let ulid = Ulid::new();
+        let id = StageId::from_ulid(ulid);
+        assert_eq!(format!("{}", id), format!("stage_{}", ulid));
     }
 }

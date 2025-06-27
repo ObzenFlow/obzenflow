@@ -86,9 +86,6 @@ macro_rules! build_typed_flow {
         let topology = Arc::new(builder.build()
             .map_err(|e| format!("Failed to build topology: {:?}", e))?);
         
-        // Create pipeline
-        let mut pipeline = Pipeline::new(journal.clone(), topology.clone());
-        
         // Create services
         use obzenflow_runtime_services::data_plane::journal_subscription::ReactiveJournal;
         use obzenflow_runtime_services::message_bus::FsmMessageBus;
@@ -97,7 +94,8 @@ macro_rules! build_typed_flow {
         let reactive_journal = Arc::new(ReactiveJournal::new(journal.clone()));
         let message_bus = Arc::new(FsmMessageBus::new());
         
-        // Create supervisors
+        // Create stage supervisors
+        let mut stages = Vec::new();
         for (name, id) in name_to_id {
             if let Some(descriptor) = descriptors.remove(&name) {
                 let upstream_stages = topology.upstream_stages(id);
@@ -111,7 +109,7 @@ macro_rules! build_typed_flow {
                 };
                 
                 let supervisor = descriptor.create_supervisor(config);
-                pipeline.add_stage(supervisor);
+                stages.push(supervisor);
             }
         }
         
@@ -119,7 +117,7 @@ macro_rules! build_typed_flow {
         use $crate::prelude::{PipelineSupervisor, FlowHandle};
         use tokio::sync::RwLock;
         
-        let mut supervisor = PipelineSupervisor::new(pipeline)
+        let mut supervisor = PipelineSupervisor::new(topology.clone(), reactive_journal.clone(), stages)
             .map_err(|e| format!("Failed to create supervisor: {:?}", e))?;
         
         supervisor.materialize().await?;

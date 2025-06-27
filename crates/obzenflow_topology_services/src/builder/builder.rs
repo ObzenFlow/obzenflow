@@ -21,7 +21,7 @@ impl TopologyBuilder {
 
     /// Add a stage and optionally connect from current stage
     pub fn add_stage(&mut self, name: Option<String>) -> StageId {
-        let id = StageId::next();
+        let id = StageId::new();
         let info = match name {
             Some(n) => StageInfo::new(id, n),
             None => StageInfo::auto_named(id),

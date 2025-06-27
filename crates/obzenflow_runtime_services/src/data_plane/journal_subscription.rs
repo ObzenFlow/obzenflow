@@ -7,6 +7,7 @@ use obzenflow_core::Result;
 use obzenflow_topology_services::stages::StageId;
 use obzenflow_core::journal::journal::Journal;
 use obzenflow_core::journal::writer_id::WriterId;
+use obzenflow_core::JournalError;
 use obzenflow_core::ChainEvent;
 use obzenflow_core::EventEnvelope;
 use obzenflow_core::EventId;
@@ -15,6 +16,7 @@ use tokio::sync::{RwLock, mpsc};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Instant;
 use ulid::Ulid;
+use async_trait::async_trait;
 
 /// Constants for subscription management
 const SUBSCRIPTION_CHANNEL_SIZE: usize = 1000;
@@ -53,13 +55,24 @@ pub struct EventNotification {
 }
 
 
-/// Filter for subscriptions
+/// Subscription mode - explicit types for different subscription patterns
 #[derive(Debug, Clone)]
-pub struct SubscriptionFilter {
-    /// Which upstream stages to subscribe to
-    pub upstream_stages: Vec<StageId>,
-    /// Optional event type filters
-    pub event_types: Option<Vec<String>>,
+pub enum SubscriptionFilter {
+    /// Subscribe to all events from specific upstream stages (data flow)
+    UpstreamStages {
+        stages: Vec<StageId>,
+    },
+    
+    /// Subscribe to specific event types from all stages (control flow)
+    EventTypes {
+        event_types: Vec<String>,
+    },
+    
+    /// Subscribe to specific event types from specific stages
+    StagesAndEventTypes {
+        stages: Vec<StageId>,
+        event_types: Vec<String>,
+    },
 }
 
 /// Internal subscription state
@@ -175,6 +188,12 @@ impl ReactiveJournal {
             subscriptions: Arc::new(RwLock::new(SubscriptionManager::new())),
         }
     }
+    
+    /// Get writer info for a writer ID
+    pub async fn get_writer_info(&self, writer_id: &WriterId) -> Option<WriterInfo> {
+        let registry = self.writer_registry.read().await;
+        registry.writers.get(writer_id).cloned()
+    }
 
     /// Register a writer for a stage
     pub async fn register_writer(
@@ -234,12 +253,49 @@ impl ReactiveJournal {
         // Add subscription
         manager.subscriptions.insert(id, sub);
 
-        // Register stage mappings for O(1) routing
-        for &stage in &filter.upstream_stages {
-            manager.stage_subscriptions
-                .entry(stage)
-                .or_default()
-                .push(id);
+        // Log subscription creation
+        match &filter {
+            SubscriptionFilter::EventTypes { event_types } => {
+                tracing::info!(
+                    "Created EventTypes subscription {} for event types: {:?}", 
+                    id, event_types
+                );
+            },
+            SubscriptionFilter::UpstreamStages { stages } => {
+                tracing::debug!(
+                    "Created UpstreamStages subscription {} for stages: {:?}", 
+                    id, stages
+                );
+            },
+            SubscriptionFilter::StagesAndEventTypes { stages, event_types } => {
+                tracing::debug!(
+                    "Created StagesAndEventTypes subscription {} for stages: {:?}, events: {:?}", 
+                    id, stages, event_types
+                );
+            },
+        }
+
+        // Register stage mappings for O(1) routing (only for stage-based subscriptions)
+        match &filter {
+            SubscriptionFilter::UpstreamStages { stages } => {
+                for &stage in stages {
+                    manager.stage_subscriptions
+                        .entry(stage)
+                        .or_default()
+                        .push(id);
+                }
+            },
+            SubscriptionFilter::StagesAndEventTypes { stages, .. } => {
+                for &stage in stages {
+                    manager.stage_subscriptions
+                        .entry(stage)
+                        .or_default()
+                        .push(id);
+                }
+            },
+            SubscriptionFilter::EventTypes { .. } => {
+                // No stage mapping needed - these subscriptions check all events
+            }
         }
 
         Ok(JournalSubscription {
@@ -260,26 +316,72 @@ impl ReactiveJournal {
         let registry = self.writer_registry.read().await;
         let stage_id = match registry.writers.get(&envelope.writer_id) {
             Some(info) => info.stage_id,
-            None => return, // Unknown writer, skip notification
+            None => {
+                tracing::warn!("Unknown writer_id: {:?}, skipping notification", envelope.writer_id);
+                return;
+            }
         };
 
-        if let Some(sub_ids) = manager.stage_subscriptions.get(&stage_id) {
-            for sub_id in sub_ids {
-                if let Some(sub) = manager.subscriptions.get(sub_id) {
-                    let notification = EventNotification {
-                        event_id: envelope.event.id,
-                        stage_id,
-                    };
+        // Debug logging for system events
+        if envelope.event.event_type.starts_with("system.") {
+            tracing::debug!(
+                "Processing system event: type={}, stage_id={:?}, writer_id={:?}, total_subscriptions={}", 
+                envelope.event.event_type, stage_id, envelope.writer_id, manager.subscriptions.len()
+            );
+        }
 
-                    // Try to send notification (non-blocking)
-                    match sub.sender.try_send(notification) {
-                        Ok(_) => {},
-                        Err(mpsc::error::TrySendError::Full(_)) => {
-                            tracing::warn!("Subscription {} channel full", sub_id);
+        // Check each subscription to see if it should be notified
+        if envelope.event.event_type.starts_with("system.") {
+            tracing::debug!("Checking {} subscriptions for system event", manager.subscriptions.len());
+            for (sub_id, sub) in &manager.subscriptions {
+                tracing::debug!("  Subscription {}: filter={:?}", sub_id, sub.filter);
+            }
+        }
+        
+        for (sub_id, sub) in &manager.subscriptions {
+            let should_notify = match &sub.filter {
+                SubscriptionFilter::UpstreamStages { stages } => {
+                    // Data flow: notify if event is from an upstream stage
+                    stages.contains(&stage_id)
+                },
+                SubscriptionFilter::EventTypes { event_types } => {
+                    // Control flow: notify if event type matches (from any stage)
+                    let matches = event_types.contains(&envelope.event.event_type);
+                    if envelope.event.event_type.starts_with("system.") {
+                        tracing::debug!(
+                            "EventTypes subscription {} checking event type '{}' against filter {:?}: matches={}", 
+                            sub_id, envelope.event.event_type, event_types, matches
+                        );
+                    }
+                    matches
+                },
+                SubscriptionFilter::StagesAndEventTypes { stages, event_types } => {
+                    // Combined: notify if both stage and event type match
+                    stages.contains(&stage_id) && event_types.contains(&envelope.event.event_type)
+                },
+            };
+
+            if should_notify {
+                let notification = EventNotification {
+                    event_id: envelope.event.id,
+                    stage_id,
+                };
+
+                // Try to send notification (non-blocking)
+                match sub.sender.try_send(notification) {
+                    Ok(_) => {
+                        if envelope.event.event_type.starts_with("system.") {
+                            tracing::debug!(
+                                "Sent system event notification to subscription {}", 
+                                sub_id
+                            );
                         }
-                        Err(mpsc::error::TrySendError::Closed(_)) => {
-                            tracing::debug!("Subscription {} closed", sub_id);
-                        }
+                    },
+                    Err(mpsc::error::TrySendError::Full(_)) => {
+                        tracing::warn!("Subscription {} channel full", sub_id);
+                    }
+                    Err(mpsc::error::TrySendError::Closed(_)) => {
+                        tracing::debug!("Subscription {} closed", sub_id);
                     }
                 }
             }
@@ -302,6 +404,40 @@ impl ReactiveJournal {
             subs.retain(|id| valid_ids.contains(id));
             !subs.is_empty()
         });
+    }
+}
+
+/// Implement Journal trait for ReactiveJournal to make it a drop-in replacement
+#[async_trait]
+impl Journal for ReactiveJournal {
+    async fn append(
+        &self,
+        writer_id: &WriterId,
+        event: ChainEvent,
+        parent: Option<&EventEnvelope>
+    ) -> std::result::Result<EventEnvelope, JournalError> {
+        // Write to underlying journal
+        let envelope = self.journal.append(writer_id, event, parent).await?;
+        
+        // Notify subscribers (ignore notification errors)
+        self.notify_subscribers(&envelope).await;
+        
+        Ok(envelope)
+    }
+
+    async fn read_causally_ordered(&self) -> std::result::Result<Vec<EventEnvelope>, JournalError> {
+        // Direct delegation
+        self.journal.read_causally_ordered().await
+    }
+
+    async fn read_causally_after(&self, after_event_id: &EventId) -> std::result::Result<Vec<EventEnvelope>, JournalError> {
+        // Direct delegation
+        self.journal.read_causally_after(after_event_id).await
+    }
+
+    async fn read_event(&self, event_id: &EventId) -> std::result::Result<Option<EventEnvelope>, JournalError> {
+        // Direct delegation
+        self.journal.read_event(event_id).await
     }
 }
 

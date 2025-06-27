@@ -15,7 +15,7 @@ use crate::message_bus::FsmMessageBus;
 use crate::errors::{FlowError, PipelineSupervisorError};
 use obzenflow_topology_services::stages::StageId;
 use obzenflow_core::{ChainEvent, EventId};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -45,23 +45,32 @@ pub struct PipelineSupervisor {
 
 impl PipelineSupervisor {
     /// Create a new pipeline supervisor
-    pub fn new(pipeline: Pipeline) -> Result<Self, PipelineSupervisorError> {
+    pub fn new(
+        topology: Arc<obzenflow_topology_services::topology::Topology>, 
+        reactive_journal: Arc<ReactiveJournal>,
+        stages: Vec<BoxedStageHandle>
+    ) -> Result<Self, PipelineSupervisorError> {
         // Create message bus
         let message_bus = Arc::new(FsmMessageBus::new());
         
-        // Create reactive journal wrapper
-        let reactive_journal = Arc::new(ReactiveJournal::new(pipeline.journal.clone()));
-        
-        // Create pipeline context
+        // Create pipeline context - use reactive_journal so everyone uses the same instance
         let pipeline_context = Arc::new(PipelineContext {
             bus: message_bus.clone(),
-            topology: pipeline.topology.clone(),
-            journal: pipeline.journal.clone(),
+            topology: topology.clone(),
+            journal: reactive_journal.clone(),
             completed_stages: Arc::new(RwLock::new(Vec::new())),
         });
         
         // Build pipeline FSM
         let pipeline_fsm = build_pipeline_fsm();
+        
+        // Create pipeline with the provided stages
+        let pipeline = Pipeline {
+            journal: reactive_journal.clone(),
+            topology: topology.clone(),
+            stages,
+            observers: Vec::new(),
+        };
         
         Ok(Self {
             pipeline_fsm,
@@ -228,14 +237,12 @@ impl PipelineSupervisor {
     
     /// Start journal-based completion tracking
     async fn start_completion_tracker(&mut self) -> Result<(), String> {
-        // Create subscription for system control events
-        let filter = crate::data_plane::journal_subscription::SubscriptionFilter {
-            upstream_stages: vec![], // All stages
-            // TODO add proper event types, similar to EOF
-            event_types: Some(vec![
+        // Create subscription for system control events from all stages
+        let filter = crate::data_plane::journal_subscription::SubscriptionFilter::EventTypes {
+            event_types: vec![
                 "system.stage.completed".to_string(),
                 "system.stage.failed".to_string(),
-            ]),
+            ],
         };
         
         let mut subscription = self.reactive_journal.subscribe(filter).await
@@ -264,63 +271,63 @@ impl PipelineSupervisor {
                             match event.event_type.as_str() {
                                 // TODO add proper event types, similar to EOF
                                 "system.stage.completed" => {
-                                    if let Some(stage_id_str) = event.payload.get("stage_id")
-                                        .and_then(|v| v.as_str()) {
+                                    // Get stage info from the event
+                                    let stage_name = event.payload.get("stage_name")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("unknown");
+                                    
+                                    let stage_id_str = event.payload.get("stage_id")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("unknown");
+                                    
+                                    // Get stage ID from the writer registry
+                                    if let Some(writer_info) = reactive_journal.get_writer_info(&envelope.writer_id).await {
+                                        let stage_id = writer_info.stage_id;
                                         
-                                        // Parse stage ID (for now, just track completion)
-                                        let stage_name = event.payload.get("stage_name")
-                                            .and_then(|v| v.as_str())
-                                            .unwrap_or("unknown");
-                                            
-                                        // Parse stage ID from string (format: "stage_N")
-                                        if let Some(stage_num_str) = stage_id_str.strip_prefix("stage_") {
-                                            if let Ok(stage_id_num) = stage_num_str.parse::<u32>() {
-                                                let stage_id = StageId::from_u32(stage_id_num);
-                                                
-                                                tracing::info!("Stage completed: {} ({}, id={})", stage_name, stage_id_str, stage_id_num);
-                                            
-                                            // Add to completed stages
-                                            let mut completed = pipeline_context.completed_stages.write().await;
-                                            if !completed.contains(&stage_id) {
-                                                completed.push(stage_id);
-                                            }
-                                            
-                                            // Check if this stage was expected
-                                            if !expected_stages.contains(&stage_id) {
-                                                tracing::warn!("Received completion for unexpected stage: {} ({})", stage_name, stage_id_str);
-                                            }
-                                            
-                                            // For now, just check if we have enough completions
-                                            // This works around the stage ID mismatch issue
-                                            tracing::debug!("Completion tracker: {} stages completed. Expected count: {}, Expected IDs: {:?}, Completed IDs: {:?}", 
-                                                completed.len(), total_stages, expected_stages, completed);
-                                                
-                                            if completed.len() >= total_stages {
-                                                tracing::info!("All {} stages have completed (by count)!", total_stages);
-                                                
-                                                // Write pipeline completion event to journal
-                                                let writer_id = reactive_journal.register_writer(StageId::from_u32(0), None)
-                                                    .await
-                                                    .unwrap_or_else(|e| panic!("FATAL: Failed to register pipeline writer: {:?}", e));
-                                                
-                                                let pipeline_completed = ChainEvent::new(
-                                                    EventId::new(),
-                                                    writer_id.clone(),
-                                                    "system.pipeline.completed",
-                                                    serde_json::json!({
-                                                        "timestamp": chrono::Utc::now().to_rfc3339(),
-                                                        "completed_stages": completed.len(),
-                                                    })
-                                                );
-                                                
-                                                if let Err(e) = reactive_journal.write(&writer_id, pipeline_completed, None).await {
-                                                    panic!("FATAL: Failed to write pipeline completion event: {}", e);
-                                                }
-                                                
-                                                break;
-                                            }
-                                            }
+                                        tracing::info!("Stage completed: {} ({})", stage_name, stage_id);
+                                        
+                                        // Add to completed stages
+                                        let mut completed = pipeline_context.completed_stages.write().await;
+                                        if !completed.contains(&stage_id) {
+                                            completed.push(stage_id);
                                         }
+                                        
+                                        // Check if this stage was expected
+                                        if !expected_stages.contains(&stage_id) {
+                                            tracing::warn!("Received completion for unexpected stage: {} ({})", stage_name, stage_id);
+                                        }
+                                        
+                                        tracing::debug!("Completion tracker: {} stages completed. Expected count: {}, Expected IDs: {:?}, Completed IDs: {:?}", 
+                                            completed.len(), total_stages, expected_stages, completed);
+                                            
+                                        if completed.len() >= total_stages {
+                                            tracing::info!("All {} stages have completed!", total_stages);
+                                            
+                                            // Write pipeline completion event to journal  
+                                            let pipeline_stage_id = StageId::new(); // Pipeline gets its own unique ID
+                                            let writer_id = reactive_journal.register_writer(pipeline_stage_id, None)
+                                                .await
+                                                .unwrap_or_else(|e| panic!("FATAL: Failed to register pipeline writer: {:?}", e));
+                                            
+                                            let pipeline_completed = ChainEvent::new(
+                                                EventId::new(),
+                                                writer_id.clone(),
+                                                "system.pipeline.completed",
+                                                serde_json::json!({
+                                                    "timestamp": chrono::Utc::now().to_rfc3339(),
+                                                    "completed_stages": completed.len(),
+                                                })
+                                            );
+                                            
+                                            if let Err(e) = reactive_journal.write(&writer_id, pipeline_completed, None).await {
+                                                panic!("FATAL: Failed to write pipeline completion event: {}", e);
+                                            }
+                                            
+                                            // Exit the completion tracker task
+                                            return;
+                                        }
+                                    } else {
+                                        tracing::warn!("Stage completed event from unknown writer: {:?}", envelope.writer_id);
                                     }
                                 }
                                 // TODO add proper event types, similar to EOF

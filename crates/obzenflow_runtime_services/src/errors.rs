@@ -10,15 +10,6 @@ use obzenflow_topology_services::stages::StageId;
 pub enum MessageBusError {
     #[error("Failed to send stage command - no stages are listening (are stages initialized?)")]
     NoStageReceivers,
-    
-    #[error("Failed to send stage notification - pipeline receiver dropped")]
-    PipelineReceiverDropped,
-    
-    #[error("Failed to send pipeline event - receiver dropped")]
-    PipelineInboxDropped,
-    
-    #[error("Channel receiver already taken")]
-    ReceiverAlreadyTaken,
 }
 
 /// Errors that can occur in the pipeline supervisor
