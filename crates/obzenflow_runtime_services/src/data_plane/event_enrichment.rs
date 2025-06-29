@@ -2,7 +2,7 @@
 //! 
 //! Runtime layer adds metadata to events for tracking and debugging
 
-use obzenflow_core::{ChainEvent, WriterId};
+use obzenflow_core::{ChainEvent, WriterId, EventId};
 use serde_json::json;
 use std::time::Instant;
 
@@ -80,14 +80,14 @@ mod tests {
         let enricher = EventEnricher::new(
             "test_flow".to_string(),
             "test_stage".to_string(),
-            WriterId::new(StageId::new(1)),
+            WriterId::new(),
         );
         
-        let event = ChainEvent::new("test_event", json!({"value": 42}));
+        let event = ChainEvent::new(EventId::new(), WriterId::new(), "test_event", json!({"value": 42}));
         let enriched = enricher.enrich(event);
         
-        assert!(enriched.data["_meta"].is_object());
-        assert_eq!(enriched.data["_meta"]["flow_name"], "test_flow");
-        assert_eq!(enriched.data["_meta"]["stage_name"], "test_stage");
+        assert!(enriched.payload["_meta"].is_object());
+        assert_eq!(enriched.payload["_meta"]["flow_name"], "test_flow");
+        assert_eq!(enriched.payload["_meta"]["stage_name"], "test_stage");
     }
 }

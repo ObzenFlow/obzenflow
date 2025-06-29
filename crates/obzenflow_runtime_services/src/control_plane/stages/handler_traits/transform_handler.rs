@@ -14,14 +14,21 @@ use async_trait::async_trait;
 /// 
 /// # Example
 /// ```rust
+/// use obzenflow_runtime_services::control_plane::stages::handler_traits::TransformHandler;
+/// use obzenflow_core::{ChainEvent, Result};
+/// use std::collections::HashMap;
+/// use serde_json::{json, Value};
+/// use async_trait::async_trait;
+/// 
 /// struct DataEnricher {
-///     cache: HashMap<String, Metadata>,
+///     cache: HashMap<String, Value>,
 /// }
 /// 
+/// #[async_trait]
 /// impl TransformHandler for DataEnricher {
 ///     fn process(&self, mut event: ChainEvent) -> Vec<ChainEvent> {
 ///         // Enrich event with cached metadata
-///         if let Some(metadata) = self.cache.get(&event.key) {
+///         if let Some(metadata) = self.cache.get(&event.event_type) {
 ///             event.payload["metadata"] = metadata.clone();
 ///         }
 ///         vec![event]

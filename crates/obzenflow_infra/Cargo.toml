@@ -34,3 +34,5 @@ statsd = ["dep:statsd"]
 tokio-test = "0.4"
 tempfile = "3.8"
 uuid = { version = "1.0", features = ["v4"] }
+anyhow = "1.0"
+obzenflow_dsl_infra = { path = "../obzenflow_dsl_infra" }

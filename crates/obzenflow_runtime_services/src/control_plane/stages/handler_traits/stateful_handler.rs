@@ -14,6 +14,11 @@ use async_trait::async_trait;
 /// 
 /// # Example
 /// ```rust
+/// use obzenflow_runtime_services::control_plane::stages::handler_traits::StatefulHandler;
+/// use obzenflow_core::{ChainEvent, EventId, WriterId, Result};
+/// use serde_json::json;
+/// use async_trait::async_trait;
+/// 
 /// #[derive(Clone, Default)]
 /// struct AggregatorState {
 ///     count: u64,
@@ -22,8 +27,10 @@ use async_trait::async_trait;
 /// 
 /// struct MetricsAggregator {
 ///     window_size: u64,
+///     writer_id: WriterId,
 /// }
 /// 
+/// #[async_trait]
 /// impl StatefulHandler for MetricsAggregator {
 ///     type State = AggregatorState;
 ///     
@@ -39,9 +46,15 @@ use async_trait::async_trait;
 ///         // Check if window is complete
 ///         if new_state.count >= self.window_size {
 ///             // Emit aggregation and reset
-///             let output = vec![ChainEvent::new("metrics", json!({
-///                 "avg": new_state.sum / new_state.count as f64,
-///             }))];
+///             let output = vec![ChainEvent::new(
+///                 EventId::new(),
+///                 self.writer_id.clone(),
+///                 "metrics",
+///                 json!({
+///                     "avg": new_state.sum / new_state.count as f64,
+///                     "count": new_state.count,
+///                 })
+///             )];
 ///             (AggregatorState::default(), output)
 ///         } else {
 ///             (new_state, vec![])

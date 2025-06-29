@@ -3,27 +3,37 @@
 //!   • Pipeline = Source → CapStage → DigitWordStage → Sink
 //! Run with:  `cargo run --example char_transform`
 
-use flowstate_rs::prelude::*;
-use flowstate_rs::flow;
-use flowstate_rs::lifecycle::{EventHandler, ProcessingMode};
-use flowstate_rs::topology::StageId;
+use obzenflow_dsl_infra::{flow, source, transform, sink};
+use obzenflow_runtime_services::control_plane::stages::handler_traits::{
+    FiniteSourceHandler, TransformHandler, SinkHandler
+};
+use obzenflow_infra::journal::DiskJournal;
+use obzenflow_core::event::event_id::EventId;
+use obzenflow_core::event::chain_event::ChainEvent;
+use obzenflow_core::journal::writer_id::WriterId;
+use obzenflow_adapters::monitoring::taxonomies::{
+    golden_signals::GoldenSignals,
+    red::RED,
+    use_taxonomy::USE,
+    saafe::SAAFE,
+};
 use serde_json::json;
-use std::sync::{Arc, Mutex};
-use std::sync::atomic::{AtomicU64, AtomicBool, Ordering};
+use std::sync::Arc;
+use anyhow::Result;
+use async_trait::async_trait;
 
-// Source -- Emits one `Char` event per character from sample sentences.
+/// Source that emits one `Char` event per character from sample sentences
 struct TextCharSource {
     sentences: Vec<String>,
     chars: Vec<char>,
     start_idx: Vec<usize>,
-    announced: AtomicU64,
-    emitted:   AtomicU64,
-    stage_id: StageId,
-    completion_sent: Arc<AtomicBool>,
+    current_index: usize,
+    announced: usize,
+    writer_id: WriterId,
 }
 
 impl TextCharSource {
-    fn new(stage_id: StageId) -> Self {
+    fn new() -> Self {
         let sentences = vec![
             "Hello, FlowState!".to_string(),
             "Rust makes systems programming fun.".to_string(),
@@ -47,69 +57,65 @@ impl TextCharSource {
             sentences,
             chars,
             start_idx,
-            announced: AtomicU64::new(0),
-            emitted:   AtomicU64::new(0),
-            stage_id,
-            completion_sent: Arc::new(AtomicBool::new(false)),
+            current_index: 0,
+            announced: 0,
+            writer_id: WriterId::new(),
         }
     }
 }
 
-impl EventHandler for TextCharSource {
-    fn transform(&self, _event: ChainEvent) -> Vec<ChainEvent> {
-        let idx = self.emitted.load(Ordering::Relaxed) as usize;
-        
-        if idx < self.chars.len() {
-            // Generate normal events
-            self.emitted.fetch_add(1, Ordering::Relaxed);
-
-        // Announce sentence start (console progress)
-        let next = self.announced.load(Ordering::Relaxed) as usize;
-        if next < self.start_idx.len() && idx == self.start_idx[next] {
-            println!("📝  Processing sentence: {}", self.sentences[next]);
-            self.announced.fetch_add(1, Ordering::Relaxed);
-        }
-
+impl FiniteSourceHandler for TextCharSource {
+    fn next(&mut self) -> Option<ChainEvent> {
+        if self.current_index < self.chars.len() {
+            let idx = self.current_index;
+            self.current_index += 1;
+            
+            // Announce sentence start (console progress)
+            if self.announced < self.start_idx.len() && idx == self.start_idx[self.announced] {
+                println!("📝  Processing sentence: {}", self.sentences[self.announced]);
+                self.announced += 1;
+            }
+            
             let ch = self.chars[idx];
-            vec![ChainEvent::new("Char", json!({ "ch": ch.to_string() }))]
-        } else if !self.completion_sent.load(Ordering::Relaxed) {
-            // Send completion event once
-            self.completion_sent.store(true, Ordering::Relaxed);
-            println!("TextCharSource: Emitting source completion event");
-            vec![ChainEvent::source_complete(self.stage_id, true)]
+            Some(ChainEvent::new(
+                EventId::new(),
+                self.writer_id.clone(),
+                "Char",
+                json!({ "ch": ch.to_string() })
+            ))
         } else {
-            // Already sent completion
-            vec![]
+            None
         }
     }
-    
-    fn processing_mode(&self) -> ProcessingMode {
-        ProcessingMode::Transform
+
+    fn is_complete(&self) -> bool {
+        self.current_index >= self.chars.len()
     }
 }
 
-// First Stage – Capitalize letters
+/// First Stage – Capitalize letters
 struct CapStage;
 
-impl CapStage { fn new() -> Self { Self } }
+impl CapStage {
+    fn new() -> Self {
+        Self
+    }
+}
 
-impl EventHandler for CapStage {
-    fn transform(&self, event: ChainEvent) -> Vec<ChainEvent> {
+impl TransformHandler for CapStage {
+    fn process(&self, mut event: ChainEvent) -> Vec<ChainEvent> {
         if event.event_type == "Char" {
             if let Some(ch) = event.payload["ch"].as_str().and_then(|s| s.chars().next()) {
                 let out = if ch.is_ascii_alphabetic() { ch.to_ascii_uppercase() } else { ch };
-                return vec![ChainEvent::new("Char", json!({ "ch": out.to_string() }))];
+                event.payload["ch"] = json!(out.to_string());
+                return vec![event];
             }
         }
         vec![]
     }
-    
-    fn processing_mode(&self) -> ProcessingMode {
-        ProcessingMode::Transform
-    }
 }
 
-// Second Stage -- Digit → Word
+/// Second Stage -- Digit → Word
 fn digit_word(d: char) -> &'static str {
     match d {
         '0' => "zero",  '1' => "one",   '2' => "two",  '3' => "three", '4' => "four",
@@ -120,10 +126,14 @@ fn digit_word(d: char) -> &'static str {
 
 struct DigitWordStage;
 
-impl DigitWordStage { fn new() -> Self { Self } }
+impl DigitWordStage {
+    fn new() -> Self {
+        Self
+    }
+}
 
-impl EventHandler for DigitWordStage {
-    fn transform(&self, event: ChainEvent) -> Vec<ChainEvent> {
+impl TransformHandler for DigitWordStage {
+    fn process(&self, event: ChainEvent) -> Vec<ChainEvent> {
         if event.event_type == "Char" {
             if let Some(ch) = event.payload["ch"].as_str().and_then(|s| s.chars().next()) {
                 let frag = if ch.is_ascii_digit() {
@@ -131,83 +141,99 @@ impl EventHandler for DigitWordStage {
                 } else {
                     ch.to_string()
                 };
-                return vec![ChainEvent::new("OutFragment", json!({ "frag": frag }))];
+                return vec![ChainEvent::new(
+                    EventId::new(),
+                    event.writer_id.clone(),
+                    "OutFragment",
+                    json!({ "frag": frag })
+                )];
             }
         }
         vec![]
     }
-    
-    fn processing_mode(&self) -> ProcessingMode {
-        ProcessingMode::Transform
-    }
 }
 
-// Sink – collects output fragments into a string buffer
+/// Sink – collects output fragments into a string buffer
 struct TextCollectorSink {
-    buf: Arc<Mutex<String>>,
+    buf: Arc<std::sync::Mutex<String>>,
 }
 
 impl TextCollectorSink {
-    fn new() -> (Self, Arc<Mutex<String>>) {
-        let buf = Arc::new(Mutex::new(String::new()));
-        (
-            Self { buf: buf.clone() },
-            buf,
-        )
+    fn new() -> Self {
+        Self {
+            buf: Arc::new(std::sync::Mutex::new(String::new())),
+        }
     }
 }
 
-impl EventHandler for TextCollectorSink {
-    fn transform(&self, event: ChainEvent) -> Vec<ChainEvent> {
+#[async_trait]
+impl SinkHandler for TextCollectorSink {
+    fn consume(&mut self, event: ChainEvent) -> obzenflow_core::Result<()> {
         if event.event_type == "OutFragment" {
             if let Some(frag) = event.payload["frag"].as_str() {
                 let mut b = self.buf.lock().unwrap();
                 b.push_str(frag);
             }
         }
-        vec![] // Sinks consume events
-    }
-    
-    fn processing_mode(&self) -> ProcessingMode {
-        ProcessingMode::Transform
+        Ok(())
     }
 }
 
-// Example goes brrr!
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Enable debug logging to see what's happening
+    // Initialize tracing for better error messages
     tracing_subscriber::fmt()
-        .with_env_filter("flowstate_rs=debug")
+        .with_env_filter("obzenflow=debug,char_transform=debug")
+        .with_file(true)
+        .with_line_number(true)
+        .with_thread_ids(true)
         .init();
 
     println!("🚀 FlowState RS - Character Transform Demo (newline & 2-stage)");
     println!("============================================================\n");
 
     // Create sink that collects output in memory
-    let (sink, final_buffer) = TextCollectorSink::new();
-    let source_stage_id = StageId::from_u32(0);
+    let sink = TextCollectorSink::new();
+    let final_buffer = sink.buf.clone();
 
     println!("⏳ Initializing pipeline...");
 
-    let mut handle = flow! {
-        name: "char_transform",
+    // Create a journal for the flow
+    let journal_path = std::path::PathBuf::from("target/char-transform-logs");
+    std::fs::create_dir_all(&journal_path)?;
+    let journal = Arc::new(DiskJournal::new(journal_path, "char_transform").await?);
+
+    // Create the flow using the new flow! macro
+    let handle = flow! {
+        journal: journal,
         middleware: [GoldenSignals::monitoring()],
-        ("source"   => TextCharSource::new(source_stage_id), [RED::monitoring()])
-        |> ("cap"   => CapStage::new(),       [USE::monitoring()])
-        |> ("digit" => DigitWordStage::new(), [USE::monitoring()])
-        |> ("sink"  => sink,                 [SAAFE::monitoring()])
-    }?;
+        
+        stages: {
+            src = source!("source" => TextCharSource::new(), [RED::monitoring()]);
+            cap = transform!("cap" => CapStage::new(), [USE::monitoring()]);
+            digit = transform!("digit" => DigitWordStage::new(), [USE::monitoring()]);
+            out = sink!("sink" => sink, [SAAFE::monitoring()]);
+        },
+        
+        topology: {
+            src |> cap;
+            cap |> digit;
+            digit |> out;
+        }
+    }.await.map_err(|e| anyhow::anyhow!("Failed to create flow with DSL: {:?}", e))?;
     
-    println!("📌 Pipeline created, waiting for natural completion...");
+    println!("📌 Pipeline created, starting execution...");
     
-    // Wait for natural completion
-    handle.wait_for_completion().await?;
+    // Start the pipeline
+    handle.run().await
+        .map_err(|e| anyhow::anyhow!("Failed to run pipeline: {:?}", e))?;
 
     println!("\n✅ Pipeline completed!\n");
 
     let result = final_buffer.lock().unwrap().clone();
     println!("🔍 Final text:\n{}", result);
 
-    Ok(()) // The grooviest!
+    // Cleanup
+    println!("\nJournal written to: target/char-transform-logs/char_transform.log");
+    Ok(())
 }

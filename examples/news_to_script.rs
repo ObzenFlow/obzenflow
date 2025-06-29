@@ -5,25 +5,34 @@
 //! 
 //! Run with: cargo run --example news_to_script
 
-use flowstate_rs::prelude::*;
-use flowstate_rs::flow;
-use flowstate_rs::lifecycle::{EventHandler, ProcessingMode};
-use flowstate_rs::topology::StageId;
+use obzenflow_dsl_infra::{flow, source, transform, sink};
+use obzenflow_runtime_services::control_plane::stages::handler_traits::{
+    FiniteSourceHandler, TransformHandler, SinkHandler
+};
+use obzenflow_infra::journal::DiskJournal;
+use obzenflow_core::event::event_id::EventId;
+use obzenflow_core::event::chain_event::ChainEvent;
+use obzenflow_core::journal::writer_id::WriterId;
+use obzenflow_adapters::monitoring::taxonomies::{
+    golden_signals::GoldenSignals,
+    red::RED,
+    use_taxonomy::USE,
+    saafe::SAAFE,
+};
 use serde_json::json;
-use std::sync::atomic::{AtomicU64, AtomicBool, Ordering};
 use std::sync::Arc;
-use chrono;
+use anyhow::Result;
+use async_trait::async_trait;
 
 /// Source that generates news items
 struct NewsSource {
     news_items: Vec<(String, String, String)>,
-    emitted: AtomicU64,
-    stage_id: StageId,
-    completion_sent: Arc<AtomicBool>,
+    current_index: usize,
+    writer_id: WriterId,
 }
 
 impl NewsSource {
-    fn new(stage_id: StageId) -> Self {
+    fn new() -> Self {
         let news_items = vec![
             ("Breaking: Major AI Breakthrough Announced".to_string(), 
              "Scientists at leading tech companies announce significant progress in artificial general intelligence, with potential applications across multiple industries.".to_string(), 
@@ -44,42 +53,39 @@ impl NewsSource {
         
         Self {
             news_items,
-            emitted: AtomicU64::new(0),
-            stage_id,
-            completion_sent: Arc::new(AtomicBool::new(false)),
+            current_index: 0,
+            writer_id: WriterId::new(),
         }
     }
 }
 
-impl EventHandler for NewsSource {
-    fn transform(&self, _event: ChainEvent) -> Vec<ChainEvent> {
-        let current = self.emitted.load(Ordering::Relaxed) as usize;
-        
-        if current < self.news_items.len() {
-            // Generate normal events
-            self.emitted.fetch_add(1, Ordering::Relaxed);
-            let (title, content, category) = &self.news_items[current];
+impl FiniteSourceHandler for NewsSource {
+    fn next(&mut self) -> Option<ChainEvent> {
+        if self.current_index < self.news_items.len() {
+            let (title, content, category) = &self.news_items[self.current_index];
+            self.current_index += 1;
+            
             println!("📰 Processing: {}", title);
-            vec![ChainEvent::new("NewsItem", json!({
-                "title": title,
-                "content": content,
-                "category": category,
-                "source": "sample_news",
-                "timestamp": chrono::Utc::now().to_rfc3339(),
-            }))]
-        } else if !self.completion_sent.load(Ordering::Relaxed) {
-            // Send completion event once
-            self.completion_sent.store(true, Ordering::Relaxed);
-            println!("NewsSource: Emitting source completion event");
-            vec![ChainEvent::source_complete(self.stage_id, true)]
+            
+            Some(ChainEvent::new(
+                EventId::new(),
+                self.writer_id.clone(),
+                "NewsItem",
+                json!({
+                    "title": title,
+                    "content": content,
+                    "category": category,
+                    "source": "sample_news",
+                    "timestamp": format!("2024-01-01T00:00:{:02}Z", self.current_index),
+                })
+            ))
         } else {
-            // Already sent completion
-            vec![]
+            None
         }
     }
     
-    fn processing_mode(&self) -> ProcessingMode {
-        ProcessingMode::Transform
+    fn is_complete(&self) -> bool {
+        self.current_index >= self.news_items.len()
     }
 }
 
@@ -92,8 +98,8 @@ impl ContentExtractor {
     }
 }
 
-impl EventHandler for ContentExtractor {
-    fn transform(&self, mut event: ChainEvent) -> Vec<ChainEvent> {
+impl TransformHandler for ContentExtractor {
+    fn process(&self, mut event: ChainEvent) -> Vec<ChainEvent> {
         if event.event_type == "NewsItem" {
             // Extract and clean the content
             if let (Some(title), Some(content)) = (
@@ -125,10 +131,6 @@ impl EventHandler for ContentExtractor {
             }
         }
         vec![event]
-    }
-    
-    fn processing_mode(&self) -> ProcessingMode {
-        ProcessingMode::Transform
     }
 }
 
@@ -190,8 +192,8 @@ impl ScriptGenerator {
     }
 }
 
-impl EventHandler for ScriptGenerator {
-    fn transform(&self, event: ChainEvent) -> Vec<ChainEvent> {
+impl TransformHandler for ScriptGenerator {
+    fn process(&self, event: ChainEvent) -> Vec<ChainEvent> {
         if event.event_type == "CleanedNews" {
             let title = event.payload.get("title")
                 .and_then(|v| v.as_str())
@@ -207,21 +209,22 @@ impl EventHandler for ScriptGenerator {
             
             let (script, quality) = self.generate_script(title, content, content_type);
             
-            vec![ChainEvent::new("YouTubeScript", json!({
-                "original_title": title,
-                "category": event.payload.get("category").cloned().unwrap_or(json!("unknown")),
-                "content_type": content_type,
-                "script": script,
-                "quality_score": quality,
-                "generated_at": chrono::Utc::now().to_rfc3339(),
-            }))]
+            vec![ChainEvent::new(
+                EventId::new(),
+                event.writer_id.clone(),
+                "YouTubeScript",
+                json!({
+                    "original_title": title,
+                    "category": event.payload.get("category").cloned().unwrap_or(json!("unknown")),
+                    "content_type": content_type,
+                    "script": script,
+                    "quality_score": quality,
+                    "generated_at": format!("2024-01-01T00:00:00Z"),
+                })
+            )]
         } else {
             vec![]
         }
-    }
-    
-    fn processing_mode(&self) -> ProcessingMode {
-        ProcessingMode::Transform
     }
 }
 
@@ -238,8 +241,8 @@ impl QualityFilter {
     }
 }
 
-impl EventHandler for QualityFilter {
-    fn transform(&self, event: ChainEvent) -> Vec<ChainEvent> {
+impl TransformHandler for QualityFilter {
+    fn process(&self, event: ChainEvent) -> Vec<ChainEvent> {
         if let Some(quality_score) = event.payload["quality_score"].as_f64() {
             if quality_score >= self.min_score {
                 println!("   ✅ High-quality script accepted (score: {:.2})", quality_score);
@@ -252,73 +255,87 @@ impl EventHandler for QualityFilter {
             vec![event] // Pass through if no quality score
         }
     }
-    
-    fn processing_mode(&self) -> ProcessingMode {
-        ProcessingMode::Transform
-    }
 }
 
 /// Sink that collects and displays scripts
 struct ScriptCollectorSink {
-    scripts: Arc<tokio::sync::Mutex<Vec<ChainEvent>>>,
+    scripts: Arc<std::sync::Mutex<Vec<ChainEvent>>>,
 }
 
 impl ScriptCollectorSink {
-    fn new() -> (Self, Arc<tokio::sync::Mutex<Vec<ChainEvent>>>) {
-        let scripts = Arc::new(tokio::sync::Mutex::new(Vec::new()));
-        (Self {
-            scripts: scripts.clone(),
-        }, scripts)
+    fn new() -> Self {
+        Self {
+            scripts: Arc::new(std::sync::Mutex::new(Vec::new())),
+        }
     }
 }
 
-impl EventHandler for ScriptCollectorSink {
-    fn transform(&self, event: ChainEvent) -> Vec<ChainEvent> {
+#[async_trait]
+impl SinkHandler for ScriptCollectorSink {
+    fn consume(&mut self, event: ChainEvent) -> obzenflow_core::Result<()> {
         if event.event_type == "YouTubeScript" {
-            let scripts = self.scripts.clone();
-            tokio::spawn(async move {
-                scripts.lock().await.push(event);
-            });
+            let mut scripts = self.scripts.lock().unwrap();
+            scripts.push(event);
         }
-        vec![] // Sinks don't emit
-    }
-    
-    fn processing_mode(&self) -> ProcessingMode {
-        ProcessingMode::Transform
+        Ok(())
     }
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Initialize tracing for better error messages
+    tracing_subscriber::fmt()
+        .with_env_filter("obzenflow=debug,news_to_script=debug")
+        .with_file(true)
+        .with_line_number(true)
+        .with_thread_ids(true)
+        .init();
+
     println!("🚀 FlowState RS - News to YouTube Scripts");
     println!("========================================");
     println!("📰 Creating sample news data...");
     
-    let (sink, scripts) = ScriptCollectorSink::new();
-    let source_stage_id = StageId::from_u32(0);
+    let sink = ScriptCollectorSink::new();
+    let scripts = sink.scripts.clone();
     
     println!("\n🎬 Running news-to-script pipeline...");
     
+    // Create a journal for the flow
+    let journal_path = std::path::PathBuf::from("target/news-to-script-logs");
+    std::fs::create_dir_all(&journal_path)?;
+    let journal = Arc::new(DiskJournal::new(journal_path, "news_to_script").await?);
+    
     // HERE'S THE BEAUTIFUL DSL SYNTAX! 🎉
-    let mut handle = flow! {
-        name: "news_to_script",
+    let handle = flow! {
+        journal: journal,
         middleware: [GoldenSignals::monitoring()],
-        ("news" => NewsSource::new(source_stage_id), [RED::monitoring()])
-        |> ("extractor" => ContentExtractor::new(), [USE::monitoring()]) 
-        |> ("generator" => ScriptGenerator::new(), [GoldenSignals::monitoring()])
-        |> ("filter" => QualityFilter::min_score(0.6), [USE::monitoring()])
-        |> ("output" => sink, [SAAFE::monitoring()])
-    }?;
+        
+        stages: {
+            news = source!("news" => NewsSource::new(), [RED::monitoring()]);
+            extractor = transform!("extractor" => ContentExtractor::new(), [USE::monitoring()]);
+            generator = transform!("generator" => ScriptGenerator::new(), [GoldenSignals::monitoring()]);
+            filter = transform!("filter" => QualityFilter::min_score(0.6), [USE::monitoring()]);
+            output = sink!("output" => sink, [SAAFE::monitoring()]);
+        },
+        
+        topology: {
+            news |> extractor;
+            extractor |> generator;
+            generator |> filter;
+            filter |> output;
+        }
+    }.await.map_err(|e| anyhow::anyhow!("Failed to create flow with DSL: {:?}", e))?;
     
     println!("⏳ Pipeline created, waiting for natural completion...");
     
-    // Wait for natural completion
-    handle.wait_for_completion().await?;
+    // Start the pipeline
+    handle.run().await
+        .map_err(|e| anyhow::anyhow!("Failed to run pipeline: {:?}", e))?;
     
     println!("\n✅ Pipeline completed successfully!");
     
     // Show the results
-    let final_scripts = scripts.lock().await;
+    let final_scripts = scripts.lock().unwrap();
     println!("\n📺 Generated YouTube Scripts:");
     println!("═══════════════════════════════");
     
@@ -360,6 +377,6 @@ async fn main() -> Result<()> {
     println!("   • Metrics collection with different taxonomies");
     
     // Cleanup
-    // Cleanup handled by tempdir
+    println!("\nJournal written to: target/news-to-script-logs/news_to_script.log");
     Ok(())
 }

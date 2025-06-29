@@ -5,29 +5,38 @@
 //! 2. Analyzes price movements with different taxonomies
 //! 3. Demonstrates the monitoring system architecture
 
-use flowstate_rs::prelude::*;
-use flowstate_rs::flow;
-use flowstate_rs::lifecycle::{EventHandler, ProcessingMode};
-use flowstate_rs::topology::StageId;
+use obzenflow_dsl_infra::{flow, source, transform, sink};
+use obzenflow_runtime_services::control_plane::stages::handler_traits::{
+    FiniteSourceHandler, TransformHandler, SinkHandler
+};
+use obzenflow_infra::journal::DiskJournal;
+use obzenflow_core::event::event_id::EventId;
+use obzenflow_core::event::chain_event::ChainEvent;
+use obzenflow_core::journal::writer_id::WriterId;
+use obzenflow_adapters::monitoring::taxonomies::{
+    golden_signals::GoldenSignals,
+    red::RED,
+    use_taxonomy::USE,
+    saafe::SAAFE,
+};
 use serde_json::json;
-use std::sync::atomic::{AtomicU64, AtomicBool, Ordering};
 use std::sync::Arc;
+use anyhow::Result;
+use async_trait::async_trait;
 
 /// Source that generates crypto market data
 struct CryptoMarketSource {
     total_events: u64,
-    emitted: AtomicU64,
-    stage_id: StageId,
-    completion_sent: Arc<AtomicBool>,
+    current_tick: usize,
+    writer_id: WriterId,
 }
 
 impl CryptoMarketSource {
-    fn new(total_events: u64, stage_id: StageId) -> Self {
+    fn new(total_events: u64) -> Self {
         Self {
             total_events,
-            emitted: AtomicU64::new(0),
-            stage_id,
-            completion_sent: Arc::new(AtomicBool::new(false)),
+            current_tick: 0,
+            writer_id: WriterId::new(),
         }
     }
     
@@ -60,46 +69,45 @@ impl CryptoMarketSource {
         let is_whale = tick % 37 == 0;
         let volume = if is_whale { base_volume * 100.0 } else { base_volume * (1.0 + volatility.abs() * 10.0) };
         
-        ChainEvent::new("MarketTick", json!({
-            "coin": coin,
-            "price": price,
-            "volume": volume,
-            "bid": price * 0.999,
-            "ask": price * 1.001,
-            "timestamp": chrono::Utc::now().to_rfc3339(),
-            "tick": tick,
-        }))
+        ChainEvent::new(
+            EventId::new(),
+            self.writer_id.clone(),
+            "MarketTick",
+            json!({
+                "coin": coin,
+                "price": price,
+                "volume": volume,
+                "bid": price * 0.999,
+                "ask": price * 1.001,
+                "timestamp": format!("2024-01-01T00:00:{}Z", tick % 60),
+                "tick": tick,
+            })
+        )
     }
 }
 
-impl EventHandler for CryptoMarketSource {
-    fn transform(&self, _event: ChainEvent) -> Vec<ChainEvent> {
-        let tick = self.emitted.load(Ordering::Relaxed);
-        
-        if tick < self.total_events {
-            // Generate normal events
-            self.emitted.fetch_add(1, Ordering::Relaxed);
+impl FiniteSourceHandler for CryptoMarketSource {
+    fn next(&mut self) -> Option<ChainEvent> {
+        if self.current_tick < self.total_events as usize {
+            let tick = self.current_tick as u64;
+            self.current_tick += 1;
+            
             // Show progress
             if tick == 0 {
                 println!("🚀 Market data generation started!");
             } else if tick % 25 == 0 {
                 println!("📊 Generated {} market events...", tick);
             }
-            vec![self.generate_market_event(tick)]
-        } else if !self.completion_sent.load(Ordering::Relaxed) {
-            // Send completion event once
-            self.completion_sent.store(true, Ordering::Relaxed);
-            println!("✨ Market data generation complete! {} events", self.total_events);
-            println!("CryptoMarketSource: Emitting source completion event");
-            vec![ChainEvent::source_complete(self.stage_id, true)]
+            
+            Some(self.generate_market_event(tick))
         } else {
-            // Already sent completion
-            vec![]
+            println!("✨ Market data generation complete! {} events", self.total_events);
+            None
         }
     }
     
-    fn processing_mode(&self) -> ProcessingMode {
-        ProcessingMode::Transform
+    fn is_complete(&self) -> bool {
+        self.current_tick >= self.total_events as usize
     }
 }
 
@@ -112,8 +120,8 @@ impl PriceAnalyzer {
     }
 }
 
-impl EventHandler for PriceAnalyzer {
-    fn transform(&self, mut event: ChainEvent) -> Vec<ChainEvent> {
+impl TransformHandler for PriceAnalyzer {
+    fn process(&self, mut event: ChainEvent) -> Vec<ChainEvent> {
         if event.event_type == "MarketTick" {
             // Calculate price movement indicators
             if let (Some(_coin), Some(_price)) = (
@@ -138,10 +146,6 @@ impl EventHandler for PriceAnalyzer {
         }
         vec![event]
     }
-    
-    fn processing_mode(&self) -> ProcessingMode {
-        ProcessingMode::Transform
-    }
 }
 
 /// Detects volume spikes
@@ -157,8 +161,8 @@ impl VolumeDetector {
     }
 }
 
-impl EventHandler for VolumeDetector {
-    fn transform(&self, mut event: ChainEvent) -> Vec<ChainEvent> {
+impl TransformHandler for VolumeDetector {
+    fn process(&self, mut event: ChainEvent) -> Vec<ChainEvent> {
         if event.event_type == "MarketTick" {
             if let Some(volume) = event.payload.get("volume").and_then(|v| v.as_f64()) {
                 // Detect volume anomalies
@@ -181,10 +185,6 @@ impl EventHandler for VolumeDetector {
         }
         vec![event]
     }
-    
-    fn processing_mode(&self) -> ProcessingMode {
-        ProcessingMode::Transform
-    }
 }
 
 /// Aggregates market statistics
@@ -200,19 +200,18 @@ struct MarketStats {
 }
 
 impl MarketAggregator {
-    fn new() -> (Self, Arc<std::sync::Mutex<MarketStats>>) {
-        let stats = Arc::new(std::sync::Mutex::new(MarketStats::default()));
-        (Self {
-            stats: stats.clone(),
-        }, stats)
+    fn new() -> Self {
+        Self {
+            stats: Arc::new(std::sync::Mutex::new(MarketStats::default())),
+        }
     }
 }
 
-impl EventHandler for MarketAggregator {
-    fn transform(&self, event: ChainEvent) -> Vec<ChainEvent> {
+#[async_trait]
+impl SinkHandler for MarketAggregator {
+    fn consume(&mut self, event: ChainEvent) -> obzenflow_core::Result<()> {
         if event.event_type == "MarketTick" {
             // Process synchronously to avoid race conditions
-            let stats = self.stats.clone();
             let volume = event.payload.get("volume").and_then(|v| v.as_f64()).unwrap_or(0.0);
             let is_high_volume = event.payload.get("high_volume").and_then(|v| v.as_bool()).unwrap_or(false);
             
@@ -232,51 +231,73 @@ impl EventHandler for MarketAggregator {
                 }
             }
         }
-        vec![] // Sink consumes events
-    }
-    
-    fn processing_mode(&self) -> ProcessingMode {
-        ProcessingMode::Transform
+        Ok(())
     }
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Initialize tracing for better error messages
+    tracing_subscriber::fmt()
+        .with_env_filter("obzenflow=debug,crypto_market_prometheus=debug")
+        .with_file(true)
+        .with_line_number(true)
+        .with_thread_ids(true)
+        .init();
+
     println!("🪙 FlowState RS - Crypto Market Analysis");
     println!("=========================================");
     println!("📊 Simulating cryptocurrency market...");
     println!("");
     
-    let (aggregator, stats) = MarketAggregator::new();
-    let source_stage_id = StageId::from_u32(0);
+    let aggregator = MarketAggregator::new();
+    let stats = aggregator.stats.clone();
     
-    // Run the flow
-    let mut handle = flow! {
-        name: "crypto_market",
+    println!("⏳ Initializing pipeline...");
+    
+    // Create a journal for the flow
+    let journal_path = std::path::PathBuf::from("target/crypto-market-logs");
+    std::fs::create_dir_all(&journal_path)?;
+    let journal = Arc::new(DiskJournal::new(journal_path, "crypto_market").await?);
+    
+    // Create the flow using the new flow! macro
+    let handle = flow! {
+        journal: journal,
         middleware: [GoldenSignals::monitoring()],
-        ("market" => CryptoMarketSource::new(100, source_stage_id), [RED::monitoring()])  // 100 market events
-        |> ("analyzer" => PriceAnalyzer::new(), [GoldenSignals::monitoring()])
-        |> ("detector" => VolumeDetector::new(), [USE::monitoring()]) 
-        |> ("aggregator" => aggregator, [SAAFE::monitoring()])
-    }?;
+        
+        stages: {
+            market = source!("market" => CryptoMarketSource::new(100), [RED::monitoring()]);  // 100 market events
+            analyzer = transform!("analyzer" => PriceAnalyzer::new(), [GoldenSignals::monitoring()]);
+            detector = transform!("detector" => VolumeDetector::new(), [USE::monitoring()]);
+            agg = sink!("aggregator" => aggregator, [SAAFE::monitoring()]);
+        },
+        
+        topology: {
+            market |> analyzer;
+            analyzer |> detector;
+            detector |> agg;
+        }
+    }.await.map_err(|e| anyhow::anyhow!("Failed to create flow with DSL: {:?}", e))?;
     
-    println!("⏳ Pipeline created, waiting for natural completion...");
+    println!("📌 Pipeline created, starting execution...");
     
-    // Wait for natural completion
-    handle.wait_for_completion().await?;
+    // Start the pipeline
+    handle.run().await
+        .map_err(|e| anyhow::anyhow!("Failed to run pipeline: {:?}", e))?;
     
     // Small delay to ensure all stats are updated
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
     
     // Print final statistics
-    let final_stats = stats.lock().unwrap();
     println!("\n✅ Market simulation completed!");
+    
+    let final_stats = stats.lock().unwrap();
     println!("📊 Statistics:");
     println!("   - Events processed: {}", final_stats.events_processed);
     println!("   - Total volume: ${:.2}M", final_stats.total_volume / 1_000_000.0);
     println!("   - High volume events: {}", final_stats.high_volume_events);
     
     // Cleanup
-    // Cleanup handled by tempdir
+    println!("\nJournal written to: target/crypto-market-logs/crypto_market.log");
     Ok(())
 }

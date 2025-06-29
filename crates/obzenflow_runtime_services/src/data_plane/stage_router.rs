@@ -2,28 +2,42 @@
 //!
 //! This module handles partitioning and routing of events to stage instances
 //! based on their declared semantics.
+//!
+//! NOTE: This is currently DEAD CODE - not instantiated or used by the runtime.
+//! Will be integrated as part of FLOWIP-080 implementation to enable
+//! semantic-aware routing and multi-worker stages.
 
-use obzenflow_core::ChainEvent;
+use obzenflow_core::{ChainEvent, EventId, WriterId};
 use crate::data_plane::stage_semantics::{StageSemantics, PartitionStrategy};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 /// Routes events to stage instances based on semantics
+///
+/// TODO(FLOWIP-080): This will be instantiated by Pipeline/StageCoordinator
+/// to handle multi-worker stages and semantic-aware routing.
 pub struct StageRouter {
     /// Number of available instances for each stage
     instance_counts: std::collections::HashMap<String, usize>,
+    /// Round-robin counters for each stage
+    round_robin_counters: std::collections::HashMap<String, std::sync::atomic::AtomicUsize>,
 }
 
 impl StageRouter {
     pub fn new() -> Self {
         Self {
             instance_counts: std::collections::HashMap::new(),
+            round_robin_counters: std::collections::HashMap::new(),
         }
     }
 
     /// Register a stage with its instance count
     pub fn register_stage(&mut self, stage_id: &str, instance_count: usize) {
         self.instance_counts.insert(stage_id.to_string(), instance_count);
+        self.round_robin_counters.insert(
+            stage_id.to_string(), 
+            std::sync::atomic::AtomicUsize::new(0)
+        );
     }
 
     /// Route an event to a specific instance of a stage
@@ -42,7 +56,7 @@ impl StageRouter {
         match semantics {
             StageSemantics::Stateless => {
                 // Round-robin for stateless
-                self.round_robin_route(event, instance_count)
+                self.round_robin_route(stage_id, instance_count)
             }
 
             StageSemantics::StatefulIndependent { partition_strategy } => {
@@ -51,7 +65,7 @@ impl StageRouter {
                         self.hash_route(event, key_path, instance_count)
                     }
                     PartitionStrategy::RoundRobin => {
-                        self.round_robin_route(event, instance_count)
+                        self.round_robin_route(stage_id, instance_count)
                     }
                     _ => 0, // Default to first instance
                 }
@@ -62,11 +76,14 @@ impl StageRouter {
         }
     }
 
-    fn round_robin_route(&self, event: &ChainEvent, instance_count: usize) -> usize {
-        // Use event type for consistent routing since we don't have ulid
-        let mut hasher = DefaultHasher::new();
-        event.event_type.hash(&mut hasher);
-        (hasher.finish() as usize) % instance_count
+    fn round_robin_route(&self, stage_id: &str, instance_count: usize) -> usize {
+        // Get the counter for this stage and increment atomically
+        if let Some(counter) = self.round_robin_counters.get(stage_id) {
+            let current = counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            current % instance_count
+        } else {
+            0 // Default to first instance if counter not found
+        }
     }
 
     fn hash_route(&self, event: &ChainEvent, key_path: &str, instance_count: usize) -> usize {
@@ -88,7 +105,7 @@ mod tests {
     #[test]
     fn test_single_instance_routing() {
         let router = StageRouter::new();
-        let event = ChainEvent::new("test", serde_json::json!({}));
+        let event = ChainEvent::new(EventId::new(), WriterId::new(), "test", serde_json::json!({}));
         let semantics = StageSemantics::Stateless;
 
         // With no registration or single instance, always routes to 0
@@ -105,7 +122,7 @@ mod tests {
         // Create multiple events and verify distribution
         let mut instances = std::collections::HashSet::new();
         for _ in 0..20 {
-            let event = ChainEvent::new("test", serde_json::json!({}));
+            let event = ChainEvent::new(EventId::new(), WriterId::new(), "test", serde_json::json!({}));
             let instance = router.route_event(&event, "stage1", &semantics);
             assert!(instance < 4);
             instances.insert(instance);

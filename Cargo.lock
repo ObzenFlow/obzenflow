@@ -1150,6 +1150,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "obzenflow_benchmarks"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "criterion",
+ "fastrand",
+ "futures",
+ "obzenflow_adapters",
+ "obzenflow_core",
+ "obzenflow_dsl_infra",
+ "obzenflow_infra",
+ "obzenflow_runtime_services",
+ "obzenflow_topology_services",
+ "serde",
+ "serde_json",
+ "sysinfo",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "ulid",
+]
+
+[[package]]
 name = "obzenflow_core"
 version = "0.1.0"
 dependencies = [
@@ -1194,10 +1219,12 @@ dependencies = [
 name = "obzenflow_infra"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "async-trait",
  "chrono",
  "obzenflow_adapters",
  "obzenflow_core",
+ "obzenflow_dsl_infra",
  "obzenflow_runtime_services",
  "obzenflow_topology_services",
  "prometheus",

@@ -13,24 +13,34 @@ use obzenflow_core::ChainEvent;
 /// 
 /// # Example
 /// ```rust
-/// struct CsvSource {
-///     reader: csv::Reader<File>,
-///     done: bool,
+/// use obzenflow_runtime_services::control_plane::stages::handler_traits::FiniteSourceHandler;
+/// use obzenflow_core::{ChainEvent, EventId, WriterId};
+/// use serde_json::json;
+/// 
+/// struct ListSource {
+///     items: Vec<String>,
+///     index: usize,
+///     writer_id: WriterId,
 /// }
 /// 
-/// impl FiniteSourceHandler for CsvSource {
+/// impl FiniteSourceHandler for ListSource {
 ///     fn next(&mut self) -> Option<ChainEvent> {
-///         match self.reader.deserialize().next() {
-///             Some(Ok(record)) => Some(ChainEvent::new(...)),
-///             _ => {
-///                 self.done = true;
-///                 None
-///             }
+///         if self.index < self.items.len() {
+///             let item = self.items[self.index].clone();
+///             self.index += 1;
+///             Some(ChainEvent::new(
+///                 EventId::new(),
+///                 self.writer_id.clone(),
+///                 "list_item",
+///                 json!({ "value": item, "index": self.index - 1 })
+///             ))
+///         } else {
+///             None
 ///         }
 ///     }
 ///     
 ///     fn is_complete(&self) -> bool {
-///         self.done
+///         self.index >= self.items.len()
 ///     }
 /// }
 /// ```

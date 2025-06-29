@@ -12,16 +12,30 @@ use obzenflow_core::ChainEvent;
 /// 
 /// # Example
 /// ```rust
-/// struct KafkaSource {
-///     consumer: KafkaConsumer,
+/// use obzenflow_runtime_services::control_plane::stages::handler_traits::InfiniteSourceHandler;
+/// use obzenflow_core::{ChainEvent, EventId, WriterId};
+/// use std::time::Duration;
+/// use serde_json::json;
+/// 
+/// struct NetworkSource {
+///     reader: std::sync::Mutex<Vec<String>>,
+///     writer_id: WriterId,
 /// }
 /// 
-/// impl InfiniteSourceHandler for KafkaSource {
+/// impl InfiniteSourceHandler for NetworkSource {
 ///     fn next(&mut self) -> Option<ChainEvent> {
-///         match self.consumer.poll(Duration::from_millis(100)) {
-///             Some(msg) => Some(ChainEvent::new(...)),
-///             None => None, // No message available right now
+///         // Simulate polling from a network source
+///         if let Ok(mut messages) = self.reader.lock() {
+///             if let Some(msg) = messages.pop() {
+///                 return Some(ChainEvent::new(
+///                     EventId::new(),
+///                     self.writer_id.clone(),
+///                     "network_message",
+///                     json!({ "data": msg })
+///                 ));
+///             }
 ///         }
+///         None // No message available right now
 ///     }
 /// }
 /// ```

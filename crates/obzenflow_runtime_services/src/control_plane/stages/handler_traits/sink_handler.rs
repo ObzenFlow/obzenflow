@@ -14,23 +14,33 @@ use async_trait::async_trait;
 /// 
 /// # Example
 /// ```rust
-/// struct DatabaseSink {
-///     conn: DatabaseConnection,
-///     buffer: Vec<Record>,
+/// use obzenflow_runtime_services::control_plane::stages::handler_traits::SinkHandler;
+/// use obzenflow_core::{ChainEvent, Result};
+/// use async_trait::async_trait;
+/// 
+/// struct FileSink {
+///     file: std::sync::Mutex<Vec<String>>,
+///     buffer: Vec<String>,
 /// }
 /// 
-/// impl SinkHandler for DatabaseSink {
+/// #[async_trait]
+/// impl SinkHandler for FileSink {
 ///     fn consume(&mut self, event: ChainEvent) -> Result<()> {
-///         self.buffer.push(parse_record(event)?);
-///         if self.buffer.len() >= 1000 {
-///             self.flush()?;
+///         // Extract data from event and buffer it
+///         if let Some(data) = event.payload.get("data").and_then(|v| v.as_str()) {
+///             self.buffer.push(data.to_string());
+///             if self.buffer.len() >= 100 {
+///                 self.flush()?;
+///             }
 ///         }
 ///         Ok(())
 ///     }
 ///     
 ///     fn flush(&mut self) -> Result<()> {
-///         self.conn.bulk_insert(&self.buffer)?;
-///         self.buffer.clear();
+///         // Write buffered data to file
+///         if let Ok(mut file) = self.file.lock() {
+///             file.extend(self.buffer.drain(..));
+///         }
 ///         Ok(())
 ///     }
 /// }

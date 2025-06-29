@@ -9,6 +9,8 @@ use super::{Middleware, MiddlewareAction, ErrorAction, StepError};
 /// ## Example
 /// 
 /// ```rust
+/// use obzenflow_adapters::middleware::{FnMiddleware, MiddlewareAction, ErrorAction};
+/// 
 /// let middleware = FnMiddleware {
 ///     pre: |event| {
 ///         println!("Processing: {:?}", event);
@@ -64,6 +66,24 @@ where
 /// ## Example
 /// 
 /// ```rust
+/// # use obzenflow_adapters::middleware::{middleware_fn, MiddlewareAction, TransformHandlerExt};
+/// # use obzenflow_runtime_services::control_plane::stages::handler_traits::TransformHandler;
+/// # use obzenflow_core::ChainEvent;
+/// # use async_trait::async_trait;
+/// #
+/// # struct MyStep;
+/// # 
+/// # #[async_trait]
+/// # impl TransformHandler for MyStep {
+/// #     fn process(&self, event: ChainEvent) -> Vec<ChainEvent> {
+/// #         vec![event]
+/// #     }
+/// # }
+/// #
+/// # impl MyStep {
+/// #     fn new() -> Self { Self }
+/// # }
+/// #
 /// // Filter events by type
 /// let filter = middleware_fn(|event| {
 ///     if event.event_type == "important" {

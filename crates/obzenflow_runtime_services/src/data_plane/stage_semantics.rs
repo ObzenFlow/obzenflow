@@ -2,6 +2,9 @@
 //! 
 //! Defines how stages behave during execution and how the runtime
 //! should coordinate them. This is a runtime concern, NOT a storage concern!
+//!
+//! NOTE: This is currently DEAD CODE - not wired up to the runtime.
+//! Will be integrated as part of FLOWIP-080 implementation.
 
 use serde::{Serialize, Deserialize};
 use std::time::Duration;
@@ -65,6 +68,8 @@ pub enum EmitStrategy {
     OnCount { threshold: usize },
     /// Emit on size threshold
     OnSize { bytes: usize },
+    // TODO(FLOWIP-080): Add OnEOF variant for emit-on-completion semantics
+    // OnEOF,  // Emit only when stage receives EOF (dangerous with infinite sources!)
 }
 
 impl Default for StageSemantics {

@@ -11,7 +11,15 @@ categories = ["asynchronous", "data-structures"]
 [workspace]
 members = ["crates/*"]
 # Build all workspace members by default (excluding the root package)
-default-members = ["crates/*"]
+# Note: obzenflow_benchmarks is excluded from default-members as it's only for benchmarking
+default-members = [
+    "crates/obzenflow_core",
+    "crates/obzenflow_topology_services",
+    "crates/obzenflow_runtime_services",
+    "crates/obzenflow_adapters",
+    "crates/obzenflow_dsl_infra",
+    "crates/obzenflow_infra"
+]
 
 [dependencies]
 # Internal workspace dependencies
@@ -47,65 +55,8 @@ futures = "0.3"
 lto = true
 codegen-units = 1
 
-[[bench]]
-name = "pipeline_execution"
-path = "bench/performance/pipeline_execution.rs"
-harness = false
-
-[[bench]]
-name = "pipeline_throughput"
-path = "bench/performance/pipeline_throughput.rs"
-harness = false
-
-[[bench]]
-name = "idle_cpu_usage"
-path = "bench/performance/idle_cpu_usage.rs"
-harness = false
-
-[[bench]]
-name = "per_event_latency_1_stage"
-path = "bench/performance/per_event_latency_1_stage.rs"
-harness = false
-
-[[bench]]
-name = "per_event_latency_3_stage"
-path = "bench/performance/per_event_latency_3_stage.rs"
-harness = false
-
-[[bench]]
-name = "per_event_latency_5_stage"
-path = "bench/performance/per_event_latency_5_stage.rs"
-harness = false
-
-[[bench]]
-name = "per_event_latency_2_stage"
-path = "bench/performance/per_event_latency_2_stage.rs"
-harness = false
-
-[[bench]]
-name = "per_event_latency_4_stage"
-path = "bench/performance/per_event_latency_4_stage.rs"
-harness = false
-
-[[bench]]
-name = "per_event_latency_20_stage"
-path = "bench/performance/per_event_latency_20_stage.rs"
-harness = false
-
-[[bench]]
-name = "per_event_latency_100_stage"
-path = "bench/performance/per_event_latency_100_stage.rs"
-harness = false
-
-[[bench]]
-name = "tokio_worker_3_stage_experiment"
-path = "bench/performance/tokio_worker_3_stage_experiment.rs"
-harness = false
-
-[[bench]]
-name = "tokio_channel_benchmark"
-path = "bench/performance/tokio_channel_benchmark.rs"
-harness = false
+# Benchmarks have been moved to crates/obzenflow_benchmarks
+# Run benchmarks with: cargo bench -p obzenflow_benchmarks
 
 [[example]]
 name = "flight_delays"

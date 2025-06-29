@@ -1,0 +1,105 @@
+[package]
+name = "obzenflow_benchmarks"
+version = "0.1.0"
+edition = "2021"
+description = "Performance benchmarks for ObzenFlow event streaming framework"
+publish = false
+
+[dependencies]
+# ObzenFlow dependencies - we need all layers for integration benchmarks
+obzenflow_core = { path = "../obzenflow_core" }
+obzenflow_topology_services = { path = "../obzenflow_topology_services" }
+obzenflow_runtime_services = { path = "../obzenflow_runtime_services" }
+obzenflow_adapters = { path = "../obzenflow_adapters" }
+obzenflow_dsl_infra = { path = "../obzenflow_dsl_infra" }
+obzenflow_infra = { path = "../obzenflow_infra" }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+async-trait = "0.1"
+
+# Benchmarking
+criterion = { version = "0.5", features = ["async_tokio", "html_reports"] }
+
+# Data structures and serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Utilities
+tempfile = "3.8"
+ulid = "1.0"
+anyhow = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# System information for CPU usage benchmarks
+sysinfo = "0.29"
+
+[dev-dependencies]
+# Additional test utilities
+futures = "0.3"
+fastrand = "2.0"
+
+# Latency benchmarks
+[[bench]]
+name = "per_event_latency_1_stage"
+path = "benches/latency/per_event_latency_1_stage.rs"
+harness = false
+
+[[bench]]
+name = "per_event_latency_2_stage"
+path = "benches/latency/per_event_latency_2_stage.rs"
+harness = false
+
+[[bench]]
+name = "per_event_latency_3_stage"
+path = "benches/latency/per_event_latency_3_stage.rs"
+harness = false
+
+[[bench]]
+name = "per_event_latency_4_stage"
+path = "benches/latency/per_event_latency_4_stage.rs"
+harness = false
+
+[[bench]]
+name = "per_event_latency_5_stage"
+path = "benches/latency/per_event_latency_5_stage.rs"
+harness = false
+
+[[bench]]
+name = "per_event_latency_20_stage"
+path = "benches/latency/per_event_latency_20_stage.rs"
+harness = false
+
+[[bench]]
+name = "per_event_latency_100_stage"
+path = "benches/latency/per_event_latency_100_stage.rs"
+harness = false
+
+[[bench]]
+name = "per_event_latency_100_stage_memory"
+path = "benches/latency/per_event_latency_100_stage_memory.rs"
+harness = false
+
+# Throughput benchmarks
+[[bench]]
+name = "pipeline_throughput"
+path = "benches/throughput/pipeline_throughput.rs"
+harness = false
+
+# Runtime benchmarks
+[[bench]]
+name = "idle_cpu_usage"
+path = "benches/runtime/idle_cpu_usage.rs"
+harness = false
+
+[[bench]]
+name = "tokio_worker_3_stage_experiment"
+path = "benches/runtime/tokio_worker_3_stage_experiment.rs"
+harness = false
+
+# Integration benchmarks
+[[bench]]
+name = "pipeline_execution"
+path = "benches/integration/pipeline_execution.rs"
+harness = false

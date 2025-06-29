@@ -150,7 +150,7 @@ mod tests {
             let mut fail_count = self.fail_count.lock().unwrap();
             if *fail_count > 0 {
                 *fail_count -= 1;
-                return Err(anyhow::anyhow!("Simulated failure"));
+                return Err(anyhow::anyhow!("Simulated failure").into());
             }
             
             self.consumed.lock().unwrap().push(event);

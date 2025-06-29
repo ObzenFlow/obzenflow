@@ -230,9 +230,9 @@ mod tests {
     #[test]
     fn test_validate_acyclic_simple_dag() {
         let mut stages = HashMap::new();
-        let s1 = StageId::from_u32(1);
-        let s2 = StageId::from_u32(2);
-        let s3 = StageId::from_u32(3);
+        let s1 = StageId::new();
+        let s2 = StageId::new();
+        let s3 = StageId::new();
         
         stages.insert(s1, ());
         stages.insert(s2, ());
@@ -248,9 +248,9 @@ mod tests {
     #[test]
     fn test_validate_acyclic_with_cycle() {
         let mut stages = HashMap::new();
-        let s1 = StageId::from_u32(1);
-        let s2 = StageId::from_u32(2);
-        let s3 = StageId::from_u32(3);
+        let s1 = StageId::new();
+        let s2 = StageId::new();
+        let s3 = StageId::new();
         
         stages.insert(s1, ());
         stages.insert(s2, ());
@@ -278,10 +278,10 @@ mod tests {
     #[test]
     fn test_disconnected_stages() {
         let mut stages = HashMap::new();
-        let s1 = StageId::from_u32(1);
-        let s2 = StageId::from_u32(2);
-        let s3 = StageId::from_u32(3);
-        let s4 = StageId::from_u32(4); // Disconnected
+        let s1 = StageId::new();
+        let s2 = StageId::new();
+        let s3 = StageId::new();
+        let s4 = StageId::new(); // Disconnected
         
         stages.insert(s1, ());
         stages.insert(s2, ());
@@ -306,9 +306,9 @@ mod tests {
     #[test]
     fn test_no_disconnected_stages() {
         let mut stages = HashMap::new();
-        let s1 = StageId::from_u32(1);
-        let s2 = StageId::from_u32(2);
-        let s3 = StageId::from_u32(3);
+        let s1 = StageId::new();
+        let s2 = StageId::new();
+        let s3 = StageId::new();
         
         stages.insert(s1, ());
         stages.insert(s2, ());

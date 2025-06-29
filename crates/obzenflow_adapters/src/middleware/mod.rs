@@ -1,32 +1,167 @@
-//! # Middleware Architecture for FlowState
-//! 
-//! This module provides a composable middleware system for wrapping handler behavior
-//! with cross-cutting concerns like monitoring, logging, retry logic, and circuit breaking.
-//! 
-//! ## Example with New Handler Types
-//! 
+//! # Middleware System for FlowState
+//!
+//! This module provides a composable middleware system for adding cross-cutting
+//! concerns like monitoring, logging, rate limiting, and retries to your FlowState
+//! pipeline stages without modifying their core logic.
+//!
+//! ## Middleware Overview
+//!
+//! Middleware is composable - you can stack multiple middleware on a handler.
+//! When used in flows (via the DSL layer), middleware is specified as an array
+//! of middleware instances for each stage.
+//!
+//! The middleware execution order is:
+//! 1. First middleware's `pre_handle`
+//! 2. Second middleware's `pre_handle`
+//! 3. Handler processes the event
+//! 4. Second middleware's `post_handle`
+//! 5. First middleware's `post_handle`
+//!
+//! ## Getting Monitoring Middleware
+//!
+//! Each monitoring taxonomy provides a `monitoring()` method that returns
+//! a boxed middleware instance:
+//!
 //! ```rust
-//! use flowstate::middleware::{TransformHandlerExt, LoggingMiddleware, logging, retry};
+//! use obzenflow_adapters::monitoring::taxonomies::{
+//!     red::RED,
+//!     use_taxonomy::USE,
+//!     golden_signals::GoldenSignals,
+//!     saafe::SAAFE,
+//! };
+//!
+//! // Get monitoring middleware instances
+//! let red_middleware = RED::monitoring();
+//! let use_middleware = USE::monitoring();
+//! let golden_signals_middleware = GoldenSignals::monitoring();
+//! let saafe_middleware = SAAFE::monitoring();
+//! ```
+//!
+//! ## Available Monitoring Taxonomies
+//!
+//! FlowState provides several built-in monitoring taxonomies, each optimized
+//! for different types of stages:
+//!
+//! ### RED (Rate, Errors, Duration)
+//! Best for request/response systems and sources. Tracks:
+//! - **Rate**: Events processed per second
+//! - **Errors**: Error count and rate
+//! - **Duration**: Processing time distribution
+//!
+//! ```rust
+//! use obzenflow_adapters::monitoring::taxonomies::red::RED;
 //! 
-//! // Apply middleware to transform handler - using concrete LoggingMiddleware
-//! let transform = MyTransformHandler::new()
+//! let red_monitoring = RED::monitoring();
+//! ```
+//!
+//! ### USE (Utilization, Saturation, Errors)
+//! Ideal for resource-focused stages like transforms. Tracks:
+//! - **Utilization**: Resource usage percentage
+//! - **Saturation**: Queue depth and backpressure
+//! - **Errors**: Processing errors
+//!
+//! ```rust
+//! use obzenflow_adapters::monitoring::taxonomies::use_taxonomy::USE;
+//! 
+//! let use_monitoring = USE::monitoring();
+//! ```
+//!
+//! ### GoldenSignals (Latency, Traffic, Errors, Saturation)
+//! Comprehensive monitoring for critical stages. Tracks:
+//! - **Latency**: End-to-end processing time
+//! - **Traffic**: Request volume
+//! - **Errors**: Error rate and types
+//! - **Saturation**: Resource saturation
+//!
+//! ```rust
+//! use obzenflow_adapters::monitoring::taxonomies::golden_signals::GoldenSignals;
+//! 
+//! let golden_signals_monitoring = GoldenSignals::monitoring();
+//! ```
+//!
+//! ### SAAFE (Saturation, Anomalies, Amendments, Failures, Errors)
+//! Advanced monitoring for sinks and data quality. Tracks:
+//! - **Saturation**: Backpressure and queue depth
+//! - **Anomalies**: Unusual patterns in data
+//! - **Amendments**: Data corrections/updates
+//! - **Failures**: Persistent failures
+//! - **Errors**: Transient errors
+//!
+//! ```rust
+//! use obzenflow_adapters::monitoring::taxonomies::saafe::SAAFE;
+//! 
+//! let saafe_monitoring = SAAFE::monitoring();
+//! ```
+//!
+//! ## Applying Middleware to Handlers
+//!
+//! Use the handler extension traits to apply middleware:
+//!
+//! ```rust
+//! use obzenflow_adapters::middleware::{TransformHandlerExt, LoggingMiddleware};
+//! use obzenflow_adapters::monitoring::taxonomies::red::RED;
+//! use obzenflow_runtime_services::control_plane::stages::handler_traits::TransformHandler;
+//! use obzenflow_core::event::chain_event::ChainEvent;
+//!
+//! struct MyTransform;
+//!
+//! impl TransformHandler for MyTransform {
+//!     fn process(&self, event: ChainEvent) -> Vec<ChainEvent> {
+//!         vec![event]
+//!     }
+//! }
+//!
+//! // Apply multiple middleware
+//! let handler_with_middleware = MyTransform
 //!     .middleware()
+//!     .with(RED::monitoring())
 //!     .with(LoggingMiddleware::new())
-//!     .with(retry::fixed_delay(3, Duration::from_millis(100)))
 //!     .build();
+//! ```
+//!
+//! ## Common Middleware Utilities
+//!
+//! The `common` module provides pre-built middleware for common patterns:
+//!
+//! ```rust
+//! use obzenflow_adapters::middleware::common;
+//! use std::time::Duration;
+//!
+//! // Rate limiting - limits events per second
+//! let rate_limiter = common::rate_limit(100);
+//!
+//! // Retry logic - uses exponential backoff
+//! let retry_middleware = common::retry::exponential(3)
+//!     .initial_delay(Duration::from_millis(100))
+//!     .build();
+//!
+//! // Timeout - fails if processing takes too long  
+//! let timeout_middleware = common::timeout(Duration::from_secs(1));
+//!
+//! // Logging - logs events and results
+//! let logging_middleware = common::logging(tracing::Level::INFO);
+//! ```
+//!
+//! ## Custom Middleware
+//!
+//! You can also create custom middleware by implementing the `Middleware` trait:
+//!
+//! ```rust
+//! use obzenflow_adapters::middleware::{Middleware, MiddlewareAction};
+//! use obzenflow_core::event::chain_event::ChainEvent;
 //! 
-//! // Apply to source handler (needs writer_id) - using builder pattern
-//! let source = MySourceHandler::new()
-//!     .middleware(writer_id)
-//!     .with(logging::debug().with_metadata().build())
-//!     .build();
+//! struct MyCustomMiddleware;
 //! 
-//! // Apply to sink handler - with custom prefix
-//! let sink = MySinkHandler::new()
-//!     .middleware()
-//!     .with(LoggingMiddleware::with_prefix("SINK WAZ HERE!"))
-//!     .with(retry::exponential(5).with_jitter().build())
-//!     .build();
+//! impl Middleware for MyCustomMiddleware {
+//!     fn pre_handle(&self, event: &ChainEvent) -> MiddlewareAction {
+//!         println!("Processing event: {:?}", event.id);
+//!         MiddlewareAction::Continue
+//!     }
+//!     
+//!     fn post_handle(&self, event: &ChainEvent, results: &mut Vec<ChainEvent>) {
+//!         println!("Produced {} results", results.len());
+//!     }
+//! }
 //! ```
 
 // Handler-specific middleware adapters
@@ -40,8 +175,12 @@ pub mod monitoring;
 pub mod common;
 pub mod flow_boundary;
 mod logging_middleware;
-#[macro_use]
-mod macros;
+// Note: The monitoring! macro has been removed as it's not used.
+// Use the taxonomy-specific monitoring() methods instead:
+// - RED::monitoring()
+// - USE::monitoring()
+// - GoldenSignals::monitoring()
+// - SAAFE::monitoring()
 
 // Handler-specific exports
 pub use transform_middleware::{MiddlewareTransform, TransformHandlerExt, TransformMiddlewareBuilder};
@@ -58,7 +197,7 @@ pub use monitoring::{MetricRecorder, MonitoringMiddleware};
 pub use common::{rate_limit, timeout, logging, retry};
 pub use flow_boundary::{FlowBoundaryTracker, BoundaryTrackingMiddleware, BoundaryConfig, FlowMetrics};
 pub use logging_middleware::LoggingMiddleware;
-// monitoring! macro is exported at crate root
+// Monitoring is provided via taxonomy-specific methods
 
 use obzenflow_core::event::chain_event::ChainEvent;
 use std::error::Error;
@@ -76,11 +215,14 @@ pub type StepError = Box<dyn Error + Send + Sync>;
 /// ## Example Implementation
 /// 
 /// ```rust
+/// use obzenflow_adapters::middleware::{Middleware, MiddlewareAction};
+/// use obzenflow_core::ChainEvent;
+/// 
 /// struct LoggingMiddleware;
 /// 
 /// impl Middleware for LoggingMiddleware {
 ///     fn pre_handle(&self, event: &ChainEvent) -> MiddlewareAction {
-///         println!("Processing event: {}", event.id);
+///         println!("Processing event: {:?}", event.id);
 ///         MiddlewareAction::Continue
 ///     }
 ///     

@@ -15,6 +15,16 @@ use obzenflow_core::{ChainEvent, Result};
 /// 
 /// # Example
 /// ```rust
+/// use obzenflow_runtime_services::control_plane::stages::handler_traits::ObserverHandler;
+/// use obzenflow_core::{ChainEvent, Result};
+/// use tracing::{debug, info};
+/// 
+/// #[derive(Debug)]
+/// enum LogLevel {
+///     Debug,
+///     Info,
+/// }
+/// 
 /// struct EventLogger {
 ///     log_level: LogLevel,
 /// }
@@ -24,7 +34,6 @@ use obzenflow_core::{ChainEvent, Result};
 ///         match self.log_level {
 ///             LogLevel::Debug => debug!("Event: {:?}", event),
 ///             LogLevel::Info => info!("Event type: {}", event.event_type),
-///             _ => {}
 ///         }
 ///         Ok(())
 ///     }

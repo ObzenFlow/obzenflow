@@ -127,7 +127,7 @@ fn test_stage_name_retrieval() {
             assert_eq!(topology.stage_name(source_id), Some("source"));
             assert_eq!(topology.stage_name(transform_id), Some("transform"));
             assert_eq!(topology.stage_name(sink_id), Some("sink"));
-            assert_eq!(topology.stage_name(StageId::from_u32(999)), None);
+            assert_eq!(topology.stage_name(StageId::new()), None);
         }
         Err(e) => panic!("Unexpected error: {}", e),
     }

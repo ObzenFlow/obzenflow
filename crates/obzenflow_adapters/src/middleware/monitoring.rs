@@ -9,11 +9,36 @@
 //! 
 //! ## Example
 //! 
-//! ```rust
-//! use flowstate::middleware::{MonitoringMiddleware, StepExt};
-//! use flowstate::monitoring::RED;
+//! Monitoring middleware is typically used via the taxonomy-specific `monitoring()` methods:
 //! 
-//! let step = MyProcessor::new()
+//! ```rust
+//! use obzenflow_adapters::monitoring::taxonomies::red::RED;
+//! use obzenflow_adapters::middleware::Middleware;
+//! 
+//! // Get a monitoring middleware instance
+//! let monitoring: Box<dyn Middleware> = RED::monitoring();
+//! ```
+//! 
+//! ## Direct Usage with Handlers
+//! 
+//! You can apply monitoring middleware to handlers using the extension traits:
+//! 
+//! ```rust
+//! use obzenflow_adapters::middleware::{MonitoringMiddleware, TransformHandlerExt};
+//! use obzenflow_adapters::monitoring::taxonomies::red::RED;
+//! use obzenflow_runtime_services::control_plane::stages::handler_traits::TransformHandler;
+//! use obzenflow_core::event::chain_event::ChainEvent;
+//! 
+//! struct MyProcessor;
+//! 
+//! impl TransformHandler for MyProcessor {
+//!     fn process(&self, event: ChainEvent) -> Vec<ChainEvent> {
+//!         vec![event]
+//!     }
+//! }
+//! 
+//! // Apply monitoring middleware
+//! let handler_with_monitoring = MyProcessor
 //!     .middleware()
 //!     .with(MonitoringMiddleware::<RED>::new("my_processor"))
 //!     .build();

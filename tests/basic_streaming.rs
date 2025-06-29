@@ -1,156 +1,129 @@
 // tests/basic_streaming.rs
-use flowstate_rs::prelude::*;
-use flowstate_rs::flow;
+use obzenflow_dsl_infra::{flow, source, transform, sink};
+use obzenflow_runtime_services::control_plane::stages::handler_traits::{
+    FiniteSourceHandler, TransformHandler, SinkHandler
+};
+use obzenflow_infra::journal::DiskJournal;
+use obzenflow_core::event::event_id::EventId;
+use obzenflow_core::event::chain_event::ChainEvent;
+use obzenflow_core::journal::writer_id::WriterId;
+use obzenflow_adapters::monitoring::taxonomies::{
+    golden_signals::GoldenSignals,
+    red::RED,
+    use_taxonomy::USE,
+};
+use serde_json::json;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::path::PathBuf;
 use tempfile::tempdir;
+use anyhow::Result;
+use async_trait::async_trait;
 
 /// Simple test sink that counts events
+#[derive(Clone)]
 struct EventCounterSink {
     count: Arc<AtomicU64>,
-    metrics: <RED as Taxonomy>::Metrics,
 }
 
 impl EventCounterSink {
     fn new() -> (Self, Arc<AtomicU64>) {
         let count = Arc::new(AtomicU64::new(0));
-        let metrics = RED::create_metrics("EventCounterSink");
-        (Self { count: count.clone(), metrics }, count)
+        (Self { count: count.clone() }, count)
     }
 }
 
-impl Step for EventCounterSink {
-    type Taxonomy = RED;
-    
-    fn taxonomy(&self) -> &Self::Taxonomy {
-        &RED
-    }
-    
-    fn metrics(&self) -> &<Self::Taxonomy as Taxonomy>::Metrics {
-        &self.metrics
-    }
-    
-    fn step_type(&self) -> StepType {
-        StepType::Sink
-    }
-    
-    fn handle(&self, _event: ChainEvent) -> Vec<ChainEvent> {
+#[async_trait]
+impl SinkHandler for EventCounterSink {
+    fn consume(&mut self, _event: ChainEvent) -> obzenflow_core::Result<()> {
         self.count.fetch_add(1, Ordering::Relaxed);
-        // Record success in RED metrics
-        self.metrics.record_success(std::time::Duration::from_micros(100));
-        vec![] // Sinks typically don't emit events
+        Ok(())
     }
 }
 
 /// Source that generates a fixed number of events
 struct TestEventSource {
-    count: u64,
-    emitted: AtomicU64,
-    metrics: <RED as Taxonomy>::Metrics,
+    count: usize,
+    emitted: usize,
+    writer_id: WriterId,
 }
 
 impl TestEventSource {
-    fn new(count: u64) -> Self {
+    fn new(count: usize) -> Self {
         Self { 
             count,
-            emitted: AtomicU64::new(0),
-            metrics: RED::create_metrics("TestEventSource"),
+            emitted: 0,
+            writer_id: WriterId::new(),
         }
     }
 }
 
-impl Step for TestEventSource {
-    type Taxonomy = RED;
-    
-    fn taxonomy(&self) -> &Self::Taxonomy {
-        &RED
-    }
-    
-    fn metrics(&self) -> &<Self::Taxonomy as Taxonomy>::Metrics {
-        &self.metrics
-    }
-    
-    fn step_type(&self) -> StepType {
-        StepType::Source
-    }
-    
-    fn handle(&self, _event: ChainEvent) -> Vec<ChainEvent> {
-        let current = self.emitted.fetch_add(1, Ordering::Relaxed);
-        if current < self.count {
-            self.metrics.record_success(std::time::Duration::from_micros(50));
-            vec![ChainEvent::new(
+impl FiniteSourceHandler for TestEventSource {
+    fn next(&mut self) -> Option<ChainEvent> {
+        if self.emitted < self.count {
+            let index = self.emitted;
+            self.emitted += 1;
+            Some(ChainEvent::new(
+                EventId::new(),
+                self.writer_id.clone(),
                 "TestEvent",
-                json!({ "index": current }),
-            )]
+                json!({ "index": index }),
+            ))
         } else {
-            vec![]
+            None
         }
+    }
+    
+    fn is_complete(&self) -> bool {
+        self.emitted >= self.count
     }
 }
 
 #[tokio::test]
 async fn test_basic_flow() -> Result<()> {
     let temp_dir = tempdir()?;
-    let store_path = temp_dir.path().join("test_event_store");
+    let journal_path = temp_dir.path().to_path_buf();
     
     let (counter_sink, counter) = EventCounterSink::new();
-    
-    let event_store = EventStore::new(EventStoreConfig {
-        path: store_path.clone(),
-        max_segment_size: 1024 * 1024,
-    }).await?;
+    let journal = Arc::new(DiskJournal::new(journal_path, "test_basic").await?);
     
     // Create a simple flow
     let handle = flow! {
-        store: event_store,
-        flow_taxonomy: GoldenSignals,
-        ("source" => TestEventSource::new(10), RED)
-        |> ("sink" => counter_sink, USE)
-    }?;
+        journal: journal,
+        middleware: [GoldenSignals::monitoring()],
+        
+        stages: {
+            src = source!("source" => TestEventSource::new(10), [RED::monitoring()]);
+            snk = sink!("sink" => counter_sink, [USE::monitoring()]);
+        },
+        
+        topology: {
+            src |> snk;
+        }
+    }.await.map_err(|e| anyhow::anyhow!("Failed to create flow: {:?}", e))?;
     
-    // Let the flow run for a bit
-    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-    
-    // Gracefully shut down the flow
-    handle.shutdown().await?;
+    // Run the flow
+    handle.run().await?;
     
     // Check that events were processed
     let final_count = counter.load(Ordering::Relaxed);
-    assert!(final_count > 0, "Expected some events to be processed, but got {}", final_count);
-    assert!(final_count <= 10, "Expected at most 10 events, but got {}", final_count);
+    assert_eq!(final_count, 10, "Expected exactly 10 events to be processed, but got {}", final_count);
     
     // Cleanup handled by tempdir
     Ok(())
 }
 
 /// Stage that doubles each event
-struct Doubler {
-    metrics: <USE as Taxonomy>::Metrics,
-}
+struct Doubler;
 
 impl Doubler {
     fn new() -> Self {
-        Self {
-            metrics: USE::create_metrics("Doubler"),
-        }
+        Self
     }
 }
 
-impl Step for Doubler {
-    type Taxonomy = USE;
-    
-    fn taxonomy(&self) -> &Self::Taxonomy {
-        &USE
-    }
-    
-    fn metrics(&self) -> &<Self::Taxonomy as Taxonomy>::Metrics {
-        &self.metrics
-    }
-    
-    fn handle(&self, event: ChainEvent) -> Vec<ChainEvent> {
-        // For USE taxonomy, we might track utilization
-        // For now, just return doubled events
+impl TransformHandler for Doubler {
+    fn process(&self, event: ChainEvent) -> Vec<ChainEvent> {
+        // Return doubled events
         vec![event.clone(), event]
     }
 }
@@ -158,33 +131,33 @@ impl Step for Doubler {
 #[tokio::test]
 async fn test_multi_stage_flow() -> Result<()> {
     let temp_dir = tempdir()?;
-    let store_path = temp_dir.path().join("test_event_store_multi");
+    let journal_path = temp_dir.path().to_path_buf();
     
     let (counter_sink, counter) = EventCounterSink::new();
-    
-    let event_store = EventStore::new(EventStoreConfig {
-        path: store_path.clone(),
-        max_segment_size: 1024 * 1024,
-    }).await?;
+    let journal = Arc::new(DiskJournal::new(journal_path, "test_multi_stage").await?);
     
     let handle = flow! {
-        store: event_store,
-        flow_taxonomy: GoldenSignals,
-        ("source" => TestEventSource::new(5), RED)
-        |> ("doubler" => Doubler::new(), USE)
-        |> ("sink" => counter_sink, RED)
-    }?;
+        journal: journal,
+        middleware: [GoldenSignals::monitoring()],
+        
+        stages: {
+            src = source!("source" => TestEventSource::new(5), [RED::monitoring()]);
+            dbl = transform!("doubler" => Doubler::new(), [USE::monitoring()]);
+            snk = sink!("sink" => counter_sink, [RED::monitoring()]);
+        },
+        
+        topology: {
+            src |> dbl;
+            dbl |> snk;
+        }
+    }.await.map_err(|e| anyhow::anyhow!("Failed to create flow: {:?}", e))?;
     
-    // Let the flow run for a bit
-    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-    
-    // Gracefully shut down the flow
-    handle.shutdown().await?;
+    // Run the flow
+    handle.run().await?;
     
     // Would expect 10 events (5 * 2) after processing
     let final_count = counter.load(Ordering::Relaxed);
-    assert!(final_count > 0, "Expected some events to be processed, but got {}", final_count);
-    assert!(final_count <= 10, "Expected at most 10 events (5 * 2), but got {}", final_count);
+    assert_eq!(final_count, 10, "Expected exactly 10 events (5 * 2), but got {}", final_count);
     
     // Cleanup handled by tempdir
     Ok(())
@@ -192,80 +165,57 @@ async fn test_multi_stage_flow() -> Result<()> {
 
 /// A source that generates numbered events
 struct NumberSource {
-    count: u64,
-    emitted: AtomicU64,
-    metrics: <RED as Taxonomy>::Metrics,
+    count: usize,
+    emitted: usize,
+    writer_id: WriterId,
 }
 
 impl NumberSource {
-    fn new(count: u64) -> Self {
+    fn new(count: usize) -> Self {
         Self { 
             count,
-            emitted: AtomicU64::new(0),
-            metrics: RED::create_metrics("NumberSource"),
+            emitted: 0,
+            writer_id: WriterId::new(),
         }
     }
 }
 
-impl Step for NumberSource {
-    type Taxonomy = RED;
-    
-    fn taxonomy(&self) -> &Self::Taxonomy {
-        &RED
-    }
-    
-    fn metrics(&self) -> &<Self::Taxonomy as Taxonomy>::Metrics {
-        &self.metrics
-    }
-    
-    fn step_type(&self) -> StepType {
-        StepType::Source
-    }
-    
-    fn handle(&self, _event: ChainEvent) -> Vec<ChainEvent> {
-        let current = self.emitted.fetch_add(1, Ordering::Relaxed);
-        if current < self.count {
-            vec![ChainEvent::new(
+impl FiniteSourceHandler for NumberSource {
+    fn next(&mut self) -> Option<ChainEvent> {
+        if self.emitted < self.count {
+            let value = self.emitted + 1;
+            self.emitted += 1;
+            Some(ChainEvent::new(
+                EventId::new(),
+                self.writer_id.clone(),
                 "Number",
-                json!({ "value": current + 1 }),
-            )]
+                json!({ "value": value }),
+            ))
         } else {
-            vec![]
+            None
         }
+    }
+    
+    fn is_complete(&self) -> bool {
+        self.emitted >= self.count
     }
 }
 
 /// A transform that doubles numbers
-struct NumberDoubler {
-    metrics: <USE as Taxonomy>::Metrics,
-}
+struct NumberDoubler;
 
 impl NumberDoubler {
     fn new() -> Self {
-        Self {
-            metrics: USE::create_metrics("NumberDoubler"),
-        }
+        Self
     }
 }
 
-impl Step for NumberDoubler {
-    type Taxonomy = USE;
-    
-    fn taxonomy(&self) -> &Self::Taxonomy {
-        &USE
-    }
-    
-    fn metrics(&self) -> &<Self::Taxonomy as Taxonomy>::Metrics {
-        &self.metrics
-    }
-    
-    fn step_type(&self) -> StepType {
-        StepType::Stage
-    }
-    
-    fn handle(&self, event: ChainEvent) -> Vec<ChainEvent> {
+impl TransformHandler for NumberDoubler {
+    fn process(&self, event: ChainEvent) -> Vec<ChainEvent> {
         if let Some(value) = event.payload.get("value").and_then(|v| v.as_u64()) {
             vec![ChainEvent::new(
+                EventId::new(),
+                event.writer_id.clone(),
                 "DoubledNumber",
                 json!({ "value": value * 2 }),
             )]
@@ -276,70 +226,57 @@ impl Step for NumberDoubler {
 }
 
 /// A sink that sums all numbers it receives
+#[derive(Clone)]
 struct SumSink {
     sum: Arc<AtomicU64>,
-    metrics: <RED as Taxonomy>::Metrics,
 }
 
 impl SumSink {
     fn new() -> (Self, Arc<AtomicU64>) {
         let sum = Arc::new(AtomicU64::new(0));
-        let metrics = RED::create_metrics("SumSink");
-        (Self { sum: sum.clone(), metrics }, sum)
+        (Self { sum: sum.clone() }, sum)
     }
 }
 
-impl Step for SumSink {
-    type Taxonomy = RED;
-    
-    fn taxonomy(&self) -> &Self::Taxonomy {
-        &RED
-    }
-    
-    fn metrics(&self) -> &<Self::Taxonomy as Taxonomy>::Metrics {
-        &self.metrics
-    }
-    
-    fn step_type(&self) -> StepType {
-        StepType::Sink
-    }
-    
-    fn handle(&self, event: ChainEvent) -> Vec<ChainEvent> {
+#[async_trait]
+impl SinkHandler for SumSink {
+    fn consume(&mut self, event: ChainEvent) -> obzenflow_core::Result<()> {
         if let Some(value) = event.payload.get("value").and_then(|v| v.as_u64()) {
             self.sum.fetch_add(value, Ordering::Relaxed);
         }
-        vec![]
+        Ok(())
     }
 }
 
 #[tokio::test]
 async fn test_pipeline_topology() -> Result<()> {
     let temp_dir = tempdir()?;
-    let store_path = temp_dir.path().join("test_pipeline_topology");
+    let journal_path = temp_dir.path().to_path_buf();
     
     let (sum_sink, sum) = SumSink::new();
-    
-    let event_store = EventStore::new(EventStoreConfig {
-        path: store_path.clone(),
-        max_segment_size: 1024 * 1024,
-    }).await?;
+    let journal = Arc::new(DiskJournal::new(journal_path, "test_topology").await?);
     
     // Pipeline: Source(1,2,3) -> Doubler(2,4,6) -> Sum
     // If topology filtering works, Sum should be 12 (2+4+6)
     // If it doesn't work (broadcast), Sum would be 21 (1+2+3+2+4+6)
     let handle = flow! {
-        store: event_store,
-        flow_taxonomy: GoldenSignals,
-        ("source" => NumberSource::new(3), RED)
-        |> ("doubler" => NumberDoubler::new(), USE)
-        |> ("sink" => sum_sink, RED)
-    }?;
+        journal: journal,
+        middleware: [GoldenSignals::monitoring()],
+        
+        stages: {
+            src = source!("source" => NumberSource::new(3), [RED::monitoring()]);
+            dbl = transform!("doubler" => NumberDoubler::new(), [USE::monitoring()]);
+            snk = sink!("sink" => sum_sink, [RED::monitoring()]);
+        },
+        
+        topology: {
+            src |> dbl;
+            dbl |> snk;
+        }
+    }.await.map_err(|e| anyhow::anyhow!("Failed to create flow: {:?}", e))?;
     
-    // Let the flow run for a bit
-    tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
-    
-    // Gracefully shut down the flow
-    handle.shutdown().await?;
+    // Run the flow
+    handle.run().await?;
     
     // Check the sum
     let final_sum = sum.load(Ordering::Relaxed);
