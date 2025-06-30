@@ -2,7 +2,7 @@
 //! 
 //! Runtime layer adds metadata to events for tracking and debugging
 
-use obzenflow_core::{ChainEvent, WriterId, EventId};
+use obzenflow_core::{ChainEvent, WriterId};
 use serde_json::json;
 use std::time::Instant;
 
@@ -74,6 +74,7 @@ pub enum BoundaryType {
 mod tests {
     use super::*;
     use obzenflow_topology_services::stages::StageId;
+    use obzenflow_core::EventId;
     
     #[test]
     fn test_event_enrichment() {

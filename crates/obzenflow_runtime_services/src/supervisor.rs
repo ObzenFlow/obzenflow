@@ -276,7 +276,7 @@ impl PipelineSupervisor {
                                         .and_then(|v| v.as_str())
                                         .unwrap_or("unknown");
                                     
-                                    let stage_id_str = event.payload.get("stage_id")
+                                    let _stage_id_str = event.payload.get("stage_id")
                                         .and_then(|v| v.as_str())
                                         .unwrap_or("unknown");
                                     

@@ -10,6 +10,7 @@ pub mod handler_traits;
 pub mod handler_contexts;
 pub mod handler_impls;
 pub mod fsm_builders;
+pub mod control_strategy;
 pub mod supervisors;
 pub mod stage_supervisor_factory;
 

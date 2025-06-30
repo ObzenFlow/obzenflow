@@ -126,7 +126,7 @@
 //! use std::time::Duration;
 //!
 //! // Rate limiting - limits events per second
-//! let rate_limiter = common::rate_limit(100);
+//! let rate_limiter = common::rate_limit(100.0);
 //!
 //! // Retry logic - uses exponential backoff
 //! let retry_middleware = common::retry::exponential(3)
@@ -176,7 +176,15 @@ pub mod circuit_breaker;
 pub mod retry;
 pub mod flow_boundary;
 pub mod sli;
+pub mod windowing;
+pub mod rate_limiter;
 mod logging_middleware;
+mod control_requirements;
+mod safety_validation;
+
+// Dangerous middleware examples (for documentation/testing)
+#[cfg(test)]
+pub mod dangerous_examples;
 
 // Tests
 #[cfg(test)]
@@ -207,10 +215,26 @@ pub use retry::{RetryMiddleware, RetryBuilder, RetryStrategy};
 pub use flow_boundary::{FlowBoundaryTracker, BoundaryTrackingMiddleware, BoundaryConfig, FlowMetrics};
 pub use logging_middleware::LoggingMiddleware;
 pub use sli::{CircuitBreakerSLI, RetrySLI, LatencySLI, SLOTracker, SLODefinition, AlertConfig};
+pub use control_requirements::{ControlStrategyRequirement, BackoffConfig};
+pub use self::safety_validation::{validate_middleware_safety, ValidationResult};
+pub use windowing::{WindowingMiddleware, WindowingMiddlewareFactory};
+pub use rate_limiter::{RateLimiterMiddleware, RateLimiterFactory};
 // Monitoring is provided via taxonomy-specific methods
 
 use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_runtime_services::control_plane::stages::supervisors::config::StageConfig;
+use obzenflow_runtime_services::control_plane::stages::supervisors::stage_handle::StageType;
+
+/// Safety level of middleware
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MiddlewareSafety {
+    /// Safe for all uses
+    Safe,
+    /// Requires understanding of implications
+    Advanced,
+    /// Can cause data loss or pipeline hangs if misused
+    Dangerous,
+}
 
 /// Factory that creates middleware with stage context.
 /// 
@@ -245,6 +269,37 @@ pub trait MiddlewareFactory: Send + Sync {
     
     /// Get a descriptive name for this middleware type
     fn name(&self) -> &str;
+    
+    /// Declare what control event strategy this middleware requires
+    /// 
+    /// Most middleware don't need special control event handling and can
+    /// return None. Middleware that needs retry logic (like circuit breakers)
+    /// or delay logic (like windowing) should return their requirements.
+    fn required_control_strategy(&self) -> Option<ControlStrategyRequirement> {
+        None
+    }
+    
+    /// Which stage types this middleware supports
+    /// 
+    /// Default implementation supports all stage types. Override this
+    /// to restrict middleware to specific stage types.
+    fn supported_stage_types(&self) -> &[StageType] {
+        &[
+            StageType::FiniteSource,
+            StageType::InfiniteSource, 
+            StageType::Transform, 
+            StageType::Sink,
+            StageType::Stateful
+        ]
+    }
+    
+    /// Safety level of this middleware
+    /// 
+    /// Default is Safe. Override for middleware that can cause
+    /// data loss or pipeline hangs if misused.
+    fn safety_level(&self) -> MiddlewareSafety {
+        MiddlewareSafety::Safe
+    }
 }
 
 // Implementation for Box<dyn MiddlewareFactory> to allow boxed factories
@@ -255,6 +310,18 @@ impl<F: MiddlewareFactory + ?Sized> MiddlewareFactory for Box<F> {
     
     fn name(&self) -> &str {
         (**self).name()
+    }
+    
+    fn required_control_strategy(&self) -> Option<ControlStrategyRequirement> {
+        (**self).required_control_strategy()
+    }
+    
+    fn supported_stage_types(&self) -> &[StageType] {
+        (**self).supported_stage_types()
+    }
+    
+    fn safety_level(&self) -> MiddlewareSafety {
+        (**self).safety_level()
     }
 }
 

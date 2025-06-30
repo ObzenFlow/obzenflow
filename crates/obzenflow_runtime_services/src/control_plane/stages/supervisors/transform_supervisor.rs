@@ -13,6 +13,7 @@ use crate::control_plane::stages::{
     events::TransformEvent,
     actions::TransformAction,
     handler_contexts::TransformContext,
+    control_strategy::{ControlEventStrategy, ControlEventAction, ProcessingContext, JonestownStrategy},
 };
 use super::{
     config::StageConfig, 
@@ -29,10 +30,19 @@ pub struct TransformSupervisor<H: TransformHandler + 'static> {
     stage_name: String,
     upstream_stages: Vec<StageId>,
     processing_task: Arc<RwLock<Option<JoinHandle<()>>>>,
+    control_strategy: Arc<dyn ControlEventStrategy>,
 }
 
 impl<H: TransformHandler + 'static> TransformSupervisor<H> {
     pub fn new(handler: H, config: StageConfig) -> Self {
+        Self::with_strategy(handler, config, Arc::new(JonestownStrategy))
+    }
+    
+    pub fn with_strategy(
+        handler: H, 
+        config: StageConfig, 
+        control_strategy: Arc<dyn ControlEventStrategy>
+    ) -> Self {
         let wrapper = TransformWrapper(handler);
         let context = Arc::new(TransformContext::new(
             wrapper.0,
@@ -51,6 +61,7 @@ impl<H: TransformHandler + 'static> TransformSupervisor<H> {
             stage_name: config.stage_name.clone(),
             upstream_stages: config.upstream_stages,
             processing_task: Arc::new(RwLock::new(None)),
+            control_strategy,
         }
     }
     
@@ -120,12 +131,16 @@ impl<H: TransformHandler + 'static> TransformSupervisor<H> {
     async fn start_transform_loop(&self) -> Result<(), String> {
         let context = self.context.clone();
         let stage_name = self.stage_name.clone();
+        let control_strategy = self.control_strategy.clone();
         
         let task = tokio::spawn(async move {
             tracing::info!("[{}] Transform loop started", stage_name);
             
             // Get subscription
             let subscription = context.subscription.clone();
+            
+            // Processing context for control events
+            let mut processing_ctx = ProcessingContext::new();
             
             let mut eof_received = false;
             loop {
@@ -136,36 +151,76 @@ impl<H: TransformHandler + 'static> TransformSupervisor<H> {
                             
                             // Process each event
                             for envelope in events {
-                                // Check if this is an EOF event
+                                // Check if this is a control event
                                 match envelope.event.as_control_type() {
-                                    Some(ChainEvent::EOF_EVENT_TYPE) => {
-                                        tracing::info!("[{}] Transform received EOF event from upstream", stage_name);
+                                    Some(control_type) => {
+                                        // Delegate to control strategy
+                                        let action = match control_type {
+                                            ChainEvent::EOF_EVENT_TYPE => {
+                                                tracing::info!("[{}] Transform received EOF event from upstream", stage_name);
+                                                control_strategy.handle_eof(&envelope, &mut processing_ctx)
+                                            }
+                                            ChainEvent::WATERMARK_EVENT_TYPE => {
+                                                control_strategy.handle_watermark(&envelope, &mut processing_ctx)
+                                            }
+                                            "flowstate.checkpoint" => {
+                                                control_strategy.handle_checkpoint(&envelope, &mut processing_ctx)
+                                            }
+                                            "flowstate.drain" => {
+                                                control_strategy.handle_drain(&envelope, &mut processing_ctx)
+                                            }
+                                            _ => {
+                                                tracing::debug!("[{}] Unknown control event: {}", stage_name, control_type);
+                                                ControlEventAction::Forward
+                                            }
+                                        };
                                         
-                                        // Forward EOF downstream with our writer_id
-                                        if let Some(writer_id) = &*context.writer_id.read().await {
-                                            let eof_event = ChainEvent::eof(
-                                                EventId::new(),
-                                                writer_id.clone(),
-                                                envelope.event.payload["natural"].as_bool().unwrap_or(false)
-                                            );
-                                            if let Err(e) = context.journal.write(writer_id, eof_event, Some(&envelope)).await {
-                                                tracing::error!("[{}] Failed to write EOF: {}", stage_name, e);
+                                        // Execute the action
+                                        match action {
+                                            ControlEventAction::Forward => {
+                                                // Forward the control event downstream
+                                                if let Some(writer_id) = &*context.writer_id.read().await {
+                                                    let forward_event = match control_type {
+                                                        ChainEvent::EOF_EVENT_TYPE => ChainEvent::eof(
+                                                            EventId::new(),
+                                                            writer_id.clone(),
+                                                            envelope.event.payload["natural"].as_bool().unwrap_or(false)
+                                                        ),
+                                                        _ => envelope.event.clone(),
+                                                    };
+                                                    if let Err(e) = context.journal.write(writer_id, forward_event, Some(&envelope)).await {
+                                                        tracing::error!("[{}] Failed to forward control event: {}", stage_name, e);
+                                                    }
+                                                }
+                                                
+                                                // Exit on EOF
+                                                if control_type == ChainEvent::EOF_EVENT_TYPE {
+                                                    tracing::info!("[{}] Transform completed processing after EOF", stage_name);
+                                                    eof_received = true;
+                                                    break;
+                                                }
+                                            }
+                                            ControlEventAction::Delay(duration) => {
+                                                tracing::info!("[{}] Delaying {} for {:?}", stage_name, control_type, duration);
+                                                // TODO: Implement delayed forwarding
+                                                // For now, just sleep and then forward
+                                                tokio::time::sleep(duration).await;
+                                                // Retry processing this event
+                                                continue;
+                                            }
+                                            ControlEventAction::Retry => {
+                                                tracing::info!("[{}] Retry requested for {}, continuing processing", stage_name, control_type);
+                                                // Don't forward EOF yet, continue processing
+                                                if control_type == ChainEvent::EOF_EVENT_TYPE {
+                                                    // Buffer the EOF for later
+                                                    processing_ctx.buffered_eof = Some(envelope.clone());
+                                                }
+                                            }
+                                            ControlEventAction::Skip => {
+                                                tracing::warn!("[{}] Skipping {} (dangerous!)", stage_name, control_type);
+                                                // Don't forward, don't exit
                                             }
                                         }
-                                        
-                                        // Call the handler's drain method if it has custom logic
-                                        // Transform handlers are stateless, but may have cleanup logic
-                                        // We need to get a mutable reference through Arc::get_mut or similar
-                                        // For now, we'll skip drain since transforms are stateless
-                                        tracing::debug!("[{}] Transform has no special drain logic", stage_name);
-                                        
-                                        // Exit the processing loop
-                                        tracing::info!("[{}] Transform completed processing after EOF", stage_name);
-                                        eof_received = true;
-                                        break;
-                                    }
-                                    Some(other) => {
-                                        tracing::debug!("[{}] Ignoring control event: {}", stage_name, other);
                                     }
                                     None => {
                                         // Regular data event

@@ -7,7 +7,7 @@
 //! Will be integrated as part of FLOWIP-080 implementation to enable
 //! semantic-aware routing and multi-worker stages.
 
-use obzenflow_core::{ChainEvent, EventId, WriterId};
+use obzenflow_core::ChainEvent;
 use crate::data_plane::stage_semantics::{StageSemantics, PartitionStrategy};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -101,6 +101,7 @@ impl StageRouter {
 mod tests {
     use super::*;
     use ulid::Ulid;
+    use obzenflow_core::{EventId, WriterId};
 
     #[test]
     fn test_single_instance_routing() {

@@ -3,29 +3,22 @@
 //! This module provides ready-to-use middleware for common cross-cutting concerns
 //! like rate limiting, timeouts, and basic logging.
 
-use super::{Middleware, MiddlewareAction, middleware_fn};
+use super::{Middleware, MiddlewareAction, MiddlewareFactory, middleware_fn};
+use super::windowing::WindowingMiddlewareFactory;
+use super::rate_limiter::{rate_limit as create_rate_limiter};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use std::collections::VecDeque;
 use serde_json;
+use obzenflow_core::event::chain_event::ChainEvent;
 
-/// Rate limiting middleware that limits events per second
-pub fn rate_limit(per_second: u32) -> Box<dyn Middleware> {
-    let rate_limiter = Arc::new(Mutex::new(RateLimiterState::new(per_second)));
-    
-    Box::new(middleware_fn(move |_event, ctx| {
-        let mut state = rate_limiter.lock().unwrap();
-        if state.allow_event() {
-            MiddlewareAction::Continue
-        } else {
-            ctx.emit_event("rate_limiter", "event_dropped", serde_json::json!({
-                "reason": "rate_limit_exceeded",
-                "limit_per_second": state.per_second
-            }));
-            MiddlewareAction::Skip(vec![])
-        }
-    }))
+/// Rate limiting middleware factory that limits events per second
+pub fn rate_limit(per_second: f64) -> Box<dyn MiddlewareFactory> {
+    create_rate_limiter(per_second)
 }
+
+/// Rate limiting with burst capacity
+pub use super::rate_limiter::rate_limit_with_burst;
 
 /// Simple timeout middleware (placeholder - real implementation would be async)
 pub fn timeout(duration: Duration) -> Box<dyn Middleware> {
@@ -180,40 +173,68 @@ pub mod logging {
     }
 }
 
-// Internal rate limiter state
-struct RateLimiterState {
-    per_second: u32,
-    window: VecDeque<Instant>,
-}
 
-impl RateLimiterState {
-    fn new(per_second: u32) -> Self {
-        Self {
-            per_second,
-            window: VecDeque::with_capacity(per_second as usize),
-        }
+/// Helper module for windowing middleware with different aggregations
+pub mod windowing {
+    use super::*;
+    
+    /// Create a tumbling window that counts events
+    pub fn count(window_duration: Duration) -> Box<dyn MiddlewareFactory> {
+        Box::new(WindowingMiddlewareFactory::tumbling_count(window_duration))
     }
     
-    fn allow_event(&mut self) -> bool {
-        let now = Instant::now();
-        let one_second_ago = now - Duration::from_secs(1);
-        
-        // Remove events older than 1 second
-        while let Some(&front) = self.window.front() {
-            if front < one_second_ago {
-                self.window.pop_front();
-            } else {
-                break;
-            }
-        }
-        
-        // Check if we can allow this event
-        if self.window.len() < self.per_second as usize {
-            self.window.push_back(now);
-            true
-        } else {
-            false
-        }
+    /// Create a tumbling window that sums a numeric field
+    pub fn sum(window_duration: Duration, field: impl Into<String>) -> Box<dyn MiddlewareFactory> {
+        Box::new(WindowingMiddlewareFactory::tumbling_sum(window_duration, field.into()))
+    }
+    
+    /// Create a tumbling window that averages a numeric field
+    pub fn average(window_duration: Duration, field: impl Into<String>) -> Box<dyn MiddlewareFactory> {
+        let field = field.into();
+        Box::new(WindowingMiddlewareFactory::tumbling_custom(
+            window_duration,
+            Arc::new(move |events: Vec<ChainEvent>| {
+                let values: Vec<f64> = events.iter()
+                    .filter_map(|e| e.payload.get(&field))
+                    .filter_map(|v| v.as_f64())
+                    .collect();
+                
+                let avg = if values.is_empty() {
+                    0.0
+                } else {
+                    values.iter().sum::<f64>() / values.len() as f64
+                };
+                
+                let mut result = ChainEvent::new(
+                    obzenflow_core::event::event_id::EventId::new(),
+                    obzenflow_core::journal::writer_id::WriterId::new(),
+                    "windowing.average",
+                    serde_json::Value::Null,
+                );
+                result.payload = serde_json::json!({
+                    "average": avg,
+                    "field": field,
+                    "value_count": values.len(),
+                    "event_count": events.len(),
+                    "window_end_ms": std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_millis(),
+                });
+                result
+            })
+        ))
+    }
+    
+    /// Create a tumbling window with custom aggregation
+    pub fn custom<F>(window_duration: Duration, aggregation_fn: F) -> Box<dyn MiddlewareFactory>
+    where
+        F: Fn(Vec<ChainEvent>) -> ChainEvent + Send + Sync + 'static,
+    {
+        Box::new(WindowingMiddlewareFactory::tumbling_custom(
+            window_duration,
+            Arc::new(aggregation_fn),
+        ))
     }
 }
 
@@ -221,15 +242,4 @@ impl RateLimiterState {
 mod tests {
     use super::*;
     
-    #[test]
-    fn test_rate_limiter_state() {
-        let mut limiter = RateLimiterState::new(2);
-        
-        // First two events should be allowed
-        assert!(limiter.allow_event());
-        assert!(limiter.allow_event());
-        
-        // Third event within the same second should be rejected
-        assert!(!limiter.allow_event());
-    }
 }

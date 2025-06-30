@@ -13,6 +13,7 @@ use crate::control_plane::stages::{
     events::SinkEvent,
     actions::SinkAction,
     handler_contexts::SinkContext,
+    control_strategy::{ControlEventStrategy, ControlEventAction, ProcessingContext, JonestownStrategy},
 };
 use super::{
     config::StageConfig, 
@@ -29,10 +30,19 @@ pub struct SinkSupervisor<H: SinkHandler + 'static> {
     stage_name: String,
     upstream_stages: Vec<StageId>,
     processing_task: Arc<RwLock<Option<JoinHandle<()>>>>,
+    control_strategy: Arc<dyn ControlEventStrategy>,
 }
 
 impl<H: SinkHandler + 'static> SinkSupervisor<H> {
     pub fn new(handler: H, config: StageConfig) -> Self {
+        Self::with_strategy(handler, config, Arc::new(JonestownStrategy))
+    }
+    
+    pub fn with_strategy(
+        handler: H, 
+        config: StageConfig, 
+        control_strategy: Arc<dyn ControlEventStrategy>
+    ) -> Self {
         let wrapper = SinkWrapper(handler);
         let context = Arc::new(SinkContext::new(
             wrapper.0,
@@ -51,6 +61,7 @@ impl<H: SinkHandler + 'static> SinkSupervisor<H> {
             stage_name: config.stage_name.clone(),
             upstream_stages: config.upstream_stages,
             processing_task: Arc::new(RwLock::new(None)),
+            control_strategy,
         }
     }
     
@@ -103,12 +114,16 @@ impl<H: SinkHandler + 'static> SinkSupervisor<H> {
     async fn start_sink_loop(&self) -> Result<(), String> {
         let context = self.context.clone();
         let stage_name = self.stage_name.clone();
+        let control_strategy = self.control_strategy.clone();
         
         let task = tokio::spawn(async move {
             tracing::info!("[{}] Sink loop started", stage_name);
             
             // Get subscription
             let subscription = context.subscription.clone();
+            
+            // Processing context for control events
+            let mut processing_ctx = ProcessingContext::new();
             
             let mut eof_received = false;
             loop {
@@ -119,33 +134,73 @@ impl<H: SinkHandler + 'static> SinkSupervisor<H> {
                             
                             // Process each event
                             for envelope in events {
-                                let event = envelope.event;
-                                
-                                // Check if this is an EOF event
-                                match event.as_control_type() {
-                                    Some(ChainEvent::EOF_EVENT_TYPE) => {
-                                        tracing::info!("[{}] Sink received EOF event from upstream", stage_name);
+                                // Check if this is a control event
+                                match envelope.event.as_control_type() {
+                                    Some(control_type) => {
+                                        // Delegate to control strategy
+                                        let action = match control_type {
+                                            ChainEvent::EOF_EVENT_TYPE => {
+                                                tracing::info!("[{}] Sink received EOF event from upstream", stage_name);
+                                                control_strategy.handle_eof(&envelope, &mut processing_ctx)
+                                            }
+                                            ChainEvent::WATERMARK_EVENT_TYPE => {
+                                                control_strategy.handle_watermark(&envelope, &mut processing_ctx)
+                                            }
+                                            "flowstate.checkpoint" => {
+                                                control_strategy.handle_checkpoint(&envelope, &mut processing_ctx)
+                                            }
+                                            "flowstate.drain" => {
+                                                control_strategy.handle_drain(&envelope, &mut processing_ctx)
+                                            }
+                                            _ => {
+                                                tracing::debug!("[{}] Unknown control event: {}", stage_name, control_type);
+                                                ControlEventAction::Forward
+                                            }
+                                        };
                                         
-                                        // Call the handler's drain method
-                                        let mut handler = context.handler.write().await;
-                                        if let Err(e) = handler.drain().await {
-                                            tracing::error!("[{}] Failed to drain handler: {}", stage_name, e);
+                                        // Execute the action
+                                        match action {
+                                            ControlEventAction::Forward => {
+                                                // For sinks, "forwarding" EOF means draining and exiting
+                                                if control_type == ChainEvent::EOF_EVENT_TYPE {
+                                                    // Call the handler's drain method
+                                                    let mut handler = context.handler.write().await;
+                                                    if let Err(e) = handler.drain().await {
+                                                        tracing::error!("[{}] Failed to drain handler: {}", stage_name, e);
+                                                    }
+                                                    
+                                                    tracing::info!("[{}] Sink completed processing after EOF", stage_name);
+                                                    eof_received = true;
+                                                    break;
+                                                }
+                                                // Other control events - sinks don't forward downstream
+                                            }
+                                            ControlEventAction::Delay(duration) => {
+                                                tracing::info!("[{}] Delaying {} for {:?}", stage_name, control_type, duration);
+                                                // Delay before processing EOF (e.g., waiting for buffer to flush)
+                                                tokio::time::sleep(duration).await;
+                                                // Retry processing this event
+                                                continue;
+                                            }
+                                            ControlEventAction::Retry => {
+                                                tracing::info!("[{}] Retry requested for {}, continuing processing", stage_name, control_type);
+                                                // Don't drain yet, continue processing
+                                                if control_type == ChainEvent::EOF_EVENT_TYPE {
+                                                    // Buffer the EOF for later
+                                                    processing_ctx.buffered_eof = Some(envelope.clone());
+                                                }
+                                            }
+                                            ControlEventAction::Skip => {
+                                                tracing::warn!("[{}] Skipping {} (dangerous for sinks!)", stage_name, control_type);
+                                                // Don't drain, don't exit - very dangerous for sinks!
+                                            }
                                         }
-                                        
-                                        // Exit the processing loop
-                                        tracing::info!("[{}] Sink completed processing after EOF", stage_name);
-                                        // TODO: Send ReceivedEOF event to FSM to trigger flush
-                                        eof_received = true;
-                                        break;
-                                    }
-                                    Some(other) => {
-                                        tracing::debug!("[{}] Ignoring control event: {}", stage_name, other);
                                     }
                                     None => {
                                         // Regular data event
                                         // Consume the event
                                         let mut handler = context.handler.write().await;
-                                        if let Err(e) = handler.consume(event) {
+                                        if let Err(e) = handler.consume(envelope.event) {
                                             tracing::error!("[{}] Failed to consume event: {:?}", stage_name, e);
                                         }
                                     }
