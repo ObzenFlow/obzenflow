@@ -2,6 +2,9 @@ use crate::monitoring::{Taxonomy, TaxonomyMetrics, MetricSnapshot, MetricUpdate}
 use crate::monitoring::metrics::{
     SaturationMetric, AmendmentMetric, AnomalyMetric, FailureMetric, ErrorMetric
 };
+use crate::middleware::{Middleware, MiddlewareFactory};
+use obzenflow_runtime_services::control_plane::stages::supervisors::config::StageConfig;
+use obzenflow_topology_services::stages::StageId;
 use tokio::sync::broadcast;
 use std::sync::Arc;
 use std::time::Instant;
@@ -12,6 +15,7 @@ use std::time::Instant;
 /// hardware and system-level metrics.
 pub struct SAAFEMetrics {
     stage_name: String,
+    stage_id: StageId,
     saturation: Arc<SaturationMetric>,
     amendments: Arc<AmendmentMetric>,
     anomalies: Arc<AnomalyMetric>,
@@ -21,7 +25,7 @@ pub struct SAAFEMetrics {
 }
 
 impl SAAFEMetrics {
-    pub fn new(stage_name: &str) -> Self {
+    pub fn new(stage_name: &str, stage_id: StageId) -> Self {
         let saturation = Arc::new(SaturationMetric::new(format!("{}_saturation", stage_name)));
         let amendments = Arc::new(AmendmentMetric::new(format!("{}_amendments", stage_name)));
         let anomalies = Arc::new(AnomalyMetric::new(format!("{}_anomalies", stage_name)));
@@ -35,6 +39,7 @@ impl SAAFEMetrics {
         
         Self {
             stage_name: stage_name.to_string(),
+            stage_id,
             saturation,
             amendments,
             anomalies,
@@ -91,11 +96,11 @@ impl TaxonomyMetrics for SAAFEMetrics {
     fn current_values(&self) -> MetricSnapshot {
         MetricSnapshot {
             timestamp: Instant::now(),
-            saturation: 0.0, // TODO: Get from saturation metric
-            amendments: 0, // TODO: Get from amendments metric
-            anomalies: 0, // TODO: Get from anomalies metric
-            failures: 0, // TODO: Get from failures metric
-            error_count: 0, // TODO: Get from error metric
+            saturation: self.saturation.current_ratio(),
+            amendments: self.amendments.total_amendments(),
+            anomalies: self.anomalies.anomaly_count(),
+            failures: self.failures.total_failures(),
+            error_count: self.errors.total_errors(),
             ..Default::default()
         }
     }
@@ -112,14 +117,29 @@ impl TaxonomyMetrics for SAAFEMetrics {
         SAAFE::NAME
     }
 }
-
 /// SAAFE taxonomy definition
 pub struct SAAFE;
 
+/// Factory for creating SAAFE monitoring middleware with stage context
+pub struct SaafeMonitoringFactory;
+
+impl MiddlewareFactory for SaafeMonitoringFactory {
+    fn create(&self, config: &StageConfig) -> Box<dyn Middleware> {
+        Box::new(crate::middleware::MonitoringMiddleware::<SAAFE>::new(
+            config.stage_name.clone(),
+            config.stage_id,
+        ))
+    }
+    
+    fn name(&self) -> &str {
+        "SAAFE::monitoring"
+    }
+}
+
 impl SAAFE {
-    /// Create monitoring middleware for this taxonomy
-    pub fn monitoring() -> Box<dyn crate::middleware::Middleware> {
-        Box::new(crate::middleware::MonitoringMiddleware::<Self>::new(""))
+    /// Create monitoring middleware factory for this taxonomy
+    pub fn monitoring() -> Box<dyn MiddlewareFactory> {
+        Box::new(SaafeMonitoringFactory)
     }
 }
 
@@ -129,7 +149,7 @@ impl Taxonomy for SAAFE {
     
     type Metrics = SAAFEMetrics;
     
-    fn create_metrics(stage_name: &str) -> Self::Metrics {
-        SAAFEMetrics::new(stage_name)
+    fn create_metrics(stage_name: &str, stage_id: StageId) -> Self::Metrics {
+        SAAFEMetrics::new(stage_name, stage_id)
     }
 }

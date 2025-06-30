@@ -7,7 +7,7 @@ use obzenflow_core::{ChainEvent, EventId, WriterId};
 use obzenflow_runtime_services::control_plane::stages::handler_traits::{
     FiniteSourceHandler, InfiniteSourceHandler
 };
-use super::{Middleware, MiddlewareAction};
+use super::{Middleware, MiddlewareAction, MiddlewareContext};
 
 /// A FiniteSourceHandler wrapper that applies middleware
 pub struct MiddlewareFiniteSource<H: FiniteSourceHandler> {
@@ -49,9 +49,12 @@ impl<H: FiniteSourceHandler> FiniteSourceHandler for MiddlewareFiniteSource<H> {
             })
         );
         
+        // Create ephemeral context for this processing
+        let mut ctx = MiddlewareContext::new();
+        
         // Pre-processing phase
         for middleware in &self.middleware_chain {
-            match middleware.pre_handle(&synthetic_event) {
+            match middleware.pre_handle(&synthetic_event, &mut ctx) {
                 MiddlewareAction::Continue => continue,
                 MiddlewareAction::Skip(mut results) => {
                     // If middleware provides results, return the first one
@@ -66,17 +69,17 @@ impl<H: FiniteSourceHandler> FiniteSourceHandler for MiddlewareFiniteSource<H> {
         
         // Post-processing phase (only if we got an event)
         if let Some(ref event) = result {
-            let mut results = vec![event.clone()];
+            let results = vec![event.clone()];
             for middleware in &self.middleware_chain {
-                middleware.post_handle(&synthetic_event, &mut results);
+                middleware.post_handle(&synthetic_event, &results, &mut ctx);
             }
-            // Return the potentially modified event
-            results.into_iter().next()
+            // Return the original event (middleware can't modify it)
+            Some(event.clone())
         } else {
             // Let middleware know we got no event
-            let mut empty = vec![];
+            let empty = vec![];
             for middleware in &self.middleware_chain {
-                middleware.post_handle(&synthetic_event, &mut empty);
+                middleware.post_handle(&synthetic_event, &empty, &mut ctx);
             }
             None
         }
@@ -128,9 +131,12 @@ impl<H: InfiniteSourceHandler> InfiniteSourceHandler for MiddlewareInfiniteSourc
             })
         );
         
+        // Create ephemeral context for this processing
+        let mut ctx = MiddlewareContext::new();
+        
         // Pre-processing phase
         for middleware in &self.middleware_chain {
-            match middleware.pre_handle(&synthetic_event) {
+            match middleware.pre_handle(&synthetic_event, &mut ctx) {
                 MiddlewareAction::Continue => continue,
                 MiddlewareAction::Skip(mut results) => {
                     // If middleware provides results, return the first one
@@ -145,17 +151,17 @@ impl<H: InfiniteSourceHandler> InfiniteSourceHandler for MiddlewareInfiniteSourc
         
         // Post-processing phase (only if we got an event)
         if let Some(ref event) = result {
-            let mut results = vec![event.clone()];
+            let results = vec![event.clone()];
             for middleware in &self.middleware_chain {
-                middleware.post_handle(&synthetic_event, &mut results);
+                middleware.post_handle(&synthetic_event, &results, &mut ctx);
             }
-            // Return the potentially modified event
-            results.into_iter().next()
+            // Return the original event (middleware can't modify it)
+            Some(event.clone())
         } else {
             // Let middleware know we got no event
-            let mut empty = vec![];
+            let empty = vec![];
             for middleware in &self.middleware_chain {
-                middleware.post_handle(&synthetic_event, &mut empty);
+                middleware.post_handle(&synthetic_event, &empty, &mut ctx);
             }
             None
         }

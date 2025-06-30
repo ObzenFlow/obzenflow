@@ -14,7 +14,7 @@ use obzenflow_runtime_services::control_plane::stages::{
     }
 };
 use obzenflow_adapters::middleware::{
-    Middleware, FiniteSourceHandlerExt, InfiniteSourceHandlerExt,
+    Middleware, MiddlewareFactory, FiniteSourceHandlerExt, InfiniteSourceHandlerExt,
     TransformHandlerExt, SinkHandlerExt
 };
 use obzenflow_core::journal::writer_id::WriterId;
@@ -37,7 +37,7 @@ pub trait StageDescriptor: Send + Sync {
 pub struct FiniteSourceDescriptor<H: FiniteSourceHandler + 'static> {
     pub name: String,
     pub handler: H,
-    pub middleware: Vec<Box<dyn Middleware>>,
+    pub middleware: Vec<Box<dyn MiddlewareFactory>>,
 }
 
 impl<H: FiniteSourceHandler + 'static> StageDescriptor for FiniteSourceDescriptor<H> {
@@ -48,13 +48,18 @@ impl<H: FiniteSourceHandler + 'static> StageDescriptor for FiniteSourceDescripto
     fn create_supervisor(self: Box<Self>, config: StageConfig) -> BoxedStageHandle {
         let writer_id = WriterId::new();
         
-        // Apply middleware and create supervisor
+        // Create middleware instances from factories
         if self.middleware.is_empty() {
             let supervisor = FiniteSourceSupervisor::new(self.handler, config);
             Box::new(supervisor) as BoxedStageHandle
         } else {
+            let middleware_instances: Vec<Box<dyn Middleware>> = self.middleware
+                .into_iter()
+                .map(|factory| factory.create(&config))
+                .collect();
+            
             let mut builder = self.handler.middleware(writer_id.clone());
-            for mw in self.middleware {
+            for mw in middleware_instances {
                 builder = builder.with(mw);
             }
             let handler_with_middleware = builder.build();
@@ -68,7 +73,7 @@ impl<H: FiniteSourceHandler + 'static> StageDescriptor for FiniteSourceDescripto
 pub struct InfiniteSourceDescriptor<H: InfiniteSourceHandler + 'static> {
     pub name: String,
     pub handler: H,
-    pub middleware: Vec<Box<dyn Middleware>>,
+    pub middleware: Vec<Box<dyn MiddlewareFactory>>,
 }
 
 impl<H: InfiniteSourceHandler + 'static> StageDescriptor for InfiniteSourceDescriptor<H> {
@@ -79,13 +84,18 @@ impl<H: InfiniteSourceHandler + 'static> StageDescriptor for InfiniteSourceDescr
     fn create_supervisor(self: Box<Self>, config: StageConfig) -> BoxedStageHandle {
         let writer_id = WriterId::new();
         
-        // Apply middleware and create supervisor
+        // Create middleware instances from factories
         if self.middleware.is_empty() {
             let supervisor = InfiniteSourceSupervisor::new(self.handler, config);
             Box::new(supervisor) as BoxedStageHandle
         } else {
+            let middleware_instances: Vec<Box<dyn Middleware>> = self.middleware
+                .into_iter()
+                .map(|factory| factory.create(&config))
+                .collect();
+            
             let mut builder = self.handler.middleware(writer_id.clone());
-            for mw in self.middleware {
+            for mw in middleware_instances {
                 builder = builder.with(mw);
             }
             let handler_with_middleware = builder.build();
@@ -99,7 +109,7 @@ impl<H: InfiniteSourceHandler + 'static> StageDescriptor for InfiniteSourceDescr
 pub struct TransformDescriptor<H: TransformHandler + 'static> {
     pub name: String,
     pub handler: H,
-    pub middleware: Vec<Box<dyn Middleware>>,
+    pub middleware: Vec<Box<dyn MiddlewareFactory>>,
 }
 
 impl<H: TransformHandler + 'static> StageDescriptor for TransformDescriptor<H> {
@@ -108,13 +118,18 @@ impl<H: TransformHandler + 'static> StageDescriptor for TransformDescriptor<H> {
     }
     
     fn create_supervisor(self: Box<Self>, config: StageConfig) -> BoxedStageHandle {
-        // Apply middleware and create supervisor
+        // Create middleware instances from factories
         if self.middleware.is_empty() {
             let supervisor = TransformSupervisor::new(self.handler, config);
             Box::new(supervisor) as BoxedStageHandle
         } else {
+            let middleware_instances: Vec<Box<dyn Middleware>> = self.middleware
+                .into_iter()
+                .map(|factory| factory.create(&config))
+                .collect();
+            
             let mut builder = self.handler.middleware();
-            for mw in self.middleware {
+            for mw in middleware_instances {
                 builder = builder.with(mw);
             }
             let handler_with_middleware = builder.build();
@@ -128,7 +143,7 @@ impl<H: TransformHandler + 'static> StageDescriptor for TransformDescriptor<H> {
 pub struct SinkDescriptor<H: SinkHandler + 'static> {
     pub name: String,
     pub handler: H,
-    pub middleware: Vec<Box<dyn Middleware>>,
+    pub middleware: Vec<Box<dyn MiddlewareFactory>>,
 }
 
 impl<H: SinkHandler + 'static> StageDescriptor for SinkDescriptor<H> {
@@ -137,13 +152,18 @@ impl<H: SinkHandler + 'static> StageDescriptor for SinkDescriptor<H> {
     }
     
     fn create_supervisor(self: Box<Self>, config: StageConfig) -> BoxedStageHandle {
-        // Apply middleware and create supervisor
+        // Create middleware instances from factories
         if self.middleware.is_empty() {
             let supervisor = SinkSupervisor::new(self.handler, config);
             Box::new(supervisor) as BoxedStageHandle
         } else {
+            let middleware_instances: Vec<Box<dyn Middleware>> = self.middleware
+                .into_iter()
+                .map(|factory| factory.create(&config))
+                .collect();
+            
             let mut builder = self.handler.middleware();
-            for mw in self.middleware {
+            for mw in middleware_instances {
                 builder = builder.with(mw);
             }
             let handler_with_middleware = builder.build();

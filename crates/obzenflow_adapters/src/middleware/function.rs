@@ -1,5 +1,5 @@
 use obzenflow_core::event::chain_event::ChainEvent;
-use super::{Middleware, MiddlewareAction, ErrorAction, StepError};
+use super::{Middleware, MiddlewareAction, ErrorAction, MiddlewareContext};
 
 /// Middleware implementation that wraps functions/closures.
 /// 
@@ -12,24 +12,24 @@ use super::{Middleware, MiddlewareAction, ErrorAction, StepError};
 /// use obzenflow_adapters::middleware::{FnMiddleware, MiddlewareAction, ErrorAction};
 /// 
 /// let middleware = FnMiddleware {
-///     pre: |event| {
+///     pre: |event, ctx| {
 ///         println!("Processing: {:?}", event);
 ///         MiddlewareAction::Continue
 ///     },
-///     post: |event, results| {
+///     post: |event, results, ctx| {
 ///         println!("Produced {} results", results.len());
 ///     },
-///     error: |event, error| {
-///         println!("Error processing {:?}: {}", event, error);
+///     error: |event, ctx| {
+///         println!("Error processing {:?}", event);
 ///         ErrorAction::Propagate
 ///     }
 /// };
 /// ```
 pub struct FnMiddleware<F, G, H>
 where
-    F: Fn(&ChainEvent) -> MiddlewareAction,
-    G: Fn(&ChainEvent, &mut Vec<ChainEvent>),
-    H: Fn(&ChainEvent, &StepError) -> ErrorAction,
+    F: Fn(&ChainEvent, &mut MiddlewareContext) -> MiddlewareAction,
+    G: Fn(&ChainEvent, &[ChainEvent], &mut MiddlewareContext),
+    H: Fn(&ChainEvent, &mut MiddlewareContext) -> ErrorAction,
 {
     pub pre: F,
     pub post: G,
@@ -38,23 +38,23 @@ where
 
 impl<F, G, H> Middleware for FnMiddleware<F, G, H>
 where
-    F: Fn(&ChainEvent) -> MiddlewareAction + Send + Sync,
-    G: Fn(&ChainEvent, &mut Vec<ChainEvent>) + Send + Sync,
-    H: Fn(&ChainEvent, &StepError) -> ErrorAction + Send + Sync,
+    F: Fn(&ChainEvent, &mut MiddlewareContext) -> MiddlewareAction + Send + Sync,
+    G: Fn(&ChainEvent, &[ChainEvent], &mut MiddlewareContext) + Send + Sync,
+    H: Fn(&ChainEvent, &mut MiddlewareContext) -> ErrorAction + Send + Sync,
 {
-    fn pre_handle(&self, event: &ChainEvent) -> MiddlewareAction {
+    fn pre_handle(&self, event: &ChainEvent, ctx: &mut MiddlewareContext) -> MiddlewareAction {
         // Call the stored pre-processing function
-        (self.pre)(event)
+        (self.pre)(event, ctx)
     }
 
-    fn post_handle(&self, event: &ChainEvent, results: &mut Vec<ChainEvent>) {
+    fn post_handle(&self, event: &ChainEvent, results: &[ChainEvent], ctx: &mut MiddlewareContext) {
         // Call the stored post-processing function
-        (self.post)(event, results)
+        (self.post)(event, results, ctx)
     }
 
-    fn on_error(&self, event: &ChainEvent, error: &StepError) -> ErrorAction {
+    fn on_error(&self, event: &ChainEvent, ctx: &mut MiddlewareContext) -> ErrorAction {
         // Call the stored error handling function
-        (self.error)(event, error)
+        (self.error)(event, ctx)
     }
 }
 
@@ -85,7 +85,7 @@ where
 /// # }
 /// #
 /// // Filter events by type
-/// let filter = middleware_fn(|event| {
+/// let filter = middleware_fn(|event, ctx| {
 ///     if event.event_type == "important" {
 ///         MiddlewareAction::Continue
 ///     } else {
@@ -101,11 +101,11 @@ where
 /// ```
 pub fn middleware_fn<F>(pre: F) -> impl Middleware
 where
-    F: Fn(&ChainEvent) -> MiddlewareAction + Send + Sync + 'static,
+    F: Fn(&ChainEvent, &mut MiddlewareContext) -> MiddlewareAction + Send + Sync + 'static,
 {
     FnMiddleware {
         pre,
-        post: |_, _| {},  // No-op for post-processing
+        post: |_, _, _| {},  // No-op for post-processing
         error: |_, _| ErrorAction::Propagate,  // Default error handling
     }
 }

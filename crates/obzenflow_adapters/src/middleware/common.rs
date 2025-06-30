@@ -7,16 +7,21 @@ use super::{Middleware, MiddlewareAction, middleware_fn};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use std::collections::VecDeque;
+use serde_json;
 
 /// Rate limiting middleware that limits events per second
 pub fn rate_limit(per_second: u32) -> Box<dyn Middleware> {
     let rate_limiter = Arc::new(Mutex::new(RateLimiterState::new(per_second)));
     
-    Box::new(middleware_fn(move |_event| {
+    Box::new(middleware_fn(move |_event, ctx| {
         let mut state = rate_limiter.lock().unwrap();
         if state.allow_event() {
             MiddlewareAction::Continue
         } else {
+            ctx.emit_event("rate_limiter", "event_dropped", serde_json::json!({
+                "reason": "rate_limit_exceeded",
+                "limit_per_second": state.per_second
+            }));
             MiddlewareAction::Skip(vec![])
         }
     }))
@@ -24,17 +29,21 @@ pub fn rate_limit(per_second: u32) -> Box<dyn Middleware> {
 
 /// Simple timeout middleware (placeholder - real implementation would be async)
 pub fn timeout(duration: Duration) -> Box<dyn Middleware> {
-    Box::new(middleware_fn(move |event| {
+    Box::new(middleware_fn(move |event, ctx| {
         // Store timeout deadline in event metadata for downstream handling
         // Real implementation would use async runtime for proper timeout
         tracing::debug!("Timeout middleware: {:?} for event {}", duration, event.id.as_str());
+        ctx.emit_event("timeout", "deadline_set", serde_json::json!({
+            "event_id": event.id.as_str(),
+            "timeout_ms": duration.as_millis()
+        }));
         MiddlewareAction::Continue
     }))
 }
 
 /// Simple logging middleware
 pub fn logging(level: tracing::Level) -> Box<dyn Middleware> {
-    Box::new(middleware_fn(move |event| {
+    Box::new(middleware_fn(move |event, _ctx| {
         match level {
             tracing::Level::TRACE => tracing::trace!("Processing event: {:?}", event),
             tracing::Level::DEBUG => tracing::debug!("Processing event: {}", event.id.as_str()),
@@ -94,7 +103,7 @@ pub mod retry {
         pub fn build(self) -> Box<dyn Middleware> {
             // For now, return a simple middleware that logs retry attempts
             // Full implementation would track retry counts per event
-            Box::new(middleware_fn(move |event| {
+            Box::new(middleware_fn(move |event, _ctx| {
                 tracing::debug!("Retry middleware configured for event {}", event.id.as_str());
                 MiddlewareAction::Continue
             }))
@@ -103,7 +112,7 @@ pub mod retry {
     
     /// Simple fixed delay retry
     pub fn fixed_delay(max_attempts: usize, delay: Duration) -> Box<dyn Middleware> {
-        Box::new(middleware_fn(move |event| {
+        Box::new(middleware_fn(move |event, _ctx| {
             tracing::debug!("Fixed retry middleware: {} attempts, {:?} delay for event {}", 
                 max_attempts, delay, event.id.as_str());
             MiddlewareAction::Continue
@@ -149,7 +158,7 @@ pub mod logging {
         }
         
         pub fn build(self) -> Box<dyn Middleware> {
-            Box::new(middleware_fn(move |event| {
+            Box::new(middleware_fn(move |event, _ctx| {
                 let msg = if self.with_payload {
                     format!("Processing event: {} ({}) - payload: {:?}", 
                         event.id.as_str(), event.event_type, event.payload)

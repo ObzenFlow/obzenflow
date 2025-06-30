@@ -1,5 +1,8 @@
 use crate::monitoring::{Taxonomy, TaxonomyMetrics, MetricSnapshot, MetricUpdate};
 use crate::monitoring::metrics::{UtilizationMetric, SaturationMetric, ErrorMetric};
+use crate::middleware::{Middleware, MiddlewareFactory};
+use obzenflow_runtime_services::control_plane::stages::supervisors::config::StageConfig;
+use obzenflow_topology_services::stages::StageId;
 use tokio::sync::broadcast;
 use std::sync::Arc;
 use std::time::Instant;
@@ -7,6 +10,7 @@ use std::time::Instant;
 /// USE (Utilization, Saturation, Errors) metrics implementation
 pub struct USEMetrics {
     stage_name: String,
+    stage_id: StageId,
     utilization: Arc<UtilizationMetric>,
     saturation: Arc<SaturationMetric>,
     errors: Arc<ErrorMetric>,
@@ -14,7 +18,7 @@ pub struct USEMetrics {
 }
 
 impl USEMetrics {
-    pub fn new(stage_name: &str) -> Self {
+    pub fn new(stage_name: &str, stage_id: StageId) -> Self {
         let utilization = Arc::new(UtilizationMetric::new(format!("{}_utilization", stage_name)));
         let saturation = Arc::new(SaturationMetric::new(format!("{}_saturation", stage_name)));
         let errors = Arc::new(ErrorMetric::new(format!("{}_errors", stage_name)));
@@ -23,6 +27,7 @@ impl USEMetrics {
         
         Self {
             stage_name: stage_name.to_string(),
+            stage_id,
             utilization,
             saturation,
             errors,
@@ -128,14 +133,29 @@ impl TaxonomyMetrics for USEMetrics {
         USE::NAME
     }
 }
-
 /// USE taxonomy definition
 pub struct USE;
 
+/// Factory for creating USE monitoring middleware with stage context
+pub struct UseMonitoringFactory;
+
+impl MiddlewareFactory for UseMonitoringFactory {
+    fn create(&self, config: &StageConfig) -> Box<dyn Middleware> {
+        Box::new(crate::middleware::MonitoringMiddleware::<USE>::new(
+            config.stage_name.clone(),
+            config.stage_id,
+        ))
+    }
+    
+    fn name(&self) -> &str {
+        "USE::monitoring"
+    }
+}
+
 impl USE {
-    /// Create monitoring middleware for this taxonomy
-    pub fn monitoring() -> Box<dyn crate::middleware::Middleware> {
-        Box::new(crate::middleware::MonitoringMiddleware::<Self>::new(""))
+    /// Create monitoring middleware factory for this taxonomy
+    pub fn monitoring() -> Box<dyn MiddlewareFactory> {
+        Box::new(UseMonitoringFactory)
     }
 }
 
@@ -145,7 +165,7 @@ impl Taxonomy for USE {
     
     type Metrics = USEMetrics;
     
-    fn create_metrics(stage_name: &str) -> Self::Metrics {
-        USEMetrics::new(stage_name)
+    fn create_metrics(stage_name: &str, stage_id: StageId) -> Self::Metrics {
+        USEMetrics::new(stage_name, stage_id)
     }
 }

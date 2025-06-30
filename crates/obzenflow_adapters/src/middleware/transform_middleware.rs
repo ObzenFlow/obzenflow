@@ -5,7 +5,7 @@
 
 use obzenflow_core::{ChainEvent, Result};
 use obzenflow_runtime_services::control_plane::stages::handler_traits::TransformHandler;
-use super::{Middleware, MiddlewareAction};
+use super::{Middleware, MiddlewareAction, MiddlewareContext};
 use async_trait::async_trait;
 
 /// A TransformHandler wrapper that applies middleware to transform operations
@@ -34,9 +34,12 @@ impl<H: TransformHandler> MiddlewareTransform<H> {
     where
         F: FnOnce(ChainEvent) -> Vec<ChainEvent>,
     {
+        // Create ephemeral context for this processing
+        let mut ctx = MiddlewareContext::new();
+        
         // Pre-processing phase
         for middleware in &self.middleware_chain {
-            match middleware.pre_handle(&event) {
+            match middleware.pre_handle(&event, &mut ctx) {
                 MiddlewareAction::Continue => continue,
                 MiddlewareAction::Skip(results) => return results,
                 MiddlewareAction::Abort => return vec![],
@@ -44,11 +47,11 @@ impl<H: TransformHandler> MiddlewareTransform<H> {
         }
         
         // Execute the transform
-        let mut results = transform_fn(event.clone());
+        let results = transform_fn(event.clone());
         
-        // Post-processing phase
-        for middleware in &self.middleware_chain {
-            middleware.post_handle(&event, &mut results);
+        // Post-processing phase (reverse order)
+        for middleware in self.middleware_chain.iter().rev() {
+            middleware.post_handle(&event, &results, &mut ctx);
         }
         
         results
@@ -121,16 +124,20 @@ mod tests {
     }
     
     impl Middleware for TestMiddleware {
-        fn pre_handle(&self, _event: &ChainEvent) -> MiddlewareAction {
+        fn pre_handle(&self, _event: &ChainEvent, ctx: &mut MiddlewareContext) -> MiddlewareAction {
             println!("Pre-handle: {}", self.tag);
+            ctx.emit_event("test", &self.tag, json!({"phase": "pre"}));
             MiddlewareAction::Continue
         }
         
-        fn post_handle(&self, _event: &ChainEvent, results: &mut Vec<ChainEvent>) {
+        fn post_handle(&self, _event: &ChainEvent, results: &[ChainEvent], ctx: &mut MiddlewareContext) {
             println!("Post-handle: {} - {} results", self.tag, results.len());
-            for result in results {
-                result.payload[&self.tag] = json!(true);
-            }
+            // Check if we can see events from earlier middleware
+            let events_count = ctx.events.len();
+            println!("Context has {} events", events_count);
+            
+            // Emit a post-processing event
+            ctx.emit_event("test", &self.tag, json!({"phase": "post", "results": results.len()}));
         }
     }
     
@@ -151,9 +158,11 @@ mod tests {
         
         let results = handler.process(event);
         
+        // Middleware can't modify events anymore, just verify the transform worked
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].payload["processed"], json!(true));
-        assert_eq!(results[0].payload["first"], json!(true));
-        assert_eq!(results[0].payload["second"], json!(true));
+        
+        // The middleware would have emitted events through context,
+        // but we can't verify that here without access to the context
     }
 }

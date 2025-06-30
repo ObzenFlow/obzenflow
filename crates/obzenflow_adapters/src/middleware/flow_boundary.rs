@@ -5,7 +5,7 @@
 
 use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::event_id::EventId;
-use crate::middleware::{Middleware, MiddlewareAction, ErrorAction};
+use crate::middleware::{Middleware, MiddlewareAction, ErrorAction, MiddlewareContext};
 use crate::monitoring::MetricSnapshot;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -184,7 +184,7 @@ impl BoundaryTrackingMiddleware {
 }
 
 impl Middleware for BoundaryTrackingMiddleware {
-    fn pre_handle(&self, event: &ChainEvent) -> MiddlewareAction {
+    fn pre_handle(&self, event: &ChainEvent, _ctx: &mut MiddlewareContext) -> MiddlewareAction {
         if self.boundary_type == BoundaryType::Entry && self.tracker.is_flow_entry(event) {
             // Clone for async task
             let tracker = self.tracker.clone();
@@ -196,7 +196,7 @@ impl Middleware for BoundaryTrackingMiddleware {
         MiddlewareAction::Continue
     }
 
-    fn post_handle(&self, _event: &ChainEvent, results: &mut Vec<ChainEvent>) {
+    fn post_handle(&self, _event: &ChainEvent, results: &[ChainEvent], _ctx: &mut MiddlewareContext) {
         if self.boundary_type == BoundaryType::Exit {
             // For exit tracking, we track all results
             for result in results.iter() {
@@ -209,7 +209,7 @@ impl Middleware for BoundaryTrackingMiddleware {
         }
     }
 
-    fn on_error(&self, _event: &ChainEvent, _error: &crate::middleware::StepError) -> ErrorAction {
+    fn on_error(&self, _event: &ChainEvent, _ctx: &mut MiddlewareContext) -> ErrorAction {
         // Could track failed requests here
         ErrorAction::Propagate
     }

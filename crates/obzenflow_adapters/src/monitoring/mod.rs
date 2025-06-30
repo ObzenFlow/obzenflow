@@ -10,6 +10,7 @@
 
 use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
+use obzenflow_topology_services::stages::StageId;
 
 pub mod metrics;
 pub mod taxonomies;
@@ -30,7 +31,7 @@ pub trait Taxonomy: Send + Sync + 'static {
     type Metrics: TaxonomyMetrics;
     
     /// Create a new instance of metrics for this taxonomy
-    fn create_metrics(stage_name: &str) -> Self::Metrics;
+    fn create_metrics(stage_name: &str, stage_id: StageId) -> Self::Metrics;
 }
 
 /// Base trait for all taxonomy metrics

@@ -3,7 +3,7 @@
 //! This provides a simple but real LoggingMiddleware that can be used to verify
 //! that our middleware adapters work correctly.
 
-use super::{Middleware, MiddlewareAction, ErrorAction, StepError};
+use super::{Middleware, MiddlewareAction, ErrorAction, MiddlewareContext};
 use obzenflow_core::event::chain_event::ChainEvent;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -56,7 +56,7 @@ impl Default for LoggingMiddleware {
 }
 
 impl Middleware for LoggingMiddleware {
-    fn pre_handle(&self, event: &ChainEvent) -> MiddlewareAction {
+    fn pre_handle(&self, event: &ChainEvent, ctx: &mut MiddlewareContext) -> MiddlewareAction {
         let count = self.events_processed.fetch_add(1, Ordering::Relaxed) + 1;
         
         let message = if let Some(prefix) = &self.prefix {
@@ -75,10 +75,17 @@ impl Middleware for LoggingMiddleware {
             tracing::Level::ERROR => tracing::error!("{}", message),
         }
         
+        // Emit a logging event
+        ctx.emit_event("logging", "event_processed", serde_json::json!({
+            "event_id": event.id.as_str(),
+            "event_type": event.event_type,
+            "count": count
+        }));
+        
         MiddlewareAction::Continue
     }
     
-    fn post_handle(&self, event: &ChainEvent, results: &mut Vec<ChainEvent>) {
+    fn post_handle(&self, event: &ChainEvent, results: &[ChainEvent], ctx: &mut MiddlewareContext) {
         let message = if let Some(prefix) = &self.prefix {
             format!("{} - Completed processing {}, produced {} results", 
                 prefix, event.id, results.len())
@@ -94,16 +101,27 @@ impl Middleware for LoggingMiddleware {
             tracing::Level::WARN => tracing::warn!("{}", message),
             tracing::Level::ERROR => tracing::error!("{}", message),
         }
+        
+        // Emit completion event
+        ctx.emit_event("logging", "processing_completed", serde_json::json!({
+            "event_id": event.id.as_str(),
+            "results_count": results.len()
+        }));
     }
     
-    fn on_error(&self, event: &ChainEvent, error: &StepError) -> ErrorAction {
+    fn on_error(&self, event: &ChainEvent, ctx: &mut MiddlewareContext) -> ErrorAction {
         let message = if let Some(prefix) = &self.prefix {
-            format!("{} - Error processing {}: {:?}", prefix, event.id, error)
+            format!("{} - Error processing {}", prefix, event.id)
         } else {
-            format!("Error processing {}: {:?}", event.id, error)
+            format!("Error processing {}", event.id)
         };
         
         tracing::error!("{}", message);
+        
+        // Emit error event
+        ctx.emit_event("logging", "processing_error", serde_json::json!({
+            "event_id": event.id.as_str()
+        }));
         
         // Just log and propagate - don't interfere with error handling
         ErrorAction::Propagate
@@ -129,10 +147,11 @@ mod tests {
         // Process some events
         assert_eq!(middleware.events_processed(), 0);
         
-        middleware.pre_handle(&event);
+        let mut ctx = MiddlewareContext::new();
+        middleware.pre_handle(&event, &mut ctx);
         assert_eq!(middleware.events_processed(), 1);
         
-        middleware.pre_handle(&event);
+        middleware.pre_handle(&event, &mut ctx);
         assert_eq!(middleware.events_processed(), 2);
     }
     

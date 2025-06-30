@@ -5,7 +5,7 @@
 
 use obzenflow_core::{ChainEvent, Result};
 use obzenflow_runtime_services::control_plane::stages::handler_traits::SinkHandler;
-use super::{Middleware, MiddlewareAction, ErrorAction, StepError};
+use super::{Middleware, MiddlewareAction, ErrorAction, MiddlewareContext};
 use async_trait::async_trait;
 
 /// A SinkHandler wrapper that applies middleware
@@ -34,9 +34,12 @@ impl<H: SinkHandler> MiddlewareSink<H> {
         &mut self,
         event: ChainEvent,
     ) -> Result<()> {
+        // Create ephemeral context for this processing
+        let mut ctx = MiddlewareContext::new();
+        
         // Pre-processing phase
         for middleware in &self.middleware_chain {
-            match middleware.pre_handle(&event) {
+            match middleware.pre_handle(&event, &mut ctx) {
                 MiddlewareAction::Continue => continue,
                 MiddlewareAction::Skip(_) => return Ok(()), // Skip means don't consume
                 MiddlewareAction::Abort => return Ok(()),   // Abort is also a no-op for sinks
@@ -47,22 +50,16 @@ impl<H: SinkHandler> MiddlewareSink<H> {
         match self.inner.consume(event.clone()) {
             Ok(()) => {
                 // Post-processing phase - sinks don't produce output events
-                let mut empty = vec![];
+                let empty = vec![];
                 for middleware in &self.middleware_chain {
-                    middleware.post_handle(&event, &mut empty);
+                    middleware.post_handle(&event, &empty, &mut ctx);
                 }
                 Ok(())
             }
             Err(e) => {
-                // Convert to StepError for middleware
-                let error_string = format!("{:?}", e);
-                let step_error: StepError = Box::new(
-                    std::io::Error::new(std::io::ErrorKind::Other, error_string.clone())
-                );
-                
                 // Give each middleware a chance to handle the error
                 for middleware in &self.middleware_chain {
-                    match middleware.on_error(&event, &step_error) {
+                    match middleware.on_error(&event, &mut ctx) {
                         ErrorAction::Propagate => continue,
                         ErrorAction::Recover(_) => return Ok(()), // Recovery means success
                         ErrorAction::Retry => {
@@ -73,10 +70,7 @@ impl<H: SinkHandler> MiddlewareSink<H> {
                 }
                 
                 // If no middleware handled it, propagate the error
-                Err(Box::new(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!("Sink error: {}", error_string)
-                )))
+                Err(e)
             }
         }
     }
@@ -163,7 +157,7 @@ mod tests {
     }
     
     impl Middleware for RetryMiddleware {
-        fn on_error(&self, _event: &ChainEvent, _error: &StepError) -> ErrorAction {
+        fn on_error(&self, _event: &ChainEvent, _ctx: &mut MiddlewareContext) -> ErrorAction {
             ErrorAction::Retry
         }
     }

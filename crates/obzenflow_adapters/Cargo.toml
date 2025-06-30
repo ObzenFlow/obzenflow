@@ -19,11 +19,14 @@ thiserror = "1.0"
 ulid = "1.0"
 serde_json = "1.0"
 anyhow = "1.0"
+dashmap = "5.5"
 
 # Optional adapters
 prometheus = { version = "0.13", optional = true }
 statsd = { version = "0.16", optional = true }
 warp = { version = "0.3", optional = true }
+rand = "0.9.1"
+serde = { version = "1.0.219", features = ["derive"] }
 
 [features]
 default = []
@@ -31,4 +34,5 @@ metrics-prometheus = ["prometheus", "warp"]
 metrics-statsd = ["statsd"]
 
 [dev-dependencies]
-tokio-test = "0.4"
+chrono = "0.4"
+tracing-subscriber = "0.3"

@@ -1,6 +1,9 @@
 use crate::monitoring::{Taxonomy, TaxonomyMetrics, MetricSnapshot, MetricUpdate};
 use crate::monitoring::metrics::{RateMetric, ErrorMetric, DurationMetric};
 use crate::monitoring::metrics::duration::DurationBuckets;
+use crate::middleware::{Middleware, MiddlewareFactory};
+use obzenflow_runtime_services::control_plane::stages::supervisors::config::StageConfig;
+use obzenflow_topology_services::stages::StageId;
 use tokio::sync::broadcast;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -8,6 +11,7 @@ use std::time::{Duration, Instant};
 /// RED (Rate, Errors, Duration) metrics implementation
 pub struct REDMetrics {
     stage_name: String,
+    stage_id: StageId,
     rate: Arc<RateMetric>,
     errors: Arc<ErrorMetric>,
     duration: Arc<DurationMetric>,
@@ -15,7 +19,7 @@ pub struct REDMetrics {
 }
 
 impl REDMetrics {
-    pub fn new(stage_name: &str) -> Self {
+    pub fn new(stage_name: &str, stage_id: StageId) -> Self {
         let rate = Arc::new(RateMetric::new(format!("{}_rate", stage_name)));
         let errors = Arc::new(ErrorMetric::new(format!("{}_errors", stage_name)));
         let duration = Arc::new(DurationMetric::with_buckets(
@@ -27,6 +31,7 @@ impl REDMetrics {
         
         Self {
             stage_name: stage_name.to_string(),
+            stage_id,
             rate,
             errors,
             duration,
@@ -97,14 +102,29 @@ impl TaxonomyMetrics for REDMetrics {
         RED::NAME
     }
 }
-
 /// RED taxonomy definition
 pub struct RED;
 
+/// Factory for creating RED monitoring middleware with stage context
+pub struct RedMonitoringFactory;
+
+impl MiddlewareFactory for RedMonitoringFactory {
+    fn create(&self, config: &StageConfig) -> Box<dyn Middleware> {
+        Box::new(crate::middleware::MonitoringMiddleware::<RED>::new(
+            config.stage_name.clone(),
+            config.stage_id,
+        ))
+    }
+    
+    fn name(&self) -> &str {
+        "RED::monitoring"
+    }
+}
+
 impl RED {
-    /// Create monitoring middleware for this taxonomy
-    pub fn monitoring() -> Box<dyn crate::middleware::Middleware> {
-        Box::new(crate::middleware::MonitoringMiddleware::<Self>::new(""))
+    /// Create monitoring middleware factory for this taxonomy
+    pub fn monitoring() -> Box<dyn MiddlewareFactory> {
+        Box::new(RedMonitoringFactory)
     }
 }
 
@@ -114,7 +134,7 @@ impl Taxonomy for RED {
     
     type Metrics = REDMetrics;
     
-    fn create_metrics(stage_name: &str) -> Self::Metrics {
-        REDMetrics::new(stage_name)
+    fn create_metrics(stage_name: &str, stage_id: StageId) -> Self::Metrics {
+        REDMetrics::new(stage_name, stage_id)
     }
 }

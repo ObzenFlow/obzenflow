@@ -99,7 +99,6 @@
 //!
 //! ```rust
 //! use obzenflow_adapters::middleware::{TransformHandlerExt, LoggingMiddleware};
-//! use obzenflow_adapters::monitoring::taxonomies::red::RED;
 //! use obzenflow_runtime_services::control_plane::stages::handler_traits::TransformHandler;
 //! use obzenflow_core::event::chain_event::ChainEvent;
 //!
@@ -111,10 +110,9 @@
 //!     }
 //! }
 //!
-//! // Apply multiple middleware
+//! // Apply middleware directly (monitoring middleware is created via factories in descriptors)
 //! let handler_with_middleware = MyTransform
 //!     .middleware()
-//!     .with(RED::monitoring())
 //!     .with(LoggingMiddleware::new())
 //!     .build();
 //! ```
@@ -147,18 +145,18 @@
 //! You can also create custom middleware by implementing the `Middleware` trait:
 //!
 //! ```rust
-//! use obzenflow_adapters::middleware::{Middleware, MiddlewareAction};
+//! use obzenflow_adapters::middleware::{Middleware, MiddlewareAction, MiddlewareContext};
 //! use obzenflow_core::event::chain_event::ChainEvent;
 //! 
 //! struct MyCustomMiddleware;
 //! 
 //! impl Middleware for MyCustomMiddleware {
-//!     fn pre_handle(&self, event: &ChainEvent) -> MiddlewareAction {
+//!     fn pre_handle(&self, event: &ChainEvent, _ctx: &mut MiddlewareContext) -> MiddlewareAction {
 //!         println!("Processing event: {:?}", event.id);
 //!         MiddlewareAction::Continue
 //!     }
 //!     
-//!     fn post_handle(&self, event: &ChainEvent, results: &mut Vec<ChainEvent>) {
+//!     fn post_handle(&self, event: &ChainEvent, results: &[ChainEvent], _ctx: &mut MiddlewareContext) {
 //!         println!("Produced {} results", results.len());
 //!     }
 //! }
@@ -173,8 +171,16 @@ mod sink_middleware;
 mod function;
 pub mod monitoring;
 pub mod common;
+pub mod context;
+pub mod circuit_breaker;
+pub mod retry;
 pub mod flow_boundary;
+pub mod sli;
 mod logging_middleware;
+
+// Tests
+#[cfg(test)]
+mod factory_tests;
 // Note: The monitoring! macro has been removed as it's not used.
 // Use the taxonomy-specific monitoring() methods instead:
 // - RED::monitoring()
@@ -194,16 +200,63 @@ pub use sink_middleware::{MiddlewareSink, SinkHandlerExt, SinkMiddlewareBuilder}
 // Common utilities
 pub use function::{FnMiddleware, middleware_fn};
 pub use monitoring::{MetricRecorder, MonitoringMiddleware};
-pub use common::{rate_limit, timeout, logging, retry};
+pub use common::{rate_limit, timeout, logging};
+pub use context::{MiddlewareContext, MiddlewareEvent};
+pub use circuit_breaker::{CircuitBreakerMiddleware, CircuitBreakerBuilder, circuit_breaker};
+pub use retry::{RetryMiddleware, RetryBuilder, RetryStrategy};
 pub use flow_boundary::{FlowBoundaryTracker, BoundaryTrackingMiddleware, BoundaryConfig, FlowMetrics};
 pub use logging_middleware::LoggingMiddleware;
+pub use sli::{CircuitBreakerSLI, RetrySLI, LatencySLI, SLOTracker, SLODefinition, AlertConfig};
 // Monitoring is provided via taxonomy-specific methods
 
 use obzenflow_core::event::chain_event::ChainEvent;
-use std::error::Error;
+use obzenflow_runtime_services::control_plane::stages::supervisors::config::StageConfig;
 
-/// Type alias for errors returned by steps
-pub type StepError = Box<dyn Error + Send + Sync>;
+/// Factory that creates middleware with stage context.
+/// 
+/// This trait solves the stage context injection problem by deferring middleware
+/// creation until the supervisor is built with full context available.
+/// 
+/// ## Example Implementation
+/// 
+/// ```rust
+/// use obzenflow_adapters::middleware::{MiddlewareFactory, Middleware, MonitoringMiddleware};
+/// use obzenflow_adapters::monitoring::taxonomies::red::RED;
+/// use obzenflow_runtime_services::control_plane::stages::supervisors::config::StageConfig;
+/// 
+/// struct RedMonitoringFactory;
+/// 
+/// impl MiddlewareFactory for RedMonitoringFactory {
+///     fn create(&self, config: &StageConfig) -> Box<dyn Middleware> {
+///         Box::new(MonitoringMiddleware::<RED>::new(
+///             config.stage_name.clone(),
+///             config.stage_id,
+///         ))
+///     }
+///     
+///     fn name(&self) -> &str {
+///         "RED::monitoring"
+///     }
+/// }
+/// ```
+pub trait MiddlewareFactory: Send + Sync {
+    /// Create middleware instance with full stage context
+    fn create(&self, config: &StageConfig) -> Box<dyn Middleware>;
+    
+    /// Get a descriptive name for this middleware type
+    fn name(&self) -> &str;
+}
+
+// Implementation for Box<dyn MiddlewareFactory> to allow boxed factories
+impl<F: MiddlewareFactory + ?Sized> MiddlewareFactory for Box<F> {
+    fn create(&self, config: &StageConfig) -> Box<dyn Middleware> {
+        (**self).create(config)
+    }
+    
+    fn name(&self) -> &str {
+        (**self).name()
+    }
+}
 
 /// Trait for composable middleware that wraps Step behavior.
 /// 
@@ -215,18 +268,18 @@ pub type StepError = Box<dyn Error + Send + Sync>;
 /// ## Example Implementation
 /// 
 /// ```rust
-/// use obzenflow_adapters::middleware::{Middleware, MiddlewareAction};
+/// use obzenflow_adapters::middleware::{Middleware, MiddlewareAction, MiddlewareContext};
 /// use obzenflow_core::ChainEvent;
 /// 
 /// struct LoggingMiddleware;
 /// 
 /// impl Middleware for LoggingMiddleware {
-///     fn pre_handle(&self, event: &ChainEvent) -> MiddlewareAction {
+///     fn pre_handle(&self, event: &ChainEvent, _ctx: &mut MiddlewareContext) -> MiddlewareAction {
 ///         println!("Processing event: {:?}", event.id);
 ///         MiddlewareAction::Continue
 ///     }
 ///     
-///     fn post_handle(&self, event: &ChainEvent, results: &mut Vec<ChainEvent>) {
+///     fn post_handle(&self, event: &ChainEvent, results: &[ChainEvent], _ctx: &mut MiddlewareContext) {
 ///         println!("Produced {} results", results.len());
 ///     }
 /// }
@@ -239,17 +292,19 @@ pub trait Middleware: Send + Sync {
     /// - Add caching (return `Skip` with cached results)
     /// - Validate events (return `Abort` for invalid)
     /// - Record metrics (return `Continue` after recording)
-    fn pre_handle(&self, _event: &ChainEvent) -> MiddlewareAction {
+    /// - Emit middleware events for observability
+    fn pre_handle(&self, _event: &ChainEvent, _ctx: &mut MiddlewareContext) -> MiddlewareAction {
         MiddlewareAction::Continue
     }
 
     /// Called after the inner step successfully processes the event.
     /// 
     /// Use this to:
-    /// - Transform or enrich results
+    /// - Observe results (but not modify them)
     /// - Record success metrics
     /// - Perform side effects like logging
-    fn post_handle(&self, _event: &ChainEvent, _results: &mut Vec<ChainEvent>) {
+    /// - Emit middleware events based on outcomes
+    fn post_handle(&self, _event: &ChainEvent, _results: &[ChainEvent], _ctx: &mut MiddlewareContext) {
         // Default: no-op
     }
 
@@ -259,7 +314,7 @@ pub trait Middleware: Send + Sync {
     /// - Implement retry logic (return `Retry`)
     /// - Convert errors to events (return `Recover`)
     /// - Let errors bubble up (return `Propagate`)
-    fn on_error(&self, _event: &ChainEvent, _error: &StepError) -> ErrorAction {
+    fn on_error(&self, _event: &ChainEvent, _ctx: &mut MiddlewareContext) -> ErrorAction {
         ErrorAction::Propagate
     }
 }
@@ -288,16 +343,16 @@ pub enum ErrorAction {
 
 // Implementation for Box<dyn Middleware> to allow boxed middleware
 impl<M: Middleware + ?Sized> Middleware for Box<M> {
-    fn pre_handle(&self, event: &ChainEvent) -> MiddlewareAction {
-        (**self).pre_handle(event)
+    fn pre_handle(&self, event: &ChainEvent, ctx: &mut MiddlewareContext) -> MiddlewareAction {
+        (**self).pre_handle(event, ctx)
     }
 
-    fn post_handle(&self, event: &ChainEvent, results: &mut Vec<ChainEvent>) {
-        (**self).post_handle(event, results)
+    fn post_handle(&self, event: &ChainEvent, results: &[ChainEvent], ctx: &mut MiddlewareContext) {
+        (**self).post_handle(event, results, ctx)
     }
 
-    fn on_error(&self, event: &ChainEvent, error: &StepError) -> ErrorAction {
-        (**self).on_error(event, error)
+    fn on_error(&self, event: &ChainEvent, ctx: &mut MiddlewareContext) -> ErrorAction {
+        (**self).on_error(event, ctx)
     }
 }
 
