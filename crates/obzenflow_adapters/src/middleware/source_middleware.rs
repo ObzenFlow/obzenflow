@@ -4,7 +4,7 @@
 //! and InfiniteSourceHandler implementations.
 
 use obzenflow_core::{ChainEvent, EventId, WriterId};
-use obzenflow_runtime_services::control_plane::stages::handler_traits::{
+use obzenflow_runtime_services::stages::common::handlers::{
     FiniteSourceHandler, InfiniteSourceHandler
 };
 use super::{Middleware, MiddlewareAction, MiddlewareContext};

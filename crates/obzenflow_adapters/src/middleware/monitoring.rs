@@ -26,7 +26,7 @@
 //! ```rust
 //! use obzenflow_adapters::middleware::{MonitoringMiddleware, TransformHandlerExt};
 //! use obzenflow_adapters::monitoring::taxonomies::red::RED;
-//! use obzenflow_runtime_services::control_plane::stages::handler_traits::TransformHandler;
+//! use obzenflow_runtime_services::stages::common::handlers::TransformHandler;
 //! use obzenflow_core::event::chain_event::ChainEvent;
 //! use obzenflow_topology_services::stages::StageId;
 //! 

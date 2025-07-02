@@ -4,7 +4,7 @@
 //! with special focus on error handling and retry logic.
 
 use obzenflow_core::{ChainEvent, Result};
-use obzenflow_runtime_services::control_plane::stages::handler_traits::SinkHandler;
+use obzenflow_runtime_services::stages::common::handlers::SinkHandler;
 use super::{Middleware, MiddlewareAction, ErrorAction, MiddlewareContext};
 use async_trait::async_trait;
 

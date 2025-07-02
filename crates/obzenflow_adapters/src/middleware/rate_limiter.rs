@@ -8,10 +8,8 @@ use crate::middleware::{
     ControlStrategyRequirement, ErrorAction, MiddlewareSafety,
 };
 use obzenflow_core::event::chain_event::ChainEvent;
-use obzenflow_runtime_services::control_plane::stages::supervisors::{
-    config::StageConfig,
-    stage_handle::StageType,
-};
+use obzenflow_runtime_services::pipeline::config::StageConfig;
+use obzenflow_runtime_services::stages::common::stage_handle::StageType;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use std::collections::VecDeque;

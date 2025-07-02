@@ -99,7 +99,7 @@
 //!
 //! ```rust
 //! use obzenflow_adapters::middleware::{TransformHandlerExt, LoggingMiddleware};
-//! use obzenflow_runtime_services::control_plane::stages::handler_traits::TransformHandler;
+//! use obzenflow_runtime_services::stages::common::handlers::TransformHandler;
 //! use obzenflow_core::event::chain_event::ChainEvent;
 //!
 //! struct MyTransform;
@@ -217,8 +217,8 @@ pub use rate_limiter::{RateLimiterMiddleware, RateLimiterFactory};
 // Monitoring is provided via taxonomy-specific methods
 
 use obzenflow_core::event::chain_event::ChainEvent;
-use obzenflow_runtime_services::control_plane::stages::supervisors::config::StageConfig;
-use obzenflow_runtime_services::control_plane::stages::supervisors::stage_handle::StageType;
+use obzenflow_runtime_services::pipeline::config::StageConfig;
+use obzenflow_runtime_services::stages::common::stage_handle::StageType;
 
 /// Safety level of middleware
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -241,14 +241,14 @@ pub enum MiddlewareSafety {
 /// ```rust
 /// use obzenflow_adapters::middleware::{MiddlewareFactory, Middleware, MonitoringMiddleware};
 /// use obzenflow_adapters::monitoring::taxonomies::red::RED;
-/// use obzenflow_runtime_services::control_plane::stages::supervisors::config::StageConfig;
+/// use obzenflow_runtime_services::pipeline::config::StageConfig;
 /// 
 /// struct RedMonitoringFactory;
 /// 
 /// impl MiddlewareFactory for RedMonitoringFactory {
 ///     fn create(&self, config: &StageConfig) -> Box<dyn Middleware> {
 ///         Box::new(MonitoringMiddleware::<RED>::new(
-///             config.stage_name.clone(),
+///             config.name.clone(),
 ///             config.stage_id,
 ///         ))
 ///     }

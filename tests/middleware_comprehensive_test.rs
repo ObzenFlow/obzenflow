@@ -17,10 +17,10 @@ use obzenflow_adapters::monitoring::taxonomies::red::RED;
 use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::journal::writer_id::WriterId;
 use obzenflow_core::Result;
-use obzenflow_runtime_services::control_plane::stages::handler_traits::{
+use obzenflow_runtime_services::stages::common::handlers::{
     TransformHandler, SinkHandler, FiniteSourceHandler,
 };
-use obzenflow_runtime_services::control_plane::stages::supervisors::config::StageConfig;
+use obzenflow_runtime_services::pipeline::config::StageConfig;
 use obzenflow_topology_services::stages::StageId;
 use serde_json::json;
 use std::sync::{Arc, Mutex};

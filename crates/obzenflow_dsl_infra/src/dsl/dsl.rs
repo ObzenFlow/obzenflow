@@ -87,9 +87,10 @@ macro_rules! build_typed_flow {
             .map_err(|e| format!("Failed to build topology: {:?}", e))?);
         
         // Create services
-        use obzenflow_runtime_services::data_plane::journal_subscription::ReactiveJournal;
+        use obzenflow_runtime_services::event_flow::reactive_journal::ReactiveJournal;
         use obzenflow_runtime_services::message_bus::FsmMessageBus;
-        use obzenflow_runtime_services::control_plane::stages::supervisors::StageConfig;
+        use obzenflow_runtime_services::pipeline::config::StageConfig;
+        use obzenflow_runtime_services::stages::common::resources::StageResources;
         
         let reactive_journal = Arc::new(ReactiveJournal::new(journal.clone()));
         let message_bus = Arc::new(FsmMessageBus::new());
@@ -102,13 +103,16 @@ macro_rules! build_typed_flow {
                 
                 let config = StageConfig {
                     stage_id: id,
-                    stage_name: descriptor.name().to_string(),
-                    upstream_stages,
-                    journal: reactive_journal.clone(),
-                    message_bus: message_bus.clone(),
+                    name: descriptor.name().to_string(),
                 };
                 
-                let supervisor = descriptor.create_supervisor(config);
+                let resources = StageResources {
+                    journal: reactive_journal.clone(),
+                    message_bus: message_bus.clone(),
+                    upstream_stages,
+                };
+                
+                let supervisor = descriptor.create_supervisor(config, resources);
                 stages.push(supervisor);
             }
         }

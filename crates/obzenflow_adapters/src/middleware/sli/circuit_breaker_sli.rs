@@ -1,6 +1,6 @@
 use crate::middleware::{Middleware, MiddlewareFactory, MiddlewareContext, MiddlewareAction};
 use obzenflow_core::ChainEvent;
-use obzenflow_runtime_services::control_plane::stages::supervisors::config::StageConfig;
+use obzenflow_runtime_services::pipeline::config::StageConfig;
 use serde_json::json;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -193,7 +193,7 @@ pub struct CircuitBreakerSLIFactory;
 
 impl MiddlewareFactory for CircuitBreakerSLIFactory {
     fn create(&self, config: &StageConfig) -> Box<dyn Middleware> {
-        Box::new(CircuitBreakerSLI::new(config.stage_name.clone()))
+        Box::new(CircuitBreakerSLI::new(config.name.clone()))
     }
     
     fn name(&self) -> &str {

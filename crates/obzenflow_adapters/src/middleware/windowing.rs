@@ -9,10 +9,8 @@ use crate::middleware::{
 };
 use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::event_id::EventId;
-use obzenflow_runtime_services::control_plane::stages::supervisors::{
-    config::StageConfig,
-    stage_handle::StageType,
-};
+use obzenflow_runtime_services::pipeline::config::StageConfig;
+use obzenflow_runtime_services::stages::common::stage_handle::StageType;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 use serde_json::json;

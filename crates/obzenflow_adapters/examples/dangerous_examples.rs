@@ -8,10 +8,8 @@ use obzenflow_adapters::middleware::{
     MiddlewareContext, ErrorAction, ControlStrategyRequirement, BackoffConfig,
 };
 use obzenflow_core::ChainEvent;
-use obzenflow_runtime_services::control_plane::stages::supervisors::{
-    config::StageConfig,
-    stage_handle::StageType,
-};
+use obzenflow_runtime_services::pipeline::config::StageConfig;
+use obzenflow_runtime_services::stages::common::stage_handle::StageType;
 
 /// Middleware that skips all control events - EXTREMELY DANGEROUS for sinks!
 pub struct SkipControlEventsMiddleware;

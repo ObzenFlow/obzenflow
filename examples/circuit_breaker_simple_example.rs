@@ -10,7 +10,7 @@
 //! allowing handlers to focus on their core logic.
 
 use obzenflow_dsl_infra::{flow, source, transform, sink};
-use obzenflow_runtime_services::control_plane::stages::handler_traits::{
+use obzenflow_runtime_services::stages::common::handlers::{
     FiniteSourceHandler, TransformHandler, SinkHandler
 };
 use obzenflow_infra::journal::memory::MemoryJournal;

@@ -3,21 +3,25 @@
 //! This is the core of the let bindings approach - each stage macro creates a
 //! descriptor that encapsulates both the handler and how to create its supervisor.
 
-use obzenflow_runtime_services::control_plane::stages::{
-    BoxedStageHandle,
-    supervisors::{
-        StageConfig, FiniteSourceSupervisor, InfiniteSourceSupervisor,
-        TransformSupervisor, SinkSupervisor,
-        stage_handle::StageType,
+use obzenflow_runtime_services::{
+    stages::{
+        common::{
+            stage_handle::{BoxedStageHandle, StageType},
+            handlers::{
+                FiniteSourceHandler, InfiniteSourceHandler, TransformHandler, SinkHandler
+            },
+            control_strategies::{
+                ControlEventStrategy, ControlEventAction, ProcessingContext,
+                JonestownStrategy, RetryStrategy, WindowingStrategy,
+                CompositeStrategy, BackoffStrategy,
+            },
+            resources::StageResources,
+        },
+        source::{FiniteSourceSupervisor, InfiniteSourceSupervisor},
+        transform::TransformSupervisor,
+        sink::SinkSupervisor,
     },
-    handler_traits::{
-        FiniteSourceHandler, InfiniteSourceHandler, TransformHandler, SinkHandler
-    },
-    control_strategy::{
-        ControlEventStrategy, ControlEventAction, ProcessingContext,
-        JonestownStrategy, RetryStrategy, WindowingStrategy,
-        CompositeStrategy, BackoffStrategy,
-    },
+    pipeline::config::StageConfig,
 };
 use obzenflow_adapters::middleware::{
     Middleware, MiddlewareFactory, FiniteSourceHandlerExt, InfiniteSourceHandlerExt,
@@ -113,7 +117,7 @@ pub trait StageDescriptor: Send + Sync {
     fn name(&self) -> &str;
     
     /// Create the supervisor for this stage
-    fn create_supervisor(self: Box<Self>, config: StageConfig) -> BoxedStageHandle;
+    fn create_supervisor(self: Box<Self>, config: StageConfig, resources: StageResources) -> BoxedStageHandle;
     
     /// Get a debug representation
     fn debug_info(&self) -> String {
@@ -133,12 +137,12 @@ impl<H: FiniteSourceHandler + 'static> StageDescriptor for FiniteSourceDescripto
         &self.name
     }
     
-    fn create_supervisor(self: Box<Self>, config: StageConfig) -> BoxedStageHandle {
+    fn create_supervisor(self: Box<Self>, config: StageConfig, resources: StageResources) -> BoxedStageHandle {
         let writer_id = WriterId::new();
         
         // Create middleware instances from factories
         if self.middleware.is_empty() {
-            let supervisor = FiniteSourceSupervisor::new(self.handler, config);
+            let supervisor = FiniteSourceSupervisor::new(self.handler, config, resources);
             Box::new(supervisor) as BoxedStageHandle
         } else {
             let middleware_instances: Vec<Box<dyn Middleware>> = self.middleware
@@ -151,7 +155,7 @@ impl<H: FiniteSourceHandler + 'static> StageDescriptor for FiniteSourceDescripto
                 builder = builder.with(mw);
             }
             let handler_with_middleware = builder.build();
-            let supervisor = FiniteSourceSupervisor::new(handler_with_middleware, config);
+            let supervisor = FiniteSourceSupervisor::new(handler_with_middleware, config, resources);
             Box::new(supervisor) as BoxedStageHandle
         }
     }
@@ -169,12 +173,12 @@ impl<H: InfiniteSourceHandler + 'static> StageDescriptor for InfiniteSourceDescr
         &self.name
     }
     
-    fn create_supervisor(self: Box<Self>, config: StageConfig) -> BoxedStageHandle {
+    fn create_supervisor(self: Box<Self>, config: StageConfig, resources: StageResources) -> BoxedStageHandle {
         let writer_id = WriterId::new();
         
         // Create middleware instances from factories
         if self.middleware.is_empty() {
-            let supervisor = InfiniteSourceSupervisor::new(self.handler, config);
+            let supervisor = InfiniteSourceSupervisor::new(self.handler, config, resources);
             Box::new(supervisor) as BoxedStageHandle
         } else {
             let middleware_instances: Vec<Box<dyn Middleware>> = self.middleware
@@ -187,7 +191,7 @@ impl<H: InfiniteSourceHandler + 'static> StageDescriptor for InfiniteSourceDescr
                 builder = builder.with(mw);
             }
             let handler_with_middleware = builder.build();
-            let supervisor = InfiniteSourceSupervisor::new(handler_with_middleware, config);
+            let supervisor = InfiniteSourceSupervisor::new(handler_with_middleware, config, resources);
             Box::new(supervisor) as BoxedStageHandle
         }
     }
@@ -205,7 +209,7 @@ impl<H: TransformHandler + 'static> StageDescriptor for TransformDescriptor<H> {
         &self.name
     }
     
-    fn create_supervisor(self: Box<Self>, config: StageConfig) -> BoxedStageHandle {
+    fn create_supervisor(self: Box<Self>, config: StageConfig, resources: StageResources) -> BoxedStageHandle {
         // Validate middleware safety and collect strategy requirements
         let mut strategy_requirements = Vec::new();
         
@@ -241,6 +245,7 @@ impl<H: TransformHandler + 'static> StageDescriptor for TransformDescriptor<H> {
             let supervisor = TransformSupervisor::with_strategy(
                 self.handler,
                 config,
+                resources,
                 control_strategy,
             );
             Box::new(supervisor) as BoxedStageHandle
@@ -258,6 +263,7 @@ impl<H: TransformHandler + 'static> StageDescriptor for TransformDescriptor<H> {
             let supervisor = TransformSupervisor::with_strategy(
                 handler_with_middleware,
                 config,
+                resources,
                 control_strategy,
             );
             Box::new(supervisor) as BoxedStageHandle
@@ -277,7 +283,7 @@ impl<H: SinkHandler + 'static> StageDescriptor for SinkDescriptor<H> {
         &self.name
     }
     
-    fn create_supervisor(self: Box<Self>, config: StageConfig) -> BoxedStageHandle {
+    fn create_supervisor(self: Box<Self>, config: StageConfig, resources: StageResources) -> BoxedStageHandle {
         // Validate middleware safety and collect strategy requirements
         let mut strategy_requirements = Vec::new();
         
@@ -313,6 +319,7 @@ impl<H: SinkHandler + 'static> StageDescriptor for SinkDescriptor<H> {
             let supervisor = SinkSupervisor::with_strategy(
                 self.handler,
                 config,
+                resources,
                 control_strategy,
             );
             Box::new(supervisor) as BoxedStageHandle
@@ -330,6 +337,7 @@ impl<H: SinkHandler + 'static> StageDescriptor for SinkDescriptor<H> {
             let supervisor = SinkSupervisor::with_strategy(
                 handler_with_middleware,
                 config,
+                resources,
                 control_strategy,
             );
             Box::new(supervisor) as BoxedStageHandle

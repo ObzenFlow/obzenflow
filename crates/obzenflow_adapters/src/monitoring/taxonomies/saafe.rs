@@ -3,7 +3,7 @@ use crate::monitoring::metrics::{
     SaturationMetric, AmendmentMetric, AnomalyMetric, FailureMetric, ErrorMetric
 };
 use crate::middleware::{Middleware, MiddlewareFactory};
-use obzenflow_runtime_services::control_plane::stages::supervisors::config::StageConfig;
+use obzenflow_runtime_services::pipeline::config::StageConfig;
 use obzenflow_topology_services::stages::StageId;
 use tokio::sync::broadcast;
 use std::sync::Arc;
@@ -126,7 +126,7 @@ pub struct SaafeMonitoringFactory;
 impl MiddlewareFactory for SaafeMonitoringFactory {
     fn create(&self, config: &StageConfig) -> Box<dyn Middleware> {
         Box::new(crate::middleware::MonitoringMiddleware::<SAAFE>::new(
-            config.stage_name.clone(),
+            config.name.clone(),
             config.stage_id,
         ))
     }

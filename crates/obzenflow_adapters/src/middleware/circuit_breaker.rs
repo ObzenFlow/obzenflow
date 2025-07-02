@@ -6,7 +6,7 @@
 
 use super::{Middleware, MiddlewareAction, MiddlewareContext, MiddlewareFactory};
 use obzenflow_core::event::chain_event::ChainEvent;
-use obzenflow_runtime_services::control_plane::stages::supervisors::config::StageConfig;
+use obzenflow_runtime_services::pipeline::config::StageConfig;
 use serde_json::json;
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};

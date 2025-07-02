@@ -158,7 +158,7 @@ mod tests {
     #[test]
     fn test_logging_middleware_with_sink() {
         use crate::middleware::SinkHandlerExt;
-        use obzenflow_runtime_services::control_plane::stages::handler_traits::SinkHandler;
+        use obzenflow_runtime_services::stages::common::handlers::SinkHandler;
         use obzenflow_core::Result;
         use async_trait::async_trait;
         

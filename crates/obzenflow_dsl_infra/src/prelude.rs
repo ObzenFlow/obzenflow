@@ -7,7 +7,7 @@ pub use obzenflow_core::event::chain_event::ChainEvent;
 pub use obzenflow_core::journal::writer_id::WriterId;
 
 // Supervision
-pub use obzenflow_runtime_services::supervisor::{PipelineSupervisor, FlowHandle};
+pub use obzenflow_runtime_services::pipeline::supervisor::{PipelineSupervisor, FlowHandle};
 
 // Core journal interface
 pub use obzenflow_core::journal::journal::Journal;
@@ -24,15 +24,15 @@ pub use obzenflow_adapters::middleware::{
 };
 
 // Handler traits
-pub use obzenflow_runtime_services::control_plane::stages::handler_traits::{
+pub use obzenflow_runtime_services::stages::common::handlers::{
     FiniteSourceHandler, InfiniteSourceHandler, TransformHandler, SinkHandler
 };
 
 // Supervisor config
-pub use obzenflow_runtime_services::control_plane::stages::supervisors::StageConfig;
+pub use obzenflow_runtime_services::pipeline::config::StageConfig;
 
 // Monitoring
 pub use obzenflow_adapters::monitoring::{Taxonomy, TaxonomyMetrics};
 
 // Pipeline
-pub use obzenflow_runtime_services::control_plane::pipeline::Pipeline;
+pub use obzenflow_runtime_services::pipeline::Pipeline;

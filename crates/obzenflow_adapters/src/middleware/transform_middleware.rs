@@ -4,7 +4,7 @@
 //! with middleware for cross-cutting concerns like logging, monitoring, and retry logic.
 
 use obzenflow_core::{ChainEvent, Result};
-use obzenflow_runtime_services::control_plane::stages::handler_traits::TransformHandler;
+use obzenflow_runtime_services::stages::common::handlers::TransformHandler;
 use super::{Middleware, MiddlewareAction, MiddlewareContext};
 use async_trait::async_trait;
 

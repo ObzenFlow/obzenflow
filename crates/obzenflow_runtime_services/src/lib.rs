@@ -3,51 +3,46 @@
 //! This layer contains business logic related to flow execution, runtime coordination,
 //! and execution management.
 
-// Top-level supervision and coordination
-pub mod supervisor;
-pub mod message_bus;
+// Core modules
 pub mod errors;
+pub mod message_bus;
 
-// Control plane - state management
-pub mod control_plane {
-    pub mod pipeline;
-    pub mod stages;
-}
+// Major subsystems
+pub mod pipeline;
+pub mod stages;
+pub mod event_flow;
+pub mod factory;
 
-// Data plane - event flow and routing
-pub mod data_plane {
-    pub mod journal_subscription;
-    pub mod stage_router;
-    pub mod stage_semantics;
-    pub mod event_enrichment;
-}
 
 // Re-export commonly used types
 pub mod prelude {
     // Errors
     pub use crate::errors::{FlowError, MessageBusError, PipelineSupervisorError, RuntimeResult};
     
-    // Supervision
-    pub use crate::supervisor::{PipelineSupervisor, FlowHandle};
-    pub use crate::control_plane::pipeline::{PipelineState, PipelineEvent};
+    // Pipeline
+    pub use crate::pipeline::{
+        PipelineSupervisor, Pipeline,
+        PipelineState, PipelineEvent, PipelineAction,
+        PipelineStageConfig, ObserverConfig,
+    };
+    
+    // Message bus
     pub use crate::message_bus::{FsmMessageBus, StageCommand};
     
-    // Control plane - handler traits (from stages)
-    pub use crate::control_plane::stages::handler_traits::{
-        ResourceManaged, HealthStatus, ResourceInfo,
+    // Handlers
+    pub use crate::stages::{
+        FiniteSourceHandler, InfiniteSourceHandler, TransformHandler, SinkHandler,
+        ObserverHandler, StatefulHandler, ResourceManaged,
     };
-
-    // Control plane - stage
-    pub use crate::control_plane::stages::{
-        StageSupervisor, StageConfig, 
-        StageEvent, StageHandle, BoxedStageHandle,
-        FiniteSourceSupervisor, TransformSupervisor,
-    };
-
-    // Data plane
-    pub use crate::data_plane::{
-        journal_subscription::{ReactiveJournal, JournalSubscription, SubscriptionFilter},
-        stage_semantics::StageSemantics,
-        stage_router::StageRouter,
+    
+    // Supervisors
+    pub use crate::stages::source::{FiniteSourceSupervisor, InfiniteSourceSupervisor};
+    pub use crate::stages::transform::TransformSupervisor;
+    pub use crate::stages::sink::SinkSupervisor;
+    
+    // Event flow
+    pub use crate::event_flow::{
+        JournalSubscription, SubscriptionFilter,
+        EventEnricher, BoundaryType, StageSemantics,
     };
 }

@@ -67,7 +67,7 @@ where
 /// 
 /// ```rust
 /// # use obzenflow_adapters::middleware::{middleware_fn, MiddlewareAction, TransformHandlerExt};
-/// # use obzenflow_runtime_services::control_plane::stages::handler_traits::TransformHandler;
+/// # use obzenflow_runtime_services::stages::common::handlers::TransformHandler;
 /// # use obzenflow_core::ChainEvent;
 /// # use async_trait::async_trait;
 /// #

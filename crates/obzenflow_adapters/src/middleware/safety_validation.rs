@@ -4,7 +4,7 @@
 //! constructing pipelines, issuing warnings for dangerous combinations.
 
 use crate::middleware::{MiddlewareFactory, MiddlewareSafety};
-use obzenflow_runtime_services::control_plane::stages::supervisors::stage_handle::StageType;
+use obzenflow_runtime_services::stages::common::stage_handle::StageType;
 use tracing::{warn, error};
 
 /// Validates middleware safety for a given stage type
@@ -187,7 +187,7 @@ mod tests {
         Middleware, MiddlewareFactory, MiddlewareAction, MiddlewareContext,
         ControlStrategyRequirement, BackoffConfig
     };
-    use obzenflow_runtime_services::control_plane::stages::supervisors::StageConfig;
+    use obzenflow_runtime_services::pipeline::config::StageConfig;
     use obzenflow_core::ChainEvent;
     use std::time::Duration;
     

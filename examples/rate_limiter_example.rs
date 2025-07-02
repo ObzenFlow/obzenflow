@@ -6,7 +6,7 @@
 use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::event_id::EventId;
 use obzenflow_core::journal::writer_id::WriterId;
-use obzenflow_runtime_services::control_plane::stages::handler_traits::TransformHandler;
+use obzenflow_runtime_services::stages::common::handlers::TransformHandler;
 use obzenflow_adapters::middleware::{common, RateLimiterFactory};
 use std::time::Duration;
 use serde_json::json;

@@ -9,7 +9,7 @@
 //! Run with: cargo run --example payment_gateway_resilience_example
 
 use obzenflow_dsl_infra::{flow, infinite_source, transform, sink};
-use obzenflow_runtime_services::control_plane::stages::handler_traits::{
+use obzenflow_runtime_services::stages::common::handlers::{
     InfiniteSourceHandler, TransformHandler, SinkHandler
 };
 use obzenflow_infra::journal::MemoryJournal;

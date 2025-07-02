@@ -6,9 +6,8 @@
 use super::{Middleware, MiddlewareAction, MiddlewareFactory, middleware_fn};
 use super::windowing::WindowingMiddlewareFactory;
 use super::rate_limiter::{rate_limit as create_rate_limiter};
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
-use std::collections::VecDeque;
+use std::sync::Arc;
+use std::time::Duration;
 use serde_json;
 use obzenflow_core::event::chain_event::ChainEvent;
 

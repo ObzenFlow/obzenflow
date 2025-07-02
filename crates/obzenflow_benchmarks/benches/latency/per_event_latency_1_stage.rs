@@ -7,7 +7,7 @@
 
 use criterion::{criterion_group, criterion_main, Criterion};
 use obzenflow_dsl_infra::{flow, source, sink};
-use obzenflow_runtime_services::control_plane::stages::handler_traits::{
+use obzenflow_runtime_services::stages::common::handlers::{
     FiniteSourceHandler, SinkHandler
 };
 use obzenflow_infra::journal::DiskJournal;

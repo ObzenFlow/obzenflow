@@ -1,6 +1,6 @@
 use crate::middleware::{Middleware, MiddlewareFactory, MiddlewareContext, MiddlewareAction};
 use obzenflow_core::ChainEvent;
-use obzenflow_runtime_services::control_plane::stages::supervisors::config::StageConfig;
+use obzenflow_runtime_services::pipeline::config::StageConfig;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::Arc;
@@ -341,7 +341,7 @@ impl SLOTrackerFactory {
 impl MiddlewareFactory for SLOTrackerFactory {
     fn create(&self, config: &StageConfig) -> Box<dyn Middleware> {
         Box::new(SLOTracker::with_objectives(
-            config.stage_name.clone(),
+            config.name.clone(),
             self.objectives.clone(),
         ))
     }
