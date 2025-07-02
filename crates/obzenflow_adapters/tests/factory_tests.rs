@@ -2,8 +2,8 @@
 
 #[cfg(test)]
 mod tests {
-    use crate::middleware::MiddlewareFactory;
-    use crate::monitoring::taxonomies::{red::RED, use_taxonomy::USE, golden_signals::GoldenSignals, saafe::SAAFE};
+    use obzenflow_adapters::middleware::MiddlewareFactory;
+    use obzenflow_adapters::monitoring::taxonomies::{red::RED, use_taxonomy::USE, golden_signals::GoldenSignals, saafe::SAAFE};
 
     #[test]
     fn test_red_factory_name() {

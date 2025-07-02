@@ -3,7 +3,7 @@
 //! These middleware are intentionally dangerous and should only be used with
 //! full understanding of their implications.
 
-use crate::middleware::{
+use obzenflow_adapters::middleware::{
     Middleware, MiddlewareFactory, MiddlewareAction, MiddlewareSafety,
     MiddlewareContext, ErrorAction, ControlStrategyRequirement, BackoffConfig,
 };
@@ -207,4 +207,26 @@ mod tests {
         assert!(!infinite_retry.supported_stage_types().contains(&StageType::FiniteSource));
         assert!(!infinite_retry.supported_stage_types().contains(&StageType::InfiniteSource));
     }
+}
+
+fn main() {
+    println!("Dangerous middleware examples - these are for demonstration only!");
+    println!("\nChecking safety levels of dangerous middleware:");
+    
+    let skip_factory = SkipControlEventsFactory;
+    println!("- SkipControlEventsFactory: {:?}", skip_factory.safety_level());
+    println!("  Supported stages: {:?}", skip_factory.supported_stage_types());
+    
+    let unbounded_factory = UnboundedBatchingFactory::new(100);
+    println!("- UnboundedBatchingFactory (no timeout): {:?}", unbounded_factory.safety_level());
+    
+    let bounded_factory = UnboundedBatchingFactory::new(100)
+        .with_timeout(std::time::Duration::from_secs(1));
+    println!("- UnboundedBatchingFactory (with timeout): {:?}", bounded_factory.safety_level());
+    
+    let infinite_retry = InfiniteRetryFactory;
+    println!("- InfiniteRetryFactory: {:?}", infinite_retry.safety_level());
+    println!("  Supported stages: {:?}", infinite_retry.supported_stage_types());
+    
+    println!("\nWARNING: These middleware examples are dangerous and should not be used in production!");
 }

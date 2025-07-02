@@ -182,13 +182,8 @@ mod logging_middleware;
 mod control_requirements;
 mod safety_validation;
 
-// Dangerous middleware examples (for documentation/testing)
-#[cfg(test)]
-pub mod dangerous_examples;
-
-// Tests
-#[cfg(test)]
-mod factory_tests;
+// Dangerous middleware examples moved to examples/dangerous_examples.rs
+// Factory tests moved to tests/factory_tests.rs
 // Note: The monitoring! macro has been removed as it's not used.
 // Use the taxonomy-specific monitoring() methods instead:
 // - RED::monitoring()

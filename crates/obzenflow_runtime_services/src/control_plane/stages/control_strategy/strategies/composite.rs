@@ -1,6 +1,6 @@
 //! Composite strategy that combines multiple control event strategies
 
-use super::{ControlEventStrategy, ControlEventAction, ProcessingContext};
+use crate::control_plane::stages::control_strategy::{ControlEventStrategy, ControlEventAction, ProcessingContext};
 use obzenflow_core::event::event_envelope::EventEnvelope;
 
 /// Composite strategy that stacks multiple strategies

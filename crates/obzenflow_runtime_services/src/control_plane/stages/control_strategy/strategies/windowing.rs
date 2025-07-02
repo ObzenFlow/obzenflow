@@ -1,7 +1,7 @@
 //! Windowing strategy for time-based event aggregation
 
 use std::time::{Duration, Instant};
-use super::{ControlEventStrategy, ControlEventAction, ProcessingContext};
+use crate::control_plane::stages::control_strategy::{ControlEventStrategy, ControlEventAction, ProcessingContext};
 use obzenflow_core::event::event_envelope::EventEnvelope;
 
 /// Strategy that delays EOF to allow time-based windows to complete

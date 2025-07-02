@@ -77,3 +77,15 @@ path = "examples/flow_monitoring_demo.rs"
 [[example]]
 name = "news_to_script"
 path = "examples/news_to_script.rs"
+
+[[example]]
+name = "circuit_breaker_simple_example"
+path = "examples/circuit_breaker_simple_example.rs"
+
+[[example]]
+name = "rate_limiting"
+path = "examples/rate_limiting.rs"
+
+[[example]]
+name = "payment_gateway_resilience_example"
+path = "examples/payment_gateway_resilience_example.rs"

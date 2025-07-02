@@ -146,10 +146,10 @@ impl<H: SinkHandler + 'static> SinkSupervisor<H> {
                                             ChainEvent::WATERMARK_EVENT_TYPE => {
                                                 control_strategy.handle_watermark(&envelope, &mut processing_ctx)
                                             }
-                                            "flowstate.checkpoint" => {
+                                            ChainEvent::CHECKPOINT_EVENT_TYPE => {
                                                 control_strategy.handle_checkpoint(&envelope, &mut processing_ctx)
                                             }
-                                            "flowstate.drain" => {
+                                            ChainEvent::DRAIN_EVENT_TYPE => {
                                                 control_strategy.handle_drain(&envelope, &mut processing_ctx)
                                             }
                                             _ => {

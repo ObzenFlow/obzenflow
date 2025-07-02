@@ -47,13 +47,19 @@ pub struct ChainEvent {
 }
 
 impl ChainEvent {
+    // Control event constants
+    /// Prefix for all control event types
+    pub const CONTROL_EVENT_PREFIX: &'static str = "control.";
+    
     // Control event types that flow through the journal
     /// Standard event type for EOF events
-    pub const EOF_EVENT_TYPE: &'static str = "flowstate.eof";
+    pub const EOF_EVENT_TYPE: &'static str = "control.eof";
     /// Standard event type for watermark events (future)
-    pub const WATERMARK_EVENT_TYPE: &'static str = "flowstate.watermark";
-    /// Standard event type for barrier events (future)
-    pub const BARRIER_EVENT_TYPE: &'static str = "flowstate.barrier";
+    pub const WATERMARK_EVENT_TYPE: &'static str = "control.watermark";
+    /// Standard event type for checkpoint events
+    pub const CHECKPOINT_EVENT_TYPE: &'static str = "control.checkpoint";
+    /// Standard event type for drain events
+    pub const DRAIN_EVENT_TYPE: &'static str = "control.drain";
     
     /// Create a new ChainEvent with minimal fields (for backward compatibility)
     /// Note: This creates an incomplete event - you should use StageWriter for proper events
@@ -100,7 +106,7 @@ impl ChainEvent {
     
     /// Check if this is a control event (vs data event)
     pub fn is_control(&self) -> bool {
-        self.event_type.starts_with("flowstate.")
+        self.event_type.starts_with(Self::CONTROL_EVENT_PREFIX)
     }
     
     /// Helper for stage processing loops - returns control event type if this is a control event

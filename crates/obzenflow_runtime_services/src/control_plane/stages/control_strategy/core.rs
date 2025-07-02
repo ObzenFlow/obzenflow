@@ -1,20 +1,10 @@
-//! Control event handling strategies for supervisors
+//! Core types and traits for control event handling strategies
 //!
-//! This module implements the Strategy pattern to keep supervisor event loops clean
-//! while allowing middleware to configure control event behavior.
+//! This module contains the fundamental abstractions for implementing
+//! control event handling strategies in stage supervisors.
 
 use std::time::Duration;
 use obzenflow_core::event::event_envelope::EventEnvelope;
-
-mod jonestown;
-mod retry;
-mod windowing;
-mod composite;
-
-pub use jonestown::JonestownStrategy;
-pub use retry::{RetryStrategy, BackoffStrategy};
-pub use windowing::WindowingStrategy;
-pub use composite::CompositeStrategy;
 
 /// Strategy for handling control events in stage supervisors
 pub trait ControlEventStrategy: Send + Sync {

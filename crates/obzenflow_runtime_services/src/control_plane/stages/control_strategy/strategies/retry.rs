@@ -1,7 +1,7 @@
 //! Retry strategy for control events - used by circuit breakers and retry middleware
 
 use std::time::Duration;
-use super::{ControlEventStrategy, ControlEventAction, ProcessingContext};
+use crate::control_plane::stages::control_strategy::{ControlEventStrategy, ControlEventAction, ProcessingContext};
 use obzenflow_core::event::event_envelope::EventEnvelope;
 
 /// Strategy that retries processing before accepting EOF

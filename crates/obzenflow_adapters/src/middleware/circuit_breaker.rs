@@ -4,8 +4,9 @@
 //! cascading failures. It emits raw events that can be consumed by
 //! monitoring and SLI middleware.
 
-use super::{Middleware, MiddlewareAction, MiddlewareContext};
+use super::{Middleware, MiddlewareAction, MiddlewareContext, MiddlewareFactory};
 use obzenflow_core::event::chain_event::ChainEvent;
+use obzenflow_runtime_services::control_plane::stages::supervisors::config::StageConfig;
 use serde_json::json;
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -240,18 +241,53 @@ impl CircuitBreakerBuilder {
         self
     }
     
-    /// Build the circuit breaker middleware
-    pub fn build(self) -> Box<dyn Middleware> {
+    /// Build the circuit breaker middleware factory
+    pub fn build(self) -> Box<dyn MiddlewareFactory> {
+        Box::new(CircuitBreakerFactory {
+            threshold: self.threshold,
+            cooldown: self.cooldown,
+        })
+    }
+}
+
+/// Factory for creating circuit breaker middleware
+pub struct CircuitBreakerFactory {
+    threshold: usize,
+    cooldown: Duration,
+}
+
+impl CircuitBreakerFactory {
+    /// Create a new circuit breaker factory with the given threshold
+    pub fn new(threshold: usize) -> Self {
+        Self {
+            threshold,
+            cooldown: Duration::from_secs(60),
+        }
+    }
+    
+    /// Set the cooldown duration before attempting to close the circuit
+    pub fn with_cooldown(mut self, duration: Duration) -> Self {
+        self.cooldown = duration;
+        self
+    }
+}
+
+impl MiddlewareFactory for CircuitBreakerFactory {
+    fn create(&self, _config: &StageConfig) -> Box<dyn Middleware> {
         Box::new(CircuitBreakerMiddleware::with_cooldown(
             self.threshold,
             self.cooldown,
         ))
     }
+    
+    fn name(&self) -> &str {
+        "circuit_breaker"
+    }
 }
 
-/// Create a circuit breaker with default settings
-pub fn circuit_breaker(threshold: usize) -> Box<dyn Middleware> {
-    CircuitBreakerBuilder::new(threshold).build()
+/// Create a circuit breaker factory with default settings
+pub fn circuit_breaker(threshold: usize) -> Box<dyn MiddlewareFactory> {
+    Box::new(CircuitBreakerFactory::new(threshold))
 }
 
 #[cfg(test)]

@@ -1,6 +1,6 @@
 //! Default Jonestown strategy - forward EOF and terminate immediately
 
-use super::{ControlEventStrategy, ControlEventAction, ProcessingContext};
+use crate::control_plane::stages::control_strategy::{ControlEventStrategy, ControlEventAction, ProcessingContext};
 use obzenflow_core::event::event_envelope::EventEnvelope;
 
 /// The default "Jonestown Protocol" strategy

@@ -183,12 +183,63 @@ impl ValidationResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::middleware::{dangerous_examples::*, Middleware, MiddlewareFactory};
+    use crate::middleware::{
+        Middleware, MiddlewareFactory, MiddlewareAction, MiddlewareContext,
+        ControlStrategyRequirement, BackoffConfig
+    };
     use obzenflow_runtime_services::control_plane::stages::supervisors::StageConfig;
+    use obzenflow_core::ChainEvent;
+    use std::time::Duration;
+    
+    // Mock middleware for testing dangerous patterns
+    struct MockSkipControlMiddleware;
+    impl Middleware for MockSkipControlMiddleware {
+        fn pre_handle(&self, _event: &ChainEvent, _ctx: &mut MiddlewareContext) -> MiddlewareAction {
+            MiddlewareAction::Continue
+        }
+    }
+    
+    struct MockSkipControlFactory;
+    impl MiddlewareFactory for MockSkipControlFactory {
+        fn create(&self, _config: &StageConfig) -> Box<dyn Middleware> {
+            Box::new(MockSkipControlMiddleware)
+        }
+        fn name(&self) -> &str {
+            "skip_control_events" // Name triggers the dangerous pattern check
+        }
+        fn supported_stage_types(&self) -> &[StageType] {
+            &[StageType::Transform]
+        }
+        fn safety_level(&self) -> MiddlewareSafety {
+            MiddlewareSafety::Dangerous
+        }
+    }
+    
+    struct MockInfiniteRetryFactory;
+    impl MiddlewareFactory for MockInfiniteRetryFactory {
+        fn create(&self, _config: &StageConfig) -> Box<dyn Middleware> {
+            Box::new(MockSkipControlMiddleware) // Reuse the middleware impl
+        }
+        fn name(&self) -> &str {
+            "infinite_retry"
+        }
+        fn supported_stage_types(&self) -> &[StageType] {
+            &[StageType::Transform, StageType::Sink]
+        }
+        fn safety_level(&self) -> MiddlewareSafety {
+            MiddlewareSafety::Dangerous
+        }
+        fn required_control_strategy(&self) -> Option<ControlStrategyRequirement> {
+            Some(ControlStrategyRequirement::Retry {
+                max_attempts: usize::MAX, // Triggers infinite retry pattern
+                backoff: BackoffConfig::Fixed { delay: Duration::from_millis(0) },
+            })
+        }
+    }
     
     #[test]
     fn test_skip_control_on_sink_is_error() {
-        let factory = SkipControlEventsFactory;
+        let factory = MockSkipControlFactory;
         let result = validate_middleware_safety(
             &factory,
             StageType::Sink,
@@ -202,7 +253,7 @@ mod tests {
     
     #[test]
     fn test_skip_control_on_transform_is_warning() {
-        let factory = SkipControlEventsFactory;
+        let factory = MockSkipControlFactory;
         let result = validate_middleware_safety(
             &factory,
             StageType::Transform,
@@ -216,7 +267,7 @@ mod tests {
     
     #[test]
     fn test_infinite_retry_on_source_is_error() {
-        let factory = InfiniteRetryFactory;
+        let factory = MockInfiniteRetryFactory;
         let result = validate_middleware_safety(
             &factory,
             StageType::FiniteSource,
