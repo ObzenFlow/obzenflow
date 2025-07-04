@@ -6,6 +6,7 @@ use serde_json::Value;
 use crate::event::event_id::EventId;
 use crate::journal::writer_id::WriterId;
 use crate::event::causality::CausalityInfo;
+use crate::event::correlation::{CorrelationId, CorrelationPayload};
 use crate::event::flow_context::FlowContext;
 use crate::event::intent::Intent;
 use crate::event::processing_info::ProcessingInfo;
@@ -44,6 +45,15 @@ pub struct ChainEvent {
     // === CHAIN Maturity Support ===
     /// Explicit intent (I1 maturity minimum)
     pub intent: Option<Intent>,
+    
+    // === Flow-Level Correlation (FLOWIP-054d) ===
+    /// Correlation ID that flows through all derived events
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub correlation_id: Option<CorrelationId>,
+    
+    /// Metadata about when/where this correlation entered the flow
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub correlation_payload: Option<CorrelationPayload>,
 }
 
 impl ChainEvent {
@@ -78,6 +88,8 @@ impl ChainEvent {
             flow_context: FlowContext::default(),
             processing_info: ProcessingInfo::default(),
             intent: None,
+            correlation_id: None,
+            correlation_payload: None,
         }
     }
 
@@ -124,5 +136,34 @@ impl ChainEvent {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_millis() as u64
+    }
+    
+    // === Correlation Support (FLOWIP-054d) ===
+    
+    /// Create correlation for a source event (flow entry)
+    pub fn with_new_correlation(mut self, stage_name: impl Into<String>) -> Self {
+        use crate::event::correlation::new_correlation_id;
+        
+        let correlation_id = new_correlation_id();
+        self.correlation_id = Some(correlation_id);
+        self.correlation_payload = Some(CorrelationPayload::new(stage_name, self.id));
+        self
+    }
+    
+    /// Propagate correlation from parent event to derived event
+    pub fn with_correlation_from(mut self, parent: &ChainEvent) -> Self {
+        self.correlation_id = parent.correlation_id.clone();
+        self.correlation_payload = parent.correlation_payload.clone();
+        self
+    }
+    
+    /// Check if this event has correlation info
+    pub fn has_correlation(&self) -> bool {
+        self.correlation_id.is_some()
+    }
+    
+    /// Calculate latency if this event has correlation payload
+    pub fn correlation_latency(&self) -> Option<std::time::Duration> {
+        self.correlation_payload.as_ref().map(|p| p.calculate_latency())
     }
 }

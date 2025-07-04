@@ -175,6 +175,7 @@ pub mod context;
 pub mod circuit_breaker;
 pub mod retry;
 pub mod flow_boundary;
+pub mod flow_metrics_registry;
 pub mod sli;
 pub mod windowing;
 pub mod rate_limiter;

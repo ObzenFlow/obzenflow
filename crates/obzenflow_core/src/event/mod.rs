@@ -4,6 +4,7 @@
 
 pub mod causality;
 pub mod chain_event;
+pub mod correlation;
 pub mod event_envelope;
 pub mod event_filter;
 pub mod event_id;
