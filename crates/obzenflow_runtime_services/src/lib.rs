@@ -12,6 +12,7 @@ pub mod pipeline;
 pub mod stages;
 pub mod event_flow;
 pub mod factory;
+pub mod metrics;
 
 
 // Re-export commonly used types
@@ -43,6 +44,9 @@ pub mod prelude {
     // Event flow
     pub use crate::event_flow::{
         JournalSubscription, SubscriptionFilter,
-        EventEnricher, BoundaryType, StageSemantics,
+        StageSemantics,
     };
+    
+    // Metrics
+    pub use crate::metrics::DefaultMetricsConfig;
 }

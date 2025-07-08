@@ -1,4 +1,9 @@
 //! Unit tests for middleware factory implementation
+//! 
+//! DEPRECATED: With FLOWIP-056-666, monitoring is no longer implemented as middleware.
+//! These tests are disabled as the monitoring() methods no longer exist.
+
+#![cfg(skip)]
 
 #[cfg(test)]
 mod tests {

@@ -17,30 +17,25 @@
 //! 4. Second middleware's `post_handle`
 //! 5. First middleware's `post_handle`
 //!
-//! ## Getting Monitoring Middleware
+//! ## Monitoring with FLOWIP-056-666
 //!
-//! Each monitoring taxonomy provides a `monitoring()` method that returns
-//! a boxed middleware instance:
+//! With FLOWIP-056-666 Wide Events, monitoring is no longer implemented as middleware.
+//! Instead, metrics are automatically derived from the event journal by MetricsAggregator.
+//!
+//! The monitoring taxonomies (RED, USE, Golden Signals, SAAFE) are now documentation-only
+//! and provide Prometheus queries and Grafana dashboards for viewing metrics.
 //!
 //! ```rust
-//! use obzenflow_adapters::monitoring::taxonomies::{
-//!     red::RED,
-//!     use_taxonomy::USE,
-//!     golden_signals::GoldenSignals,
-//!     saafe::SAAFE,
-//! };
+//! // OLD: Monitoring middleware (no longer available)
+//! // let red_middleware = RED::monitoring();
 //!
-//! // Get monitoring middleware instances
-//! let red_middleware = RED::monitoring();
-//! let use_middleware = USE::monitoring();
-//! let golden_signals_middleware = GoldenSignals::monitoring();
-//! let saafe_middleware = SAAFE::monitoring();
+//! // NEW: Metrics are automatically collected from the journal
+//! // See obzenflow_adapters::monitoring::aggregator::MetricsAggregator
 //! ```
 //!
-//! ## Available Monitoring Taxonomies
+//! ## Available Monitoring Views
 //!
-//! FlowState provides several built-in monitoring taxonomies, each optimized
-//! for different types of stages:
+//! FlowState provides several monitoring taxonomies as view definitions:
 //!
 //! ### RED (Rate, Errors, Duration)
 //! Best for request/response systems and sources. Tracks:
@@ -51,7 +46,8 @@
 //! ```rust
 //! use obzenflow_adapters::monitoring::taxonomies::red::RED;
 //! 
-//! let red_monitoring = RED::monitoring();
+//! // Get Prometheus queries for RED metrics
+//! let queries = RED::prometheus_queries("my_flow", "my_stage");
 //! ```
 //!
 //! ### USE (Utilization, Saturation, Errors)
@@ -63,7 +59,8 @@
 //! ```rust
 //! use obzenflow_adapters::monitoring::taxonomies::use_taxonomy::USE;
 //! 
-//! let use_monitoring = USE::monitoring();
+//! // Get Prometheus queries for USE metrics
+//! let queries = USE::prometheus_queries("my_flow", "my_stage");
 //! ```
 //!
 //! ### GoldenSignals (Latency, Traffic, Errors, Saturation)
@@ -76,7 +73,8 @@
 //! ```rust
 //! use obzenflow_adapters::monitoring::taxonomies::golden_signals::GoldenSignals;
 //! 
-//! let golden_signals_monitoring = GoldenSignals::monitoring();
+//! // Get Prometheus queries for Golden Signals metrics
+//! let queries = GoldenSignals::prometheus_queries("my_flow", "my_stage");
 //! ```
 //!
 //! ### SAAFE (Saturation, Anomalies, Amendments, Failures, Errors)
@@ -90,7 +88,8 @@
 //! ```rust
 //! use obzenflow_adapters::monitoring::taxonomies::saafe::SAAFE;
 //! 
-//! let saafe_monitoring = SAAFE::monitoring();
+//! // Get Prometheus queries for SAAFE metrics
+//! let queries = SAAFE::prometheus_queries("my_flow", "my_stage");
 //! ```
 //!
 //! ## Applying Middleware to Handlers
@@ -169,7 +168,6 @@ mod sink_middleware;
 
 // Common middleware utilities
 mod function;
-pub mod monitoring;
 pub mod common;
 pub mod context;
 pub mod circuit_breaker;
@@ -182,15 +180,19 @@ pub mod rate_limiter;
 mod logging_middleware;
 mod control_requirements;
 mod safety_validation;
+mod timing;
+mod system_enrichment;
+mod outcome_enrichment;
 
 // Dangerous middleware examples moved to examples/dangerous_examples.rs
 // Factory tests moved to tests/factory_tests.rs
-// Note: The monitoring! macro has been removed as it's not used.
-// Use the taxonomy-specific monitoring() methods instead:
-// - RED::monitoring()
-// - USE::monitoring()
-// - GoldenSignals::monitoring()
-// - SAAFE::monitoring()
+// Note: With FLOWIP-056-666, monitoring is no longer implemented as middleware.
+// Metrics are automatically derived from the event journal by MetricsAggregator.
+// Taxonomies now provide Prometheus queries and Grafana dashboards:
+// - RED::prometheus_queries()
+// - USE::prometheus_queries()
+// - GoldenSignals::prometheus_queries()
+// - SAAFE::prometheus_queries()
 
 // Handler-specific exports
 pub use transform_middleware::{MiddlewareTransform, TransformHandlerExt, TransformMiddlewareBuilder};
@@ -203,7 +205,6 @@ pub use sink_middleware::{MiddlewareSink, SinkHandlerExt, SinkMiddlewareBuilder}
 
 // Common utilities
 pub use function::{FnMiddleware, middleware_fn};
-pub use monitoring::{MetricRecorder, MonitoringMiddleware};
 pub use common::{rate_limit, timeout, logging};
 pub use context::{MiddlewareContext, MiddlewareEvent};
 pub use circuit_breaker::{CircuitBreakerMiddleware, CircuitBreakerBuilder, circuit_breaker};
@@ -215,6 +216,9 @@ pub use control_requirements::{ControlStrategyRequirement, BackoffConfig};
 pub use self::safety_validation::{validate_middleware_safety, ValidationResult};
 pub use windowing::{WindowingMiddleware, WindowingMiddlewareFactory};
 pub use rate_limiter::{RateLimiterMiddleware, RateLimiterFactory};
+pub use timing::TimingMiddleware;
+pub use system_enrichment::SystemEnrichmentMiddleware;
+pub use outcome_enrichment::OutcomeEnrichmentMiddleware;
 // Monitoring is provided via taxonomy-specific methods
 
 use obzenflow_core::event::chain_event::ChainEvent;
@@ -240,22 +244,19 @@ pub enum MiddlewareSafety {
 /// ## Example Implementation
 /// 
 /// ```rust
-/// use obzenflow_adapters::middleware::{MiddlewareFactory, Middleware, MonitoringMiddleware};
-/// use obzenflow_adapters::monitoring::taxonomies::red::RED;
+/// use obzenflow_adapters::middleware::{MiddlewareFactory, Middleware, LoggingMiddleware};
 /// use obzenflow_runtime_services::pipeline::config::StageConfig;
 /// 
-/// struct RedMonitoringFactory;
+/// struct LoggingFactory;
 /// 
-/// impl MiddlewareFactory for RedMonitoringFactory {
+/// impl MiddlewareFactory for LoggingFactory {
 ///     fn create(&self, config: &StageConfig) -> Box<dyn Middleware> {
-///         Box::new(MonitoringMiddleware::<RED>::new(
-///             config.name.clone(),
-///             config.stage_id,
-///         ))
+///         // LoggingMiddleware::new() takes no arguments
+///         Box::new(LoggingMiddleware::new())
 ///     }
 ///     
 ///     fn name(&self) -> &str {
-///         "RED::monitoring"
+///         "logging"
 ///     }
 /// }
 /// ```
@@ -380,6 +381,23 @@ pub trait Middleware: Send + Sync {
     fn on_error(&self, _event: &ChainEvent, _ctx: &mut MiddlewareContext) -> ErrorAction {
         ErrorAction::Propagate
     }
+
+    /// Called before each result event is written to the journal.
+    /// 
+    /// This hook enables event enrichment with timing data, flow context,
+    /// and other metadata needed for observability. The event is mutable,
+    /// allowing middleware to add fields following the "wide events" pattern.
+    /// 
+    /// Use this to:
+    /// - Add processing time to events
+    /// - Ensure flow context is populated
+    /// - Enrich events with deployment/environment info
+    /// - Add correlation IDs for tracing
+    /// 
+    /// Default implementation is a no-op for backward compatibility.
+    fn pre_write(&self, _event: &mut ChainEvent, _ctx: &MiddlewareContext) {
+        // Default: no-op
+    }
 }
 
 /// Actions that middleware can take during pre-processing
@@ -416,6 +434,10 @@ impl<M: Middleware + ?Sized> Middleware for Box<M> {
 
     fn on_error(&self, event: &ChainEvent, ctx: &mut MiddlewareContext) -> ErrorAction {
         (**self).on_error(event, ctx)
+    }
+
+    fn pre_write(&self, event: &mut ChainEvent, ctx: &MiddlewareContext) {
+        (**self).pre_write(event, ctx)
     }
 }
 

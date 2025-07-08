@@ -17,11 +17,8 @@ use obzenflow_core::event::event_id::EventId;
 use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::journal::writer_id::WriterId;
 use obzenflow_adapters::middleware::{common, CircuitBreakerBuilder};
-use obzenflow_adapters::monitoring::taxonomies::{
-    red::RED,
-    golden_signals::GoldenSignals,
-    saafe::SAAFE,
-};
+// Monitoring taxonomies removed per FLOWIP-056-666
+// Monitoring is now handled through correlation context
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicBool, Ordering};
 use std::sync::Arc;
@@ -361,20 +358,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         
         stages: {
             // Order source simulating Black Friday traffic
-            orders = infinite_source!("order_source" => BlackFridayOrderSource::new(20.0), [RED::monitoring()]);
+            orders = infinite_source!("order_source" => BlackFridayOrderSource::new(20.0));
             
             // Convert orders to payment requests
-            processor = transform!("payment_processor" => PaymentProcessor, [RED::monitoring()]);
+            processor = transform!("payment_processor" => PaymentProcessor);
             
             // Rate limit BEFORE sending to provider (protective rate limiting)
-            rate_limited = transform!("rate_limiter" => RateLimiter, [common::rate_limit_with_burst(100.0, 500.0), RED::monitoring()]);
+            rate_limited = transform!("rate_limiter" => RateLimiter, [common::rate_limit_with_burst(100.0, 500.0)]);
             
             // Payment provider with circuit breaker protection via middleware
             provider = transform!("payment_provider" => PaymentProviderGateway::new(), [
                 CircuitBreakerBuilder::new(10)
                     .cooldown(Duration::from_secs(30))
-                    .build(),
-                SAAFE::monitoring()
+                    .build()
             ]);
             
             // Collect results
@@ -383,7 +379,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 failed_payments: AtomicU32::new(0),
                 declined_payments: AtomicU32::new(0),
                 total_amount_cents: AtomicU64::new(0),
-            }, [GoldenSignals::monitoring()]);
+            });
         },
         
         topology: {

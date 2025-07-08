@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use crate::middleware::flow_boundary::FlowMetrics;
-use crate::monitoring::metrics::core::MetricSnapshot as NewMetricSnapshot;
+use crate::monitoring::metrics::core::MetricSnapshot;
 
 /// Flow identifier
 type FlowId = String;
@@ -44,7 +44,7 @@ impl FlowMetricsRegistry {
     }
     
     /// Export all flow metrics for Prometheus
-    pub async fn export_all_metrics(&self) -> Vec<NewMetricSnapshot> {
+    pub async fn export_all_metrics(&self) -> Vec<MetricSnapshot> {
         let flows = self.flows.read().await;
         let mut all_metrics = Vec::new();
         

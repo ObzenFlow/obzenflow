@@ -15,6 +15,7 @@ use crate::message_bus::FsmMessageBus;
 use crate::errors::{FlowError, PipelineSupervisorError};
 use obzenflow_topology_services::stages::StageId;
 use obzenflow_core::{ChainEvent, EventId};
+use crate::metrics::MetricsAggregator;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -41,6 +42,17 @@ pub struct PipelineSupervisor {
     
     /// Completion tracker task handle
     completion_tracker_handle: Option<tokio::task::JoinHandle<()>>,
+    
+    /// App metrics collection task handle (FLOWIP-056-666)
+    app_metrics_task_handle: Option<tokio::task::JoinHandle<()>>,
+    
+    /// Metrics exporter for accessing aggregated metrics (FLOWIP-056-666)
+    /// Uses trait object to avoid runtime→adapters dependency
+    metrics_exporter: Option<Arc<dyn obzenflow_core::metrics::MetricsExporter>>,
+    
+    /// Metrics aggregator instance (FLOWIP-056-666)
+    /// Uses trait object to avoid runtime→adapters dependency
+    metrics_aggregator: Option<Arc<std::sync::Mutex<Box<dyn MetricsAggregator>>>>,
 }
 
 impl PipelineSupervisor {
@@ -48,7 +60,9 @@ impl PipelineSupervisor {
     pub fn new(
         topology: Arc<obzenflow_topology_services::topology::Topology>, 
         reactive_journal: Arc<ReactiveJournal>,
-        stages: Vec<BoxedStageHandle>
+        stages: Vec<BoxedStageHandle>,
+        metrics_exporter: Option<Arc<dyn obzenflow_core::metrics::MetricsExporter>>,
+        metrics_aggregator: Option<Arc<std::sync::Mutex<Box<dyn MetricsAggregator>>>>,
     ) -> Result<Self, PipelineSupervisorError> {
         // Create message bus
         let message_bus = Arc::new(FsmMessageBus::new());
@@ -80,14 +94,111 @@ impl PipelineSupervisor {
             pipeline,
             reactive_journal,
             completion_tracker_handle: None,
+            app_metrics_task_handle: None,
+            metrics_exporter,
+            metrics_aggregator,
         })
     }
     
     /// Materialize the pipeline (creates stages)
     pub async fn materialize(&mut self) -> Result<(), String> {
-        // Start completion tracker
-        self.start_completion_tracker().await?;
+        // Start app metrics collection if we have both exporter and factory
+        tracing::info!("Checking metrics configuration: exporter={}, aggregator={}", 
+            self.metrics_exporter.is_some(), 
+            self.metrics_aggregator.is_some()
+        );
         
+        // Start metrics collection if we have both aggregator and exporter
+        if let (Some(aggregator), Some(exporter)) = (&self.metrics_aggregator, &self.metrics_exporter) {
+            tracing::info!("Starting metrics collection");
+            
+            // Create subscription for all events
+            let filter = crate::event_flow::SubscriptionFilter::All;
+            let mut subscription = match self.reactive_journal.subscribe(filter).await {
+                Ok(sub) => sub,
+                Err(e) => {
+                    tracing::error!("Failed to create metrics subscription: {:?}", e);
+                    return Err(format!("Failed to create metrics subscription: {:?}", e));
+                }
+            };
+            
+            let aggregator_clone = aggregator.clone();
+            let exporter_clone = exporter.clone();
+            
+            // Spawn metrics event loop
+            let handle = tokio::spawn(async move {
+                tracing::info!("MetricsAggregator event loop started");
+                
+                // Log aggregator instance address
+                let agg_ptr = Arc::as_ptr(&aggregator_clone) as usize;
+                tracing::warn!("Event loop using aggregator at 0x{:x}", agg_ptr);
+                
+                // Create snapshot interval
+                let mut snapshot_interval = tokio::time::interval(tokio::time::Duration::from_secs(10));
+                
+                loop {
+                    tokio::select! {
+                        // Process events
+                        result = subscription.recv_batch() => {
+                            match result {
+                                Ok(events) if !events.is_empty() => {
+                                    tracing::info!("MetricsAggregator@0x{:x} received {} events", agg_ptr, events.len());
+                                    
+                                    // Process events
+                                    for envelope in events {
+                                        match aggregator_clone.lock() {
+                                            Ok(mut boxed_agg) => {
+                                                tracing::info!("Successfully locked aggregator, type is Box<dyn MetricsAggregator>");
+                                                // Need to deref the Box to get to the trait object
+                                                boxed_agg.as_mut().process_event(&envelope);
+                                                tracing::info!("process_event returned");
+                                            }
+                                            Err(e) => {
+                                                tracing::error!("Failed to lock aggregator: {}", e);
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                                Ok(_) => {
+                                    // Empty batch
+                                    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+                                }
+                                Err(e) => {
+                                    tracing::error!("Subscription error: {}", e);
+                                    break;
+                                }
+                            }
+                        }
+                        
+                        // Push snapshots periodically
+                        _ = snapshot_interval.tick() => {
+                            tracing::info!("MetricsAggregator@0x{:x} pushing snapshot to exporter", agg_ptr);
+                            
+                            // Create snapshot
+                            let snapshot = {
+                                if let Ok(agg) = aggregator_clone.lock() {
+                                    agg.create_snapshot()
+                                } else {
+                                    tracing::error!("Failed to lock aggregator for snapshot");
+                                    continue;
+                                }
+                            };
+                            
+                            // Push to exporter
+                            if let Err(e) = exporter_clone.update_app_metrics(snapshot) {
+                                tracing::warn!("Failed to push app metrics snapshot: {}", e);
+                            } else {
+                                tracing::debug!("Successfully pushed metrics snapshot");
+                            }
+                        }
+                    }
+                }
+            });
+            
+            self.app_metrics_task_handle = Some(handle);
+        }
+
         // Trigger FSM to materialize
         let actions = self.pipeline_fsm.handle(
             PipelineEvent::Materialize,
@@ -144,6 +255,11 @@ impl PipelineSupervisor {
             self.handle_action(action).await?;
         }
         
+        // Stop app metrics collection
+        if let Some(handle) = self.app_metrics_task_handle.take() {
+            handle.abort();
+        }
+        
         Ok(())
     }
     
@@ -163,6 +279,11 @@ impl PipelineSupervisor {
             handle.abort();
         }
         
+        // Stop app metrics collection
+        if let Some(handle) = self.app_metrics_task_handle.take() {
+            handle.abort();
+        }
+        
         Ok(())
     }
     
@@ -170,7 +291,7 @@ impl PipelineSupervisor {
     pub fn pipeline_state(&self) -> &PipelineState {
         self.pipeline_fsm.state()
     }
-    
+
     /// Handle pipeline actions
     async fn handle_action(&mut self, action: PipelineAction) -> Result<(), String> {
         match action {
@@ -261,6 +382,9 @@ impl PipelineSupervisor {
             tracing::info!("Pipeline completion tracker started - expecting {} stages to complete: {:?}", 
                 total_stages, expected_stages);
             
+            // Track flow name from first completed stage
+            let mut flow_name: Option<String> = None;
+            
             loop {
                 match subscription.recv_batch().await {
                     Ok(events) if !events.is_empty() => {
@@ -286,6 +410,11 @@ impl PipelineSupervisor {
                                         
                                         tracing::info!("Stage completed: {} ({})", stage_name, stage_id);
                                         
+                                        // Capture flow name from first completed stage event
+                                        if flow_name.is_none() && !event.flow_context.flow_name.is_empty() {
+                                            flow_name = Some(event.flow_context.flow_name.clone());
+                                        }
+                                        
                                         // Add to completed stages
                                         let mut completed = pipeline_context.completed_stages.write().await;
                                         if !completed.contains(&stage_id) {
@@ -309,7 +438,7 @@ impl PipelineSupervisor {
                                                 .await
                                                 .unwrap_or_else(|e| panic!("FATAL: Failed to register pipeline writer: {:?}", e));
                                             
-                                            let pipeline_completed = ChainEvent::new(
+                                            let mut pipeline_completed = ChainEvent::new(
                                                 EventId::new(),
                                                 writer_id.clone(),
                                                 "system.pipeline.completed",
@@ -318,6 +447,14 @@ impl PipelineSupervisor {
                                                     "completed_stages": completed.len(),
                                                 })
                                             );
+                                            
+                                            // Set flow context for pipeline completion event
+                                            pipeline_completed.flow_context = obzenflow_core::event::flow_context::FlowContext {
+                                                flow_name: flow_name.clone().unwrap_or_else(|| "unknown".to_string()),
+                                                flow_id: "default".to_string(),
+                                                stage_name: "pipeline".to_string(),
+                                                stage_type: obzenflow_core::event::flow_context::StageType::Transform,
+                                            };
                                             
                                             if let Err(e) = reactive_journal.write(&writer_id, pipeline_completed, None).await {
                                                 panic!("FATAL: Failed to write pipeline completion event: {}", e);
@@ -356,8 +493,6 @@ impl PipelineSupervisor {
                     }
                 }
             }
-            
-            tracing::info!("Pipeline completion tracker exited");
         });
         
         self.completion_tracker_handle = Some(handle);
@@ -409,5 +544,21 @@ impl FlowHandle {
     pub async fn state(&self) -> PipelineState {
         let supervisor = self.supervisor.read().await;
         supervisor.pipeline_state().clone()
+    }
+    
+    /// Render metrics in Prometheus format
+    pub async fn render_metrics(&self) -> Result<String, FlowError> {
+        let supervisor = self.supervisor.read().await;
+        
+        if let Some(ref exporter) = supervisor.metrics_exporter {
+            exporter.render_metrics()
+                .map_err(|e| FlowError::ExecutionFailed(Box::new(
+                    std::io::Error::new(std::io::ErrorKind::Other, e.to_string())
+                )))
+        } else {
+            Err(FlowError::ExecutionFailed(Box::new(
+                std::io::Error::new(std::io::ErrorKind::Other, "No metrics exporter configured")
+            )))
+        }
     }
 }

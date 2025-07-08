@@ -26,6 +26,7 @@ pub struct InfiniteSourceSupervisor<H: InfiniteSourceHandler + 'static> {
     context: Arc<InfiniteSourceContext<H>>,
     stage_id: StageId,
     stage_name: String,
+    flow_name: String,
     processing_task: Arc<RwLock<Option<JoinHandle<()>>>>,
 }
 
@@ -46,7 +47,8 @@ impl<H: InfiniteSourceHandler + 'static> InfiniteSourceSupervisor<H> {
             fsm,
             context,
             stage_id: config.stage_id,
-            stage_name: config.name,
+            stage_name: config.name.clone(),
+            flow_name: config.flow_name,
             processing_task: Arc::new(RwLock::new(None)),
         }
     }
@@ -106,6 +108,7 @@ impl<H: InfiniteSourceHandler + 'static> InfiniteSourceSupervisor<H> {
     async fn start_source_loop(&self) -> Result<(), String> {
         let context = self.context.clone();
         let stage_name = self.stage_name.clone();
+        let flow_name = self.flow_name.clone();
         
         let task = tokio::spawn(async move {
             tracing::info!("[{}] Infinite source loop started", stage_name);
@@ -126,7 +129,15 @@ impl<H: InfiniteSourceHandler + 'static> InfiniteSourceSupervisor<H> {
                 // Get next event from handler
                 let mut handler = context.handler.write().await;
                 match handler.next() {
-                    Some(event) => {
+                    Some(mut event) => {
+                        // Populate flow context as required by FLOWIP-056-666
+                        event.flow_context = obzenflow_core::event::flow_context::FlowContext {
+                            flow_name: flow_name.clone(),
+                            flow_id: "default".to_string(),
+                            stage_name: stage_name.clone(),
+                            stage_type: obzenflow_core::event::flow_context::StageType::Source,
+                        };
+                        
                         // Write event to journal
                         if let Some(writer_id) = &*context.writer_id.read().await {
                             if let Err(e) = context.journal.write(writer_id, event, None).await {
@@ -144,16 +155,24 @@ impl<H: InfiniteSourceHandler + 'static> InfiniteSourceSupervisor<H> {
             // Write completion event after exiting the loop
             tracing::info!("[{}] Writing completion event to journal", stage_name);
             if let Some(writer_id) = &*context.writer_id.read().await {
-                let completion_event = ChainEvent::new(
+                let mut completion_event = ChainEvent::new(
                     EventId::new(),
                     writer_id.clone(),
                     "system.stage.completed",
                     serde_json::json!({
                         "stage_id": context.stage_id.to_string(),
-                        "stage_name": stage_name,
+                        "stage_name": stage_name.clone(),
                         "timestamp": chrono::Utc::now().to_rfc3339(),
                     })
                 );
+                
+                // Populate flow context for completion
+                completion_event.flow_context = obzenflow_core::event::flow_context::FlowContext {
+                    flow_name: flow_name.clone(),
+                    flow_id: "default".to_string(),
+                    stage_name: stage_name.clone(),
+                    stage_type: obzenflow_core::event::flow_context::StageType::Source,
+                };
                 if let Err(e) = context.journal.write(writer_id, completion_event, None).await {
                     // CRITICAL: If we can't write completion, pipeline will hang forever!
                     panic!("[{}] FATAL: Failed to write completion event after shutdown: {}", stage_name, e);

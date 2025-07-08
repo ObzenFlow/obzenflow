@@ -13,12 +13,8 @@ use obzenflow_infra::journal::DiskJournal;
 use obzenflow_core::event::event_id::EventId;
 use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::journal::writer_id::WriterId;
-use obzenflow_adapters::monitoring::taxonomies::{
-    golden_signals::GoldenSignals,
-    red::RED,
-    use_taxonomy::USE,
-    saafe::SAAFE,
-};
+// Monitoring taxonomies removed per FLOWIP-056-666
+// Monitoring is now handled through correlation context
 use serde_json::json;
 use std::sync::Arc;
 use anyhow::Result;
@@ -308,14 +304,14 @@ async fn main() -> Result<()> {
     // HERE'S THE BEAUTIFUL DSL SYNTAX! 🎉
     let handle = flow! {
         journal: journal,
-        middleware: [GoldenSignals::monitoring()],
+        middleware: [],
         
         stages: {
-            news = source!("news" => NewsSource::new(), [RED::monitoring()]);
-            extractor = transform!("extractor" => ContentExtractor::new(), [USE::monitoring()]);
-            generator = transform!("generator" => ScriptGenerator::new(), [GoldenSignals::monitoring()]);
-            filter = transform!("filter" => QualityFilter::min_score(0.6), [USE::monitoring()]);
-            output = sink!("output" => sink, [SAAFE::monitoring()]);
+            news = source!("news" => NewsSource::new());
+            extractor = transform!("extractor" => ContentExtractor::new());
+            generator = transform!("generator" => ScriptGenerator::new());
+            filter = transform!("filter" => QualityFilter::min_score(0.6));
+            output = sink!("output" => sink);
         },
         
         topology: {

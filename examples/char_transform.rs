@@ -11,12 +11,8 @@ use obzenflow_infra::journal::DiskJournal;
 use obzenflow_core::event::event_id::EventId;
 use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::journal::writer_id::WriterId;
-use obzenflow_adapters::monitoring::taxonomies::{
-    golden_signals::GoldenSignals,
-    red::RED,
-    use_taxonomy::USE,
-    saafe::SAAFE,
-};
+// Monitoring taxonomies are no longer needed with FLOWIP-056-666
+// Metrics are automatically collected by MetricsAggregator from the event journal
 use serde_json::json;
 use std::sync::Arc;
 use anyhow::Result;
@@ -205,14 +201,15 @@ async fn main() -> Result<()> {
 
     // Create the flow using the new flow! macro
     let handle = flow! {
+        name: "char_transform",
         journal: journal,
-        middleware: [GoldenSignals::monitoring()],
+        middleware: [],
         
         stages: {
-            src = source!("source" => TextCharSource::new(), [RED::monitoring()]);
-            cap = transform!("cap" => CapStage::new(), [USE::monitoring()]);
-            digit = transform!("digit" => DigitWordStage::new(), [USE::monitoring()]);
-            out = sink!("sink" => sink, [SAAFE::monitoring()]);
+            src = source!("source" => TextCharSource::new());
+            cap = transform!("cap" => CapStage::new());
+            digit = transform!("digit" => DigitWordStage::new());
+            out = sink!("sink" => sink);
         },
         
         topology: {

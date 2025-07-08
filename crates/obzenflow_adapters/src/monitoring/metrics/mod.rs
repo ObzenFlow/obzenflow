@@ -13,13 +13,8 @@ pub mod utilities;
 use std::collections::HashMap;
 use tokio::sync::broadcast;
 
-// Re-export new core traits (using different names to avoid conflicts during migration)
+// Re-export core traits
 pub use core::{
-    Metric as NewMetric, 
-    MetricSnapshot as NewMetricSnapshot, 
-    MetricType as NewMetricType, 
-    MetricValue as NewMetricValue, 
-    MetricUpdate as NewMetricUpdate, 
     MetricError,
     EventfulMetric,
     StatefulMetric,

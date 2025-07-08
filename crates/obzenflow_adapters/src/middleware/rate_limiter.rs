@@ -11,7 +11,7 @@ use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_runtime_services::pipeline::config::StageConfig;
 use obzenflow_runtime_services::stages::common::stage_handle::StageType;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use std::collections::VecDeque;
 use serde_json::json;
 
@@ -26,6 +26,27 @@ struct TokenBucket {
     refill_rate: f64,
     /// Last time tokens were refilled
     last_refill: Instant,
+    /// Track if we've crossed threshold
+    was_exhausted: bool,
+}
+
+#[derive(Debug)]
+struct RateLimiterStats {
+    requests_allowed: u64,
+    requests_delayed: u64,
+    tokens_consumed: f64,
+    last_summary: Instant,
+}
+
+impl Default for RateLimiterStats {
+    fn default() -> Self {
+        Self {
+            requests_allowed: 0,
+            requests_delayed: 0,
+            tokens_consumed: 0.0,
+            last_summary: Instant::now(),
+        }
+    }
 }
 
 impl TokenBucket {
@@ -35,6 +56,7 @@ impl TokenBucket {
             tokens: capacity, // Start full
             refill_rate,
             last_refill: Instant::now(),
+            was_exhausted: false,
         }
     }
     
@@ -78,6 +100,26 @@ impl TokenBucket {
         self.refill();
         self.tokens
     }
+    
+    /// Check if we've crossed the exhaustion threshold (< 10% capacity)
+    fn is_exhausted(&self) -> bool {
+        self.tokens < self.capacity * 0.1
+    }
+    
+    /// Check if we've crossed a threshold and should emit control event
+    fn check_threshold_crossed(&mut self) -> Option<(&'static str, &'static str)> {
+        let exhausted = self.is_exhausted();
+        
+        if exhausted && !self.was_exhausted {
+            self.was_exhausted = true;
+            Some(("normal", "exhausted"))
+        } else if !exhausted && self.was_exhausted {
+            self.was_exhausted = false;
+            Some(("exhausted", "normal"))
+        } else {
+            None
+        }
+    }
 }
 
 /// Rate limiting middleware using token bucket algorithm
@@ -87,6 +129,8 @@ pub struct RateLimiterMiddleware {
     delayed_events: Arc<Mutex<VecDeque<ChainEvent>>>,
     /// Cost per event (default 1.0)
     cost_per_event: f64,
+    /// Statistics for periodic summaries
+    stats: Arc<Mutex<RateLimiterStats>>,
 }
 
 impl RateLimiterMiddleware {
@@ -98,6 +142,12 @@ impl RateLimiterMiddleware {
             bucket: Arc::new(Mutex::new(bucket)),
             delayed_events: Arc::new(Mutex::new(VecDeque::new())),
             cost_per_event,
+            stats: Arc::new(Mutex::new(RateLimiterStats {
+                requests_allowed: 0,
+                requests_delayed: 0,
+                tokens_consumed: 0.0,
+                last_summary: Instant::now(),
+            })),
         }
     }
     
@@ -122,6 +172,49 @@ impl RateLimiterMiddleware {
         }
         
         result
+    }
+    
+    /// Check if we should emit a summary and do so if needed
+    fn maybe_emit_summary(&self, ctx: &mut MiddlewareContext) {
+        let mut stats = self.stats.lock().unwrap();
+        let bucket = self.bucket.lock().unwrap();
+        
+        // Emit summary every 10 seconds or every 1000 requests
+        let should_emit = stats.last_summary.elapsed() >= Duration::from_secs(10) ||
+                         stats.requests_allowed + stats.requests_delayed >= 1000;
+        
+        if should_emit {
+            let consumption_rate = if stats.last_summary.elapsed().as_secs() > 0 {
+                stats.tokens_consumed / stats.last_summary.elapsed().as_secs_f64()
+            } else {
+                0.0
+            };
+            
+            ctx.write_control_event(ChainEvent::control(
+                ChainEvent::CONTROL_MIDDLEWARE_SUMMARY,
+                json!({
+                    "middleware": "rate_limiter",
+                    "window_duration_s": stats.last_summary.elapsed().as_secs(),
+                    "stats": {
+                        "requests_allowed": stats.requests_allowed,
+                        "requests_delayed": stats.requests_delayed,
+                        "tokens_consumed": stats.tokens_consumed,
+                        "consumption_rate": consumption_rate,
+                        "available_tokens": bucket.tokens,
+                        "capacity": bucket.capacity,
+                        "refill_rate": bucket.refill_rate,
+                        "utilization": 1.0 - (bucket.tokens / bucket.capacity),
+                        "delayed_queue_size": self.delayed_events.lock().unwrap().len()
+                    }
+                })
+            ));
+            
+            // Reset stats
+            stats.requests_allowed = 0;
+            stats.requests_delayed = 0;
+            stats.tokens_consumed = 0.0;
+            stats.last_summary = Instant::now();
+        }
     }
 }
 
@@ -148,6 +241,33 @@ impl Middleware for RateLimiterMiddleware {
         let mut bucket = self.bucket.lock().unwrap();
         
         if bucket.try_consume(self.cost_per_event) {
+            // Track successful consumption
+            self.stats.lock().unwrap().requests_allowed += 1;
+            self.stats.lock().unwrap().tokens_consumed += self.cost_per_event;
+            
+            // Check for threshold crossing
+            if let Some((from, to)) = bucket.check_threshold_crossed() {
+                ctx.write_control_event(ChainEvent::control(
+                    ChainEvent::CONTROL_MIDDLEWARE_STATE,
+                    json!({
+                        "middleware": "rate_limiter",
+                        "state_transition": {
+                            "from": from,
+                            "to": to,
+                            "reason": if to == "exhausted" { 
+                                "rate_limit_approaching" 
+                            } else { 
+                                "rate_limit_recovered" 
+                            }
+                        },
+                        "available_tokens": bucket.tokens,
+                        "capacity": bucket.capacity,
+                        "consumption_rate": bucket.refill_rate,
+                        "timestamp": SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()
+                    })
+                ));
+            }
+            
             // We have capacity - emit any delayed events first
             drop(bucket); // Release lock
             let mut released = self.emit_delayed_events(ctx);
@@ -164,6 +284,28 @@ impl Middleware for RateLimiterMiddleware {
                 MiddlewareAction::Skip(released)
             }
         } else {
+            // Track delayed request
+            self.stats.lock().unwrap().requests_delayed += 1;
+            
+            // Check for threshold crossing
+            if let Some((from, to)) = bucket.check_threshold_crossed() {
+                ctx.write_control_event(ChainEvent::control(
+                    ChainEvent::CONTROL_MIDDLEWARE_STATE,
+                    json!({
+                        "middleware": "rate_limiter",
+                        "state_transition": {
+                            "from": from,
+                            "to": to,
+                            "reason": "rate_limit_exhausted"
+                        },
+                        "available_tokens": bucket.tokens,
+                        "capacity": bucket.capacity,
+                        "consumption_rate": bucket.refill_rate,
+                        "timestamp": SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()
+                    })
+                ));
+            }
+            
             // No tokens - delay this event
             let wait_time = bucket.time_until_available(self.cost_per_event)
                 .unwrap_or(Duration::from_millis(100));
@@ -181,6 +323,11 @@ impl Middleware for RateLimiterMiddleware {
             // Skip this event for now
             MiddlewareAction::Skip(vec![])
         }
+    }
+    
+    fn post_handle(&self, _event: &ChainEvent, _outputs: &[ChainEvent], ctx: &mut MiddlewareContext) {
+        // Check if we should emit a summary
+        self.maybe_emit_summary(ctx);
     }
     
     fn on_error(&self, _event: &ChainEvent, _ctx: &mut MiddlewareContext) -> ErrorAction {

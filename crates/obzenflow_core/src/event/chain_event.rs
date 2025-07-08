@@ -71,6 +71,26 @@ impl ChainEvent {
     /// Standard event type for drain events
     pub const DRAIN_EVENT_TYPE: &'static str = "control.drain";
     
+    // Middleware control events (FLOWIP-056-666)
+    /// Middleware state transitions (e.g., circuit breaker open/closed)
+    pub const CONTROL_MIDDLEWARE_STATE: &'static str = "control.middleware.state";
+    /// Middleware periodic summaries (aggregated stats)
+    pub const CONTROL_MIDDLEWARE_SUMMARY: &'static str = "control.middleware.summary";
+    /// Middleware anomaly detection events
+    pub const CONTROL_MIDDLEWARE_ANOMALY: &'static str = "control.middleware.anomaly";
+    
+    // Metrics control events (FLOWIP-056-666)
+    /// Stage state metrics (saturation: queue depth, in-flight)
+    pub const CONTROL_METRICS_STATE: &'static str = "control.metrics.state";
+    /// Stage resource metrics (utilization: CPU, memory)
+    pub const CONTROL_METRICS_RESOURCE: &'static str = "control.metrics.resource";
+    /// Custom metrics from user code
+    /// TODO(FLOWIP-053a): Reserved for future custom metrics implementation
+    /// See docs/flowip-proposals/FLOWIP-053a-custom-metrics.md for design
+    pub const CONTROL_METRICS_CUSTOM: &'static str = "control.metrics.custom";
+    /// Anomaly detection events
+    pub const CONTROL_METRICS_ANOMALY: &'static str = "control.metrics.anomaly";
+    
     /// Create a new ChainEvent with minimal fields (for backward compatibility)
     /// Note: This creates an incomplete event - you should use StageWriter for proper events
     pub fn new(
@@ -108,6 +128,24 @@ impl ChainEvent {
                 "natural": natural,  // true = natural completion, false = drain/error
                 "timestamp": Self::current_timestamp(),
             })
+        )
+    }
+    
+    /// Create a control event with the given type and payload
+    /// This is used by middleware and stages to emit metrics/state events
+    pub fn control(
+        event_type: &str,
+        payload: Value
+    ) -> Self {
+        // Generate IDs - these will be replaced by StageWriter when actually emitted
+        let id = EventId::new();
+        let writer_id = WriterId::new();
+        
+        Self::new(
+            id,
+            writer_id,
+            event_type,
+            payload
         )
     }
     

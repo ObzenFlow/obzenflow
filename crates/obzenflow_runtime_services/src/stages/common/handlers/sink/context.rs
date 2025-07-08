@@ -35,6 +35,9 @@ pub struct SinkContext<H: SinkHandler> {
     
     /// Upstream stage IDs
     pub upstream_stages: Vec<StageId>,
+    
+    /// Writer ID for this sink to emit control events
+    pub writer_id: Arc<RwLock<Option<obzenflow_core::WriterId>>>,
 }
 
 impl<H: SinkHandler> SinkContext<H> {
@@ -55,6 +58,7 @@ impl<H: SinkHandler> SinkContext<H> {
             subscription: Arc::new(RwLock::new(None)),
             is_flushing: Arc::new(RwLock::new(false)),
             upstream_stages,
+            writer_id: Arc::new(RwLock::new(None)),
         }
     }
 }

@@ -41,18 +41,65 @@ impl<H: TransformHandler> MiddlewareTransform<H> {
         for middleware in &self.middleware_chain {
             match middleware.pre_handle(&event, &mut ctx) {
                 MiddlewareAction::Continue => continue,
-                MiddlewareAction::Skip(results) => return results,
+                MiddlewareAction::Skip(mut results) => {
+                    // Pre-write phase for skip results
+                    for result in &mut results {
+                        for mw in &self.middleware_chain {
+                            mw.pre_write(result, &ctx);
+                        }
+                    }
+                    
+                    // Check for control events even on skip
+                    if !ctx.control_events.is_empty() {
+                        tracing::trace!(
+                            "Appending {} control events from middleware (skip path)", 
+                            ctx.control_events.len()
+                        );
+                    }
+                    // Pre-write on control events - take ownership to avoid borrow issues
+                    let mut control_events = std::mem::take(&mut ctx.control_events);
+                    for control_event in &mut control_events {
+                        for mw in &self.middleware_chain {
+                            mw.pre_write(control_event, &ctx);
+                        }
+                    }
+                    results.extend(control_events);
+                    return results;
+                },
                 MiddlewareAction::Abort => return vec![],
             }
         }
         
         // Execute the transform
-        let results = transform_fn(event.clone());
+        let mut results = transform_fn(event.clone());
         
         // Post-processing phase (reverse order)
         for middleware in self.middleware_chain.iter().rev() {
             middleware.post_handle(&event, &results, &mut ctx);
         }
+        
+        // Pre-write phase: allow middleware to enrich each result event
+        for result in &mut results {
+            for middleware in &self.middleware_chain {
+                middleware.pre_write(result, &ctx);
+            }
+        }
+        
+        // Append control events after all middleware runs
+        if !ctx.control_events.is_empty() {
+            tracing::trace!(
+                "Appending {} control events from middleware", 
+                ctx.control_events.len()
+            );
+        }
+        // Pre-write on control events - take ownership to avoid borrow issues
+        let mut control_events = std::mem::take(&mut ctx.control_events);
+        for control_event in &mut control_events {
+            for middleware in &self.middleware_chain {
+                middleware.pre_write(control_event, &ctx);
+            }
+        }
+        results.extend(control_events);
         
         results
     }
@@ -164,5 +211,117 @@ mod tests {
         
         // The middleware would have emitted events through context,
         // but we can't verify that here without access to the context
+    }
+    
+    struct ControlEventMiddleware;
+    
+    impl Middleware for ControlEventMiddleware {
+        fn pre_handle(&self, _event: &ChainEvent, ctx: &mut MiddlewareContext) -> MiddlewareAction {
+            // Emit a control event
+            ctx.write_control_event(ChainEvent::control(
+                ChainEvent::CONTROL_MIDDLEWARE_STATE,
+                json!({
+                    "middleware": "test_middleware",
+                    "state_transition": {
+                        "from": "inactive",
+                        "to": "active",
+                        "reason": "test"
+                    }
+                })
+            ));
+            MiddlewareAction::Continue
+        }
+        
+        fn post_handle(&self, _event: &ChainEvent, _results: &[ChainEvent], ctx: &mut MiddlewareContext) {
+            // Emit another control event in post phase
+            ctx.write_control_event(ChainEvent::control(
+                ChainEvent::CONTROL_METRICS_STATE,
+                json!({
+                    "queue_depth": 10,
+                    "in_flight": 3
+                })
+            ));
+        }
+    }
+    
+    #[test]
+    fn test_control_events_appended() {
+        let handler = TestTransform
+            .middleware()
+            .with(ControlEventMiddleware)
+            .build();
+            
+        let event = ChainEvent::new(
+            obzenflow_core::EventId::new(),
+            obzenflow_core::WriterId::new(),
+            "test",
+            json!({})
+        );
+        
+        let results = handler.process(event);
+        
+        // Should have 3 events: 1 from handler + 2 control events
+        assert_eq!(results.len(), 3);
+        
+        // First event is the transformed data event
+        assert_eq!(results[0].payload["processed"], json!(true));
+        assert!(!results[0].is_control());
+        
+        // Second event is the control event from pre_handle
+        assert!(results[1].is_control());
+        assert_eq!(results[1].event_type, ChainEvent::CONTROL_MIDDLEWARE_STATE);
+        
+        // Third event is the control event from post_handle
+        assert!(results[2].is_control());
+        assert_eq!(results[2].event_type, ChainEvent::CONTROL_METRICS_STATE);
+    }
+    
+    struct SkipWithControlMiddleware;
+    
+    impl Middleware for SkipWithControlMiddleware {
+        fn pre_handle(&self, _event: &ChainEvent, ctx: &mut MiddlewareContext) -> MiddlewareAction {
+            // Write control event then skip
+            ctx.write_control_event(ChainEvent::control(
+                ChainEvent::CONTROL_MIDDLEWARE_SUMMARY,
+                json!({
+                    "middleware": "skip_test",
+                    "action": "skipped"
+                })
+            ));
+            MiddlewareAction::Skip(vec![ChainEvent::new(
+                obzenflow_core::EventId::new(),
+                obzenflow_core::WriterId::new(),
+                "skipped",
+                json!({"skipped": true})
+            )])
+        }
+    }
+    
+    #[test]
+    fn test_control_events_collected_on_skip() {
+        let handler = TestTransform
+            .middleware()
+            .with(SkipWithControlMiddleware)
+            .build();
+            
+        let event = ChainEvent::new(
+            obzenflow_core::EventId::new(),
+            obzenflow_core::WriterId::new(),
+            "test",
+            json!({})
+        );
+        
+        let results = handler.process(event);
+        
+        // Should have 2 events: 1 skip result + 1 control event
+        assert_eq!(results.len(), 2);
+        
+        // First is the skip result
+        assert_eq!(results[0].event_type, "skipped");
+        assert!(!results[0].is_control());
+        
+        // Second is the control event
+        assert!(results[1].is_control());
+        assert_eq!(results[1].event_type, ChainEvent::CONTROL_MIDDLEWARE_SUMMARY);
     }
 }

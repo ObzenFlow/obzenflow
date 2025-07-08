@@ -18,6 +18,7 @@ pub enum StageHandlerType {
 pub struct StageConfig {
     pub stage_id: StageId,
     pub name: String,
+    pub flow_name: String,
 }
 
 // TODO: Observers need redesign for FLOWIP-084

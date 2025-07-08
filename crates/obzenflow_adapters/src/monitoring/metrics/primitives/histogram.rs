@@ -161,6 +161,49 @@ impl Histogram {
     pub fn sum_time(&self) -> TimeUnit {
         TimeUnit::from_millis(self.sum() as u64)
     }
+    
+    /// Create a snapshot of the histogram for export
+    pub fn snapshot(&self) -> obzenflow_core::metrics::HistogramSnapshot {
+        use obzenflow_core::metrics::HistogramSnapshot;
+        use std::collections::HashMap;
+        
+        let count = self.count();
+        let sum = self.sum();
+        
+        // Calculate percentiles based on bucket counts
+        let mut percentiles = HashMap::new();
+        
+        if count > 0 {
+            let bucket_counts = self.bucket_counts();
+            
+            // Helper to find value at percentile
+            let find_percentile = |target_count: u64| -> f64 {
+                let mut cumulative = 0u64;
+                for (i, &bucket_count) in bucket_counts.iter().enumerate() {
+                    cumulative += bucket_count;
+                    if cumulative >= target_count {
+                        // Return the upper bound of this bucket
+                        return self.bucket_boundaries[i];
+                    }
+                }
+                self.bucket_boundaries.last().copied().unwrap_or(0.0)
+            };
+            
+            // Calculate standard percentiles
+            percentiles.insert("0.5".to_string(), find_percentile((count as f64 * 0.5) as u64));
+            percentiles.insert("0.9".to_string(), find_percentile((count as f64 * 0.9) as u64));
+            percentiles.insert("0.95".to_string(), find_percentile((count as f64 * 0.95) as u64));
+            percentiles.insert("0.99".to_string(), find_percentile((count as f64 * 0.99) as u64));
+        }
+        
+        HistogramSnapshot {
+            count,
+            sum,
+            min: if count > 0 { 0.0 } else { f64::INFINITY }, // We don't track min
+            max: if count > 0 { f64::INFINITY } else { f64::NEG_INFINITY }, // We don't track max
+            percentiles,
+        }
+    }
 }
 
 impl Default for Histogram {

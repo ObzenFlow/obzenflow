@@ -26,10 +26,25 @@ use obzenflow_runtime_services::{
 use obzenflow_adapters::middleware::{
     Middleware, MiddlewareFactory, FiniteSourceHandlerExt, InfiniteSourceHandlerExt,
     TransformHandlerExt, SinkHandlerExt, ControlStrategyRequirement, BackoffConfig,
-    validate_middleware_safety,
+    validate_middleware_safety, TimingMiddleware, SystemEnrichmentMiddleware,
+    OutcomeEnrichmentMiddleware,
 };
 use obzenflow_core::{journal::writer_id::WriterId, event::event_envelope::EventEnvelope};
 use std::sync::Arc;
+
+/// Create system middleware for a stage
+fn create_system_middleware(config: &StageConfig, stage_type: obzenflow_core::event::flow_context::StageType) -> Vec<Box<dyn Middleware>> {
+    vec![
+        Box::new(TimingMiddleware::new(&config.name)),
+        Box::new(SystemEnrichmentMiddleware::new(
+            config.flow_name.clone(),
+            config.flow_name.clone(), // flow_id same as flow_name for now
+            config.name.clone(),
+            stage_type,
+        )),
+        Box::new(OutcomeEnrichmentMiddleware::new(&config.name)),
+    ]
+}
 
 /// Wrapper to convert Arc to Box for CompositeStrategy
 struct ArcStrategyWrapper(Arc<dyn ControlEventStrategy>);
@@ -140,24 +155,24 @@ impl<H: FiniteSourceHandler + 'static> StageDescriptor for FiniteSourceDescripto
     fn create_supervisor(self: Box<Self>, config: StageConfig, resources: StageResources) -> BoxedStageHandle {
         let writer_id = WriterId::new();
         
-        // Create middleware instances from factories
-        if self.middleware.is_empty() {
-            let supervisor = FiniteSourceSupervisor::new(self.handler, config, resources);
-            Box::new(supervisor) as BoxedStageHandle
-        } else {
-            let middleware_instances: Vec<Box<dyn Middleware>> = self.middleware
-                .into_iter()
-                .map(|factory| factory.create(&config))
-                .collect();
-            
-            let mut builder = self.handler.middleware(writer_id.clone());
-            for mw in middleware_instances {
-                builder = builder.with(mw);
-            }
-            let handler_with_middleware = builder.build();
-            let supervisor = FiniteSourceSupervisor::new(handler_with_middleware, config, resources);
-            Box::new(supervisor) as BoxedStageHandle
+        // Create system middleware
+        let mut all_middleware = create_system_middleware(&config, obzenflow_core::event::flow_context::StageType::Source);
+        
+        // Add user middleware
+        let user_middleware: Vec<Box<dyn Middleware>> = self.middleware
+            .into_iter()
+            .map(|factory| factory.create(&config))
+            .collect();
+        all_middleware.extend(user_middleware);
+        
+        // Apply all middleware
+        let mut builder = self.handler.middleware(writer_id.clone());
+        for mw in all_middleware {
+            builder = builder.with(mw);
         }
+        let handler_with_middleware = builder.build();
+        let supervisor = FiniteSourceSupervisor::new(handler_with_middleware, config, resources);
+        Box::new(supervisor) as BoxedStageHandle
     }
 }
 
@@ -176,24 +191,24 @@ impl<H: InfiniteSourceHandler + 'static> StageDescriptor for InfiniteSourceDescr
     fn create_supervisor(self: Box<Self>, config: StageConfig, resources: StageResources) -> BoxedStageHandle {
         let writer_id = WriterId::new();
         
-        // Create middleware instances from factories
-        if self.middleware.is_empty() {
-            let supervisor = InfiniteSourceSupervisor::new(self.handler, config, resources);
-            Box::new(supervisor) as BoxedStageHandle
-        } else {
-            let middleware_instances: Vec<Box<dyn Middleware>> = self.middleware
-                .into_iter()
-                .map(|factory| factory.create(&config))
-                .collect();
-            
-            let mut builder = self.handler.middleware(writer_id.clone());
-            for mw in middleware_instances {
-                builder = builder.with(mw);
-            }
-            let handler_with_middleware = builder.build();
-            let supervisor = InfiniteSourceSupervisor::new(handler_with_middleware, config, resources);
-            Box::new(supervisor) as BoxedStageHandle
+        // Create system middleware
+        let mut all_middleware = create_system_middleware(&config, obzenflow_core::event::flow_context::StageType::Source);
+        
+        // Add user middleware
+        let user_middleware: Vec<Box<dyn Middleware>> = self.middleware
+            .into_iter()
+            .map(|factory| factory.create(&config))
+            .collect();
+        all_middleware.extend(user_middleware);
+        
+        // Apply all middleware
+        let mut builder = self.handler.middleware(writer_id.clone());
+        for mw in all_middleware {
+            builder = builder.with(mw);
         }
+        let handler_with_middleware = builder.build();
+        let supervisor = InfiniteSourceSupervisor::new(handler_with_middleware, config, resources);
+        Box::new(supervisor) as BoxedStageHandle
     }
 }
 
@@ -240,34 +255,29 @@ impl<H: TransformHandler + 'static> StageDescriptor for TransformDescriptor<H> {
             &self.name,
         );
         
-        // Create middleware instances from factories
-        if self.middleware.is_empty() {
-            let supervisor = TransformSupervisor::with_strategy(
-                self.handler,
-                config,
-                resources,
-                control_strategy,
-            );
-            Box::new(supervisor) as BoxedStageHandle
-        } else {
-            let middleware_instances: Vec<Box<dyn Middleware>> = self.middleware
-                .into_iter()
-                .map(|factory| factory.create(&config))
-                .collect();
-            
-            let mut builder = self.handler.middleware();
-            for mw in middleware_instances {
-                builder = builder.with(mw);
-            }
-            let handler_with_middleware = builder.build();
-            let supervisor = TransformSupervisor::with_strategy(
-                handler_with_middleware,
-                config,
-                resources,
-                control_strategy,
-            );
-            Box::new(supervisor) as BoxedStageHandle
+        // Create system middleware
+        let mut all_middleware = create_system_middleware(&config, obzenflow_core::event::flow_context::StageType::Transform);
+        
+        // Add user middleware
+        let user_middleware: Vec<Box<dyn Middleware>> = self.middleware
+            .into_iter()
+            .map(|factory| factory.create(&config))
+            .collect();
+        all_middleware.extend(user_middleware);
+        
+        // Apply all middleware
+        let mut builder = self.handler.middleware();
+        for mw in all_middleware {
+            builder = builder.with(mw);
         }
+        let handler_with_middleware = builder.build();
+        let supervisor = TransformSupervisor::with_strategy(
+            handler_with_middleware,
+            config,
+            resources,
+            control_strategy,
+        );
+        Box::new(supervisor) as BoxedStageHandle
     }
 }
 
@@ -314,33 +324,28 @@ impl<H: SinkHandler + 'static> StageDescriptor for SinkDescriptor<H> {
             &self.name,
         );
         
-        // Create middleware instances from factories
-        if self.middleware.is_empty() {
-            let supervisor = SinkSupervisor::with_strategy(
-                self.handler,
-                config,
-                resources,
-                control_strategy,
-            );
-            Box::new(supervisor) as BoxedStageHandle
-        } else {
-            let middleware_instances: Vec<Box<dyn Middleware>> = self.middleware
-                .into_iter()
-                .map(|factory| factory.create(&config))
-                .collect();
-            
-            let mut builder = self.handler.middleware();
-            for mw in middleware_instances {
-                builder = builder.with(mw);
-            }
-            let handler_with_middleware = builder.build();
-            let supervisor = SinkSupervisor::with_strategy(
-                handler_with_middleware,
-                config,
-                resources,
-                control_strategy,
-            );
-            Box::new(supervisor) as BoxedStageHandle
+        // Create system middleware
+        let mut all_middleware = create_system_middleware(&config, obzenflow_core::event::flow_context::StageType::Sink);
+        
+        // Add user middleware
+        let user_middleware: Vec<Box<dyn Middleware>> = self.middleware
+            .into_iter()
+            .map(|factory| factory.create(&config))
+            .collect();
+        all_middleware.extend(user_middleware);
+        
+        // Apply all middleware
+        let mut builder = self.handler.middleware();
+        for mw in all_middleware {
+            builder = builder.with(mw);
         }
+        let handler_with_middleware = builder.build();
+        let supervisor = SinkSupervisor::with_strategy(
+            handler_with_middleware,
+            config,
+            resources,
+            control_strategy,
+        );
+        Box::new(supervisor) as BoxedStageHandle
     }
 }

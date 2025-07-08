@@ -119,23 +119,21 @@ impl Default for ExporterRegistry {
 }
 
 // Conditional compilation for different exporters
-#[cfg(feature = "metrics-prometheus")]
-pub mod prometheus;
-
 #[cfg(feature = "metrics-statsd")]
 pub mod statsd;
 
 // Always available for testing
 pub mod test;
 
-// Re-exports based on features
-#[cfg(feature = "metrics-prometheus")]
-pub use self::prometheus::PrometheusExporter;
+// Clean exporters for FLOWIP-056-666
+pub mod prometheus_exporter;
+
+// Re-exports
+pub use self::prometheus_exporter::PrometheusExporter;
+pub use self::test::TestExporter;
 
 #[cfg(feature = "metrics-statsd")]
 pub use self::statsd::StatsDExporter;
-
-pub use self::test::TestExporter;
 
 #[cfg(test)]
 mod tests {

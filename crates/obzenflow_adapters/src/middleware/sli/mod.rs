@@ -10,9 +10,11 @@
 /// ```text
 /// Layer 1: Operational → emits raw events (circuit breaker, retry, etc.)
 /// Layer 2: SLI        → computes indicators from raw events
-/// Layer 3: Monitoring → tracks metrics from raw events
-/// Layer 4: SLO        → ensures objectives based on SLI events
-/// Layer 5: Debug      → observes all events
+/// Layer 3: SLO        → ensures objectives based on SLI events
+/// Layer 4: Debug      → observes all events
+/// 
+/// Note: Monitoring is no longer a middleware layer with FLOWIP-056-666.
+/// Metrics are automatically derived from the event journal by MetricsAggregator.
 /// ```
 /// 
 /// ## Available Components
@@ -27,7 +29,6 @@
 /// ```rust,no_run
 /// # use obzenflow_adapters::middleware::sli::{CircuitBreakerSLI, RetrySLI, LatencySLI};
 /// # use obzenflow_adapters::middleware::{CircuitBreakerMiddleware, RetryMiddleware};
-/// # use obzenflow_adapters::monitoring::taxonomies::red::RED;
 /// # use std::time::Duration;
 /// // Example middleware stack configuration:
 /// // Layer 1: Operational
@@ -44,8 +45,8 @@
 ///     Duration::from_millis(500),  // P99 target
 /// );
 /// 
-/// // Layer 3: Monitoring
-/// let monitoring = RED::monitoring();
+/// // Note: With FLOWIP-056-666, monitoring is automatically handled by MetricsAggregator
+/// // Metrics are derived from the event journal, not middleware
 /// ```
 
 mod circuit_breaker_sli;

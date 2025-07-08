@@ -18,8 +18,8 @@ pub use obzenflow_topology_services::stages::{StageId, StageInfo};
 pub use obzenflow_topology_services::topology::Topology;
 
 // Middleware
+// FLOWIP-056-666: Monitoring middleware temporarily disabled pending redesign
 pub use obzenflow_adapters::middleware::{
-    MonitoringMiddleware,
     TransformHandlerExt, FiniteSourceHandlerExt, InfiniteSourceHandlerExt, SinkHandlerExt,
 };
 
@@ -32,7 +32,8 @@ pub use obzenflow_runtime_services::stages::common::handlers::{
 pub use obzenflow_runtime_services::pipeline::config::StageConfig;
 
 // Monitoring
-pub use obzenflow_adapters::monitoring::{Taxonomy, TaxonomyMetrics};
+// FLOWIP-056-666: Monitoring middleware temporarily disabled pending redesign
+// pub use obzenflow_adapters::monitoring::{Taxonomy, TaxonomyMetrics};
 
 // Pipeline
 pub use obzenflow_runtime_services::pipeline::Pipeline;

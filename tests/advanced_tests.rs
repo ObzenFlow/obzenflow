@@ -7,12 +7,7 @@ use obzenflow_infra::journal::DiskJournal;
 use obzenflow_core::event::event_id::EventId;
 use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::journal::writer_id::WriterId;
-use obzenflow_adapters::monitoring::taxonomies::{
-    golden_signals::GoldenSignals,
-    red::RED,
-    use_taxonomy::USE,
-    saafe::SAAFE,
-};
+// FLOWIP-056-666: Monitoring middleware temporarily disabled pending redesign
 use serde_json::json;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -120,13 +115,14 @@ async fn test_dsl_pipeline() -> Result<()> {
 
     // Run pipeline with DSL
     let handle = flow! {
+        name: "dsl_transformation_test",
         journal: journal,
-        middleware: [GoldenSignals::monitoring()],
+        middleware: [],
         
         stages: {
-            gen = source!("generator" => EventGenerator::new(), [RED::monitoring()]);
-            dbl = transform!("doubler" => Doubler::new(), [USE::monitoring()]);
-            sum = sink!("summer" => summer, [SAAFE::monitoring()]);
+            gen = source!("generator" => EventGenerator::new());
+            dbl = transform!("doubler" => Doubler::new());
+            sum = sink!("summer" => summer);
         },
         
         topology: {

@@ -1,157 +1,157 @@
-use crate::monitoring::{Taxonomy, TaxonomyMetrics, MetricSnapshot, MetricUpdate};
-use crate::monitoring::metrics::{RateMetric, ErrorMetric, DurationMetric, SaturationMetric};
-use crate::monitoring::metrics::duration::DurationBuckets;
-use crate::middleware::{Middleware, MiddlewareFactory};
-use obzenflow_runtime_services::pipeline::config::StageConfig;
-use obzenflow_topology_services::stages::StageId;
-use tokio::sync::broadcast;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+//! Golden Signals Taxonomy
+//!
+//! The Four Golden Signals are the most important metrics to monitor:
+//! - **Latency**: The time it takes to service a request
+//! - **Traffic**: A measure of how much demand is placed on the system
+//! - **Errors**: The rate of requests that fail
+//! - **Saturation**: How "full" the service is
+//!
+//! This taxonomy comes from the Google SRE book and is ideal for service monitoring.
+//!
+//! ## Metrics Available in ObzenFlow
+//!
+//! With FLOWIP-056-666, Golden Signals are automatically derived from events:
+//!
+//! | Signal | Prometheus Name | Description |
+//! |--------|----------------|-------------|
+//! | Latency | `obzenflow_duration_seconds` | Request duration histogram |
+//! | Traffic | `obzenflow_events_total` | Total requests (use `rate()`) |
+//! | Errors | `obzenflow_errors_total` | Failed requests |
+//! | Saturation | `obzenflow_queue_depth` | Queue depth as saturation proxy |
+//!
+//! ## Example Prometheus Queries
+//!
+//! ```promql
+//! # Traffic (requests per second)
+//! rate(obzenflow_events_total{flow="api_gateway"}[5m])
+//!
+//! # Latency (95th percentile)
+//! histogram_quantile(0.95, rate(obzenflow_duration_seconds_bucket[5m]))
+//!
+//! # Error rate (percentage)
+//! rate(obzenflow_errors_total[5m]) / rate(obzenflow_events_total[5m]) * 100
+//!
+//! # Saturation
+//! obzenflow_queue_depth{flow="api_gateway"} / 1000  # Assuming 1000 is max capacity
+//! ```
 
-/// Golden Signals (Latency, Traffic, Errors, Saturation) metrics implementation
-pub struct GoldenSignalsMetrics {
-    stage_name: String,
-    stage_id: StageId,
-    traffic: Arc<RateMetric>, // All requests (success + error)
-    errors: Arc<ErrorMetric>,
-    latency: Arc<DurationMetric>,
-    saturation: Arc<SaturationMetric>,
-    update_tx: broadcast::Sender<MetricUpdate>,
-}
-
-impl GoldenSignalsMetrics {
-    pub fn new(stage_name: &str, stage_id: StageId) -> Self {
-        let traffic = Arc::new(RateMetric::new(format!("{}_traffic", stage_name)));
-        let errors = Arc::new(ErrorMetric::new(format!("{}_errors", stage_name)));
-        let latency = Arc::new(DurationMetric::with_buckets(
-            format!("{}_latency", stage_name),
-            DurationBuckets::Milliseconds
-        ));
-        let saturation = Arc::new(SaturationMetric::new(format!("{}_saturation", stage_name)));
-        
-        let (tx, _) = broadcast::channel(256);
-        
-        Self {
-            stage_name: stage_name.to_string(),
-            stage_id,
-            traffic,
-            errors,
-            latency,
-            saturation,
-            update_tx: tx,
-        }
-    }
-    
-    /// Record a successful request
-    pub fn record_success(&self, duration: Duration) {
-        self.traffic.record_event();
-        self.latency.record_duration(duration);
-        self.broadcast_update();
-    }
-    
-    /// Record a failed request
-    pub fn record_error(&self, duration: Duration) {
-        self.traffic.record_event();
-        self.errors.record_error();
-        self.latency.record_duration(duration);
-        self.broadcast_update();
-    }
-    
-    /// Record saturation (queue depth)
-    pub fn record_saturation(&self, queue_depth: usize, max_depth: usize) {
-        if max_depth > 0 {
-            let ratio = queue_depth as f64 / max_depth as f64;
-            self.saturation.set_ratio(ratio);
-        }
-        
-        let _ = self.update_tx.send(MetricUpdate::Saturation {
-            value: if max_depth > 0 { queue_depth as f64 / max_depth as f64 } else { 0.0 },
-            queue_depth,
-            timestamp: Instant::now(),
-            stage: self.stage_name.clone(),
-        });
-    }
-    
-    /// Start a timer for latency tracking
-    pub fn start_timer(&self) -> crate::monitoring::Timer {
-        crate::monitoring::Timer::start()
-    }
-    
-    fn broadcast_update(&self) {
-        let _ = self.update_tx.send(MetricUpdate::Rate {
-            value: 0.0, // Would calculate actual rate
-            timestamp: Instant::now(),
-            stage: self.stage_name.clone(),
-        });
-    }
-}
-
-impl TaxonomyMetrics for GoldenSignalsMetrics {
-    fn current_values(&self) -> MetricSnapshot {
-        let total_traffic = self.traffic.total_events();
-        let total_errors = self.errors.total_errors();
-        let error_rate = if total_traffic > 0 {
-            total_errors as f64 / total_traffic as f64
-        } else {
-            0.0
-        };
-        
-        MetricSnapshot {
-            timestamp: Instant::now(),
-            traffic_per_sec: total_traffic as f64, // Raw counter - exporters calculate rate
-            error_count: total_errors,
-            error_rate,
-            latency_p99: Duration::from_millis(0), // TODO: Get from latency metric
-            saturation: self.saturation.current_ratio(),
-            ..Default::default()
-        }
-    }
-    
-    fn subscribe_updates(&self) -> broadcast::Receiver<MetricUpdate> {
-        self.update_tx.subscribe()
-    }
-    
-    fn export_prometheus(&self) {
-        // Metrics auto-register with Prometheus on creation
-    }
-    
-    fn taxonomy_name(&self) -> &'static str {
-        GoldenSignals::NAME
-    }
-}
 /// Golden Signals taxonomy definition
+///
+/// The Four Golden Signals from Google SRE: Latency, Traffic, Errors, and Saturation.
 pub struct GoldenSignals;
 
-/// Factory for creating GoldenSignals monitoring middleware with stage context
-pub struct GoldenSignalsMonitoringFactory;
-
-impl MiddlewareFactory for GoldenSignalsMonitoringFactory {
-    fn create(&self, config: &StageConfig) -> Box<dyn Middleware> {
-        Box::new(crate::middleware::MonitoringMiddleware::<GoldenSignals>::new(
-            config.name.clone(),
-            config.stage_id,
-        ))
-    }
-    
-    fn name(&self) -> &str {
-        "GoldenSignals::monitoring"
-    }
-}
-
 impl GoldenSignals {
-    /// Create monitoring middleware factory for this taxonomy
-    pub fn monitoring() -> Box<dyn MiddlewareFactory> {
-        Box::new(GoldenSignalsMonitoringFactory)
+    /// Taxonomy name
+    pub const NAME: &'static str = "GoldenSignals";
+    
+    /// Human-readable description
+    pub const DESCRIPTION: &'static str = "Latency, Traffic, Errors, Saturation - Google SRE's four golden signals";
+    
+    /// Get Prometheus queries for Golden Signals
+    pub fn prometheus_queries(flow_name: &str, stage_name: &str) -> Vec<(&'static str, String)> {
+        vec![
+            (
+                "Traffic (req/s)",
+                format!(
+                    "rate(obzenflow_events_total{{flow=\"{}\",stage=\"{}\"}}[5m])",
+                    flow_name, stage_name
+                )
+            ),
+            (
+                "Latency P50",
+                format!(
+                    "histogram_quantile(0.5, rate(obzenflow_duration_seconds_bucket{{flow=\"{}\",stage=\"{}\"}}[5m]))",
+                    flow_name, stage_name
+                )
+            ),
+            (
+                "Latency P95",
+                format!(
+                    "histogram_quantile(0.95, rate(obzenflow_duration_seconds_bucket{{flow=\"{}\",stage=\"{}\"}}[5m]))",
+                    flow_name, stage_name
+                )
+            ),
+            (
+                "Latency P99",
+                format!(
+                    "histogram_quantile(0.99, rate(obzenflow_duration_seconds_bucket{{flow=\"{}\",stage=\"{}\"}}[5m]))",
+                    flow_name, stage_name
+                )
+            ),
+            (
+                "Error Rate (%)",
+                format!(
+                    "rate(obzenflow_errors_total{{flow=\"{}\",stage=\"{}\"}}[5m]) / rate(obzenflow_events_total{{flow=\"{}\",stage=\"{}\"}}[5m]) * 100",
+                    flow_name, stage_name, flow_name, stage_name
+                )
+            ),
+            (
+                "Saturation (Queue Depth)",
+                format!(
+                    "obzenflow_queue_depth{{flow=\"{}\",stage=\"{}\"}}",
+                    flow_name, stage_name
+                )
+            ),
+        ]
     }
-}
-
-impl Taxonomy for GoldenSignals {
-    const NAME: &'static str = "GoldenSignals";
-    const DESCRIPTION: &'static str = "Latency, Traffic, Errors, Saturation - Google's SRE approach";
     
-    type Metrics = GoldenSignalsMetrics;
-    
-    fn create_metrics(stage_name: &str, stage_id: StageId) -> Self::Metrics {
-        GoldenSignalsMetrics::new(stage_name, stage_id)
+    /// Get Grafana dashboard JSON for Golden Signals
+    pub fn grafana_dashboard(flow_name: &str) -> serde_json::Value {
+        serde_json::json!({
+            "title": format!("Golden Signals - {}", flow_name),
+            "panels": [
+                {
+                    "title": "Traffic",
+                    "targets": [{
+                        "expr": format!("rate(obzenflow_events_total{{flow=\"{}\"}}[5m])", flow_name)
+                    }],
+                    "unit": "reqps"
+                },
+                {
+                    "title": "Latency",
+                    "targets": [
+                        {
+                            "expr": format!("histogram_quantile(0.5, rate(obzenflow_duration_seconds_bucket{{flow=\"{}\"}}[5m]))", flow_name),
+                            "legendFormat": "P50"
+                        },
+                        {
+                            "expr": format!("histogram_quantile(0.95, rate(obzenflow_duration_seconds_bucket{{flow=\"{}\"}}[5m]))", flow_name),
+                            "legendFormat": "P95"
+                        },
+                        {
+                            "expr": format!("histogram_quantile(0.99, rate(obzenflow_duration_seconds_bucket{{flow=\"{}\"}}[5m]))", flow_name),
+                            "legendFormat": "P99"
+                        }
+                    ],
+                    "unit": "s"
+                },
+                {
+                    "title": "Errors",
+                    "targets": [
+                        {
+                            "expr": format!("rate(obzenflow_errors_total{{flow=\"{}\"}}[5m])", flow_name),
+                            "legendFormat": "Error Rate"
+                        },
+                        {
+                            "expr": format!("rate(obzenflow_errors_total{{flow=\"{}\"}}[5m]) / rate(obzenflow_events_total{{flow=\"{}\"}}[5m]) * 100", flow_name, flow_name),
+                            "legendFormat": "Error %"
+                        }
+                    ]
+                },
+                {
+                    "title": "Saturation",
+                    "targets": [
+                        {
+                            "expr": format!("obzenflow_queue_depth{{flow=\"{}\"}}", flow_name),
+                            "legendFormat": "Queue Depth"
+                        },
+                        {
+                            "expr": format!("obzenflow_in_flight_events{{flow=\"{}\"}}", flow_name),
+                            "legendFormat": "In-Flight"
+                        }
+                    ]
+                }
+            ]
+        })
     }
 }

@@ -7,6 +7,7 @@
 #[macro_export]
 macro_rules! flow {
     {
+        name: $flow_name:literal,
         journal: $journal:expr,
         middleware: [$($flow_mw:expr),*],
         
@@ -44,7 +45,7 @@ macro_rules! flow {
             )*
             
             // Build the flow
-            $crate::build_typed_flow!(journal, stages, connections, [$($flow_mw),*])
+            $crate::build_typed_flow!($flow_name, journal, stages, connections, [$($flow_mw),*])
         }
     }};
 }
@@ -52,7 +53,7 @@ macro_rules! flow {
 /// Build the actual flow from collected stages and connections
 #[macro_export]
 macro_rules! build_typed_flow {
-    ($journal:expr, $stages:expr, $connections:expr, [$($flow_mw:expr),*]) => {{
+    ($flow_name:expr, $journal:expr, $stages:expr, $connections:expr, [$($flow_mw:expr),*]) => {{
         use $crate::prelude::*;
         use std::sync::Arc;
         use std::collections::HashMap;
@@ -91,8 +92,47 @@ macro_rules! build_typed_flow {
         use obzenflow_runtime_services::message_bus::FsmMessageBus;
         use obzenflow_runtime_services::pipeline::config::StageConfig;
         use obzenflow_runtime_services::stages::common::resources::StageResources;
+        use obzenflow_runtime_services::metrics::DefaultMetricsConfig;
         
-        let reactive_journal = Arc::new(ReactiveJournal::new(journal.clone()));
+        // Wire metrics if enabled
+        let (reactive_journal, metrics_exporter, metrics_aggregator) = {
+            let metrics_config = DefaultMetricsConfig::default();
+            let journal = ReactiveJournal::new(journal.clone());
+            let mut metrics_exporter = None;
+            let mut metrics_aggregator = None;
+            
+            if metrics_config.is_enabled() {
+                // Use clean PrometheusExporter - no blocking observer!
+                use obzenflow_adapters::monitoring::exporters::PrometheusExporter;
+                use obzenflow_adapters::monitoring::aggregator::MetricsAggregatorFactory as ConcreteFactory;
+                use obzenflow_runtime_services::metrics::MetricsAggregatorFactory;
+                
+                let exporter = Arc::new(PrometheusExporter::new());
+                tracing::info!("Created metrics exporter at {:p}", Arc::as_ptr(&exporter));
+                metrics_exporter = Some(exporter as Arc<dyn obzenflow_core::metrics::MetricsExporter>);
+                
+                // Create MetricsAggregator instance
+                let factory = ConcreteFactory::new();
+                let boxed_aggregator = factory.create();
+                // Wrap Box<dyn MetricsAggregator> in Arc<Mutex<_>>
+                let aggregator = Arc::new(std::sync::Mutex::new(boxed_aggregator));
+                tracing::info!("Created metrics aggregator instance");
+                metrics_aggregator = Some(aggregator);
+                
+                // TODO: Wire InfraMetricsObserver when ReactiveJournal supports it
+                // The InfraMetricsObserver exists in runtime_services but needs
+                // a hook in ReactiveJournal to measure write latency without
+                // going through the journal (observer paradox).
+                // 
+                // if metrics_config.collect_infra_metrics {
+                //     use obzenflow_runtime_services::metrics::InfraMetricsObserver;
+                //     let observer = InfraMetricsObserver::new();
+                //     // Need: journal.with_infra_observer(observer, exporter);
+                // }
+            }
+            
+            (Arc::new(journal), metrics_exporter, metrics_aggregator)
+        };
         let message_bus = Arc::new(FsmMessageBus::new());
         
         // Create stage supervisors
@@ -104,6 +144,7 @@ macro_rules! build_typed_flow {
                 let config = StageConfig {
                     stage_id: id,
                     name: descriptor.name().to_string(),
+                    flow_name: $flow_name.to_string(),
                 };
                 
                 let resources = StageResources {
@@ -121,8 +162,14 @@ macro_rules! build_typed_flow {
         use $crate::prelude::{PipelineSupervisor, FlowHandle};
         use tokio::sync::RwLock;
         
-        let mut supervisor = PipelineSupervisor::new(topology.clone(), reactive_journal.clone(), stages)
-            .map_err(|e| format!("Failed to create supervisor: {:?}", e))?;
+        let mut supervisor = PipelineSupervisor::new(
+            topology.clone(), 
+            reactive_journal.clone(), 
+            stages,
+            metrics_exporter,
+            metrics_aggregator
+        )
+        .map_err(|e| format!("Failed to create supervisor: {:?}", e))?;
         
         supervisor.materialize().await?;
         

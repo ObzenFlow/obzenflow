@@ -7,6 +7,7 @@
 pub mod error;
 pub mod event;
 pub mod journal;
+pub mod metrics;
 
 // Re-export key types for convenience
 pub use error::Result;
@@ -17,3 +18,4 @@ pub use event::chain_event::ChainEvent;
 pub use event::event_envelope::EventEnvelope;
 pub use journal::journal::Journal;
 pub use journal::journal_error::JournalError;
+pub use metrics::observer::{MetricsObserver, NoOpMetricsObserver};

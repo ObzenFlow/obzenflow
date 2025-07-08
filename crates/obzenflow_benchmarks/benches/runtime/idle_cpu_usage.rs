@@ -14,11 +14,7 @@ use obzenflow_infra::journal::DiskJournal;
 use obzenflow_core::event::event_id::EventId;
 use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::journal::writer_id::WriterId;
-use obzenflow_adapters::monitoring::taxonomies::{
-    golden_signals::GoldenSignals,
-    red::RED,
-    use_taxonomy::USE,
-};
+// Monitoring removed per FLOWIP-056-666
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -144,11 +140,11 @@ async fn build_pipeline(
         1 => {
             flow! {
                 journal: journal,
-                middleware: [GoldenSignals::monitoring()],
+                middleware: [],
                 
                 stages: {
-                    src = source!("source" => source, [RED::monitoring()]);
-                    snk = sink!("sink" => sink, [RED::monitoring()]);
+                    src = source!("source" => source);
+                    snk = sink!("sink" => sink);
                 },
                 
                 topology: {
@@ -159,20 +155,20 @@ async fn build_pipeline(
         10 => {
             flow! {
                 journal: journal,
-                middleware: [GoldenSignals::monitoring()],
+                middleware: [],
                 
                 stages: {
-                    src = source!("source" => source, [RED::monitoring()]);
-                    s1 = transform!("stage1" => PassthroughStage::new("stage1"), [USE::monitoring()]);
-                    s2 = transform!("stage2" => PassthroughStage::new("stage2"), [USE::monitoring()]);
-                    s3 = transform!("stage3" => PassthroughStage::new("stage3"), [USE::monitoring()]);
-                    s4 = transform!("stage4" => PassthroughStage::new("stage4"), [USE::monitoring()]);
-                    s5 = transform!("stage5" => PassthroughStage::new("stage5"), [USE::monitoring()]);
-                    s6 = transform!("stage6" => PassthroughStage::new("stage6"), [USE::monitoring()]);
-                    s7 = transform!("stage7" => PassthroughStage::new("stage7"), [USE::monitoring()]);
-                    s8 = transform!("stage8" => PassthroughStage::new("stage8"), [USE::monitoring()]);
-                    s9 = transform!("stage9" => PassthroughStage::new("stage9"), [USE::monitoring()]);
-                    snk = sink!("sink" => sink, [RED::monitoring()]);
+                    src = source!("source" => source);
+                    s1 = transform!("stage1" => PassthroughStage::new("stage1"));
+                    s2 = transform!("stage2" => PassthroughStage::new("stage2"));
+                    s3 = transform!("stage3" => PassthroughStage::new("stage3"));
+                    s4 = transform!("stage4" => PassthroughStage::new("stage4"));
+                    s5 = transform!("stage5" => PassthroughStage::new("stage5"));
+                    s6 = transform!("stage6" => PassthroughStage::new("stage6"));
+                    s7 = transform!("stage7" => PassthroughStage::new("stage7"));
+                    s8 = transform!("stage8" => PassthroughStage::new("stage8"));
+                    s9 = transform!("stage9" => PassthroughStage::new("stage9"));
+                    snk = sink!("sink" => sink);
                 },
                 
                 topology: {
@@ -192,30 +188,30 @@ async fn build_pipeline(
         20 => {
             flow! {
                 journal: journal,
-                middleware: [GoldenSignals::monitoring()],
+                middleware: [],
                 
                 stages: {
-                    src = source!("source" => source, [RED::monitoring()]);
-                    s1 = transform!("stage1" => PassthroughStage::new("stage1"), [USE::monitoring()]);
-                    s2 = transform!("stage2" => PassthroughStage::new("stage2"), [USE::monitoring()]);
-                    s3 = transform!("stage3" => PassthroughStage::new("stage3"), [USE::monitoring()]);
-                    s4 = transform!("stage4" => PassthroughStage::new("stage4"), [USE::monitoring()]);
-                    s5 = transform!("stage5" => PassthroughStage::new("stage5"), [USE::monitoring()]);
-                    s6 = transform!("stage6" => PassthroughStage::new("stage6"), [USE::monitoring()]);
-                    s7 = transform!("stage7" => PassthroughStage::new("stage7"), [USE::monitoring()]);
-                    s8 = transform!("stage8" => PassthroughStage::new("stage8"), [USE::monitoring()]);
-                    s9 = transform!("stage9" => PassthroughStage::new("stage9"), [USE::monitoring()]);
-                    s10 = transform!("stage10" => PassthroughStage::new("stage10"), [USE::monitoring()]);
-                    s11 = transform!("stage11" => PassthroughStage::new("stage11"), [USE::monitoring()]);
-                    s12 = transform!("stage12" => PassthroughStage::new("stage12"), [USE::monitoring()]);
-                    s13 = transform!("stage13" => PassthroughStage::new("stage13"), [USE::monitoring()]);
-                    s14 = transform!("stage14" => PassthroughStage::new("stage14"), [USE::monitoring()]);
-                    s15 = transform!("stage15" => PassthroughStage::new("stage15"), [USE::monitoring()]);
-                    s16 = transform!("stage16" => PassthroughStage::new("stage16"), [USE::monitoring()]);
-                    s17 = transform!("stage17" => PassthroughStage::new("stage17"), [USE::monitoring()]);
-                    s18 = transform!("stage18" => PassthroughStage::new("stage18"), [USE::monitoring()]);
-                    s19 = transform!("stage19" => PassthroughStage::new("stage19"), [USE::monitoring()]);
-                    snk = sink!("sink" => sink, [RED::monitoring()]);
+                    src = source!("source" => source);
+                    s1 = transform!("stage1" => PassthroughStage::new("stage1"));
+                    s2 = transform!("stage2" => PassthroughStage::new("stage2"));
+                    s3 = transform!("stage3" => PassthroughStage::new("stage3"));
+                    s4 = transform!("stage4" => PassthroughStage::new("stage4"));
+                    s5 = transform!("stage5" => PassthroughStage::new("stage5"));
+                    s6 = transform!("stage6" => PassthroughStage::new("stage6"));
+                    s7 = transform!("stage7" => PassthroughStage::new("stage7"));
+                    s8 = transform!("stage8" => PassthroughStage::new("stage8"));
+                    s9 = transform!("stage9" => PassthroughStage::new("stage9"));
+                    s10 = transform!("stage10" => PassthroughStage::new("stage10"));
+                    s11 = transform!("stage11" => PassthroughStage::new("stage11"));
+                    s12 = transform!("stage12" => PassthroughStage::new("stage12"));
+                    s13 = transform!("stage13" => PassthroughStage::new("stage13"));
+                    s14 = transform!("stage14" => PassthroughStage::new("stage14"));
+                    s15 = transform!("stage15" => PassthroughStage::new("stage15"));
+                    s16 = transform!("stage16" => PassthroughStage::new("stage16"));
+                    s17 = transform!("stage17" => PassthroughStage::new("stage17"));
+                    s18 = transform!("stage18" => PassthroughStage::new("stage18"));
+                    s19 = transform!("stage19" => PassthroughStage::new("stage19"));
+                    snk = sink!("sink" => sink);
                 },
                 
                 topology: {
@@ -246,20 +242,20 @@ async fn build_pipeline(
             // For 100 stages, simplify to 10 stages for maintainability
             flow! {
                 journal: journal,
-                middleware: [GoldenSignals::monitoring()],
+                middleware: [],
                 
                 stages: {
-                    src = source!("source" => source, [RED::monitoring()]);
-                    s1 = transform!("stage1" => PassthroughStage::new("stage1"), [USE::monitoring()]);
-                    s2 = transform!("stage2" => PassthroughStage::new("stage2"), [USE::monitoring()]);
-                    s3 = transform!("stage3" => PassthroughStage::new("stage3"), [USE::monitoring()]);
-                    s4 = transform!("stage4" => PassthroughStage::new("stage4"), [USE::monitoring()]);
-                    s5 = transform!("stage5" => PassthroughStage::new("stage5"), [USE::monitoring()]);
-                    s6 = transform!("stage6" => PassthroughStage::new("stage6"), [USE::monitoring()]);
-                    s7 = transform!("stage7" => PassthroughStage::new("stage7"), [USE::monitoring()]);
-                    s8 = transform!("stage8" => PassthroughStage::new("stage8"), [USE::monitoring()]);
-                    s9 = transform!("stage9" => PassthroughStage::new("stage9"), [USE::monitoring()]);
-                    snk = sink!("sink" => sink, [RED::monitoring()]);
+                    src = source!("source" => source);
+                    s1 = transform!("stage1" => PassthroughStage::new("stage1"));
+                    s2 = transform!("stage2" => PassthroughStage::new("stage2"));
+                    s3 = transform!("stage3" => PassthroughStage::new("stage3"));
+                    s4 = transform!("stage4" => PassthroughStage::new("stage4"));
+                    s5 = transform!("stage5" => PassthroughStage::new("stage5"));
+                    s6 = transform!("stage6" => PassthroughStage::new("stage6"));
+                    s7 = transform!("stage7" => PassthroughStage::new("stage7"));
+                    s8 = transform!("stage8" => PassthroughStage::new("stage8"));
+                    s9 = transform!("stage9" => PassthroughStage::new("stage9"));
+                    snk = sink!("sink" => sink);
                 },
                 
                 topology: {
@@ -295,7 +291,7 @@ async fn measure_idle_cpu() -> anyhow::Result<f64> {
         middleware: [GoldenSignals::monitoring()],
         
         stages: {
-            src = source!("source" => idle_source, [RED::monitoring()]);
+            src = source!("source" => idle_source);
             snk = sink!("sink" => sink, [RED::monitoring()]);
         },
         

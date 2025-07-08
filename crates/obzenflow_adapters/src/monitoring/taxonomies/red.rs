@@ -1,140 +1,117 @@
-use crate::monitoring::{Taxonomy, TaxonomyMetrics, MetricSnapshot, MetricUpdate};
-use crate::monitoring::metrics::{RateMetric, ErrorMetric, DurationMetric};
-use crate::monitoring::metrics::duration::DurationBuckets;
-use crate::middleware::{Middleware, MiddlewareFactory};
-use obzenflow_runtime_services::pipeline::config::StageConfig;
-use obzenflow_topology_services::stages::StageId;
-use tokio::sync::broadcast;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+//! RED (Rate, Errors, Duration) Taxonomy
+//!
+//! The RED method is a monitoring approach that focuses on:
+//! - **Rate**: The number of requests per second
+//! - **Errors**: The number of failed requests
+//! - **Duration**: The amount of time requests take
+//!
+//! This taxonomy is ideal for request/response systems and user-facing services.
+//!
+//! ## Metrics Available in ObzenFlow
+//!
+//! With FLOWIP-056-666, RED metrics are automatically derived from the event journal:
+//!
+//! | Metric | Prometheus Name | Description |
+//! |--------|----------------|-------------|
+//! | Rate | `obzenflow_events_total` | Total events processed (use `rate()` function) |
+//! | Errors | `obzenflow_errors_total` | Total errors encountered |
+//! | Duration | `obzenflow_duration_seconds` | Processing time histogram |
+//!
+//! ## Example Prometheus Queries
+//!
+//! ```promql
+//! # Request rate (per second)
+//! rate(obzenflow_events_total{flow="payment_processing"}[5m])
+//!
+//! # Error rate (percentage)
+//! rate(obzenflow_errors_total[5m]) / rate(obzenflow_events_total[5m]) * 100
+//!
+//! # 99th percentile latency
+//! histogram_quantile(0.99, rate(obzenflow_duration_seconds_bucket[5m]))
+//! ```
 
-/// RED (Rate, Errors, Duration) metrics implementation
-pub struct REDMetrics {
-    stage_name: String,
-    stage_id: StageId,
-    rate: Arc<RateMetric>,
-    errors: Arc<ErrorMetric>,
-    duration: Arc<DurationMetric>,
-    update_tx: broadcast::Sender<MetricUpdate>,
-}
-
-impl REDMetrics {
-    pub fn new(stage_name: &str, stage_id: StageId) -> Self {
-        let rate = Arc::new(RateMetric::new(format!("{}_rate", stage_name)));
-        let errors = Arc::new(ErrorMetric::new(format!("{}_errors", stage_name)));
-        let duration = Arc::new(DurationMetric::with_buckets(
-            format!("{}_duration", stage_name),
-            DurationBuckets::Milliseconds
-        ));
-        
-        let (tx, _) = broadcast::channel(256);
-        
-        Self {
-            stage_name: stage_name.to_string(),
-            stage_id,
-            rate,
-            errors,
-            duration,
-            update_tx: tx,
-        }
-    }
-    
-    /// Record a successful request
-    pub fn record_success(&self, duration: Duration) {
-        self.rate.record_event();
-        self.duration.record_duration(duration);
-        self.broadcast_update();
-    }
-    
-    /// Record a failed request
-    pub fn record_error(&self, duration: Duration) {
-        self.rate.record_event();
-        self.errors.record_error();
-        self.duration.record_duration(duration);
-        self.broadcast_update();
-    }
-    
-    /// Start a timer for duration tracking
-    pub fn start_timer(&self) -> crate::monitoring::Timer {
-        crate::monitoring::Timer::start()
-    }
-    
-    fn broadcast_update(&self) {
-        let _ = self.update_tx.send(MetricUpdate::Rate {
-            value: self.rate.total_events() as f64, // Raw counter value
-            timestamp: Instant::now(),
-            stage: self.stage_name.clone(),
-        });
-    }
-}
-
-impl TaxonomyMetrics for REDMetrics {
-    fn current_values(&self) -> MetricSnapshot {
-        let total_events = self.rate.total_events();
-        let total_errors = self.errors.total_errors();
-        let error_rate = if total_events > 0 {
-            total_errors as f64 / total_events as f64
-        } else {
-            0.0
-        };
-        
-        MetricSnapshot {
-            timestamp: Instant::now(),
-            rate_per_sec: total_events as f64, // Raw counter - exporters calculate rate
-            error_count: total_errors,
-            error_rate,
-            duration_p50: Duration::from_millis(0), // Duration metric provides these
-            duration_p99: Duration::from_millis(0),
-            duration_p999: Duration::from_millis(0),
-            ..Default::default()
-        }
-    }
-    
-    fn subscribe_updates(&self) -> broadcast::Receiver<MetricUpdate> {
-        self.update_tx.subscribe()
-    }
-    
-    fn export_prometheus(&self) {
-        // Metrics auto-register with Prometheus on creation
-    }
-    
-    fn taxonomy_name(&self) -> &'static str {
-        RED::NAME
-    }
-}
 /// RED taxonomy definition
+/// 
+/// RED focuses on Rate, Errors, and Duration - the three key metrics
+/// for understanding request/response systems.
 pub struct RED;
 
-/// Factory for creating RED monitoring middleware with stage context
-pub struct RedMonitoringFactory;
-
-impl MiddlewareFactory for RedMonitoringFactory {
-    fn create(&self, config: &StageConfig) -> Box<dyn Middleware> {
-        Box::new(crate::middleware::MonitoringMiddleware::<RED>::new(
-            config.name.clone(),
-            config.stage_id,
-        ))
-    }
-    
-    fn name(&self) -> &str {
-        "RED::monitoring"
-    }
-}
-
 impl RED {
-    /// Create monitoring middleware factory for this taxonomy
-    pub fn monitoring() -> Box<dyn MiddlewareFactory> {
-        Box::new(RedMonitoringFactory)
+    /// Taxonomy name
+    pub const NAME: &'static str = "RED";
+    
+    /// Human-readable description
+    pub const DESCRIPTION: &'static str = "Rate, Errors, Duration - ideal for request/response systems";
+    
+    /// Get Prometheus queries for RED metrics
+    pub fn prometheus_queries(flow_name: &str, stage_name: &str) -> Vec<(&'static str, String)> {
+        vec![
+            (
+                "Request Rate (req/s)",
+                format!(
+                    "rate(obzenflow_events_total{{flow=\"{}\",stage=\"{}\"}}[5m])",
+                    flow_name, stage_name
+                )
+            ),
+            (
+                "Error Rate (%)",
+                format!(
+                    "rate(obzenflow_errors_total{{flow=\"{}\",stage=\"{}\"}}[5m]) / rate(obzenflow_events_total{{flow=\"{}\",stage=\"{}\"}}[5m]) * 100",
+                    flow_name, stage_name, flow_name, stage_name
+                )
+            ),
+            (
+                "P50 Latency",
+                format!(
+                    "histogram_quantile(0.5, rate(obzenflow_duration_seconds_bucket{{flow=\"{}\",stage=\"{}\"}}[5m]))",
+                    flow_name, stage_name
+                )
+            ),
+            (
+                "P99 Latency", 
+                format!(
+                    "histogram_quantile(0.99, rate(obzenflow_duration_seconds_bucket{{flow=\"{}\",stage=\"{}\"}}[5m]))",
+                    flow_name, stage_name
+                )
+            ),
+        ]
     }
-}
-
-impl Taxonomy for RED {
-    const NAME: &'static str = "RED";
-    const DESCRIPTION: &'static str = "Rate, Errors, Duration - ideal for request/response systems";
     
-    type Metrics = REDMetrics;
-    
-    fn create_metrics(stage_name: &str, stage_id: StageId) -> Self::Metrics {
-        REDMetrics::new(stage_name, stage_id)
+    /// Get Grafana dashboard JSON for RED metrics
+    pub fn grafana_dashboard(flow_name: &str) -> serde_json::Value {
+        serde_json::json!({
+            "title": format!("RED Metrics - {}", flow_name),
+            "panels": [
+                {
+                    "title": "Request Rate",
+                    "targets": [{
+                        "expr": format!("rate(obzenflow_events_total{{flow=\"{}\"}}[5m])", flow_name)
+                    }]
+                },
+                {
+                    "title": "Error Rate",
+                    "targets": [{
+                        "expr": format!("rate(obzenflow_errors_total{{flow=\"{}\"}}[5m]) / rate(obzenflow_events_total{{flow=\"{}\"}}[5m]) * 100", flow_name, flow_name)
+                    }]
+                },
+                {
+                    "title": "Latency (P50, P95, P99)",
+                    "targets": [
+                        {
+                            "expr": format!("histogram_quantile(0.5, rate(obzenflow_duration_seconds_bucket{{flow=\"{}\"}}[5m]))", flow_name),
+                            "legendFormat": "P50"
+                        },
+                        {
+                            "expr": format!("histogram_quantile(0.95, rate(obzenflow_duration_seconds_bucket{{flow=\"{}\"}}[5m]))", flow_name),
+                            "legendFormat": "P95"
+                        },
+                        {
+                            "expr": format!("histogram_quantile(0.99, rate(obzenflow_duration_seconds_bucket{{flow=\"{}\"}}[5m]))", flow_name),
+                            "legendFormat": "P99"
+                        }
+                    ]
+                }
+            ]
+        })
     }
 }

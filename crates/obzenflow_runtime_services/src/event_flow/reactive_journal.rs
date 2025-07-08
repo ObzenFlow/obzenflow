@@ -11,6 +11,7 @@ use obzenflow_core::JournalError;
 use obzenflow_core::ChainEvent;
 use obzenflow_core::EventEnvelope;
 use obzenflow_core::EventId;
+// MetricsObserver removed - using subscription pattern instead per FLOWIP-056-666
 use std::sync::Arc;
 use tokio::sync::{RwLock, mpsc};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -58,6 +59,9 @@ pub struct EventNotification {
 /// Subscription mode - explicit types for different subscription patterns
 #[derive(Debug, Clone)]
 pub enum SubscriptionFilter {
+    /// Subscribe to all events - no filtering
+    All,
+    
     /// Subscribe to all events from specific upstream stages (data flow)
     UpstreamStages {
         stages: Vec<StageId>,
@@ -230,7 +234,7 @@ impl ReactiveJournal {
         // Write to underlying journal
         let envelope = self.journal.append(writer_id, event, parent).await?;
 
-        // Notify subscribers
+        // Notify subscribers (metrics are now handled via subscriptions per FLOWIP-056-666)
         self.notify_subscribers(&envelope).await;
 
         Ok(envelope)
@@ -255,6 +259,9 @@ impl ReactiveJournal {
 
         // Log subscription creation
         match &filter {
+            SubscriptionFilter::All => {
+                tracing::info!("Created subscription {} for ALL events", id);
+            },
             SubscriptionFilter::EventTypes { event_types } => {
                 tracing::info!(
                     "Created EventTypes subscription {} for event types: {:?}", 
@@ -295,6 +302,9 @@ impl ReactiveJournal {
             },
             SubscriptionFilter::EventTypes { .. } => {
                 // No stage mapping needed - these subscriptions check all events
+            }
+            SubscriptionFilter::All => {
+                // No stage mapping needed - these subscriptions see ALL events
             }
         }
 
@@ -340,6 +350,10 @@ impl ReactiveJournal {
         
         for (sub_id, sub) in &manager.subscriptions {
             let should_notify = match &sub.filter {
+                SubscriptionFilter::All => {
+                    // Always notify for All filter
+                    true
+                },
                 SubscriptionFilter::UpstreamStages { stages } => {
                     // Data flow: notify if event is from an upstream stage
                     stages.contains(&stage_id)
@@ -460,3 +474,8 @@ impl ReactiveWriter {
         self.journal.write(&self.writer_id, event, parent).await
     }
 }
+
+// Include tests
+#[cfg(test)]
+#[path = "reactive_journal_tests.rs"]
+mod reactive_journal_tests;

@@ -6,10 +6,10 @@
 use obzenflow_core::event::chain_event::ChainEvent;
 use crate::middleware::{Middleware, MiddlewareAction, ErrorAction, MiddlewareContext};
 use crate::monitoring::metrics::core::{
-    Metric as NewMetric, 
-    MetricType as NewMetricType, 
-    MetricValue as NewMetricValue, 
-    MetricSnapshot as NewMetricSnapshot
+    Metric,
+    MetricType, 
+    MetricValue, 
+    MetricSnapshot
 };
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -261,11 +261,11 @@ impl FlowMetrics {
         initial_count - correlations.len()
     }
 
-    pub fn export_metrics(&self) -> Vec<NewMetricSnapshot> {
+    pub fn export_metrics(&self) -> Vec<MetricSnapshot> {
         let mut snapshots = vec![];
         
         // Add flow-level labels
-        let mut add_flow_labels = |mut snapshot: NewMetricSnapshot| -> NewMetricSnapshot {
+        let mut add_flow_labels = |mut snapshot: MetricSnapshot| -> MetricSnapshot {
             snapshot.labels.insert("level".to_string(), "flow".to_string());
             snapshot.labels.insert("flow_name".to_string(), self.flow_name.clone());
             snapshot
@@ -280,10 +280,10 @@ impl FlowMetrics {
         // Add a gauge for active correlations
         // Note: We can't easily get async count in sync context, so we'll skip for now
         // In production, this would be handled by a background task that updates a cached value
-        snapshots.push(NewMetricSnapshot {
+        snapshots.push(MetricSnapshot {
             name: format!("{}_active_correlations", self.flow_name),
-            metric_type: NewMetricType::Gauge,
-            value: NewMetricValue::Gauge(0.0), // TODO: Cache active count
+            metric_type: MetricType::Gauge,
+            value: MetricValue::Gauge(0.0), // TODO: Cache active count
             timestamp: Instant::now(),
             labels: {
                 let mut labels = HashMap::new();

@@ -1,4 +1,4 @@
-use super::{NewMetric as Metric, NewMetricValue as MetricValue, NewMetricUpdate as MetricUpdate, NewMetricSnapshot as MetricSnapshot, NewMetricType as MetricType};
+use super::core::{Metric, MetricValue, MetricUpdate, MetricSnapshot, MetricType};
 use super::core::{EventfulMetric};
 use super::primitives::{Histogram, TimeUnit};
 use std::collections::HashMap;

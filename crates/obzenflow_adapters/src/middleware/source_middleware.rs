@@ -57,8 +57,15 @@ impl<H: FiniteSourceHandler> FiniteSourceHandler for MiddlewareFiniteSource<H> {
             match middleware.pre_handle(&synthetic_event, &mut ctx) {
                 MiddlewareAction::Continue => continue,
                 MiddlewareAction::Skip(mut results) => {
-                    // If middleware provides results, return the first one
-                    return results.pop();
+                    // If middleware provides results, enrich them before returning
+                    if let Some(mut event) = results.pop() {
+                        // Call pre_write to enrich the skipped event
+                        for mw in &self.middleware_chain {
+                            mw.pre_write(&mut event, &ctx);
+                        }
+                        return Some(event);
+                    }
+                    return None;
                 },
                 MiddlewareAction::Abort => return None,
             }
@@ -68,13 +75,21 @@ impl<H: FiniteSourceHandler> FiniteSourceHandler for MiddlewareFiniteSource<H> {
         let result = self.inner.next();
         
         // Post-processing phase (only if we got an event)
-        if let Some(ref event) = result {
+        if let Some(mut event) = result {
             let results = vec![event.clone()];
+            
+            // Call post_handle for observation
             for middleware in &self.middleware_chain {
                 middleware.post_handle(&synthetic_event, &results, &mut ctx);
             }
-            // Return the original event (middleware can't modify it)
-            Some(event.clone())
+            
+            // Now call pre_write to enrich the event before returning
+            for middleware in &self.middleware_chain {
+                middleware.pre_write(&mut event, &ctx);
+            }
+            
+            // Return the enriched event
+            Some(event)
         } else {
             // Let middleware know we got no event
             let empty = vec![];
@@ -139,8 +154,15 @@ impl<H: InfiniteSourceHandler> InfiniteSourceHandler for MiddlewareInfiniteSourc
             match middleware.pre_handle(&synthetic_event, &mut ctx) {
                 MiddlewareAction::Continue => continue,
                 MiddlewareAction::Skip(mut results) => {
-                    // If middleware provides results, return the first one
-                    return results.pop();
+                    // If middleware provides results, enrich them before returning
+                    if let Some(mut event) = results.pop() {
+                        // Call pre_write to enrich the skipped event
+                        for mw in &self.middleware_chain {
+                            mw.pre_write(&mut event, &ctx);
+                        }
+                        return Some(event);
+                    }
+                    return None;
                 },
                 MiddlewareAction::Abort => return None,
             }
@@ -150,13 +172,21 @@ impl<H: InfiniteSourceHandler> InfiniteSourceHandler for MiddlewareInfiniteSourc
         let result = self.inner.next();
         
         // Post-processing phase (only if we got an event)
-        if let Some(ref event) = result {
+        if let Some(mut event) = result {
             let results = vec![event.clone()];
+            
+            // Call post_handle for observation
             for middleware in &self.middleware_chain {
                 middleware.post_handle(&synthetic_event, &results, &mut ctx);
             }
-            // Return the original event (middleware can't modify it)
-            Some(event.clone())
+            
+            // Now call pre_write to enrich the event before returning
+            for middleware in &self.middleware_chain {
+                middleware.pre_write(&mut event, &ctx);
+            }
+            
+            // Return the enriched event
+            Some(event)
         } else {
             // Let middleware know we got no event
             let empty = vec![];

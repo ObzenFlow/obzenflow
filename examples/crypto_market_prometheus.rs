@@ -13,12 +13,8 @@ use obzenflow_infra::journal::DiskJournal;
 use obzenflow_core::event::event_id::EventId;
 use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::journal::writer_id::WriterId;
-use obzenflow_adapters::monitoring::taxonomies::{
-    golden_signals::GoldenSignals,
-    red::RED,
-    use_taxonomy::USE,
-    saafe::SAAFE,
-};
+// Monitoring taxonomies are no longer needed with FLOWIP-056-666
+// Metrics are automatically collected by MetricsAggregator from the event journal
 use serde_json::json;
 use std::sync::Arc;
 use anyhow::Result;
@@ -263,13 +259,13 @@ async fn main() -> Result<()> {
     // Create the flow using the new flow! macro
     let handle = flow! {
         journal: journal,
-        middleware: [GoldenSignals::monitoring()],
+        middleware: [],
         
         stages: {
-            market = source!("market" => CryptoMarketSource::new(100), [RED::monitoring()]);  // 100 market events
-            analyzer = transform!("analyzer" => PriceAnalyzer::new(), [GoldenSignals::monitoring()]);
-            detector = transform!("detector" => VolumeDetector::new(), [USE::monitoring()]);
-            agg = sink!("aggregator" => aggregator, [SAAFE::monitoring()]);
+            market = source!("market" => CryptoMarketSource::new(100));  // 100 market events
+            analyzer = transform!("analyzer" => PriceAnalyzer::new());
+            detector = transform!("detector" => VolumeDetector::new());
+            agg = sink!("aggregator" => aggregator);
         },
         
         topology: {

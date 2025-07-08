@@ -18,7 +18,8 @@ use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::event_id::EventId;
 use obzenflow_core::journal::writer_id::WriterId;
 use obzenflow_adapters::middleware::{circuit_breaker, CircuitBreakerBuilder};
-use obzenflow_adapters::monitoring::taxonomies::red::RED;
+// Monitoring taxonomies are no longer needed with FLOWIP-056-666
+// Metrics are automatically collected by MetricsAggregator from the event journal
 use serde_json::json;
 use std::sync::atomic::{AtomicU32, AtomicBool, Ordering};
 use std::sync::Arc;
@@ -235,8 +236,7 @@ async fn basic_circuit_breaker() -> Result<()> {
             src = source!("request_gen" => RequestGenerator::new(200));
             // Apply circuit breaker middleware with default settings
             service = transform!("service" => UnreliableService::new(0.3), [
-                circuit_breaker(5),  // Opens after 5 consecutive failures
-                RED::monitoring()
+                circuit_breaker(5)  // Opens after 5 consecutive failures
             ]);
             sink = sink!("tracker" => ResponseTracker::new());
         },
@@ -271,8 +271,7 @@ async fn custom_threshold_circuit_breaker() -> Result<()> {
             src = source!("request_gen" => RequestGenerator::new(300));
             // Use lower threshold for more sensitive circuit breaking
             service = transform!("service" => UnreliableService::new(0.15), [
-                circuit_breaker(3),  // Opens after only 3 consecutive failures
-                RED::monitoring()
+                circuit_breaker(3)  // Opens after only 3 consecutive failures
             ]);
             sink = sink!("tracker" => ResponseTracker::new());
         },
@@ -308,8 +307,7 @@ async fn custom_cooldown_circuit_breaker() -> Result<()> {
             service = transform!("service" => UnreliableService::new(0.2), [
                 CircuitBreakerBuilder::new(5)
                     .cooldown(Duration::from_secs(30))
-                    .build(),
-                RED::monitoring()
+                    .build()
             ]);
             sink = sink!("tracker" => ResponseTracker::new());
         },

@@ -26,6 +26,7 @@ pub struct FiniteSourceSupervisor<H: FiniteSourceHandler + 'static> {
     context: Arc<FiniteSourceContext<H>>,
     stage_id: StageId,
     stage_name: String,
+    flow_name: String,
     processing_task: Arc<RwLock<Option<JoinHandle<()>>>>,
 }
 
@@ -46,7 +47,8 @@ impl<H: FiniteSourceHandler + 'static> FiniteSourceSupervisor<H> {
             fsm,
             context,
             stage_id: config.stage_id,
-            stage_name: config.name,
+            stage_name: config.name.clone(),
+            flow_name: config.flow_name,
             processing_task: Arc::new(RwLock::new(None)),
         }
     }
@@ -75,11 +77,19 @@ impl<H: FiniteSourceHandler + 'static> FiniteSourceSupervisor<H> {
                 tracing::info!("[{}] Sending EOF", self.stage_name);
                 // Write EOF event to journal
                 if let Some(writer_id) = &*self.context.writer_id.read().await {
-                    let eof_event = ChainEvent::eof(
+                    let mut eof_event = ChainEvent::eof(
                         EventId::new(),
                         writer_id.clone(),
                         false // Not natural - this is triggered by drain
                     );
+                    
+                    // Populate flow context
+                    eof_event.flow_context = obzenflow_core::event::flow_context::FlowContext {
+                        flow_name: self.flow_name.clone(),
+                        flow_id: "default".to_string(),
+                        stage_name: self.stage_name.clone(),
+                        stage_type: obzenflow_core::event::flow_context::StageType::Source,
+                    };
                     self.context.journal
                         .write(writer_id, eof_event, None)
                         .await
@@ -106,6 +116,7 @@ impl<H: FiniteSourceHandler + 'static> FiniteSourceSupervisor<H> {
     async fn start_source_loop(&self) -> Result<(), String> {
         let context = self.context.clone();
         let stage_name = self.stage_name.clone();
+        let flow_name = self.flow_name.clone();
         
         let task = tokio::spawn(async move {
             tracing::info!("[{}] Source loop started", stage_name);
@@ -120,7 +131,15 @@ impl<H: FiniteSourceHandler + 'static> FiniteSourceSupervisor<H> {
                 // Get next event from handler
                 let mut handler = context.handler.write().await;
                 match handler.next() {
-                    Some(event) => {
+                    Some(mut event) => {
+                        // Populate flow context as required by FLOWIP-056-666
+                        event.flow_context = obzenflow_core::event::flow_context::FlowContext {
+                            flow_name: flow_name.clone(),
+                            flow_id: "default".to_string(),
+                            stage_name: stage_name.clone(),
+                            stage_type: obzenflow_core::event::flow_context::StageType::Source,
+                        };
+                        
                         // Write event to journal
                         if let Some(writer_id) = &*context.writer_id.read().await {
                             if let Err(e) = context.journal.write(writer_id, event, None).await {
@@ -135,11 +154,19 @@ impl<H: FiniteSourceHandler + 'static> FiniteSourceSupervisor<H> {
                             
                             // Write EOF event to journal
                             if let Some(writer_id) = &*context.writer_id.read().await {
-                                let eof_event = ChainEvent::eof(
+                                let mut eof_event = ChainEvent::eof(
                                     EventId::new(),
                                     writer_id.clone(),
                                     true // natural completion
                                 );
+                                
+                                // Populate flow context for EOF
+                                eof_event.flow_context = obzenflow_core::event::flow_context::FlowContext {
+                                    flow_name: flow_name.clone(),
+                                    flow_id: "default".to_string(),
+                                    stage_name: stage_name.clone(),
+                                    stage_type: obzenflow_core::event::flow_context::StageType::Source,
+                                };
                                 if let Err(e) = context.journal.write(writer_id, eof_event, None).await {
                                     tracing::error!("[{}] Failed to write EOF: {}", stage_name, e);
                                 }
@@ -158,16 +185,24 @@ impl<H: FiniteSourceHandler + 'static> FiniteSourceSupervisor<H> {
             // Write completion event after exiting the loop
             tracing::info!("[{}] Writing completion event to journal", stage_name);
             if let Some(writer_id) = &*context.writer_id.read().await {
-                let completion_event = ChainEvent::new(
+                let mut completion_event = ChainEvent::new(
                     EventId::new(),
                     writer_id.clone(),
                     "system.stage.completed",
                     serde_json::json!({
                         "stage_id": format!("{}", context.stage_id),
-                        "stage_name": stage_name,
+                        "stage_name": stage_name.clone(),
                         "timestamp": chrono::Utc::now().to_rfc3339(),
                     })
                 );
+                
+                // Populate flow context for completion
+                completion_event.flow_context = obzenflow_core::event::flow_context::FlowContext {
+                    flow_name: flow_name.clone(),
+                    flow_id: "default".to_string(),
+                    stage_name: stage_name.clone(),
+                    stage_type: obzenflow_core::event::flow_context::StageType::Source,
+                };
                 if let Err(e) = context.journal.write(writer_id, completion_event, None).await {
                     // CRITICAL: If we can't write completion, pipeline will hang forever!
                     panic!("[{}] FATAL: Failed to write completion event after producing all data: {}", stage_name, e);

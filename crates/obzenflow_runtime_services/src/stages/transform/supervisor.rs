@@ -27,6 +27,7 @@ pub struct TransformSupervisor<H: TransformHandler + 'static> {
     context: Arc<TransformContext<H>>,
     stage_id: StageId,
     stage_name: String,
+    flow_name: String,
     processing_task: Arc<RwLock<Option<JoinHandle<()>>>>,
     control_strategy: Arc<dyn ControlEventStrategy>,
 }
@@ -59,6 +60,7 @@ impl<H: TransformHandler + 'static> TransformSupervisor<H> {
             context,
             stage_id: config.stage_id,
             stage_name: config.name.clone(),
+            flow_name: config.flow_name,
             processing_task: Arc::new(RwLock::new(None)),
             control_strategy,
         }
@@ -131,6 +133,7 @@ impl<H: TransformHandler + 'static> TransformSupervisor<H> {
     async fn start_transform_loop(&self) -> Result<(), String> {
         let context = self.context.clone();
         let stage_name = self.stage_name.clone();
+        let flow_name = self.flow_name.clone();
         let control_strategy = self.control_strategy.clone();
         
         let task = tokio::spawn(async move {
@@ -228,7 +231,15 @@ impl<H: TransformHandler + 'static> TransformSupervisor<H> {
                                         
                                         // Write outputs
                                         if let Some(writer_id) = &*context.writer_id.read().await {
-                                            for output in outputs {
+                                            for mut output in outputs {
+                                                // Populate flow context as required by FLOWIP-056-666
+                                                output.flow_context = obzenflow_core::event::flow_context::FlowContext {
+                                                    flow_name: flow_name.clone(),
+                                                    flow_id: "default".to_string(), // TODO: Add flow_id support
+                                                    stage_name: stage_name.clone(),
+                                                    stage_type: obzenflow_core::event::flow_context::StageType::Transform,
+                                                };
+                                                
                                                 if let Err(e) = context.journal.write(writer_id, output, None).await {
                                                     tracing::error!("[{}] Failed to write output: {}", stage_name, e);
                                                 }
@@ -260,16 +271,24 @@ impl<H: TransformHandler + 'static> TransformSupervisor<H> {
             // Write completion event after exiting the loop
             tracing::info!("[{}] Writing completion event to journal", stage_name);
             if let Some(writer_id) = &*context.writer_id.read().await {
-                let completion_event = ChainEvent::new(
+                let mut completion_event = ChainEvent::new(
                     EventId::new(),
                     writer_id.clone(),
                     "system.stage.completed",
                     serde_json::json!({
                         "stage_id": format!("{}", context.stage_id),
-                        "stage_name": stage_name,
+                        "stage_name": stage_name.clone(),
                         "timestamp": chrono::Utc::now().to_rfc3339(),
                     })
                 );
+                
+                // Populate flow context for completion event
+                completion_event.flow_context = obzenflow_core::event::flow_context::FlowContext {
+                    flow_name: flow_name.clone(),
+                    flow_id: "default".to_string(),
+                    stage_name: stage_name.clone(),
+                    stage_type: obzenflow_core::event::flow_context::StageType::Transform,
+                };
                 if let Err(e) = context.journal.write(writer_id, completion_event, None).await {
                     // CRITICAL: If we can't write completion, pipeline will hang forever!
                     panic!("[{}] FATAL: Failed to write completion event after processing all data: {}", stage_name, e);

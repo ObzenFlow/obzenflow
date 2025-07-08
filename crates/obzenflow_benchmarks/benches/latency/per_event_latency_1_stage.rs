@@ -14,10 +14,7 @@ use obzenflow_infra::journal::DiskJournal;
 use obzenflow_core::event::event_id::EventId;
 use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::journal::writer_id::WriterId;
-use obzenflow_adapters::monitoring::taxonomies::{
-    golden_signals::GoldenSignals,
-    red::RED,
-};
+// Monitoring removed per FLOWIP-056-666
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -135,11 +132,11 @@ async fn run_1_stage_pipeline() -> anyhow::Result<Duration> {
 
     let handle = flow! {
         journal: journal,
-        middleware: [GoldenSignals::monitoring()],
+        middleware: [],
         
         stages: {
-            src = source!("source" => source, [RED::monitoring()]);
-            snk = sink!("sink" => sink, [RED::monitoring()]);
+            src = source!("source" => source);
+            snk = sink!("sink" => sink);
         },
         
         topology: {

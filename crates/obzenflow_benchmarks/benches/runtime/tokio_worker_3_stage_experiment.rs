@@ -20,11 +20,7 @@ use obzenflow_infra::journal::DiskJournal;
 use obzenflow_core::event::event_id::EventId;
 use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::journal::writer_id::WriterId;
-use obzenflow_adapters::monitoring::taxonomies::{
-    golden_signals::GoldenSignals,
-    red::RED,
-    use_taxonomy::USE,
-};
+// Monitoring removed per FLOWIP-056-666
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -164,13 +160,13 @@ async fn run_3_stage_pipeline_with_runtime(runtime_name: &str, rt: Arc<Runtime>)
 
         let handle = flow! {
             journal: journal,
-            middleware: [GoldenSignals::monitoring()],
+            middleware: [],
             
             stages: {
-                src = source!("source" => source, [RED::monitoring()]);
-                s1 = transform!("stage1" => PassthroughStage::new("stage1"), [USE::monitoring()]);
-                s2 = transform!("stage2" => PassthroughStage::new("stage2"), [USE::monitoring()]);
-                snk = sink!("sink" => sink, [RED::monitoring()]);
+                src = source!("source" => source);
+                s1 = transform!("stage1" => PassthroughStage::new("stage1"));
+                s2 = transform!("stage2" => PassthroughStage::new("stage2"));
+                snk = sink!("sink" => sink);
             },
             
             topology: {
@@ -345,15 +341,15 @@ fn bench_5_stage_control(c: &mut Criterion) {
 
                 let handle = flow! {
                     journal: journal,
-                    middleware: [GoldenSignals::monitoring()],
+                    middleware: [],
                     
                     stages: {
-                        src = source!("source" => source, [RED::monitoring()]);
-                        s1 = transform!("stage1" => PassthroughStage::new("stage1"), [USE::monitoring()]);
-                        s2 = transform!("stage2" => PassthroughStage::new("stage2"), [USE::monitoring()]);
-                        s3 = transform!("stage3" => PassthroughStage::new("stage3"), [USE::monitoring()]);
-                        s4 = transform!("stage4" => PassthroughStage::new("stage4"), [USE::monitoring()]);
-                        snk = sink!("sink" => sink, [RED::monitoring()]);
+                        src = source!("source" => source);
+                        s1 = transform!("stage1" => PassthroughStage::new("stage1"));
+                        s2 = transform!("stage2" => PassthroughStage::new("stage2"));
+                        s3 = transform!("stage3" => PassthroughStage::new("stage3"));
+                        s4 = transform!("stage4" => PassthroughStage::new("stage4"));
+                        snk = sink!("sink" => sink);
                     },
                     
                     topology: {

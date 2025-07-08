@@ -7,11 +7,7 @@ use obzenflow_infra::journal::DiskJournal;
 use obzenflow_core::event::event_id::EventId;
 use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::journal::writer_id::WriterId;
-use obzenflow_adapters::monitoring::taxonomies::{
-    golden_signals::GoldenSignals,
-    red::RED,
-    use_taxonomy::USE,
-};
+// FLOWIP-056-666: Monitoring middleware temporarily disabled pending redesign
 use serde_json::json;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -88,12 +84,13 @@ async fn test_basic_flow() -> Result<()> {
     
     // Create a simple flow
     let handle = flow! {
+        name: "basic_flow_test",
         journal: journal,
-        middleware: [GoldenSignals::monitoring()],
+        middleware: [],
         
         stages: {
-            src = source!("source" => TestEventSource::new(10), [RED::monitoring()]);
-            snk = sink!("sink" => counter_sink, [USE::monitoring()]);
+            src = source!("source" => TestEventSource::new(10));
+            snk = sink!("sink" => counter_sink);
         },
         
         topology: {
@@ -137,13 +134,14 @@ async fn test_multi_stage_flow() -> Result<()> {
     let journal = Arc::new(DiskJournal::new(journal_path, "test_multi_stage").await?);
     
     let handle = flow! {
+        name: "multi_stage_flow_test",
         journal: journal,
-        middleware: [GoldenSignals::monitoring()],
+        middleware: [],
         
         stages: {
-            src = source!("source" => TestEventSource::new(5), [RED::monitoring()]);
-            dbl = transform!("doubler" => Doubler::new(), [USE::monitoring()]);
-            snk = sink!("sink" => counter_sink, [RED::monitoring()]);
+            src = source!("source" => TestEventSource::new(5));
+            dbl = transform!("doubler" => Doubler::new());
+            snk = sink!("sink" => counter_sink);
         },
         
         topology: {
@@ -260,13 +258,14 @@ async fn test_pipeline_topology() -> Result<()> {
     // If topology filtering works, Sum should be 12 (2+4+6)
     // If it doesn't work (broadcast), Sum would be 21 (1+2+3+2+4+6)
     let handle = flow! {
+        name: "pipeline_topology_test",
         journal: journal,
-        middleware: [GoldenSignals::monitoring()],
+        middleware: [],
         
         stages: {
-            src = source!("source" => NumberSource::new(3), [RED::monitoring()]);
-            dbl = transform!("doubler" => NumberDoubler::new(), [USE::monitoring()]);
-            snk = sink!("sink" => sum_sink, [RED::monitoring()]);
+            src = source!("source" => NumberSource::new(3));
+            dbl = transform!("doubler" => NumberDoubler::new());
+            snk = sink!("sink" => sum_sink);
         },
         
         topology: {

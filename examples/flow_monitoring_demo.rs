@@ -11,12 +11,8 @@ use obzenflow_infra::journal::DiskJournal;
 use obzenflow_core::event::event_id::EventId;
 use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::journal::writer_id::WriterId;
-use obzenflow_adapters::monitoring::taxonomies::{
-    golden_signals::GoldenSignals,
-    red::RED,
-    use_taxonomy::USE,
-    saafe::SAAFE,
-};
+// Monitoring taxonomies removed per FLOWIP-056-666
+// Monitoring is now handled through correlation context
 use serde_json::json;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -139,12 +135,12 @@ async fn main() -> Result<()> {
     // This demonstrates the new FLOWIP-055 syntax
     let handle = flow! {
         journal: journal,
-        middleware: [GoldenSignals::monitoring()],  // Flow-level monitoring
+        middleware: [],  // Flow-level monitoring removed per FLOWIP-056-666
         
         stages: {
-            src = source!("source" => generator, [RED::monitoring()]);      // Stage monitoring
-            proc = transform!("processor" => processor, [USE::monitoring()]); // Stage monitoring
-            log = sink!("sink" => logger, [RED::monitoring()]);              // Stage monitoring
+            src = source!("source" => generator);      // Stage monitoring removed per FLOWIP-056-666
+            proc = transform!("processor" => processor); // Stage monitoring removed per FLOWIP-056-666
+            log = sink!("sink" => logger);              // Stage monitoring removed per FLOWIP-056-666
         },
         
         topology: {

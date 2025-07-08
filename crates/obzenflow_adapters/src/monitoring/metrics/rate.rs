@@ -1,5 +1,4 @@
-use super::{NewMetric as Metric, NewMetricValue as MetricValue, NewMetricUpdate as MetricUpdate, NewMetricSnapshot as MetricSnapshot, NewMetricType as MetricType};
-use super::core::{EventfulMetric};
+use super::core::{Metric, MetricValue, MetricUpdate, MetricSnapshot, MetricType, EventfulMetric};
 use super::primitives::Counter;
 use std::collections::HashMap;
 use std::time::Instant;

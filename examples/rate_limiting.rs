@@ -15,10 +15,8 @@ use obzenflow_core::event::event_id::EventId;
 use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::journal::writer_id::WriterId;
 use obzenflow_adapters::middleware::common;
-use obzenflow_adapters::monitoring::taxonomies::{
-    red::RED,
-    golden_signals::GoldenSignals
-};
+// Monitoring taxonomies removed per FLOWIP-056-666
+// Monitoring is now handled through correlation context
 use serde_json::json;
 use std::sync::Arc;
 use tracing::info;
@@ -214,13 +212,13 @@ async fn simple_rate_limiting() -> Result<()> {
                 vec!["user1".to_string(), "user2".to_string()],
                 vec!["/api/data".to_string(), "/api/search".to_string()],
                 500  // Generate 500 requests
-            ), [RED::monitoring()]);
+            ));
             
             // Transform with rate limiting
-            proc = transform!("processor" => ApiProcessor::new(), [common::rate_limit(100.0), RED::monitoring()]);
+            proc = transform!("processor" => ApiProcessor::new(), [common::rate_limit(100.0)]);
             
             // Sink to log results
-            sink = sink!("logger" => ResponseLogger::new(), [GoldenSignals::monitoring()]);
+            sink = sink!("logger" => ResponseLogger::new());
         },
         
         topology: {
@@ -252,13 +250,13 @@ async fn burst_rate_limiting() -> Result<()> {
                 vec!["user1".to_string(), "user2".to_string(), "user3".to_string()],
                 vec!["/api/data".to_string(), "/api/search".to_string(), "/api/health".to_string()],
                 1000  // Generate 1000 requests
-            ), [RED::monitoring()]);
+            ));
             
             // Rate limiting with burst capacity
             // Sustain: 50 req/sec, Burst: up to 200 requests
-            proc = transform!("processor" => ApiProcessor::new(), [common::rate_limit_with_burst(50.0, 200.0), RED::monitoring()]);
+            proc = transform!("processor" => ApiProcessor::new(), [common::rate_limit_with_burst(50.0, 200.0)]);
             
-            sink = sink!("logger" => ResponseLogger::new(), [GoldenSignals::monitoring()]);
+            sink = sink!("logger" => ResponseLogger::new());
         },
         
         topology: {
@@ -293,15 +291,15 @@ async fn multi_tier_rate_limiting() -> Result<()> {
                 vec!["premium_user".to_string(), "basic_user".to_string(), "trial_user".to_string()],
                 vec!["/api/data".to_string(), "/api/search".to_string(), "/api/compute".to_string()],
                 2000  // Generate 2000 requests
-            ), [RED::monitoring()]);
+            ));
             
             // First tier: Global rate limit
-            global_limiter = transform!("global_limiter" => IdentityTransform::new(), [common::rate_limit_with_burst(1000.0, 5000.0), RED::monitoring()]);
+            global_limiter = transform!("global_limiter" => IdentityTransform::new(), [common::rate_limit_with_burst(1000.0, 5000.0)]);
             
             // Second tier: Per-endpoint rate limiting
-            endpoint_processor = transform!("endpoint_processor" => ApiProcessor::new(), [common::rate_limit(200.0), RED::monitoring()]);
+            endpoint_processor = transform!("endpoint_processor" => ApiProcessor::new(), [common::rate_limit(200.0)]);
             
-            sink = sink!("logger" => ResponseLogger::new(), [GoldenSignals::monitoring()]);
+            sink = sink!("logger" => ResponseLogger::new());
         },
         
         topology: {

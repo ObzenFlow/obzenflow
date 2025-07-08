@@ -6,6 +6,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
+use obzenflow_core::ChainEvent;
 
 /// Ephemeral event emitted by middleware during processing
 /// 
@@ -53,6 +54,10 @@ pub struct MiddlewareContext {
     
     /// Key-value baggage for middleware state
     pub baggage: HashMap<String, Value>,
+    
+    /// Control events to be written to the journal after processing
+    /// These are collected during middleware execution and appended by MiddlewareTransform
+    pub control_events: Vec<ChainEvent>,
 }
 
 impl MiddlewareContext {
@@ -103,6 +108,18 @@ impl MiddlewareContext {
     /// Remove a baggage value
     pub fn remove_baggage(&mut self, key: &str) -> Option<Value> {
         self.baggage.remove(key)
+    }
+    
+    /// Write a control event to the journal
+    /// 
+    /// Control events are durable events that flow through the journal and are
+    /// observed by the MetricsAggregator. Use this for significant state changes,
+    /// periodic summaries, or anomaly detection.
+    /// 
+    /// Note: The control event will be appended to the handler's results by
+    /// MiddlewareTransform after all middleware has run.
+    pub fn write_control_event(&mut self, event: ChainEvent) {
+        self.control_events.push(event);
     }
 }
 
@@ -184,5 +201,36 @@ mod tests {
         let removed = ctx.remove_baggage("circuit_state");
         assert_eq!(removed, Some(json!("open")));
         assert!(!ctx.has_baggage("circuit_state"));
+    }
+    
+    #[test]
+    fn test_write_control_event() {
+        let mut ctx = MiddlewareContext::new();
+        
+        // Write a middleware state control event
+        ctx.write_control_event(ChainEvent::control(
+            ChainEvent::CONTROL_MIDDLEWARE_STATE,
+            json!({
+                "middleware": "circuit_breaker",
+                "state_transition": {
+                    "from": "closed",
+                    "to": "open",
+                    "reason": "threshold_exceeded"
+                }
+            })
+        ));
+        
+        // Write a metrics state control event
+        ctx.write_control_event(ChainEvent::control(
+            ChainEvent::CONTROL_METRICS_STATE,
+            json!({
+                "queue_depth": 42,
+                "in_flight": 7
+            })
+        ));
+        
+        assert_eq!(ctx.control_events.len(), 2);
+        assert_eq!(ctx.control_events[0].event_type, ChainEvent::CONTROL_MIDDLEWARE_STATE);
+        assert_eq!(ctx.control_events[1].event_type, ChainEvent::CONTROL_METRICS_STATE);
     }
 }

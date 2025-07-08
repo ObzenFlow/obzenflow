@@ -27,6 +27,7 @@ pub struct SinkSupervisor<H: SinkHandler + 'static> {
     context: Arc<SinkContext<H>>,
     stage_id: StageId,
     stage_name: String,
+    flow_name: String,
     processing_task: Arc<RwLock<Option<JoinHandle<()>>>>,
     control_strategy: Arc<dyn ControlEventStrategy>,
 }
@@ -59,6 +60,7 @@ impl<H: SinkHandler + 'static> SinkSupervisor<H> {
             context,
             stage_id: config.stage_id,
             stage_name: config.name.clone(),
+            flow_name: config.flow_name,
             processing_task: Arc::new(RwLock::new(None)),
             control_strategy,
         }
@@ -68,6 +70,11 @@ impl<H: SinkHandler + 'static> SinkSupervisor<H> {
         match action {
             SinkAction::AllocateResources => {
                 tracing::info!("[{}] Allocating resources", self.stage_name);
+                
+                // Register writer for control events
+                let writer_id = self.context.journal.register_writer(self.context.stage_id, None).await
+                    .map_err(|e| format!("Failed to register writer: {:?}", e))?;
+                *self.context.writer_id.write().await = Some(writer_id);
                 
                 // Create subscription to upstreams (provided by pipeline)
                 let upstream_stages = self.context.upstream_stages.clone();
@@ -114,6 +121,7 @@ impl<H: SinkHandler + 'static> SinkSupervisor<H> {
     async fn start_sink_loop(&self) -> Result<(), String> {
         let context = self.context.clone();
         let stage_name = self.stage_name.clone();
+        let flow_name = self.flow_name.clone();
         let control_strategy = self.control_strategy.clone();
         
         let task = tokio::spawn(async move {
@@ -198,10 +206,38 @@ impl<H: SinkHandler + 'static> SinkSupervisor<H> {
                                     }
                                     None => {
                                         // Regular data event
+                                        let event = envelope.event.clone();
+                                        
                                         // Consume the event
                                         let mut handler = context.handler.write().await;
-                                        if let Err(e) = handler.consume(envelope.event) {
+                                        if let Err(e) = handler.consume(event.clone()) {
                                             tracing::error!("[{}] Failed to consume event: {:?}", stage_name, e);
+                                        } else {
+                                            // Emit a lightweight control event to track sink consumption
+                                            // This allows metrics to see sink activity
+                                            if let Some(writer_id) = &*context.writer_id.read().await {
+                                                let mut control_event = ChainEvent::control(
+                                                    "control.sink.consumed",
+                                                    serde_json::json!({
+                                                        "event_type": event.event_type,
+                                                        "correlation_id": event.correlation_id.map(|id| id.to_string()),
+                                                    })
+                                                );
+                                                
+                                                // Set flow context to match the consumed event
+                                                control_event.flow_context = obzenflow_core::event::flow_context::FlowContext {
+                                                    flow_name: flow_name.clone(),
+                                                    flow_id: "default".to_string(),
+                                                    stage_name: stage_name.clone(),
+                                                    stage_type: obzenflow_core::event::flow_context::StageType::Sink,
+                                                };
+                                                
+                                                if let Err(e) = context.journal.write(writer_id, control_event, None).await {
+                                                    tracing::trace!("[{}] Failed to write sink consumption event: {}", stage_name, e);
+                                                }
+                                            } else {
+                                                tracing::trace!("[{}] No writer_id available for sink metrics", stage_name);
+                                            }
                                         }
                                     }
                                 }
@@ -228,25 +264,34 @@ impl<H: SinkHandler + 'static> SinkSupervisor<H> {
             
             // Write completion event after exiting the loop
             tracing::info!("[{}] Writing completion event to journal", stage_name);
-            // Sinks need to register a writer just for the completion event
-            let writer_id = context.journal.register_writer(context.stage_id, None)
-                .await
-                .unwrap_or_else(|e| panic!("[{}] FATAL: Failed to register writer for completion event: {:?}", stage_name, e));
             
-            let completion_event = ChainEvent::new(
-                EventId::new(),
-                writer_id.clone(),
-                "system.stage.completed",
-                serde_json::json!({
-                    "stage_id": format!("{}", context.stage_id),
-                    "stage_name": stage_name,
-                    "timestamp": chrono::Utc::now().to_rfc3339(),
-                })
-            );
-            
-            if let Err(e) = context.journal.write(&writer_id, completion_event, None).await {
-                // CRITICAL: If we can't write completion, pipeline will hang forever!
-                panic!("[{}] FATAL: Failed to write completion event after processing all data: {}", stage_name, e);
+            // Use the pre-registered writer_id
+            if let Some(writer_id) = &*context.writer_id.read().await {
+                let mut completion_event = ChainEvent::new(
+                    EventId::new(),
+                    writer_id.clone(),
+                    "system.stage.completed",
+                    serde_json::json!({
+                        "stage_id": format!("{}", context.stage_id),
+                        "stage_name": stage_name,
+                        "timestamp": chrono::Utc::now().to_rfc3339(),
+                    })
+                );
+                
+                // Populate flow context for completion
+                completion_event.flow_context = obzenflow_core::event::flow_context::FlowContext {
+                    flow_name: flow_name.clone(),
+                    flow_id: "default".to_string(),
+                    stage_name: stage_name.clone(),
+                    stage_type: obzenflow_core::event::flow_context::StageType::Sink,
+                };
+                
+                if let Err(e) = context.journal.write(writer_id, completion_event, None).await {
+                    // CRITICAL: If we can't write completion, pipeline will hang forever!
+                    panic!("[{}] FATAL: Failed to write completion event after processing all data: {}", stage_name, e);
+                }
+            } else {
+                panic!("[{}] FATAL: No writer_id available to write completion event", stage_name);
             }
             
             tracing::info!("[{}] Sink task completed successfully", stage_name);

@@ -7,12 +7,7 @@ use obzenflow_infra::journal::DiskJournal;
 use obzenflow_core::event::event_id::EventId;
 use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::journal::writer_id::WriterId;
-use obzenflow_adapters::monitoring::taxonomies::{
-    golden_signals::GoldenSignals,
-    red::RED,
-    use_taxonomy::USE,
-    saafe::SAAFE,
-};
+// FLOWIP-056-666: Monitoring middleware temporarily disabled pending redesign
 use serde_json::json;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -168,13 +163,14 @@ async fn test_basic_throughput() -> Result<()> {
     
     let start = Instant::now();
     let handle = flow! {
+        name: "high_throughput_test",
         journal: journal,
-        middleware: [GoldenSignals::monitoring()],
+        middleware: [],
         
         stages: {
-            src = source!("source" => EventGenerator::new(1000, 1000, "TestEvent".to_string()), [RED::monitoring()]);
-            pass = transform!("passthrough" => PassthroughStage::new(), [USE::monitoring()]);
-            snk = sink!("sink" => counter_sink, [SAAFE::monitoring()]);
+            src = source!("source" => EventGenerator::new(1000, 1000, "TestEvent".to_string()));
+            pass = transform!("passthrough" => PassthroughStage::new());
+            snk = sink!("sink" => counter_sink);
         },
         
         topology: {
@@ -211,13 +207,14 @@ async fn test_backpressure() -> Result<()> {
     // Fast producer, slow consumer
     let start = Instant::now();
     let handle = flow! {
+        name: "backpressure_test",
         journal: journal,
-        middleware: [GoldenSignals::monitoring()],
+        middleware: [],
         
         stages: {
-            src = source!("source" => EventGenerator::new(1000, 100, "TestEvent".to_string()), [RED::monitoring()]);
-            cpu = transform!("cpu_intensive" => CpuIntensiveStage::new(Duration::from_micros(100)), [USE::monitoring()]);
-            snk = sink!("sink" => counter_sink, [SAAFE::monitoring()]);
+            src = source!("source" => EventGenerator::new(1000, 100, "TestEvent".to_string()));
+            cpu = transform!("cpu_intensive" => CpuIntensiveStage::new(Duration::from_micros(100)));
+            snk = sink!("sink" => counter_sink);
         },
         
         topology: {
@@ -251,13 +248,14 @@ async fn test_memory_pressure() -> Result<()> {
     let journal = Arc::new(DiskJournal::new(journal_path, "test_memory").await?);
 
     let handle = flow! {
+        name: "disk_journal_memory_usage_test",
         journal: journal,
-        middleware: [GoldenSignals::monitoring()],
+        middleware: [],
         
         stages: {
-            src = source!("source" => EventGenerator::new(100, 50, "TestEvent".to_string()), [RED::monitoring()]);
-            mem = transform!("memory_intensive" => MemoryIntensiveStage::new(1024 * 1024), [USE::monitoring()]); // 1MB per event
-            snk = sink!("sink" => counter_sink, [SAAFE::monitoring()]);
+            src = source!("source" => EventGenerator::new(100, 50, "TestEvent".to_string()));
+            mem = transform!("memory_intensive" => MemoryIntensiveStage::new(1024 * 1024)); // 1MB per event
+            snk = sink!("sink" => counter_sink);
         },
         
         topology: {

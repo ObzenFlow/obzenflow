@@ -13,12 +13,8 @@ use obzenflow_infra::journal::DiskJournal;
 use obzenflow_core::event::event_id::EventId;
 use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::journal::writer_id::WriterId;
-use obzenflow_adapters::monitoring::taxonomies::{
-    golden_signals::GoldenSignals,
-    red::RED,
-    use_taxonomy::USE,
-    saafe::SAAFE,
-};
+// Monitoring taxonomies removed per FLOWIP-056-666
+// Monitoring is now handled through correlation context
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -210,13 +206,13 @@ async fn main() -> Result<()> {
     // Create the flow using the new flow! macro
     let handle = flow! {
         journal: journal,
-        middleware: [GoldenSignals::monitoring()],
+        middleware: [],
         
         stages: {
-            src = source!("source" => FlightDataSource::new(), [RED::monitoring()]);
-            val = transform!("validator" => FlightValidator::new(), [USE::monitoring()]);
-            calc = transform!("calculator" => DelayCalculator::new(), [GoldenSignals::monitoring()]);
-            agg = sink!("aggregator" => aggregator, [SAAFE::monitoring()]);
+            src = source!("source" => FlightDataSource::new());
+            val = transform!("validator" => FlightValidator::new());
+            calc = transform!("calculator" => DelayCalculator::new());
+            agg = sink!("aggregator" => aggregator);
         },
         
         topology: {

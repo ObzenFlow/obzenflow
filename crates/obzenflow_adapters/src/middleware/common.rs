@@ -47,6 +47,12 @@ pub fn logging(level: tracing::Level) -> Box<dyn Middleware> {
     }))
 }
 
+/// System timing middleware factory
+pub use super::timing::timing;
+
+/// System enrichment middleware factory
+pub use super::system_enrichment::system_enrichment;
+
 /// Helper module for retry middleware with different strategies
 pub mod retry {
     use super::*;
