@@ -1,5 +1,5 @@
 use super::core::{Metric, MetricValue, MetricUpdate, MetricSnapshot, MetricType, EventfulMetric};
-use super::primitives::Counter;
+use obzenflow_core::metrics::primitives::Counter;
 use std::collections::HashMap;
 use std::time::Instant;
 use tokio::sync::broadcast;

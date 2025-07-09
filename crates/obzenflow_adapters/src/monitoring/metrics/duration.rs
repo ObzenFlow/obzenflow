@@ -1,6 +1,6 @@
 use super::core::{Metric, MetricValue, MetricUpdate, MetricSnapshot, MetricType};
 use super::core::{EventfulMetric};
-use super::primitives::{Histogram, TimeUnit};
+use obzenflow_core::metrics::primitives::{Histogram, TimeUnit};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use tokio::sync::broadcast;

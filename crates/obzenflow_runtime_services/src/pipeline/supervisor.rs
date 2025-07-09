@@ -14,8 +14,7 @@ use crate::event_flow::reactive_journal::ReactiveJournal;
 use crate::message_bus::FsmMessageBus;
 use crate::errors::{FlowError, PipelineSupervisorError};
 use obzenflow_topology_services::stages::StageId;
-use obzenflow_core::{ChainEvent, EventId};
-use crate::metrics::MetricsAggregator;
+use obzenflow_core::{ChainEvent, EventId, WriterId, Journal};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -40,19 +39,15 @@ pub struct PipelineSupervisor {
     /// Reactive journal wrapper
     reactive_journal: Arc<ReactiveJournal>,
     
-    /// Completion tracker task handle
-    completion_tracker_handle: Option<tokio::task::JoinHandle<()>>,
-    
-    /// App metrics collection task handle (FLOWIP-056-666)
-    app_metrics_task_handle: Option<tokio::task::JoinHandle<()>>,
+    /// Subscription for stage completion events
+    completion_subscription: Option<crate::event_flow::JournalSubscription>,
     
     /// Metrics exporter for accessing aggregated metrics (FLOWIP-056-666)
     /// Uses trait object to avoid runtime→adapters dependency
     metrics_exporter: Option<Arc<dyn obzenflow_core::metrics::MetricsExporter>>,
     
-    /// Metrics aggregator instance (FLOWIP-056-666)
-    /// Uses trait object to avoid runtime→adapters dependency
-    metrics_aggregator: Option<Arc<std::sync::Mutex<Box<dyn MetricsAggregator>>>>,
+    /// Writer ID for journal events
+    writer_id: Option<WriterId>,
 }
 
 impl PipelineSupervisor {
@@ -62,7 +57,6 @@ impl PipelineSupervisor {
         reactive_journal: Arc<ReactiveJournal>,
         stages: Vec<BoxedStageHandle>,
         metrics_exporter: Option<Arc<dyn obzenflow_core::metrics::MetricsExporter>>,
-        metrics_aggregator: Option<Arc<std::sync::Mutex<Box<dyn MetricsAggregator>>>>,
     ) -> Result<Self, PipelineSupervisorError> {
         // Create message bus
         let message_bus = Arc::new(FsmMessageBus::new());
@@ -93,110 +87,65 @@ impl PipelineSupervisor {
             stage_supervisors: HashMap::new(),
             pipeline,
             reactive_journal,
-            completion_tracker_handle: None,
-            app_metrics_task_handle: None,
+            completion_subscription: None,
             metrics_exporter,
-            metrics_aggregator,
+            writer_id: None,
         })
     }
     
     /// Materialize the pipeline (creates stages)
     pub async fn materialize(&mut self) -> Result<(), String> {
-        // Start app metrics collection if we have both exporter and factory
-        tracing::info!("Checking metrics configuration: exporter={}, aggregator={}", 
-            self.metrics_exporter.is_some(), 
-            self.metrics_aggregator.is_some()
+        // Register as a writer first
+        let stage_id = StageId::new();
+        self.writer_id = Some(
+            self.reactive_journal
+                .register_writer(stage_id, None)
+                .await
+                .map_err(|e| format!("Failed to register pipeline writer: {}", e))?
         );
-        
-        // Start metrics collection if we have both aggregator and exporter
-        if let (Some(aggregator), Some(exporter)) = (&self.metrics_aggregator, &self.metrics_exporter) {
-            tracing::info!("Starting metrics collection");
+
+        // Start metrics aggregator if we have an exporter
+        if let Some(exporter) = self.metrics_exporter.clone() {
+            let journal = self.reactive_journal.clone();
             
-            // Create subscription for all events
-            let filter = crate::event_flow::SubscriptionFilter::All;
-            let mut subscription = match self.reactive_journal.subscribe(filter).await {
-                Ok(sub) => sub,
-                Err(e) => {
-                    tracing::error!("Failed to create metrics subscription: {:?}", e);
-                    return Err(format!("Failed to create metrics subscription: {:?}", e));
-                }
-            };
+            // Subscribe for metrics ready event before spawning
+            let mut ready_subscription = self.reactive_journal
+                .subscribe(crate::event_flow::SubscriptionFilter::EventTypes { 
+                    event_types: vec!["system.metrics.ready".to_string()] 
+                })
+                .await
+                .map_err(|e| format!("Failed to subscribe for metrics ready: {}", e))?;
             
-            let aggregator_clone = aggregator.clone();
-            let exporter_clone = exporter.clone();
-            
-            // Spawn metrics event loop
-            let handle = tokio::spawn(async move {
-                tracing::info!("MetricsAggregator event loop started");
-                
-                // Log aggregator instance address
-                let agg_ptr = Arc::as_ptr(&aggregator_clone) as usize;
-                tracing::warn!("Event loop using aggregator at 0x{:x}", agg_ptr);
-                
-                // Create snapshot interval
-                let mut snapshot_interval = tokio::time::interval(tokio::time::Duration::from_secs(10));
-                
-                loop {
-                    tokio::select! {
-                        // Process events
-                        result = subscription.recv_batch() => {
-                            match result {
-                                Ok(events) if !events.is_empty() => {
-                                    tracing::info!("MetricsAggregator@0x{:x} received {} events", agg_ptr, events.len());
-                                    
-                                    // Process events
-                                    for envelope in events {
-                                        match aggregator_clone.lock() {
-                                            Ok(mut boxed_agg) => {
-                                                tracing::info!("Successfully locked aggregator, type is Box<dyn MetricsAggregator>");
-                                                // Need to deref the Box to get to the trait object
-                                                boxed_agg.as_mut().process_event(&envelope);
-                                                tracing::info!("process_event returned");
-                                            }
-                                            Err(e) => {
-                                                tracing::error!("Failed to lock aggregator: {}", e);
-                                                break;
-                                            }
-                                        }
-                                    }
-                                }
-                                Ok(_) => {
-                                    // Empty batch
-                                    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-                                }
-                                Err(e) => {
-                                    tracing::error!("Subscription error: {}", e);
-                                    break;
-                                }
-                            }
-                        }
-                        
-                        // Push snapshots periodically
-                        _ = snapshot_interval.tick() => {
-                            tracing::info!("MetricsAggregator@0x{:x} pushing snapshot to exporter", agg_ptr);
-                            
-                            // Create snapshot
-                            let snapshot = {
-                                if let Ok(agg) = aggregator_clone.lock() {
-                                    agg.create_snapshot()
-                                } else {
-                                    tracing::error!("Failed to lock aggregator for snapshot");
-                                    continue;
-                                }
-                            };
-                            
-                            // Push to exporter
-                            if let Err(e) = exporter_clone.update_app_metrics(snapshot) {
-                                tracing::warn!("Failed to push app metrics snapshot: {}", e);
-                            } else {
-                                tracing::debug!("Successfully pushed metrics snapshot");
-                            }
-                        }
-                    }
+            // Spawn metrics aggregator
+            tokio::spawn(async move {
+                let mut metrics = crate::metrics::MetricsAggregatorSupervisor::new(
+                    journal,
+                    Some(exporter),
+                    10, // 10 second export interval
+                );
+                if let Err(e) = metrics.start().await {
+                    tracing::error!("Metrics aggregator failed: {}", e);
                 }
             });
             
-            self.app_metrics_task_handle = Some(handle);
+            // Wait for metrics aggregator to be ready
+            match tokio::time::timeout(
+                tokio::time::Duration::from_secs(5),
+                ready_subscription.recv_batch()
+            ).await {
+                Ok(Ok(batch)) if !batch.is_empty() => {
+                    tracing::info!("Metrics aggregator is ready");
+                }
+                Ok(Ok(_)) => {
+                    return Err("No metrics ready event received".to_string());
+                }
+                Ok(Err(e)) => {
+                    return Err(format!("Failed to receive metrics ready event: {}", e));
+                }
+                Err(_) => {
+                    return Err("Timeout waiting for metrics aggregator to be ready".to_string());
+                }
+            }
         }
 
         // Trigger FSM to materialize
@@ -234,11 +183,28 @@ impl PipelineSupervisor {
             self.handle_action(action).await?;
         }
         
-        // Wait for completion - the completion tracker writes to journal when all stages complete
-        // For finite sources, we need to wait for all stages to complete naturally
-        if let Some(handle) = self.completion_tracker_handle.take() {
-            // The completion tracker exits when all stages complete
-            let _ = handle.await;
+        // Start processing stage completion events
+        self.start_completion_subscription().await?;
+        
+        // Process stage completion events until pipeline is drained
+        // This is event-driven, not polling
+        loop {
+            // Process completion events (this blocks until events arrive)
+            self.process_completion_events().await?;
+            
+            // Check if we've transitioned to a terminal state
+            match self.pipeline_fsm.state() {
+                PipelineState::Drained => {
+                    tracing::info!("Pipeline has reached Drained state");
+                    break;
+                }
+                PipelineState::Failed { reason } => {
+                    return Err(format!("Pipeline failed: {}", reason));
+                }
+                _ => {
+                    // Continue processing events
+                }
+            }
         }
         
         Ok(())
@@ -255,9 +221,9 @@ impl PipelineSupervisor {
             self.handle_action(action).await?;
         }
         
-        // Stop app metrics collection
-        if let Some(handle) = self.app_metrics_task_handle.take() {
-            handle.abort();
+        // Request metrics drain if we have metrics running
+        if self.metrics_exporter.is_some() {
+            self.drain_metrics().await?;
         }
         
         Ok(())
@@ -274,15 +240,8 @@ impl PipelineSupervisor {
             self.handle_action(action).await?;
         }
         
-        // Stop completion tracker
-        if let Some(handle) = self.completion_tracker_handle.take() {
-            handle.abort();
-        }
-        
-        // Stop app metrics collection
-        if let Some(handle) = self.app_metrics_task_handle.take() {
-            handle.abort();
-        }
+        // Stop completion subscription
+        self.completion_subscription = None;
         
         Ok(())
     }
@@ -290,6 +249,46 @@ impl PipelineSupervisor {
     /// Get current pipeline state
     pub fn pipeline_state(&self) -> &PipelineState {
         self.pipeline_fsm.state()
+    }
+    
+    /// Drain metrics aggregator and wait for completion
+    async fn drain_metrics(&mut self) -> Result<(), String> {
+        tracing::info!("Requesting metrics drain via journal");
+        
+        let writer_id = self.writer_id.clone()
+            .ok_or_else(|| "No writer ID available".to_string())?;
+        
+        // 1. Publish drain request to journal
+        let drain_event = ChainEvent::new(
+            EventId::new(),
+            writer_id,
+            "system.metrics.drain",
+            serde_json::json!({})
+        );
+        
+        self.reactive_journal.append(&writer_id, drain_event, None).await
+            .map_err(|e| format!("Failed to publish drain event: {}", e))?;
+        
+        // 2. Subscribe and wait for drain completion event
+        let mut subscription = self.reactive_journal
+            .subscribe(crate::event_flow::SubscriptionFilter::EventTypes { 
+                event_types: vec!["system.metrics.drained".to_string()] 
+            })
+            .await
+            .map_err(|e| format!("Failed to subscribe for drain completion: {}", e))?;
+        
+        match tokio::time::timeout(
+            tokio::time::Duration::from_secs(30),
+            subscription.recv_batch()
+        ).await {
+            Ok(Ok(batch)) if !batch.is_empty() => {
+                tracing::info!("Metrics successfully drained");
+                Ok(())
+            }
+            Ok(Ok(_)) => Err("No drain completion event received".to_string()),
+            Ok(Err(e)) => Err(format!("Failed to receive drain completion: {}", e)),
+            Err(_) => Err("Metrics drain timeout".to_string())
+        }
     }
 
     /// Handle pipeline actions
@@ -320,14 +319,67 @@ impl PipelineSupervisor {
                 }
             }
             PipelineAction::BeginDrain => {
-                self.message_bus.send_stage_command(
-                    crate::message_bus::StageCommand::BeginDrain
-                ).await.map_err(|e| format!("Failed to send drain command: {:?}", e))?;
+                // Publish drain event to journal for stages to pick up
+                let writer_id = self.writer_id.clone()
+                    .ok_or_else(|| "No writer ID available".to_string())?;
+                
+                let drain_event = ChainEvent::new(
+                    EventId::new(),
+                    writer_id.clone(),
+                    "system.pipeline.drain",
+                    serde_json::json!({
+                        "timestamp": chrono::Utc::now().to_rfc3339(),
+                    })
+                );
+                
+                self.reactive_journal.append(&writer_id, drain_event, None).await
+                    .map_err(|e| format!("Failed to publish drain event: {}", e))?;
+                    
+                tracing::info!("Published drain event to journal");
+            }
+            PipelineAction::WritePipelineCompleted => {
+                self.write_pipeline_completed_event().await?;
             }
             PipelineAction::Cleanup => {
                 // Cleanup will be handled by supervisor drop
             }
         }
+        Ok(())
+    }
+    
+    /// Write pipeline completed event to journal
+    async fn write_pipeline_completed_event(&self) -> Result<(), String> {
+        // Get flow name from context or use default
+        let flow_name = "default"; // TODO: Get from first completed stage event
+        
+        // Register writer for pipeline
+        let pipeline_stage_id = StageId::new();
+        let writer_id = self.reactive_journal.register_writer(pipeline_stage_id, None)
+            .await
+            .map_err(|e| format!("Failed to register pipeline writer: {:?}", e))?;
+        
+        let mut pipeline_completed = ChainEvent::new(
+            EventId::new(),
+            writer_id.clone(),
+            "system.pipeline.completed",
+            serde_json::json!({
+                "timestamp": chrono::Utc::now().to_rfc3339(),
+                "completed_stages": self.stage_supervisors.len(),
+            })
+        );
+        
+        // Set flow context for pipeline completion event
+        pipeline_completed.flow_context = obzenflow_core::event::flow_context::FlowContext {
+            flow_name: flow_name.to_string(),
+            flow_id: "default".to_string(),
+            stage_name: "pipeline".to_string(),
+            stage_type: obzenflow_core::event::flow_context::StageType::Transform,
+        };
+        
+        self.reactive_journal.write(&writer_id, pipeline_completed, None).await
+            .map_err(|e| format!("Failed to write pipeline completion event: {}", e))?;
+            
+        tracing::info!("Pipeline completion event written");
         Ok(())
     }
     
@@ -356,8 +408,8 @@ impl PipelineSupervisor {
         Ok(())
     }
     
-    /// Start journal-based completion tracking
-    async fn start_completion_tracker(&mut self) -> Result<(), String> {
+    /// Start subscription for stage completion events
+    async fn start_completion_subscription(&mut self) -> Result<(), String> {
         // Create subscription for system control events from all stages
         let filter = crate::event_flow::reactive_journal::SubscriptionFilter::EventTypes {
             event_types: vec![
@@ -366,136 +418,128 @@ impl PipelineSupervisor {
             ],
         };
         
-        let mut subscription = self.reactive_journal.subscribe(filter).await
+        let subscription = self.reactive_journal.subscribe(filter).await
             .map_err(|e| format!("Failed to create control subscription: {:?}", e))?;
             
-        let pipeline_context = self.pipeline_context.clone();
-        let reactive_journal = self.reactive_journal.clone();
+        self.completion_subscription = Some(subscription);
         
-        let handle = tokio::spawn(async move {
-            // Get all stage IDs from topology
-            let expected_stages: std::collections::HashSet<StageId> = pipeline_context.topology.stages()
+        tracing::info!("Started subscription for stage completion events");
+        Ok(())
+    }
+    
+    /// Process completion events from the subscription
+    async fn process_completion_events(&mut self) -> Result<(), String> {
+        let Some(ref mut subscription) = self.completion_subscription else {
+            return Ok(());
+        };
+        
+        // Receive events (blocks until events are available)
+        match subscription.recv_batch().await {
+            Ok(events) if !events.is_empty() => {
+                for envelope in events {
+                    let event = &envelope.event;
+                    match event.event_type.as_str() {
+                        "system.stage.completed" => {
+                            self.handle_stage_completed(&envelope).await?;
+                        }
+                        "system.stage.failed" => {
+                            let stage_name = event.payload.get("stage_name")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("unknown");
+                            let error = event.payload.get("error")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("Unknown error");
+                            
+                            // Trigger error event on FSM
+                            let _ = self.pipeline_fsm.handle(
+                                PipelineEvent::Error { message: format!("Stage '{}' failed: {}", stage_name, error) },
+                                self.pipeline_context.clone()
+                            ).await?;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Ok(_) => {
+                // No events available
+            }
+            Err(e) => {
+                tracing::error!("Failed to receive completion events: {:?}", e);
+                return Err(format!("Subscription error: {:?}", e));
+            }
+        }
+        
+        Ok(())
+    }
+    
+    /// Handle stage completed event
+    async fn handle_stage_completed(&mut self, envelope: &obzenflow_core::EventEnvelope) -> Result<(), String> {
+        let event = &envelope.event;
+        
+        // Get stage info from the event
+        let stage_name = event.payload.get("stage_name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+        
+        // Get stage ID from the writer registry
+        if let Some(writer_info) = self.reactive_journal.get_writer_info(&envelope.writer_id).await {
+            let stage_id = writer_info.stage_id;
+            
+            tracing::info!("Stage completed: {} ({})", stage_name, stage_id);
+            
+            // Check if this is the source stage completing (triggers Jonestown protocol)
+            if self.pipeline_context.topology.upstream_stages(stage_id).is_empty() {
+                tracing::info!("Source stage completed - initiating Jonestown protocol");
+                
+                // Transition to draining state when source completes
+                let actions = self.pipeline_fsm.handle(
+                    PipelineEvent::Shutdown,
+                    self.pipeline_context.clone()
+                ).await?;
+                
+                for action in actions {
+                    self.handle_action(action).await?;
+                }
+            }
+            
+            // Add to completed stages
+            let mut completed = self.pipeline_context.completed_stages.write().await;
+            if !completed.contains(&stage_id) {
+                completed.push(stage_id);
+            }
+            
+            // Check if all expected stages have completed
+            let expected_stages: std::collections::HashSet<StageId> = self.pipeline_context.topology.stages()
                 .map(|info| info.id)
                 .collect();
             let total_stages = expected_stages.len();
             
-            tracing::info!("Pipeline completion tracker started - expecting {} stages to complete: {:?}", 
-                total_stages, expected_stages);
+            tracing::debug!("Stage completion: {} of {} stages completed", completed.len(), total_stages);
             
-            // Track flow name from first completed stage
-            let mut flow_name: Option<String> = None;
-            
-            loop {
-                match subscription.recv_batch().await {
-                    Ok(events) if !events.is_empty() => {
-                        tracing::debug!("Completion tracker received {} events", events.len());
-                        for envelope in events {
-                            let event = envelope.event;
-                            tracing::debug!("Completion tracker processing event type: {}", event.event_type);
-                            match event.event_type.as_str() {
-                                // TODO add proper event types, similar to EOF
-                                "system.stage.completed" => {
-                                    // Get stage info from the event
-                                    let stage_name = event.payload.get("stage_name")
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or("unknown");
-                                    
-                                    let _stage_id_str = event.payload.get("stage_id")
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or("unknown");
-                                    
-                                    // Get stage ID from the writer registry
-                                    if let Some(writer_info) = reactive_journal.get_writer_info(&envelope.writer_id).await {
-                                        let stage_id = writer_info.stage_id;
-                                        
-                                        tracing::info!("Stage completed: {} ({})", stage_name, stage_id);
-                                        
-                                        // Capture flow name from first completed stage event
-                                        if flow_name.is_none() && !event.flow_context.flow_name.is_empty() {
-                                            flow_name = Some(event.flow_context.flow_name.clone());
-                                        }
-                                        
-                                        // Add to completed stages
-                                        let mut completed = pipeline_context.completed_stages.write().await;
-                                        if !completed.contains(&stage_id) {
-                                            completed.push(stage_id);
-                                        }
-                                        
-                                        // Check if this stage was expected
-                                        if !expected_stages.contains(&stage_id) {
-                                            tracing::warn!("Received completion for unexpected stage: {} ({})", stage_name, stage_id);
-                                        }
-                                        
-                                        tracing::debug!("Completion tracker: {} stages completed. Expected count: {}, Expected IDs: {:?}, Completed IDs: {:?}", 
-                                            completed.len(), total_stages, expected_stages, completed);
-                                            
-                                        if completed.len() >= total_stages {
-                                            tracing::info!("All {} stages have completed!", total_stages);
-                                            
-                                            // Write pipeline completion event to journal  
-                                            let pipeline_stage_id = StageId::new(); // Pipeline gets its own unique ID
-                                            let writer_id = reactive_journal.register_writer(pipeline_stage_id, None)
-                                                .await
-                                                .unwrap_or_else(|e| panic!("FATAL: Failed to register pipeline writer: {:?}", e));
-                                            
-                                            let mut pipeline_completed = ChainEvent::new(
-                                                EventId::new(),
-                                                writer_id.clone(),
-                                                "system.pipeline.completed",
-                                                serde_json::json!({
-                                                    "timestamp": chrono::Utc::now().to_rfc3339(),
-                                                    "completed_stages": completed.len(),
-                                                })
-                                            );
-                                            
-                                            // Set flow context for pipeline completion event
-                                            pipeline_completed.flow_context = obzenflow_core::event::flow_context::FlowContext {
-                                                flow_name: flow_name.clone().unwrap_or_else(|| "unknown".to_string()),
-                                                flow_id: "default".to_string(),
-                                                stage_name: "pipeline".to_string(),
-                                                stage_type: obzenflow_core::event::flow_context::StageType::Transform,
-                                            };
-                                            
-                                            if let Err(e) = reactive_journal.write(&writer_id, pipeline_completed, None).await {
-                                                panic!("FATAL: Failed to write pipeline completion event: {}", e);
-                                            }
-                                            
-                                            // Exit the completion tracker task
-                                            return;
-                                        }
-                                    } else {
-                                        tracing::warn!("Stage completed event from unknown writer: {:?}", envelope.writer_id);
-                                    }
-                                }
-                                // TODO add proper event types, similar to EOF
-                                "system.stage.failed" => {
-                                    let stage_name = event.payload.get("stage_name")
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or("unknown");
-                                    let error = event.payload.get("error")
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or("Unknown error");
-                                        
-                                    // No recovery from stage failure - panic immediately
-                                    panic!("FATAL: Stage '{}' failed: {}", stage_name, error);
-                                }
-                                _ => {}
-                            }
-                        }
-                    }
-                    Ok(_) => {
-                        // Empty batch
-                        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-                    }
-                    Err(e) => {
-                        // Fatal error - can't monitor completion without subscription
-                        panic!("FATAL: Control subscription error - pipeline cannot track completion: {}", e);
-                    }
+            if completed.len() >= total_stages {
+                tracing::info!("All {} stages have completed!", total_stages);
+                drop(completed); // Release the lock
+                
+                // Drain metrics
+                if self.metrics_exporter.is_some() {
+                    self.drain_metrics().await?;
+                }
+                
+                // Trigger FSM transition
+                let actions = self.pipeline_fsm.handle(
+                    PipelineEvent::AllStagesCompleted,
+                    self.pipeline_context.clone()
+                ).await?;
+                
+                // Process the actions
+                for action in actions {
+                    self.handle_action(action).await?;
                 }
             }
-        });
+        } else {
+            tracing::warn!("Stage completed event from unknown writer: {:?}", envelope.writer_id);
+        }
         
-        self.completion_tracker_handle = Some(handle);
         Ok(())
     }
 }

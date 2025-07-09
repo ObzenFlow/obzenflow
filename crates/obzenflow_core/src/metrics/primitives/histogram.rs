@@ -163,8 +163,8 @@ impl Histogram {
     }
     
     /// Create a snapshot of the histogram for export
-    pub fn snapshot(&self) -> obzenflow_core::metrics::HistogramSnapshot {
-        use obzenflow_core::metrics::HistogramSnapshot;
+    pub fn snapshot(&self) -> crate::metrics::HistogramSnapshot {
+        use crate::metrics::HistogramSnapshot;
         use std::collections::HashMap;
         
         let count = self.count();

@@ -1,5 +1,4 @@
 pub mod core;
-pub mod primitives;
 pub mod rate;
 pub mod errors;
 pub mod duration;

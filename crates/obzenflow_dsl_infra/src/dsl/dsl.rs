@@ -92,32 +92,27 @@ macro_rules! build_typed_flow {
         use obzenflow_runtime_services::message_bus::FsmMessageBus;
         use obzenflow_runtime_services::pipeline::config::StageConfig;
         use obzenflow_runtime_services::stages::common::resources::StageResources;
-        use obzenflow_runtime_services::metrics::DefaultMetricsConfig;
+        use obzenflow_runtime_services::metrics::{DefaultMetricsConfig, MetricsAggregatorSupervisor};
+        use obzenflow_core::metrics::MetricsExporter;
+        use std::sync::Mutex;
         
         // Wire metrics if enabled
-        let (reactive_journal, metrics_exporter, metrics_aggregator) = {
+        let (reactive_journal, metrics_exporter) = {
             let metrics_config = DefaultMetricsConfig::default();
-            let journal = ReactiveJournal::new(journal.clone());
+            let journal = Arc::new(ReactiveJournal::new(journal.clone()));
             let mut metrics_exporter = None;
-            let mut metrics_aggregator = None;
             
             if metrics_config.is_enabled() {
                 // Use clean PrometheusExporter - no blocking observer!
                 use obzenflow_adapters::monitoring::exporters::PrometheusExporter;
-                use obzenflow_adapters::monitoring::aggregator::MetricsAggregatorFactory as ConcreteFactory;
-                use obzenflow_runtime_services::metrics::MetricsAggregatorFactory;
                 
                 let exporter = Arc::new(PrometheusExporter::new());
                 tracing::info!("Created metrics exporter at {:p}", Arc::as_ptr(&exporter));
-                metrics_exporter = Some(exporter as Arc<dyn obzenflow_core::metrics::MetricsExporter>);
+                let exporter_dyn: Arc<dyn MetricsExporter> = exporter.clone();
+                metrics_exporter = Some(exporter_dyn.clone());
                 
-                // Create MetricsAggregator instance
-                let factory = ConcreteFactory::new();
-                let boxed_aggregator = factory.create();
-                // Wrap Box<dyn MetricsAggregator> in Arc<Mutex<_>>
-                let aggregator = Arc::new(std::sync::Mutex::new(boxed_aggregator));
-                tracing::info!("Created metrics aggregator instance");
-                metrics_aggregator = Some(aggregator);
+                // Metrics aggregator is now started by the pipeline supervisor
+                // No need to create it here
                 
                 // TODO: Wire InfraMetricsObserver when ReactiveJournal supports it
                 // The InfraMetricsObserver exists in runtime_services but needs
@@ -131,7 +126,7 @@ macro_rules! build_typed_flow {
                 // }
             }
             
-            (Arc::new(journal), metrics_exporter, metrics_aggregator)
+            (journal, metrics_exporter)
         };
         let message_bus = Arc::new(FsmMessageBus::new());
         
@@ -166,8 +161,7 @@ macro_rules! build_typed_flow {
             topology.clone(), 
             reactive_journal.clone(), 
             stages,
-            metrics_exporter,
-            metrics_aggregator
+            metrics_exporter
         )
         .map_err(|e| format!("Failed to create supervisor: {:?}", e))?;
         

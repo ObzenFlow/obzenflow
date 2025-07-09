@@ -1,6 +1,6 @@
 use super::core::{Metric, MetricValue, MetricUpdate, MetricSnapshot, MetricType};
 use super::core::{StatefulMetric};
-use super::primitives::Gauge;
+use obzenflow_core::metrics::primitives::Gauge;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::collections::HashMap;
 use std::time::Instant;

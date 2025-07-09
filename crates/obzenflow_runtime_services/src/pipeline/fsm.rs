@@ -67,6 +67,7 @@ pub enum PipelineAction {
     NotifyStagesStart,
     NotifySourceStart,
     BeginDrain,
+    WritePipelineCompleted,
     Cleanup,
 }
 
@@ -158,7 +159,10 @@ pub fn build_pipeline_fsm() -> PipelineFsm {
             .on("AllStagesCompleted", |_state, _event: &PipelineEvent, _ctx| async move {
                 Ok(Transition {
                     next_state: PipelineState::Drained,
-                    actions: vec![PipelineAction::Cleanup],
+                    actions: vec![
+                        PipelineAction::WritePipelineCompleted,
+                        PipelineAction::Cleanup
+                    ],
                 })
             })
             .done()

@@ -1,9 +1,5 @@
-//! MetricsAggregator - Journal-based metrics collection
+//! MetricsAggregator has been moved to runtime layer
 //!
-//! This module implements FLOWIP-056-666: Wide Events Metrics.
-//! The MetricsAggregator subscribes to the journal and derives all metrics
-//! from the event stream, treating metrics as queries over events.
-
-mod metrics_aggregator;
-
-pub use metrics_aggregator::{EventMetricsAggregator, MetricsAggregatorFactory, StageKey};
+//! The aggregator implementation is now in obzenflow_runtime_services
+//! as part of the architecture refactoring in FLOWIP-056a.
+//! Only exporters remain in the adapters layer.
