@@ -61,6 +61,42 @@ impl ChainEvent {
     /// Prefix for all control event types
     pub const CONTROL_EVENT_PREFIX: &'static str = "control.";
     
+    // System event constants
+    /// Prefix for all system event types
+    pub const SYSTEM_EVENT_PREFIX: &'static str = "system.";
+    
+    // System event types for stage lifecycle
+    /// Stage has started running
+    pub const SYSTEM_STAGE_RUNNING: &'static str = "system.stage.running";
+    /// Stage is draining
+    pub const SYSTEM_STAGE_DRAINING: &'static str = "system.stage.draining";
+    /// Stage has drained
+    pub const SYSTEM_STAGE_DRAINED: &'static str = "system.stage.drained";
+    /// Stage has completed successfully
+    pub const SYSTEM_STAGE_COMPLETED: &'static str = "system.stage.completed";
+    /// Stage has failed
+    pub const SYSTEM_STAGE_FAILED: &'static str = "system.stage.failed";
+    
+    // System event types for pipeline lifecycle
+    /// All stages in pipeline have completed
+    pub const SYSTEM_PIPELINE_ALL_STAGES_COMPLETED: &'static str = "system.pipeline.all_stages_completed";
+    /// Pipeline is starting to drain
+    pub const SYSTEM_PIPELINE_DRAIN: &'static str = "system.pipeline.drain";
+    /// Pipeline has completed
+    pub const SYSTEM_PIPELINE_COMPLETED: &'static str = "system.pipeline.completed";
+    
+    // System event types for metrics
+    /// Metrics aggregator is ready
+    pub const SYSTEM_METRICS_READY: &'static str = "system.metrics.ready";
+    /// Metrics aggregator should drain
+    pub const SYSTEM_METRICS_DRAIN: &'static str = "system.metrics.drain";
+    /// Metrics aggregator has drained
+    pub const SYSTEM_METRICS_DRAINED: &'static str = "system.metrics.drained";
+    
+    // System event types for errors
+    /// Generic system error
+    pub const SYSTEM_ERROR: &'static str = "system.error";
+    
     // Control event types that flow through the journal
     /// Standard event type for EOF events
     pub const EOF_EVENT_TYPE: &'static str = "control.eof";
@@ -159,9 +195,23 @@ impl ChainEvent {
         self.event_type.starts_with(Self::CONTROL_EVENT_PREFIX)
     }
     
+    /// Check if this is a system event
+    pub fn is_system(&self) -> bool {
+        self.event_type.starts_with(Self::SYSTEM_EVENT_PREFIX)
+    }
+    
     /// Helper for stage processing loops - returns control event type if this is a control event
     pub fn as_control_type(&self) -> Option<&str> {
         if self.is_control() {
+            Some(&self.event_type)
+        } else {
+            None
+        }
+    }
+    
+    /// Helper for system event processing - returns system event type if this is a system event
+    pub fn as_system_type(&self) -> Option<&str> {
+        if self.is_system() {
             Some(&self.event_type)
         } else {
             None

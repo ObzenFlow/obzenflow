@@ -12,11 +12,14 @@ use obzenflow_infra::journal::DiskJournal;
 use obzenflow_runtime_services::stages::common::handlers::{
     FiniteSourceHandler, SinkHandler, TransformHandler,
 };
+use obzenflow_runtime_services::supervised_base::SupervisorHandle;
 use serde_json::json;
 use std::sync::Arc;
-use tokio::time::{sleep, Duration};
+use tokio::time::Duration;
+use async_trait::async_trait;
 
 /// Simple source that generates 100 events
+#[derive(Clone, Debug)]
 struct TestSource {
     count: usize,
     writer_id: WriterId,
@@ -33,7 +36,7 @@ impl TestSource {
 
 impl FiniteSourceHandler for TestSource {
     fn next(&mut self) -> Option<ChainEvent> {
-        if self.count >= 100000 {
+        if self.count >= 10 {
             return None;
         }
 
@@ -54,13 +57,15 @@ impl FiniteSourceHandler for TestSource {
     }
 
     fn is_complete(&self) -> bool {
-        self.count >= 100000
+        self.count >= 10
     }
 }
 
 /// Transform that fails on certain events
+#[derive(Clone, Debug)]
 struct TestTransform;
 
+#[async_trait]
 impl TransformHandler for TestTransform {
     fn process(&self, event: ChainEvent) -> Vec<ChainEvent> {
         // Add some processing time
@@ -80,9 +85,14 @@ impl TransformHandler for TestTransform {
             vec![result]
         }
     }
+    
+    async fn drain(&mut self) -> obzenflow_core::Result<()> {
+        Ok(())
+    }
 }
 
 /// Simple sink that counts events
+#[derive(Clone, Debug)]
 struct TestSink {
     count: usize,
 }
@@ -150,88 +160,82 @@ async fn main() -> Result<()> {
             src |> trans;
             trans |> snk;
         }
-    }
-    .await
-    .map_err(|e| anyhow::anyhow!("Failed to create flow: {:?}", e))?;
+    }.await.map_err(|e| anyhow::anyhow!("Failed to create flow: {}", e))?;
 
     println!("▶️  Running flow...\n");
 
-    // Run the flow
-    flow_handle.run().await?;
+    // Run the flow to completion and get the metrics exporter
+    let metrics_exporter = flow_handle.run_with_metrics().await?;
 
-    // Wait for metrics to settle
-    println!("⏳ Waiting for metrics collection cycle (20 seconds)...");
-    sleep(Duration::from_secs(20)).await;
+    println!("\n✅ Flow completed!");
+    
+    // Get the metrics text after completion
+    let metrics_text = if let Some(exporter) = metrics_exporter {
+        exporter.render_metrics()
+            .map_err(|e| anyhow::anyhow!("Failed to render metrics: {}", e))?
+    } else {
+        "No metrics exporter configured".to_string()
+    };
+    
+    println!("{}", "=".repeat(80));
+    println!("RAW PROMETHEUS METRICS OUTPUT (This is what Grafana scrapes):");
+    println!("{}", "=".repeat(80));
+    println!();
+    println!("{}", metrics_text);
+    println!();
+    println!("{}", "=".repeat(80));
 
-    println!("\n📈 Flow completed! Getting metrics...\n");
+    // Parse and display summary
+    println!("\n📊 Summary:");
 
-    // Get metrics
-    match flow_handle.render_metrics().await {
-        Ok(metrics_text) => {
-            println!("{}", "=".repeat(80));
-            println!("RAW PROMETHEUS METRICS OUTPUT (This is what Grafana scrapes):");
-            println!("{}", "=".repeat(80));
-            println!();
-            println!("{}", metrics_text);
-            println!();
-            println!("{}", "=".repeat(80));
+    // Count total events
+    let source_events: u64 = metrics_text
+        .lines()
+        .filter(|l| l.starts_with("obzenflow_events_total") && l.contains("event_source"))
+        .filter_map(|l| l.split_whitespace().last())
+        .filter_map(|v| v.parse::<u64>().ok())
+        .sum();
 
-            // Parse and display summary
-            println!("\n📊 Summary:");
+    let sink_events: u64 = metrics_text
+        .lines()
+        .filter(|l| l.starts_with("obzenflow_events_total") && l.contains("event_sink"))
+        .filter_map(|l| l.split_whitespace().last())
+        .filter_map(|v| v.parse::<u64>().ok())
+        .sum();
 
-            // Count total events
-            let source_events: u64 = metrics_text
-                .lines()
-                .filter(|l| l.starts_with("obzenflow_events_total") && l.contains("event_source"))
-                .filter_map(|l| l.split_whitespace().last())
-                .filter_map(|v| v.parse::<u64>().ok())
-                .sum();
+    println!("  Source generated: {} events", source_events);
+    println!("  Sink consumed: {} events", sink_events);
 
-            let sink_events: u64 = metrics_text
-                .lines()
-                .filter(|l| l.starts_with("obzenflow_events_total") && l.contains("event_sink"))
-                .filter_map(|l| l.split_whitespace().last())
-                .filter_map(|v| v.parse::<u64>().ok())
-                .sum();
-
-            println!("  Source generated: {} events", source_events);
-            println!("  Sink consumed: {} events", sink_events);
-
-            // Check dropped events
-            if let Some(dropped_line) = metrics_text
-                .lines()
-                .find(|l| l.starts_with("obzenflow_dropped_events"))
-            {
-                if let Some(count) = dropped_line.split_whitespace().last() {
-                    println!("  Dropped events: {}", count);
-                }
-            }
-
-            // Check circuit breaker state
-            if let Some(cb_line) = metrics_text
-                .lines()
-                .find(|l| l.contains("obzenflow_circuit_breaker_state"))
-            {
-                if cb_line.ends_with("1") {
-                    println!("  Circuit breaker: OPEN ⚠️");
-                } else if cb_line.ends_with("0.5") {
-                    println!("  Circuit breaker: HALF-OPEN ⚡");
-                } else {
-                    println!("  Circuit breaker: CLOSED ✅");
-                }
-            }
-
-            println!("\n💡 Key Metrics Explained:");
-            println!("  - events_total: Total events processed by each stage");
-            println!("  - duration_seconds: Processing time histograms");
-            println!("  - dropped_events: Events lost in the pipeline");
-            println!("  - circuit_breaker_state: 0=closed, 1=open, 0.5=half-open");
-            println!("  - rate_limiter_*: Rate limiting metrics");
-        }
-        Err(e) => {
-            eprintln!("❌ Failed to render metrics: {}", e);
+    // Check dropped events
+    if let Some(dropped_line) = metrics_text
+        .lines()
+        .find(|l| l.starts_with("obzenflow_dropped_events"))
+    {
+        if let Some(count) = dropped_line.split_whitespace().last() {
+            println!("  Dropped events: {}", count);
         }
     }
+
+    // Check circuit breaker state
+    if let Some(cb_line) = metrics_text
+        .lines()
+        .find(|l| l.contains("obzenflow_circuit_breaker_state"))
+    {
+        if cb_line.ends_with("1") {
+            println!("  Circuit breaker: OPEN ⚠️");
+        } else if cb_line.ends_with("0.5") {
+            println!("  Circuit breaker: HALF-OPEN ⚡");
+        } else {
+            println!("  Circuit breaker: CLOSED ✅");
+        }
+    }
+
+    println!("\n💡 Key Metrics Explained:");
+    println!("  - events_total: Total events processed by each stage");
+    println!("  - duration_seconds: Processing time histograms");
+    println!("  - dropped_events: Events lost in the pipeline");
+    println!("  - circuit_breaker_state: 0=closed, 1=open, 0.5=half-open");
+    println!("  - rate_limiter_*: Rate limiting metrics");
 
     Ok(())
 }

@@ -38,6 +38,9 @@ pub enum PipelineSupervisorError {
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
     },
+    
+    #[error("Journal error: {0}")]
+    JournalError(String),
 }
 
 /// Errors that can occur during flow execution

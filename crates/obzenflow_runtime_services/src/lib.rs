@@ -6,12 +6,12 @@
 // Core modules
 pub mod errors;
 pub mod message_bus;
+pub mod supervised_base;
 
 // Major subsystems
 pub mod pipeline;
 pub mod stages;
 pub mod event_flow;
-pub mod factory;
 pub mod metrics;
 
 
@@ -22,7 +22,7 @@ pub mod prelude {
     
     // Pipeline
     pub use crate::pipeline::{
-        PipelineSupervisor, Pipeline,
+        PipelineBuilder, FlowHandle,
         PipelineState, PipelineEvent, PipelineAction,
         PipelineStageConfig, ObserverConfig,
     };
@@ -36,10 +36,8 @@ pub mod prelude {
         ObserverHandler, StatefulHandler, ResourceManaged,
     };
     
-    // Supervisors
-    pub use crate::stages::source::{FiniteSourceSupervisor, InfiniteSourceSupervisor};
-    pub use crate::stages::transform::TransformSupervisor;
-    pub use crate::stages::sink::SinkSupervisor;
+    // Note: Supervisors are internal implementation details and not exported.
+    // Use builders and handles for creating and controlling stages.
     
     // Event flow
     pub use crate::event_flow::{

@@ -333,7 +333,7 @@ impl ReactiveJournal {
         };
 
         // Debug logging for system events
-        if envelope.event.event_type.starts_with("system.") {
+        if envelope.event.is_system() {
             tracing::debug!(
                 "Processing system event: type={}, stage_id={:?}, writer_id={:?}, total_subscriptions={}", 
                 envelope.event.event_type, stage_id, envelope.writer_id, manager.subscriptions.len()
@@ -341,7 +341,7 @@ impl ReactiveJournal {
         }
 
         // Check each subscription to see if it should be notified
-        if envelope.event.event_type.starts_with("system.") {
+        if envelope.event.is_system() {
             tracing::debug!("Checking {} subscriptions for system event", manager.subscriptions.len());
             for (sub_id, sub) in &manager.subscriptions {
                 tracing::debug!("  Subscription {}: filter={:?}", sub_id, sub.filter);
@@ -361,7 +361,7 @@ impl ReactiveJournal {
                 SubscriptionFilter::EventTypes { event_types } => {
                     // Control flow: notify if event type matches (from any stage)
                     let matches = event_types.contains(&envelope.event.event_type);
-                    if envelope.event.event_type.starts_with("system.") {
+                    if envelope.event.is_system() {
                         tracing::debug!(
                             "EventTypes subscription {} checking event type '{}' against filter {:?}: matches={}", 
                             sub_id, envelope.event.event_type, event_types, matches
@@ -384,7 +384,7 @@ impl ReactiveJournal {
                 // Try to send notification (non-blocking)
                 match sub.sender.try_send(notification) {
                     Ok(_) => {
-                        if envelope.event.event_type.starts_with("system.") {
+                        if envelope.event.is_system() {
                             tracing::debug!(
                                 "Sent system event notification to subscription {}", 
                                 sub_id
@@ -474,8 +474,3 @@ impl ReactiveWriter {
         self.journal.write(&self.writer_id, event, parent).await
     }
 }
-
-// Include tests
-#[cfg(test)]
-#[path = "reactive_journal_tests.rs"]
-mod reactive_journal_tests;

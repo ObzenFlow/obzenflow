@@ -1,257 +1,292 @@
-//! Supervisor for transform stages
+//! Transform supervisor implementation using HandlerSupervised pattern
 
 use std::sync::Arc;
-use tokio::sync::RwLock;
-use tokio::task::JoinHandle;
-use obzenflow_core::{ChainEvent, EventId};
-
-use crate::stages::common::{
-    handlers::{TransformHandler, TransformWrapper, TransformContext},
-    StageHandler,
-    traits::StageSupervisor,
-    stage_handle::{StageHandle, StageType, StageEvent},
-    control_strategies::{ControlEventStrategy, ControlEventAction, ProcessingContext, JonestownStrategy},
-    resources::StageResources,
-};
-use crate::pipeline::config::StageConfig;
-use super::{
-    states::TransformState,
-    events::TransformEvent,
-    actions::TransformAction,
-};
+use obzenflow_core::{WriterId, Journal, ChainEvent, EventEnvelope};
+use obzenflow_core::event::flow_context::FlowContext;
+use obzenflow_fsm::{FsmBuilder, Transition};
 use obzenflow_topology_services::stages::StageId;
-use obzenflow_fsm::StateMachine;
 
-pub struct TransformSupervisor<H: TransformHandler + 'static> {
-    fsm: StateMachine<TransformState, TransformEvent, TransformContext<H>, TransformAction>,
-    context: Arc<TransformContext<H>>,
-    stage_id: StageId,
-    stage_name: String,
-    flow_name: String,
-    processing_task: Arc<RwLock<Option<JoinHandle<()>>>>,
-    control_strategy: Arc<dyn ControlEventStrategy>,
+use crate::event_flow::reactive_journal::ReactiveJournal;
+use crate::stages::common::handlers::TransformHandler;
+use crate::stages::common::control_strategies::{ControlEventAction, ProcessingContext};
+use crate::supervised_base::{EventLoopDirective, HandlerSupervised};
+use crate::supervised_base::base::Supervisor;
+
+use super::fsm::{
+    TransformState, TransformEvent, TransformAction,
+    TransformContext,
+};
+
+/// Supervisor for transform stages
+pub(crate) struct TransformSupervisor<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> {
+    /// Supervisor name (for logging)
+    pub(crate) name: String,
+    
+    /// The FSM context containing all mutable state
+    pub(crate) context: Arc<TransformContext<H>>,
+    
+    /// Journal reference
+    pub(crate) journal: Arc<ReactiveJournal>,
+    
+    /// Writer ID for this transform
+    pub(crate) writer_id: WriterId,
+    
+    /// Stage ID
+    pub(crate) stage_id: StageId,
 }
 
-impl<H: TransformHandler + 'static> TransformSupervisor<H> {
-    pub fn new(handler: H, config: StageConfig, resources: StageResources) -> Self {
-        Self::with_strategy(handler, config, resources, Arc::new(JonestownStrategy))
+// Implement Sealed directly for TransformSupervisor to satisfy Supervisor trait bound
+impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> crate::supervised_base::base::private::Sealed for TransformSupervisor<H> {}
+
+impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Supervisor for TransformSupervisor<H> {
+    type State = TransformState<H>;
+    type Event = TransformEvent<H>;
+    type Context = TransformContext<H>;
+    type Action = TransformAction<H>;
+    
+    fn configure_fsm(&self, builder: FsmBuilder<Self::State, Self::Event, Self::Context, Self::Action>) 
+        -> FsmBuilder<Self::State, Self::Event, Self::Context, Self::Action> {
+        builder
+            // Created -> Initialized
+            .when("Created")
+                .on("Initialize", |_state, _event, _ctx| async move {
+                    Ok(Transition {
+                        next_state: TransformState::Initialized,
+                        actions: vec![TransformAction::AllocateResources],
+                    })
+                })
+                .done()
+            
+            // Initialized -> Running (transforms start immediately)
+            .when("Initialized")
+                .on("Ready", |_state, _event, _ctx| async move {
+                    Ok(Transition {
+                        next_state: TransformState::Running,
+                        actions: vec![TransformAction::PublishRunning],
+                    })
+                })
+                .done()
+            
+            // Running -> Draining (on EOF)
+            .when("Running")
+                .on("ReceivedEOF", |_state, _event, _ctx| async move {
+                    Ok(Transition {
+                        next_state: TransformState::Draining,
+                        actions: vec![], // Continue draining in dispatch_state
+                    })
+                })
+                .on("Error", |_state, event, _ctx| {
+                    let event = event.clone();
+                    async move {
+                        if let TransformEvent::Error(msg) = event {
+                            Ok(Transition {
+                                next_state: TransformState::Failed(msg),
+                                actions: vec![TransformAction::Cleanup],
+                            })
+                        } else {
+                            unreachable!()
+                        }
+                    }
+                })
+                .done()
+            
+            // Draining -> Drained
+            .when("Draining")
+                .on("DrainComplete", |_state, _event, _ctx| async move {
+                    Ok(Transition {
+                        next_state: TransformState::Drained,
+                        actions: vec![
+                            TransformAction::ForwardEOF,
+                            TransformAction::SendCompletion,
+                            TransformAction::Cleanup,
+                        ],
+                    })
+                })
+                .on("Error", |_state, event, _ctx| {
+                    let event = event.clone();
+                    async move {
+                        if let TransformEvent::Error(msg) = event {
+                            Ok(Transition {
+                                next_state: TransformState::Failed(msg),
+                                actions: vec![TransformAction::Cleanup],
+                            })
+                        } else {
+                            unreachable!()
+                        }
+                    }
+                })
+                .done()
+            
+            // Error transitions from any state
+            .from_any()
+                .on("Error", |state, event, _ctx| {
+                    let event = event.clone();
+                    let state = state.clone();
+                    async move {
+                        if let TransformEvent::Error(msg) = event {
+                            // If already failed, don't cleanup again
+                            if matches!(state, TransformState::Failed(_)) {
+                                Ok(Transition {
+                                    next_state: state.clone(),
+                                    actions: vec![],
+                                })
+                            } else {
+                                Ok(Transition {
+                                    next_state: TransformState::Failed(msg),
+                                    actions: vec![TransformAction::Cleanup],
+                                })
+                            }
+                        } else {
+                            unreachable!()
+                        }
+                    }
+                })
+                .done()
     }
     
-    pub fn with_strategy(
-        handler: H, 
-        config: StageConfig, 
-        resources: StageResources,
-        control_strategy: Arc<dyn ControlEventStrategy>
-    ) -> Self {
-        let wrapper = TransformWrapper(handler);
-        let context = Arc::new(TransformContext::new(
-            wrapper.0,
-            config.stage_id,
-            config.name.clone(),
-            resources.journal,
-            resources.message_bus,
-            resources.upstream_stages,
-        ));
-        
-        let fsm = <TransformWrapper<H> as StageHandler>::build_fsm();
-        
-        Self {
-            fsm,
-            context,
-            stage_id: config.stage_id,
-            stage_name: config.name.clone(),
-            flow_name: config.flow_name,
-            processing_task: Arc::new(RwLock::new(None)),
-            control_strategy,
-        }
+    fn journal(&self) -> &Arc<ReactiveJournal> {
+        &self.journal
     }
     
-    async fn handle_transform_action(&mut self, action: TransformAction) -> Result<(), String> {
-        use TransformAction::*;
-        
-        match action {
-            AllocateResources => {
-                tracing::info!("[{}] Allocating resources", self.stage_name);
-                // Register writer (None = single worker for this stage)
-                let writer_id = self.context.journal
-                    .register_writer(self.stage_id, None)
-                    .await
-                    .map_err(|e| format!("Failed to register writer: {:?}", e))?;
-                
-                *self.context.writer_id.write().await = Some(writer_id);
-                
-                // Create subscription to upstreams (provided by pipeline)
-                let upstream_stages = self.context.upstream_stages.clone();
-                if !upstream_stages.is_empty() {
-                    let filter = crate::event_flow::reactive_journal::SubscriptionFilter::UpstreamStages {
-                        stages: upstream_stages,
-                    };
-                    
-                    let subscription = self.context.journal.subscribe(filter).await
-                        .map_err(|e| format!("Failed to create subscription: {:?}", e))?;
-                    
-                    *self.context.subscription.write().await = Some(subscription);
-                }
-            }
-            
-            StartProcessing => {
-                tracing::info!("[{}] Starting processing", self.stage_name);
-                self.start_transform_loop().await?;
-            }
-            
-            ForwardEOF => {
-                tracing::info!("[{}] Forwarding EOF", self.stage_name);
-                // Write EOF event to journal
-                if let Some(writer_id) = &*self.context.writer_id.read().await {
-                    let eof_event = ChainEvent::eof(
-                        EventId::new(),
-                        writer_id.clone(),
-                        false // Not natural - this is triggered by drain
-                    );
-                    self.context.journal
-                        .write(writer_id, eof_event, None)
-                        .await
-                        .map_err(|e| format!("Failed to write EOF: {:?}", e))?;
-                }
-            }
-            
-            Cleanup => {
-                tracing::info!("[{}] Cleaning up", self.stage_name);
-                if let Some(task) = self.processing_task.write().await.take() {
-                    task.abort();
-                }
-            }
-            
-            LogTransition { from, to } => {
-                tracing::debug!("[{}] State transition: {} -> {}", self.stage_name, from, to);
-            }
-        }
-        
-        Ok(())
+    fn writer_id(&self) -> &WriterId {
+        &self.writer_id
     }
     
-    async fn start_transform_loop(&self) -> Result<(), String> {
-        let context = self.context.clone();
-        let stage_name = self.stage_name.clone();
-        let flow_name = self.flow_name.clone();
-        let control_strategy = self.control_strategy.clone();
-        
-        let task = tokio::spawn(async move {
-            tracing::info!("[{}] Transform loop started", stage_name);
+    fn name(&self) -> &str {
+        &self.name
+    }
+}
+
+#[async_trait::async_trait]
+impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSupervised for TransformSupervisor<H> {
+    type Handler = H;
+    
+    async fn dispatch_state(
+        &mut self,
+        state: &Self::State,
+    ) -> Result<EventLoopDirective<Self::Event>, Box<dyn std::error::Error + Send + Sync>> {
+        match state {
+            TransformState::Created => {
+                // Send initialize event
+                Ok(EventLoopDirective::Transition(TransformEvent::Initialize))
+            }
             
-            // Get subscription
-            let subscription = context.subscription.clone();
+            TransformState::Initialized => {
+                // Auto-transition to ready (transforms start immediately)
+                Ok(EventLoopDirective::Transition(TransformEvent::Ready))
+            }
             
-            // Processing context for control events
-            let mut processing_ctx = ProcessingContext::new();
-            
-            let mut eof_received = false;
-            loop {
-                if let Some(sub) = &mut *subscription.write().await {
-                    match sub.recv_batch().await {
+            TransformState::Running => {
+                // Process events from subscription
+                let mut subscription_guard = self.context.subscription.write().await;
+                if let Some(subscription) = subscription_guard.as_mut() {
+                    match subscription.recv_batch().await {
                         Ok(events) if !events.is_empty() => {
-                            tracing::debug!("[{}] Processing {} events", stage_name, events.len());
+                            tracing::info!(
+                                stage_name = %self.context.stage_name,
+                                count = events.len(),
+                                "Transform processing events"
+                            );
                             
-                            // Process each event
+                            // Processing context for control events
+                            let mut processing_ctx = ProcessingContext::new();
+                            
                             for envelope in events {
                                 // Check if this is a control event
-                                match envelope.event.as_control_type() {
-                                    Some(control_type) => {
-                                        // Delegate to control strategy
-                                        let action = match control_type {
-                                            ChainEvent::EOF_EVENT_TYPE => {
-                                                tracing::info!("[{}] Transform received EOF event from upstream", stage_name);
-                                                control_strategy.handle_eof(&envelope, &mut processing_ctx)
-                                            }
-                                            ChainEvent::WATERMARK_EVENT_TYPE => {
-                                                control_strategy.handle_watermark(&envelope, &mut processing_ctx)
-                                            }
-                                            ChainEvent::CHECKPOINT_EVENT_TYPE => {
-                                                control_strategy.handle_checkpoint(&envelope, &mut processing_ctx)
-                                            }
-                                            ChainEvent::DRAIN_EVENT_TYPE => {
-                                                control_strategy.handle_drain(&envelope, &mut processing_ctx)
-                                            }
-                                            _ => {
-                                                tracing::debug!("[{}] Unknown control event: {}", stage_name, control_type);
-                                                ControlEventAction::Forward
-                                            }
-                                        };
-                                        
-                                        // Execute the action
-                                        match action {
-                                            ControlEventAction::Forward => {
-                                                // Forward the control event downstream
-                                                if let Some(writer_id) = &*context.writer_id.read().await {
-                                                    let forward_event = match control_type {
-                                                        ChainEvent::EOF_EVENT_TYPE => ChainEvent::eof(
-                                                            EventId::new(),
-                                                            writer_id.clone(),
-                                                            envelope.event.payload["natural"].as_bool().unwrap_or(false)
-                                                        ),
-                                                        _ => envelope.event.clone(),
-                                                    };
-                                                    if let Err(e) = context.journal.write(writer_id, forward_event, Some(&envelope)).await {
-                                                        tracing::error!("[{}] Failed to forward control event: {}", stage_name, e);
-                                                    }
-                                                }
-                                                
-                                                // Exit on EOF
-                                                if control_type == ChainEvent::EOF_EVENT_TYPE {
-                                                    tracing::info!("[{}] Transform completed processing after EOF", stage_name);
-                                                    eof_received = true;
-                                                    break;
-                                                }
-                                            }
-                                            ControlEventAction::Delay(duration) => {
-                                                tracing::info!("[{}] Delaying {} for {:?}", stage_name, control_type, duration);
-                                                // TODO: Implement delayed forwarding
-                                                // For now, just sleep and then forward
-                                                tokio::time::sleep(duration).await;
-                                                // Retry processing this event
-                                                continue;
-                                            }
-                                            ControlEventAction::Retry => {
-                                                tracing::info!("[{}] Retry requested for {}, continuing processing", stage_name, control_type);
-                                                // Don't forward EOF yet, continue processing
-                                                if control_type == ChainEvent::EOF_EVENT_TYPE {
-                                                    // Buffer the EOF for later
-                                                    processing_ctx.buffered_eof = Some(envelope.clone());
-                                                }
-                                            }
-                                            ControlEventAction::Skip => {
-                                                tracing::warn!("[{}] Skipping {} (dangerous!)", stage_name, control_type);
-                                                // Don't forward, don't exit
+                                if let Some(control_type) = envelope.event.as_control_type() {
+                                    // Handle control events with strategy
+                                    let action = match control_type {
+                                        ChainEvent::EOF_EVENT_TYPE => {
+                                            tracing::info!(
+                                                stage_name = %self.context.stage_name,
+                                                "Transform received EOF from upstream"
+                                            );
+                                            self.context.control_strategy.handle_eof(&envelope, &mut processing_ctx)
+                                        }
+                                        ChainEvent::WATERMARK_EVENT_TYPE => {
+                                            self.context.control_strategy.handle_watermark(&envelope, &mut processing_ctx)
+                                        }
+                                        ChainEvent::CHECKPOINT_EVENT_TYPE => {
+                                            self.context.control_strategy.handle_checkpoint(&envelope, &mut processing_ctx)
+                                        }
+                                        ChainEvent::DRAIN_EVENT_TYPE => {
+                                            self.context.control_strategy.handle_drain(&envelope, &mut processing_ctx)
+                                        }
+                                        _ => {
+                                            tracing::debug!(
+                                                stage_name = %self.context.stage_name,
+                                                control_type = control_type,
+                                                "Unknown control event"
+                                            );
+                                            ControlEventAction::Forward
+                                        }
+                                    };
+                                    
+                                    // Execute the action
+                                    match action {
+                                        ControlEventAction::Forward => {
+                                            // Forward control events immediately
+                                            if control_type != ChainEvent::EOF_EVENT_TYPE {
+                                                self.forward_control_event(&envelope).await?;
+                                            } else {
+                                                // Buffer EOF for draining state
+                                                *self.context.buffered_eof.write().await = Some(envelope.event.clone());
+                                                drop(subscription_guard);
+                                                return Ok(EventLoopDirective::Transition(TransformEvent::ReceivedEOF));
                                             }
                                         }
-                                    }
-                                    None => {
-                                        // Regular data event
-                                        let outputs = context.handler.process(envelope.event);
-                                        
-                                        // Write outputs
-                                        if let Some(writer_id) = &*context.writer_id.read().await {
-                                            for mut output in outputs {
-                                                // Populate flow context as required by FLOWIP-056-666
-                                                output.flow_context = obzenflow_core::event::flow_context::FlowContext {
-                                                    flow_name: flow_name.clone(),
-                                                    flow_id: "default".to_string(), // TODO: Add flow_id support
-                                                    stage_name: stage_name.clone(),
-                                                    stage_type: obzenflow_core::event::flow_context::StageType::Transform,
-                                                };
-                                                
-                                                if let Err(e) = context.journal.write(writer_id, output, None).await {
-                                                    tracing::error!("[{}] Failed to write output: {}", stage_name, e);
-                                                }
+                                        ControlEventAction::Delay(duration) => {
+                                            tracing::info!(
+                                                stage_name = %self.context.stage_name,
+                                                control_type = control_type,
+                                                duration = ?duration,
+                                                "Delaying control event"
+                                            );
+                                            tokio::time::sleep(duration).await;
+                                            // Re-process after delay
+                                            continue;
+                                        }
+                                        ControlEventAction::Retry => {
+                                            tracing::info!(
+                                                stage_name = %self.context.stage_name,
+                                                control_type = control_type,
+                                                "Retry requested, buffering event"
+                                            );
+                                            if control_type == ChainEvent::EOF_EVENT_TYPE {
+                                                processing_ctx.buffered_eof = Some(envelope.clone());
                                             }
+                                        }
+                                        ControlEventAction::Skip => {
+                                            tracing::warn!(
+                                                stage_name = %self.context.stage_name,
+                                                control_type = control_type,
+                                                "Skipping control event (dangerous!)"
+                                            );
+                                            // Don't forward, don't process
+                                        }
+                                    }
+                                } else {
+                                    // Process normal data event
+                                    let transformed_events = self.context.handler.process(envelope.event.clone());
+                                    
+                                    // Write transformed events
+                                    let writer_id_guard = self.context.writer_id.read().await;
+                                    if let Some(writer_id) = writer_id_guard.as_ref() {
+                                        for mut event in transformed_events {
+                                            // Add flow context
+                                            event.flow_context = FlowContext {
+                                                flow_name: self.context.flow_name.clone(),
+                                                flow_id: format!("{}-{}", self.context.flow_name, self.context.stage_id),
+                                                stage_name: self.context.stage_name.clone(),
+                                                stage_type: obzenflow_core::event::flow_context::StageType::Transform,
+                                            };
+                                            
+                                            self.context.journal
+                                                .append(writer_id, event, Some(&envelope))
+                                                .await?;
                                         }
                                     }
                                 }
-                            }
-                            
-                            // Check if we received EOF and should exit
-                            if eof_received {
-                                break;
                             }
                         }
                         Ok(_) => {
@@ -259,157 +294,108 @@ impl<H: TransformHandler + 'static> TransformSupervisor<H> {
                             tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
                         }
                         Err(e) => {
-                            tracing::error!("[{}] Subscription error: {}", stage_name, e);
-                            break;
+                            tracing::error!(
+                                stage_name = %self.context.stage_name,
+                                error = ?e,
+                                "Subscription error"
+                            );
+                            drop(subscription_guard);
+                            return Ok(EventLoopDirective::Transition(
+                                TransformEvent::Error(format!("Subscription error: {}", e))
+                            ));
                         }
                     }
                 } else {
+                    // No subscription yet, wait
                     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
                 }
-            }
-            
-            // Write completion event after exiting the loop
-            tracing::info!("[{}] Writing completion event to journal", stage_name);
-            if let Some(writer_id) = &*context.writer_id.read().await {
-                let mut completion_event = ChainEvent::new(
-                    EventId::new(),
-                    writer_id.clone(),
-                    "system.stage.completed",
-                    serde_json::json!({
-                        "stage_id": format!("{}", context.stage_id),
-                        "stage_name": stage_name.clone(),
-                        "timestamp": chrono::Utc::now().to_rfc3339(),
-                    })
-                );
                 
-                // Populate flow context for completion event
-                completion_event.flow_context = obzenflow_core::event::flow_context::FlowContext {
-                    flow_name: flow_name.clone(),
-                    flow_id: "default".to_string(),
-                    stage_name: stage_name.clone(),
-                    stage_type: obzenflow_core::event::flow_context::StageType::Transform,
-                };
-                if let Err(e) = context.journal.write(writer_id, completion_event, None).await {
-                    // CRITICAL: If we can't write completion, pipeline will hang forever!
-                    panic!("[{}] FATAL: Failed to write completion event after processing all data: {}", stage_name, e);
-                }
-            } else {
-                panic!("[{}] FATAL: No writer_id available to write completion event", stage_name);
+                Ok(EventLoopDirective::Continue)
             }
             
-            tracing::info!("[{}] Transform task completed successfully", stage_name);
-        });
-        
-        *self.processing_task.write().await = Some(task);
-        Ok(())
+            TransformState::Draining => {
+                // Continue processing remaining events with short timeout
+                let mut subscription_guard = self.context.subscription.write().await;
+                if let Some(subscription) = subscription_guard.as_mut() {
+                    // Use shorter timeout to detect empty queue
+                    match tokio::time::timeout(
+                        tokio::time::Duration::from_millis(50),
+                        subscription.recv_batch()
+                    ).await {
+                        Ok(Ok(events)) if !events.is_empty() => {
+                            tracing::debug!(
+                                stage_name = %self.context.stage_name,
+                                count = events.len(),
+                                "Transform draining events"
+                            );
+                            
+                            // Process remaining events
+                            for envelope in events {
+                                if !envelope.event.is_control() {
+                                    let transformed_events = self.context.handler.process(envelope.event.clone());
+                                    
+                                    let writer_id_guard = self.context.writer_id.read().await;
+                                    if let Some(writer_id) = writer_id_guard.as_ref() {
+                                        for mut event in transformed_events {
+                                            event.flow_context = FlowContext {
+                                                flow_name: self.context.flow_name.clone(),
+                                                flow_id: format!("{}-{}", self.context.flow_name, self.context.stage_id),
+                                                stage_name: self.context.stage_name.clone(),
+                                                stage_type: obzenflow_core::event::flow_context::StageType::Transform,
+                                            };
+                                            
+                                            self.context.journal
+                                                .append(writer_id, event, Some(&envelope))
+                                                .await?;
+                                        }
+                                    }
+                                }
+                            }
+                            Ok(EventLoopDirective::Continue)
+                        }
+                        _ => {
+                            // Timeout or empty - queue is drained
+                            tracing::info!(
+                                stage_name = %self.context.stage_name,
+                                "Transform queue drained"
+                            );
+                            drop(subscription_guard);
+                            Ok(EventLoopDirective::Transition(TransformEvent::DrainComplete))
+                        }
+                    }
+                } else {
+                    // No subscription, complete immediately
+                    Ok(EventLoopDirective::Transition(TransformEvent::DrainComplete))
+                }
+            }
+            
+            TransformState::Drained => {
+                // Terminal state
+                Ok(EventLoopDirective::Terminate)
+            }
+            
+            TransformState::Failed(_) => {
+                // Terminal state
+                Ok(EventLoopDirective::Terminate)
+            }
+            
+            TransformState::_Phantom(_) => {
+                unreachable!("PhantomData variant should never be instantiated")
+            }
+        }
     }
 }
 
-#[async_trait::async_trait]
-impl<H: TransformHandler + 'static> StageSupervisor for TransformSupervisor<H> {
-    fn stage_id(&self) -> StageId {
-        self.stage_id
-    }
-    
-    fn stage_name(&self) -> &str {
-        &self.stage_name
-    }
-    
-    async fn initialize(&mut self) -> Result<(), String> {
-        let actions = self.fsm.handle(TransformEvent::Initialize, self.context.clone()).await?;
-        for action in actions {
-            self.handle_transform_action(action).await?;
-        }
-        
-        // Transforms go straight to ready
-        let actions = self.fsm.handle(TransformEvent::Ready, self.context.clone()).await?;
-        for action in actions {
-            self.handle_transform_action(action).await?;
-        }
-        
-        Ok(())
-    }
-    
-    async fn start(&mut self) -> Result<(), String> {
-        // Transforms don't need explicit start
-        Ok(())
-    }
-    
-    async fn begin_drain(&mut self) -> Result<(), String> {
-        let actions = self.fsm.handle(TransformEvent::BeginDrain, self.context.clone()).await?;
-        for action in actions {
-            self.handle_transform_action(action).await?;
+impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> TransformSupervisor<H> {
+    /// Helper to forward control events
+    async fn forward_control_event(&self, envelope: &EventEnvelope) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let writer_id_guard = self.context.writer_id.read().await;
+        if let Some(writer_id) = writer_id_guard.as_ref() {
+            let forward_event = envelope.event.clone();
+            self.context.journal
+                .write(writer_id, forward_event, Some(envelope))
+                .await?;
         }
         Ok(())
-    }
-    
-    async fn is_drained(&self) -> bool {
-        matches!(self.fsm.state(), TransformState::Drained)
-    }
-    
-    async fn force_shutdown(&mut self) -> Result<(), String> {
-        let actions = self.fsm.handle(
-            TransformEvent::Error("Force shutdown".to_string()), 
-            self.context.clone()
-        ).await?;
-        for action in actions {
-            self.handle_transform_action(action).await?;
-        }
-        Ok(())
-    }
-}
-
-#[async_trait::async_trait]
-impl<H: TransformHandler + 'static> StageHandle for TransformSupervisor<H> {
-    fn stage_id(&self) -> StageId {
-        self.stage_id
-    }
-    
-    fn stage_name(&self) -> &str {
-        &self.stage_name
-    }
-    
-    fn stage_type(&self) -> StageType {
-        StageType::Transform
-    }
-    
-    async fn initialize(&mut self) -> Result<(), String> {
-        <Self as StageSupervisor>::initialize(self).await
-    }
-    
-    async fn start(&mut self) -> Result<(), String> {
-        <Self as StageSupervisor>::start(self).await
-    }
-    
-    async fn send_event(&mut self, event: StageEvent) -> Result<(), String> {
-        // Map StageEvent to TransformEvent
-        let transform_event = match event {
-            StageEvent::Initialize => TransformEvent::Initialize,
-            StageEvent::Start => TransformEvent::Ready, // Transforms auto-start
-            StageEvent::Shutdown => TransformEvent::BeginDrain,
-            _ => return Err(format!("Unsupported event for transform: {:?}", event)),
-        };
-        
-        let actions = self.fsm.handle(transform_event, self.context.clone()).await?;
-        for action in actions {
-            self.handle_transform_action(action).await?;
-        }
-        Ok(())
-    }
-    
-    async fn begin_drain(&mut self) -> Result<(), String> {
-        <Self as StageSupervisor>::begin_drain(self).await
-    }
-    
-    fn is_ready(&self) -> bool {
-        matches!(self.fsm.state(), TransformState::Running)
-    }
-    
-    fn is_drained(&self) -> bool {
-        matches!(self.fsm.state(), TransformState::Drained)
-    }
-    
-    async fn force_shutdown(&mut self) -> Result<(), String> {
-        <Self as StageSupervisor>::force_shutdown(self).await
     }
 }

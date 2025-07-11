@@ -6,6 +6,7 @@
 
 pub mod dsl;
 pub mod prelude;
+pub mod stage_handle_adapter;
 
 // Re-export modules
 pub use dsl::*;

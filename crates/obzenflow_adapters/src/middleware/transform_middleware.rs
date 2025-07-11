@@ -14,6 +14,25 @@ pub struct MiddlewareTransform<H: TransformHandler> {
     middleware_chain: Vec<Box<dyn Middleware>>,
 }
 
+// Manual Clone implementation that clones the handler but creates empty middleware chain
+impl<H: TransformHandler + Clone> Clone for MiddlewareTransform<H> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+            middleware_chain: Vec::new(), // Don't clone middleware, start fresh
+        }
+    }
+}
+
+impl<H: TransformHandler> std::fmt::Debug for MiddlewareTransform<H> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MiddlewareTransform")
+            .field("inner_type", &std::any::type_name::<H>())
+            .field("middleware_count", &self.middleware_chain.len())
+            .finish()
+    }
+}
+
 impl<H: TransformHandler> MiddlewareTransform<H> {
     /// Create a new middleware-wrapped transform handler
     pub fn new(inner: H) -> Self {
@@ -156,13 +175,19 @@ impl<H: TransformHandler> TransformMiddlewareBuilder<H> {
 mod tests {
     use super::*;
     use serde_json::json;
+    use async_trait::async_trait;
     
     struct TestTransform;
     
+    #[async_trait]
     impl TransformHandler for TestTransform {
         fn process(&self, mut event: ChainEvent) -> Vec<ChainEvent> {
             event.payload["processed"] = json!(true);
             vec![event]
+        }
+        
+        async fn drain(&mut self) -> Result<()> {
+            Ok(())
         }
     }
     

@@ -16,6 +16,27 @@ pub struct MiddlewareFiniteSource<H: FiniteSourceHandler> {
     writer_id: WriterId, // Sources need a writer ID for synthetic events
 }
 
+// Manual Clone implementation that clones the handler but creates empty middleware chain
+impl<H: FiniteSourceHandler + Clone> Clone for MiddlewareFiniteSource<H> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+            middleware_chain: Vec::new(), // Don't clone middleware, start fresh
+            writer_id: self.writer_id.clone(),
+        }
+    }
+}
+
+impl<H: FiniteSourceHandler> std::fmt::Debug for MiddlewareFiniteSource<H> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MiddlewareFiniteSource")
+            .field("inner_type", &std::any::type_name::<H>())
+            .field("middleware_count", &self.middleware_chain.len())
+            .field("writer_id", &self.writer_id)
+            .finish()
+    }
+}
+
 impl<H: FiniteSourceHandler> MiddlewareFiniteSource<H> {
     /// Create a new middleware-wrapped finite source handler
     pub fn new(inner: H, writer_id: WriterId) -> Self {
@@ -111,6 +132,27 @@ pub struct MiddlewareInfiniteSource<H: InfiniteSourceHandler> {
     inner: H,
     middleware_chain: Vec<Box<dyn Middleware>>,
     writer_id: WriterId,
+}
+
+// Manual Clone implementation that clones the handler but creates empty middleware chain
+impl<H: InfiniteSourceHandler + Clone> Clone for MiddlewareInfiniteSource<H> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+            middleware_chain: Vec::new(), // Don't clone middleware, start fresh
+            writer_id: self.writer_id.clone(),
+        }
+    }
+}
+
+impl<H: InfiniteSourceHandler> std::fmt::Debug for MiddlewareInfiniteSource<H> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MiddlewareInfiniteSource")
+            .field("inner_type", &std::any::type_name::<H>())
+            .field("middleware_count", &self.middleware_chain.len())
+            .field("writer_id", &self.writer_id)
+            .finish()
+    }
 }
 
 impl<H: InfiniteSourceHandler> MiddlewareInfiniteSource<H> {

@@ -7,7 +7,7 @@ pub use obzenflow_core::event::chain_event::ChainEvent;
 pub use obzenflow_core::journal::writer_id::WriterId;
 
 // Supervision
-pub use obzenflow_runtime_services::pipeline::supervisor::{PipelineSupervisor, FlowHandle};
+pub use obzenflow_runtime_services::pipeline::{FlowHandle, PipelineBuilder};
 
 // Core journal interface
 pub use obzenflow_core::journal::journal::Journal;
@@ -35,5 +35,3 @@ pub use obzenflow_runtime_services::pipeline::config::StageConfig;
 // FLOWIP-056-666: Monitoring middleware temporarily disabled pending redesign
 // pub use obzenflow_adapters::monitoring::{Taxonomy, TaxonomyMetrics};
 
-// Pipeline
-pub use obzenflow_runtime_services::pipeline::Pipeline;

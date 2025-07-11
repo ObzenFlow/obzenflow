@@ -1,6 +1,6 @@
 //! Simple FSM example with Arc<Context> pattern
 
-use obzenflow_fsm::{FsmBuilder, StateVariant, EventVariant, Transition};
+use obzenflow_fsm::{FsmBuilder, StateVariant, EventVariant, FsmContext, FsmAction, Transition};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -38,6 +38,26 @@ impl EventVariant for DoorEvent {
 enum DoorAction {
     Ring,
     Log(String),
+}
+
+impl FsmContext for DoorContext {}
+
+#[async_trait::async_trait]
+impl FsmAction for DoorAction {
+    type Context = DoorContext;
+    
+    async fn execute(&self, ctx: &Self::Context) -> Result<(), String> {
+        match self {
+            DoorAction::Ring => {
+                ctx.log.write().await.push("Ring!".to_string());
+                Ok(())
+            }
+            DoorAction::Log(msg) => {
+                ctx.log.write().await.push(msg.clone());
+                Ok(())
+            }
+        }
+    }
 }
 
 #[derive(Clone)]

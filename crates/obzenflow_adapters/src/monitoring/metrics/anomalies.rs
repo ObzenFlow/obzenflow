@@ -219,7 +219,7 @@ mod tests {
     async fn test_anomaly_severity_tracking_pattern() {
         // Demonstrate how to handle severity tracking with separate metrics
         
-        use super::super::primitives::Gauge;
+        use obzenflow_core::metrics::primitives::Gauge;
         
         let anomaly_count = AnomalyMetric::new("anomalies_count");
         let anomaly_severity = Gauge::new(); // Separate gauge for severity tracking

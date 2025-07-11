@@ -6,603 +6,523 @@
 //! - Clean separation between supervision and business logic
 
 use super::{
-    pipeline::Pipeline,
-    fsm::{PipelineState, PipelineEvent, PipelineAction, PipelineContext, PipelineFsm, build_pipeline_fsm}
+    fsm::{PipelineAction, PipelineContext, PipelineEvent, PipelineState},
 };
-use crate::stages::common::stage_handle::BoxedStageHandle;
 use crate::event_flow::reactive_journal::ReactiveJournal;
-use crate::message_bus::FsmMessageBus;
-use crate::errors::{FlowError, PipelineSupervisorError};
-use obzenflow_topology_services::stages::StageId;
-use obzenflow_core::{ChainEvent, EventId, WriterId, Journal};
-use std::collections::HashMap;
+use crate::supervised_base::{EventLoopDirective, SelfSupervised};
+use obzenflow_core::{WriterId, ChainEvent};
 use std::sync::Arc;
-use tokio::sync::RwLock;
 
 /// Pipeline supervisor - manages the lifecycle of a pipeline
-pub struct PipelineSupervisor {
-    /// The pipeline FSM
-    pipeline_fsm: PipelineFsm,
-    
-    /// Pipeline context
-    pipeline_context: Arc<PipelineContext>,
-    
-    /// Message bus for inter-FSM communication
-    message_bus: Arc<FsmMessageBus>,
-    
-    /// Stage supervisors by ID
-    stage_supervisors: HashMap<StageId, BoxedStageHandle>,
-    
-    /// Pipeline configuration
-    pipeline: Pipeline,
-    
-    /// Reactive journal wrapper
-    reactive_journal: Arc<ReactiveJournal>,
-    
-    /// Subscription for stage completion events
-    completion_subscription: Option<crate::event_flow::JournalSubscription>,
-    
-    /// Metrics exporter for accessing aggregated metrics (FLOWIP-056-666)
-    /// Uses trait object to avoid runtime→adapters dependency
-    metrics_exporter: Option<Arc<dyn obzenflow_core::metrics::MetricsExporter>>,
-    
-    /// Writer ID for journal events
-    writer_id: Option<WriterId>,
+pub(crate) struct PipelineSupervisor {
+    /// Supervisor name
+    pub(crate) name: String,
+
+    /// Pipeline context (contains all mutable state)
+    pub(crate) pipeline_context: Arc<PipelineContext>,
+
+    /// Reactive journal wrapper (immutable reference)
+    pub(crate) reactive_journal: Arc<ReactiveJournal>,
+
+    /// Writer ID for journal events (immutable after creation)
+    pub(crate) writer_id: WriterId,
 }
 
-impl PipelineSupervisor {
-    /// Create a new pipeline supervisor
-    pub fn new(
-        topology: Arc<obzenflow_topology_services::topology::Topology>, 
-        reactive_journal: Arc<ReactiveJournal>,
-        stages: Vec<BoxedStageHandle>,
-        metrics_exporter: Option<Arc<dyn obzenflow_core::metrics::MetricsExporter>>,
-    ) -> Result<Self, PipelineSupervisorError> {
-        // Create message bus
-        let message_bus = Arc::new(FsmMessageBus::new());
-        
-        // Create pipeline context - use reactive_journal so everyone uses the same instance
-        let pipeline_context = Arc::new(PipelineContext {
-            bus: message_bus.clone(),
-            topology: topology.clone(),
-            journal: reactive_journal.clone(),
-            completed_stages: Arc::new(RwLock::new(Vec::new())),
-        });
-        
-        // Build pipeline FSM
-        let pipeline_fsm = build_pipeline_fsm();
-        
-        // Create pipeline with the provided stages
-        let pipeline = Pipeline {
-            journal: reactive_journal.clone(),
-            topology: topology.clone(),
-            stages,
-            observers: Vec::new(),
-        };
-        
-        Ok(Self {
-            pipeline_fsm,
-            pipeline_context,
-            message_bus,
-            stage_supervisors: HashMap::new(),
-            pipeline,
-            reactive_journal,
-            completion_subscription: None,
-            metrics_exporter,
-            writer_id: None,
-        })
-    }
-    
-    /// Materialize the pipeline (creates stages)
-    pub async fn materialize(&mut self) -> Result<(), String> {
-        // Register as a writer first
-        let stage_id = StageId::new();
-        self.writer_id = Some(
-            self.reactive_journal
-                .register_writer(stage_id, None)
-                .await
-                .map_err(|e| format!("Failed to register pipeline writer: {}", e))?
-        );
+impl crate::supervised_base::base::Supervisor for PipelineSupervisor {
+    type State = PipelineState;
+    type Event = PipelineEvent;
+    type Context = PipelineContext;
+    type Action = PipelineAction;
 
-        // Start metrics aggregator if we have an exporter
-        if let Some(exporter) = self.metrics_exporter.clone() {
-            let journal = self.reactive_journal.clone();
-            
-            // Subscribe for metrics ready event before spawning
-            let mut ready_subscription = self.reactive_journal
-                .subscribe(crate::event_flow::SubscriptionFilter::EventTypes { 
-                    event_types: vec!["system.metrics.ready".to_string()] 
-                })
-                .await
-                .map_err(|e| format!("Failed to subscribe for metrics ready: {}", e))?;
-            
-            // Spawn metrics aggregator
-            tokio::spawn(async move {
-                let mut metrics = crate::metrics::MetricsAggregatorSupervisor::new(
-                    journal,
-                    Some(exporter),
-                    10, // 10 second export interval
-                );
-                if let Err(e) = metrics.start().await {
-                    tracing::error!("Metrics aggregator failed: {}", e);
-                }
-            });
-            
-            // Wait for metrics aggregator to be ready
-            match tokio::time::timeout(
-                tokio::time::Duration::from_secs(5),
-                ready_subscription.recv_batch()
-            ).await {
-                Ok(Ok(batch)) if !batch.is_empty() => {
-                    tracing::info!("Metrics aggregator is ready");
-                }
-                Ok(Ok(_)) => {
-                    return Err("No metrics ready event received".to_string());
-                }
-                Ok(Err(e)) => {
-                    return Err(format!("Failed to receive metrics ready event: {}", e));
-                }
-                Err(_) => {
-                    return Err("Timeout waiting for metrics aggregator to be ready".to_string());
-                }
-            }
-        }
-
-        // Trigger FSM to materialize
-        let actions = self.pipeline_fsm.handle(
-            PipelineEvent::Materialize,
-            self.pipeline_context.clone()
-        ).await?;
-        
-        // Handle actions
-        for action in actions {
-            self.handle_action(action).await?;
-        }
-        
-        // Complete materialization
-        let actions = self.pipeline_fsm.handle(
-            PipelineEvent::MaterializationComplete,
-            self.pipeline_context.clone()
-        ).await?;
-        
-        for action in actions {
-            self.handle_action(action).await?;
-        }
-        
-        Ok(())
-    }
-    
-    /// Run the pipeline (starts sources)
-    pub async fn run(&mut self) -> Result<(), String> {
-        let actions = self.pipeline_fsm.handle(
-            PipelineEvent::Run,
-            self.pipeline_context.clone()
-        ).await?;
-        
-        for action in actions {
-            self.handle_action(action).await?;
-        }
-        
-        // Start processing stage completion events
-        self.start_completion_subscription().await?;
-        
-        // Process stage completion events until pipeline is drained
-        // This is event-driven, not polling
-        loop {
-            // Process completion events (this blocks until events arrive)
-            self.process_completion_events().await?;
-            
-            // Check if we've transitioned to a terminal state
-            match self.pipeline_fsm.state() {
-                PipelineState::Drained => {
-                    tracing::info!("Pipeline has reached Drained state");
-                    break;
-                }
-                PipelineState::Failed { reason } => {
-                    return Err(format!("Pipeline failed: {}", reason));
-                }
-                _ => {
-                    // Continue processing events
-                }
-            }
-        }
-        
-        Ok(())
-    }
-    
-    /// Shutdown the pipeline gracefully
-    pub async fn shutdown(&mut self) -> Result<(), String> {
-        let actions = self.pipeline_fsm.handle(
-            PipelineEvent::Shutdown,
-            self.pipeline_context.clone()
-        ).await?;
-        
-        for action in actions {
-            self.handle_action(action).await?;
-        }
-        
-        // Request metrics drain if we have metrics running
-        if self.metrics_exporter.is_some() {
-            self.drain_metrics().await?;
-        }
-        
-        Ok(())
-    }
-    
-    /// Force shutdown the pipeline
-    pub async fn force_shutdown(&mut self, reason: &str) -> Result<(), String> {
-        let actions = self.pipeline_fsm.handle(
-            PipelineEvent::Error { message: reason.to_string() },
-            self.pipeline_context.clone()
-        ).await?;
-        
-        for action in actions {
-            self.handle_action(action).await?;
-        }
-        
-        // Stop completion subscription
-        self.completion_subscription = None;
-        
-        Ok(())
-    }
-    
-    /// Get current pipeline state
-    pub fn pipeline_state(&self) -> &PipelineState {
-        self.pipeline_fsm.state()
-    }
-    
-    /// Drain metrics aggregator and wait for completion
-    async fn drain_metrics(&mut self) -> Result<(), String> {
-        tracing::info!("Requesting metrics drain via journal");
-        
-        let writer_id = self.writer_id.clone()
-            .ok_or_else(|| "No writer ID available".to_string())?;
-        
-        // 1. Publish drain request to journal
-        let drain_event = ChainEvent::new(
-            EventId::new(),
-            writer_id,
-            "system.metrics.drain",
-            serde_json::json!({})
-        );
-        
-        self.reactive_journal.append(&writer_id, drain_event, None).await
-            .map_err(|e| format!("Failed to publish drain event: {}", e))?;
-        
-        // 2. Subscribe and wait for drain completion event
-        let mut subscription = self.reactive_journal
-            .subscribe(crate::event_flow::SubscriptionFilter::EventTypes { 
-                event_types: vec!["system.metrics.drained".to_string()] 
-            })
-            .await
-            .map_err(|e| format!("Failed to subscribe for drain completion: {}", e))?;
-        
-        match tokio::time::timeout(
-            tokio::time::Duration::from_secs(30),
-            subscription.recv_batch()
-        ).await {
-            Ok(Ok(batch)) if !batch.is_empty() => {
-                tracing::info!("Metrics successfully drained");
-                Ok(())
-            }
-            Ok(Ok(_)) => Err("No drain completion event received".to_string()),
-            Ok(Err(e)) => Err(format!("Failed to receive drain completion: {}", e)),
-            Err(_) => Err("Metrics drain timeout".to_string())
-        }
-    }
-
-    /// Handle pipeline actions
-    async fn handle_action(&mut self, action: PipelineAction) -> Result<(), String> {
-        match action {
-            PipelineAction::CreateStages => {
-                self.create_all_stages().await?;
-            }
-            PipelineAction::NotifyStagesStart => {
-                // Non-source stages now start automatically when initialized and ready
-                // This action is a no-op since stages handle their own lifecycle
-                tracing::debug!("NotifyStagesStart: Non-source stages start automatically");
-            }
-            PipelineAction::NotifySourceStart => {
-                // Find the source stage (stage with no upstreams) and trigger FSM transition
-                let source_id = self.stage_supervisors.iter()
-                    .find(|(stage_id, _)| self.pipeline_context.topology.upstream_stages(**stage_id).is_empty())
-                    .map(|(stage_id, _)| *stage_id);
-                    
-                if let Some(source_id) = source_id {
-                    tracing::info!("Starting source stage: {:?}", source_id);
-                    
-                    // Get the source supervisor and send Start event
-                    if let Some(stage) = self.stage_supervisors.get_mut(&source_id) {
-                        stage.start().await
-                            .map_err(|e| format!("Failed to start source stage: {}", e))?;
-                    }
-                }
-            }
-            PipelineAction::BeginDrain => {
-                // Publish drain event to journal for stages to pick up
-                let writer_id = self.writer_id.clone()
-                    .ok_or_else(|| "No writer ID available".to_string())?;
-                
-                let drain_event = ChainEvent::new(
-                    EventId::new(),
-                    writer_id.clone(),
-                    "system.pipeline.drain",
-                    serde_json::json!({
-                        "timestamp": chrono::Utc::now().to_rfc3339(),
+    fn configure_fsm(
+        &self,
+        builder: obzenflow_fsm::FsmBuilder<Self::State, Self::Event, Self::Context, Self::Action>,
+    ) -> obzenflow_fsm::FsmBuilder<Self::State, Self::Event, Self::Context, Self::Action> {
+        builder
+            .when("Created")
+            .on(
+                "Materialize",
+                |_state, _event: &PipelineEvent, _ctx| async move {
+                    Ok(obzenflow_fsm::Transition {
+                        next_state: PipelineState::Materializing,
+                        actions: vec![PipelineAction::CreateStages],
                     })
-                );
-                
-                self.reactive_journal.append(&writer_id, drain_event, None).await
-                    .map_err(|e| format!("Failed to publish drain event: {}", e))?;
-                    
-                tracing::info!("Published drain event to journal");
-            }
-            PipelineAction::WritePipelineCompleted => {
-                self.write_pipeline_completed_event().await?;
-            }
-            PipelineAction::Cleanup => {
-                // Cleanup will be handled by supervisor drop
-            }
-        }
-        Ok(())
-    }
-    
-    /// Write pipeline completed event to journal
-    async fn write_pipeline_completed_event(&self) -> Result<(), String> {
-        // Get flow name from context or use default
-        let flow_name = "default"; // TODO: Get from first completed stage event
-        
-        // Register writer for pipeline
-        let pipeline_stage_id = StageId::new();
-        let writer_id = self.reactive_journal.register_writer(pipeline_stage_id, None)
-            .await
-            .map_err(|e| format!("Failed to register pipeline writer: {:?}", e))?;
-        
-        let mut pipeline_completed = ChainEvent::new(
-            EventId::new(),
-            writer_id.clone(),
-            "system.pipeline.completed",
-            serde_json::json!({
-                "timestamp": chrono::Utc::now().to_rfc3339(),
-                "completed_stages": self.stage_supervisors.len(),
-            })
-        );
-        
-        // Set flow context for pipeline completion event
-        pipeline_completed.flow_context = obzenflow_core::event::flow_context::FlowContext {
-            flow_name: flow_name.to_string(),
-            flow_id: "default".to_string(),
-            stage_name: "pipeline".to_string(),
-            stage_type: obzenflow_core::event::flow_context::StageType::Transform,
-        };
-        
-        self.reactive_journal.write(&writer_id, pipeline_completed, None).await
-            .map_err(|e| format!("Failed to write pipeline completion event: {}", e))?;
-            
-        tracing::info!("Pipeline completion event written");
-        Ok(())
-    }
-    
-    /// Initialize all stage supervisors
-    async fn create_all_stages(&mut self) -> Result<(), String> {
-        // Stages are already created as BoxedStageHandle instances
-        // We just need to move them into our supervisor map and initialize them
-        
-        for mut stage in self.pipeline.stages.drain(..) {
-            let stage_id = stage.stage_id();
-            let stage_name = stage.stage_name().to_string();
-            
-            tracing::info!("Initializing stage: {} (id: {:?})", stage_name, stage_id);
-            
-            // Initialize the stage
-            stage.initialize().await
-                .map_err(|e| format!("Failed to initialize stage {}: {}", stage_name, e))?;
-            
-            // Store supervisor
-            self.stage_supervisors.insert(stage_id, stage);
-            
-            tracing::info!("Stage {} initialized", stage_name);
-        }
-        
-        tracing::info!("All {} stages initialized successfully", self.stage_supervisors.len());
-        Ok(())
-    }
-    
-    /// Start subscription for stage completion events
-    async fn start_completion_subscription(&mut self) -> Result<(), String> {
-        // Create subscription for system control events from all stages
-        let filter = crate::event_flow::reactive_journal::SubscriptionFilter::EventTypes {
-            event_types: vec![
-                "system.stage.completed".to_string(),
-                "system.stage.failed".to_string(),
-            ],
-        };
-        
-        let subscription = self.reactive_journal.subscribe(filter).await
-            .map_err(|e| format!("Failed to create control subscription: {:?}", e))?;
-            
-        self.completion_subscription = Some(subscription);
-        
-        tracing::info!("Started subscription for stage completion events");
-        Ok(())
-    }
-    
-    /// Process completion events from the subscription
-    async fn process_completion_events(&mut self) -> Result<(), String> {
-        let Some(ref mut subscription) = self.completion_subscription else {
-            return Ok(());
-        };
-        
-        // Receive events (blocks until events are available)
-        match subscription.recv_batch().await {
-            Ok(events) if !events.is_empty() => {
-                for envelope in events {
-                    let event = &envelope.event;
-                    match event.event_type.as_str() {
-                        "system.stage.completed" => {
-                            self.handle_stage_completed(&envelope).await?;
-                        }
-                        "system.stage.failed" => {
-                            let stage_name = event.payload.get("stage_name")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("unknown");
-                            let error = event.payload.get("error")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("Unknown error");
-                            
-                            // Trigger error event on FSM
-                            let _ = self.pipeline_fsm.handle(
-                                PipelineEvent::Error { message: format!("Stage '{}' failed: {}", stage_name, error) },
-                                self.pipeline_context.clone()
-                            ).await?;
-                        }
-                        _ => {}
+                },
+            )
+            .done()
+            .when("Materializing")
+            .on(
+                "MaterializationComplete",
+                |_state, _event: &PipelineEvent, _ctx| async move {
+                    Ok(obzenflow_fsm::Transition {
+                        next_state: PipelineState::Materialized,
+                        actions: vec![
+                            PipelineAction::StartCompletionSubscription,
+                            PipelineAction::NotifyStagesStart,
+                        ],
+                    })
+                },
+            )
+            .on("Error", |_state, event, _ctx| {
+                let event = event.clone();
+                async move {
+                    if let PipelineEvent::Error { message } = event {
+                        Ok(obzenflow_fsm::Transition {
+                            next_state: PipelineState::Failed { reason: message },
+                            actions: vec![PipelineAction::Cleanup],
+                        })
+                    } else {
+                        Err("Invalid event".to_string())
                     }
                 }
-            }
-            Ok(_) => {
-                // No events available
-            }
-            Err(e) => {
-                tracing::error!("Failed to receive completion events: {:?}", e);
-                return Err(format!("Subscription error: {:?}", e));
-            }
-        }
-        
-        Ok(())
+            })
+            .done()
+            .when("Materialized")
+            .on("Run", |_state, _event: &PipelineEvent, _ctx| async move {
+                Ok(obzenflow_fsm::Transition {
+                    next_state: PipelineState::Running,
+                    actions: vec![PipelineAction::NotifySourceStart],
+                })
+            })
+            .done()
+            .when("Running")
+            .on(
+                "Shutdown",
+                |_state, _event: &PipelineEvent, _ctx| async move {
+                    Ok(obzenflow_fsm::Transition {
+                        next_state: PipelineState::SourceCompleted,
+                        actions: vec![], // No actions yet - just track state
+                    })
+                },
+            )
+            .on("StageCompleted", |_state, event, _ctx| {
+                let event = event.clone();
+                async move {
+                    if let PipelineEvent::StageCompleted { envelope } = event {
+                        // Just track the completion, stay in Running state
+                        Ok(obzenflow_fsm::Transition {
+                            next_state: PipelineState::Running,
+                            actions: vec![PipelineAction::HandleStageCompleted { envelope }],
+                        })
+                    } else {
+                        Err("Invalid event".to_string())
+                    }
+                }
+            })
+            .on("Error", |_state, event, _ctx| {
+                let event = event.clone();
+                async move {
+                    if let PipelineEvent::Error { message } = event {
+                        Ok(obzenflow_fsm::Transition {
+                            next_state: PipelineState::Failed { reason: message },
+                            actions: vec![PipelineAction::Cleanup],
+                        })
+                    } else {
+                        Err("Invalid event".to_string())
+                    }
+                }
+            })
+            .on("AllStagesCompleted", |_state, _event: &PipelineEvent, _ctx| async move {
+                Ok(obzenflow_fsm::Transition {
+                    next_state: PipelineState::Drained,
+                    actions: vec![
+                        PipelineAction::WritePipelineCompleted,
+                        PipelineAction::Cleanup
+                    ],
+                })
+            })
+            .done()
+            .when("SourceCompleted")
+            .on(
+                "BeginDrain",
+                |_state, _event: &PipelineEvent, _ctx| async move {
+                    Ok(obzenflow_fsm::Transition {
+                        next_state: PipelineState::Draining,
+                        actions: vec![PipelineAction::BeginDrain],
+                    })
+                },
+            )
+            .done()
+            .when("Draining")
+            .on("StageCompleted", |_state, event, _ctx| {
+                let event = event.clone();
+                async move {
+                    if let PipelineEvent::StageCompleted { envelope } = event {
+                        // Track completion and check if all stages are done
+                        Ok(obzenflow_fsm::Transition {
+                            next_state: PipelineState::Draining,
+                            actions: vec![PipelineAction::HandleStageCompleted { envelope }],
+                        })
+                    } else {
+                        Err("Invalid event".to_string())
+                    }
+                }
+            })
+            .on(
+                "AllStagesCompleted",
+                |_state, _event: &PipelineEvent, _ctx| async move {
+                    Ok(obzenflow_fsm::Transition {
+                        next_state: PipelineState::Drained,
+                        actions: vec![
+                            PipelineAction::WritePipelineCompleted,
+                            PipelineAction::Cleanup,
+                        ],
+                    })
+                },
+            )
+            .done()
     }
-    
-    /// Handle stage completed event
-    async fn handle_stage_completed(&mut self, envelope: &obzenflow_core::EventEnvelope) -> Result<(), String> {
-        let event = &envelope.event;
-        
-        // Get stage info from the event
-        let stage_name = event.payload.get("stage_name")
-            .and_then(|v| v.as_str())
-            .unwrap_or("unknown");
-        
-        // Get stage ID from the writer registry
-        if let Some(writer_info) = self.reactive_journal.get_writer_info(&envelope.writer_id).await {
-            let stage_id = writer_info.stage_id;
-            
-            tracing::info!("Stage completed: {} ({})", stage_name, stage_id);
-            
-            // Check if this is the source stage completing (triggers Jonestown protocol)
-            if self.pipeline_context.topology.upstream_stages(stage_id).is_empty() {
-                tracing::info!("Source stage completed - initiating Jonestown protocol");
-                
-                // Transition to draining state when source completes
-                let actions = self.pipeline_fsm.handle(
-                    PipelineEvent::Shutdown,
-                    self.pipeline_context.clone()
-                ).await?;
-                
-                for action in actions {
-                    self.handle_action(action).await?;
-                }
-            }
-            
-            // Add to completed stages
-            let mut completed = self.pipeline_context.completed_stages.write().await;
-            if !completed.contains(&stage_id) {
-                completed.push(stage_id);
-            }
-            
-            // Check if all expected stages have completed
-            let expected_stages: std::collections::HashSet<StageId> = self.pipeline_context.topology.stages()
-                .map(|info| info.id)
-                .collect();
-            let total_stages = expected_stages.len();
-            
-            tracing::debug!("Stage completion: {} of {} stages completed", completed.len(), total_stages);
-            
-            if completed.len() >= total_stages {
-                tracing::info!("All {} stages have completed!", total_stages);
-                drop(completed); // Release the lock
-                
-                // Drain metrics
-                if self.metrics_exporter.is_some() {
-                    self.drain_metrics().await?;
-                }
-                
-                // Trigger FSM transition
-                let actions = self.pipeline_fsm.handle(
-                    PipelineEvent::AllStagesCompleted,
-                    self.pipeline_context.clone()
-                ).await?;
-                
-                // Process the actions
-                for action in actions {
-                    self.handle_action(action).await?;
-                }
-            }
-        } else {
-            tracing::warn!("Stage completed event from unknown writer: {:?}", envelope.writer_id);
-        }
-        
-        Ok(())
+
+    fn journal(&self) -> &Arc<ReactiveJournal> {
+        &self.reactive_journal
+    }
+
+    fn writer_id(&self) -> &WriterId {
+        &self.writer_id
+    }
+
+    fn name(&self) -> &str {
+        &self.name
     }
 }
 
-/// Flow handle for external control
-pub struct FlowHandle {
-    supervisor: Arc<RwLock<PipelineSupervisor>>,
-}
+// Implement SelfSupervised trait
+#[async_trait::async_trait]
+impl SelfSupervised for PipelineSupervisor {
+    async fn dispatch_state(
+        &mut self,
+        state: &Self::State,
+    ) -> Result<EventLoopDirective<Self::Event>, Box<dyn std::error::Error + Send + Sync>> {
+        match state {
+            PipelineState::Created => {
+                // In Created state, we wait for external trigger to materialize
+                // This would typically come from the FlowHandle
+                Ok(EventLoopDirective::Continue)
+            }
 
-impl FlowHandle {
-    pub fn new(supervisor: Arc<RwLock<PipelineSupervisor>>) -> Self {
-        Self { supervisor }
-    }
-    
-    /// Start the pipeline (triggers sources)
-    pub async fn run(&self) -> Result<(), FlowError> {
-        let mut supervisor = self.supervisor.write().await;
-        supervisor.run().await
-            .map_err(|e| FlowError::ExecutionFailed(Box::new(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                e
-            ))))
-    }
-    
-    /// Graceful shutdown
-    pub async fn shutdown(&self) -> Result<(), FlowError> {
-        let mut supervisor = self.supervisor.write().await;
-        supervisor.shutdown().await
-            .map_err(|e| FlowError::ExecutionFailed(Box::new(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                e
-            ))))
-    }
-    
-    /// Force shutdown
-    pub async fn abort(&self, reason: &str) -> Result<(), FlowError> {
-        let mut supervisor = self.supervisor.write().await;
-        supervisor.force_shutdown(reason).await
-            .map_err(|e| FlowError::ExecutionFailed(Box::new(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                e
-            ))))
-    }
-    
-    /// Query current state
-    pub async fn state(&self) -> PipelineState {
-        let supervisor = self.supervisor.read().await;
-        supervisor.pipeline_state().clone()
-    }
-    
-    /// Render metrics in Prometheus format
-    pub async fn render_metrics(&self) -> Result<String, FlowError> {
-        let supervisor = self.supervisor.read().await;
-        
-        if let Some(ref exporter) = supervisor.metrics_exporter {
-            exporter.render_metrics()
-                .map_err(|e| FlowError::ExecutionFailed(Box::new(
-                    std::io::Error::new(std::io::ErrorKind::Other, e.to_string())
-                )))
-        } else {
-            Err(FlowError::ExecutionFailed(Box::new(
-                std::io::Error::new(std::io::ErrorKind::Other, "No metrics exporter configured")
-            )))
+            PipelineState::Materializing => {
+                // Check if all stages have been initialized
+                let supervisors = self.pipeline_context.stage_supervisors.read().await;
+                let expected_count = self.pipeline_context.topology.stages().count();
+                let initialized_count = supervisors.len();
+                drop(supervisors);
+                
+                if initialized_count == expected_count && expected_count > 0 {
+                    // All stages created, transition to Materialized
+                    Ok(EventLoopDirective::Transition(
+                        PipelineEvent::MaterializationComplete,
+                    ))
+                } else {
+                    // Still waiting for stages to be created
+                    Ok(EventLoopDirective::Continue)
+                }
+            }
+
+            PipelineState::Materialized => {
+                // First check if any stages are already running (they might have published before we subscribed)
+                let supervisors = self.pipeline_context.stage_supervisors.read().await;
+                for (stage_id, stage) in supervisors.iter() {
+                    if stage.is_ready() && !self.pipeline_context.topology.upstream_stages(*stage_id).is_empty() {
+                        // This is a non-source stage that's already running
+                        self.pipeline_context.running_stages.write().await.insert(*stage_id);
+                        tracing::info!("Stage '{}' was already running", stage.stage_name());
+                    }
+                }
+                drop(supervisors);
+                
+                // Poll for stage running events to know when all non-source stages are ready
+                let mut subscription_guard =
+                    self.pipeline_context.completion_subscription.write().await;
+                let subscription = subscription_guard
+                    .as_mut()
+                    .ok_or("No subscription available - should have been initialized during materialization")?;
+
+                // Check for stage running events with timeout
+                match tokio::time::timeout(
+                    tokio::time::Duration::from_millis(100),
+                    subscription.recv_batch(),
+                )
+                .await
+                {
+                    Ok(Ok(events)) if !events.is_empty() => {
+                        drop(subscription_guard);
+                        
+                        // Process stage running events
+                        for envelope in events {
+                            let event = &envelope.event;
+                            if event.event_type == ChainEvent::SYSTEM_STAGE_RUNNING {
+                                if let Some(writer_info) = self
+                                    .reactive_journal
+                                    .get_writer_info(&envelope.writer_id)
+                                    .await
+                                {
+                                    let stage_id = writer_info.stage_id;
+                                    
+                                    // Track this stage as running
+                                    self.pipeline_context.running_stages.write().await.insert(stage_id);
+                                    
+                                    let stage_name = event
+                                        .payload
+                                        .get("stage_name")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("unknown");
+                                    
+                                    // Log based on stage type
+                                    if self.pipeline_context.topology.upstream_stages(stage_id).is_empty() {
+                                        tracing::debug!("Source stage '{}' is running (waiting for pipeline signal)", stage_name);
+                                    } else {
+                                        tracing::info!("Stage '{}' is now running", stage_name);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    _ => {
+                        // No new events, but that's OK - stages might already be running
+                    }
+                }
+                
+                // Check if all non-source stages are running
+                let running_stages = self.pipeline_context.running_stages.read().await;
+                let topology = &self.pipeline_context.topology;
+                
+                // Get all non-source stage IDs
+                let non_source_stages: std::collections::HashSet<_> = topology
+                    .stages()
+                    .filter(|stage_info| !topology.upstream_stages(stage_info.id).is_empty())
+                    .map(|stage_info| stage_info.id)
+                    .collect();
+                
+                // Check if all non-source stages are in the running set
+                let all_ready = !non_source_stages.is_empty() && 
+                    non_source_stages.iter().all(|stage_id| running_stages.contains(stage_id));
+                
+                if all_ready {
+                    tracing::info!(
+                        "All {} non-source stages are running, starting pipeline", 
+                        non_source_stages.len()
+                    );
+                    Ok(EventLoopDirective::Transition(PipelineEvent::Run))
+                } else {
+                    // Still waiting for stages to report running
+                    let waiting_for = non_source_stages
+                        .difference(&*running_stages)
+                        .count();
+                    if waiting_for > 0 {
+                        tracing::debug!(
+                            "Waiting for {} more stage(s) to report running ({}/{} ready)",
+                            waiting_for,
+                            running_stages.len(),
+                            non_source_stages.len()
+                        );
+                    }
+                    Ok(EventLoopDirective::Continue)
+                }
+            }
+
+            PipelineState::Running => {
+                // Poll for completion events from stages
+                let mut subscription_guard =
+                    self.pipeline_context.completion_subscription.write().await;
+                let subscription = subscription_guard
+                    .as_mut()
+                    .ok_or("No subscription available - should have been initialized during materialization")?;
+
+                // Use timeout to allow periodic state checks while waiting for events
+                match tokio::time::timeout(
+                    tokio::time::Duration::from_millis(100),
+                    subscription.recv_batch(),
+                )
+                .await
+                {
+                    Ok(Ok(events)) if !events.is_empty() => {
+                        drop(subscription_guard);
+                        
+                        // Collect important events that need transitions
+                        let mut stage_completion_event = None;
+                        let mut all_stages_completed_event = None;
+                        let mut error_event = None;
+                        
+                        // Process ALL events in the batch
+                        for envelope in events {
+                            let event = &envelope.event;
+
+                            match event.event_type.as_str() {
+                                ChainEvent::SYSTEM_STAGE_RUNNING => {
+                                    // Just log - stage is now running
+                                    let stage_name = event
+                                        .payload
+                                        .get("stage_name")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("unknown");
+                                    tracing::info!("Stage '{}' is now running", stage_name);
+                                }
+                                ChainEvent::SYSTEM_STAGE_DRAINING => {
+                                    // Stage has started draining
+                                    let stage_name = event
+                                        .payload
+                                        .get("stage_name")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("unknown");
+                                    tracing::info!("Stage '{}' is draining", stage_name);
+                                }
+                                ChainEvent::SYSTEM_STAGE_DRAINED => {
+                                    // Stage has finished draining but not yet completed
+                                    let stage_name = event
+                                        .payload
+                                        .get("stage_name")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("unknown");
+                                    tracing::info!("Stage '{}' is drained", stage_name);
+                                }
+                                ChainEvent::SYSTEM_STAGE_COMPLETED => {
+                                    // Stage has fully completed
+                                    if let Some(writer_info) = self
+                                        .reactive_journal
+                                        .get_writer_info(&envelope.writer_id)
+                                        .await
+                                    {
+                                        // Store the completion event (we'll process after checking all events)
+                                        stage_completion_event = Some(envelope);
+                                    }
+                                }
+                                ChainEvent::SYSTEM_PIPELINE_ALL_STAGES_COMPLETED => {
+                                    tracing::info!("Received AllStagesCompleted event!");
+                                    all_stages_completed_event = Some(());
+                                }
+                                ChainEvent::SYSTEM_STAGE_FAILED => {
+                                    let stage_name = event
+                                        .payload
+                                        .get("stage_name")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("unknown");
+                                    let error = event
+                                        .payload
+                                        .get("error")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("Unknown error");
+
+                                    error_event = Some(format!("Stage '{}' failed: {}", stage_name, error));
+                                }
+                                _ => {}
+                            }
+                        }
+                        
+                        // Now decide what transition to make based on collected events
+                        // Priority: Error > AllStagesCompleted > StageCompleted
+                        if let Some(error_message) = error_event {
+                            return Ok(EventLoopDirective::Transition(PipelineEvent::Error {
+                                message: error_message,
+                            }));
+                        } else if all_stages_completed_event.is_some() {
+                            return Ok(EventLoopDirective::Transition(
+                                PipelineEvent::AllStagesCompleted,
+                            ));
+                        } else if let Some(envelope) = stage_completion_event {
+                            return Ok(EventLoopDirective::Transition(
+                                PipelineEvent::StageCompleted { envelope },
+                            ));
+                        }
+                    }
+                    _ => {
+                        // No events or timeout - continue running
+                    }
+                }
+
+                Ok(EventLoopDirective::Continue)
+            }
+
+            PipelineState::SourceCompleted => {
+                // Source has completed - initiate Jonestown protocol
+                tracing::info!("Source completed - beginning pipeline drain");
+
+                // Immediately transition to start draining
+                Ok(EventLoopDirective::Transition(PipelineEvent::BeginDrain))
+            }
+
+            PipelineState::Draining => {
+                // Continue polling for completion events during drain
+                let mut subscription_guard =
+                    self.pipeline_context.completion_subscription.write().await;
+                let subscription = subscription_guard
+                    .as_mut()
+                    .ok_or("No subscription available")?;
+
+                match tokio::time::timeout(
+                    tokio::time::Duration::from_millis(100),
+                    subscription.recv_batch(),
+                )
+                .await
+                {
+                    Ok(Ok(events)) if !events.is_empty() => {
+                        drop(subscription_guard);
+                        
+                        // Collect important events that need transitions
+                        let mut stage_completion_event = None;
+                        let mut all_stages_completed_event = None;
+                        
+                        // Process ALL events in the batch during drain
+                        for envelope in events {
+                            let event = &envelope.event;
+
+                            match event.event_type.as_str() {
+                                ChainEvent::SYSTEM_STAGE_COMPLETED => {
+                                    if let Some(writer_info) = self
+                                        .reactive_journal
+                                        .get_writer_info(&envelope.writer_id)
+                                        .await
+                                    {
+                                        // Store the completion event
+                                        stage_completion_event = Some(envelope);
+                                    }
+                                }
+                                ChainEvent::SYSTEM_PIPELINE_ALL_STAGES_COMPLETED => {
+                                    tracing::info!(
+                                        "All stages have completed - transitioning to drained"
+                                    );
+                                    all_stages_completed_event = Some(());
+                                }
+                                _ => {
+                                    // Log other events
+                                    tracing::debug!(
+                                        "Received event during drain: {}",
+                                        event.event_type
+                                    );
+                                }
+                            }
+                        }
+                        
+                        // Decide what transition to make
+                        // Priority: AllStagesCompleted > StageCompleted
+                        if all_stages_completed_event.is_some() {
+                            return Ok(EventLoopDirective::Transition(
+                                PipelineEvent::AllStagesCompleted,
+                            ));
+                        } else if let Some(envelope) = stage_completion_event {
+                            return Ok(EventLoopDirective::Transition(
+                                PipelineEvent::StageCompleted { envelope },
+                            ));
+                        }
+                    }
+                    _ => {
+                        // No events - continue draining
+                    }
+                }
+
+                Ok(EventLoopDirective::Continue)
+            }
+
+            PipelineState::Drained => {
+                // Terminal state
+                tracing::info!("Pipeline drained, terminating");
+                Ok(EventLoopDirective::Terminate)
+            }
+
+            PipelineState::Failed { reason } => {
+                // Terminal state
+                tracing::error!("Pipeline failed: {}", reason);
+                Ok(EventLoopDirective::Terminate)
+            }
         }
     }
 }

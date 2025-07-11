@@ -1,8 +1,9 @@
 //! Fluent builder API for creating FSMs (inspired by Akka Classic FSM)
 
-use crate::{StateMachine, StateHandler, TimeoutHandler, Transition, TransitionHandler, StateVariant, EventVariant};
+use crate::handlers::{StateHandler, TimeoutHandler, TransitionHandler};
+use crate::machine::StateMachine;
+use crate::types::{StateVariant, EventVariant, FsmContext, FsmAction, Transition};
 use std::collections::HashMap;
-use std::fmt::Debug;
 use std::future::Future;
 use std::marker::PhantomData;
 use std::pin::Pin;
@@ -30,8 +31,8 @@ impl<S, E, C, A> FsmBuilder<S, E, C, A>
 where
     S: StateVariant,
     E: EventVariant,
-    C: Send + Sync + 'static,
-    A: Clone + Debug + Send + Sync + 'static,
+    C: FsmContext + 'static,
+    A: FsmAction<Context = C> + 'static,
 {
     /// Create a new FSM builder with an initial state
     pub fn new(initial_state: S) -> Self {
@@ -121,8 +122,8 @@ impl<S, E, C, A> WhenBuilder<S, E, C, A>
 where
     S: StateVariant,
     E: EventVariant,
-    C: Send + Sync + 'static,
-    A: Clone + Debug + Send + Sync + 'static,
+    C: FsmContext + 'static,
+    A: FsmAction<Context = C> + 'static,
 {
     /// Define a transition for a specific event
     pub fn on<F, Fut>(mut self, event_name: &str, handler: F) -> Self
@@ -174,8 +175,8 @@ impl<S, E, C, A> TimeoutBuilder<S, E, C, A>
 where
     S: StateVariant,
     E: EventVariant,
-    C: Send + Sync + 'static,
-    A: Clone + Debug + Send + Sync + 'static,
+    C: FsmContext + 'static,
+    A: FsmAction<Context = C> + 'static,
 {
     /// Define a transition for a specific event
     pub fn on<F, Fut>(mut self, event_name: &str, handler: F) -> Self
@@ -280,6 +281,30 @@ mod tests {
     }
 
     struct DoorContext;
+    
+    impl crate::FsmContext for DoorContext {
+        fn describe(&self) -> String {
+            "Door FSM context".to_string()
+        }
+    }
+    
+    #[async_trait::async_trait]
+    impl crate::FsmAction for DoorAction {
+        type Context = DoorContext;
+        
+        async fn execute(&self, _ctx: &Self::Context) -> Result<(), String> {
+            match self {
+                DoorAction::Ring => {
+                    println!("Ring!");
+                    Ok(())
+                }
+                DoorAction::Log(msg) => {
+                    println!("Log: {}", msg);
+                    Ok(())
+                }
+            }
+        }
+    }
 
     #[tokio::test]
     async fn test_door_fsm() {

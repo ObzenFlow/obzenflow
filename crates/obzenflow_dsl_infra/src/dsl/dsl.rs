@@ -6,6 +6,7 @@
 /// The main flow! macro using the clean typed approach
 #[macro_export]
 macro_rules! flow {
+    // Pattern with explicit flow name
     {
         name: $flow_name:literal,
         journal: $journal:expr,
@@ -46,6 +47,49 @@ macro_rules! flow {
             
             // Build the flow
             $crate::build_typed_flow!($flow_name, journal, stages, connections, [$($flow_mw),*])
+        }
+    }};
+    
+    // Pattern without explicit flow name (uses "default")
+    {
+        journal: $journal:expr,
+        middleware: [$($flow_mw:expr),*],
+        
+        stages: {
+            $($stage_name:ident = $stage_macro:ident!($name:literal => $handler:expr $(, [$($mw:expr),*])?);)*
+        },
+        
+        topology: {
+            $($from:ident |> $to:ident;)*
+        }
+    } => {{
+        async move {
+            use $crate::prelude::*;
+            use $crate::dsl::stage_descriptor::*;
+            use std::sync::Arc;
+            use std::collections::HashMap;
+            
+            let journal = $journal;
+            
+            // Create stages
+            let mut stages: HashMap<String, Box<dyn StageDescriptor>> = HashMap::new();
+            
+            $(
+                let descriptor = $stage_macro!($name => $handler $(, [$($mw),*])?);
+                stages.insert(stringify!($stage_name).to_string(), descriptor);
+            )*
+            
+            // Create connections
+            let mut connections: Vec<(String, String)> = Vec::new();
+            $(
+                connections.push((
+                    stringify!($from).to_string(), 
+                    stringify!($to).to_string()
+                ));
+            )*
+            
+            // Build the flow with default name
+            $crate::build_typed_flow!("default", journal, stages, connections, [$($flow_mw),*])
         }
     }};
 }
@@ -91,8 +135,8 @@ macro_rules! build_typed_flow {
         use obzenflow_runtime_services::event_flow::reactive_journal::ReactiveJournal;
         use obzenflow_runtime_services::message_bus::FsmMessageBus;
         use obzenflow_runtime_services::pipeline::config::StageConfig;
-        use obzenflow_runtime_services::stages::common::resources::StageResources;
-        use obzenflow_runtime_services::metrics::{DefaultMetricsConfig, MetricsAggregatorSupervisor};
+        use $crate::dsl::stage_descriptor::StageResources;
+        use obzenflow_runtime_services::metrics::DefaultMetricsConfig;
         use obzenflow_core::metrics::MetricsExporter;
         use std::sync::Mutex;
         
@@ -148,26 +192,27 @@ macro_rules! build_typed_flow {
                     upstream_stages,
                 };
                 
-                let supervisor = descriptor.create_supervisor(config, resources);
-                stages.push(supervisor);
+                let handle = descriptor.create_handle(config, resources).await
+                    .map_err(|e| format!("Failed to create stage '{}': {}", name, e))?;
+                stages.push(handle);
             }
         }
         
-        // Create flow handle
-        use $crate::prelude::{PipelineSupervisor, FlowHandle};
-        use tokio::sync::RwLock;
+        // Create flow handle using builder pattern
+        use $crate::prelude::{PipelineBuilder, FlowHandle};
+        use obzenflow_runtime_services::supervised_base::SupervisorBuilder;
         
-        let mut supervisor = PipelineSupervisor::new(
-            topology.clone(), 
-            reactive_journal.clone(), 
-            stages,
-            metrics_exporter
-        )
-        .map_err(|e| format!("Failed to create supervisor: {:?}", e))?;
+        let builder = PipelineBuilder::new(topology.clone(), reactive_journal.clone())
+            .with_stages(stages);
         
-        supervisor.materialize().await?;
+        let builder = if let Some(exporter) = metrics_exporter {
+            builder.with_metrics(exporter)
+        } else {
+            builder
+        };
         
-        let handle = FlowHandle::new(Arc::new(RwLock::new(supervisor)));
+        let handle = builder.build().await
+            .map_err(|e| format!("Failed to build pipeline: {:?}", e))?;
         
         Ok::<FlowHandle, Box<dyn std::error::Error + Send + Sync>>(handle)
     }};

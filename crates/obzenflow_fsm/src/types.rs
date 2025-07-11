@@ -98,6 +98,29 @@ pub trait EventVariant: Clone + Debug + Send + Sync + 'static {
     fn variant_name(&self) -> &str;
 }
 
+/// Trait for FSM context types that provide state-specific capabilities
+pub trait FsmContext: Send + Sync + 'static {
+    /// Get a description of this context for debugging
+    fn describe(&self) -> String {
+        "FSM Context".to_string()
+    }
+}
+
+/// Trait for FSM action types that can be executed
+#[async_trait::async_trait]
+pub trait FsmAction: Clone + Debug + Send + Sync + 'static {
+    /// The context type this action operates on
+    type Context: FsmContext;
+    
+    /// Execute this action with the given context
+    async fn execute(&self, ctx: &Self::Context) -> Result<(), String>;
+    
+    /// Get a description of what this action does
+    fn describe(&self) -> String {
+        format!("{:?}", self)
+    }
+}
+
 /// A boxed future that is Send
 pub type BoxFuture<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
 

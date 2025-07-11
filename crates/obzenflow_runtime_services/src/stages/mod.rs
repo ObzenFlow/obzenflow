@@ -7,7 +7,6 @@ pub mod sink;
 
 // Re-export commonly used types from common
 pub use common::{
-    StageHandler,
     FiniteSourceHandler, InfiniteSourceHandler, TransformHandler, SinkHandler,
     ObserverHandler, StatefulHandler, ResourceManaged,
     ControlEventStrategy, ControlEventAction, ProcessingContext,

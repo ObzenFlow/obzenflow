@@ -14,6 +14,25 @@ pub struct MiddlewareSink<H: SinkHandler> {
     middleware_chain: Vec<Box<dyn Middleware>>,
 }
 
+// Manual Clone implementation that clones the handler but creates empty middleware chain
+impl<H: SinkHandler + Clone> Clone for MiddlewareSink<H> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+            middleware_chain: Vec::new(), // Don't clone middleware, start fresh
+        }
+    }
+}
+
+impl<H: SinkHandler> std::fmt::Debug for MiddlewareSink<H> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MiddlewareSink")
+            .field("inner_type", &std::any::type_name::<H>())
+            .field("middleware_count", &self.middleware_chain.len())
+            .finish()
+    }
+}
+
 impl<H: SinkHandler> MiddlewareSink<H> {
     /// Create a new middleware-wrapped sink handler
     pub fn new(inner: H) -> Self {

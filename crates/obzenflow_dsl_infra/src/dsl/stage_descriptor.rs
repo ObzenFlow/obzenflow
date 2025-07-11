@@ -6,7 +6,7 @@
 use obzenflow_runtime_services::{
     stages::{
         common::{
-            stage_handle::{BoxedStageHandle, StageType},
+            stage_handle::{BoxedStageHandle, StageEvent, StageType},
             handlers::{
                 FiniteSourceHandler, InfiniteSourceHandler, TransformHandler, SinkHandler
             },
@@ -15,13 +15,16 @@ use obzenflow_runtime_services::{
                 JonestownStrategy, RetryStrategy, WindowingStrategy,
                 CompositeStrategy, BackoffStrategy,
             },
-            resources::StageResources,
         },
-        source::{FiniteSourceSupervisor, InfiniteSourceSupervisor},
-        transform::TransformSupervisor,
-        sink::SinkSupervisor,
+        source::{
+            finite::{FiniteSourceBuilder, FiniteSourceConfig, FiniteSourceEvent, FiniteSourceState},
+            infinite::{InfiniteSourceBuilder, InfiniteSourceConfig, InfiniteSourceEvent, InfiniteSourceState},
+        },
+        transform::{TransformBuilder, TransformConfig, TransformEvent, TransformState},
+        sink::{SinkBuilder, SinkConfig, SinkEvent, SinkState},
     },
     pipeline::config::StageConfig,
+    supervised_base::{SupervisorBuilder as SupervisorBuilderTrait},
 };
 use obzenflow_adapters::middleware::{
     Middleware, MiddlewareFactory, FiniteSourceHandlerExt, InfiniteSourceHandlerExt,
@@ -30,7 +33,21 @@ use obzenflow_adapters::middleware::{
     OutcomeEnrichmentMiddleware,
 };
 use obzenflow_core::{journal::writer_id::WriterId, event::event_envelope::EventEnvelope};
+use obzenflow_topology_services::stages::StageId;
+use obzenflow_runtime_services::{
+    event_flow::reactive_journal::ReactiveJournal,
+    message_bus::FsmMessageBus,
+};
+use crate::stage_handle_adapter::StageHandleAdapter;
 use std::sync::Arc;
+use async_trait::async_trait;
+
+/// Resources provided to stage creation
+pub struct StageResources {
+    pub journal: Arc<ReactiveJournal>,
+    pub message_bus: Arc<FsmMessageBus>,
+    pub upstream_stages: Vec<StageId>,
+}
 
 /// Create system middleware for a stage
 fn create_system_middleware(config: &StageConfig, stage_type: obzenflow_core::event::flow_context::StageType) -> Vec<Box<dyn Middleware>> {
@@ -127,12 +144,17 @@ fn create_strategy_for(
 }
 
 /// Trait for stage descriptors that know how to create their supervisors
+#[async_trait]
 pub trait StageDescriptor: Send + Sync {
     /// Get the stage name
     fn name(&self) -> &str;
     
-    /// Create the supervisor for this stage
-    fn create_supervisor(self: Box<Self>, config: StageConfig, resources: StageResources) -> BoxedStageHandle;
+    /// Create the handle for this stage
+    async fn create_handle(
+        self: Box<Self>, 
+        config: StageConfig, 
+        resources: StageResources
+    ) -> Result<BoxedStageHandle, String>;
     
     /// Get a debug representation
     fn debug_info(&self) -> String {
@@ -147,12 +169,17 @@ pub struct FiniteSourceDescriptor<H: FiniteSourceHandler + 'static> {
     pub middleware: Vec<Box<dyn MiddlewareFactory>>,
 }
 
-impl<H: FiniteSourceHandler + 'static> StageDescriptor for FiniteSourceDescriptor<H> {
+#[async_trait]
+impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDescriptor for FiniteSourceDescriptor<H> {
     fn name(&self) -> &str {
         &self.name
     }
     
-    fn create_supervisor(self: Box<Self>, config: StageConfig, resources: StageResources) -> BoxedStageHandle {
+    async fn create_handle(
+        self: Box<Self>, 
+        config: StageConfig, 
+        resources: StageResources
+    ) -> Result<BoxedStageHandle, String> {
         let writer_id = WriterId::new();
         
         // Create system middleware
@@ -171,8 +198,36 @@ impl<H: FiniteSourceHandler + 'static> StageDescriptor for FiniteSourceDescripto
             builder = builder.with(mw);
         }
         let handler_with_middleware = builder.build();
-        let supervisor = FiniteSourceSupervisor::new(handler_with_middleware, config, resources);
-        Box::new(supervisor) as BoxedStageHandle
+        
+        // Create the stage configuration
+        let source_config = FiniteSourceConfig {
+            stage_id: config.stage_id,
+            stage_name: config.name.clone(),
+            flow_name: config.flow_name.clone(),
+        };
+        
+        // Use the builder to create the handle
+        let handle = FiniteSourceBuilder::new(
+            handler_with_middleware,
+            source_config,
+            resources.journal,
+            resources.message_bus,
+        )
+        .build()
+        .await
+        .map_err(|e| format!("Failed to build finite source: {:?}", e))?;
+        
+        // Create adapter to bridge to StageHandle
+        let adapter = StageHandleAdapter::new(
+            handle,
+            config.stage_id,
+            config.name,
+            StageType::InfiniteSource,
+            move |event| translate_stage_event_to_finite_source(event),
+            |state| check_finite_source_state(state),
+        );
+        
+        Ok(Box::new(adapter) as BoxedStageHandle)
     }
 }
 
@@ -183,12 +238,17 @@ pub struct InfiniteSourceDescriptor<H: InfiniteSourceHandler + 'static> {
     pub middleware: Vec<Box<dyn MiddlewareFactory>>,
 }
 
-impl<H: InfiniteSourceHandler + 'static> StageDescriptor for InfiniteSourceDescriptor<H> {
+#[async_trait]
+impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDescriptor for InfiniteSourceDescriptor<H> {
     fn name(&self) -> &str {
         &self.name
     }
     
-    fn create_supervisor(self: Box<Self>, config: StageConfig, resources: StageResources) -> BoxedStageHandle {
+    async fn create_handle(
+        self: Box<Self>, 
+        config: StageConfig, 
+        resources: StageResources
+    ) -> Result<BoxedStageHandle, String> {
         let writer_id = WriterId::new();
         
         // Create system middleware
@@ -207,8 +267,36 @@ impl<H: InfiniteSourceHandler + 'static> StageDescriptor for InfiniteSourceDescr
             builder = builder.with(mw);
         }
         let handler_with_middleware = builder.build();
-        let supervisor = InfiniteSourceSupervisor::new(handler_with_middleware, config, resources);
-        Box::new(supervisor) as BoxedStageHandle
+        
+        // Create the stage configuration
+        let source_config = InfiniteSourceConfig {
+            stage_id: config.stage_id,
+            stage_name: config.name.clone(),
+            flow_name: config.flow_name.clone(),
+        };
+        
+        // Use the builder to create the handle
+        let handle = InfiniteSourceBuilder::new(
+            handler_with_middleware,
+            source_config,
+            resources.journal,
+            resources.message_bus,
+        )
+        .build()
+        .await
+        .map_err(|e| format!("Failed to build infinite source: {:?}", e))?;
+        
+        // Create adapter to bridge to StageHandle
+        let adapter = StageHandleAdapter::new(
+            handle,
+            config.stage_id,
+            config.name,
+            StageType::InfiniteSource,
+            move |event| translate_stage_event_to_infinite_source(event),
+            |state| check_infinite_source_state(state),
+        );
+        
+        Ok(Box::new(adapter) as BoxedStageHandle)
     }
 }
 
@@ -219,12 +307,17 @@ pub struct TransformDescriptor<H: TransformHandler + 'static> {
     pub middleware: Vec<Box<dyn MiddlewareFactory>>,
 }
 
-impl<H: TransformHandler + 'static> StageDescriptor for TransformDescriptor<H> {
+#[async_trait]
+impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDescriptor for TransformDescriptor<H> {
     fn name(&self) -> &str {
         &self.name
     }
     
-    fn create_supervisor(self: Box<Self>, config: StageConfig, resources: StageResources) -> BoxedStageHandle {
+    async fn create_handle(
+        self: Box<Self>, 
+        config: StageConfig, 
+        resources: StageResources
+    ) -> Result<BoxedStageHandle, String> {
         // Validate middleware safety and collect strategy requirements
         let mut strategy_requirements = Vec::new();
         
@@ -271,13 +364,38 @@ impl<H: TransformHandler + 'static> StageDescriptor for TransformDescriptor<H> {
             builder = builder.with(mw);
         }
         let handler_with_middleware = builder.build();
-        let supervisor = TransformSupervisor::with_strategy(
+        
+        // Create the stage configuration
+        let transform_config = TransformConfig {
+            stage_id: config.stage_id,
+            stage_name: config.name.clone(),
+            flow_name: config.flow_name.clone(),
+            control_strategy: Some(control_strategy),
+            upstream_stages: resources.upstream_stages.clone(),
+        };
+        
+        // Use the builder to create the handle
+        let handle = TransformBuilder::new(
             handler_with_middleware,
-            config,
-            resources,
-            control_strategy,
+            transform_config,
+            resources.journal,
+            resources.message_bus,
+        )
+        .build()
+        .await
+        .map_err(|e| format!("Failed to build transform: {:?}", e))?;
+        
+        // Create adapter to bridge to StageHandle
+        let adapter = StageHandleAdapter::new(
+            handle,
+            config.stage_id,
+            config.name,
+            StageType::Transform,
+            move |event| translate_stage_event_to_transform(event),
+            |state| check_transform_state(state),
         );
-        Box::new(supervisor) as BoxedStageHandle
+        
+        Ok(Box::new(adapter) as BoxedStageHandle)
     }
 }
 
@@ -288,12 +406,17 @@ pub struct SinkDescriptor<H: SinkHandler + 'static> {
     pub middleware: Vec<Box<dyn MiddlewareFactory>>,
 }
 
-impl<H: SinkHandler + 'static> StageDescriptor for SinkDescriptor<H> {
+#[async_trait]
+impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDescriptor for SinkDescriptor<H> {
     fn name(&self) -> &str {
         &self.name
     }
     
-    fn create_supervisor(self: Box<Self>, config: StageConfig, resources: StageResources) -> BoxedStageHandle {
+    async fn create_handle(
+        self: Box<Self>, 
+        config: StageConfig, 
+        resources: StageResources
+    ) -> Result<BoxedStageHandle, String> {
         // Validate middleware safety and collect strategy requirements
         let mut strategy_requirements = Vec::new();
         
@@ -340,12 +463,132 @@ impl<H: SinkHandler + 'static> StageDescriptor for SinkDescriptor<H> {
             builder = builder.with(mw);
         }
         let handler_with_middleware = builder.build();
-        let supervisor = SinkSupervisor::with_strategy(
+        
+        // Create the stage configuration
+        let sink_config = SinkConfig {
+            stage_id: config.stage_id,
+            stage_name: config.name.clone(),
+            flow_name: config.flow_name.clone(),
+            upstream_stages: resources.upstream_stages.clone(),
+            buffer_size: None,
+            flush_interval_ms: None,
+        };
+        
+        // Use the builder to create the handle
+        let handle = SinkBuilder::new(
             handler_with_middleware,
-            config,
-            resources,
-            control_strategy,
+            sink_config,
+            resources.journal,
+            resources.message_bus,
+        )
+        .build()
+        .await
+        .map_err(|e| format!("Failed to build sink: {:?}", e))?;
+        
+        // Create adapter to bridge to StageHandle
+        let adapter = StageHandleAdapter::new(
+            handle,
+            config.stage_id,
+            config.name,
+            StageType::Sink,
+            move |event| translate_stage_event_to_sink(event),
+            |state| check_sink_state(state),
         );
-        Box::new(supervisor) as BoxedStageHandle
+        
+        Ok(Box::new(adapter) as BoxedStageHandle)
+    }
+}
+
+// Event translation functions
+
+fn translate_stage_event_to_finite_source<H>(event: StageEvent) -> Result<FiniteSourceEvent<H>, String> {
+    match event {
+        StageEvent::Initialize => Ok(FiniteSourceEvent::Initialize),
+        StageEvent::Start => Ok(FiniteSourceEvent::Start),
+        StageEvent::BeginDrain => Ok(FiniteSourceEvent::BeginDrain),
+        StageEvent::ForceShutdown => Ok(FiniteSourceEvent::Error("Force shutdown requested".to_string())),
+        _ => Err(format!("Unsupported stage event for finite source: {:?}", event)),
+    }
+}
+
+fn check_finite_source_state<H>(state: &FiniteSourceState<H>) -> crate::stage_handle_adapter::StageStatus {
+    use crate::stage_handle_adapter::StageStatus;
+    match state {
+        FiniteSourceState::Created => StageStatus::Created,
+        FiniteSourceState::Initialized | FiniteSourceState::WaitingForGun => StageStatus::Ready,
+        FiniteSourceState::Running => StageStatus::Running,
+        FiniteSourceState::Draining => StageStatus::Draining,
+        FiniteSourceState::Drained => StageStatus::Drained,
+        FiniteSourceState::Failed(_) => StageStatus::Failed,
+        _ => StageStatus::Created,
+    }
+}
+
+fn translate_stage_event_to_infinite_source<H>(event: StageEvent) -> Result<InfiniteSourceEvent<H>, String> {
+    match event {
+        StageEvent::Initialize => Ok(InfiniteSourceEvent::Initialize),
+        StageEvent::Start => Ok(InfiniteSourceEvent::Start),
+        StageEvent::BeginDrain => Ok(InfiniteSourceEvent::BeginDrain),
+        StageEvent::ForceShutdown => Ok(InfiniteSourceEvent::Error("Force shutdown requested".to_string())),
+        _ => Err(format!("Unsupported stage event for infinite source: {:?}", event)),
+    }
+}
+
+fn check_infinite_source_state<H>(state: &InfiniteSourceState<H>) -> crate::stage_handle_adapter::StageStatus {
+    use crate::stage_handle_adapter::StageStatus;
+    match state {
+        InfiniteSourceState::Created => StageStatus::Created,
+        InfiniteSourceState::Initialized | InfiniteSourceState::WaitingForGun => StageStatus::Ready,
+        InfiniteSourceState::Running => StageStatus::Running,
+        InfiniteSourceState::Draining => StageStatus::Draining,
+        InfiniteSourceState::Drained => StageStatus::Drained,
+        InfiniteSourceState::Failed(_) => StageStatus::Failed,
+        _ => StageStatus::Created,
+    }
+}
+
+fn translate_stage_event_to_transform<H>(event: StageEvent) -> Result<TransformEvent<H>, String> {
+    match event {
+        StageEvent::Initialize => Ok(TransformEvent::Initialize),
+        StageEvent::Start => Ok(TransformEvent::Ready), // Transforms don't have Start, they use Ready
+        StageEvent::BeginDrain => Ok(TransformEvent::BeginDrain),
+        StageEvent::ForceShutdown => Ok(TransformEvent::Error("Force shutdown requested".to_string())),
+        _ => Err(format!("Unsupported stage event for transform: {:?}", event)),
+    }
+}
+
+fn check_transform_state<H>(state: &TransformState<H>) -> crate::stage_handle_adapter::StageStatus {
+    use crate::stage_handle_adapter::StageStatus;
+    match state {
+        TransformState::Created => StageStatus::Created,
+        TransformState::Initialized => StageStatus::Ready,
+        TransformState::Running => StageStatus::Running,
+        TransformState::Draining => StageStatus::Draining,
+        TransformState::Drained => StageStatus::Drained,
+        TransformState::Failed(_) => StageStatus::Failed,
+        _ => StageStatus::Created,
+    }
+}
+
+fn translate_stage_event_to_sink<H>(event: StageEvent) -> Result<SinkEvent<H>, String> {
+    match event {
+        StageEvent::Initialize => Ok(SinkEvent::Initialize),
+        StageEvent::Start => Ok(SinkEvent::Ready), // Sinks don't have Start, they use Ready
+        StageEvent::BeginDrain => Ok(SinkEvent::BeginDrain),
+        StageEvent::ForceShutdown => Ok(SinkEvent::Error("Force shutdown requested".to_string())),
+        _ => Err(format!("Unsupported stage event for sink: {:?}", event)),
+    }
+}
+
+fn check_sink_state<H>(state: &SinkState<H>) -> crate::stage_handle_adapter::StageStatus {
+    use crate::stage_handle_adapter::StageStatus;
+    match state {
+        SinkState::Created => StageStatus::Created,
+        SinkState::Initialized => StageStatus::Ready,
+        SinkState::Running => StageStatus::Running,
+        SinkState::Flushing | SinkState::Draining => StageStatus::Draining,
+        SinkState::Drained => StageStatus::Drained,
+        SinkState::Failed(_) => StageStatus::Failed,
+        _ => StageStatus::Created,
     }
 }

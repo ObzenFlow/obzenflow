@@ -4,12 +4,56 @@
 //! so the Pipeline FSM can coordinate them properly.
 
 use obzenflow_topology_services::stages::StageId;
+use std::fmt;
+
+/// Error type for stage operations
+#[derive(Debug, Clone)]
+pub enum StageError {
+    /// Failed to initialize stage
+    InitializationFailed(String),
+    /// Failed to send event to stage
+    EventSendFailed(String),
+    /// Stage is in invalid state for operation
+    InvalidState(String),
+    /// Operation timed out
+    Timeout,
+    /// Generic error
+    Other(String),
+}
+
+impl fmt::Display for StageError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            StageError::InitializationFailed(msg) => write!(f, "Stage initialization failed: {}", msg),
+            StageError::EventSendFailed(msg) => write!(f, "Failed to send event to stage: {}", msg),
+            StageError::InvalidState(msg) => write!(f, "Invalid stage state: {}", msg),
+            StageError::Timeout => write!(f, "Stage operation timed out"),
+            StageError::Other(msg) => write!(f, "Stage error: {}", msg),
+        }
+    }
+}
+
+impl std::error::Error for StageError {}
+
+impl From<String> for StageError {
+    fn from(s: String) -> Self {
+        StageError::Other(s)
+    }
+}
+
+impl From<&str> for StageError {
+    fn from(s: &str) -> Self {
+        StageError::Other(s.to_string())
+    }
+}
 
 /// Generic stage events that Pipeline uses for coordination
 #[derive(Debug, Clone)]
 pub enum StageEvent {
     Initialize,
     Start,
+    BeginDrain,
+    ForceShutdown,
     Shutdown,
     Error(String),
 }
@@ -32,16 +76,16 @@ pub trait StageHandle: Send + Sync {
     fn stage_type(&self) -> StageType;
     
     /// Initialize the stage (allocate resources, create subscriptions)
-    async fn initialize(&mut self) -> Result<(), String>;
+    async fn initialize(&self) -> Result<(), StageError>;
     
     /// Start the stage (only sources need this, others can no-op)
-    async fn start(&mut self) -> Result<(), String>;
+    async fn start(&self) -> Result<(), StageError>;
     
     /// Send an event to the stage FSM
-    async fn send_event(&mut self, event: StageEvent) -> Result<(), String>;
+    async fn send_event(&self, event: StageEvent) -> Result<(), StageError>;
     
     /// Begin draining the stage
-    async fn begin_drain(&mut self) -> Result<(), String>;
+    async fn begin_drain(&self) -> Result<(), StageError>;
     
     /// Check if the stage is ready
     fn is_ready(&self) -> bool;
@@ -50,7 +94,7 @@ pub trait StageHandle: Send + Sync {
     fn is_drained(&self) -> bool;
     
     /// Force shutdown
-    async fn force_shutdown(&mut self) -> Result<(), String>;
+    async fn force_shutdown(&self) -> Result<(), StageError>;
 }
 
 /// Stage type for pipeline coordination decisions

@@ -84,7 +84,5 @@ pub trait StatefulHandler: Send + Sync {
     /// 
     /// For stateful handlers, this might flush pending aggregations,
     /// emit final window results, or close session tracking.
-    async fn drain(&mut self, _state: &Self::State) -> Result<Vec<ChainEvent>> {
-        Ok(vec![]) // Default: no special drain logic
-    }
+    async fn drain(&mut self, _state: &Self::State) -> Result<Vec<ChainEvent>>;
 }

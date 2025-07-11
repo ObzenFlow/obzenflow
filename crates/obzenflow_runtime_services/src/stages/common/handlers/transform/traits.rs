@@ -51,7 +51,5 @@ pub trait TransformHandler: Send + Sync {
     /// 
     /// For stateless transforms, this is typically a no-op.
     /// For stateful transforms, this might flush caches or close connections.
-    async fn drain(&mut self) -> Result<()> {
-        Ok(()) // Default: no special drain logic
-    }
+    async fn drain(&mut self) -> Result<()>;
 }

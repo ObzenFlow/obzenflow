@@ -3,378 +3,328 @@
 //! The supervisor owns the FSM directly and runs autonomously.
 //! Once started, all communication happens through journal events only.
 
-use obzenflow_core::{ChainEvent, EventEnvelope, EventId, WriterId, Journal};
-use obzenflow_core::metrics::{AppMetricsSnapshot, MetricsExporter};
-use obzenflow_fsm::StateMachine;
+use obzenflow_core::{WriterId, ChainEvent};
+use obzenflow_fsm::FsmBuilder;
+use serde_json::json;
 use std::sync::Arc;
 
-use crate::event_flow::{reactive_journal::ReactiveJournal, JournalSubscription, SubscriptionFilter};
+use crate::event_flow::reactive_journal::{
+    ReactiveJournal, SubscriptionFilter,
+};
+use crate::supervised_base::{EventLoopDirective, SelfSupervised};
+use crate::supervised_base::base::Supervisor;
 
-use super::{
-    build_metrics_aggregator_fsm, MetricsAggregatorAction, MetricsAggregatorContext,
-    MetricsAggregatorEvent, MetricsAggregatorState, StageMetrics,
+use super::fsm::{
+    MetricsAggregatorAction, MetricsAggregatorContext, MetricsAggregatorEvent,
+    MetricsAggregatorState,
 };
 
-/// Type alias for the metrics FSM
-type MetricsAggregatorFsm = StateMachine<
-    MetricsAggregatorState,
-    MetricsAggregatorEvent,
-    MetricsAggregatorContext,
-    MetricsAggregatorAction,
->;
-
 /// The supervisor that manages the metrics aggregator
-pub struct MetricsAggregatorSupervisor {
-    /// The metrics FSM - owned directly
-    fsm: MetricsAggregatorFsm,
-    
-    /// Metrics context
-    context: Arc<MetricsAggregatorContext>,
-    
-    /// Reactive journal
-    journal: Arc<ReactiveJournal>,
-    
-    /// Journal subscription
-    subscription: Option<JournalSubscription>,
-    
-    /// Writer ID for journal events
-    writer_id: Option<WriterId>,
+pub(crate) struct MetricsAggregatorSupervisor {
+    /// Supervisor name
+    pub(crate) name: String,
+
+    /// Metrics context (contains all mutable state)
+    pub(crate) context: Arc<MetricsAggregatorContext>,
+
+    /// Reactive journal (immutable reference)
+    pub(crate) journal: Arc<ReactiveJournal>,
+
+    /// Writer ID for journal events (immutable after creation)
+    pub(crate) writer_id: WriterId,
 }
 
-impl MetricsAggregatorSupervisor {
-    /// Create a new metrics aggregator supervisor
-    pub fn new(
-        journal: Arc<ReactiveJournal>,
-        exporter: Option<Arc<dyn MetricsExporter>>,
-        export_interval_secs: u64,
-    ) -> Self {
-        let context = Arc::new(MetricsAggregatorContext::new(
-            journal.clone(),
-            exporter,
-            export_interval_secs,
-        ));
+// Implement base Supervisor trait
+impl Supervisor for MetricsAggregatorSupervisor {
+    type State = MetricsAggregatorState;
+    type Event = MetricsAggregatorEvent;
+    type Context = MetricsAggregatorContext;
+    type Action = MetricsAggregatorAction;
 
-        Self {
-            fsm: build_metrics_aggregator_fsm(),
-            context,
-            journal,
-            subscription: None,
-            writer_id: None,
-        }
-    }
-
-    /// Start the aggregator - this is the only public method
-    /// It runs until the aggregator reaches the Drained state
-    pub async fn start(&mut self) -> Result<(), String> {
-        // Register as a writer
-        let stage_id = obzenflow_topology_services::stages::StageId::new();
-        self.writer_id = Some(
-            self.journal
-                .register_writer(stage_id, None)
-                .await
-                .map_err(|e| format!("Failed to register writer: {}", e))?
-        );
-
-        // Initialize FSM
-        let actions = self.fsm
-            .handle(MetricsAggregatorEvent::StartRunning, self.context.clone())
-            .await
-            .map_err(|e| format!("Failed to initialize FSM: {}", e))?;
-        
-        self.handle_actions(actions).await;
-
-        // Subscribe to all events
-        self.subscription = Some(
-            self.journal
-                .subscribe(SubscriptionFilter::All)
-                .await
-                .map_err(|e| format!("Failed to subscribe to journal: {}", e))?
-        );
-        
-        // Publish ready event to signal we're ready to receive events
-        if let Some(writer_id) = &self.writer_id {
-            let ready_event = ChainEvent::new(
-                EventId::new(),
-                writer_id.clone(),
-                "system.metrics.ready",
-                serde_json::json!({})
-            );
+    fn configure_fsm(
+        &self,
+        builder: FsmBuilder<Self::State, Self::Event, Self::Context, Self::Action>,
+    ) -> FsmBuilder<Self::State, Self::Event, Self::Context, Self::Action> {
+        builder
+            // Initializing -> Running
+            .when("Initializing")
+                .on("StartRunning", |_state, _event: &MetricsAggregatorEvent, _ctx| async move {
+                    Ok(obzenflow_fsm::Transition {
+                        next_state: MetricsAggregatorState::Running,
+                        actions: vec![MetricsAggregatorAction::Initialize],
+                    })
+                })
+                .done()
             
-            self.journal.append(writer_id, ready_event, None).await
-                .map_err(|e| format!("Failed to publish ready event: {}", e))?;
-            
-            tracing::info!("Metrics aggregator published ready event");
-        }
-
-        // Run the event loop
-        self.run().await;
-        
-        Ok(())
-    }
-
-    /// Internal event loop - runs until drained
-    async fn run(&mut self) {
-        let mut export_timer = tokio::time::interval(
-            tokio::time::Duration::from_secs(self.context.export_interval_secs)
-        );
-        export_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
-        // Take ownership of subscription to avoid borrow checker issues
-        let mut subscription = match self.subscription.take() {
-            Some(sub) => sub,
-            None => {
-                tracing::error!("No subscription available");
-                return;
-            }
-        };
-
-        loop {
-            match self.fsm.state() {
-                MetricsAggregatorState::Running => {
-                    tokio::select! {
-                        // Process journal events
-                        result = subscription.recv_batch() => {
-                            match result {
-                                Ok(batch) => {
-                                    for envelope in &batch {
-                                        // Check for control events
-                                        if envelope.event.event_type == "system.metrics.drain" {
-                                            let actions = self.fsm
-                                                .handle(MetricsAggregatorEvent::StartDraining, self.context.clone())
-                                                .await
-                                                .unwrap_or_default();
-                                            self.handle_actions(actions).await;
-                                        }
-                                        
-                                        // Update metrics directly
-                                        self.update_metrics(&envelope).await;
-                                    }
-                                }
-                                Err(e) => {
-                                    tracing::error!("Failed to receive events: {}", e);
-                                }
-                            }
-                        }
+            // Running state transitions
+            .when("Running")
+                .on("ProcessBatch", |_state, event: &MetricsAggregatorEvent, _ctx| {
+                    let event = event.clone();
+                    async move {
+                        if let MetricsAggregatorEvent::ProcessBatch { events } = event {
+                        // Create update actions for each event
+                        let actions: Vec<_> = events.into_iter()
+                            .map(|envelope| MetricsAggregatorAction::UpdateMetrics {
+                                envelope,
+                            })
+                            .collect();
                         
-                        // Export periodically
-                        _ = export_timer.tick() => {
-                            self.export_metrics().await;
-                        }
+                        Ok(obzenflow_fsm::Transition {
+                            next_state: MetricsAggregatorState::Running,
+                            actions,
+                        })
+                    } else {
+                        Err("Invalid event".to_string())
                     }
                 }
-                
-                MetricsAggregatorState::Draining => {
-                    // Keep draining until we get no events for a timeout period
-                    let mut consecutive_empty_batches = 0;
-                    loop {
-                        match tokio::time::timeout(
-                            tokio::time::Duration::from_millis(50),
-                            subscription.recv_batch()
-                        ).await {
-                            Ok(Ok(batch)) if !batch.is_empty() => {
-                                // Got events, reset counter
-                                consecutive_empty_batches = 0;
-                                for envelope in batch {
-                                    self.update_metrics(&envelope).await;
-                                }
-                            }
-                            _ => {
-                                // No events in this batch
-                                consecutive_empty_batches += 1;
-                                
-                                // If we've had 2 consecutive empty batches, we're done
-                                if consecutive_empty_batches >= 2 {
-                                    // Export final metrics before draining
-                                    tracing::info!("Exporting final metrics before drain");
-                                    self.export_metrics().await;
-                                    
-                                    // Now transition to drained
-                                    let last_event_id = self.get_last_event_id().await;
-                                    let actions = self.fsm
-                                        .handle(
-                                            MetricsAggregatorEvent::DrainComplete { last_event_id },
-                                            self.context.clone()
-                                        )
-                                        .await
-                                        .unwrap_or_default();
-                                    self.handle_actions(actions).await;
-                                    break;
-                                }
-                            }
-                        }
+                })
+                .on("ExportMetrics", |_state, _event: &MetricsAggregatorEvent, _ctx| async move {
+                    Ok(obzenflow_fsm::Transition {
+                        next_state: MetricsAggregatorState::Running,
+                        actions: vec![MetricsAggregatorAction::ExportMetrics],
+                    })
+                })
+                .on("StartDraining", |_state, _event: &MetricsAggregatorEvent, _ctx| async move {
+                    Ok(obzenflow_fsm::Transition {
+                        next_state: MetricsAggregatorState::Draining {
+                            consecutive_empty_batches: 0,
+                        },
+                        actions: vec![],
+                    })
+                })
+                .done()
+            
+            // Draining state transitions  
+            .when("Draining")
+                .on("ProcessBatch", |_state, event: &MetricsAggregatorEvent, _ctx| {
+                    let event = event.clone();
+                    async move {
+                        if let MetricsAggregatorEvent::ProcessBatch { events } = event {
+                        // Process events during drain
+                        let actions: Vec<_> = events.into_iter()
+                            .map(|envelope| MetricsAggregatorAction::UpdateMetrics {
+                                envelope,
+                            })
+                            .collect();
+                        
+                        Ok(obzenflow_fsm::Transition {
+                            next_state: MetricsAggregatorState::Draining {
+                                consecutive_empty_batches: 0,
+                            },
+                            actions,
+                        })
+                    } else {
+                        Err("Invalid event".to_string())
                     }
                 }
-                
-                MetricsAggregatorState::Drained { .. } => {
-                    // Terminal state - exit
-                    tracing::info!("Metrics aggregator drained, exiting");
-                    break;
-                }
-                
-                _ => {
-                    // Initializing state - should not be here during run
-                    tracing::warn!("Unexpected state in run loop: {:?}", self.fsm.state());
-                    break;
-                }
-            }
-        }
-    }
-
-    /// Handle FSM actions
-    async fn handle_actions(&self, actions: Vec<MetricsAggregatorAction>) {
-        for action in actions {
-            match action {
-                MetricsAggregatorAction::Initialize => {
-                    tracing::info!("Metrics aggregator initialized");
-                }
-                
-                MetricsAggregatorAction::PublishDrainComplete { last_event_id } => {
-                    if let Some(writer_id) = &self.writer_id {
-                        let mut payload = serde_json::json!({});
-                        if let Some(id) = last_event_id {
-                            payload["last_event_id"] = serde_json::json!(id.to_string());
-                        }
+                })
+                .on("ProcessBatch", |state, event: &MetricsAggregatorEvent, _ctx| {
+                    let state = state.clone();
+                    let event = event.clone();
+                    async move {
+                        if let (MetricsAggregatorState::Draining { .. }, 
+                                MetricsAggregatorEvent::ProcessBatch { events }) = (state, event) {
+                        // Process events during drain
+                        let actions: Vec<_> = events.into_iter()
+                            .map(|envelope| MetricsAggregatorAction::UpdateMetrics {
+                                envelope,
+                            })
+                            .collect();
                         
-                        let drain_event = ChainEvent::new(
-                            EventId::new(),
-                            writer_id.clone(),
-                            "system.metrics.drained",
-                            payload
-                        );
+                        // Reset counter since we got events
+                        Ok(obzenflow_fsm::Transition {
+                            next_state: MetricsAggregatorState::Draining {
+                                consecutive_empty_batches: 0,
+                            },
+                            actions,
+                        })
+                    } else {
+                        Err("Invalid event".to_string())
+                    }
+                }
+                })
+                .on("DrainEmptyBatch", |state, _event: &MetricsAggregatorEvent, _ctx| {
+                    let state = state.clone();
+                    async move {
+                        if let MetricsAggregatorState::Draining { consecutive_empty_batches } = state {
+                        let new_count = consecutive_empty_batches + 1;
                         
-                        if let Err(e) = self.journal.append(writer_id, drain_event, None).await {
-                            tracing::error!("Failed to publish drain complete event: {}", e);
+                        if new_count >= 2 {
+                            // We've had enough empty batches, transition to complete
+                            // This will trigger the DrainComplete event from dispatch_state
+                            Ok(obzenflow_fsm::Transition {
+                                next_state: MetricsAggregatorState::Draining {
+                                    consecutive_empty_batches: new_count,
+                                },
+                                actions: vec![],
+                            })
+                        } else {
+                            // Increment counter and continue draining
+                            Ok(obzenflow_fsm::Transition {
+                                next_state: MetricsAggregatorState::Draining {
+                                    consecutive_empty_batches: new_count,
+                                },
+                                actions: vec![],
+                            })
                         }
                     } else {
-                        tracing::error!("No writer ID available to publish drain event");
+                        Err("Invalid state for DrainEmptyBatch".to_string())
+                    }
+                }
+                })
+                .on("DrainComplete", |_state, event: &MetricsAggregatorEvent, _ctx| {
+                    let event = event.clone();
+                    async move {
+                        if let MetricsAggregatorEvent::DrainComplete { last_event_id } = event {
+                        Ok(obzenflow_fsm::Transition {
+                            next_state: MetricsAggregatorState::Drained {
+                                last_event_id: last_event_id.clone(),
+                            },
+                            actions: vec![
+                                MetricsAggregatorAction::ExportMetrics, // Export final metrics
+                                MetricsAggregatorAction::PublishDrainComplete {
+                                    last_event_id: last_event_id.clone(),
+                                },
+                            ],
+                        })
+                    } else {
+                        Err("Invalid event".to_string())
+                    }
+                }
+                })
+                .done()
+    }
+
+    fn journal(&self) -> &Arc<ReactiveJournal> {
+        &self.journal
+    }
+
+    fn writer_id(&self) -> &WriterId {
+        &self.writer_id
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+}
+
+// Implement SelfSupervised with ALL the logic - no separate impl blocks!
+#[async_trait::async_trait]
+impl SelfSupervised for MetricsAggregatorSupervisor {
+    async fn dispatch_state(
+        &mut self,
+        state: &Self::State,
+    ) -> Result<EventLoopDirective<Self::Event>, Box<dyn std::error::Error + Send + Sync>> {
+        match state {
+            MetricsAggregatorState::Initializing => {
+                // Subscribe to all events
+                let subscription = self.subscribe(SubscriptionFilter::All).await?;
+                *self.context.subscription.write().await = Some(subscription);
+
+                // Publish ready event
+                self.write_event(ChainEvent::SYSTEM_METRICS_READY, json!({})).await?;
+
+                tracing::info!("Metrics aggregator published ready event");
+
+                // Transition to Running
+                Ok(EventLoopDirective::Transition(
+                    MetricsAggregatorEvent::StartRunning,
+                ))
+            }
+
+            MetricsAggregatorState::Running => {
+                // Process events in the Running state
+                let mut export_timer = tokio::time::interval(tokio::time::Duration::from_secs(
+                    self.context.export_interval_secs,
+                ));
+                export_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+                // Get subscription from context
+                let mut subscription_guard = self.context.subscription.write().await;
+                let subscription = subscription_guard
+                    .as_mut()
+                    .ok_or("No subscription available")?;
+
+                tokio::select! {
+                    // Process journal events
+                    result = subscription.recv_batch() => {
+                        match result {
+                            Ok(batch) if !batch.is_empty() => {
+                                // Check for drain event first
+                                for envelope in &batch {
+                                    if envelope.event.event_type == ChainEvent::SYSTEM_METRICS_DRAIN {
+                                        return Ok(EventLoopDirective::Transition(MetricsAggregatorEvent::StartDraining));
+                                    }
+                                }
+                                
+                                // Process batch through FSM
+                                Ok(EventLoopDirective::Transition(MetricsAggregatorEvent::ProcessBatch { events: batch }))
+                            }
+                            Ok(_) => {
+                                // Empty batch, continue
+                                Ok(EventLoopDirective::Continue)
+                            }
+                            Err(e) => {
+                                tracing::error!("Failed to receive events: {}", e);
+                                Ok(EventLoopDirective::Continue)
+                            }
+                        }
+                    }
+
+                    // Export periodically
+                    _ = export_timer.tick() => {
+                        Ok(EventLoopDirective::Transition(MetricsAggregatorEvent::ExportMetrics))
                     }
                 }
             }
-        }
-    }
 
-    /// Update metrics from an event
-    async fn update_metrics(&self, envelope: &EventEnvelope) {
-        let mut store = self.context.metrics_store.write().await;
-        
-        // Update last event ID
-        store.last_event_id = Some(envelope.event.id.clone());
-        
-        let event = &envelope.event;
-        
-        // Skip control events that start with "control." or "system."
-        if event.is_control() || event.event_type.starts_with("system.") {
-            // Handle specific control events if needed
-            match event.event_type.as_str() {
-                // We could handle control events here if needed
-                _ => return,
-            }
-        }
-        
-        // Process data events - extract metrics from flow context
-        let stage_name = &event.flow_context.stage_name;
-        let flow_name = &event.flow_context.flow_name;
-        
-        // Create a key combining flow and stage name
-        let key = format!("{}:{}", flow_name, stage_name);
-        
-        let metrics = store
-            .stage_metrics
-            .entry(key.clone())
-            .or_insert_with(StageMetrics::default);
-        
-        // Count the event
-        metrics.events_in += 1;
-        metrics.events_out += 1; // For now, treat as both in and out
-        
-        // Check for errors from processing outcome
-        if matches!(event.processing_info.outcome, obzenflow_core::event::processing_outcome::ProcessingOutcome::Error(_)) {
-            metrics.errors += 1;
-        }
-        
-        // Record processing time
-        let duration_ms = event.processing_info.processing_time_ms;
-        metrics.total_processing_time_ms += duration_ms;
-        metrics.event_count += 1;
-        
-        tracing::debug!(
-            "Updated metrics for {}: events={}, errors={}, avg_time={}ms",
-            key,
-            metrics.events_in,
-            metrics.errors,
-            if metrics.event_count > 0 { metrics.total_processing_time_ms / metrics.event_count } else { 0 }
-        );
-    }
-
-    /// Export metrics snapshot
-    async fn export_metrics(&self) {
-        if let Some(exporter) = &self.context.exporter {
-            let store = self.context.metrics_store.read().await;
-            let mut snapshot = AppMetricsSnapshot::default();
-            
-            tracing::info!("Exporting metrics: {} stage entries", store.stage_metrics.len());
-            
-            // Convert stage metrics to snapshot format
-            for (stage_key, metrics) in &store.stage_metrics {
-                // Use events_in as the event count (since we increment both in and out)
-                snapshot
-                    .event_counts
-                    .insert(stage_key.clone(), metrics.events_in);
+            MetricsAggregatorState::Draining { consecutive_empty_batches } => {
+                // Check if we've had enough empty batches
+                if *consecutive_empty_batches >= 2 {
+                    // Get last event ID and transition to complete
+                    let store = self.context.metrics_store.read().await;
+                    let last_event_id = store.last_event_id.clone();
+                    drop(store);
                     
-                snapshot
-                    .error_counts
-                    .insert(stage_key.clone(), metrics.errors);
-                    
-                // Add processing time as a simple histogram snapshot
-                if metrics.event_count > 0 {
-                    let avg_time_seconds = (metrics.total_processing_time_ms as f64 / metrics.event_count as f64) / 1000.0;
-                    
-                    // Create a simple histogram snapshot with the average
-                    let mut percentiles = std::collections::HashMap::new();
-                    percentiles.insert("p50".to_string(), avg_time_seconds);
-                    percentiles.insert("p90".to_string(), avg_time_seconds);
-                    percentiles.insert("p99".to_string(), avg_time_seconds);
-                    
-                    let hist_snapshot = obzenflow_core::metrics::HistogramSnapshot {
-                        count: metrics.event_count,
-                        sum: (metrics.total_processing_time_ms as f64) / 1000.0,
-                        min: avg_time_seconds,
-                        max: avg_time_seconds,
-                        percentiles,
-                    };
-                    
-                    snapshot
-                        .processing_times
-                        .insert(stage_key.clone(), hist_snapshot);
+                    return Ok(EventLoopDirective::Transition(
+                        MetricsAggregatorEvent::DrainComplete { last_event_id },
+                    ));
                 }
                 
-                tracing::debug!(
-                    "Exported metrics for {}: events={}, errors={}, avg_time={}ms",
-                    stage_key,
-                    metrics.events_in,
-                    metrics.errors,
-                    if metrics.event_count > 0 { metrics.total_processing_time_ms / metrics.event_count } else { 0 }
-                );
+                // Process draining state
+                let mut subscription_guard = self.context.subscription.write().await;
+                let subscription = subscription_guard
+                    .as_mut()
+                    .ok_or("No subscription available")?;
+
+                // Try to get more events with timeout
+                match tokio::time::timeout(
+                    tokio::time::Duration::from_millis(50),
+                    subscription.recv_batch(),
+                )
+                .await
+                {
+                    Ok(Ok(batch)) if !batch.is_empty() => {
+                        // Got events, process them
+                        Ok(EventLoopDirective::Transition(MetricsAggregatorEvent::ProcessBatch { events: batch }))
+                    }
+                    _ => {
+                        // No events or timeout - increment empty batch counter
+                        Ok(EventLoopDirective::Transition(MetricsAggregatorEvent::DrainEmptyBatch))
+                    }
+                }
             }
-            
-            drop(store); // Release the lock before exporting
-            
-            tracing::info!("Pushing metrics snapshot to exporter");
-            
-            if let Err(e) = exporter.update_app_metrics(snapshot) {
-                tracing::warn!("Failed to export metrics: {}", e);
-            } else {
-                tracing::info!("Successfully exported metrics");
+
+            MetricsAggregatorState::Drained { .. } => {
+                // Terminal state
+                tracing::info!("Metrics aggregator drained, terminating");
+                Ok(EventLoopDirective::Terminate)
             }
         }
     }
-
-    /// Get the last processed event ID
-    async fn get_last_event_id(&self) -> Option<EventId> {
-        let store = self.context.metrics_store.read().await;
-        store.last_event_id.clone()
-    }
 }
+
+// All business logic has been moved to FSM actions - no free functions needed!
 
 impl Drop for MetricsAggregatorSupervisor {
     fn drop(&mut self) {
@@ -382,3 +332,4 @@ impl Drop for MetricsAggregatorSupervisor {
         tracing::debug!("Metrics aggregator supervisor dropped");
     }
 }
+

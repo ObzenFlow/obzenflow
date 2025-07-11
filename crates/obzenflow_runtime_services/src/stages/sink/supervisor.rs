@@ -1,251 +1,228 @@
-//! Supervisor for sink stages
+//! Sink supervisor implementation using HandlerSupervised pattern
 
 use std::sync::Arc;
-use tokio::sync::RwLock;
-use tokio::task::JoinHandle;
-use obzenflow_core::{ChainEvent, EventId};
-
-use crate::stages::common::{
-    handlers::{SinkHandler, SinkWrapper, SinkContext},
-    StageHandler,
-    traits::StageSupervisor,
-    stage_handle::{StageHandle, StageType, StageEvent},
-    control_strategies::{ControlEventStrategy, ControlEventAction, ProcessingContext, JonestownStrategy},
-    resources::StageResources,
-};
-use crate::pipeline::config::StageConfig;
-use super::{
-    states::SinkState,
-    events::SinkEvent,
-    actions::SinkAction,
-};
+use obzenflow_core::{WriterId, ChainEvent};
+use obzenflow_fsm::{FsmBuilder, Transition};
 use obzenflow_topology_services::stages::StageId;
-use obzenflow_fsm::StateMachine;
 
-pub struct SinkSupervisor<H: SinkHandler + 'static> {
-    fsm: StateMachine<SinkState, SinkEvent, SinkContext<H>, SinkAction>,
-    context: Arc<SinkContext<H>>,
-    stage_id: StageId,
-    stage_name: String,
-    flow_name: String,
-    processing_task: Arc<RwLock<Option<JoinHandle<()>>>>,
-    control_strategy: Arc<dyn ControlEventStrategy>,
+use crate::event_flow::reactive_journal::ReactiveJournal;
+use crate::stages::common::handlers::SinkHandler;
+use crate::supervised_base::{EventLoopDirective, HandlerSupervised};
+use crate::supervised_base::base::Supervisor;
+
+use super::fsm::{
+    SinkState, SinkEvent, SinkAction,
+    SinkContext,
+};
+
+/// Supervisor for sink stages
+pub(crate) struct SinkSupervisor<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> {
+    /// Supervisor name (for logging)
+    pub(crate) name: String,
+    
+    /// The FSM context containing all mutable state
+    pub(crate) context: Arc<SinkContext<H>>,
+    
+    /// Journal reference
+    pub(crate) journal: Arc<ReactiveJournal>,
+    
+    /// Writer ID for this sink
+    pub(crate) writer_id: WriterId,
+    
+    /// Stage ID
+    pub(crate) stage_id: StageId,
 }
 
-impl<H: SinkHandler + 'static> SinkSupervisor<H> {
-    pub fn new(handler: H, config: StageConfig, resources: StageResources) -> Self {
-        Self::with_strategy(handler, config, resources, Arc::new(JonestownStrategy))
-    }
+// Implement Sealed directly for SinkSupervisor to satisfy Supervisor trait bound
+impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> crate::supervised_base::base::private::Sealed for SinkSupervisor<H> {}
+
+impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Supervisor for SinkSupervisor<H> {
+    type State = SinkState<H>;
+    type Event = SinkEvent<H>;
+    type Context = SinkContext<H>;
+    type Action = SinkAction<H>;
     
-    pub fn with_strategy(
-        handler: H, 
-        config: StageConfig, 
-        resources: StageResources,
-        control_strategy: Arc<dyn ControlEventStrategy>
-    ) -> Self {
-        let wrapper = SinkWrapper(handler);
-        let context = Arc::new(SinkContext::new(
-            wrapper.0,
-            config.stage_id,
-            config.name.clone(),
-            resources.journal,
-            resources.message_bus,
-            resources.upstream_stages,
-        ));
-        
-        let fsm = <SinkWrapper<H> as StageHandler>::build_fsm();
-        
-        Self {
-            fsm,
-            context,
-            stage_id: config.stage_id,
-            stage_name: config.name.clone(),
-            flow_name: config.flow_name,
-            processing_task: Arc::new(RwLock::new(None)),
-            control_strategy,
-        }
-    }
-    
-    async fn handle_sink_action(&mut self, action: SinkAction) -> Result<(), String> {
-        match action {
-            SinkAction::AllocateResources => {
-                tracing::info!("[{}] Allocating resources", self.stage_name);
-                
-                // Register writer for control events
-                let writer_id = self.context.journal.register_writer(self.context.stage_id, None).await
-                    .map_err(|e| format!("Failed to register writer: {:?}", e))?;
-                *self.context.writer_id.write().await = Some(writer_id);
-                
-                // Create subscription to upstreams (provided by pipeline)
-                let upstream_stages = self.context.upstream_stages.clone();
-                if !upstream_stages.is_empty() {
-                    let filter = crate::event_flow::reactive_journal::SubscriptionFilter::UpstreamStages {
-                        stages: upstream_stages,
-                    };
-                    
-                    let subscription = self.context.journal.subscribe(filter).await
-                        .map_err(|e| format!("Failed to create subscription: {:?}", e))?;
-                    
-                    *self.context.subscription.write().await = Some(subscription);
-                }
-            }
+    fn configure_fsm(&self, builder: FsmBuilder<Self::State, Self::Event, Self::Context, Self::Action>) 
+        -> FsmBuilder<Self::State, Self::Event, Self::Context, Self::Action> {
+        builder
+            // Created -> Initialized
+            .when("Created")
+                .on("Initialize", |_state, _event, _ctx| async move {
+                    Ok(Transition {
+                        next_state: SinkState::Initialized,
+                        actions: vec![SinkAction::AllocateResources],
+                    })
+                })
+                .done()
             
-            SinkAction::StartConsuming => {
-                tracing::info!("[{}] Starting consumption", self.stage_name);
-                self.start_sink_loop().await?;
-            }
+            // Initialized -> Running (sinks auto-start)
+            .when("Initialized")
+                .on("Ready", |_state, _event, _ctx| async move {
+                    Ok(Transition {
+                        next_state: SinkState::Running,
+                        actions: vec![SinkAction::PublishRunning],
+                    })
+                })
+                .done()
             
-            SinkAction::FlushBuffers => {
-                tracing::info!("[{}] Flushing sink", self.stage_name);
-                // Call handler's flush method
-                let mut handler = self.context.handler.write().await;
-                handler.flush()
-                    .map_err(|e| format!("Failed to flush: {:?}", e))?;
-            }
+            // Running -> Flushing (on EOF)
+            .when("Running")
+                .on("ReceivedEOF", |_state, _event, _ctx| async move {
+                    Ok(Transition {
+                        next_state: SinkState::Flushing,
+                        actions: vec![SinkAction::FlushBuffers],
+                    })
+                })
+                .on("BeginFlush", |_state, _event, _ctx| async move {
+                    Ok(Transition {
+                        next_state: SinkState::Flushing,
+                        actions: vec![SinkAction::FlushBuffers],
+                    })
+                })
+                .on("Error", |_state, event, _ctx| {
+                    let event = event.clone();
+                    async move {
+                        if let SinkEvent::Error(msg) = event {
+                            Ok(Transition {
+                                next_state: SinkState::Failed(msg),
+                                actions: vec![SinkAction::Cleanup],
+                            })
+                        } else {
+                            unreachable!()
+                        }
+                    }
+                })
+                .done()
             
-            SinkAction::Cleanup => {
-                tracing::info!("[{}] Cleaning up", self.stage_name);
-                if let Some(task) = self.processing_task.write().await.take() {
-                    task.abort();
-                }
-            }
+            // Flushing -> Draining
+            .when("Flushing")
+                .on("FlushComplete", |_state, _event, _ctx| async move {
+                    Ok(Transition {
+                        next_state: SinkState::Draining,
+                        actions: vec![],
+                    })
+                })
+                .on("Error", |_state, event, _ctx| {
+                    let event = event.clone();
+                    async move {
+                        if let SinkEvent::Error(msg) = event {
+                            Ok(Transition {
+                                next_state: SinkState::Failed(msg),
+                                actions: vec![SinkAction::Cleanup],
+                            })
+                        } else {
+                            unreachable!()
+                        }
+                    }
+                })
+                .done()
             
-            SinkAction::LogTransition { from, to } => {
-                tracing::debug!("[{}] State transition: {} -> {}", self.stage_name, from, to);
-            }
-        }
-        
-        Ok(())
-    }
-    
-    async fn start_sink_loop(&self) -> Result<(), String> {
-        let context = self.context.clone();
-        let stage_name = self.stage_name.clone();
-        let flow_name = self.flow_name.clone();
-        let control_strategy = self.control_strategy.clone();
-        
-        let task = tokio::spawn(async move {
-            tracing::info!("[{}] Sink loop started", stage_name);
+            // Draining -> Drained
+            .when("Draining")
+                .on("BeginDrain", |_state, _event, _ctx| async move {
+                    Ok(Transition {
+                        next_state: SinkState::Drained,
+                        actions: vec![SinkAction::SendCompletion, SinkAction::Cleanup],
+                    })
+                })
+                .done()
             
-            // Get subscription
-            let subscription = context.subscription.clone();
-            
-            // Processing context for control events
-            let mut processing_ctx = ProcessingContext::new();
-            
-            let mut eof_received = false;
-            loop {
-                if let Some(sub) = &mut *subscription.write().await {
-                    match sub.recv_batch().await {
-                        Ok(events) if !events.is_empty() => {
-                            tracing::debug!("[{}] Processing {} events", stage_name, events.len());
-                            
-                            // Process each event
-                            for envelope in events {
-                                // Check if this is a control event
-                                match envelope.event.as_control_type() {
-                                    Some(control_type) => {
-                                        // Delegate to control strategy
-                                        let action = match control_type {
-                                            ChainEvent::EOF_EVENT_TYPE => {
-                                                tracing::info!("[{}] Sink received EOF event from upstream", stage_name);
-                                                control_strategy.handle_eof(&envelope, &mut processing_ctx)
-                                            }
-                                            ChainEvent::WATERMARK_EVENT_TYPE => {
-                                                control_strategy.handle_watermark(&envelope, &mut processing_ctx)
-                                            }
-                                            ChainEvent::CHECKPOINT_EVENT_TYPE => {
-                                                control_strategy.handle_checkpoint(&envelope, &mut processing_ctx)
-                                            }
-                                            ChainEvent::DRAIN_EVENT_TYPE => {
-                                                control_strategy.handle_drain(&envelope, &mut processing_ctx)
-                                            }
-                                            _ => {
-                                                tracing::debug!("[{}] Unknown control event: {}", stage_name, control_type);
-                                                ControlEventAction::Forward
-                                            }
-                                        };
-                                        
-                                        // Execute the action
-                                        match action {
-                                            ControlEventAction::Forward => {
-                                                // For sinks, "forwarding" EOF means draining and exiting
-                                                if control_type == ChainEvent::EOF_EVENT_TYPE {
-                                                    // Call the handler's drain method
-                                                    let mut handler = context.handler.write().await;
-                                                    if let Err(e) = handler.drain().await {
-                                                        tracing::error!("[{}] Failed to drain handler: {}", stage_name, e);
-                                                    }
-                                                    
-                                                    tracing::info!("[{}] Sink completed processing after EOF", stage_name);
-                                                    eof_received = true;
-                                                    break;
-                                                }
-                                                // Other control events - sinks don't forward downstream
-                                            }
-                                            ControlEventAction::Delay(duration) => {
-                                                tracing::info!("[{}] Delaying {} for {:?}", stage_name, control_type, duration);
-                                                // Delay before processing EOF (e.g., waiting for buffer to flush)
-                                                tokio::time::sleep(duration).await;
-                                                // Retry processing this event
-                                                continue;
-                                            }
-                                            ControlEventAction::Retry => {
-                                                tracing::info!("[{}] Retry requested for {}, continuing processing", stage_name, control_type);
-                                                // Don't drain yet, continue processing
-                                                if control_type == ChainEvent::EOF_EVENT_TYPE {
-                                                    // Buffer the EOF for later
-                                                    processing_ctx.buffered_eof = Some(envelope.clone());
-                                                }
-                                            }
-                                            ControlEventAction::Skip => {
-                                                tracing::warn!("[{}] Skipping {} (dangerous for sinks!)", stage_name, control_type);
-                                                // Don't drain, don't exit - very dangerous for sinks!
-                                            }
-                                        }
-                                    }
-                                    None => {
-                                        // Regular data event
-                                        let event = envelope.event.clone();
-                                        
-                                        // Consume the event
-                                        let mut handler = context.handler.write().await;
-                                        if let Err(e) = handler.consume(event.clone()) {
-                                            tracing::error!("[{}] Failed to consume event: {:?}", stage_name, e);
-                                        } else {
-                                            // Emit a lightweight control event to track sink consumption
-                                            // This allows metrics to see sink activity
-                                            if let Some(writer_id) = &*context.writer_id.read().await {
-                                                let mut control_event = ChainEvent::control(
-                                                    "control.sink.consumed",
-                                                    serde_json::json!({
-                                                        "event_type": event.event_type,
-                                                        "correlation_id": event.correlation_id.map(|id| id.to_string()),
-                                                    })
-                                                );
-                                                
-                                                // Set flow context to match the consumed event
-                                                control_event.flow_context = obzenflow_core::event::flow_context::FlowContext {
-                                                    flow_name: flow_name.clone(),
-                                                    flow_id: "default".to_string(),
-                                                    stage_name: stage_name.clone(),
-                                                    stage_type: obzenflow_core::event::flow_context::StageType::Sink,
-                                                };
-                                                
-                                                if let Err(e) = context.journal.write(writer_id, control_event, None).await {
-                                                    tracing::trace!("[{}] Failed to write sink consumption event: {}", stage_name, e);
-                                                }
-                                            } else {
-                                                tracing::trace!("[{}] No writer_id available for sink metrics", stage_name);
-                                            }
-                                        }
-                                    }
-                                }
+            // Error transitions from any state
+            .from_any()
+                .on("Error", |state, event, _ctx| {
+                    let event = event.clone();
+                    let state = state.clone();
+                    async move {
+                        if let SinkEvent::Error(msg) = event {
+                            // If already failed, don't cleanup again
+                            if matches!(state, SinkState::Failed(_)) {
+                                Ok(Transition {
+                                    next_state: state.clone(),
+                                    actions: vec![],
+                                })
+                            } else {
+                                Ok(Transition {
+                                    next_state: SinkState::Failed(msg),
+                                    actions: vec![SinkAction::Cleanup],
+                                })
                             }
+                        } else {
+                            unreachable!()
+                        }
+                    }
+                })
+                .done()
+    }
+    
+    fn journal(&self) -> &Arc<ReactiveJournal> {
+        &self.journal
+    }
+    
+    fn writer_id(&self) -> &WriterId {
+        &self.writer_id
+    }
+    
+    fn name(&self) -> &str {
+        &self.name
+    }
+}
+
+#[async_trait::async_trait]
+impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSupervised for SinkSupervisor<H> {
+    type Handler = H;
+    
+    async fn dispatch_state(
+        &mut self,
+        state: &Self::State,
+    ) -> Result<EventLoopDirective<Self::Event>, Box<dyn std::error::Error + Send + Sync>> {
+        match state {
+            SinkState::Created => {
+                // Send initialize event
+                Ok(EventLoopDirective::Transition(SinkEvent::Initialize))
+            }
+            
+            SinkState::Initialized => {
+                // Auto-transition to ready
+                Ok(EventLoopDirective::Transition(SinkEvent::Ready))
+            }
+            
+            SinkState::Running => {
+                // Check subscription for events
+                let mut subscription_guard = self.context.subscription.write().await;
+                if let Some(subscription) = subscription_guard.as_mut() {
+                    match subscription.recv_batch().await {
+                        Ok(events) if !events.is_empty() => {
+                            tracing::trace!(
+                                stage_name = %self.context.stage_name,
+                                count = events.len(),
+                                "Sink processing events"
+                            );
                             
-                            // Check if we received EOF and should exit
-                            if eof_received {
-                                break;
+                            for envelope in events {
+                                // Check for EOF event
+                                if envelope.event.event_type == ChainEvent::EOF_EVENT_TYPE {
+                                    tracing::info!(
+                                        stage_name = %self.context.stage_name,
+                                        "Sink received EOF"
+                                    );
+                                    drop(subscription_guard);
+                                    return Ok(EventLoopDirective::Transition(SinkEvent::ReceivedEOF));
+                                }
+                                
+                                // Process normal event
+                                let mut handler = self.context.handler.write().await;
+                                if let Err(e) = handler.consume(envelope.event) {
+                                    tracing::error!(
+                                        stage_name = %self.context.stage_name,
+                                        error = ?e,
+                                        "Failed to consume event"
+                                    );
+                                    drop(handler);
+                                    drop(subscription_guard);
+                                    return Ok(EventLoopDirective::Transition(
+                                        SinkEvent::Error(format!("Failed to consume event: {:?}", e))
+                                    ));
+                                }
                             }
                         }
                         Ok(_) => {
@@ -253,160 +230,49 @@ impl<H: SinkHandler + 'static> SinkSupervisor<H> {
                             tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
                         }
                         Err(e) => {
-                            tracing::error!("[{}] Subscription error: {}", stage_name, e);
-                            break;
+                            tracing::error!(
+                                stage_name = %self.context.stage_name,
+                                error = ?e,
+                                "Subscription error"
+                            );
+                            drop(subscription_guard);
+                            return Ok(EventLoopDirective::Transition(
+                                SinkEvent::Error(format!("Subscription error: {}", e))
+                            ));
                         }
                     }
                 } else {
+                    // No subscription yet, wait
                     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
                 }
+                
+                Ok(EventLoopDirective::Continue)
             }
             
-            // Write completion event after exiting the loop
-            tracing::info!("[{}] Writing completion event to journal", stage_name);
-            
-            // Use the pre-registered writer_id
-            if let Some(writer_id) = &*context.writer_id.read().await {
-                let mut completion_event = ChainEvent::new(
-                    EventId::new(),
-                    writer_id.clone(),
-                    "system.stage.completed",
-                    serde_json::json!({
-                        "stage_id": format!("{}", context.stage_id),
-                        "stage_name": stage_name,
-                        "timestamp": chrono::Utc::now().to_rfc3339(),
-                    })
-                );
-                
-                // Populate flow context for completion
-                completion_event.flow_context = obzenflow_core::event::flow_context::FlowContext {
-                    flow_name: flow_name.clone(),
-                    flow_id: "default".to_string(),
-                    stage_name: stage_name.clone(),
-                    stage_type: obzenflow_core::event::flow_context::StageType::Sink,
-                };
-                
-                if let Err(e) = context.journal.write(writer_id, completion_event, None).await {
-                    // CRITICAL: If we can't write completion, pipeline will hang forever!
-                    panic!("[{}] FATAL: Failed to write completion event after processing all data: {}", stage_name, e);
-                }
-            } else {
-                panic!("[{}] FATAL: No writer_id available to write completion event", stage_name);
+            SinkState::Flushing => {
+                // Wait for flush to complete
+                // The actual flush happens in the action
+                Ok(EventLoopDirective::Transition(SinkEvent::FlushComplete))
             }
             
-            tracing::info!("[{}] Sink task completed successfully", stage_name);
-        });
-        
-        *self.processing_task.write().await = Some(task);
-        Ok(())
-    }
-}
-
-#[async_trait::async_trait]
-impl<H: SinkHandler + 'static> StageSupervisor for SinkSupervisor<H> {
-    fn stage_id(&self) -> StageId {
-        self.stage_id
-    }
-    
-    fn stage_name(&self) -> &str {
-        &self.stage_name
-    }
-    
-    async fn initialize(&mut self) -> Result<(), String> {
-        let actions = self.fsm.handle(SinkEvent::Initialize, self.context.clone()).await?;
-        for action in actions {
-            self.handle_sink_action(action).await?;
+            SinkState::Draining => {
+                // Move to drained state
+                Ok(EventLoopDirective::Transition(SinkEvent::BeginDrain))
+            }
+            
+            SinkState::Drained => {
+                // Terminal state
+                Ok(EventLoopDirective::Terminate)
+            }
+            
+            SinkState::Failed(_) => {
+                // Terminal state
+                Ok(EventLoopDirective::Terminate)
+            }
+            
+            SinkState::_Phantom(_) => {
+                unreachable!("PhantomData variant should never be instantiated")
+            }
         }
-        
-        // Sinks go straight to ready
-        let actions = self.fsm.handle(SinkEvent::Ready, self.context.clone()).await?;
-        for action in actions {
-            self.handle_sink_action(action).await?;
-        }
-        
-        Ok(())
-    }
-    
-    async fn start(&mut self) -> Result<(), String> {
-        // Sinks don't need explicit start
-        Ok(())
-    }
-    
-    async fn begin_drain(&mut self) -> Result<(), String> {
-        let actions = self.fsm.handle(SinkEvent::BeginDrain, self.context.clone()).await?;
-        for action in actions {
-            self.handle_sink_action(action).await?;
-        }
-        Ok(())
-    }
-    
-    async fn is_drained(&self) -> bool {
-        matches!(self.fsm.state(), SinkState::Drained)
-    }
-    
-    async fn force_shutdown(&mut self) -> Result<(), String> {
-        let actions = self.fsm.handle(
-            SinkEvent::Error("Force shutdown".to_string()), 
-            self.context.clone()
-        ).await?;
-        for action in actions {
-            self.handle_sink_action(action).await?;
-        }
-        Ok(())
-    }
-}
-
-#[async_trait::async_trait]
-impl<H: SinkHandler + 'static> StageHandle for SinkSupervisor<H> {
-    fn stage_id(&self) -> StageId {
-        self.stage_id
-    }
-    
-    fn stage_name(&self) -> &str {
-        &self.stage_name
-    }
-    
-    fn stage_type(&self) -> StageType {
-        StageType::Sink
-    }
-    
-    async fn initialize(&mut self) -> Result<(), String> {
-        <Self as StageSupervisor>::initialize(self).await
-    }
-    
-    async fn start(&mut self) -> Result<(), String> {
-        <Self as StageSupervisor>::start(self).await
-    }
-    
-    async fn send_event(&mut self, event: StageEvent) -> Result<(), String> {
-        // Map StageEvent to SinkEvent
-        let sink_event = match event {
-            StageEvent::Initialize => SinkEvent::Initialize,
-            StageEvent::Start => SinkEvent::Ready, // Sinks auto-start
-            StageEvent::Shutdown => SinkEvent::BeginDrain,
-            _ => return Err(format!("Unsupported event for sink: {:?}", event)),
-        };
-        
-        let actions = self.fsm.handle(sink_event, self.context.clone()).await?;
-        for action in actions {
-            self.handle_sink_action(action).await?;
-        }
-        Ok(())
-    }
-    
-    async fn begin_drain(&mut self) -> Result<(), String> {
-        <Self as StageSupervisor>::begin_drain(self).await
-    }
-    
-    fn is_ready(&self) -> bool {
-        matches!(self.fsm.state(), SinkState::Running)
-    }
-    
-    fn is_drained(&self) -> bool {
-        matches!(self.fsm.state(), SinkState::Drained)
-    }
-    
-    async fn force_shutdown(&mut self) -> Result<(), String> {
-        <Self as StageSupervisor>::force_shutdown(self).await
     }
 }
