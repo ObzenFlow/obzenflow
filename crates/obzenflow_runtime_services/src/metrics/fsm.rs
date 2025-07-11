@@ -109,6 +109,7 @@ pub struct MetricsAggregatorContext {
     pub export_interval_secs: u64,
     pub writer_id: Arc<RwLock<Option<obzenflow_core::WriterId>>>,
     pub subscription: Arc<RwLock<Option<crate::event_flow::reactive_journal::JournalSubscription>>>,
+    pub export_timer: Arc<tokio::sync::Mutex<Option<tokio::time::Interval>>>,
 }
 
 /// Simple metrics storage
@@ -140,6 +141,7 @@ impl MetricsAggregatorContext {
             export_interval_secs,
             writer_id: Arc::new(RwLock::new(None)),
             subscription: Arc::new(RwLock::new(None)),
+            export_timer: Arc::new(tokio::sync::Mutex::new(None)),
         }
     }
 }
@@ -215,6 +217,7 @@ impl FsmAction for MetricsAggregatorAction {
             }
             
             MetricsAggregatorAction::ExportMetrics => {
+                tracing::info!("ExportMetrics action triggered");
                 if let Some(exporter) = &ctx.exporter {
                     let store = ctx.metrics_store.read().await;
                     let mut snapshot = obzenflow_core::metrics::AppMetricsSnapshot::default();

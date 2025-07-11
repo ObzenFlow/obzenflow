@@ -58,6 +58,7 @@ impl crate::supervised_base::base::Supervisor for PipelineSupervisor {
                         next_state: PipelineState::Materialized,
                         actions: vec![
                             PipelineAction::StartCompletionSubscription,
+                            PipelineAction::StartMetricsAggregator,
                             PipelineAction::NotifyStagesStart,
                         ],
                     })
@@ -126,6 +127,7 @@ impl crate::supervised_base::base::Supervisor for PipelineSupervisor {
                 Ok(obzenflow_fsm::Transition {
                     next_state: PipelineState::Drained,
                     actions: vec![
+                        PipelineAction::DrainMetrics,
                         PipelineAction::WritePipelineCompleted,
                         PipelineAction::Cleanup
                     ],
@@ -164,6 +166,7 @@ impl crate::supervised_base::base::Supervisor for PipelineSupervisor {
                     Ok(obzenflow_fsm::Transition {
                         next_state: PipelineState::Drained,
                         actions: vec![
+                            PipelineAction::DrainMetrics,
                             PipelineAction::WritePipelineCompleted,
                             PipelineAction::Cleanup,
                         ],
@@ -240,39 +243,37 @@ impl SelfSupervised for PipelineSupervisor {
                 // Check for stage running events with timeout
                 match tokio::time::timeout(
                     tokio::time::Duration::from_millis(100),
-                    subscription.recv_batch(),
+                    subscription.recv(),
                 )
                 .await
                 {
-                    Ok(Ok(events)) if !events.is_empty() => {
+                    Ok(Ok(envelope)) => {
                         drop(subscription_guard);
                         
-                        // Process stage running events
-                        for envelope in events {
-                            let event = &envelope.event;
-                            if event.event_type == ChainEvent::SYSTEM_STAGE_RUNNING {
-                                if let Some(writer_info) = self
-                                    .reactive_journal
-                                    .get_writer_info(&envelope.writer_id)
-                                    .await
-                                {
-                                    let stage_id = writer_info.stage_id;
-                                    
-                                    // Track this stage as running
-                                    self.pipeline_context.running_stages.write().await.insert(stage_id);
-                                    
-                                    let stage_name = event
-                                        .payload
-                                        .get("stage_name")
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or("unknown");
-                                    
-                                    // Log based on stage type
-                                    if self.pipeline_context.topology.upstream_stages(stage_id).is_empty() {
-                                        tracing::debug!("Source stage '{}' is running (waiting for pipeline signal)", stage_name);
-                                    } else {
-                                        tracing::info!("Stage '{}' is now running", stage_name);
-                                    }
+                        // Process stage running event
+                        let event = &envelope.event;
+                        if event.event_type == ChainEvent::SYSTEM_STAGE_RUNNING {
+                            if let Some(writer_info) = self
+                                .reactive_journal
+                                .get_writer_info(&envelope.writer_id)
+                                .await
+                            {
+                                let stage_id = writer_info.stage_id;
+                                
+                                // Track this stage as running
+                                self.pipeline_context.running_stages.write().await.insert(stage_id);
+                                
+                                let stage_name = event
+                                    .payload
+                                    .get("stage_name")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("unknown");
+                                
+                                // Log based on stage type
+                                if self.pipeline_context.topology.upstream_stages(stage_id).is_empty() {
+                                    tracing::debug!("Source stage '{}' is running (waiting for pipeline signal)", stage_name);
+                                } else {
+                                    tracing::info!("Stage '{}' is now running", stage_name);
                                 }
                             }
                         }
@@ -331,98 +332,85 @@ impl SelfSupervised for PipelineSupervisor {
                 // Use timeout to allow periodic state checks while waiting for events
                 match tokio::time::timeout(
                     tokio::time::Duration::from_millis(100),
-                    subscription.recv_batch(),
+                    subscription.recv(),
                 )
                 .await
                 {
-                    Ok(Ok(events)) if !events.is_empty() => {
+                    Ok(Ok(envelope)) => {
                         drop(subscription_guard);
                         
-                        // Collect important events that need transitions
-                        let mut stage_completion_event = None;
-                        let mut all_stages_completed_event = None;
-                        let mut error_event = None;
-                        
-                        // Process ALL events in the batch
-                        for envelope in events {
-                            let event = &envelope.event;
+                        let event = &envelope.event;
 
-                            match event.event_type.as_str() {
-                                ChainEvent::SYSTEM_STAGE_RUNNING => {
-                                    // Just log - stage is now running
-                                    let stage_name = event
-                                        .payload
-                                        .get("stage_name")
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or("unknown");
-                                    tracing::info!("Stage '{}' is now running", stage_name);
-                                }
-                                ChainEvent::SYSTEM_STAGE_DRAINING => {
-                                    // Stage has started draining
-                                    let stage_name = event
-                                        .payload
-                                        .get("stage_name")
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or("unknown");
-                                    tracing::info!("Stage '{}' is draining", stage_name);
-                                }
-                                ChainEvent::SYSTEM_STAGE_DRAINED => {
-                                    // Stage has finished draining but not yet completed
-                                    let stage_name = event
-                                        .payload
-                                        .get("stage_name")
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or("unknown");
-                                    tracing::info!("Stage '{}' is drained", stage_name);
-                                }
-                                ChainEvent::SYSTEM_STAGE_COMPLETED => {
-                                    // Stage has fully completed
-                                    if let Some(writer_info) = self
-                                        .reactive_journal
-                                        .get_writer_info(&envelope.writer_id)
-                                        .await
-                                    {
-                                        // Store the completion event (we'll process after checking all events)
-                                        stage_completion_event = Some(envelope);
-                                    }
-                                }
-                                ChainEvent::SYSTEM_PIPELINE_ALL_STAGES_COMPLETED => {
-                                    tracing::info!("Received AllStagesCompleted event!");
-                                    all_stages_completed_event = Some(());
-                                }
-                                ChainEvent::SYSTEM_STAGE_FAILED => {
-                                    let stage_name = event
-                                        .payload
-                                        .get("stage_name")
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or("unknown");
-                                    let error = event
-                                        .payload
-                                        .get("error")
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or("Unknown error");
-
-                                    error_event = Some(format!("Stage '{}' failed: {}", stage_name, error));
-                                }
-                                _ => {}
+                        return match event.event_type.as_str() {
+                            ChainEvent::SYSTEM_STAGE_RUNNING => {
+                                // Just log - stage is now running
+                                let stage_name = event
+                                    .payload
+                                    .get("stage_name")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("unknown");
+                                tracing::info!("Stage '{}' is now running", stage_name);
+                                Ok(EventLoopDirective::Continue)
                             }
-                        }
-                        
-                        // Now decide what transition to make based on collected events
-                        // Priority: Error > AllStagesCompleted > StageCompleted
-                        if let Some(error_message) = error_event {
-                            return Ok(EventLoopDirective::Transition(PipelineEvent::Error {
-                                message: error_message,
-                            }));
-                        } else if all_stages_completed_event.is_some() {
-                            return Ok(EventLoopDirective::Transition(
-                                PipelineEvent::AllStagesCompleted,
-                            ));
-                        } else if let Some(envelope) = stage_completion_event {
-                            return Ok(EventLoopDirective::Transition(
-                                PipelineEvent::StageCompleted { envelope },
-                            ));
-                        }
+                            ChainEvent::SYSTEM_STAGE_DRAINING => {
+                                // Stage has started draining
+                                let stage_name = event
+                                    .payload
+                                    .get("stage_name")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("unknown");
+                                tracing::info!("Stage '{}' is draining", stage_name);
+                                Ok(EventLoopDirective::Continue)
+                            }
+                            ChainEvent::SYSTEM_STAGE_DRAINED => {
+                                // Stage has finished draining but not yet completed
+                                let stage_name = event
+                                    .payload
+                                    .get("stage_name")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("unknown");
+                                tracing::info!("Stage '{}' is drained", stage_name);
+                                Ok(EventLoopDirective::Continue)
+                            }
+                            ChainEvent::SYSTEM_STAGE_COMPLETED => {
+                                // Stage has fully completed
+                                if let Some(_writer_info) = self
+                                    .reactive_journal
+                                    .get_writer_info(&envelope.writer_id)
+                                    .await
+                                {
+                                    // Process stage completion immediately
+                                    Ok(EventLoopDirective::Transition(
+                                        PipelineEvent::StageCompleted { envelope },
+                                    ))
+                                } else {
+                                    Ok(EventLoopDirective::Continue)
+                                }
+                            }
+                            ChainEvent::SYSTEM_PIPELINE_ALL_STAGES_COMPLETED => {
+                                tracing::info!("Received AllStagesCompleted event!");
+                                Ok(EventLoopDirective::Transition(
+                                    PipelineEvent::AllStagesCompleted,
+                                ))
+                            }
+                            ChainEvent::SYSTEM_STAGE_FAILED => {
+                                let stage_name = event
+                                    .payload
+                                    .get("stage_name")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("unknown");
+                                let error = event
+                                    .payload
+                                    .get("error")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("Unknown error");
+
+                                Ok(EventLoopDirective::Transition(PipelineEvent::Error {
+                                    message: format!("Stage '{}' failed: {}", stage_name, error),
+                                }))
+                            }
+                            _ => Ok(EventLoopDirective::Continue)
+                        };
                     }
                     _ => {
                         // No events or timeout - continue running
@@ -450,59 +438,47 @@ impl SelfSupervised for PipelineSupervisor {
 
                 match tokio::time::timeout(
                     tokio::time::Duration::from_millis(100),
-                    subscription.recv_batch(),
+                    subscription.recv(),
                 )
                 .await
                 {
-                    Ok(Ok(events)) if !events.is_empty() => {
+                    Ok(Ok(envelope)) => {
                         drop(subscription_guard);
                         
-                        // Collect important events that need transitions
-                        let mut stage_completion_event = None;
-                        let mut all_stages_completed_event = None;
-                        
-                        // Process ALL events in the batch during drain
-                        for envelope in events {
-                            let event = &envelope.event;
+                        let event = &envelope.event;
 
-                            match event.event_type.as_str() {
-                                ChainEvent::SYSTEM_STAGE_COMPLETED => {
-                                    if let Some(writer_info) = self
-                                        .reactive_journal
-                                        .get_writer_info(&envelope.writer_id)
-                                        .await
-                                    {
-                                        // Store the completion event
-                                        stage_completion_event = Some(envelope);
-                                    }
-                                }
-                                ChainEvent::SYSTEM_PIPELINE_ALL_STAGES_COMPLETED => {
-                                    tracing::info!(
-                                        "All stages have completed - transitioning to drained"
-                                    );
-                                    all_stages_completed_event = Some(());
-                                }
-                                _ => {
-                                    // Log other events
-                                    tracing::debug!(
-                                        "Received event during drain: {}",
-                                        event.event_type
-                                    );
+                        return match event.event_type.as_str() {
+                            ChainEvent::SYSTEM_STAGE_COMPLETED => {
+                                if let Some(_writer_info) = self
+                                    .reactive_journal
+                                    .get_writer_info(&envelope.writer_id)
+                                    .await
+                                {
+                                    // Process stage completion immediately
+                                    Ok(EventLoopDirective::Transition(
+                                        PipelineEvent::StageCompleted { envelope },
+                                    ))
+                                } else {
+                                    Ok(EventLoopDirective::Continue)
                                 }
                             }
-                        }
-                        
-                        // Decide what transition to make
-                        // Priority: AllStagesCompleted > StageCompleted
-                        if all_stages_completed_event.is_some() {
-                            return Ok(EventLoopDirective::Transition(
-                                PipelineEvent::AllStagesCompleted,
-                            ));
-                        } else if let Some(envelope) = stage_completion_event {
-                            return Ok(EventLoopDirective::Transition(
-                                PipelineEvent::StageCompleted { envelope },
-                            ));
-                        }
+                            ChainEvent::SYSTEM_PIPELINE_ALL_STAGES_COMPLETED => {
+                                tracing::info!(
+                                    "All stages have completed - transitioning to drained"
+                                );
+                                Ok(EventLoopDirective::Transition(
+                                    PipelineEvent::AllStagesCompleted,
+                                ))
+                            }
+                            _ => {
+                                // Log other events
+                                tracing::debug!(
+                                    "Received event during drain: {}",
+                                    event.event_type
+                                );
+                                Ok(EventLoopDirective::Continue)
+                            }
+                        };
                     }
                     _ => {
                         // No events - continue draining

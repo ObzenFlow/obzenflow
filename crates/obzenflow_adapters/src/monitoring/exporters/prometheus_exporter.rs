@@ -37,6 +37,7 @@ impl Default for PrometheusExporter {
 impl MetricsExporter for PrometheusExporter {
     /// Update application metrics from event stream
     fn update_app_metrics(&self, snapshot: AppMetricsSnapshot) -> Result<(), Box<dyn Error + Send + Sync>> {
+        tracing::info!("update_app_metrics called with {} event counts", snapshot.event_counts.len());
         let mut app_snapshot = self.app_snapshot.write()
             .map_err(|_| "Failed to acquire app snapshot write lock")?;
         *app_snapshot = Some(snapshot);
@@ -65,14 +66,20 @@ impl MetricsExporter for PrometheusExporter {
         // Render application metrics
         if let Ok(app_guard) = self.app_snapshot.read() {
             if let Some(ref snapshot) = *app_guard {
+                tracing::debug!("Rendering app metrics snapshot with {} event counts", snapshot.event_counts.len());
                 self.render_app_metrics(&mut output, snapshot)?;
+            } else {
+                tracing::debug!("No app metrics snapshot available");
             }
         }
         
         // Render infrastructure metrics
         if let Ok(infra_guard) = self.infra_snapshot.read() {
             if let Some(ref snapshot) = *infra_guard {
+                tracing::debug!("Rendering infra metrics snapshot");
                 self.render_infra_metrics(&mut output, snapshot)?;
+            } else {
+                tracing::debug!("No infra metrics snapshot available");
             }
         }
         

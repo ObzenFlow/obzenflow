@@ -265,8 +265,10 @@ impl FsmAction for PipelineAction {
             }
             
             PipelineAction::StartMetricsAggregator => {
+                tracing::info!("StartMetricsAggregator action triggered");
                 // Start metrics aggregator if we have an exporter
                 if let Some(exporter) = context.metrics_exporter.clone() {
+                    tracing::info!("Found metrics exporter, starting metrics aggregator");
                     let journal = context.journal.clone();
                     
                     // Subscribe for metrics ready event before spawning
@@ -305,15 +307,12 @@ impl FsmAction for PipelineAction {
                     // Wait for metrics aggregator to be ready
                     match tokio::time::timeout(
                         tokio::time::Duration::from_secs(5),
-                        ready_subscription.recv_batch(),
+                        ready_subscription.recv(),
                     )
                     .await
                     {
-                        Ok(Ok(batch)) if !batch.is_empty() => {
+                        Ok(Ok(_event)) => {
                             tracing::info!("Metrics aggregator is ready");
-                        }
-                        Ok(Ok(_)) => {
-                            return Err("No metrics ready event received".into());
                         }
                         Ok(Err(e)) => {
                             return Err(format!("Failed to receive metrics ready event: {}", e).into());
@@ -322,6 +321,8 @@ impl FsmAction for PipelineAction {
                             return Err("Timeout waiting for metrics aggregator to be ready".into());
                         }
                     }
+                } else {
+                    tracing::warn!("No metrics exporter configured in pipeline context");
                 }
             }
             
@@ -353,14 +354,17 @@ impl FsmAction for PipelineAction {
                 
                 match tokio::time::timeout(
                     tokio::time::Duration::from_secs(30),
-                    subscription.recv_batch(),
+                    subscription.recv(),
                 )
                 .await
                 {
-                    Ok(Ok(batch)) if !batch.is_empty() => {
-                        tracing::info!("Metrics successfully drained");
+                    Ok(Ok(event)) => {
+                        if event.event.event_type == ChainEvent::SYSTEM_METRICS_DRAINED {
+                            tracing::info!("Metrics successfully drained");
+                        } else {
+                            return Err(format!("Expected metrics drained event, got: {}", event.event.event_type).into());
+                        }
                     }
-                    Ok(Ok(_)) => return Err("No drain completion event received".into()),
                     Ok(Err(e)) => return Err(format!("Failed to receive drain completion: {}", e).into()),
                     Err(_) => return Err("Metrics drain timeout".into()),
                 }

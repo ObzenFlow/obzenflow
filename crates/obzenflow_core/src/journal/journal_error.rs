@@ -13,6 +13,9 @@ pub enum JournalError {
     #[error("Causal ordering violation")]
     CausalityViolation,
     
+    #[error("Subscription closed")]
+    SubscriptionClosed,
+    
     /// Generic implementation error with source
     #[error("Implementation error: {message}")]
     Implementation {

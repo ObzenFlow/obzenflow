@@ -116,6 +116,36 @@ pub struct JournalSubscription {
 }
 
 impl JournalSubscription {
+    /// Receive next single event
+    /// Blocks until an event is available
+    pub async fn recv(&mut self) -> Result<EventEnvelope> {
+        // Check for pending events first
+        if let Some(event) = self.pending_buffer.pop_front() {
+            return Ok(event);
+        }
+
+        // Wait for notification
+        match self.receiver.recv().await {
+            Some(notif) => {
+                // Read the event
+                match self.journal.read_event(&notif.event_id).await? {
+                    Some(event) => {
+                        // Track EOF events internally
+                        if event.event.is_eof() {
+                            tracing::debug!("Subscription {} received EOF event", self.id);
+                        }
+                        Ok(event)
+                    }
+                    None => {
+                        // Event was deleted, try again
+                        Box::pin(self.recv()).await
+                    }
+                }
+            }
+            None => Err(Box::new(JournalError::SubscriptionClosed)),
+        }
+    }
+    
     /// Receive next batch of events
     /// Returns empty vec when no events are immediately available
     pub async fn recv_batch(&mut self) -> Result<Vec<EventEnvelope>> {

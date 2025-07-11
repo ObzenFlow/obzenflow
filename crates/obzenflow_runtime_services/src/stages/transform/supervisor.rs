@@ -180,18 +180,15 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Hand
                 // Process events from subscription
                 let mut subscription_guard = self.context.subscription.write().await;
                 if let Some(subscription) = subscription_guard.as_mut() {
-                    match subscription.recv_batch().await {
-                        Ok(events) if !events.is_empty() => {
-                            tracing::info!(
+                    match subscription.recv().await {
+                        Ok(envelope) => {
+                            tracing::debug!(
                                 stage_name = %self.context.stage_name,
-                                count = events.len(),
-                                "Transform processing events"
+                                "Transform processing event"
                             );
                             
                             // Processing context for control events
                             let mut processing_ctx = ProcessingContext::new();
-                            
-                            for envelope in events {
                                 // Check if this is a control event
                                 if let Some(control_type) = envelope.event.as_control_type() {
                                     // Handle control events with strategy
@@ -243,8 +240,8 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Hand
                                                 "Delaying control event"
                                             );
                                             tokio::time::sleep(duration).await;
-                                            // Re-process after delay
-                                            continue;
+                                            // Return Continue to re-process after delay
+                                            return Ok(EventLoopDirective::Continue);
                                         }
                                         ControlEventAction::Retry => {
                                             tracing::info!(
@@ -287,11 +284,6 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Hand
                                         }
                                     }
                                 }
-                            }
-                        }
-                        Ok(_) => {
-                            // Empty batch, continue
-                            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
                         }
                         Err(e) => {
                             tracing::error!(
@@ -320,34 +312,31 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Hand
                     // Use shorter timeout to detect empty queue
                     match tokio::time::timeout(
                         tokio::time::Duration::from_millis(50),
-                        subscription.recv_batch()
+                        subscription.recv()
                     ).await {
-                        Ok(Ok(events)) if !events.is_empty() => {
+                        Ok(Ok(envelope)) => {
                             tracing::debug!(
                                 stage_name = %self.context.stage_name,
-                                count = events.len(),
                                 "Transform draining events"
                             );
                             
-                            // Process remaining events
-                            for envelope in events {
-                                if !envelope.event.is_control() {
-                                    let transformed_events = self.context.handler.process(envelope.event.clone());
-                                    
-                                    let writer_id_guard = self.context.writer_id.read().await;
-                                    if let Some(writer_id) = writer_id_guard.as_ref() {
-                                        for mut event in transformed_events {
-                                            event.flow_context = FlowContext {
-                                                flow_name: self.context.flow_name.clone(),
-                                                flow_id: format!("{}-{}", self.context.flow_name, self.context.stage_id),
-                                                stage_name: self.context.stage_name.clone(),
-                                                stage_type: obzenflow_core::event::flow_context::StageType::Transform,
-                                            };
-                                            
-                                            self.context.journal
-                                                .append(writer_id, event, Some(&envelope))
-                                                .await?;
-                                        }
+                            // Process remaining event
+                            if !envelope.event.is_control() {
+                                let transformed_events = self.context.handler.process(envelope.event.clone());
+                                
+                                let writer_id_guard = self.context.writer_id.read().await;
+                                if let Some(writer_id) = writer_id_guard.as_ref() {
+                                    for mut event in transformed_events {
+                                        event.flow_context = FlowContext {
+                                            flow_name: self.context.flow_name.clone(),
+                                            flow_id: format!("{}-{}", self.context.flow_name, self.context.stage_id),
+                                            stage_name: self.context.stage_name.clone(),
+                                            stage_type: obzenflow_core::event::flow_context::StageType::Transform,
+                                        };
+                                        
+                                        self.context.journal
+                                            .append(writer_id, event, Some(&envelope))
+                                            .await?;
                                     }
                                 }
                             }

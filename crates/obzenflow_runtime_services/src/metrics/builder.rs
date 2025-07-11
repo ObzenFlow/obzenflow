@@ -87,6 +87,7 @@ impl SupervisorBuilder for MetricsAggregatorBuilder {
             metrics_store: Arc::new(RwLock::new(Default::default())),
             writer_id: Arc::new(RwLock::new(Some(writer_id))),
             subscription: Arc::new(RwLock::new(None)),
+            export_timer: Arc::new(tokio::sync::Mutex::new(None)),
         });
         
         // Create channels for supervisor communication

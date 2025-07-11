@@ -190,44 +190,37 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                 // Check subscription for events
                 let mut subscription_guard = self.context.subscription.write().await;
                 if let Some(subscription) = subscription_guard.as_mut() {
-                    match subscription.recv_batch().await {
-                        Ok(events) if !events.is_empty() => {
+                    match subscription.recv().await {
+                        Ok(envelope) => {
                             tracing::trace!(
                                 stage_name = %self.context.stage_name,
-                                count = events.len(),
-                                "Sink processing events"
+                                "Sink processing event"
                             );
                             
-                            for envelope in events {
-                                // Check for EOF event
-                                if envelope.event.event_type == ChainEvent::EOF_EVENT_TYPE {
-                                    tracing::info!(
-                                        stage_name = %self.context.stage_name,
-                                        "Sink received EOF"
-                                    );
-                                    drop(subscription_guard);
-                                    return Ok(EventLoopDirective::Transition(SinkEvent::ReceivedEOF));
-                                }
-                                
-                                // Process normal event
-                                let mut handler = self.context.handler.write().await;
-                                if let Err(e) = handler.consume(envelope.event) {
-                                    tracing::error!(
-                                        stage_name = %self.context.stage_name,
-                                        error = ?e,
-                                        "Failed to consume event"
-                                    );
-                                    drop(handler);
-                                    drop(subscription_guard);
-                                    return Ok(EventLoopDirective::Transition(
-                                        SinkEvent::Error(format!("Failed to consume event: {:?}", e))
-                                    ));
-                                }
+                            // Check for EOF event
+                            if envelope.event.event_type == ChainEvent::EOF_EVENT_TYPE {
+                                tracing::info!(
+                                    stage_name = %self.context.stage_name,
+                                    "Sink received EOF"
+                                );
+                                drop(subscription_guard);
+                                return Ok(EventLoopDirective::Transition(SinkEvent::ReceivedEOF));
                             }
-                        }
-                        Ok(_) => {
-                            // Empty batch, continue
-                            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+                            
+                            // Process normal event
+                            let mut handler = self.context.handler.write().await;
+                            if let Err(e) = handler.consume(envelope.event) {
+                                tracing::error!(
+                                    stage_name = %self.context.stage_name,
+                                    error = ?e,
+                                    "Failed to consume event"
+                                );
+                                drop(handler);
+                                drop(subscription_guard);
+                                return Ok(EventLoopDirective::Transition(
+                                    SinkEvent::Error(format!("Failed to consume event: {:?}", e))
+                                ));
+                            }
                         }
                         Err(e) => {
                             tracing::error!(

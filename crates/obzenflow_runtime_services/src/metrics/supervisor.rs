@@ -233,11 +233,20 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
             }
 
             MetricsAggregatorState::Running => {
-                // Process events in the Running state
-                let mut export_timer = tokio::time::interval(tokio::time::Duration::from_secs(
-                    self.context.export_interval_secs,
-                ));
-                export_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                // Create timer on first entry to Running state
+                {
+                    let mut timer_guard = self.context.export_timer.lock().await;
+                    if timer_guard.is_none() {
+                        tracing::debug!("Creating export timer with interval {}s", self.context.export_interval_secs);
+                        let mut export_timer = tokio::time::interval(tokio::time::Duration::from_secs(
+                            self.context.export_interval_secs,
+                        ));
+                        export_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                        // First tick happens immediately, so consume it
+                        export_timer.tick().await;
+                        *timer_guard = Some(export_timer);
+                    }
+                }
 
                 // Get subscription from context
                 let mut subscription_guard = self.context.subscription.write().await;
@@ -245,34 +254,48 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                     .as_mut()
                     .ok_or("No subscription available")?;
 
+                // Create a future for the timer tick
+                let timer_tick = async {
+                    let mut timer_guard = self.context.export_timer.lock().await;
+                    if let Some(timer) = timer_guard.as_mut() {
+                        timer.tick().await
+                    } else {
+                        // This shouldn't happen, but if it does, wait forever
+                        std::future::pending::<tokio::time::Instant>().await
+                    }
+                };
+
                 tokio::select! {
-                    // Process journal events
-                    result = subscription.recv_batch() => {
+                    // Process journal events one at a time
+                    result = subscription.recv() => {
                         match result {
-                            Ok(batch) if !batch.is_empty() => {
-                                // Check for drain event first
-                                for envelope in &batch {
-                                    if envelope.event.event_type == ChainEvent::SYSTEM_METRICS_DRAIN {
-                                        return Ok(EventLoopDirective::Transition(MetricsAggregatorEvent::StartDraining));
-                                    }
+                            Ok(envelope) => {
+                                // Check for drain event 
+                                if envelope.event.event_type == ChainEvent::SYSTEM_METRICS_DRAIN {
+                                    tracing::info!("Metrics aggregator received drain event");
+                                    // Clear the timer when transitioning away from Running
+                                    *self.context.export_timer.lock().await = None;
+                                    return Ok(EventLoopDirective::Transition(MetricsAggregatorEvent::StartDraining));
                                 }
                                 
-                                // Process batch through FSM
-                                Ok(EventLoopDirective::Transition(MetricsAggregatorEvent::ProcessBatch { events: batch }))
-                            }
-                            Ok(_) => {
-                                // Empty batch, continue
-                                Ok(EventLoopDirective::Continue)
+                                // Skip control and system events - they shouldn't be counted in metrics
+                                if envelope.event.is_control() || envelope.event.is_system() {
+                                    return Ok(EventLoopDirective::Continue);
+                                }
+                                
+                                // Process single event through FSM
+                                // Metrics aggregator is special - it can batch in its action
+                                Ok(EventLoopDirective::Transition(MetricsAggregatorEvent::ProcessBatch { events: vec![envelope] }))
                             }
                             Err(e) => {
-                                tracing::error!("Failed to receive events: {}", e);
+                                tracing::error!("Failed to receive event: {}", e);
                                 Ok(EventLoopDirective::Continue)
                             }
                         }
                     }
 
                     // Export periodically
-                    _ = export_timer.tick() => {
+                    _ = timer_tick => {
                         Ok(EventLoopDirective::Transition(MetricsAggregatorEvent::ExportMetrics))
                     }
                 }
@@ -300,13 +323,17 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                 // Try to get more events with timeout
                 match tokio::time::timeout(
                     tokio::time::Duration::from_millis(50),
-                    subscription.recv_batch(),
+                    subscription.recv(),
                 )
                 .await
                 {
-                    Ok(Ok(batch)) if !batch.is_empty() => {
-                        // Got events, process them
-                        Ok(EventLoopDirective::Transition(MetricsAggregatorEvent::ProcessBatch { events: batch }))
+                    Ok(Ok(envelope)) => {
+                        // Skip control and system events even during draining
+                        if envelope.event.is_control() || envelope.event.is_system() {
+                            return Ok(EventLoopDirective::Continue);
+                        }
+                        // Got event, process it
+                        Ok(EventLoopDirective::Transition(MetricsAggregatorEvent::ProcessBatch { events: vec![envelope] }))
                     }
                     _ => {
                         // No events or timeout - increment empty batch counter
