@@ -103,12 +103,12 @@ pub enum MetricsAggregatorAction {
 /// Context for the FSM - contains everything actions need to do their work
 #[derive(Clone)]
 pub struct MetricsAggregatorContext {
-    pub journal: Arc<crate::event_flow::reactive_journal::ReactiveJournal>,
+    pub journal: Arc<crate::messaging::reactive_journal::ReactiveJournal>,
     pub exporter: Option<Arc<dyn obzenflow_core::metrics::MetricsExporter>>,
     pub metrics_store: Arc<RwLock<MetricsStore>>,
     pub export_interval_secs: u64,
     pub writer_id: Arc<RwLock<Option<obzenflow_core::WriterId>>>,
-    pub subscription: Arc<RwLock<Option<crate::event_flow::reactive_journal::JournalSubscription>>>,
+    pub subscription: Arc<RwLock<Option<crate::messaging::reactive_journal::JournalSubscription>>>,
     pub export_timer: Arc<tokio::sync::Mutex<Option<tokio::time::Interval>>>,
 }
 
@@ -130,7 +130,7 @@ pub struct StageMetrics {
 
 impl MetricsAggregatorContext {
     pub fn new(
-        journal: Arc<crate::event_flow::reactive_journal::ReactiveJournal>,
+        journal: Arc<crate::messaging::reactive_journal::ReactiveJournal>,
         exporter: Option<Arc<dyn obzenflow_core::metrics::MetricsExporter>>,
         export_interval_secs: u64,
     ) -> Self {

@@ -44,6 +44,7 @@ impl FlowHandle {
     
     /// Run the pipeline and wait for completion, returning the metrics exporter
     /// Use this when you need to access metrics after the flow completes
+    /// Typically used with finite sources (not infinite sources)
     pub async fn run_with_metrics(self) -> Result<Option<Arc<dyn obzenflow_core::metrics::MetricsExporter>>, FlowError> {
         // Send the Run event to transition from Materialized to Running
         // This will trigger NotifySourceStart action
@@ -80,7 +81,7 @@ impl FlowHandle {
         self.handle.state_receiver()
     }
     
-    /// Render metrics in Prometheus format
+    /// Render metrics based on the wrapped exporter's format
     pub async fn render_metrics(&self) -> Result<String, FlowError> {
         if let Some(ref exporter) = self.metrics_exporter {
             exporter.render_metrics().map_err(|e| {

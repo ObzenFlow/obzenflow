@@ -6,7 +6,7 @@ use obzenflow_core::event::flow_context::FlowContext;
 use obzenflow_fsm::{FsmBuilder, Transition};
 use obzenflow_topology_services::stages::StageId;
 
-use crate::event_flow::reactive_journal::ReactiveJournal;
+use crate::messaging::reactive_journal::ReactiveJournal;
 use crate::stages::common::handlers::TransformHandler;
 use crate::stages::common::control_strategies::{ControlEventAction, ProcessingContext};
 use crate::supervised_base::{EventLoopDirective, HandlerSupervised};

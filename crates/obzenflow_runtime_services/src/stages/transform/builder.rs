@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use obzenflow_core::WriterId;
 
-use crate::event_flow::reactive_journal::ReactiveJournal;
+use crate::messaging::reactive_journal::ReactiveJournal;
 use crate::message_bus::FsmMessageBus;
 use crate::stages::common::handlers::TransformHandler;
 use crate::stages::common::control_strategies::{ControlEventStrategy, JonestownStrategy};

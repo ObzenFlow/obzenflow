@@ -8,7 +8,7 @@ use obzenflow_fsm::FsmBuilder;
 use serde_json::json;
 use std::sync::Arc;
 
-use crate::event_flow::reactive_journal::{
+use crate::messaging::reactive_journal::{
     ReactiveJournal, SubscriptionFilter,
 };
 use crate::supervised_base::{EventLoopDirective, SelfSupervised};

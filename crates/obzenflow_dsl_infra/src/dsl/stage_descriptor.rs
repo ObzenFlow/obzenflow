@@ -35,7 +35,7 @@ use obzenflow_adapters::middleware::{
 use obzenflow_core::{journal::writer_id::WriterId, event::event_envelope::EventEnvelope};
 use obzenflow_topology_services::stages::StageId;
 use obzenflow_runtime_services::{
-    event_flow::reactive_journal::ReactiveJournal,
+    messaging::reactive_journal::ReactiveJournal,
     message_bus::FsmMessageBus,
 };
 use crate::stage_handle_adapter::StageHandleAdapter;

@@ -10,7 +10,7 @@ use obzenflow_adapters::middleware::{
 };
 use obzenflow_core::{ChainEvent, EventId};
 use obzenflow_runtime_services::stages::common::handlers::TransformHandler;
-use obzenflow_runtime_services::event_flow::reactive_journal::ReactiveJournal;
+use obzenflow_runtime_services::messaging::reactive_journal::ReactiveJournal;
 use obzenflow_infra::journal::MemoryJournal;
 use serde_json::json;
 use std::sync::Arc;
@@ -62,7 +62,7 @@ async fn test_middleware_control_events_flow_to_journal() {
     
     // Create subscription for control events
     let mut subscription = journal.subscribe(
-        obzenflow_runtime_services::event_flow::reactive_journal::SubscriptionFilter::EventTypes {
+        obzenflow_runtime_services::messaging::reactive_journal::SubscriptionFilter::EventTypes {
             event_types: vec![
                 ChainEvent::CONTROL_METRICS_STATE.to_string(),
                 ChainEvent::CONTROL_MIDDLEWARE_STATE.to_string(),

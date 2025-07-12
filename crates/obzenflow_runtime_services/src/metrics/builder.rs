@@ -9,7 +9,7 @@ use super::{
     config::DefaultMetricsConfig,
 };
 use crate::{
-    event_flow::reactive_journal::ReactiveJournal,
+    messaging::reactive_journal::ReactiveJournal,
     supervised_base::{
         SupervisorBuilder, BuilderError, ChannelBuilder, HandleBuilder, StandardHandle,
         SelfSupervisedExt, SupervisorTaskBuilder,

@@ -9,7 +9,7 @@ use super::{
     supervisor::PipelineSupervisor,
 };
 use crate::{
-    event_flow::reactive_journal::ReactiveJournal,
+    messaging::reactive_journal::ReactiveJournal,
     message_bus::FsmMessageBus,
     stages::common::stage_handle::BoxedStageHandle,
     supervised_base::{

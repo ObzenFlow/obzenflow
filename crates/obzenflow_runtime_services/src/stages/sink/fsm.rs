@@ -259,7 +259,7 @@ pub struct SinkContext<H: SinkHandler> {
     pub flow_name: String,
     
     /// Journal for reading events and writing control events
-    pub journal: Arc<crate::event_flow::reactive_journal::ReactiveJournal>,
+    pub journal: Arc<crate::messaging::reactive_journal::ReactiveJournal>,
     
     /// Message bus for pipeline communication
     pub bus: Arc<crate::message_bus::FsmMessageBus>,
@@ -268,7 +268,7 @@ pub struct SinkContext<H: SinkHandler> {
     pub writer_id: Arc<RwLock<Option<WriterId>>>,
     
     /// Subscription to upstream events
-    pub subscription: Arc<RwLock<Option<crate::event_flow::reactive_journal::JournalSubscription>>>,
+    pub subscription: Arc<RwLock<Option<crate::messaging::reactive_journal::JournalSubscription>>>,
     
     /// Processing task handle (moved from supervisor to follow FSM patterns)
     pub processing_task: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
@@ -286,7 +286,7 @@ impl<H: SinkHandler> SinkContext<H> {
         stage_id: obzenflow_topology_services::stages::StageId,
         stage_name: String,
         flow_name: String,
-        journal: Arc<crate::event_flow::reactive_journal::ReactiveJournal>,
+        journal: Arc<crate::messaging::reactive_journal::ReactiveJournal>,
         bus: Arc<crate::message_bus::FsmMessageBus>,
         upstream_stages: Vec<obzenflow_topology_services::stages::StageId>,
     ) -> Self {
@@ -329,7 +329,7 @@ impl<H: SinkHandler + Send + Sync + 'static> FsmAction for SinkAction<H> {
                 
                 // Create subscription to upstreams (provided by pipeline)
                 if !ctx.upstream_stages.is_empty() {
-                    let filter = crate::event_flow::reactive_journal::SubscriptionFilter::UpstreamStages {
+                    let filter = crate::messaging::reactive_journal::SubscriptionFilter::UpstreamStages {
                         stages: ctx.upstream_stages.clone(),
                     };
                     

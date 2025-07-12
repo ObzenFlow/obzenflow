@@ -19,7 +19,7 @@ use obzenflow_adapters::middleware::{
 };
 use obzenflow_adapters::monitoring::aggregator::{MetricsAggregator, MetricsEndpoint};
 use obzenflow_infra::journal::memory::MemoryJournal;
-use obzenflow_runtime_services::event_flow::reactive_journal::ReactiveJournal;
+use obzenflow_runtime_services::messaging::reactive_journal::ReactiveJournal;
 use obzenflow_core::{ChainEvent, EventId, WriterId};
 use serde_json::json;
 use std::sync::{Arc, Mutex};

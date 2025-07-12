@@ -93,7 +93,7 @@ pub struct PipelineContext {
     pub topology: Arc<obzenflow_topology_services::topology::Topology>,
     
     /// Journal for event flow
-    pub journal: Arc<crate::event_flow::reactive_journal::ReactiveJournal>,
+    pub journal: Arc<crate::messaging::reactive_journal::ReactiveJournal>,
     
     /// Stage supervisors by ID
     pub stage_supervisors: Arc<RwLock<HashMap<StageId, crate::stages::common::stage_handle::BoxedStageHandle>>>,
@@ -105,7 +105,7 @@ pub struct PipelineContext {
     pub running_stages: Arc<RwLock<std::collections::HashSet<StageId>>>,
     
     /// Subscription for stage completion events
-    pub completion_subscription: Arc<RwLock<Option<crate::event_flow::JournalSubscription>>>,
+    pub completion_subscription: Arc<RwLock<Option<crate::messaging::JournalSubscription>>>,
     
     /// Metrics exporter for accessing aggregated metrics
     pub metrics_exporter: Option<Arc<dyn obzenflow_core::metrics::MetricsExporter>>,
@@ -273,7 +273,7 @@ impl FsmAction for PipelineAction {
                     
                     // Subscribe for metrics ready event before spawning
                     let mut ready_subscription = journal
-                        .subscribe(crate::event_flow::SubscriptionFilter::EventTypes {
+                        .subscribe(crate::messaging::SubscriptionFilter::EventTypes {
                             event_types: vec![ChainEvent::SYSTEM_METRICS_READY.to_string()],
                         })
                         .await
@@ -346,7 +346,7 @@ impl FsmAction for PipelineAction {
                 
                 // 2. Subscribe and wait for drain completion event
                 let mut subscription = context.journal
-                    .subscribe(crate::event_flow::SubscriptionFilter::EventTypes {
+                    .subscribe(crate::messaging::SubscriptionFilter::EventTypes {
                         event_types: vec![ChainEvent::SYSTEM_METRICS_DRAINED.to_string()],
                     })
                     .await
@@ -372,7 +372,7 @@ impl FsmAction for PipelineAction {
             
             PipelineAction::StartCompletionSubscription => {
                 // Create subscription for ALL system stage control events AND pipeline events
-                let filter = crate::event_flow::reactive_journal::SubscriptionFilter::EventTypes {
+                let filter = crate::messaging::reactive_journal::SubscriptionFilter::EventTypes {
                     event_types: vec![
                         ChainEvent::SYSTEM_STAGE_RUNNING.to_string(),
                         ChainEvent::SYSTEM_STAGE_DRAINING.to_string(), 

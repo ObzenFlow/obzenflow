@@ -8,7 +8,7 @@
 use super::{
     fsm::{PipelineAction, PipelineContext, PipelineEvent, PipelineState},
 };
-use crate::event_flow::reactive_journal::ReactiveJournal;
+use crate::messaging::reactive_journal::ReactiveJournal;
 use crate::supervised_base::{EventLoopDirective, SelfSupervised};
 use obzenflow_core::{WriterId, ChainEvent};
 use std::sync::Arc;

@@ -222,7 +222,7 @@ pub struct InfiniteSourceContext<H: InfiniteSourceHandler> {
     pub flow_name: String,
     
     /// Journal for writing events
-    pub journal: Arc<crate::event_flow::reactive_journal::ReactiveJournal>,
+    pub journal: Arc<crate::messaging::reactive_journal::ReactiveJournal>,
     
     /// Message bus for pipeline communication
     pub bus: Arc<crate::message_bus::FsmMessageBus>,
@@ -243,7 +243,7 @@ impl<H: InfiniteSourceHandler> InfiniteSourceContext<H> {
         stage_id: obzenflow_topology_services::stages::StageId,
         stage_name: String,
         flow_name: String,
-        journal: Arc<crate::event_flow::reactive_journal::ReactiveJournal>,
+        journal: Arc<crate::messaging::reactive_journal::ReactiveJournal>,
         bus: Arc<crate::message_bus::FsmMessageBus>,
     ) -> Self {
         Self {

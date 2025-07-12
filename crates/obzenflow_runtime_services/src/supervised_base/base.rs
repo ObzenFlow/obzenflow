@@ -3,7 +3,7 @@
 //! This module provides shared types and traits used by both self-supervised
 //! and handler-supervised state machine implementations.
 
-use crate::event_flow::reactive_journal::{
+use crate::messaging::reactive_journal::{
     JournalSubscription, ReactiveJournal, SubscriptionFilter,
 };
 use obzenflow_core::{ChainEvent, EventId, Journal, WriterId};

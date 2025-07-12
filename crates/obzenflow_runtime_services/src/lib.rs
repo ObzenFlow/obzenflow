@@ -11,7 +11,7 @@ pub mod supervised_base;
 // Major subsystems
 pub mod pipeline;
 pub mod stages;
-pub mod event_flow;
+pub mod messaging;
 pub mod metrics;
 
 
@@ -40,9 +40,8 @@ pub mod prelude {
     // Use builders and handles for creating and controlling stages.
     
     // Event flow
-    pub use crate::event_flow::{
+    pub use crate::messaging::{
         JournalSubscription, SubscriptionFilter,
-        StageSemantics,
     };
     
     // Metrics

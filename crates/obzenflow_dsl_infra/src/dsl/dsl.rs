@@ -132,7 +132,7 @@ macro_rules! build_typed_flow {
             .map_err(|e| format!("Failed to build topology: {:?}", e))?);
         
         // Create services
-        use obzenflow_runtime_services::event_flow::reactive_journal::ReactiveJournal;
+        use obzenflow_runtime_services::messaging::reactive_journal::ReactiveJournal;
         use obzenflow_runtime_services::message_bus::FsmMessageBus;
         use obzenflow_runtime_services::pipeline::config::StageConfig;
         use $crate::dsl::stage_descriptor::StageResources;
