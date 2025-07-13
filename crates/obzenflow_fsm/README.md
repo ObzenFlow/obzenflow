@@ -4,10 +4,10 @@
 
 This FSM library requires contexts to be wrapped in `Arc`. This is a deliberate design choice to support:
 
-1. **Concurrent handlers** - Entry, exit, and transition handlers may run concurrently
-2. **Async closures** - Handlers are async blocks that need to own their data
-3. **Middleware composition** - Middleware can wrap and modify handler behavior
-4. **Thread safety** - The FSM can be used across thread boundaries
+1. **Async closures** - Handlers are async blocks that need to own their data (primary reason)
+2. **Multiple FSM instances** - Different FSMs can share resources like journals or message buses
+3. **Thread safety** - The FSM can be safely used across thread boundaries
+4. **Future flexibility** - Enables concurrent patterns if needed in the future
 
 While this adds some complexity for simple use cases, it ensures the FSM works correctly in all async scenarios without lifetime issues.
 
@@ -135,3 +135,73 @@ Want similar guarantees? Here's what we recommend:
 4. **Comprehensive tests** - Our test utilities make it easy to verify all transitions
 
 The bottom line: our enum-based FSM is purpose-built for the realities of async Rust services. It's not a compromise - it's the right tool for this particular job.
+
+## Theoretical Foundation: Mealy Machine with Modern Extensions
+
+You might be curious how obzenflow_fsm relates to traditional state machine theory. At its core, this implementation is closest to a **Mealy machine** with some practical adaptations for async Rust.
+
+### Core Mealy Machine Characteristics
+
+1. **Outputs depend on both state AND input**: Our transition handlers take both the current state and event as parameters to produce actions:
+   ```rust
+   pub type TransitionHandler<S, E, C, A> = Arc<
+       dyn Fn(&S, &E, Arc<C>) -> Pin<Box<dyn Future<Output = Result<Transition<S, A>, String>> + Send>>
+   ```
+
+2. **Actions occur during transitions**: Actions are produced as part of the transition result, not just from being in a state:
+   ```rust
+   pub struct Transition<S, A> {
+       pub next_state: S,
+       pub actions: Vec<A>,  // Actions are part of the transition
+   }
+   ```
+
+3. **The fundamental equation matches Mealy**: As stated in our design docs:
+   > **State(S) × Event(E) → Actions(A), State(S')**
+   
+   This is exactly the Mealy machine model where outputs (actions) are determined by the combination of current state and input event.
+
+### Why Not a Moore Machine?
+
+In a Moore machine, outputs depend only on the current state, not the input. But in obzenflow_fsm, the transition handlers explicitly receive both state AND event to determine actions. This gives us more flexibility for real-world use cases.
+
+### Modern Extensions Beyond Classical Theory
+
+1. **Entry/Exit actions**: We support state entry and exit handlers, which is more like a UML state machine feature:
+   ```rust
+   .on_entry("Running", |state, ctx| async {
+       // Initialize resources when entering Running state
+   })
+   .on_exit("Running", |state, ctx| async {
+       // Cleanup when leaving Running state
+   })
+   ```
+
+2. **Async operations**: All handlers are async, which is a practical adaptation for modern systems but not part of classical FSM theory.
+
+3. **Context parameter**: The addition of a context parameter provides shared state across the FSM, enabling complex stateful operations while keeping the FSM itself pure.
+
+4. **Timeout handlers**: State timeouts are supported, allowing automatic transitions based on time:
+   ```rust
+   .timeout("Pending", Duration::from_secs(30), |state, ctx| async {
+       // Transition to Timeout state after 30 seconds
+   })
+   ```
+
+### The Akka Heritage
+
+Our design was inspired by Akka's classic FSM, which also follows the Mealy machine model. This heritage shows through in:
+- The builder API design
+- Support for unhandled event handlers
+- The focus on actor-like isolation and message passing
+- The emphasis on making state transitions explicit and auditable
+
+### Practical Implications
+
+Understanding that this is a Mealy machine helps explain certain design decisions:
+- Why actions are returned from transitions (not just state entry)
+- Why we pass both state and event to handlers
+- Why the same event can produce different actions in different states
+- Why we model side effects as explicit actions rather than implicit operations
+
+This theoretical foundation, combined with our practical extensions for async Rust, creates a powerful abstraction for modeling complex stateful systems in a type-safe, testable way.
