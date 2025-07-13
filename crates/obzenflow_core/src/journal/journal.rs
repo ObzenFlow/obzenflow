@@ -4,6 +4,7 @@ use crate::event::event_id::EventId;
 use super::writer_id::WriterId;
 use super::journal_error::JournalError;
 use super::journal_owner::JournalOwner;
+use super::journal_reader::JournalReader;
 
 use async_trait::async_trait;
 
@@ -44,4 +45,16 @@ pub trait Journal: Send + Sync {
     ///
     /// Returns None if the event doesn't exist
     async fn read_event(&self, event_id: &EventId) -> Result<Option<EventEnvelope>, JournalError>;
+    
+    /// Create a reader that starts from the beginning
+    ///
+    /// This reader maintains its own position and file handle for efficient
+    /// sequential reading. Multiple readers can be created for the same journal.
+    async fn reader(&self) -> Result<Box<dyn JournalReader>, JournalError>;
+    
+    /// Create a reader that starts from a specific position
+    ///
+    /// The position is journal-specific (e.g., line number for disk, index for memory).
+    /// This is useful for resuming from a checkpoint.
+    async fn reader_from(&self, position: u64) -> Result<Box<dyn JournalReader>, JournalError>;
 }

@@ -24,7 +24,8 @@ pub struct StageResourcesBuilder {
     flow_id: FlowId,
     pipeline_id: PipelineId,
     topology: Arc<Topology>,
-    journal_factory: Box<dyn Fn(&str, &JournalOwner) -> Arc<dyn Journal>>,
+    control_journal: Arc<dyn Journal>,
+    stage_journals: HashMap<StageId, Arc<dyn Journal>>,
 }
 
 impl StageResourcesBuilder {
@@ -33,13 +34,15 @@ impl StageResourcesBuilder {
         flow_id: FlowId,
         pipeline_id: PipelineId,
         topology: Arc<Topology>,
-        journal_factory: impl Fn(&str, &JournalOwner) -> Arc<dyn Journal> + 'static,
+        control_journal: Arc<dyn Journal>,
+        stage_journals: HashMap<StageId, Arc<dyn Journal>>,
     ) -> Self {
         Self {
             flow_id,
             pipeline_id,
             topology,
-            journal_factory: Box::new(journal_factory),
+            control_journal,
+            stage_journals,
         }
     }
     
@@ -53,35 +56,11 @@ impl StageResourcesBuilder {
             topology_map.insert(stage_id, upstream_ids);
         }
         
-        // Create journal creator that properly assigns ownership
-        let journal_factory = self.journal_factory;
-        let pipeline_id = self.pipeline_id.clone();
-        
-        let journal_creator = move |name: &str| -> Arc<dyn Journal> {
-            let owner = if name == "control" {
-                JournalOwner::Pipeline { pipeline_id: pipeline_id.clone() }
-            } else {
-                // Extract stage ID from journal name (e.g., "stage_01ABC...")
-                if let Some(stage_id_str) = name.strip_prefix("stage_") {
-                    if let Ok(ulid) = obzenflow_core::Ulid::from_string(stage_id_str) {
-                        JournalOwner::Stage { stage_id: StageId::from_ulid(ulid) }
-                    } else {
-                        // Fallback: create a new stage ID
-                        JournalOwner::Stage { stage_id: StageId::new() }
-                    }
-                } else {
-                    // Fallback for unknown journal types
-                    JournalOwner::Stage { stage_id: StageId::new() }
-                }
-            };
-            
-            journal_factory(name, &owner)
-        };
-        
-        // Build stage-local journals using ReactiveJournalBuilder
+        // Build stage-local journals using ReactiveJournalBuilder with pre-created journals
         let journal_builder = ReactiveJournalBuilder::new(
             topology_map,
-            journal_creator,
+            self.control_journal.clone(),
+            self.stage_journals.clone(),
             self.pipeline_id.clone(),
         );
         

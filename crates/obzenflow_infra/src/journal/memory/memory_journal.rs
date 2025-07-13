@@ -6,6 +6,7 @@
 use obzenflow_core::journal::journal::Journal;
 use obzenflow_core::journal::journal_error::JournalError;
 use obzenflow_core::journal::journal_owner::JournalOwner;
+use obzenflow_core::journal::journal_reader::JournalReader;
 use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::event_envelope::EventEnvelope;
 use obzenflow_core::event::event_id::EventId;
@@ -143,6 +144,22 @@ impl Journal for MemoryJournal {
         Ok(events.iter()
             .find(|e| &e.event.id == event_id)
             .cloned())
+    }
+    
+    async fn reader(&self) -> Result<Box<dyn JournalReader>, JournalError> {
+        // TODO: Implement MemoryJournalReader
+        Err(JournalError::Implementation {
+            message: "MemoryJournalReader not yet implemented".to_string(),
+            source: "Not implemented".into(),
+        })
+    }
+    
+    async fn reader_from(&self, _position: u64) -> Result<Box<dyn JournalReader>, JournalError> {
+        // TODO: Implement MemoryJournalReader
+        Err(JournalError::Implementation {
+            message: "MemoryJournalReader not yet implemented".to_string(),
+            source: "Not implemented".into(),
+        })
     }
 }
 

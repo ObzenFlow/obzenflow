@@ -137,8 +137,7 @@ async fn main() -> Result<()> {
 
             // Transform with middleware
             trans = transform!("processor" => TestTransform, [
-                rate_limit(50.0),  // 50 events per second
-                circuit_breaker(3) // Opens after 3 failures
+                rate_limit(1.0)  // 1 event per second
             ]);
 
             // Sink

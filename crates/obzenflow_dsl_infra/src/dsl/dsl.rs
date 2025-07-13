@@ -142,7 +142,27 @@ macro_rules! build_typed_flow {
         let pipeline_id = PipelineId::new();
         
         // Get the journal factory for this specific flow
-        let journal_factory = journal_factory_provider(flow_id.clone());
+        let mut journal_factory = journal_factory_provider(flow_id.clone())
+            .map_err(|e| format!("Failed to create journal factory: {:?}", e))?;
+        
+        // Create all journals upfront with proper ownership
+        use obzenflow_core::journal::journal_name::JournalName;
+        use obzenflow_core::journal::journal_owner::JournalOwner;
+        use obzenflow_infra::journal::JournalFactory;
+        
+        let control_journal = journal_factory.create_journal(
+            JournalName::Control,
+            JournalOwner::pipeline(pipeline_id.clone())
+        ).map_err(|e| format!("Failed to create control journal: {:?}", e))?;
+        
+        let mut stage_journals = HashMap::new();
+        for &stage_id in name_to_id.values() {
+            let journal = journal_factory.create_journal(
+                JournalName::Stage(stage_id),
+                JournalOwner::stage(stage_id)
+            ).map_err(|e| format!("Failed to create journal for stage {:?}: {:?}", stage_id, e))?;
+            stage_journals.insert(stage_id, journal);
+        }
         
         // Use StageResourcesBuilder to handle all the complex wiring
         use obzenflow_runtime_services::stages::resources_builder::StageResourcesBuilder;
@@ -151,7 +171,8 @@ macro_rules! build_typed_flow {
             flow_id.clone(),
             pipeline_id.clone(),
             topology.clone(),
-            journal_factory,
+            control_journal,
+            stage_journals,
         );
         
         let stage_resources_set = resources_builder.build()

@@ -10,6 +10,7 @@ use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::event::event_id::EventId;
 use obzenflow_core::journal::journal::Journal;
 use obzenflow_core::journal::journal_error::JournalError;
+use obzenflow_core::journal::journal_reader::JournalReader;
 use async_trait::async_trait;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -25,15 +26,8 @@ use chrono::{DateTime, Utc};
 use serde::{Serialize, Deserialize};
 use std::io::SeekFrom;
 
-/// Compact log record format
-#[derive(Debug, Serialize, Deserialize)]
-struct LogRecord {
-    event_id: Ulid,
-    writer_id: String,  // Keep as string for serialization compatibility
-    vector_clock: VectorClock,
-    timestamp: DateTime<Utc>,
-    event: ChainEvent,
-}
+use super::disk_journal_reader::DiskJournalReader;
+use super::log_record::LogRecord;
 
 /// Single append-only log for a flow execution
 ///
@@ -415,6 +409,14 @@ impl Journal for DiskJournal {
         } else {
             Ok(None)
         }
+    }
+    
+    async fn reader(&self) -> Result<Box<dyn JournalReader>, JournalError> {
+        Ok(Box::new(DiskJournalReader::new(self.path.clone()).await?))
+    }
+    
+    async fn reader_from(&self, position: u64) -> Result<Box<dyn JournalReader>, JournalError> {
+        Ok(Box::new(DiskJournalReader::from_position(self.path.clone(), position).await?))
     }
 }
 

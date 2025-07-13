@@ -8,6 +8,7 @@
 use obzenflow_core::Result;
 use obzenflow_core::{StageId, PipelineId};
 use obzenflow_core::journal::journal::Journal;
+use obzenflow_core::journal::journal_reader::JournalReader;
 use obzenflow_core::journal::writer_id::WriterId;
 use obzenflow_core::JournalError;
 use obzenflow_core::ChainEvent;
@@ -79,34 +80,34 @@ impl ReactiveJournal {
     
     /// Create a subscription to all journals I need to read
     pub async fn subscribe(&self) -> Result<JournalSubscription> {
-        // Build list of all journals to read from
+        // Build list of readers for all journals
         let mut readers = vec![];
         
         // ALWAYS read from control journal for system/pipeline events
-        readers.push((CONTROL_STAGE_ID, self.control_journal.clone()));
+        let control_reader = self.control_journal.reader().await
+            .map_err(|e| format!("Failed to create control journal reader: {}", e))?;
+        readers.push((CONTROL_STAGE_ID, control_reader));
         
-        // Then add upstream stage journals for data
+        // Then add upstream stage journal readers for data
         for (stage_id, journal) in &self.upstream_journals {
-            readers.push((*stage_id, journal.clone()));
+            let reader = journal.reader().await
+                .map_err(|e| format!("Failed to create reader for stage {:?}: {}", stage_id, e))?;
+            readers.push((*stage_id, reader));
         }
         
         Ok(JournalSubscription {
             upstream_readers: readers,
             current_index: 0,
-            read_positions: HashMap::new(),
         })
     }
 }
 
-/// Simple subscription that reads directly from journals (FLOWIP-008)
+/// Simple subscription that reads directly from journals (FLOWIP-008a)
 /// 
-/// No channels, no notifications - just reads from journals in round-robin
+/// Uses JournalReader for efficient cursor-based reading with O(1) performance
 pub struct JournalSubscription {
-    /// Upstream journals we're reading from
-    upstream_readers: Vec<(StageId, Arc<dyn Journal>)>,
-    
-    /// Current position in each journal
-    read_positions: HashMap<StageId, u64>,
+    /// Readers for each upstream journal - keeps files open!
+    upstream_readers: Vec<(StageId, Box<dyn JournalReader>)>,
     
     /// Round-robin index
     current_index: usize,
@@ -128,6 +129,8 @@ impl JournalSubscription {
     /// 2. Stages can handle events as they arrive
     /// 3. Critical ordering can be enforced by event dependencies (parent relationships)
     pub async fn recv(&mut self) -> Result<EventEnvelope> {
+        let mut attempts = 0;
+        
         loop {
             // Round-robin through upstream journals
             if self.upstream_readers.is_empty() {
@@ -136,17 +139,15 @@ impl JournalSubscription {
                 continue;
             }
             
-            let (stage_id, journal) = &self.upstream_readers[self.current_index];
-            let position = self.read_positions.get(stage_id).copied().unwrap_or(0);
+            let (stage_id, reader) = &mut self.upstream_readers[self.current_index];
             
-            // Try to read next event using causally ordered read
-            match journal.read_causally_ordered().await {
-                Ok(events) => {
-                    // Find first event we haven't seen
-                    if let Some(envelope) = events.into_iter().skip(position as usize).next() {
-                        self.read_positions.insert(*stage_id, position + 1);
-                        return Ok(envelope);
-                    }
+            // Just call next() - no reopening files, no re-reading!
+            match reader.next().await {
+                Ok(Some(envelope)) => {
+                    return Ok(envelope);
+                }
+                Ok(None) => {
+                    // No more events from this reader (for now)
                 }
                 Err(e) => {
                     tracing::warn!("Error reading from journal for stage {:?}: {}", stage_id, e);
@@ -155,10 +156,12 @@ impl JournalSubscription {
             
             // Move to next journal
             self.current_index = (self.current_index + 1) % self.upstream_readers.len();
+            attempts += 1;
             
-            // If we've checked all journals, brief sleep
-            if self.current_index == 0 {
+            // Brief sleep after checking all journals
+            if attempts >= self.upstream_readers.len() {
                 tokio::time::sleep(Duration::from_millis(10)).await;
+                attempts = 0;
             }
         }
     }
@@ -168,40 +171,36 @@ impl JournalSubscription {
 }
 
 /// Builder for creating stage-local journal architecture
-pub struct ReactiveJournalBuilder<'a> {
+pub struct ReactiveJournalBuilder {
     topology: HashMap<StageId, Vec<StageId>>, // stage -> upstream stages
-    journal_creator: Box<dyn Fn(&str) -> Arc<dyn Journal> + 'a>,
+    control_journal: Arc<dyn Journal>,
+    stage_journals: HashMap<StageId, Arc<dyn Journal>>,
     pipeline_id: PipelineId,
 }
 
-impl<'a> ReactiveJournalBuilder<'a> {
+impl ReactiveJournalBuilder {
     pub fn new(
         topology: HashMap<StageId, Vec<StageId>>,
-        journal_creator: impl Fn(&str) -> Arc<dyn Journal> + 'a,
+        control_journal: Arc<dyn Journal>,
+        stage_journals: HashMap<StageId, Arc<dyn Journal>>,
         pipeline_id: PipelineId,
     ) -> Self {
         Self {
             topology,
-            journal_creator: Box::new(journal_creator),
+            control_journal,
+            stage_journals,
             pipeline_id,
         }
     }
     
     pub fn build(self) -> Result<JournalSet> {
-        let mut raw_journals = HashMap::new();
         let mut reactive_journals = HashMap::new();
         
-        // Step 1: Create control journal (owned by pipeline)
-        let control_journal = (self.journal_creator)("control");
+        // Use the passed-in journals directly
+        let control_journal = self.control_journal;
+        let raw_journals = self.stage_journals;
         
-        // Step 2: Create all stage data journals
-        for stage_id in self.topology.keys() {
-            let journal_name = format!("stage_{}", stage_id);
-            let journal = (self.journal_creator)(&journal_name);
-            raw_journals.insert(*stage_id, journal);
-        }
-        
-        // Step 3: Create ReactiveJournals with correct upstream references
+        // Create ReactiveJournals with correct upstream references
         for (stage_id, upstream_ids) in &self.topology {
             let upstream_journals: Vec<(StageId, Arc<dyn Journal>)> = upstream_ids
                 .iter()
@@ -212,8 +211,11 @@ impl<'a> ReactiveJournalBuilder<'a> {
                 })
                 .collect();
             
+            let stage_journal = raw_journals.get(stage_id)
+                .ok_or_else(|| format!("Missing journal for stage {:?}", stage_id))?;
+            
             let reactive_journal = ReactiveJournal::new(
-                raw_journals[stage_id].clone(),
+                stage_journal.clone(),
                 WriterId::new(),
                 control_journal.clone(),
                 upstream_journals,
@@ -222,7 +224,7 @@ impl<'a> ReactiveJournalBuilder<'a> {
             reactive_journals.insert(*stage_id, reactive_journal);
         }
         
-        // Step 4: Create pipeline's ReactiveJournal (writes to control)
+        // Create pipeline's ReactiveJournal (writes to control)
         let pipeline_journal = ReactiveJournal::new(
             control_journal.clone(), // Pipeline writes to control journal
             WriterId::new(),
@@ -275,5 +277,15 @@ impl Journal for ReactiveJournal {
     async fn read_event(&self, event_id: &obzenflow_core::EventId) -> std::result::Result<Option<EventEnvelope>, JournalError> {
         // Read from my journal
         self.my_journal.read_event(event_id).await
+    }
+    
+    async fn reader(&self) -> std::result::Result<Box<dyn obzenflow_core::journal::journal_reader::JournalReader>, JournalError> {
+        // Create a reader for my journal
+        self.my_journal.reader().await
+    }
+    
+    async fn reader_from(&self, position: u64) -> std::result::Result<Box<dyn obzenflow_core::journal::journal_reader::JournalReader>, JournalError> {
+        // Create a reader for my journal starting from position
+        self.my_journal.reader_from(position).await
     }
 }
