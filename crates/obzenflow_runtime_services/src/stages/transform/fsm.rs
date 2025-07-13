@@ -233,7 +233,7 @@ pub struct TransformContext<H: TransformHandler> {
     pub handler: Arc<H>,
     
     /// This transform's stage ID
-    pub stage_id: obzenflow_topology_services::stages::StageId,
+    pub stage_id: obzenflow_core::StageId,
     
     /// Human-readable stage name for logging
     pub stage_name: String,
@@ -257,7 +257,7 @@ pub struct TransformContext<H: TransformHandler> {
     pub processing_task: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
     
     /// Upstream stage IDs
-    pub upstream_stages: Vec<obzenflow_topology_services::stages::StageId>,
+    pub upstream_stages: Vec<obzenflow_core::StageId>,
     
     /// Control event handling strategy
     pub control_strategy: Arc<dyn ControlEventStrategy>,
@@ -269,12 +269,12 @@ pub struct TransformContext<H: TransformHandler> {
 impl<H: TransformHandler> TransformContext<H> {
     pub fn new(
         handler: H,
-        stage_id: obzenflow_topology_services::stages::StageId,
+        stage_id: obzenflow_core::StageId,
         stage_name: String,
         flow_name: String,
         journal: Arc<crate::messaging::reactive_journal::ReactiveJournal>,
         bus: Arc<crate::message_bus::FsmMessageBus>,
-        upstream_stages: Vec<obzenflow_topology_services::stages::StageId>,
+        upstream_stages: Vec<obzenflow_core::StageId>,
         control_strategy: Arc<dyn ControlEventStrategy>,
     ) -> Self {
         Self {
@@ -307,25 +307,17 @@ impl<H: TransformHandler + Send + Sync + 'static> FsmAction for TransformAction<
     async fn execute(&self, ctx: &Self::Context) -> Result<(), String> {
         match self {
             TransformAction::AllocateResources => {
-                // Register writer ID with journal
-                let writer_id = ctx.journal
-                    .register_writer(ctx.stage_id, None)
-                    .await
-                    .map_err(|e| format!("Failed to register writer: {}", e))?;
-                
+                // In the new architecture, ReactiveJournal already has its writer_id
+                // Just get it from the journal
+                let writer_id = ctx.journal.writer_id.clone();
                 *ctx.writer_id.write().await = Some(writer_id);
                 
-                // Create subscription to upstreams
-                if !ctx.upstream_stages.is_empty() {
-                    let filter = crate::messaging::reactive_journal::SubscriptionFilter::UpstreamStages {
-                        stages: ctx.upstream_stages.clone(),
-                    };
-                    
-                    let subscription = ctx.journal.subscribe(filter).await
-                        .map_err(|e| format!("Failed to create subscription: {:?}", e))?;
-                    
-                    *ctx.subscription.write().await = Some(subscription);
-                }
+                // Create subscription - will automatically subscribe to upstream journals
+                // The new architecture (FLOWIP-008) handles upstream filtering internally
+                let subscription = ctx.journal.subscribe().await
+                    .map_err(|e| format!("Failed to create subscription: {:?}", e))?;
+                
+                *ctx.subscription.write().await = Some(subscription);
                 
                 tracing::info!(
                     stage_name = %ctx.stage_name,
@@ -352,7 +344,7 @@ impl<H: TransformHandler + Send + Sync + 'static> FsmAction for TransformAction<
                 );
                 
                 ctx.journal
-                    .write(writer_id, running_event, None)
+                    .write_control_event(running_event)
                     .await
                     .map_err(|e| format!("Failed to publish running event: {}", e))?;
                 
@@ -381,7 +373,7 @@ impl<H: TransformHandler + Send + Sync + 'static> FsmAction for TransformAction<
                 };
                 
                 ctx.journal
-                    .write(writer_id, eof_event, None)
+                    .write(eof_event, None)
                     .await
                     .map_err(|e| format!("Failed to forward EOF: {}", e))?;
                 
@@ -418,7 +410,7 @@ impl<H: TransformHandler + Send + Sync + 'static> FsmAction for TransformAction<
                 };
                 
                 ctx.journal
-                    .write(writer_id, completion_event, None)
+                    .write_control_event(completion_event)
                     .await
                     .map_err(|e| format!("Failed to write completion event: {}", e))?;
                 

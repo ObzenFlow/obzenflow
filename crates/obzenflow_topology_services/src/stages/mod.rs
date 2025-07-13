@@ -1,5 +1,5 @@
-mod stage_id;
 mod stage_info;
 
-pub use stage_id::StageId;
+// Use StageId from core instead of defining our own
+pub use obzenflow_core::StageId;
 pub use stage_info::StageInfo;

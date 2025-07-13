@@ -1,6 +1,6 @@
 //! Configuration for finite source stages
 
-use obzenflow_topology_services::stages::StageId;
+use obzenflow_core::StageId;
 
 /// Configuration for a finite source stage
 #[derive(Clone, Debug)]

@@ -213,7 +213,7 @@ pub struct InfiniteSourceContext<H: InfiniteSourceHandler> {
     pub handler: Arc<RwLock<H>>,
     
     /// This source's stage ID
-    pub stage_id: obzenflow_topology_services::stages::StageId,
+    pub stage_id: obzenflow_core::StageId,
     
     /// Human-readable stage name for logging
     pub stage_name: String,
@@ -240,7 +240,7 @@ pub struct InfiniteSourceContext<H: InfiniteSourceHandler> {
 impl<H: InfiniteSourceHandler> InfiniteSourceContext<H> {
     pub fn new(
         handler: H,
-        stage_id: obzenflow_topology_services::stages::StageId,
+        stage_id: obzenflow_core::StageId,
         stage_name: String,
         flow_name: String,
         journal: Arc<crate::messaging::reactive_journal::ReactiveJournal>,
@@ -298,12 +298,9 @@ impl<H: InfiniteSourceHandler + Send + Sync + 'static> FsmAction for InfiniteSou
     async fn execute(&self, ctx: &Self::Context) -> Result<(), String> {
         match self {
             InfiniteSourceAction::AllocateResources => {
-                // Register writer ID with journal
-                let writer_id = ctx.journal
-                    .register_writer(ctx.stage_id, None)
-                    .await
-                    .map_err(|e| format!("Failed to register writer: {}", e))?;
-                
+                // In the new architecture, ReactiveJournal already has its writer_id
+                // Just get it from the journal
+                let writer_id = ctx.journal.writer_id.clone();
                 *ctx.writer_id.write().await = Some(writer_id);
                 
                 tracing::info!(
@@ -331,7 +328,7 @@ impl<H: InfiniteSourceHandler + Send + Sync + 'static> FsmAction for InfiniteSou
                 );
                 
                 ctx.journal
-                    .append(writer_id, eof_event, None)
+                    .write(eof_event, None)
                     .await
                     .map_err(|e| format!("Failed to send EOF: {}", e))?;
                 
@@ -361,7 +358,7 @@ impl<H: InfiniteSourceHandler + Send + Sync + 'static> FsmAction for InfiniteSou
                 );
                 
                 ctx.journal
-                    .append(writer_id, error_event, None)
+                    .write_control_event(error_event)
                     .await
                     .map_err(|e| format!("Failed to send error event: {}", e))?;
                 

@@ -128,9 +128,13 @@ pub mod test;
 // Clean exporters for FLOWIP-056-666
 pub mod prometheus_exporter;
 
+// Builder for creating exporters
+pub mod builder;
+
 // Re-exports
 pub use self::prometheus_exporter::PrometheusExporter;
 pub use self::test::TestExporter;
+pub use self::builder::{MetricsExporterBuilder, ExporterType};
 
 #[cfg(feature = "metrics-statsd")]
 pub use self::statsd::StatsDExporter;

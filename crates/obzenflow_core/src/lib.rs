@@ -6,6 +6,7 @@
 
 pub mod error;
 pub mod event;
+pub mod id;
 pub mod journal;
 pub mod metrics;
 
@@ -18,4 +19,10 @@ pub use event::chain_event::ChainEvent;
 pub use event::event_envelope::EventEnvelope;
 pub use journal::journal::Journal;
 pub use journal::journal_error::JournalError;
-pub use metrics::observer::{MetricsObserver, NoOpMetricsObserver};
+pub use journal::journal_owner::JournalOwner;
+
+// Re-export typed IDs
+pub use id::{StageId, PipelineId, MetricsId, FlowId};
+
+// Re-export Ulid for convenience since it's used in many IDs
+pub use ulid::Ulid;

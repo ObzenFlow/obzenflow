@@ -1,6 +1,6 @@
 //! Pipeline and stage configuration types
 
-use obzenflow_topology_services::stages::StageId;
+use obzenflow_core::StageId;
 use crate::stages::common::handlers::{
     FiniteSourceHandler, InfiniteSourceHandler, TransformHandler, SinkHandler
 };

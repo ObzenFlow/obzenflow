@@ -253,27 +253,24 @@ impl SelfSupervised for PipelineSupervisor {
                         // Process stage running event
                         let event = &envelope.event;
                         if event.event_type == ChainEvent::SYSTEM_STAGE_RUNNING {
-                            if let Some(writer_info) = self
-                                .reactive_journal
-                                .get_writer_info(&envelope.writer_id)
-                                .await
-                            {
-                                let stage_id = writer_info.stage_id;
-                                
-                                // Track this stage as running
-                                self.pipeline_context.running_stages.write().await.insert(stage_id);
-                                
-                                let stage_name = event
-                                    .payload
-                                    .get("stage_name")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("unknown");
-                                
-                                // Log based on stage type
-                                if self.pipeline_context.topology.upstream_stages(stage_id).is_empty() {
-                                    tracing::debug!("Source stage '{}' is running (waiting for pipeline signal)", stage_name);
-                                } else {
-                                    tracing::info!("Stage '{}' is now running", stage_name);
+                            // Extract stage_id from event payload
+                            if let Some(stage_id_str) = event.payload.get("stage_id").and_then(|v| v.as_str()) {
+                                if let Ok(stage_id) = stage_id_str.parse::<obzenflow_core::StageId>() {
+                                    // Track this stage as running
+                                    self.pipeline_context.running_stages.write().await.insert(stage_id);
+                                    
+                                    let stage_name = event
+                                        .payload
+                                        .get("stage_name")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("unknown");
+                                    
+                                    // Log based on stage type
+                                    if self.pipeline_context.topology.upstream_stages(stage_id).is_empty() {
+                                        tracing::debug!("Source stage '{}' is running (waiting for pipeline signal)", stage_name);
+                                    } else {
+                                        tracing::info!("Stage '{}' is now running", stage_name);
+                                    }
                                 }
                             }
                         }
@@ -374,18 +371,10 @@ impl SelfSupervised for PipelineSupervisor {
                             }
                             ChainEvent::SYSTEM_STAGE_COMPLETED => {
                                 // Stage has fully completed
-                                if let Some(_writer_info) = self
-                                    .reactive_journal
-                                    .get_writer_info(&envelope.writer_id)
-                                    .await
-                                {
-                                    // Process stage completion immediately
-                                    Ok(EventLoopDirective::Transition(
-                                        PipelineEvent::StageCompleted { envelope },
-                                    ))
-                                } else {
-                                    Ok(EventLoopDirective::Continue)
-                                }
+                                // We don't need writer_info - just process the completion
+                                Ok(EventLoopDirective::Transition(
+                                    PipelineEvent::StageCompleted { envelope },
+                                ))
                             }
                             ChainEvent::SYSTEM_PIPELINE_ALL_STAGES_COMPLETED => {
                                 tracing::info!("Received AllStagesCompleted event!");
@@ -449,18 +438,10 @@ impl SelfSupervised for PipelineSupervisor {
 
                         return match event.event_type.as_str() {
                             ChainEvent::SYSTEM_STAGE_COMPLETED => {
-                                if let Some(_writer_info) = self
-                                    .reactive_journal
-                                    .get_writer_info(&envelope.writer_id)
-                                    .await
-                                {
-                                    // Process stage completion immediately
-                                    Ok(EventLoopDirective::Transition(
-                                        PipelineEvent::StageCompleted { envelope },
-                                    ))
-                                } else {
-                                    Ok(EventLoopDirective::Continue)
-                                }
+                                // Process stage completion immediately
+                                Ok(EventLoopDirective::Transition(
+                                    PipelineEvent::StageCompleted { envelope },
+                                ))
                             }
                             ChainEvent::SYSTEM_PIPELINE_ALL_STAGES_COMPLETED => {
                                 tracing::info!(

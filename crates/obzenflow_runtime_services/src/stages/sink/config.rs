@@ -1,6 +1,6 @@
 //! Configuration for sink stages
 
-use obzenflow_topology_services::stages::StageId;
+use obzenflow_core::StageId;
 
 /// Configuration for a sink stage
 #[derive(Clone, Debug)]

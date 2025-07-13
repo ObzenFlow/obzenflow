@@ -3,7 +3,7 @@
 //! This defines the pipeline state machine without the supervision logic
 
 use crate::message_bus::FsmMessageBus;
-use obzenflow_topology_services::stages::StageId;
+use obzenflow_core::StageId;
 use obzenflow_fsm::{FsmBuilder, StateMachine, Transition, StateVariant, EventVariant, FsmAction};
 use obzenflow_core::{Journal, ChainEvent};
 use std::sync::Arc;
@@ -109,6 +109,9 @@ pub struct PipelineContext {
     
     /// Metrics exporter for accessing aggregated metrics
     pub metrics_exporter: Option<Arc<dyn obzenflow_core::metrics::MetricsExporter>>,
+    
+    /// Metrics journal that reads from all stage journals
+    pub metrics_journal: Option<Arc<crate::messaging::reactive_journal::ReactiveJournal>>,
     
     /// TODO: Add metrics handle once MetricsAggregatorBuilder is implemented
     // pub metrics_handle: Option<MetricsHandle>,
@@ -227,11 +230,8 @@ impl FsmAction for PipelineAction {
                 let flow_name = "default"; // TODO: Get from first completed stage event
                 
                 // Register writer for pipeline
-                let pipeline_stage_id = StageId::new();
-                let writer_id = context.journal
-                    .register_writer(pipeline_stage_id, None)
-                    .await
-                    .map_err(|e| format!("Failed to register pipeline writer: {:?}", e))?;
+                // In the new architecture, ReactiveJournal already has its writer_id
+                let writer_id = context.journal.writer_id.clone();
                 
                 let supervisors = context.stage_supervisors.read().await;
                 let mut pipeline_completed = obzenflow_core::ChainEvent::new(
@@ -253,7 +253,7 @@ impl FsmAction for PipelineAction {
                     stage_type: obzenflow_core::event::flow_context::StageType::Transform,
                 };
                 
-                context.journal.write(&writer_id, pipeline_completed, None).await
+                context.journal.write_control_event(pipeline_completed).await
                     .map_err(|e| format!("Failed to write pipeline completion event: {}", e))?;
                     
                 tracing::info!("Pipeline completion event written");
@@ -266,16 +266,14 @@ impl FsmAction for PipelineAction {
             
             PipelineAction::StartMetricsAggregator => {
                 tracing::info!("StartMetricsAggregator action triggered");
-                // Start metrics aggregator if we have an exporter
-                if let Some(exporter) = context.metrics_exporter.clone() {
-                    tracing::info!("Found metrics exporter, starting metrics aggregator");
-                    let journal = context.journal.clone();
+                // Start metrics aggregator if we have an exporter and metrics journal
+                if let (Some(exporter), Some(metrics_journal)) = (context.metrics_exporter.clone(), context.metrics_journal.clone()) {
+                    tracing::info!("Found metrics exporter and metrics journal, starting metrics aggregator");
+                    let journal = metrics_journal;
                     
-                    // Subscribe for metrics ready event before spawning
+                    // Subscribe to control journal - will filter for metrics ready in recv loop
                     let mut ready_subscription = journal
-                        .subscribe(crate::messaging::SubscriptionFilter::EventTypes {
-                            event_types: vec![ChainEvent::SYSTEM_METRICS_READY.to_string()],
-                        })
+                        .subscribe()
                         .await
                         .map_err(|e| format!("Failed to subscribe for metrics ready: {}", e))?;
                     
@@ -305,24 +303,27 @@ impl FsmAction for PipelineAction {
                     });
                     
                     // Wait for metrics aggregator to be ready
-                    match tokio::time::timeout(
-                        tokio::time::Duration::from_secs(5),
-                        ready_subscription.recv(),
-                    )
-                    .await
-                    {
-                        Ok(Ok(_event)) => {
-                            tracing::info!("Metrics aggregator is ready");
-                        }
-                        Ok(Err(e)) => {
-                            return Err(format!("Failed to receive metrics ready event: {}", e).into());
-                        }
-                        Err(_) => {
-                            return Err("Timeout waiting for metrics aggregator to be ready".into());
+                    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
+                    loop {
+                        match tokio::time::timeout_at(deadline, ready_subscription.recv()).await {
+                            Ok(Ok(event)) => {
+                                // Check if this is the metrics ready event
+                                if event.event.event_type == ChainEvent::SYSTEM_METRICS_READY {
+                                    tracing::info!("Metrics aggregator is ready");
+                                    break;
+                                }
+                                // Otherwise continue waiting for the right event
+                            }
+                            Ok(Err(e)) => {
+                                return Err(format!("Failed to receive metrics ready event: {}", e).into());
+                            }
+                            Err(_) => {
+                                return Err("Timeout waiting for metrics aggregator to be ready".into());
+                            }
                         }
                     }
                 } else {
-                    tracing::warn!("No metrics exporter configured in pipeline context");
+                    tracing::warn!("No metrics exporter or metrics journal configured in pipeline context");
                 }
             }
             
@@ -340,57 +341,44 @@ impl FsmAction for PipelineAction {
                 );
                 
                 context.journal
-                    .append(&writer_id, drain_event, None)
+                    .write_control_event(drain_event)
                     .await
                     .map_err(|e| format!("Failed to publish drain event: {}", e))?;
                 
                 // 2. Subscribe and wait for drain completion event
                 let mut subscription = context.journal
-                    .subscribe(crate::messaging::SubscriptionFilter::EventTypes {
-                        event_types: vec![ChainEvent::SYSTEM_METRICS_DRAINED.to_string()],
-                    })
+                    .subscribe()
                     .await
                     .map_err(|e| format!("Failed to subscribe for drain completion: {}", e))?;
                 
-                match tokio::time::timeout(
-                    tokio::time::Duration::from_secs(30),
-                    subscription.recv(),
-                )
-                .await
-                {
-                    Ok(Ok(event)) => {
-                        if event.event.event_type == ChainEvent::SYSTEM_METRICS_DRAINED {
-                            tracing::info!("Metrics successfully drained");
-                        } else {
-                            return Err(format!("Expected metrics drained event, got: {}", event.event.event_type).into());
+                // Wait for the specific drain completion event
+                let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(30);
+                loop {
+                    match tokio::time::timeout_at(deadline, subscription.recv()).await {
+                        Ok(Ok(event)) => {
+                            if event.event.event_type == ChainEvent::SYSTEM_METRICS_DRAINED {
+                                tracing::info!("Metrics successfully drained");
+                                break;
+                            }
+                            // Otherwise continue waiting for the right event
                         }
+                        Ok(Err(e)) => return Err(format!("Failed to receive drain completion: {}", e).into()),
+                        Err(_) => return Err("Metrics drain timeout".into()),
                     }
-                    Ok(Err(e)) => return Err(format!("Failed to receive drain completion: {}", e).into()),
-                    Err(_) => return Err("Metrics drain timeout".into()),
                 }
             }
             
             PipelineAction::StartCompletionSubscription => {
-                // Create subscription for ALL system stage control events AND pipeline events
-                let filter = crate::messaging::reactive_journal::SubscriptionFilter::EventTypes {
-                    event_types: vec![
-                        ChainEvent::SYSTEM_STAGE_RUNNING.to_string(),
-                        ChainEvent::SYSTEM_STAGE_DRAINING.to_string(), 
-                        ChainEvent::SYSTEM_STAGE_DRAINED.to_string(),
-                        ChainEvent::SYSTEM_STAGE_COMPLETED.to_string(),
-                        ChainEvent::SYSTEM_STAGE_FAILED.to_string(),
-                        ChainEvent::SYSTEM_PIPELINE_ALL_STAGES_COMPLETED.to_string(),
-                    ],
-                };
-                
+                // Create subscription to control journal - will receive ALL control events
+                // The new architecture (FLOWIP-008) doesn't filter at subscription time
                 let subscription = context.journal
-                    .subscribe(filter)
+                    .subscribe()
                     .await
                     .map_err(|e| format!("Failed to create control subscription: {:?}", e))?;
                 
                 *context.completion_subscription.write().await = Some(subscription);
                 
-                tracing::info!("Started subscription for stage and pipeline events");
+                tracing::info!("Started subscription for control journal events");
             }
             
             PipelineAction::ProcessCompletionEvents => {

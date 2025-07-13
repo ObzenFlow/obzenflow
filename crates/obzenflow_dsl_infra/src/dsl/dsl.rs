@@ -9,7 +9,7 @@ macro_rules! flow {
     // Pattern with explicit flow name
     {
         name: $flow_name:literal,
-        journal: $journal:expr,
+        journals: $journals:expr,
         middleware: [$($flow_mw:expr),*],
         
         stages: {
@@ -26,7 +26,7 @@ macro_rules! flow {
             use std::sync::Arc;
             use std::collections::HashMap;
             
-            let journal = $journal;
+            let journals = $journals;
             
             // Create stages
             let mut stages: HashMap<String, Box<dyn StageDescriptor>> = HashMap::new();
@@ -46,13 +46,13 @@ macro_rules! flow {
             )*
             
             // Build the flow
-            $crate::build_typed_flow!($flow_name, journal, stages, connections, [$($flow_mw),*])
+            $crate::build_typed_flow!($flow_name, $journals, stages, connections, [$($flow_mw),*])
         }
     }};
     
     // Pattern without explicit flow name (uses "default")
     {
-        journal: $journal:expr,
+        journals: $journals:expr,
         middleware: [$($flow_mw:expr),*],
         
         stages: {
@@ -69,7 +69,7 @@ macro_rules! flow {
             use std::sync::Arc;
             use std::collections::HashMap;
             
-            let journal = $journal;
+            let journals = $journals;
             
             // Create stages
             let mut stages: HashMap<String, Box<dyn StageDescriptor>> = HashMap::new();
@@ -89,7 +89,7 @@ macro_rules! flow {
             )*
             
             // Build the flow with default name
-            $crate::build_typed_flow!("default", journal, stages, connections, [$($flow_mw),*])
+            $crate::build_typed_flow!("default", $journals, stages, connections, [$($flow_mw),*])
         }
     }};
 }
@@ -97,12 +97,12 @@ macro_rules! flow {
 /// Build the actual flow from collected stages and connections
 #[macro_export]
 macro_rules! build_typed_flow {
-    ($flow_name:expr, $journal:expr, $stages:expr, $connections:expr, [$($flow_mw:expr),*]) => {{
+    ($flow_name:expr, $journals:expr, $stages:expr, $connections:expr, [$($flow_mw:expr),*]) => {{
         use $crate::prelude::*;
         use std::sync::Arc;
         use std::collections::HashMap;
         
-        let journal = $journal;
+        let journal_factory_provider = $journals;
         let stages = $stages;
         let connections = $connections;
         
@@ -132,65 +132,53 @@ macro_rules! build_typed_flow {
             .map_err(|e| format!("Failed to build topology: {:?}", e))?);
         
         // Create services
-        use obzenflow_runtime_services::messaging::reactive_journal::ReactiveJournal;
-        use obzenflow_runtime_services::message_bus::FsmMessageBus;
         use obzenflow_runtime_services::pipeline::config::StageConfig;
-        use $crate::dsl::stage_descriptor::StageResources;
         use obzenflow_runtime_services::metrics::DefaultMetricsConfig;
-        use obzenflow_core::metrics::MetricsExporter;
-        use std::sync::Mutex;
+        use obzenflow_core::{PipelineId, FlowId};
+        use obzenflow_adapters::monitoring::exporters::MetricsExporterBuilder;
         
-        // Wire metrics if enabled
-        let (reactive_journal, metrics_exporter) = {
-            let metrics_config = DefaultMetricsConfig::default();
-            let journal = Arc::new(ReactiveJournal::new(journal.clone()));
-            let mut metrics_exporter = None;
-            
-            if metrics_config.is_enabled() {
-                // Use clean PrometheusExporter - no blocking observer!
-                use obzenflow_adapters::monitoring::exporters::PrometheusExporter;
-                
-                let exporter = Arc::new(PrometheusExporter::new());
-                tracing::info!("Created metrics exporter at {:p}", Arc::as_ptr(&exporter));
-                let exporter_dyn: Arc<dyn MetricsExporter> = exporter.clone();
-                metrics_exporter = Some(exporter_dyn.clone());
-                
-                // Metrics aggregator is now started by the pipeline supervisor
-                // No need to create it here
-                
-                // TODO: Wire InfraMetricsObserver when ReactiveJournal supports it
-                // The InfraMetricsObserver exists in runtime_services but needs
-                // a hook in ReactiveJournal to measure write latency without
-                // going through the journal (observer paradox).
-                // 
-                // if metrics_config.collect_infra_metrics {
-                //     use obzenflow_runtime_services::metrics::InfraMetricsObserver;
-                //     let observer = InfraMetricsObserver::new();
-                //     // Need: journal.with_infra_observer(observer, exporter);
-                // }
-            }
-            
-            (journal, metrics_exporter)
+        // Create stage-local journals using the builder pattern (FLOWIP-008)
+        let flow_id = FlowId::new();
+        let pipeline_id = PipelineId::new();
+        
+        // Get the journal factory for this specific flow
+        let journal_factory = journal_factory_provider(flow_id.clone());
+        
+        // Use StageResourcesBuilder to handle all the complex wiring
+        use obzenflow_runtime_services::stages::resources_builder::StageResourcesBuilder;
+        
+        let resources_builder = StageResourcesBuilder::new(
+            flow_id.clone(),
+            pipeline_id.clone(),
+            topology.clone(),
+            journal_factory,
+        );
+        
+        let stage_resources_set = resources_builder.build()
+            .map_err(|e| format!("Failed to build stage resources: {:?}", e))?;
+        
+        // Create metrics exporter using the builder pattern
+        let metrics_exporter = if DefaultMetricsConfig::default().is_enabled() {
+            Some(MetricsExporterBuilder::from_env().build())
+        } else {
+            None
         };
-        let message_bus = Arc::new(FsmMessageBus::new());
         
-        // Create stage supervisors
+        // Create stage supervisors using resources from StageResourcesBuilder
         let mut stages = Vec::new();
+        let mut stage_resources = stage_resources_set.stage_resources;
+        
         for (name, id) in name_to_id {
             if let Some(descriptor) = descriptors.remove(&name) {
-                let upstream_stages = topology.upstream_stages(id);
-                
                 let config = StageConfig {
                     stage_id: id,
                     name: descriptor.name().to_string(),
                     flow_name: $flow_name.to_string(),
                 };
                 
-                let resources = StageResources {
-                    journal: reactive_journal.clone(),
-                    message_bus: message_bus.clone(),
-                    upstream_stages,
-                };
+                // Get the pre-built resources for this stage
+                let resources = stage_resources.remove(&id)
+                    .ok_or_else(|| format!("No resources found for stage {:?}", id))?;
                 
                 let handle = descriptor.create_handle(config, resources).await
                     .map_err(|e| format!("Failed to create stage '{}': {}", name, e))?;
@@ -202,8 +190,9 @@ macro_rules! build_typed_flow {
         use $crate::prelude::{PipelineBuilder, FlowHandle};
         use obzenflow_runtime_services::supervised_base::SupervisorBuilder;
         
-        let builder = PipelineBuilder::new(topology.clone(), reactive_journal.clone())
-            .with_stages(stages);
+        let builder = PipelineBuilder::new(topology.clone(), Arc::new(stage_resources_set.pipeline_journal))
+            .with_stages(stages)
+            .with_metrics_journal(Arc::new(stage_resources_set.metrics_journal));
         
         let builder = if let Some(exporter) = metrics_exporter {
             builder.with_metrics(exporter)

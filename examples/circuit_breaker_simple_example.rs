@@ -13,7 +13,7 @@ use obzenflow_dsl_infra::{flow, source, transform, sink};
 use obzenflow_runtime_services::stages::common::handlers::{
     FiniteSourceHandler, TransformHandler, SinkHandler
 };
-use obzenflow_infra::journal::memory::MemoryJournal;
+use obzenflow_infra::journal::memory_journals;
 use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::event_id::EventId;
 use obzenflow_core::journal::writer_id::WriterId;
@@ -223,13 +223,11 @@ async fn main() -> Result<()> {
 }
 
 async fn basic_circuit_breaker() -> Result<()> {
-    let journal = Arc::new(MemoryJournal::new());
-    
     info!("Running basic circuit breaker demo with 200 requests...");
     info!("Circuit breaker will open after 5 consecutive failures");
     
     let handle = flow! {
-        journal: journal,
+        journals: memory_journals(),
         middleware: [],
         
         stages: {
@@ -258,13 +256,11 @@ async fn basic_circuit_breaker() -> Result<()> {
 }
 
 async fn custom_threshold_circuit_breaker() -> Result<()> {
-    let journal = Arc::new(MemoryJournal::new());
-    
     info!("Running custom threshold demo with 300 requests...");
     info!("Circuit breaker will open after only 3 consecutive failures");
     
     let handle = flow! {
-        journal: journal,
+        journals: memory_journals(),
         middleware: [],
         
         stages: {
@@ -292,13 +288,11 @@ async fn custom_threshold_circuit_breaker() -> Result<()> {
 }
 
 async fn custom_cooldown_circuit_breaker() -> Result<()> {
-    let journal = Arc::new(MemoryJournal::new());
-    
     info!("Running custom cooldown demo with 150 requests...");
     info!("Circuit breaker will use 30 second cooldown period");
     
     let handle = flow! {
-        journal: journal,
+        journals: memory_journals(),
         middleware: [],
         
         stages: {

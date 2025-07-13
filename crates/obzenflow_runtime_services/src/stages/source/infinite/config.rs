@@ -1,6 +1,6 @@
 //! Configuration for infinite source stages
 
-use obzenflow_topology_services::stages::StageId;
+use obzenflow_core::StageId;
 
 /// Configuration for an infinite source stage
 #[derive(Clone, Debug)]

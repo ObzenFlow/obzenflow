@@ -69,14 +69,12 @@ impl SupervisorBuilder for MetricsAggregatorBuilder {
     
     async fn build(self) -> Result<Self::Handle, Self::Error> {
         // Register writer with journal
-        let stage_id = obzenflow_topology_services::stages::StageId::new();
+        let stage_id = obzenflow_core::StageId::new();
         let writer_id = if let Some(id) = self.writer_id {
             id
         } else {
-            self.reactive_journal
-                .register_writer(stage_id, None)
-                .await
-                .map_err(|e| BuilderError::WriterRegistrationError(format!("Failed to register writer: {}", e)))?
+            // In the new architecture, ReactiveJournal already has its writer_id
+            self.reactive_journal.writer_id.clone()
         };
         
         // Create metrics context with all mutable state

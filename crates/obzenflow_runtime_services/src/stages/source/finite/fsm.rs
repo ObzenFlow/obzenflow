@@ -218,7 +218,7 @@ pub struct FiniteSourceContext<H: FiniteSourceHandler> {
     pub handler: Arc<RwLock<H>>,
     
     /// This source's stage ID
-    pub stage_id: obzenflow_topology_services::stages::StageId,
+    pub stage_id: obzenflow_core::StageId,
     
     /// Human-readable stage name for logging
     pub stage_name: String,
@@ -239,7 +239,7 @@ pub struct FiniteSourceContext<H: FiniteSourceHandler> {
 impl<H: FiniteSourceHandler> FiniteSourceContext<H> {
     pub fn new(
         handler: H,
-        stage_id: obzenflow_topology_services::stages::StageId,
+        stage_id: obzenflow_core::StageId,
         stage_name: String,
         flow_name: String,
         journal: Arc<crate::messaging::reactive_journal::ReactiveJournal>,
@@ -297,12 +297,9 @@ impl<H: FiniteSourceHandler + Send + Sync + 'static> FsmAction for FiniteSourceA
     async fn execute(&self, ctx: &Self::Context) -> Result<(), String> {
         match self {
             FiniteSourceAction::AllocateResources => {
-                // Register writer ID with journal
-                let writer_id = ctx.journal
-                    .register_writer(ctx.stage_id, None)
-                    .await
-                    .map_err(|e| format!("Failed to register writer: {}", e))?;
-                
+                // In the new architecture, ReactiveJournal already has its writer_id
+                // Just get it from the journal
+                let writer_id = ctx.journal.writer_id.clone();
                 *ctx.writer_id.write().await = Some(writer_id);
                 
                 tracing::info!(
@@ -330,7 +327,7 @@ impl<H: FiniteSourceHandler + Send + Sync + 'static> FsmAction for FiniteSourceA
                 );
                 
                 ctx.journal
-                    .append(writer_id, eof_event, None)
+                    .write(eof_event, None)
                     .await
                     .map_err(|e| format!("Failed to send EOF: {}", e))?;
                 
@@ -360,7 +357,7 @@ impl<H: FiniteSourceHandler + Send + Sync + 'static> FsmAction for FiniteSourceA
                 );
                 
                 ctx.journal
-                    .append(writer_id, error_event, None)
+                    .write_control_event(error_event)
                     .await
                     .map_err(|e| format!("Failed to send error event: {}", e))?;
                 
@@ -398,7 +395,7 @@ impl<H: FiniteSourceHandler + Send + Sync + 'static> FsmAction for FiniteSourceA
                 };
                 
                 ctx.journal
-                    .append(writer_id, completion_event, None)
+                    .write_control_event(completion_event)
                     .await
                     .map_err(|e| format!("Failed to send completion event: {}", e))?;
                 

@@ -1,6 +1,6 @@
 //! Configuration for transform stages
 
-use obzenflow_topology_services::stages::StageId;
+use obzenflow_core::StageId;
 use crate::stages::common::control_strategies::ControlEventStrategy;
 use std::sync::Arc;
 

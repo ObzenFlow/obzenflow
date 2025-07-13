@@ -1,14 +1,12 @@
-//! Metrics observation traits for the core domain
+//! Metrics traits and types for the core domain
 //!
-//! This module defines the abstract interface for observing events
-//! for metrics collection, following the Observer pattern.
+//! This module defines abstract interfaces for metrics collection
+//! and export, using the wide events approach from FLOWIP-056c.
 
 pub mod observer;
 pub mod exporter;
 pub mod snapshots;
 pub mod primitives;
-
-pub use observer::{MetricsObserver, NoOpMetricsObserver};
 pub use exporter::{MetricsExporter, NoOpMetricsExporter};
 pub use snapshots::{
     AppMetricsSnapshot, InfraMetricsSnapshot, HistogramSnapshot,

@@ -4,6 +4,8 @@
 //! reading from environment variables to allow runtime configuration.
 
 use std::env;
+use std::sync::Arc;
+use obzenflow_core::metrics::MetricsExporter;
 
 /// Default metrics configuration that reads from environment variables
 #[derive(Debug, Clone, PartialEq, Eq)]

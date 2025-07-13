@@ -33,21 +33,15 @@ use obzenflow_adapters::middleware::{
     OutcomeEnrichmentMiddleware,
 };
 use obzenflow_core::{journal::writer_id::WriterId, event::event_envelope::EventEnvelope};
-use obzenflow_topology_services::stages::StageId;
+use obzenflow_core::StageId;
 use obzenflow_runtime_services::{
     messaging::reactive_journal::ReactiveJournal,
     message_bus::FsmMessageBus,
+    stages::StageResources,
 };
 use crate::stage_handle_adapter::StageHandleAdapter;
 use std::sync::Arc;
 use async_trait::async_trait;
-
-/// Resources provided to stage creation
-pub struct StageResources {
-    pub journal: Arc<ReactiveJournal>,
-    pub message_bus: Arc<FsmMessageBus>,
-    pub upstream_stages: Vec<StageId>,
-}
 
 /// Create system middleware for a stage
 fn create_system_middleware(config: &StageConfig, stage_type: obzenflow_core::event::flow_context::StageType) -> Vec<Box<dyn Middleware>> {

@@ -8,9 +8,7 @@ use obzenflow_fsm::FsmBuilder;
 use serde_json::json;
 use std::sync::Arc;
 
-use crate::messaging::reactive_journal::{
-    ReactiveJournal, SubscriptionFilter,
-};
+use crate::messaging::reactive_journal::ReactiveJournal;
 use crate::supervised_base::{EventLoopDirective, SelfSupervised};
 use crate::supervised_base::base::Supervisor;
 
@@ -217,8 +215,8 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
     ) -> Result<EventLoopDirective<Self::Event>, Box<dyn std::error::Error + Send + Sync>> {
         match state {
             MetricsAggregatorState::Initializing => {
-                // Subscribe to all events
-                let subscription = self.subscribe(SubscriptionFilter::All).await?;
+                // Subscribe to journal - will receive all events
+                let subscription = self.subscribe().await?;
                 *self.context.subscription.write().await = Some(subscription);
 
                 // Publish ready event

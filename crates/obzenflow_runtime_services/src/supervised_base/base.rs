@@ -4,9 +4,9 @@
 //! and handler-supervised state machine implementations.
 
 use crate::messaging::reactive_journal::{
-    JournalSubscription, ReactiveJournal, SubscriptionFilter,
+    JournalSubscription, ReactiveJournal,
 };
-use obzenflow_core::{ChainEvent, EventId, Journal, WriterId};
+use obzenflow_core::{ChainEvent, EventId, WriterId};
 use obzenflow_fsm::{EventVariant, FsmAction, FsmContext, StateVariant};
 use serde_json::json;
 use std::sync::Arc;
@@ -72,7 +72,7 @@ pub trait Supervisor: private::Sealed {
         );
 
         self.journal()
-            .append(self.writer_id(), event, None)
+            .write(event, None)
             .await
             .map(|_| ())
             .map_err(|e| format!("Failed to write event: {}", e).into())
@@ -96,10 +96,9 @@ pub trait Supervisor: private::Sealed {
     /// Subscribe to journal events
     async fn subscribe(
         &self,
-        filter: SubscriptionFilter,
     ) -> Result<JournalSubscription, Box<dyn std::error::Error + Send + Sync>> {
         self.journal()
-            .subscribe(filter)
+            .subscribe()
             .await
             .map_err(|e| format!("Failed to subscribe: {}", e).into())
     }

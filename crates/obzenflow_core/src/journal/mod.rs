@@ -5,4 +5,5 @@
 
 pub mod journal;
 pub mod journal_error;
+pub mod journal_owner;
 pub mod writer_id;

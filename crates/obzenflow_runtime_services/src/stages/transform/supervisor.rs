@@ -4,7 +4,7 @@ use std::sync::Arc;
 use obzenflow_core::{WriterId, Journal, ChainEvent, EventEnvelope};
 use obzenflow_core::event::flow_context::FlowContext;
 use obzenflow_fsm::{FsmBuilder, Transition};
-use obzenflow_topology_services::stages::StageId;
+use obzenflow_core::StageId;
 
 use crate::messaging::reactive_journal::ReactiveJournal;
 use crate::stages::common::handlers::TransformHandler;
@@ -266,22 +266,19 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Hand
                                     // Process normal data event
                                     let transformed_events = self.context.handler.process(envelope.event.clone());
                                     
-                                    // Write transformed events
-                                    let writer_id_guard = self.context.writer_id.read().await;
-                                    if let Some(writer_id) = writer_id_guard.as_ref() {
-                                        for mut event in transformed_events {
-                                            // Add flow context
-                                            event.flow_context = FlowContext {
-                                                flow_name: self.context.flow_name.clone(),
-                                                flow_id: format!("{}-{}", self.context.flow_name, self.context.stage_id),
-                                                stage_name: self.context.stage_name.clone(),
-                                                stage_type: obzenflow_core::event::flow_context::StageType::Transform,
-                                            };
-                                            
-                                            self.context.journal
-                                                .append(writer_id, event, Some(&envelope))
-                                                .await?;
-                                        }
+                                    // Write transformed events using new journal.write() API
+                                    for mut event in transformed_events {
+                                        // Add flow context
+                                        event.flow_context = FlowContext {
+                                            flow_name: self.context.flow_name.clone(),
+                                            flow_id: format!("{}-{}", self.context.flow_name, self.context.stage_id),
+                                            stage_name: self.context.stage_name.clone(),
+                                            stage_type: obzenflow_core::event::flow_context::StageType::Transform,
+                                        };
+                                        
+                                        self.context.journal
+                                            .write(event, Some(&envelope))
+                                            .await?;
                                     }
                                 }
                         }
@@ -324,20 +321,18 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Hand
                             if !envelope.event.is_control() {
                                 let transformed_events = self.context.handler.process(envelope.event.clone());
                                 
-                                let writer_id_guard = self.context.writer_id.read().await;
-                                if let Some(writer_id) = writer_id_guard.as_ref() {
-                                    for mut event in transformed_events {
-                                        event.flow_context = FlowContext {
-                                            flow_name: self.context.flow_name.clone(),
-                                            flow_id: format!("{}-{}", self.context.flow_name, self.context.stage_id),
-                                            stage_name: self.context.stage_name.clone(),
-                                            stage_type: obzenflow_core::event::flow_context::StageType::Transform,
-                                        };
-                                        
-                                        self.context.journal
-                                            .append(writer_id, event, Some(&envelope))
-                                            .await?;
-                                    }
+                                // Write transformed events using new journal.write() API
+                                for mut event in transformed_events {
+                                    event.flow_context = FlowContext {
+                                        flow_name: self.context.flow_name.clone(),
+                                        flow_id: format!("{}-{}", self.context.flow_name, self.context.stage_id),
+                                        stage_name: self.context.stage_name.clone(),
+                                        stage_type: obzenflow_core::event::flow_context::StageType::Transform,
+                                    };
+                                    
+                                    self.context.journal
+                                        .write(event, Some(&envelope))
+                                        .await?;
                                 }
                             }
                             Ok(EventLoopDirective::Continue)
@@ -382,7 +377,7 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Tran
         if let Some(writer_id) = writer_id_guard.as_ref() {
             let forward_event = envelope.event.clone();
             self.context.journal
-                .write(writer_id, forward_event, Some(envelope))
+                .write(forward_event, Some(envelope))
                 .await?;
         }
         Ok(())

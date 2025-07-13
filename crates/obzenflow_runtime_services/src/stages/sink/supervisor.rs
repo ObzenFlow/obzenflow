@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use obzenflow_core::{WriterId, ChainEvent};
 use obzenflow_fsm::{FsmBuilder, Transition};
-use obzenflow_topology_services::stages::StageId;
+use obzenflow_core::StageId;
 
 use crate::messaging::reactive_journal::ReactiveJournal;
 use crate::stages::common::handlers::SinkHandler;

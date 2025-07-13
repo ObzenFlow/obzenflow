@@ -4,7 +4,7 @@ use std::sync::Arc;
 use obzenflow_core::{WriterId, Journal};
 use obzenflow_core::event::flow_context::FlowContext;
 use obzenflow_fsm::{FsmBuilder, Transition};
-use obzenflow_topology_services::stages::StageId;
+use obzenflow_core::StageId;
 
 use crate::messaging::reactive_journal::ReactiveJournal;
 use crate::stages::common::handlers::InfiniteSourceHandler;
@@ -207,15 +207,9 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
                         stage_type: obzenflow_core::event::flow_context::StageType::Source,
                     };
                     
-                    // Get writer ID
-                    let writer_id_guard = self.context.writer_id.read().await;
-                    let writer_id = writer_id_guard
-                        .as_ref()
-                        .ok_or("No writer ID available")?;
-                    
-                    // Write event to journal
+                    // Write event to journal using new journal.write() API
                     self.context.journal
-                        .append(writer_id, event, None)
+                        .write(event, None)
                         .await?;
                     
                     tracing::trace!(

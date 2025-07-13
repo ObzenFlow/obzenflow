@@ -3,6 +3,7 @@ use crate::event::event_envelope::EventEnvelope;
 use crate::event::event_id::EventId;
 use super::writer_id::WriterId;
 use super::journal_error::JournalError;
+use super::journal_owner::JournalOwner;
 
 use async_trait::async_trait;
 
@@ -11,6 +12,9 @@ use async_trait::async_trait;
 /// Infrastructure will implement this trait with actual storage
 #[async_trait]
 pub trait Journal: Send + Sync {
+    /// Get the owner of this journal (if any)
+    fn owner(&self) -> Option<&JournalOwner>;
+    
     /// Append an event to the journal
     ///
     /// The implementation MUST:

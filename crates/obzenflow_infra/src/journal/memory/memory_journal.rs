@@ -5,6 +5,7 @@
 
 use obzenflow_core::journal::journal::Journal;
 use obzenflow_core::journal::journal_error::JournalError;
+use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::event_envelope::EventEnvelope;
 use obzenflow_core::event::event_id::EventId;
@@ -18,14 +19,25 @@ use chrono::Utc;
 /// In-memory journal for testing
 #[derive(Clone)]
 pub struct MemoryJournal {
+    owner: Option<JournalOwner>,
     events: Arc<Mutex<Vec<EventEnvelope>>>,
     vector_clocks: Arc<Mutex<HashMap<WriterId, VectorClock>>>,
 }
 
 impl MemoryJournal {
-    /// Create a new in-memory journal
+    /// Create a new in-memory journal without an owner
     pub fn new() -> Self {
         Self {
+            owner: None,
+            events: Arc::new(Mutex::new(Vec::new())),
+            vector_clocks: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    /// Create a new in-memory journal with specified owner
+    pub fn with_owner(owner: JournalOwner) -> Self {
+        Self {
+            owner: Some(owner),
             events: Arc::new(Mutex::new(Vec::new())),
             vector_clocks: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -44,12 +56,23 @@ impl MemoryJournal {
 
 #[async_trait]
 impl Journal for MemoryJournal {
+    fn owner(&self) -> Option<&JournalOwner> {
+        self.owner.as_ref()
+    }
+
     async fn append(
         &self,  // Note: &self, not &mut self
         writer_id: &WriterId,
         event: ChainEvent,
         parent: Option<&EventEnvelope>
     ) -> Result<EventEnvelope, JournalError> {
+        // Safety check: Ensure journal has an owner before allowing writes
+        if self.owner.is_none() {
+            return Err(JournalError::Implementation {
+                message: "Cannot write to an unowned journal. Journal must have an owner.".to_string(),
+                source: "Unowned journal write attempt".into(),
+            });
+        }
         let mut clocks = self.vector_clocks.lock().unwrap();
 
         // Get or create vector clock for this writer
@@ -130,7 +153,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_memory_journal_basic_operations() {
-        let journal = MemoryJournal::new();
+        // Create a test journal with a proper owner
+        let test_stage_id = obzenflow_core::StageId::new();
+        let owner = obzenflow_core::JournalOwner::stage(test_stage_id);
+        let journal = MemoryJournal::with_owner(owner);
         let writer1 = WriterId::new();
         let writer2 = WriterId::new();
 
@@ -189,7 +215,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_memory_journal_causal_ordering() {
-        let journal = MemoryJournal::new();
+        // Create a test journal with a proper owner
+        let test_pipeline_id = obzenflow_core::PipelineId::new();
+        let owner = obzenflow_core::JournalOwner::pipeline(test_pipeline_id);
+        let journal = MemoryJournal::with_owner(owner);
         let writer = WriterId::new();
 
         // Create a chain of events

@@ -3,4 +3,4 @@
 pub mod reactive_journal;
 
 // Re-export commonly used types
-pub use reactive_journal::{JournalSubscription, SubscriptionFilter};
+pub use reactive_journal::{JournalSubscription, ReactiveJournal, ReactiveJournalBuilder, JournalSet};

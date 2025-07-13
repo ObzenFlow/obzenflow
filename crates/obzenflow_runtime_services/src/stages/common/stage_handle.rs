@@ -3,7 +3,7 @@
 //! This trait defines the interface that all stage supervisors must implement
 //! so the Pipeline FSM can coordinate them properly.
 
-use obzenflow_topology_services::stages::StageId;
+use obzenflow_core::StageId;
 use std::fmt;
 
 /// Error type for stage operations

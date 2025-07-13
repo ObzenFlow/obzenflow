@@ -3,7 +3,7 @@
 //! Provides detailed error information with context for better debugging.
 
 use thiserror::Error;
-use obzenflow_topology_services::stages::StageId;
+use obzenflow_core::StageId;
 
 /// Errors that can occur in the message bus
 #[derive(Error, Debug)]

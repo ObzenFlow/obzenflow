@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use async_trait::async_trait;
 use obzenflow_runtime_services::stages::common::stage_handle::{StageHandle, StageEvent, StageError, StageType};
-use obzenflow_topology_services::stages::StageId;
+use obzenflow_core::StageId;
 use obzenflow_runtime_services::supervised_base::{SupervisorHandle, HandleError};
 
 /// Adapter that bridges generic StandardHandle to the StageHandle trait

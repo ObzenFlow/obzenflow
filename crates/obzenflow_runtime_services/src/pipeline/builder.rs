@@ -28,6 +28,7 @@ pub struct PipelineBuilder {
     reactive_journal: Arc<ReactiveJournal>,
     stages: Vec<BoxedStageHandle>,
     metrics_exporter: Option<Arc<dyn MetricsExporter>>,
+    metrics_journal: Option<Arc<ReactiveJournal>>,
 }
 
 impl PipelineBuilder {
@@ -38,6 +39,7 @@ impl PipelineBuilder {
             reactive_journal,
             stages: Vec::new(),
             metrics_exporter: None,
+            metrics_journal: None,
         }
     }
 
@@ -52,6 +54,12 @@ impl PipelineBuilder {
         self.metrics_exporter = Some(exporter);
         self
     }
+
+    /// Add metrics journal (for metrics aggregator to read from all stage journals)
+    pub fn with_metrics_journal(mut self, journal: Arc<ReactiveJournal>) -> Self {
+        self.metrics_journal = Some(journal);
+        self
+    }
 }
 
 #[async_trait::async_trait]
@@ -63,11 +71,8 @@ impl SupervisorBuilder for PipelineBuilder {
     async fn build(self) -> Result<Self::Handle, Self::Error> {
         // Register as a writer first
         let stage_id = StageId::new();
-        let writer_id = self
-            .reactive_journal
-            .register_writer(stage_id, None)
-            .await
-            .map_err(|e| BuilderError::WriterRegistrationError(format!("Failed to register writer: {}", e)))?;
+        // In the new architecture, ReactiveJournal already has its writer_id
+        let writer_id = self.reactive_journal.writer_id.clone();
 
         // Create message bus
         let message_bus = Arc::new(FsmMessageBus::new());
@@ -89,6 +94,7 @@ impl SupervisorBuilder for PipelineBuilder {
             stage_supervisors: Arc::new(RwLock::new(stage_map)),
             completion_subscription: Arc::new(RwLock::new(None)),
             metrics_exporter: self.metrics_exporter.clone(),
+            metrics_journal: self.metrics_journal.clone(),
             writer_id: writer_id.clone(),
         });
 

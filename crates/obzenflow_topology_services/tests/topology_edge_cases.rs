@@ -1,6 +1,6 @@
 use obzenflow_topology_services::builder::TopologyBuilder;
 use obzenflow_topology_services::validation::TopologyError;
-use obzenflow_topology_services::stages::StageId;
+use obzenflow_core::StageId;
 
 #[test]
 fn test_empty_topology() {
