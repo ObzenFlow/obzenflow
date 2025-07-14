@@ -1,7 +1,7 @@
-//! Rate limiting middleware with control strategy integration
+//! Rate limiting middleware with blocking implementation
 //!
-//! This middleware demonstrates how rate limiting can use delay strategies
-//! to ensure rate limits are respected even during shutdown.
+//! This middleware implements a blocking rate limiter that creates natural
+//! backpressure by blocking when out of tokens, ensuring no events are lost.
 
 use crate::middleware::{
     Middleware, MiddlewareFactory, MiddlewareAction, MiddlewareContext,
@@ -12,8 +12,8 @@ use obzenflow_runtime_services::pipeline::config::StageConfig;
 use obzenflow_runtime_services::stages::common::stage_handle::StageType;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use std::collections::VecDeque;
 use serde_json::json;
+use tracing::{debug, trace, info};
 
 /// Token bucket rate limiter implementation
 #[derive(Debug)]
@@ -64,10 +64,14 @@ impl TokenBucket {
     fn try_consume(&mut self, tokens: f64) -> bool {
         self.refill();
         
+        trace!("try_consume: requested={}, available={}, capacity={}", tokens, self.tokens, self.capacity);
+        
         if self.tokens >= tokens {
             self.tokens -= tokens;
+            trace!("try_consume: SUCCESS, remaining tokens={}", self.tokens);
             true
         } else {
+            trace!("try_consume: FAILED, insufficient tokens");
             false
         }
     }
@@ -91,8 +95,14 @@ impl TokenBucket {
         let elapsed = now.duration_since(self.last_refill);
         
         let tokens_to_add = elapsed.as_secs_f64() * self.refill_rate;
+        let old_tokens = self.tokens;
         self.tokens = (self.tokens + tokens_to_add).min(self.capacity);
         self.last_refill = now;
+        
+        if tokens_to_add > 0.0 {
+            trace!("refill: elapsed={:?}, added={}, old={}, new={}", 
+                elapsed, tokens_to_add, old_tokens, self.tokens);
+        }
     }
     
     /// Get current token count (for monitoring)
@@ -122,11 +132,9 @@ impl TokenBucket {
     }
 }
 
-/// Rate limiting middleware using token bucket algorithm
+/// Rate limiting middleware using token bucket algorithm with blocking
 pub struct RateLimiterMiddleware {
     bucket: Arc<Mutex<TokenBucket>>,
-    /// Events that were delayed and need to be emitted
-    delayed_events: Arc<Mutex<VecDeque<ChainEvent>>>,
     /// Cost per event (default 1.0)
     cost_per_event: f64,
     /// Statistics for periodic summaries
@@ -135,12 +143,20 @@ pub struct RateLimiterMiddleware {
 
 impl RateLimiterMiddleware {
     fn new(events_per_second: f64, burst_capacity: Option<f64>, cost_per_event: f64) -> Self {
-        let capacity = burst_capacity.unwrap_or(events_per_second);
+        // For very low rates, ensure we have at least 1 token capacity
+        let capacity = burst_capacity.unwrap_or(events_per_second.max(1.0));
         let bucket = TokenBucket::new(capacity, events_per_second);
+        
+        info!(
+            events_per_second,
+            burst_capacity = capacity,
+            cost_per_event,
+            initial_tokens = capacity,
+            "Created rate limiter middleware"
+        );
         
         Self {
             bucket: Arc::new(Mutex::new(bucket)),
-            delayed_events: Arc::new(Mutex::new(VecDeque::new())),
             cost_per_event,
             stats: Arc::new(Mutex::new(RateLimiterStats {
                 requests_allowed: 0,
@@ -151,28 +167,6 @@ impl RateLimiterMiddleware {
         }
     }
     
-    /// Check and emit any delayed events that can now be processed
-    fn emit_delayed_events(&self, ctx: &mut MiddlewareContext) -> Vec<ChainEvent> {
-        let mut result = Vec::new();
-        let mut delayed = self.delayed_events.lock().unwrap();
-        let mut bucket = self.bucket.lock().unwrap();
-        
-        // Try to emit as many delayed events as possible
-        while let Some(_) = delayed.front() {
-            if bucket.try_consume(self.cost_per_event) {
-                let event = delayed.pop_front().unwrap();
-                let event_type = event.event_type.clone();
-                result.push(event);
-                ctx.emit_event("rate_limiter", "delayed_event_released", json!({
-                    "event_type": event_type,
-                }));
-            } else {
-                break; // No more tokens available
-            }
-        }
-        
-        result
-    }
     
     /// Check if we should emit a summary and do so if needed
     fn maybe_emit_summary(&self, ctx: &mut MiddlewareContext) {
@@ -190,6 +184,18 @@ impl RateLimiterMiddleware {
                 0.0
             };
             
+            let utilization = 1.0 - (bucket.tokens / bucket.capacity);
+            
+            info!(
+                window_duration_s = stats.last_summary.elapsed().as_secs(),
+                requests_allowed = stats.requests_allowed,
+                requests_delayed = stats.requests_delayed,
+                tokens_consumed = stats.tokens_consumed,
+                consumption_rate,
+                utilization_pct = format!("{:.1}%", utilization * 100.0),
+                "Rate limiter summary"
+            );
+            
             ctx.write_control_event(ChainEvent::control(
                 ChainEvent::CONTROL_MIDDLEWARE_SUMMARY,
                 json!({
@@ -203,8 +209,7 @@ impl RateLimiterMiddleware {
                         "available_tokens": bucket.tokens,
                         "capacity": bucket.capacity,
                         "refill_rate": bucket.refill_rate,
-                        "utilization": 1.0 - (bucket.tokens / bucket.capacity),
-                        "delayed_queue_size": self.delayed_events.lock().unwrap().len()
+                        "utilization": utilization
                     }
                 })
             ));
@@ -220,75 +225,103 @@ impl RateLimiterMiddleware {
 
 impl Middleware for RateLimiterMiddleware {
     fn pre_handle(&self, event: &ChainEvent, ctx: &mut MiddlewareContext) -> MiddlewareAction {
-        // Always let control events through
+        // Always let control events through without blocking
         if event.is_control() {
-            // But first, try to flush delayed events
-            let released = self.emit_delayed_events(ctx);
-            if !released.is_empty() {
-                ctx.emit_event("rate_limiter", "flushing_before_control", json!({
-                    "released_count": released.len(),
-                    "control_type": &event.event_type,
-                }));
-                // Prepend released events before the control event
-                let mut all_events = released;
-                all_events.push(event.clone());
-                return MiddlewareAction::Skip(all_events);
-            }
+            trace!(event_id = %event.id, event_type = %event.event_type, "Control event bypassing rate limiter");
             return MiddlewareAction::Continue;
         }
         
-        // Check if we have tokens for this event
-        let mut bucket = self.bucket.lock().unwrap();
+        let event_id = event.id.clone();
+        let event_type = event.event_type.clone();
+        trace!(event_id = %event_id, event_type = %event_type, "Rate limiter processing event");
         
-        if bucket.try_consume(self.cost_per_event) {
-            // Track successful consumption
-            self.stats.lock().unwrap().requests_allowed += 1;
-            self.stats.lock().unwrap().tokens_consumed += self.cost_per_event;
+        // Blocking loop - wait until we have tokens
+        loop {
+            let mut bucket = self.bucket.lock().unwrap();
             
-            // Check for threshold crossing
-            if let Some((from, to)) = bucket.check_threshold_crossed() {
-                ctx.write_control_event(ChainEvent::control(
-                    ChainEvent::CONTROL_MIDDLEWARE_STATE,
-                    json!({
-                        "middleware": "rate_limiter",
-                        "state_transition": {
-                            "from": from,
-                            "to": to,
-                            "reason": if to == "exhausted" { 
-                                "rate_limit_approaching" 
-                            } else { 
-                                "rate_limit_recovered" 
-                            }
-                        },
-                        "available_tokens": bucket.tokens,
-                        "capacity": bucket.capacity,
-                        "consumption_rate": bucket.refill_rate,
-                        "timestamp": SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()
-                    })
-                ));
-            }
-            
-            // We have capacity - emit any delayed events first
-            drop(bucket); // Release lock
-            let mut released = self.emit_delayed_events(ctx);
-            
-            if released.is_empty() {
-                // No delayed events, just continue
+            if bucket.try_consume(self.cost_per_event) {
+                // Track successful consumption
+                self.stats.lock().unwrap().requests_allowed += 1;
+                self.stats.lock().unwrap().tokens_consumed += self.cost_per_event;
+                
+                let available = bucket.available_tokens();
+                debug!(
+                    event_id = %event_id,
+                    event_type = %event_type,
+                    available_tokens = available,
+                    cost = self.cost_per_event,
+                    "Rate limit passed - processing event immediately"
+                );
+                
+                // Check for threshold crossing
+                if let Some((from, to)) = bucket.check_threshold_crossed() {
+                    info!(
+                        from_state = from,
+                        to_state = to,
+                        available_tokens = bucket.tokens,
+                        capacity = bucket.capacity,
+                        "Rate limiter state transition"
+                    );
+                    
+                    ctx.write_control_event(ChainEvent::control(
+                        ChainEvent::CONTROL_MIDDLEWARE_STATE,
+                        json!({
+                            "middleware": "rate_limiter",
+                            "state_transition": {
+                                "from": from,
+                                "to": to,
+                                "reason": if to == "exhausted" { 
+                                    "rate_limit_approaching" 
+                                } else { 
+                                    "rate_limit_recovered" 
+                                }
+                            },
+                            "available_tokens": bucket.tokens,
+                            "capacity": bucket.capacity,
+                            "consumption_rate": bucket.refill_rate,
+                            "timestamp": SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()
+                        })
+                    ));
+                }
+                
+                // We have tokens, allow the event
                 ctx.emit_event("rate_limiter", "event_allowed", json!({
-                    "available_tokens": self.bucket.lock().unwrap().available_tokens(),
+                    "event_id": event_id.to_string(),
+                    "available_tokens": bucket.available_tokens(),
                 }));
-                MiddlewareAction::Continue
-            } else {
-                // Emit delayed events along with current event
-                released.push(event.clone());
-                MiddlewareAction::Skip(released)
+                
+                drop(bucket); // Release lock before returning
+                return MiddlewareAction::Continue;
             }
-        } else {
-            // Track delayed request
+            
+            // No tokens available - calculate wait time
+            let wait_time = bucket.time_until_available(self.cost_per_event)
+                .unwrap_or(Duration::from_millis(10));
+            
+            let available = bucket.available_tokens();
+            info!(
+                event_id = %event_id,
+                event_type = %event_type,
+                wait_ms = wait_time.as_millis(),
+                available_tokens = available,
+                needed_tokens = self.cost_per_event,
+                "Rate limited - blocking for {:?}",
+                wait_time
+            );
+            
+            // Track this as a delayed request
             self.stats.lock().unwrap().requests_delayed += 1;
             
             // Check for threshold crossing
             if let Some((from, to)) = bucket.check_threshold_crossed() {
+                info!(
+                    from_state = from,
+                    to_state = to,
+                    available_tokens = bucket.tokens,
+                    capacity = bucket.capacity,
+                    "Rate limiter state transition (exhausted)"
+                );
+                
                 ctx.write_control_event(ChainEvent::control(
                     ChainEvent::CONTROL_MIDDLEWARE_STATE,
                     json!({
@@ -306,22 +339,35 @@ impl Middleware for RateLimiterMiddleware {
                 ));
             }
             
-            // No tokens - delay this event
-            let wait_time = bucket.time_until_available(self.cost_per_event)
-                .unwrap_or(Duration::from_millis(100));
-            
-            ctx.emit_event("rate_limiter", "event_delayed", json!({
+            ctx.emit_event("rate_limiter", "event_blocked", json!({
+                "event_id": event_id.to_string(),
                 "wait_time_ms": wait_time.as_millis(),
                 "available_tokens": bucket.available_tokens(),
-                "delayed_queue_size": self.delayed_events.lock().unwrap().len() + 1,
             }));
             
-            // Add to delayed queue
-            drop(bucket); // Release lock
-            self.delayed_events.lock().unwrap().push_back(event.clone());
+            // Release lock before sleeping
+            drop(bucket);
             
-            // Skip this event for now
-            MiddlewareAction::Skip(vec![])
+            // Block until tokens should be available
+            // For longer waits, use block_in_place to avoid blocking tokio worker threads
+            if wait_time > Duration::from_millis(1) {
+                trace!(event_id = %event_id, "Using block_in_place for wait > 1ms");
+                tokio::task::block_in_place(|| {
+                    std::thread::sleep(wait_time);
+                });
+            } else {
+                // For very short waits, just yield to scheduler
+                trace!(event_id = %event_id, "Using yield_now for wait <= 1ms");
+                std::thread::yield_now();
+            }
+            
+            info!(
+                event_id = %event_id,
+                event_type = %event_type,
+                "Rate limit released - attempting to process event"
+            );
+            
+            // Loop back to try again
         }
     }
     
@@ -472,20 +518,8 @@ mod tests {
             }
         }
         
-        // 21st event should be delayed
-        let event = ChainEvent::new(
-            EventId::new(),
-            WriterId::new(),
-            "test.event",
-            json!({ "index": 20 }),
-        );
-        
-        match middleware.pre_handle(&event, &mut ctx) {
-            MiddlewareAction::Skip(events) => {
-                assert!(events.is_empty()); // Event was delayed
-            },
-            other => panic!("Expected Skip for 21st event, got {:?}", other),
-        }
+        // 21st event would block, but we can't easily test blocking in unit tests
+        // The blocking behavior is tested in integration tests
     }
     
     #[test]
@@ -504,7 +538,7 @@ mod tests {
         );
         middleware.pre_handle(&data_event, &mut ctx);
         
-        // Control event should still pass through
+        // Control event should still pass through without blocking
         let eof = ChainEvent::eof(EventId::new(), WriterId::new(), true);
         match middleware.pre_handle(&eof, &mut ctx) {
             MiddlewareAction::Continue => {},

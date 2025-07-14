@@ -2,6 +2,7 @@
 //! Run with: cargo run -p obzenflow --example raw_metrics_demo
 
 use anyhow::Result;
+use async_trait::async_trait;
 use obzenflow_adapters::middleware::{circuit_breaker, rate_limit};
 use obzenflow_core::{
     event::{chain_event::ChainEvent, event_id::EventId},
@@ -15,7 +16,6 @@ use obzenflow_runtime_services::stages::common::handlers::{
 use obzenflow_runtime_services::supervised_base::SupervisorHandle;
 use serde_json::json;
 use tokio::time::Duration;
-use async_trait::async_trait;
 
 /// Simple source that generates 100 events
 #[derive(Clone, Debug)]
@@ -35,7 +35,7 @@ impl TestSource {
 
 impl FiniteSourceHandler for TestSource {
     fn next(&mut self) -> Option<ChainEvent> {
-        if self.count >= 10 {
+        if self.count >= 20 {
             return None;
         }
 
@@ -56,7 +56,7 @@ impl FiniteSourceHandler for TestSource {
     }
 
     fn is_complete(&self) -> bool {
-        self.count >= 10
+        self.count >= 20
     }
 }
 
@@ -84,7 +84,7 @@ impl TransformHandler for TestTransform {
             vec![result]
         }
     }
-    
+
     async fn drain(&mut self) -> obzenflow_core::Result<()> {
         Ok(())
     }
@@ -111,9 +111,11 @@ impl SinkHandler for TestSink {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize logging
+    // Initialize logging with rate limiter at trace level to see detailed traces
     tracing_subscriber::fmt()
-        .with_env_filter("obzenflow=debug,raw_metrics_demo=debug")
+        .with_env_filter("obzenflow=debug,raw_metrics_demo=debug,obzenflow_adapters::middleware::rate_limiter=trace")
+        .with_target(true)
+        .with_thread_ids(true)
         .init();
 
     println!("🚀 Raw Metrics Demo - Showing Prometheus Output");
@@ -121,10 +123,7 @@ async fn main() -> Result<()> {
 
     // Create journal path for disk journals
     let journal_path = std::path::PathBuf::from("target/raw_metrics_demo_journal");
-    println!(
-        "📁 Using DiskJournal at: {}",
-        journal_path.display()
-    );
+    println!("📁 Using DiskJournal at: {}", journal_path.display());
 
     println!("📊 Creating flow with automatic metrics...\n");
 
@@ -140,8 +139,7 @@ async fn main() -> Result<()> {
 
             // Transform with middleware
             trans = transform!("processor" => TestTransform, [
-                rate_limit(50.0),  // 50 events per second
-                circuit_breaker(3) // Opens after 3 failures
+                rate_limit(0.5)  // 0.5 events per second
             ]);
 
             // Sink
@@ -152,7 +150,9 @@ async fn main() -> Result<()> {
             src |> trans;
             trans |> snk;
         }
-    }.await.map_err(|e| anyhow::anyhow!("Failed to create flow: {}", e))?;
+    }
+    .await
+    .map_err(|e| anyhow::anyhow!("Failed to create flow: {}", e))?;
 
     println!("▶️  Running flow...\n");
 
@@ -160,15 +160,16 @@ async fn main() -> Result<()> {
     let metrics_exporter = flow_handle.run_with_metrics().await?;
 
     println!("\n✅ Flow completed!");
-    
+
     // Get the metrics text after completion
     let metrics_text = if let Some(exporter) = metrics_exporter {
-        exporter.render_metrics()
+        exporter
+            .render_metrics()
             .map_err(|e| anyhow::anyhow!("Failed to render metrics: {}", e))?
     } else {
         "No metrics exporter configured".to_string()
     };
-    
+
     println!("{}", "=".repeat(80));
     println!("RAW PROMETHEUS METRICS OUTPUT (This is what Grafana scrapes):");
     println!("{}", "=".repeat(80));
@@ -231,4 +232,3 @@ async fn main() -> Result<()> {
 
     Ok(())
 }
-
