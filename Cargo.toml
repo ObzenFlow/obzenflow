@@ -4,9 +4,8 @@ version = "0.1.0"
 edition = "2021"
 description = "High-performance event streaming and processing framework"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/yourusername/obzenflow"
+repository = "https://github.com/obzenflow/obzenflow"
 keywords = ["event-streaming", "event-sourcing", "async", "pipeline"]
-categories = ["asynchronous", "data-structures"]
 
 [workspace]
 members = ["crates/*"]

@@ -1,8 +1,10 @@
 [package]
 name = "obzenflow_dsl_infra"
+description = "DSL and infrastructure layer for ObzenFlow - flow! macro and high-level orchestration"
 version = "0.1.0"
 edition = "2021"
-description = "DSL and infrastructure layer for ObzenFlow - flow! macro and high-level orchestration"
+license = "MIT OR Apache-2.0"
+publish = false
 
 [dependencies]
 # Internal dependencies - all layers needed for DSL (except infra)

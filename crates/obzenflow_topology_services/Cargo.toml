@@ -1,8 +1,10 @@
 [package]
 name = "obzenflow_topology_services"
+description = "Topology services for ObzenFlow - flow graph and topology business logic"
 version = "0.1.0"
 edition = "2021"
-description = "Topology services for ObzenFlow - flow graph and topology business logic"
+license = "MIT OR Apache-2.0"
+publish = false
 
 [dependencies]
 # Internal dependencies

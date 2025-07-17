@@ -1,8 +1,10 @@
 [package]
 name = "obzenflow_infra"
+description = "Infrastructure layer for ObzenFlow - persistence and external integrations"
 version = "0.1.0"
 edition = "2021"
-description = "Infrastructure layer for ObzenFlow - persistence and external integrations"
+license = "MIT OR Apache-2.0"
+publish = false
 
 [dependencies]
 # Internal dependencies - depends on all layers

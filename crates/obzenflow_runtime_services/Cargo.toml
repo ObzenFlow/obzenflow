@@ -1,8 +1,10 @@
 [package]
 name = "obzenflow_runtime_services"
+description = "Runtime services for ObzenFlow - execution and coordination business logic"
 version = "0.1.0"
 edition = "2021"
-description = "Runtime services for ObzenFlow - execution and coordination business logic"
+license = "MIT OR Apache-2.0"
+publish = false
 
 [dependencies]
 # Internal dependencies

@@ -1,8 +1,10 @@
 [package]
 name = "obzenflow_adapters"
+description = "Adapters layer for ObzenFlow - interfaces and monitoring"
 version = "0.1.0"
 edition = "2021"
-description = "Adapters layer for ObzenFlow - interfaces and monitoring"
+license = "MIT OR Apache-2.0"
+publish = false
 
 [dependencies]
 # Internal dependencies
