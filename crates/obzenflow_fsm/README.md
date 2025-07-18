@@ -1,6 +1,6 @@
-# Async FSM Design - Solving the Lifetime Issues
+# ObzenFlow FSM
 
-## Design Tradeoff: Arc Context Requirement
+Finite State Machines are at the heart of how ObzenFlow works. This is our own custom implementation of a **Mealy machine**, that makes intention tradeoffs to support async closures for the right balance between correctness and architectural flexibility. Flexibility is required due to ObzenFlow's extremely expressive middleware and monitoring systems. 
 
 This FSM library requires contexts to be wrapped in `Arc`. This is a deliberate design choice to support:
 

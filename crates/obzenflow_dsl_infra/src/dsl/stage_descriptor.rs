@@ -143,6 +143,9 @@ pub trait StageDescriptor: Send + Sync {
     /// Get the stage name
     fn name(&self) -> &str;
     
+    /// Get the stage type
+    fn stage_type(&self) -> obzenflow_core::event::flow_context::StageType;
+    
     /// Create the handle for this stage
     async fn create_handle(
         self: Box<Self>, 
@@ -167,6 +170,10 @@ pub struct FiniteSourceDescriptor<H: FiniteSourceHandler + 'static> {
 impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDescriptor for FiniteSourceDescriptor<H> {
     fn name(&self) -> &str {
         &self.name
+    }
+    
+    fn stage_type(&self) -> obzenflow_core::event::flow_context::StageType {
+        obzenflow_core::event::flow_context::StageType::Source
     }
     
     async fn create_handle(
@@ -238,6 +245,10 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
         &self.name
     }
     
+    fn stage_type(&self) -> obzenflow_core::event::flow_context::StageType {
+        obzenflow_core::event::flow_context::StageType::Source
+    }
+    
     async fn create_handle(
         self: Box<Self>, 
         config: StageConfig, 
@@ -305,6 +316,10 @@ pub struct TransformDescriptor<H: TransformHandler + 'static> {
 impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDescriptor for TransformDescriptor<H> {
     fn name(&self) -> &str {
         &self.name
+    }
+    
+    fn stage_type(&self) -> obzenflow_core::event::flow_context::StageType {
+        obzenflow_core::event::flow_context::StageType::Transform
     }
     
     async fn create_handle(
@@ -404,6 +419,10 @@ pub struct SinkDescriptor<H: SinkHandler + 'static> {
 impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDescriptor for SinkDescriptor<H> {
     fn name(&self) -> &str {
         &self.name
+    }
+    
+    fn stage_type(&self) -> obzenflow_core::event::flow_context::StageType {
+        obzenflow_core::event::flow_context::StageType::Sink
     }
     
     async fn create_handle(

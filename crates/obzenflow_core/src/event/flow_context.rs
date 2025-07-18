@@ -21,7 +21,7 @@ pub struct FlowContext {
 }
 
 /// Simple stage type classification
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum StageType {
     Source,
     Transform,

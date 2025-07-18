@@ -421,12 +421,17 @@ impl<H: SinkHandler + Send + Sync + 'static> FsmAction for SinkAction<H> {
             }
             
             SinkAction::Cleanup => {
+                // Call handler drain before stopping tasks
+                let mut handler = ctx.handler.write().await;
+                handler.drain().await
+                    .map_err(|e| format!("Failed to drain handler: {:?}", e))?;
+                drop(handler);
+                
                 // Stop the processing task
                 if let Some(task) = ctx.processing_task.write().await.take() {
                     task.abort();
                 }
                 
-                // Handler-specific cleanup would go here
                 tracing::info!(
                     stage_name = %ctx.stage_name,
                     "Sink cleaned up resources"

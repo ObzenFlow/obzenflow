@@ -10,6 +10,18 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+// Histogram configuration constants
+const HISTOGRAM_MIN_MS: u64 = 1;        // 1ms minimum
+const HISTOGRAM_MAX_MS: u64 = 60_000;   // 60 seconds maximum  
+const HISTOGRAM_SIGFIGS: u8 = 3;        // 3 significant figures
+
+// Percentile constants
+const QUANTILE_P50: f64 = 0.5;
+const QUANTILE_P90: f64 = 0.9;
+const QUANTILE_P95: f64 = 0.95;
+const QUANTILE_P99: f64 = 0.99;
+const QUANTILE_P999: f64 = 0.999;
+
 /// FSM states for metrics aggregator lifecycle
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum MetricsAggregatorState {
@@ -119,13 +131,32 @@ pub struct MetricsStore {
     pub last_event_id: Option<EventId>,
 }
 
-#[derive(Default, Clone)]
+#[derive(Clone)]
 pub struct StageMetrics {
     pub events_in: u64,
     pub events_out: u64,
     pub errors: u64,
     pub total_processing_time_ms: u64,
     pub event_count: u64,
+    pub processing_time_histogram: hdrhistogram::Histogram<u64>,
+}
+
+impl Default for StageMetrics {
+    fn default() -> Self {
+        Self {
+            events_in: 0,
+            events_out: 0,
+            errors: 0,
+            total_processing_time_ms: 0,
+            event_count: 0,
+            // Create histogram with configured bounds
+            processing_time_histogram: hdrhistogram::Histogram::new_with_bounds(
+                HISTOGRAM_MIN_MS, 
+                HISTOGRAM_MAX_MS, 
+                HISTOGRAM_SIGFIGS
+            ).expect("Failed to create histogram"),
+        }
+    }
 }
 
 impl MetricsAggregatorContext {
@@ -200,6 +231,13 @@ impl FsmAction for MetricsAggregatorAction {
                 let duration_ms = event.processing_info.processing_time_ms;
                 metrics.total_processing_time_ms += duration_ms;
                 metrics.event_count += 1;
+                
+                // Record in histogram for percentiles
+                // Clamp to histogram bounds
+                let clamped_duration = duration_ms.max(HISTOGRAM_MIN_MS).min(HISTOGRAM_MAX_MS);
+                if let Err(e) = metrics.processing_time_histogram.record(clamped_duration) {
+                    tracing::warn!("Failed to record duration in histogram: {:?}", e);
+                }
 
                 tracing::debug!(
                     "Updated metrics for {}: events={}, errors={}, avg_time={}ms",
@@ -238,23 +276,23 @@ impl FsmAction for MetricsAggregatorAction {
                             .error_counts
                             .insert(stage_key.clone(), metrics.errors);
 
-                        // Add processing time as a simple histogram snapshot
+                        // Add processing time histogram with real percentiles
                         if metrics.event_count > 0 {
-                            let avg_time_seconds = (metrics.total_processing_time_ms as f64
-                                / metrics.event_count as f64)
-                                / 1000.0;
-
-                            // Create a simple histogram snapshot with the average
+                            let histogram = &metrics.processing_time_histogram;
+                            
+                            // Extract real percentiles from HdrHistogram and convert to seconds
                             let mut percentiles = std::collections::HashMap::new();
-                            percentiles.insert("p50".to_string(), avg_time_seconds);
-                            percentiles.insert("p90".to_string(), avg_time_seconds);
-                            percentiles.insert("p99".to_string(), avg_time_seconds);
+                            percentiles.insert("p50".to_string(), histogram.value_at_quantile(QUANTILE_P50) as f64 / 1000.0);
+                            percentiles.insert("p90".to_string(), histogram.value_at_quantile(QUANTILE_P90) as f64 / 1000.0);
+                            percentiles.insert("p95".to_string(), histogram.value_at_quantile(QUANTILE_P95) as f64 / 1000.0);
+                            percentiles.insert("p99".to_string(), histogram.value_at_quantile(QUANTILE_P99) as f64 / 1000.0);
+                            percentiles.insert("p999".to_string(), histogram.value_at_quantile(QUANTILE_P999) as f64 / 1000.0);
 
                             let hist_snapshot = obzenflow_core::metrics::HistogramSnapshot {
-                                count: metrics.event_count,
+                                count: histogram.len(),
                                 sum: (metrics.total_processing_time_ms as f64) / 1000.0,
-                                min: avg_time_seconds,
-                                max: avg_time_seconds,
+                                min: histogram.min() as f64 / 1000.0,
+                                max: histogram.max() as f64 / 1000.0,
                                 percentiles,
                             };
 

@@ -1,9 +1,9 @@
 //! Sink supervisor implementation using HandlerSupervised pattern
 
 use std::sync::Arc;
-use obzenflow_core::{WriterId, ChainEvent};
+use obzenflow_core::{WriterId, ChainEvent, StageId};
+use obzenflow_core::event::flow_context::FlowContext;
 use obzenflow_fsm::{FsmBuilder, Transition};
-use obzenflow_core::StageId;
 
 use crate::messaging::reactive_journal::ReactiveJournal;
 use crate::stages::common::handlers::SinkHandler;
@@ -205,6 +205,28 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                 );
                                 drop(subscription_guard);
                                 return Ok(EventLoopDirective::Transition(SinkEvent::ReceivedEOF));
+                            }
+                            
+                            // Update flow context to reflect this sink stage
+                            let mut updated_event = envelope.event.clone();
+                            updated_event.flow_context = obzenflow_core::event::flow_context::FlowContext {
+                                flow_name: self.context.flow_name.clone(),
+                                flow_id: format!("{}-{}", self.context.flow_name, self.context.stage_id),
+                                stage_name: self.context.stage_name.clone(),
+                                stage_type: obzenflow_core::event::flow_context::StageType::Sink,
+                            };
+                            
+                            // Write event to sink's journal for durability, metrics, and journey tracking
+                            if let Err(e) = self.context.journal.write(updated_event.clone(), Some(&envelope)).await {
+                                tracing::error!(
+                                    stage_name = %self.context.stage_name,
+                                    error = ?e,
+                                    "Failed to write event to journal"
+                                );
+                                drop(subscription_guard);
+                                return Ok(EventLoopDirective::Transition(
+                                    SinkEvent::Error(format!("Failed to write to journal: {:?}", e))
+                                ));
                             }
                             
                             // Process normal event

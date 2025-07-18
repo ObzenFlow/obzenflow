@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 use obzenflow_core::metrics::MetricsExporter;
-use super::PrometheusExporter;
+use super::{PrometheusExporter, ConsoleSummaryExporter};
 
 /// Builder for creating metrics exporters
 pub struct MetricsExporterBuilder {
@@ -81,6 +81,13 @@ impl MetricsExporterBuilder {
         }
     }
     
+    /// Create a builder with console summary exporter
+    pub fn console() -> Self {
+        Self {
+            exporter_type: ExporterType::Console,
+        }
+    }
+    
     /// Create a builder with no-op exporter
     pub fn noop() -> Self {
         Self {
@@ -102,8 +109,8 @@ impl MetricsExporterBuilder {
                 Arc::new(PrometheusExporter::new())
             }
             ExporterType::Console => {
-                tracing::info!("Creating Console metrics exporter");
-                Arc::new(ConsoleExporter::new())
+                tracing::info!("Creating Console summary metrics exporter");
+                Arc::new(ConsoleSummaryExporter::new())
             }
             ExporterType::Noop => {
                 tracing::info!("Creating No-op metrics exporter");
@@ -140,36 +147,6 @@ impl MetricsExporter for NoopExporter {
     }
 }
 
-/// Console metrics exporter for debugging
-struct ConsoleExporter;
-
-impl ConsoleExporter {
-    fn new() -> Self {
-        Self
-    }
-}
-
-impl MetricsExporter for ConsoleExporter {
-    fn update_app_metrics(&self, snapshot: obzenflow_core::metrics::AppMetricsSnapshot) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        println!("=== App Metrics Update ===");
-        println!("Event counts: {:?}", snapshot.event_counts);
-        println!("Error counts: {:?}", snapshot.error_counts);
-        println!("=======================");
-        Ok(())
-    }
-    
-    fn update_infra_metrics(&self, snapshot: obzenflow_core::metrics::InfraMetricsSnapshot) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        println!("=== Infra Metrics Update ===");
-        println!("Journal metrics: {:?}", snapshot.journal_metrics);
-        println!("Stage infra metrics: {:?}", snapshot.stage_metrics);
-        println!("=========================");
-        Ok(())
-    }
-    
-    fn render_metrics(&self) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        Ok("Console exporter: see stdout for metrics".to_string())
-    }
-}
 
 #[cfg(test)]
 mod tests {

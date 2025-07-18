@@ -542,28 +542,45 @@ fn format_labels(labels: &[(&str, &str)]) -> String {
 
 /// Estimate bucket count based on percentiles
 fn estimate_bucket_count(histogram: &HistogramSnapshot, bucket_value: f64) -> u64 {
-    // Simple linear interpolation based on available percentiles
-    if let (Some(p50), Some(p90), Some(p95), Some(p99)) = (
-        histogram.percentiles.get("0.5"),
-        histogram.percentiles.get("0.9"),
-        histogram.percentiles.get("0.95"),
-        histogram.percentiles.get("0.99"),
-    ) {
-        if bucket_value <= *p50 {
+    // Get percentiles - they're stored as "p50", "p90", etc. and values are in seconds
+    let p50 = histogram.percentiles.get("p50").copied();
+    let p90 = histogram.percentiles.get("p90").copied();
+    let p95 = histogram.percentiles.get("p95").copied();
+    let p99 = histogram.percentiles.get("p99").copied();
+    let p999 = histogram.percentiles.get("p999").copied();
+    
+    // If we have percentiles, use them for accurate bucket estimation
+    if let (Some(p50_val), Some(p90_val), Some(p95_val), Some(p99_val)) = (p50, p90, p95, p99) {
+        if bucket_value <= p50_val {
             (histogram.count as f64 * 0.5) as u64
-        } else if bucket_value <= *p90 {
+        } else if bucket_value <= p90_val {
             (histogram.count as f64 * 0.9) as u64
-        } else if bucket_value <= *p95 {
+        } else if bucket_value <= p95_val {
             (histogram.count as f64 * 0.95) as u64
-        } else if bucket_value <= *p99 {
+        } else if bucket_value <= p99_val {
             (histogram.count as f64 * 0.99) as u64
+        } else if let Some(p999_val) = p999 {
+            if bucket_value <= p999_val {
+                (histogram.count as f64 * 0.999) as u64
+            } else {
+                histogram.count
+            }
         } else {
             histogram.count
         }
     } else {
-        // Fallback to simple ratio
-        let ratio = (bucket_value - histogram.min) / (histogram.max - histogram.min);
-        (histogram.count as f64 * ratio) as u64
+        // Fallback to simple ratio if no percentiles available
+        if histogram.max > histogram.min {
+            let ratio = (bucket_value - histogram.min) / (histogram.max - histogram.min);
+            (histogram.count as f64 * ratio.min(1.0).max(0.0)) as u64
+        } else {
+            // All values are the same
+            if bucket_value >= histogram.max {
+                histogram.count
+            } else {
+                0
+            }
+        }
     }
 }
 

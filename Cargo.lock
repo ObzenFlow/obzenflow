@@ -1271,6 +1271,7 @@ dependencies = [
  "chrono",
  "edfsm",
  "futures",
+ "hdrhistogram",
  "num_cpus",
  "obzenflow_core",
  "obzenflow_fsm",

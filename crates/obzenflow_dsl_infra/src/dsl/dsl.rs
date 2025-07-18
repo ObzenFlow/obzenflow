@@ -156,9 +156,17 @@ macro_rules! build_typed_flow {
         ).map_err(|e| format!("Failed to create control journal: {:?}", e))?;
         
         let mut stage_journals = HashMap::new();
-        for &stage_id in name_to_id.values() {
+        for (name, &stage_id) in name_to_id.iter() {
+            // Get the descriptor to access stage type and name
+            let descriptor = descriptors.get(name)
+                .ok_or_else(|| format!("Missing descriptor for stage {}", name))?;
+            
             let journal = journal_factory.create_journal(
-                JournalName::Stage(stage_id),
+                JournalName::Stage {
+                    id: stage_id,
+                    stage_type: descriptor.stage_type(),
+                    name: descriptor.name().to_string(),
+                },
                 JournalOwner::stage(stage_id)
             ).map_err(|e| format!("Failed to create journal for stage {:?}: {:?}", stage_id, e))?;
             stage_journals.insert(stage_id, journal);

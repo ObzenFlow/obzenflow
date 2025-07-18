@@ -136,9 +136,7 @@ async fn main() -> Result<()> {
             src = source!("event_source" => TestSource::new());
 
             // Transform with middleware
-            trans = transform!("processor" => TestTransform, [
-                rate_limit(1.0)  // 1 event per second
-            ]);
+            trans = transform!("processor" => TestTransform, []);
 
             // Sink
             snk = sink!("event_sink" => TestSink::new());
