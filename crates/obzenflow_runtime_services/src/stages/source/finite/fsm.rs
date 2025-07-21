@@ -12,6 +12,7 @@ use std::marker::PhantomData;
 use tokio::sync::RwLock;
 
 use crate::stages::common::handlers::FiniteSourceHandler;
+use crate::metrics::instrumentation::StageInstrumentation;
 
 // ============================================================================
 // FSM States
@@ -234,6 +235,9 @@ pub struct FiniteSourceContext<H: FiniteSourceHandler> {
     
     /// Writer ID for this source (initialized during setup)
     pub writer_id: Arc<RwLock<Option<WriterId>>>,
+    
+    /// Stage instrumentation for metrics tracking
+    pub instrumentation: Arc<StageInstrumentation>,
 }
 
 impl<H: FiniteSourceHandler> FiniteSourceContext<H> {
@@ -244,6 +248,7 @@ impl<H: FiniteSourceHandler> FiniteSourceContext<H> {
         flow_name: String,
         journal: Arc<crate::messaging::reactive_journal::ReactiveJournal>,
         bus: Arc<crate::message_bus::FsmMessageBus>,
+        instrumentation: Arc<StageInstrumentation>,
     ) -> Self {
         Self {
             handler: Arc::new(RwLock::new(handler)),
@@ -253,6 +258,7 @@ impl<H: FiniteSourceHandler> FiniteSourceContext<H> {
             journal,
             bus,
             writer_id: Arc::new(RwLock::new(None)),
+            instrumentation,
         }
     }
 }

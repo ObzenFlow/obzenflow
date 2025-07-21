@@ -61,14 +61,7 @@ impl USE {
                 )
             ),
             (
-                "Queue Depth",
-                format!(
-                    "obzenflow_queue_depth{{flow=\"{}\",stage=\"{}\"}}",
-                    flow_name, stage_name
-                )
-            ),
-            (
-                "In-Flight Events",
+                "Saturation (In-Flight Events)",
                 format!(
                     "obzenflow_in_flight_events{{flow=\"{}\",stage=\"{}\"}}",
                     flow_name, stage_name
@@ -104,12 +97,8 @@ impl USE {
                     "unit": "bytes"
                 },
                 {
-                    "title": "Queue Saturation",
+                    "title": "Saturation",
                     "targets": [
-                        {
-                            "expr": format!("obzenflow_queue_depth{{flow=\"{}\"}}", flow_name),
-                            "legendFormat": "Queue Depth"
-                        },
                         {
                             "expr": format!("obzenflow_in_flight_events{{flow=\"{}\"}}", flow_name),
                             "legendFormat": "In-Flight"

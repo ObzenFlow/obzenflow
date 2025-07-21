@@ -7,6 +7,7 @@ use crate::messaging::reactive_journal::ReactiveJournal;
 use crate::message_bus::FsmMessageBus;
 use crate::stages::common::handlers::TransformHandler;
 use crate::stages::common::control_strategies::{ControlEventStrategy, JonestownStrategy};
+use crate::metrics::instrumentation::StageInstrumentation;
 use crate::supervised_base::{
     SupervisorBuilder, BuilderError, ChannelBuilder, SupervisorTaskBuilder,
     HandlerSupervisedExt, HandleBuilder, EventReceiver, StateWatcher,
@@ -25,6 +26,7 @@ pub struct TransformBuilder<H: TransformHandler + Clone + std::fmt::Debug + Send
     config: TransformConfig,
     journal: Arc<ReactiveJournal>,
     bus: Arc<FsmMessageBus>,
+    instrumentation: Option<Arc<StageInstrumentation>>,
 }
 
 impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> TransformBuilder<H> {
@@ -40,7 +42,14 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Tran
             config,
             journal,
             bus,
+            instrumentation: None,
         }
+    }
+    
+    /// Set the instrumentation for this transform
+    pub fn with_instrumentation(mut self, instrumentation: Arc<StageInstrumentation>) -> Self {
+        self.instrumentation = Some(instrumentation);
+        self
     }
     
     /// Set a custom control strategy (defaults to JonestownStrategy)
@@ -64,6 +73,10 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Supe
         let control_strategy = self.config.control_strategy
             .unwrap_or_else(|| Arc::new(JonestownStrategy));
         
+        // Create instrumentation if not provided
+        let instrumentation = self.instrumentation
+            .unwrap_or_else(|| Arc::new(StageInstrumentation::new()));
+        
         // Create context
         let context = TransformContext::new(
             self.handler,
@@ -74,6 +87,7 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Supe
             self.bus.clone(),
             self.config.upstream_stages.clone(),
             control_strategy,
+            instrumentation,
         );
         
         // Create supervisor (private - not exposed)

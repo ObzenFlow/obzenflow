@@ -159,6 +159,7 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
         &mut self,
         state: &Self::State,
     ) -> Result<EventLoopDirective<Self::Event>, Box<dyn std::error::Error + Send + Sync>> {
+        // Track every event loop iteration
         match state {
             InfiniteSourceState::Created => {
                 // Wait for initialization
@@ -180,6 +181,8 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
             }
             
             InfiniteSourceState::Running => {
+                self.context.instrumentation.event_loops_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
                 // Check if we can emit
                 let can_emit = *self.context.can_emit.read().await;
                 if !can_emit {
@@ -199,6 +202,9 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
                 if let Some(mut event) = handler.next() {
                     drop(handler);
                     
+                    // We have work - increment loops with work
+                    self.context.instrumentation.event_loops_with_work_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    
                     // Add flow context
                     event.flow_context = FlowContext {
                         flow_name: self.context.flow_name.clone(),
@@ -206,6 +212,9 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
                         stage_name: self.context.stage_name.clone(),
                         stage_type: obzenflow_core::event::flow_context::StageType::Source,
                     };
+                    
+                    // Enrich with runtime context
+                    event.runtime_context = Some(self.context.instrumentation.snapshot());
                     
                     // Write event to journal using new journal.write() API
                     self.context.journal

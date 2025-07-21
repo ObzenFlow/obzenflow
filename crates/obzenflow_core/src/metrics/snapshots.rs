@@ -24,8 +24,6 @@ pub struct AppMetricsSnapshot {
     /// In-flight events by stage
     pub in_flight: HashMap<String, f64>,
     
-    /// Queue depth by stage
-    pub queue_depth: HashMap<String, f64>,
     
     /// CPU usage ratio by stage (0.0-1.0)
     pub cpu_usage_ratio: HashMap<String, f64>,
@@ -41,6 +39,15 @@ pub struct AppMetricsSnapshot {
     
     /// SAAFE metrics - saturation ratio by stage (0.0-1.0)
     pub saturation_ratio: HashMap<String, f64>,
+    
+    /// SAAFE metrics - failures total by stage (critical failures)
+    pub failures_total: HashMap<String, u64>,
+    
+    /// USE metrics - event loops total by stage
+    pub event_loops_total: HashMap<String, u64>,
+    
+    /// USE metrics - event loops with work by stage
+    pub event_loops_with_work_total: HashMap<String, u64>,
     
     /// Flow-level latency histograms by flow name (in seconds)
     pub flow_latency_seconds: HashMap<String, HistogramSnapshot>,
@@ -132,8 +139,6 @@ pub struct JournalMetricsSnapshot {
 /// Stage-specific infrastructure metrics
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StageInfraMetrics {
-    /// Current queue depth
-    pub queue_depth: u64,
     
     /// Events currently being processed
     pub in_flight: u64,
@@ -147,12 +152,14 @@ impl Default for AppMetricsSnapshot {
             error_counts: HashMap::new(),
             processing_times: HashMap::new(),
             in_flight: HashMap::new(),
-            queue_depth: HashMap::new(),
             cpu_usage_ratio: HashMap::new(),
             memory_bytes: HashMap::new(),
             anomalies_total: HashMap::new(),
             amendments_total: HashMap::new(),
             saturation_ratio: HashMap::new(),
+            failures_total: HashMap::new(),
+            event_loops_total: HashMap::new(),
+            event_loops_with_work_total: HashMap::new(),
             flow_latency_seconds: HashMap::new(),
             dropped_events: HashMap::new(),
             circuit_breaker_state: HashMap::new(),

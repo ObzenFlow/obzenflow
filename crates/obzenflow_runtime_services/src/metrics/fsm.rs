@@ -139,6 +139,11 @@ pub struct StageMetrics {
     pub total_processing_time_ms: u64,
     pub event_count: u64,
     pub processing_time_histogram: hdrhistogram::Histogram<u64>,
+    // Runtime context metrics (FLOWIP-056c)
+    pub last_in_flight: Option<u32>,
+    pub last_failures_total: Option<u64>,
+    pub event_loops_total: u64,
+    pub event_loops_with_work_total: u64,
 }
 
 impl Default for StageMetrics {
@@ -155,6 +160,10 @@ impl Default for StageMetrics {
                 HISTOGRAM_MAX_MS, 
                 HISTOGRAM_SIGFIGS
             ).expect("Failed to create histogram"),
+            last_in_flight: None,
+            last_failures_total: None,
+            event_loops_total: 0,
+            event_loops_with_work_total: 0,
         }
     }
 }
@@ -238,6 +247,26 @@ impl FsmAction for MetricsAggregatorAction {
                 if let Err(e) = metrics.processing_time_histogram.record(clamped_duration) {
                     tracing::warn!("Failed to record duration in histogram: {:?}", e);
                 }
+                
+                // Extract runtime context metrics if available (FLOWIP-056c)
+                if let Some(runtime_ctx) = &event.runtime_context {
+                    // These are point-in-time snapshots from the FSM instrumentation
+                    // We could store them for trend analysis or immediate export
+                    tracing::trace!(
+                        "Runtime context for {}: in_flight={}, fsm_state={}",
+                        key,
+                        runtime_ctx.in_flight,
+                        runtime_ctx.fsm_state
+                    );
+                    
+                    // Store latest runtime metrics for export
+                    metrics.last_in_flight = Some(runtime_ctx.in_flight);
+                    metrics.last_failures_total = Some(runtime_ctx.failures_total);
+                    
+                    // Update cumulative event loop counters (take max to handle resets)
+                    metrics.event_loops_total = metrics.event_loops_total.max(runtime_ctx.event_loops_total);
+                    metrics.event_loops_with_work_total = metrics.event_loops_with_work_total.max(runtime_ctx.event_loops_with_work_total);
+                }
 
                 tracing::debug!(
                     "Updated metrics for {}: events={}, errors={}, avg_time={}ms",
@@ -300,6 +329,19 @@ impl FsmAction for MetricsAggregatorAction {
                                 .processing_times
                                 .insert(stage_key.clone(), hist_snapshot);
                         }
+                        
+                        // Add runtime context metrics if available (FLOWIP-056c)
+                        if let Some(in_flight) = metrics.last_in_flight {
+                            snapshot.in_flight.insert(stage_key.clone(), in_flight as f64);
+                        }
+                        // events_behind removed - calculate in PromQL instead
+                        
+                        if let Some(failures_total) = metrics.last_failures_total {
+                            snapshot.failures_total.insert(stage_key.clone(), failures_total);
+                        }
+                        // Event loop metrics are cumulative counters
+                        snapshot.event_loops_total.insert(stage_key.clone(), metrics.event_loops_total);
+                        snapshot.event_loops_with_work_total.insert(stage_key.clone(), metrics.event_loops_with_work_total);
 
                         tracing::debug!(
                             "Exported metrics for {}: events={}, errors={}, avg_time={}ms",

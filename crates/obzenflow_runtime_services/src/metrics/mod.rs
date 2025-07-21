@@ -5,6 +5,8 @@ pub mod supervisor;
 pub mod config;
 pub mod builder;
 pub mod handle;
+pub mod constants;
+pub mod instrumentation;
 
 // Re-export commonly used types
 // Note: MetricsAggregatorSupervisor is intentionally NOT exported - use MetricsAggregatorBuilder

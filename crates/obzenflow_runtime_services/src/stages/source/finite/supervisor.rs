@@ -165,6 +165,7 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> H
         &mut self,
         state: &Self::State,
     ) -> Result<EventLoopDirective<Self::Event>, Box<dyn std::error::Error + Send + Sync>> {
+        // Track every event loop iteration
         match state {
             FiniteSourceState::Created => {
                 // Wait for initialization
@@ -182,6 +183,8 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> H
             }
             
             FiniteSourceState::Running => {
+                self.context.instrumentation.event_loops_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
                 // Get next event from handler
                 let mut handler = self.context.handler.write().await;
                 
@@ -195,6 +198,9 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> H
                 if let Some(mut event) = handler.next() {
                     drop(handler);
                     
+                    // We have work - increment loops with work
+                    self.context.instrumentation.event_loops_with_work_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    
                     // Add flow context
                     event.flow_context = FlowContext {
                         flow_name: self.context.flow_name.clone(),
@@ -202,6 +208,9 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> H
                         stage_name: self.context.stage_name.clone(),
                         stage_type: obzenflow_core::event::flow_context::StageType::Source,
                     };
+                    
+                    // Enrich with runtime context
+                    event.runtime_context = Some(self.context.instrumentation.snapshot());
                     
                     // Write event to journal using new journal.write() API
                     self.context.journal

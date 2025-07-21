@@ -11,6 +11,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::stages::common::handlers::InfiniteSourceHandler;
+use crate::metrics::instrumentation::StageInstrumentation;
 
 // ============================================================================
 // FSM States
@@ -235,6 +236,9 @@ pub struct InfiniteSourceContext<H: InfiniteSourceHandler> {
     
     /// Flag to track if shutdown was requested
     pub shutdown_requested: Arc<RwLock<bool>>,
+    
+    /// Stage instrumentation for metrics tracking
+    pub instrumentation: Arc<StageInstrumentation>,
 }
 
 impl<H: InfiniteSourceHandler> InfiniteSourceContext<H> {
@@ -245,6 +249,7 @@ impl<H: InfiniteSourceHandler> InfiniteSourceContext<H> {
         flow_name: String,
         journal: Arc<crate::messaging::reactive_journal::ReactiveJournal>,
         bus: Arc<crate::message_bus::FsmMessageBus>,
+        instrumentation: Arc<StageInstrumentation>,
     ) -> Self {
         Self {
             handler: Arc::new(RwLock::new(handler)),
@@ -256,6 +261,7 @@ impl<H: InfiniteSourceHandler> InfiniteSourceContext<H> {
             writer_id: Arc::new(RwLock::new(None)),
             can_emit: Arc::new(RwLock::new(false)),
             shutdown_requested: Arc::new(RwLock::new(false)),
+            instrumentation,
         }
     }
 }

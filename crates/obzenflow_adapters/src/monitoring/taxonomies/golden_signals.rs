@@ -17,7 +17,7 @@
 //! | Latency | `obzenflow_duration_seconds` | Request duration histogram |
 //! | Traffic | `obzenflow_events_total` | Total requests (use `rate()`) |
 //! | Errors | `obzenflow_errors_total` | Failed requests |
-//! | Saturation | `obzenflow_queue_depth` | Queue depth as saturation proxy |
+//! | Saturation | `obzenflow_in_flight` | In-flight processing as saturation proxy |
 //!
 //! ## Example Prometheus Queries
 //!
@@ -32,7 +32,7 @@
 //! rate(obzenflow_errors_total[5m]) / rate(obzenflow_events_total[5m]) * 100
 //!
 //! # Saturation
-//! obzenflow_queue_depth{flow="api_gateway"} / 1000  # Assuming 1000 is max capacity
+//! obzenflow_in_flight{flow="api_gateway"}  # Current processing pressure
 //! ```
 
 /// Golden Signals taxonomy definition
@@ -86,9 +86,9 @@ impl GoldenSignals {
                 )
             ),
             (
-                "Saturation (Queue Depth)",
+                "Saturation (In-Flight)",
                 format!(
-                    "obzenflow_queue_depth{{flow=\"{}\",stage=\"{}\"}}",
+                    "obzenflow_in_flight{{flow=\"{}\",stage=\"{}\"}}",
                     flow_name, stage_name
                 )
             ),
@@ -141,10 +141,6 @@ impl GoldenSignals {
                 {
                     "title": "Saturation",
                     "targets": [
-                        {
-                            "expr": format!("obzenflow_queue_depth{{flow=\"{}\"}}", flow_name),
-                            "legendFormat": "Queue Depth"
-                        },
                         {
                             "expr": format!("obzenflow_in_flight_events{{flow=\"{}\"}}", flow_name),
                             "legendFormat": "In-Flight"

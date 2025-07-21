@@ -12,6 +12,7 @@ use std::marker::PhantomData;
 use tokio::sync::RwLock;
 
 use crate::stages::common::handlers::SinkHandler;
+use crate::metrics::instrumentation::StageInstrumentation;
 
 // ============================================================================
 // FSM States
@@ -278,6 +279,9 @@ pub struct SinkContext<H: SinkHandler> {
     
     /// Track if we're currently flushing
     pub is_flushing: Arc<RwLock<bool>>,
+    
+    /// Stage instrumentation for metrics tracking
+    pub instrumentation: Arc<StageInstrumentation>,
 }
 
 impl<H: SinkHandler> SinkContext<H> {
@@ -289,6 +293,7 @@ impl<H: SinkHandler> SinkContext<H> {
         journal: Arc<crate::messaging::reactive_journal::ReactiveJournal>,
         bus: Arc<crate::message_bus::FsmMessageBus>,
         upstream_stages: Vec<obzenflow_core::StageId>,
+        instrumentation: Arc<StageInstrumentation>,
     ) -> Self {
         Self {
             handler: Arc::new(RwLock::new(handler)),
@@ -302,6 +307,7 @@ impl<H: SinkHandler> SinkContext<H> {
             processing_task: Arc::new(RwLock::new(None)),
             upstream_stages,
             is_flushing: Arc::new(RwLock::new(false)),
+            instrumentation,
         }
     }
 }

@@ -138,22 +138,6 @@ impl MetricsEndpoint {
             writeln!(out)?;
         }
         
-        // Queue depth gauge
-        if !agg.queue_depth.is_empty() {
-            writeln!(out, "# HELP obzenflow_queue_depth Current queue depth for each stage")?;
-            writeln!(out, "# TYPE obzenflow_queue_depth gauge")?;
-            
-            for (key, gauge) in &agg.queue_depth {
-                writeln!(
-                    out,
-                    "obzenflow_queue_depth{{flow=\"{}\",stage=\"{}\"}} {}",
-                    escape_label(&key.flow_name),
-                    escape_label(&key.stage_name),
-                    gauge.get()
-                )?;
-            }
-            writeln!(out)?;
-        }
         
         // CPU usage ratio gauge
         if !agg.cpu_usage_ratio.is_empty() {
@@ -423,7 +407,6 @@ impl obzenflow_core::metrics::MetricsExporter for MetricsEndpoint {
             + aggregator.errors_total.len()
             + aggregator.duration_seconds.len()
             + aggregator.in_flight.len()
-            + aggregator.queue_depth.len()
             + aggregator.cpu_usage_ratio.len()
             + aggregator.memory_bytes.len()
             + aggregator.anomalies_total.len()
@@ -554,7 +537,6 @@ mod tests {
             let state_event = ChainEvent::control(
                 ChainEvent::CONTROL_METRICS_STATE,
                 json!({
-                    "queue_depth": 42,
                     "in_flight": 7
                 })
             );
@@ -589,8 +571,6 @@ mod tests {
         let output = endpoint.render_metrics().unwrap();
         
         // Check gauges
-        assert!(output.contains("# TYPE obzenflow_queue_depth gauge"));
-        assert!(output.contains("obzenflow_queue_depth{flow=\"test_flow\",stage=\"source1\"} 42"));
         
         assert!(output.contains("# TYPE obzenflow_in_flight_events gauge"));
         assert!(output.contains("obzenflow_in_flight_events{flow=\"test_flow\",stage=\"source1\"} 7"));

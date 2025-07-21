@@ -54,6 +54,11 @@ pub struct ChainEvent {
     /// Metadata about when/where this correlation entered the flow
     #[serde(skip_serializing_if = "Option::is_none")]
     pub correlation_payload: Option<CorrelationPayload>,
+    
+    // === Runtime Instrumentation (FLOWIP-056c) ===
+    /// Runtime snapshot at event creation time
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime_context: Option<crate::event::runtime_context::RuntimeContext>,
 }
 
 impl ChainEvent {
@@ -146,6 +151,7 @@ impl ChainEvent {
             intent: None,
             correlation_id: None,
             correlation_payload: None,
+            runtime_context: None,
         }
     }
 

@@ -6,6 +6,7 @@ use obzenflow_core::WriterId;
 use crate::messaging::reactive_journal::ReactiveJournal;
 use crate::message_bus::FsmMessageBus;
 use crate::stages::common::handlers::SinkHandler;
+use crate::metrics::instrumentation::StageInstrumentation;
 use crate::supervised_base::{
     SupervisorBuilder, BuilderError, ChannelBuilder, SupervisorTaskBuilder,
     HandlerSupervisedExt, HandleBuilder, EventReceiver, StateWatcher,
@@ -24,6 +25,7 @@ pub struct SinkBuilder<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 
     config: SinkConfig,
     journal: Arc<ReactiveJournal>,
     bus: Arc<FsmMessageBus>,
+    instrumentation: Option<Arc<StageInstrumentation>>,
 }
 
 impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> SinkBuilder<H> {
@@ -39,7 +41,14 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> SinkBuild
             config,
             journal,
             bus,
+            instrumentation: None,
         }
+    }
+    
+    /// Set the instrumentation for this sink
+    pub fn with_instrumentation(mut self, instrumentation: Arc<StageInstrumentation>) -> Self {
+        self.instrumentation = Some(instrumentation);
+        self
     }
 }
 
@@ -53,6 +62,10 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
         let (event_sender, event_receiver, state_watcher) = 
             ChannelBuilder::new().build(SinkState::<H>::Created);
         
+        // Create instrumentation if not provided
+        let instrumentation = self.instrumentation
+            .unwrap_or_else(|| Arc::new(StageInstrumentation::new()));
+        
         // Create context
         let context = SinkContext::new(
             self.handler,
@@ -62,6 +75,7 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
             self.journal.clone(),
             self.bus.clone(),
             self.config.upstream_stages.clone(),
+            instrumentation,
         );
         
         // Create supervisor (private - not exposed)

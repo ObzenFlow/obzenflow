@@ -129,6 +129,32 @@ impl ConsoleSummaryExporter {
             }
             summary.push_str("\n\n");
             
+            // Runtime State (from FSM instrumentation)
+            let total_in_flight: f64 = snapshot.in_flight.values().sum();
+            // events_behind removed - calculate in PromQL instead
+            let total_failures: u64 = snapshot.failures_total.values().sum();
+            
+            summary.push_str("🔄 Runtime State:\n");
+            summary.push_str(&format!("\n  In Flight:   {} events", total_in_flight as u64));
+            if total_in_flight > 50.0 {
+                summary.push_str(" ⚠️");
+            }
+            
+            // events_behind removed - calculate in PromQL instead
+            // e.g., events_processed_total{stage="transform"} - events_processed_total{stage="sink"}
+            
+            // Calculate utilization if event loop data available
+            let total_loops: u64 = snapshot.event_loops_total.values().sum();
+            let loops_with_work: u64 = snapshot.event_loops_with_work_total.values().sum();
+            if total_loops > 0 {
+                let utilization = (loops_with_work as f64 / total_loops as f64) * 100.0;
+                summary.push_str(&format!("\n  Utilization: {:.1}%", utilization));
+                if utilization > 90.0 {
+                    summary.push_str(" ⚠️");
+                }
+            }
+            summary.push_str("\n\n");
+            
             // Event flow
             summary.push_str("📊 Event Flow:\n");
             summary.push_str(&format!("  Source → {} events\n", source_events));
@@ -142,11 +168,14 @@ impl ConsoleSummaryExporter {
             }
             summary.push_str("\n");
             
-            // Errors and drops
-            if total_errors > 0 || snapshot.dropped_events.values().sum::<f64>() > 0.0 {
+            // Errors, failures and drops
+            if total_errors > 0 || total_failures > 0 || snapshot.dropped_events.values().sum::<f64>() > 0.0 {
                 summary.push_str("\n⚠️  Issues:\n");
                 if total_errors > 0 {
                     summary.push_str(&format!("  Errors: {}\n", total_errors));
+                }
+                if total_failures > 0 {
+                    summary.push_str(&format!("  Failures: {} (critical)\n", total_failures));
                 }
                 let total_dropped: f64 = snapshot.dropped_events.values().sum();
                 if total_dropped > 0.0 {
@@ -162,10 +191,31 @@ impl ConsoleSummaryExporter {
                 
                 for (stage_key, count) in stages {
                     let errors = snapshot.error_counts.get(stage_key).unwrap_or(&0);
+                    let failures = snapshot.failures_total.get(stage_key).unwrap_or(&0);
+                    let in_flight = snapshot.in_flight.get(stage_key).unwrap_or(&0.0);
+                    // events_behind removed - calculate in PromQL instead
+                    
                     summary.push_str(&format!("  {:<30} {} events", stage_key, count));
-                    if *errors > 0 {
-                        summary.push_str(&format!(" ({} errors)", errors));
+                    
+                    // Show errors and failures
+                    if *errors > 0 || *failures > 0 {
+                        let mut error_info = Vec::new();
+                        if *errors > 0 {
+                            error_info.push(format!("{} errors", errors));
+                        }
+                        if *failures > 0 {
+                            error_info.push(format!("{} failures", failures));
+                        }
+                        summary.push_str(&format!(" ({})", error_info.join(", ")));
                     }
+                    
+                    // Add runtime state if non-zero
+                    if *in_flight > 0.0 {
+                        summary.push_str(&format!(" [F:{}]", *in_flight as u64));
+                    }
+                    
+                    // events_behind removed - calculate in PromQL instead
+                    
                     summary.push_str("\n");
                 }
             }

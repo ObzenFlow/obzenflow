@@ -6,6 +6,7 @@ use obzenflow_core::WriterId;
 use crate::messaging::reactive_journal::ReactiveJournal;
 use crate::message_bus::FsmMessageBus;
 use crate::stages::common::handlers::InfiniteSourceHandler;
+use crate::metrics::instrumentation::StageInstrumentation;
 use crate::supervised_base::{
     SupervisorBuilder, BuilderError, ChannelBuilder, SupervisorTaskBuilder,
     HandlerSupervisedExt, HandleBuilder, EventReceiver, StateWatcher,
@@ -24,6 +25,7 @@ pub struct InfiniteSourceBuilder<H: InfiniteSourceHandler + Clone + std::fmt::De
     config: InfiniteSourceConfig,
     journal: Arc<ReactiveJournal>,
     bus: Arc<FsmMessageBus>,
+    instrumentation: Option<Arc<StageInstrumentation>>,
 }
 
 impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> InfiniteSourceBuilder<H> {
@@ -39,7 +41,14 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
             config,
             journal,
             bus,
+            instrumentation: None,
         }
+    }
+    
+    /// Set the instrumentation for this source
+    pub fn with_instrumentation(mut self, instrumentation: Arc<StageInstrumentation>) -> Self {
+        self.instrumentation = Some(instrumentation);
+        self
     }
 }
 
@@ -53,6 +62,10 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
         let (event_sender, event_receiver, state_watcher) = 
             ChannelBuilder::new().build(InfiniteSourceState::<H>::Created);
         
+        // Create instrumentation if not provided
+        let instrumentation = self.instrumentation
+            .unwrap_or_else(|| Arc::new(StageInstrumentation::new()));
+        
         // Create context
         let context = InfiniteSourceContext::new(
             self.handler,
@@ -61,6 +74,7 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
             self.config.flow_name.clone(),
             self.journal.clone(),
             self.bus.clone(),
+            instrumentation,
         );
         
         // Create supervisor (private - not exposed)

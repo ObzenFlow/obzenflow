@@ -12,6 +12,7 @@ use tokio::sync::RwLock;
 
 use crate::stages::common::handlers::TransformHandler;
 use crate::stages::common::control_strategies::ControlEventStrategy;
+use crate::metrics::instrumentation::StageInstrumentation;
 
 // ============================================================================
 // FSM States
@@ -264,6 +265,9 @@ pub struct TransformContext<H: TransformHandler> {
     
     /// EOF event to forward when draining completes
     pub buffered_eof: Arc<RwLock<Option<ChainEvent>>>,
+    
+    /// Stage instrumentation for metrics tracking
+    pub instrumentation: Arc<StageInstrumentation>,
 }
 
 impl<H: TransformHandler> TransformContext<H> {
@@ -276,6 +280,7 @@ impl<H: TransformHandler> TransformContext<H> {
         bus: Arc<crate::message_bus::FsmMessageBus>,
         upstream_stages: Vec<obzenflow_core::StageId>,
         control_strategy: Arc<dyn ControlEventStrategy>,
+        instrumentation: Arc<StageInstrumentation>,
     ) -> Self {
         Self {
             handler: Arc::new(handler),
@@ -290,6 +295,7 @@ impl<H: TransformHandler> TransformContext<H> {
             upstream_stages,
             control_strategy,
             buffered_eof: Arc::new(RwLock::new(None)),
+            instrumentation,
         }
     }
 }

@@ -38,13 +38,17 @@ use obzenflow_runtime_services::{
     messaging::reactive_journal::ReactiveJournal,
     message_bus::FsmMessageBus,
     stages::StageResources,
+    metrics::instrumentation::{StageInstrumentation, InstrumentationConfig},
 };
 use crate::stage_handle_adapter::StageHandleAdapter;
 use std::sync::Arc;
 use async_trait::async_trait;
 
 /// Create system middleware for a stage
-fn create_system_middleware(config: &StageConfig, stage_type: obzenflow_core::event::flow_context::StageType) -> Vec<Box<dyn Middleware>> {
+fn create_system_middleware(
+    config: &StageConfig, 
+    stage_type: obzenflow_core::event::flow_context::StageType,
+) -> Vec<Box<dyn Middleware>> {
     vec![
         Box::new(TimingMiddleware::new(&config.name)),
         Box::new(SystemEnrichmentMiddleware::new(
@@ -183,8 +187,15 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> S
     ) -> Result<BoxedStageHandle, String> {
         let writer_id = WriterId::new();
         
-        // Create system middleware
-        let mut all_middleware = create_system_middleware(&config, obzenflow_core::event::flow_context::StageType::Source);
+        // Create instrumentation configuration
+        let instrumentation_config = InstrumentationConfig::default();
+        let instrumentation = Arc::new(StageInstrumentation::new_with_config(instrumentation_config));
+        
+        // Create system middleware with instrumentation
+        let mut all_middleware = create_system_middleware(
+            &config, 
+            obzenflow_core::event::flow_context::StageType::Source
+        );
         
         // Add user middleware
         let user_middleware: Vec<Box<dyn Middleware>> = self.middleware
@@ -214,6 +225,7 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> S
             resources.journal,
             resources.message_bus,
         )
+        .with_instrumentation(instrumentation)
         .build()
         .await
         .map_err(|e| format!("Failed to build finite source: {:?}", e))?;
@@ -256,8 +268,15 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
     ) -> Result<BoxedStageHandle, String> {
         let writer_id = WriterId::new();
         
-        // Create system middleware
-        let mut all_middleware = create_system_middleware(&config, obzenflow_core::event::flow_context::StageType::Source);
+        // Create instrumentation configuration
+        let instrumentation_config = InstrumentationConfig::default();
+        let instrumentation = Arc::new(StageInstrumentation::new_with_config(instrumentation_config));
+        
+        // Create system middleware with instrumentation
+        let mut all_middleware = create_system_middleware(
+            &config, 
+            obzenflow_core::event::flow_context::StageType::Source
+        );
         
         // Add user middleware
         let user_middleware: Vec<Box<dyn Middleware>> = self.middleware
@@ -287,6 +306,7 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
             resources.journal,
             resources.message_bus,
         )
+        .with_instrumentation(instrumentation)
         .build()
         .await
         .map_err(|e| format!("Failed to build infinite source: {:?}", e))?;
@@ -357,8 +377,15 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stag
             &self.name,
         );
         
-        // Create system middleware
-        let mut all_middleware = create_system_middleware(&config, obzenflow_core::event::flow_context::StageType::Transform);
+        // Create instrumentation configuration
+        let instrumentation_config = InstrumentationConfig::default();
+        let instrumentation = Arc::new(StageInstrumentation::new_with_config(instrumentation_config));
+        
+        // Create system middleware with instrumentation
+        let mut all_middleware = create_system_middleware(
+            &config, 
+            obzenflow_core::event::flow_context::StageType::Transform
+        );
         
         // Add user middleware
         let user_middleware: Vec<Box<dyn Middleware>> = self.middleware
@@ -390,6 +417,7 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stag
             resources.journal,
             resources.message_bus,
         )
+        .with_instrumentation(instrumentation)
         .build()
         .await
         .map_err(|e| format!("Failed to build transform: {:?}", e))?;
@@ -460,8 +488,15 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
             &self.name,
         );
         
-        // Create system middleware
-        let mut all_middleware = create_system_middleware(&config, obzenflow_core::event::flow_context::StageType::Sink);
+        // Create instrumentation configuration
+        let instrumentation_config = InstrumentationConfig::default();
+        let instrumentation = Arc::new(StageInstrumentation::new_with_config(instrumentation_config));
+        
+        // Create system middleware with instrumentation
+        let mut all_middleware = create_system_middleware(
+            &config, 
+            obzenflow_core::event::flow_context::StageType::Sink
+        );
         
         // Add user middleware
         let user_middleware: Vec<Box<dyn Middleware>> = self.middleware
@@ -494,6 +529,7 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
             resources.journal,
             resources.message_bus,
         )
+        .with_instrumentation(instrumentation)
         .build()
         .await
         .map_err(|e| format!("Failed to build sink: {:?}", e))?;

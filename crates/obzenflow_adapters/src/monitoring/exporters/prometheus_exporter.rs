@@ -171,20 +171,6 @@ impl PrometheusExporter {
             writeln!(output)?;
         }
         
-        // Queue depth
-        if !snapshot.queue_depth.is_empty() {
-            writeln!(output, "# HELP obzenflow_queue_depth Current queue depth")?;
-            writeln!(output, "# TYPE obzenflow_queue_depth gauge")?;
-            
-            for (key, value) in &snapshot.queue_depth {
-                let parts: Vec<&str> = key.splitn(2, ':').collect();
-                if parts.len() == 2 {
-                    writeln!(output, "obzenflow_queue_depth{{flow=\"{}\",stage=\"{}\"}} {}", 
-                        escape_label(parts[0]), escape_label(parts[1]), value)?;
-                }
-            }
-            writeln!(output)?;
-        }
         
         // CPU usage
         if !snapshot.cpu_usage_ratio.is_empty() {
@@ -256,6 +242,52 @@ impl PrometheusExporter {
                 if parts.len() == 2 {
                     writeln!(output, "obzenflow_saturation_ratio{{flow=\"{}\",stage=\"{}\"}} {}", 
                         escape_label(parts[0]), escape_label(parts[1]), value)?;
+                }
+            }
+            writeln!(output)?;
+        }
+        
+        // SAAFE metrics - failures
+        if !snapshot.failures_total.is_empty() {
+            writeln!(output, "# HELP obzenflow_failures_total Total number of critical failures")?;
+            writeln!(output, "# TYPE obzenflow_failures_total counter")?;
+            
+            for (key, count) in &snapshot.failures_total {
+                let parts: Vec<&str> = key.splitn(2, ':').collect();
+                if parts.len() == 2 {
+                    writeln!(output, "obzenflow_failures_total{{flow=\"{}\",stage=\"{}\"}} {}", 
+                        escape_label(parts[0]), escape_label(parts[1]), count)?;
+                }
+            }
+            writeln!(output)?;
+        }
+        
+        
+        // USE metrics - event loops total
+        if !snapshot.event_loops_total.is_empty() {
+            writeln!(output, "# HELP obzenflow_event_loops_total Total number of event loop iterations")?;
+            writeln!(output, "# TYPE obzenflow_event_loops_total counter")?;
+            
+            for (key, count) in &snapshot.event_loops_total {
+                let parts: Vec<&str> = key.splitn(2, ':').collect();
+                if parts.len() == 2 {
+                    writeln!(output, "obzenflow_event_loops_total{{flow=\"{}\",stage=\"{}\"}} {}", 
+                        escape_label(parts[0]), escape_label(parts[1]), count)?;
+                }
+            }
+            writeln!(output)?;
+        }
+        
+        // USE metrics - event loops with work
+        if !snapshot.event_loops_with_work_total.is_empty() {
+            writeln!(output, "# HELP obzenflow_event_loops_with_work_total Event loop iterations that had work")?;
+            writeln!(output, "# TYPE obzenflow_event_loops_with_work_total counter")?;
+            
+            for (key, count) in &snapshot.event_loops_with_work_total {
+                let parts: Vec<&str> = key.splitn(2, ':').collect();
+                if parts.len() == 2 {
+                    writeln!(output, "obzenflow_event_loops_with_work_total{{flow=\"{}\",stage=\"{}\"}} {}", 
+                        escape_label(parts[0]), escape_label(parts[1]), count)?;
                 }
             }
             writeln!(output)?;
@@ -423,18 +455,6 @@ impl PrometheusExporter {
         
         // Stage infrastructure metrics
         if !snapshot.stage_metrics.is_empty() {
-            writeln!(output, "# HELP obzenflow_stage_queue_depth Current number of events queued per stage")?;
-            writeln!(output, "# TYPE obzenflow_stage_queue_depth gauge")?;
-            
-            for (stage, metrics) in &snapshot.stage_metrics {
-                writeln!(
-                    output,
-                    "obzenflow_stage_queue_depth{{stage=\"{}\"}} {}",
-                    escape_label(stage),
-                    metrics.queue_depth
-                )?;
-            }
-            writeln!(output)?;
             
             writeln!(output, "# HELP obzenflow_stage_in_flight Current number of events being processed per stage")?;
             writeln!(output, "# TYPE obzenflow_stage_in_flight gauge")?;
@@ -603,12 +623,14 @@ mod tests {
             error_counts: HashMap::new(),
             processing_times: HashMap::new(),
             in_flight: HashMap::new(),
-            queue_depth: HashMap::new(),
             cpu_usage_ratio: HashMap::new(),
             memory_bytes: HashMap::new(),
             anomalies_total: HashMap::new(),
             amendments_total: HashMap::new(),
             saturation_ratio: HashMap::new(),
+            failures_total: HashMap::new(),
+            event_loops_total: HashMap::new(),
+            event_loops_with_work_total: HashMap::new(),
             flow_latency_seconds: HashMap::new(),
             dropped_events: HashMap::new(),
             circuit_breaker_state: HashMap::new(),

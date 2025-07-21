@@ -11,6 +11,7 @@ use crate::stages::common::handlers::TransformHandler;
 use crate::stages::common::control_strategies::{ControlEventAction, ProcessingContext};
 use crate::supervised_base::{EventLoopDirective, HandlerSupervised};
 use crate::supervised_base::base::Supervisor;
+use crate::metrics::instrumentation::process_with_instrumentation;
 
 use super::fsm::{
     TransformState, TransformEvent, TransformAction,
@@ -49,7 +50,10 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Supe
         builder
             // Created -> Initialized
             .when("Created")
-                .on("Initialize", |_state, _event, _ctx| async move {
+                .on("Initialize", |_state, _event, ctx| async move {
+                    // Track state transition in instrumentation
+                    ctx.instrumentation.transition_to_state("Initialized");
+                    
                     Ok(Transition {
                         next_state: TransformState::Initialized,
                         actions: vec![TransformAction::AllocateResources],
@@ -59,7 +63,10 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Supe
             
             // Initialized -> Running (transforms start immediately)
             .when("Initialized")
-                .on("Ready", |_state, _event, _ctx| async move {
+                .on("Ready", |_state, _event, ctx| async move {
+                    // Track state transition in instrumentation
+                    ctx.instrumentation.transition_to_state("Running");
+                    
                     Ok(Transition {
                         next_state: TransformState::Running,
                         actions: vec![TransformAction::PublishRunning],
@@ -69,16 +76,23 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Supe
             
             // Running -> Draining (on EOF)
             .when("Running")
-                .on("ReceivedEOF", |_state, _event, _ctx| async move {
+                .on("ReceivedEOF", |_state, _event, ctx| async move {
+                    // Track state transition in instrumentation
+                    ctx.instrumentation.transition_to_state("Draining");
+                    
                     Ok(Transition {
                         next_state: TransformState::Draining,
                         actions: vec![], // Continue draining in dispatch_state
                     })
                 })
-                .on("Error", |_state, event, _ctx| {
+                .on("Error", |_state, event, ctx| {
                     let event = event.clone();
                     async move {
                         if let TransformEvent::Error(msg) = event {
+                            // Track state transition and failure in instrumentation
+                            ctx.instrumentation.transition_to_state("Failed");
+                            ctx.instrumentation.failures_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            
                             Ok(Transition {
                                 next_state: TransformState::Failed(msg),
                                 actions: vec![TransformAction::Cleanup],
@@ -92,7 +106,10 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Supe
             
             // Draining -> Drained
             .when("Draining")
-                .on("DrainComplete", |_state, _event, _ctx| async move {
+                .on("DrainComplete", |_state, _event, ctx| async move {
+                    // Track state transition in instrumentation
+                    ctx.instrumentation.transition_to_state("Drained");
+                    
                     Ok(Transition {
                         next_state: TransformState::Drained,
                         actions: vec![
@@ -102,10 +119,14 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Supe
                         ],
                     })
                 })
-                .on("Error", |_state, event, _ctx| {
+                .on("Error", |_state, event, ctx| {
                     let event = event.clone();
                     async move {
                         if let TransformEvent::Error(msg) = event {
+                            // Track state transition and failure in instrumentation
+                            ctx.instrumentation.transition_to_state("Failed");
+                            ctx.instrumentation.failures_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            
                             Ok(Transition {
                                 next_state: TransformState::Failed(msg),
                                 actions: vec![TransformAction::Cleanup],
@@ -165,6 +186,7 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Hand
         &mut self,
         state: &Self::State,
     ) -> Result<EventLoopDirective<Self::Event>, Box<dyn std::error::Error + Send + Sync>> {
+        // Track every event loop iteration
         match state {
             TransformState::Created => {
                 // Send initialize event
@@ -177,11 +199,16 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Hand
             }
             
             TransformState::Running => {
+                self.context.instrumentation.event_loops_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
                 // Process events from subscription
                 let mut subscription_guard = self.context.subscription.write().await;
                 if let Some(subscription) = subscription_guard.as_mut() {
                     match subscription.recv().await {
                         Ok(envelope) => {
+                            // We have work - increment loops with work
+                            self.context.instrumentation.event_loops_with_work_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            
                             tracing::debug!(
                                 stage_name = %self.context.stage_name,
                                 "Transform processing event"
@@ -263,22 +290,46 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Hand
                                         }
                                     }
                                 } else {
-                                    // Process normal data event
-                                    let transformed_events = self.context.handler.process(envelope.event.clone());
+                                    // Process normal data event with instrumentation
+                                    let handler = self.context.handler.clone();
+                                    let event_to_process = envelope.event.clone();
                                     
-                                    // Write transformed events using new journal.write() API
-                                    for mut event in transformed_events {
-                                        // Add flow context
-                                        event.flow_context = FlowContext {
-                                            flow_name: self.context.flow_name.clone(),
-                                            flow_id: format!("{}-{}", self.context.flow_name, self.context.stage_id),
-                                            stage_name: self.context.stage_name.clone(),
-                                            stage_type: obzenflow_core::event::flow_context::StageType::Transform,
-                                        };
-                                        
-                                        self.context.journal
-                                            .write(event, Some(&envelope))
-                                            .await?;
+                                    // Use process_with_instrumentation HOF
+                                    let result = process_with_instrumentation(
+                                        &self.context.instrumentation,
+                                        || async move {
+                                            Ok(handler.process(event_to_process))
+                                        }
+                                    ).await;
+                                    
+                                    match result {
+                                        Ok(transformed_events) => {
+                                            // Write transformed events using new journal.write() API
+                                            for mut event in transformed_events {
+                                                // Add flow context
+                                                event.flow_context = FlowContext {
+                                                    flow_name: self.context.flow_name.clone(),
+                                                    flow_id: format!("{}-{}", self.context.flow_name, self.context.stage_id),
+                                                    stage_name: self.context.stage_name.clone(),
+                                                    stage_type: obzenflow_core::event::flow_context::StageType::Transform,
+                                                };
+                                                
+                                                // Enrich with runtime context
+                                                event.runtime_context = Some(self.context.instrumentation.snapshot());
+                                                
+                                                self.context.journal
+                                                    .write(event, Some(&envelope))
+                                                    .await?;
+                                            }
+                                        }
+                                        Err(e) => {
+                                            tracing::error!(
+                                                stage_name = %self.context.stage_name,
+                                                error = ?e,
+                                                "Transform processing error"
+                                            );
+                                            // Error already tracked by process_with_instrumentation
+                                        }
                                     }
                                 }
                         }
@@ -317,9 +368,16 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Hand
                                 "Transform draining events"
                             );
                             
-                            // Process remaining event
+                            // Process remaining event with instrumentation
                             if !envelope.event.is_control() {
-                                let transformed_events = self.context.handler.process(envelope.event.clone());
+                                let envelope_event = envelope.event.clone();
+                                
+                                let transformed_events = process_with_instrumentation(
+                                    &self.context.instrumentation,
+                                    || async {
+                                        Ok(self.context.handler.process(envelope_event))
+                                    }
+                                ).await?;
                                 
                                 // Write transformed events using new journal.write() API
                                 for mut event in transformed_events {
@@ -329,6 +387,9 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Hand
                                         stage_name: self.context.stage_name.clone(),
                                         stage_type: obzenflow_core::event::flow_context::StageType::Transform,
                                     };
+                                    
+                                    // Enrich with runtime context
+                                    event.runtime_context = Some(self.context.instrumentation.snapshot());
                                     
                                     self.context.journal
                                         .write(event, Some(&envelope))

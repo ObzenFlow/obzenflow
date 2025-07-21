@@ -2,13 +2,13 @@
 
 use std::sync::Arc;
 use obzenflow_core::{WriterId, ChainEvent, StageId};
-use obzenflow_core::event::flow_context::FlowContext;
 use obzenflow_fsm::{FsmBuilder, Transition};
 
 use crate::messaging::reactive_journal::ReactiveJournal;
 use crate::stages::common::handlers::SinkHandler;
 use crate::supervised_base::{EventLoopDirective, HandlerSupervised};
 use crate::supervised_base::base::Supervisor;
+use crate::metrics::instrumentation::process_with_instrumentation;
 
 use super::fsm::{
     SinkState, SinkEvent, SinkAction,
@@ -187,11 +187,17 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
             }
             
             SinkState::Running => {
+                // Track event loop
+                self.context.instrumentation.event_loops_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                
                 // Check subscription for events
                 let mut subscription_guard = self.context.subscription.write().await;
                 if let Some(subscription) = subscription_guard.as_mut() {
                     match subscription.recv().await {
                         Ok(envelope) => {
+                            // Track that we have work
+                            self.context.instrumentation.event_loops_with_work_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            
                             tracing::trace!(
                                 stage_name = %self.context.stage_name,
                                 "Sink processing event"
@@ -216,6 +222,9 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                 stage_type: obzenflow_core::event::flow_context::StageType::Sink,
                             };
                             
+                            // Enrich with runtime context
+                            updated_event.runtime_context = Some(self.context.instrumentation.snapshot());
+                            
                             // Write event to sink's journal for durability, metrics, and journey tracking
                             if let Err(e) = self.context.journal.write(updated_event.clone(), Some(&envelope)).await {
                                 tracing::error!(
@@ -229,19 +238,41 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                 ));
                             }
                             
-                            // Process normal event
-                            let mut handler = self.context.handler.write().await;
-                            if let Err(e) = handler.consume(envelope.event) {
-                                tracing::error!(
-                                    stage_name = %self.context.stage_name,
-                                    error = ?e,
-                                    "Failed to consume event"
-                                );
-                                drop(handler);
-                                drop(subscription_guard);
-                                return Ok(EventLoopDirective::Transition(
-                                    SinkEvent::Error(format!("Failed to consume event: {:?}", e))
-                                ));
+                            // Only process data events with instrumentation (skip control/system events)
+                            if !envelope.event.is_control() && !envelope.event.is_system() {
+                                let envelope_event = envelope.event.clone();
+                                
+                                let result = process_with_instrumentation(
+                                    &self.context.instrumentation,
+                                    || async {
+                                        let mut handler = self.context.handler.write().await;
+                                        handler.consume(envelope_event)
+                                            .map_err(|e| e as Box<dyn std::error::Error + Send + Sync>)
+                                    }
+                                ).await;
+                                
+                                if let Err(e) = result {
+                                    tracing::error!(
+                                        stage_name = %self.context.stage_name,
+                                        error = ?e,
+                                        "Failed to consume event"
+                                    );
+                                    drop(subscription_guard);
+                                    return Ok(EventLoopDirective::Transition(
+                                        SinkEvent::Error(format!("Failed to consume event: {:?}", e))
+                                    ));
+                                }
+                            } else {
+                                // For control/system events, just consume without instrumentation
+                                let envelope_event = envelope.event.clone();
+                                let mut handler = self.context.handler.write().await;
+                                if let Err(e) = handler.consume(envelope_event) {
+                                    tracing::error!(
+                                        stage_name = %self.context.stage_name,
+                                        error = ?e,
+                                        "Failed to consume control/system event"
+                                    );
+                                }
                             }
                         }
                         Err(e) => {

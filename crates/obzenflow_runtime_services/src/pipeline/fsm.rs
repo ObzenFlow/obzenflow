@@ -352,18 +352,17 @@ impl FsmAction for PipelineAction {
                     .map_err(|e| format!("Failed to subscribe for drain completion: {}", e))?;
                 
                 // Wait for the specific drain completion event
-                let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(30);
+                // No timeout - let metrics aggregator take as much time as it needs
                 loop {
-                    match tokio::time::timeout_at(deadline, subscription.recv()).await {
-                        Ok(Ok(event)) => {
+                    match subscription.recv().await {
+                        Ok(event) => {
                             if event.event.event_type == ChainEvent::SYSTEM_METRICS_DRAINED {
                                 tracing::info!("Metrics successfully drained");
                                 break;
                             }
                             // Otherwise continue waiting for the right event
                         }
-                        Ok(Err(e)) => return Err(format!("Failed to receive drain completion: {}", e).into()),
-                        Err(_) => return Err("Metrics drain timeout".into()),
+                        Err(e) => return Err(format!("Failed to receive drain completion: {}", e).into()),
                     }
                 }
             }
@@ -561,6 +560,7 @@ pub fn build_pipeline_fsm() -> PipelineFsm {
                 Ok(Transition {
                     next_state: PipelineState::Drained,
                     actions: vec![
+                        PipelineAction::DrainMetrics,  // Drain metrics AFTER all stages complete
                         PipelineAction::WritePipelineCompleted,
                         PipelineAction::Cleanup
                     ],
