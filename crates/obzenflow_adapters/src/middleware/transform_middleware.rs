@@ -4,6 +4,7 @@
 //! with middleware for cross-cutting concerns like logging, monitoring, and retry logic.
 
 use obzenflow_core::{ChainEvent, Result};
+use obzenflow_core::event::ChainEventFactory;
 use obzenflow_runtime_services::stages::common::handlers::TransformHandler;
 use super::{Middleware, MiddlewareAction, MiddlewareContext};
 use async_trait::async_trait;
@@ -181,9 +182,21 @@ mod tests {
     
     #[async_trait]
     impl TransformHandler for TestTransform {
-        fn process(&self, mut event: ChainEvent) -> Vec<ChainEvent> {
-            event.payload["processed"] = json!(true);
-            vec![event]
+        fn process(&self, event: ChainEvent) -> Vec<ChainEvent> {
+            let mut payload = event.payload().clone();
+            payload["processed"] = json!(true);
+            
+            let mut new_event = ChainEventFactory::data_event(
+                event.writer_id.clone(),
+                event.event_type(),
+                payload,
+            );
+            // Copy over metadata
+            new_event.flow_context = event.flow_context.clone();
+            new_event.processing_info = event.processing_info.clone();
+            new_event.causality = event.causality.clone();
+            
+            vec![new_event]
         }
         
         async fn drain(&mut self) -> Result<()> {
@@ -221,9 +234,8 @@ mod tests {
             .with(TestMiddleware { tag: "second".to_string() })
             .build();
             
-        let event = ChainEvent::new(
-            obzenflow_core::EventId::new(),
-            obzenflow_core::WriterId::new(),
+        let event = ChainEventFactory::data_event(
+            obzenflow_core::WriterId::from(obzenflow_core::StageId::new()),
             "test",
             json!({})
         );
@@ -232,7 +244,7 @@ mod tests {
         
         // Middleware can't modify events anymore, just verify the transform worked
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].payload["processed"], json!(true));
+        assert_eq!(results[0].payload()["processed"], json!(true));
         
         // The middleware would have emitted events through context,
         // but we can't verify that here without access to the context
@@ -243,8 +255,9 @@ mod tests {
     impl Middleware for ControlEventMiddleware {
         fn pre_handle(&self, _event: &ChainEvent, ctx: &mut MiddlewareContext) -> MiddlewareAction {
             // Emit a control event
-            ctx.write_control_event(ChainEvent::control(
-                ChainEvent::CONTROL_MIDDLEWARE_STATE,
+            let writer_id = obzenflow_core::WriterId::from(obzenflow_core::StageId::new());
+            ctx.write_control_event(ChainEventFactory::metrics_state_snapshot(
+                writer_id,
                 json!({
                     "middleware": "test_middleware",
                     "state_transition": {
@@ -259,8 +272,9 @@ mod tests {
         
         fn post_handle(&self, _event: &ChainEvent, _results: &[ChainEvent], ctx: &mut MiddlewareContext) {
             // Emit another control event in post phase
-            ctx.write_control_event(ChainEvent::control(
-                ChainEvent::CONTROL_METRICS_STATE,
+            let writer_id = obzenflow_core::WriterId::from(obzenflow_core::StageId::new());
+            ctx.write_control_event(ChainEventFactory::metrics_state_snapshot(
+                writer_id,
                 json!({
                     "queue_depth": 10,
                     "in_flight": 3
@@ -276,9 +290,8 @@ mod tests {
             .with(ControlEventMiddleware)
             .build();
             
-        let event = ChainEvent::new(
-            obzenflow_core::EventId::new(),
-            obzenflow_core::WriterId::new(),
+        let event = ChainEventFactory::data_event(
+            obzenflow_core::WriterId::from(obzenflow_core::StageId::new()),
             "test",
             json!({})
         );
@@ -289,16 +302,16 @@ mod tests {
         assert_eq!(results.len(), 3);
         
         // First event is the transformed data event
-        assert_eq!(results[0].payload["processed"], json!(true));
+        assert_eq!(results[0].payload()["processed"], json!(true));
         assert!(!results[0].is_control());
         
         // Second event is the control event from pre_handle
-        assert!(results[1].is_control());
-        assert_eq!(results[1].event_type, ChainEvent::CONTROL_MIDDLEWARE_STATE);
+        assert!(results[1].is_lifecycle());
+        assert_eq!(results[1].event_type(), "lifecycle.metrics.state");
         
         // Third event is the control event from post_handle
-        assert!(results[2].is_control());
-        assert_eq!(results[2].event_type, ChainEvent::CONTROL_METRICS_STATE);
+        assert!(results[2].is_lifecycle());
+        assert_eq!(results[2].event_type(), "lifecycle.metrics.state");
     }
     
     struct SkipWithControlMiddleware;
@@ -306,16 +319,16 @@ mod tests {
     impl Middleware for SkipWithControlMiddleware {
         fn pre_handle(&self, _event: &ChainEvent, ctx: &mut MiddlewareContext) -> MiddlewareAction {
             // Write control event then skip
-            ctx.write_control_event(ChainEvent::control(
-                ChainEvent::CONTROL_MIDDLEWARE_SUMMARY,
+            let writer_id = obzenflow_core::WriterId::from(obzenflow_core::StageId::new());
+            ctx.write_control_event(ChainEventFactory::metrics_state_snapshot(
+                writer_id.clone(),
                 json!({
                     "middleware": "skip_test",
                     "action": "skipped"
                 })
             ));
-            MiddlewareAction::Skip(vec![ChainEvent::new(
-                obzenflow_core::EventId::new(),
-                obzenflow_core::WriterId::new(),
+            MiddlewareAction::Skip(vec![ChainEventFactory::data_event(
+                writer_id,
                 "skipped",
                 json!({"skipped": true})
             )])
@@ -329,9 +342,8 @@ mod tests {
             .with(SkipWithControlMiddleware)
             .build();
             
-        let event = ChainEvent::new(
-            obzenflow_core::EventId::new(),
-            obzenflow_core::WriterId::new(),
+        let event = ChainEventFactory::data_event(
+            obzenflow_core::WriterId::from(obzenflow_core::StageId::new()),
             "test",
             json!({})
         );
@@ -342,11 +354,11 @@ mod tests {
         assert_eq!(results.len(), 2);
         
         // First is the skip result
-        assert_eq!(results[0].event_type, "skipped");
+        assert_eq!(results[0].event_type(), "skipped");
         assert!(!results[0].is_control());
         
         // Second is the control event
-        assert!(results[1].is_control());
-        assert_eq!(results[1].event_type, ChainEvent::CONTROL_MIDDLEWARE_SUMMARY);
+        assert!(results[1].is_lifecycle());
+        assert_eq!(results[1].event_type(), "lifecycle.metrics.state");
     }
 }

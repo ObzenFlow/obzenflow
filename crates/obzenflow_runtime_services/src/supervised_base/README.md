@@ -67,7 +67,7 @@ pub enum MyState { Idle, Running }
 ```rust
 pub struct MyBuilder {
     config: MyConfig,
-    journal: Arc<ReactiveJournal>,
+    resources: StageResources,
 }
 
 #[async_trait]

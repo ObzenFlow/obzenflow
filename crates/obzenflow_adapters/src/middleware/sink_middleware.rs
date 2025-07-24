@@ -4,6 +4,7 @@
 //! with special focus on error handling and retry logic.
 
 use obzenflow_core::{ChainEvent, Result};
+use obzenflow_core::event::payloads::delivery_payload::{DeliveryPayload, DeliveryResult, DeliveryMethod};
 use obzenflow_runtime_services::stages::common::handlers::SinkHandler;
 use super::{Middleware, MiddlewareAction, ErrorAction, MiddlewareContext};
 use async_trait::async_trait;
@@ -49,10 +50,10 @@ impl<H: SinkHandler> MiddlewareSink<H> {
     }
     
     /// Apply middleware with error handling
-    fn apply_middleware_with_error_handling(
+    async fn apply_middleware_with_error_handling(
         &mut self,
         event: ChainEvent,
-    ) -> Result<()> {
+    ) -> Result<DeliveryPayload> {
         // Create ephemeral context for this processing
         let mut ctx = MiddlewareContext::new();
         
@@ -60,30 +61,54 @@ impl<H: SinkHandler> MiddlewareSink<H> {
         for middleware in &self.middleware_chain {
             match middleware.pre_handle(&event, &mut ctx) {
                 MiddlewareAction::Continue => continue,
-                MiddlewareAction::Skip(_) => return Ok(()), // Skip means don't consume
-                MiddlewareAction::Abort => return Ok(()),   // Abort is also a no-op for sinks
+                MiddlewareAction::Skip(_) => {
+                    // Skip means don't consume - return success with no delivery
+                    return Ok(DeliveryPayload::success(
+                        "middleware_sink",
+                        DeliveryMethod::Noop,
+                        0, // processing_duration_ms
+                        None, // bytes_processed
+                    ));
+                },
+                MiddlewareAction::Abort => {
+                    // Abort is also treated as success but with a different message
+                    return Ok(DeliveryPayload::success(
+                        "middleware_sink",
+                        DeliveryMethod::Noop,
+                        0, // processing_duration_ms
+                        None, // bytes_processed
+                    ));
+                }
             }
         }
         
         // Consume with inner handler
-        match self.inner.consume(event.clone()) {
-            Ok(()) => {
+        match self.inner.consume(event.clone()).await {
+            Ok(payload) => {
                 // Post-processing phase - sinks don't produce output events
                 let empty = vec![];
                 for middleware in &self.middleware_chain {
                     middleware.post_handle(&event, &empty, &mut ctx);
                 }
-                Ok(())
+                Ok(payload)
             }
             Err(e) => {
                 // Give each middleware a chance to handle the error
                 for middleware in &self.middleware_chain {
                     match middleware.on_error(&event, &mut ctx) {
                         ErrorAction::Propagate => continue,
-                        ErrorAction::Recover(_) => return Ok(()), // Recovery means success
+                        ErrorAction::Recover(_) => {
+                            // Recovery means success
+                            return Ok(DeliveryPayload::success(
+                                "middleware_sink",
+                                DeliveryMethod::Noop,
+                                0, // processing_duration_ms
+                                None, // bytes_processed
+                            ));
+                        },
                         ErrorAction::Retry => {
                             // Simple retry once - in production, might want exponential backoff
-                            return self.inner.consume(event);
+                            return self.inner.consume(event).await;
                         }
                     }
                 }
@@ -97,18 +122,26 @@ impl<H: SinkHandler> MiddlewareSink<H> {
 
 #[async_trait]
 impl<H: SinkHandler> SinkHandler for MiddlewareSink<H> {
-    fn consume(&mut self, event: ChainEvent) -> Result<()> {
-        self.apply_middleware_with_error_handling(event)
+    async fn consume(&mut self, event: ChainEvent) -> Result<DeliveryPayload> {
+        self.apply_middleware_with_error_handling(event).await
     }
     
-    fn flush(&mut self) -> Result<()> {
+    async fn flush(&mut self) -> Result<Option<DeliveryPayload>> {
         // Flush is not intercepted by middleware - it's an infrastructure concern
-        self.inner.flush()
+        self.inner.flush().await
     }
     
-    async fn drain(&mut self) -> Result<()> {
+    async fn drain(&mut self) -> Result<Option<DeliveryPayload>> {
         // Drain is not intercepted by middleware - it's an infrastructure concern
         self.inner.drain().await
+    }
+}
+
+impl<H: SinkHandler> MiddlewareSink<H> {
+    /// Test-only method to access the inner handler
+    #[cfg(test)]
+    pub fn inner(&self) -> &H {
+        &self.inner
     }
 }
 
@@ -152,14 +185,18 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::sync::{Arc, Mutex};
+    use async_trait::async_trait;
+    use obzenflow_core::event::payloads::delivery_payload::DeliveryPayload;
+    use obzenflow_core::event::ChainEventFactory;
     
     struct TestSink {
         consumed: Arc<Mutex<Vec<ChainEvent>>>,
         fail_count: Arc<Mutex<usize>>,
     }
     
+    #[async_trait]
     impl SinkHandler for TestSink {
-        fn consume(&mut self, event: ChainEvent) -> Result<()> {
+        async fn consume(&mut self, event: ChainEvent) -> Result<DeliveryPayload> {
             let mut fail_count = self.fail_count.lock().unwrap();
             if *fail_count > 0 {
                 *fail_count -= 1;
@@ -167,7 +204,12 @@ mod tests {
             }
             
             self.consumed.lock().unwrap().push(event);
-            Ok(())
+            Ok(DeliveryPayload::success(
+                "test_sink",
+                DeliveryMethod::Noop,
+                100,
+                None
+            ))
         }
     }
     
@@ -181,8 +223,8 @@ mod tests {
         }
     }
     
-    #[test]
-    fn test_sink_retry_middleware() {
+    #[tokio::test]
+    async fn test_sink_retry_middleware() {
         let consumed = Arc::new(Mutex::new(Vec::new()));
         let fail_count = Arc::new(Mutex::new(1)); // Fail once
         
@@ -194,15 +236,14 @@ mod tests {
         .with(RetryMiddleware { max_retries: 2 })
         .build();
         
-        let event = ChainEvent::new(
-            obzenflow_core::EventId::new(),
-            obzenflow_core::WriterId::new(),
+        let event = ChainEventFactory::data_event(
+            obzenflow_core::WriterId::from(obzenflow_core::StageId::new()),
             "test",
             json!({"data": "test"})
         );
         
         // Should succeed after retry
-        assert!(handler.consume(event.clone()).is_ok());
+        handler.consume(event.clone()).await.unwrap();
         assert_eq!(consumed.lock().unwrap().len(), 1);
     }
 }

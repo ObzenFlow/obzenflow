@@ -9,7 +9,6 @@ use super::{
     supervisor::PipelineSupervisor,
 };
 use crate::{
-    messaging::reactive_journal::ReactiveJournal,
     message_bus::FsmMessageBus,
     stages::common::stage_handle::BoxedStageHandle,
     supervised_base::{
@@ -17,7 +16,11 @@ use crate::{
         ChannelBuilder, EventReceiver, StateWatcher, SupervisorTaskBuilder, HandleBuilder,
     },
 };
-use obzenflow_core::{metrics::MetricsExporter, WriterId};
+use obzenflow_core::journal::journal::Journal;
+use obzenflow_core::event::{SystemEvent, ChainEvent};
+use obzenflow_core::metrics::MetricsExporter;
+use obzenflow_core::id::SystemId;
+use obzenflow_core::event::WriterId;
 use obzenflow_topology_services::{stages::StageId, topology::Topology};
 use std::{collections::HashMap, sync::Arc};
 use tokio::sync::RwLock;
@@ -25,21 +28,21 @@ use tokio::sync::RwLock;
 /// Builder for creating a pipeline with proper FSM lifecycle
 pub struct PipelineBuilder {
     topology: Arc<Topology>,
-    reactive_journal: Arc<ReactiveJournal>,
+    system_journal: Arc<dyn Journal<SystemEvent>>,
     stages: Vec<BoxedStageHandle>,
     metrics_exporter: Option<Arc<dyn MetricsExporter>>,
-    metrics_journal: Option<Arc<ReactiveJournal>>,
+    stage_journals: Option<Vec<(StageId, Arc<dyn Journal<ChainEvent>>)>>,
 }
 
 impl PipelineBuilder {
     /// Create a new pipeline builder
-    pub fn new(topology: Arc<Topology>, reactive_journal: Arc<ReactiveJournal>) -> Self {
+    pub fn new(topology: Arc<Topology>, system_journal: Arc<dyn Journal<SystemEvent>>) -> Self {
         Self {
             topology,
-            reactive_journal,
+            system_journal,
             stages: Vec::new(),
             metrics_exporter: None,
-            metrics_journal: None,
+            stage_journals: None,
         }
     }
 
@@ -55,11 +58,12 @@ impl PipelineBuilder {
         self
     }
 
-    /// Add metrics journal (for metrics aggregator to read from all stage journals)
-    pub fn with_metrics_journal(mut self, journal: Arc<ReactiveJournal>) -> Self {
-        self.metrics_journal = Some(journal);
+    /// Add stage journals for metrics aggregator
+    pub fn with_stage_journals(mut self, journals: Vec<(StageId, Arc<dyn Journal<ChainEvent>>)>) -> Self {
+        self.stage_journals = Some(journals);
         self
     }
+
 }
 
 #[async_trait::async_trait]
@@ -69,10 +73,8 @@ impl SupervisorBuilder for PipelineBuilder {
 
     /// Build and start the pipeline, returning a FlowHandle
     async fn build(self) -> Result<Self::Handle, Self::Error> {
-        // Register as a writer first
-        let stage_id = StageId::new();
-        // In the new architecture, ReactiveJournal already has its writer_id
-        let writer_id = self.reactive_journal.writer_id.clone();
+        // Create unique stage ID for the pipeline supervisor
+        let _stage_id = StageId::new();
 
         // Create message bus
         let message_bus = Arc::new(FsmMessageBus::new());
@@ -85,21 +87,23 @@ impl SupervisorBuilder for PipelineBuilder {
         }
 
         // Create pipeline context with all mutable state
+        let system_id = SystemId::new();
+        
         let pipeline_context = Arc::new(PipelineContext {
+            system_id,
             bus: message_bus.clone(),
             topology: self.topology.clone(),
-            journal: self.reactive_journal.clone(),
+            system_journal: self.system_journal.clone(),
             completed_stages: Arc::new(RwLock::new(Vec::new())),
             running_stages: Arc::new(RwLock::new(std::collections::HashSet::new())),
             stage_supervisors: Arc::new(RwLock::new(stage_map)),
-            completion_subscription: Arc::new(RwLock::new(None)),
+            stage_data_journals: Arc::new(RwLock::new(self.stage_journals.unwrap_or_default())),
+            completion_reader: Arc::new(RwLock::new(None)),
             metrics_exporter: self.metrics_exporter.clone(),
-            metrics_journal: self.metrics_journal.clone(),
-            writer_id: writer_id.clone(),
         });
 
         // Create channels using the common infrastructure
-        let (event_sender, mut event_receiver, state_watcher) = 
+        let (event_sender, event_receiver, state_watcher) = 
             ChannelBuilder::<PipelineEvent, PipelineState>::new()
                 .with_event_buffer(100)
                 .build(PipelineState::Created);
@@ -108,8 +112,7 @@ impl SupervisorBuilder for PipelineBuilder {
         let supervisor = PipelineSupervisor {
             name: "pipeline_supervisor".to_string(),
             pipeline_context: pipeline_context.clone(),
-            reactive_journal: self.reactive_journal.clone(),
-            writer_id,
+            system_journal: self.system_journal.clone(),
         };
 
         // Clone what we need for the task
@@ -174,13 +177,6 @@ impl Supervisor for SupervisorWithExternalEvents {
         self.supervisor.configure_fsm(builder)
     }
 
-    fn journal(&self) -> &Arc<ReactiveJournal> {
-        self.supervisor.journal()
-    }
-
-    fn writer_id(&self) -> &WriterId {
-        self.supervisor.writer_id()
-    }
 
     fn name(&self) -> &str {
         self.supervisor.name()
@@ -189,6 +185,14 @@ impl Supervisor for SupervisorWithExternalEvents {
 
 #[async_trait::async_trait]
 impl crate::supervised_base::SelfSupervised for SupervisorWithExternalEvents {
+    fn writer_id(&self) -> WriterId {
+        self.supervisor.writer_id()
+    }
+    
+    async fn write_completion_event(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.supervisor.write_completion_event().await
+    }
+    
     async fn dispatch_state(
         &mut self,
         state: &Self::State,

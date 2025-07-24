@@ -4,7 +4,8 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::RwLock;
 use std::time::{Duration, Instant};
 use hdrhistogram::Histogram;
-use serde::{Serialize, Deserialize};
+use serde::{Serialize, Deserialize}; // <‑‑ canonical path
+use obzenflow_core::event::context::runtime_context;
 
 use super::constants::{
     HISTOGRAM_MIN_MS, 
@@ -16,34 +17,6 @@ use super::constants::{
     QUANTILE_P99,
     QUANTILE_P999,
 };
-
-/// Runtime context snapshot injected into events
-/// Following Honeycomb's wide events philosophy - contains accurate point-in-time metrics
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RuntimeContext {
-    // Gauge snapshots - current values
-    pub in_flight: u32,
-    
-    // Histogram percentiles - pre-computed for efficiency
-    pub recent_p50_ms: u64,
-    pub recent_p90_ms: u64,
-    pub recent_p95_ms: u64,
-    pub recent_p99_ms: u64,
-    pub recent_p999_ms: u64,
-    
-    // Counter snapshots - raw totals (Prometheus computes rates)
-    pub events_processed_total: u64,
-    pub errors_total: u64,
-    pub failures_total: u64,
-    
-    // FSM state
-    pub fsm_state: String,
-    pub time_in_state_ms: u64,
-    
-    // Event loop metrics (cumulative)
-    pub event_loops_total: u64,
-    pub event_loops_with_work_total: u64,
-}
 
 /// Configuration for stage instrumentation
 #[derive(Debug, Clone)]
@@ -122,10 +95,10 @@ impl StageInstrumentation {
     }
     
     /// Create a snapshot for event injection
-    pub fn snapshot(&self) -> obzenflow_core::event::runtime_context::RuntimeContext {
+    pub fn snapshot(&self) -> RuntimeContext {
         let histogram = self.processing_time_histogram.read().unwrap();
         
-        obzenflow_core::event::runtime_context::RuntimeContext {
+        RuntimeContext {
             // Gauge snapshots
             in_flight: self.in_flight_count.load(Ordering::Relaxed),
             
@@ -217,6 +190,7 @@ impl StageInstrumentation {
 use std::future::Future;
 use std::error::Error;
 use std::sync::Arc;
+use obzenflow_core::runtime_context::RuntimeContext;
 
 pub async fn process_with_instrumentation<T, F, Fut>(
     instrumentation: &Arc<StageInstrumentation>,

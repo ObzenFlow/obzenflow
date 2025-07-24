@@ -1,9 +1,10 @@
 //! Builder for transform stages
 
 use std::sync::Arc;
-use obzenflow_core::WriterId;
 
-use crate::messaging::reactive_journal::ReactiveJournal;
+use obzenflow_core::journal::journal::Journal;
+use obzenflow_core::{ChainEvent, StageId};
+use obzenflow_core::event::SystemEvent;
 use crate::message_bus::FsmMessageBus;
 use crate::stages::common::handlers::TransformHandler;
 use crate::stages::common::control_strategies::{ControlEventStrategy, JonestownStrategy};
@@ -24,7 +25,10 @@ use super::fsm::{TransformState, TransformContext, TransformEvent, TransformActi
 pub struct TransformBuilder<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> {
     handler: H,
     config: TransformConfig,
-    journal: Arc<ReactiveJournal>,
+    flow_id: obzenflow_core::FlowId,
+    data_journal: Arc<dyn Journal<ChainEvent>>,
+    system_journal: Arc<dyn Journal<SystemEvent>>,
+    upstream_journals: Vec<(StageId, Arc<dyn Journal<ChainEvent>>)>,
     bus: Arc<FsmMessageBus>,
     instrumentation: Option<Arc<StageInstrumentation>>,
 }
@@ -34,13 +38,19 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Tran
     pub fn new(
         handler: H,
         config: TransformConfig,
-        journal: Arc<ReactiveJournal>,
+        flow_id: obzenflow_core::FlowId,
+        data_journal: Arc<dyn Journal<ChainEvent>>,
+        system_journal: Arc<dyn Journal<SystemEvent>>,
+        upstream_journals: Vec<(StageId, Arc<dyn Journal<ChainEvent>>)>,
         bus: Arc<FsmMessageBus>,
     ) -> Self {
         Self {
             handler,
             config,
-            journal,
+            flow_id,
+            data_journal,
+            system_journal,
+            upstream_journals,
             bus,
             instrumentation: None,
         }
@@ -83,7 +93,10 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Supe
             self.config.stage_id,
             self.config.stage_name.clone(),
             self.config.flow_name.clone(),
-            self.journal.clone(),
+            self.flow_id.clone(),
+            self.data_journal.clone(),
+            self.system_journal.clone(),
+            self.upstream_journals.clone(),
             self.bus.clone(),
             self.config.upstream_stages.clone(),
             control_strategy,
@@ -94,8 +107,8 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Supe
         let supervisor = TransformSupervisor {
             name: format!("transform_{}", self.config.stage_name),
             context: Arc::new(context.clone()),
-            journal: self.journal.clone(),
-            writer_id: WriterId::new(), // Will be replaced during init
+            data_journal: self.data_journal.clone(),
+            system_journal: self.system_journal.clone(),
             stage_id: self.config.stage_id,
         };
         
@@ -152,14 +165,6 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Supe
         self.supervisor.configure_fsm(builder)
     }
 
-    fn journal(&self) -> &Arc<ReactiveJournal> {
-        self.supervisor.journal()
-    }
-
-    fn writer_id(&self) -> &WriterId {
-        self.supervisor.writer_id()
-    }
-
     fn name(&self) -> &str {
         self.supervisor.name()
     }
@@ -171,6 +176,18 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> crat
 #[async_trait::async_trait]
 impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSupervised for HandlerSupervisedWithExternalEvents<H> {
     type Handler = H;
+    
+    fn writer_id(&self) -> obzenflow_core::WriterId {
+        self.supervisor.writer_id()
+    }
+    
+    fn stage_id(&self) -> obzenflow_core::StageId {
+        self.supervisor.stage_id()
+    }
+    
+    async fn write_completion_event(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.supervisor.write_completion_event().await
+    }
     
     async fn dispatch_state(
         &mut self,

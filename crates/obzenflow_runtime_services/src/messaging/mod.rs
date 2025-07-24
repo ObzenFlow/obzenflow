@@ -1,6 +1,6 @@
 //! Event flow and routing components
 
-pub mod reactive_journal;
+pub mod upstream_subscription;
 
 // Re-export commonly used types
-pub use reactive_journal::{JournalSubscription, ReactiveJournal, ReactiveJournalBuilder, JournalSet};
+pub use upstream_subscription::UpstreamSubscription;

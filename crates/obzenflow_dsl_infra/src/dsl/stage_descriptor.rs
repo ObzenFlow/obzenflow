@@ -6,14 +6,14 @@
 use obzenflow_runtime_services::{
     stages::{
         common::{
-            stage_handle::{BoxedStageHandle, StageEvent, StageType},
+            stage_handle::{BoxedStageHandle, StageEvent},
             handlers::{
                 FiniteSourceHandler, InfiniteSourceHandler, TransformHandler, SinkHandler
             },
             control_strategies::{
-                ControlEventStrategy, ControlEventAction, ProcessingContext,
-                JonestownStrategy, RetryStrategy, WindowingStrategy,
-                CompositeStrategy, BackoffStrategy,
+                ControlEventStrategy,
+                JonestownStrategy,
+                CompositeStrategy,
             },
         },
         source::{
@@ -28,26 +28,24 @@ use obzenflow_runtime_services::{
 };
 use obzenflow_adapters::middleware::{
     Middleware, MiddlewareFactory, FiniteSourceHandlerExt, InfiniteSourceHandlerExt,
-    TransformHandlerExt, SinkHandlerExt, ControlStrategyRequirement, BackoffConfig,
-    validate_middleware_safety, TimingMiddleware, SystemEnrichmentMiddleware,
-    OutcomeEnrichmentMiddleware,
+    TransformHandlerExt, SinkHandlerExt,
+    TimingMiddleware, SystemEnrichmentMiddleware, OutcomeEnrichmentMiddleware,
+    validate_middleware_safety
 };
-use obzenflow_core::{journal::writer_id::WriterId, event::event_envelope::EventEnvelope};
-use obzenflow_core::StageId;
+use obzenflow_core::WriterId;
 use obzenflow_runtime_services::{
-    messaging::reactive_journal::ReactiveJournal,
-    message_bus::FsmMessageBus,
     stages::StageResources,
     metrics::instrumentation::{StageInstrumentation, InstrumentationConfig},
 };
 use crate::stage_handle_adapter::StageHandleAdapter;
 use std::sync::Arc;
 use async_trait::async_trait;
+use obzenflow_core::event::context::StageType;
 
 /// Create system middleware for a stage
 fn create_system_middleware(
     config: &StageConfig, 
-    stage_type: obzenflow_core::event::flow_context::StageType,
+    stage_type: StageType,
 ) -> Vec<Box<dyn Middleware>> {
     vec![
         Box::new(TimingMiddleware::new(&config.name)),
@@ -61,85 +59,31 @@ fn create_system_middleware(
     ]
 }
 
-/// Wrapper to convert Arc to Box for CompositeStrategy
-struct ArcStrategyWrapper(Arc<dyn ControlEventStrategy>);
 
-impl ControlEventStrategy for ArcStrategyWrapper {
-    fn handle_eof(&self, envelope: &EventEnvelope, ctx: &mut ProcessingContext) -> ControlEventAction {
-        self.0.handle_eof(envelope, ctx)
-    }
-    
-    fn handle_watermark(&self, envelope: &EventEnvelope, ctx: &mut ProcessingContext) -> ControlEventAction {
-        self.0.handle_watermark(envelope, ctx)
-    }
-    
-    fn handle_checkpoint(&self, envelope: &EventEnvelope, ctx: &mut ProcessingContext) -> ControlEventAction {
-        self.0.handle_checkpoint(envelope, ctx)
-    }
-    
-    fn handle_drain(&self, envelope: &EventEnvelope, ctx: &mut ProcessingContext) -> ControlEventAction {
-        self.0.handle_drain(envelope, ctx)
-    }
-}
-
-/// Helper function to create a control strategy from middleware requirements
-fn create_control_strategy_from_requirements(
-    requirements: Vec<ControlStrategyRequirement>,
-    stage_name: &str,
+/// Helper function to create a control strategy from middleware factories
+fn create_control_strategy_from_factories(
+    factories: &[Box<dyn MiddlewareFactory>],
+    _stage_name: &str,
 ) -> Arc<dyn ControlEventStrategy> {
-    match requirements.len() {
+    let strategies: Vec<Box<dyn ControlEventStrategy>> = factories
+        .iter()
+        .filter_map(|factory| factory.create_control_strategy())
+        .collect();
+    
+    match strategies.len() {
         0 => Arc::new(JonestownStrategy), // Default
-        1 => create_strategy_for(&requirements[0], stage_name),
+        1 => {
+            // Convert Box<dyn> to Arc<dyn> for single strategy
+            let boxed = strategies.into_iter().next().unwrap();
+            Arc::from(boxed)
+        }
         _ => {
-            // Multiple requirements - compose them
-            let strategies: Vec<Box<dyn ControlEventStrategy>> = requirements
-                .iter()
-                .map(|req| {
-                    let arc_strategy = create_strategy_for(req, stage_name);
-                    Box::new(ArcStrategyWrapper(arc_strategy)) as Box<dyn ControlEventStrategy>
-                })
-                .collect();
+            // Multiple strategies - compose them
             Arc::new(CompositeStrategy::new(strategies))
         }
     }
 }
 
-/// Create a strategy for a single requirement
-fn create_strategy_for(
-    requirement: &ControlStrategyRequirement,
-    stage_name: &str,
-) -> Arc<dyn ControlEventStrategy> {
-    match requirement {
-        ControlStrategyRequirement::Retry { max_attempts, backoff } => {
-            let backoff_strategy = match backoff {
-                BackoffConfig::Fixed { delay } => BackoffStrategy::Fixed { delay: *delay },
-                BackoffConfig::Exponential { initial, max, factor, jitter } => {
-                    BackoffStrategy::Exponential {
-                        initial: *initial,
-                        max: *max,
-                        factor: *factor,
-                        jitter: *jitter,
-                    }
-                }
-            };
-            Arc::new(RetryStrategy {
-                max_attempts: *max_attempts,
-                backoff: backoff_strategy,
-            })
-        }
-        ControlStrategyRequirement::Windowing { window_duration } => {
-            Arc::new(WindowingStrategy::new(*window_duration))
-        }
-        ControlStrategyRequirement::Custom { strategy_id, config: _ } => {
-            // For now, log a warning and use default
-            tracing::warn!(
-                "Custom control strategy '{}' requested for stage '{}', using default",
-                strategy_id, stage_name
-            );
-            Arc::new(JonestownStrategy)
-        }
-    }
-}
 
 /// Trait for stage descriptors that know how to create their supervisors
 #[async_trait]
@@ -148,7 +92,7 @@ pub trait StageDescriptor: Send + Sync {
     fn name(&self) -> &str;
     
     /// Get the stage type
-    fn stage_type(&self) -> obzenflow_core::event::flow_context::StageType;
+    fn stage_type(&self) -> StageType;
     
     /// Create the handle for this stage
     async fn create_handle(
@@ -176,8 +120,8 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> S
         &self.name
     }
     
-    fn stage_type(&self) -> obzenflow_core::event::flow_context::StageType {
-        obzenflow_core::event::flow_context::StageType::Source
+    fn stage_type(&self) -> StageType {
+        StageType::FiniteSource
     }
     
     async fn create_handle(
@@ -185,7 +129,7 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> S
         config: StageConfig, 
         resources: StageResources
     ) -> Result<BoxedStageHandle, String> {
-        let writer_id = WriterId::new();
+        let writer_id = WriterId::from(config.stage_id);
         
         // Create instrumentation configuration
         let instrumentation_config = InstrumentationConfig::default();
@@ -194,7 +138,7 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> S
         // Create system middleware with instrumentation
         let mut all_middleware = create_system_middleware(
             &config, 
-            obzenflow_core::event::flow_context::StageType::Source
+            StageType::FiniteSource
         );
         
         // Add user middleware
@@ -222,8 +166,7 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> S
         let handle = FiniteSourceBuilder::new(
             handler_with_middleware,
             source_config,
-            resources.journal,
-            resources.message_bus,
+            resources,
         )
         .with_instrumentation(instrumentation)
         .build()
@@ -235,7 +178,7 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> S
             handle,
             config.stage_id,
             config.name,
-            StageType::InfiniteSource,
+            StageType::FiniteSource,
             move |event| translate_stage_event_to_finite_source(event),
             |state| check_finite_source_state(state),
         );
@@ -257,8 +200,8 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
         &self.name
     }
     
-    fn stage_type(&self) -> obzenflow_core::event::flow_context::StageType {
-        obzenflow_core::event::flow_context::StageType::Source
+    fn stage_type(&self) -> StageType {
+        StageType::InfiniteSource
     }
     
     async fn create_handle(
@@ -266,7 +209,7 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
         config: StageConfig, 
         resources: StageResources
     ) -> Result<BoxedStageHandle, String> {
-        let writer_id = WriterId::new();
+        let writer_id = WriterId::from(config.stage_id);
         
         // Create instrumentation configuration
         let instrumentation_config = InstrumentationConfig::default();
@@ -275,7 +218,7 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
         // Create system middleware with instrumentation
         let mut all_middleware = create_system_middleware(
             &config, 
-            obzenflow_core::event::flow_context::StageType::Source
+            StageType::InfiniteSource
         );
         
         // Add user middleware
@@ -303,8 +246,7 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
         let handle = InfiniteSourceBuilder::new(
             handler_with_middleware,
             source_config,
-            resources.journal,
-            resources.message_bus,
+            resources,
         )
         .with_instrumentation(instrumentation)
         .build()
@@ -338,8 +280,8 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stag
         &self.name
     }
     
-    fn stage_type(&self) -> obzenflow_core::event::flow_context::StageType {
-        obzenflow_core::event::flow_context::StageType::Transform
+    fn stage_type(&self) -> StageType {
+        StageType::Transform
     }
     
     async fn create_handle(
@@ -347,9 +289,7 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stag
         config: StageConfig, 
         resources: StageResources
     ) -> Result<BoxedStageHandle, String> {
-        // Validate middleware safety and collect strategy requirements
-        let mut strategy_requirements = Vec::new();
-        
+        // Validate middleware safety
         for factory in &self.middleware {
             // Validate safety
             let validation_result = validate_middleware_safety(
@@ -364,16 +304,11 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stag
                 }
                 // Could choose to panic here for critical errors
             }
-            
-            // Collect strategy requirements
-            if let Some(requirement) = factory.required_control_strategy() {
-                strategy_requirements.push(requirement);
-            }
         }
         
-        // Create control strategy from requirements
-        let control_strategy = create_control_strategy_from_requirements(
-            strategy_requirements,
+        // Create control strategy from middleware factories
+        let control_strategy = create_control_strategy_from_factories(
+            &self.middleware,
             &self.name,
         );
         
@@ -384,7 +319,7 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stag
         // Create system middleware with instrumentation
         let mut all_middleware = create_system_middleware(
             &config, 
-            obzenflow_core::event::flow_context::StageType::Transform
+            StageType::Transform
         );
         
         // Add user middleware
@@ -414,7 +349,10 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stag
         let handle = TransformBuilder::new(
             handler_with_middleware,
             transform_config,
-            resources.journal,
+            resources.flow_id,
+            resources.data_journal,
+            resources.system_journal,
+            resources.upstream_journals,
             resources.message_bus,
         )
         .with_instrumentation(instrumentation)
@@ -449,8 +387,8 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
         &self.name
     }
     
-    fn stage_type(&self) -> obzenflow_core::event::flow_context::StageType {
-        obzenflow_core::event::flow_context::StageType::Sink
+    fn stage_type(&self) -> StageType {
+        StageType::Sink
     }
     
     async fn create_handle(
@@ -458,9 +396,7 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
         config: StageConfig, 
         resources: StageResources
     ) -> Result<BoxedStageHandle, String> {
-        // Validate middleware safety and collect strategy requirements
-        let mut strategy_requirements = Vec::new();
-        
+        // Validate middleware safety
         for factory in &self.middleware {
             // Validate safety
             let validation_result = validate_middleware_safety(
@@ -475,16 +411,11 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
                 }
                 // Could choose to panic here for critical errors
             }
-            
-            // Collect strategy requirements
-            if let Some(requirement) = factory.required_control_strategy() {
-                strategy_requirements.push(requirement);
-            }
         }
         
-        // Create control strategy from requirements
-        let control_strategy = create_control_strategy_from_requirements(
-            strategy_requirements,
+        // Create control strategy from middleware factories
+        let _control_strategy = create_control_strategy_from_factories(
+            &self.middleware,
             &self.name,
         );
         
@@ -495,7 +426,7 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
         // Create system middleware with instrumentation
         let mut all_middleware = create_system_middleware(
             &config, 
-            obzenflow_core::event::flow_context::StageType::Sink
+            StageType::Sink
         );
         
         // Add user middleware
@@ -526,8 +457,7 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
         let handle = SinkBuilder::new(
             handler_with_middleware,
             sink_config,
-            resources.journal,
-            resources.message_bus,
+            resources,
         )
         .with_instrumentation(instrumentation)
         .build()

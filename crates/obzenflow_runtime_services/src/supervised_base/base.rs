@@ -3,13 +3,7 @@
 //! This module provides shared types and traits used by both self-supervised
 //! and handler-supervised state machine implementations.
 
-use crate::messaging::reactive_journal::{
-    JournalSubscription, ReactiveJournal,
-};
-use obzenflow_core::{ChainEvent, EventId, WriterId};
 use obzenflow_fsm::{EventVariant, FsmAction, FsmContext, StateVariant};
-use serde_json::json;
-use std::sync::Arc;
 
 /// Directives that control a state's event loop
 #[derive(Debug, Clone)]
@@ -49,58 +43,7 @@ pub trait Supervisor: private::Sealed {
         builder: obzenflow_fsm::FsmBuilder<Self::State, Self::Event, Self::Context, Self::Action>,
     ) -> obzenflow_fsm::FsmBuilder<Self::State, Self::Event, Self::Context, Self::Action>;
 
-    /// Get the journal reference
-    fn journal(&self) -> &Arc<ReactiveJournal>;
-
-    /// Get the writer ID
-    fn writer_id(&self) -> &WriterId;
-
     /// Get the name of this supervised component
     fn name(&self) -> &str;
-
-    /// Write an event to the journal
-    async fn write_event(
-        &self,
-        event_type: &str,
-        payload: serde_json::Value,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let event = ChainEvent::new(
-            EventId::new(),
-            self.writer_id().clone(),
-            event_type,
-            payload,
-        );
-
-        self.journal()
-            .write(event, None)
-            .await
-            .map(|_| ())
-            .map_err(|e| format!("Failed to write event: {}", e).into())
-    }
-
-    /// Write a completion event when supervision finishes
-    async fn write_completion_event(
-        &self,
-        final_state: &str,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        self.write_event(
-            ChainEvent::SYSTEM_STAGE_COMPLETED,
-            json!({
-                "name": self.name(),
-                "final_state": final_state,
-            }),
-        )
-        .await
-    }
-
-    /// Subscribe to journal events
-    async fn subscribe(
-        &self,
-    ) -> Result<JournalSubscription, Box<dyn std::error::Error + Send + Sync>> {
-        self.journal()
-            .subscribe()
-            .await
-            .map_err(|e| format!("Failed to subscribe: {}", e).into())
-    }
 }
 

@@ -74,12 +74,12 @@ impl TransformHandler for OrderValidator {
         // Check if we should fail this order
         if event.payload["should_fail"].as_bool().unwrap_or(false) {
             // Set proper error outcome
-            event.processing_info.outcome = ProcessingOutcome::Error("Order validation failed".to_string());
+            event.processing_info.status = ProcessingOutcome::Error("Order validation failed".to_string());
             event.event_type = "order.failed".to_string();
             vec![event]
         } else {
             // Set success outcome with processing time
-            event.processing_info.outcome = ProcessingOutcome::Success;
+            event.processing_info.status = ProcessingOutcome::Success;
             event.processing_info.processing_time_ms = 10;
             event.event_type = "order.validated".to_string();
             vec![event]

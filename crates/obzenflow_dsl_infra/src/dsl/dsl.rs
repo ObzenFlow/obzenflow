@@ -134,12 +134,12 @@ macro_rules! build_typed_flow {
         // Create services
         use obzenflow_runtime_services::pipeline::config::StageConfig;
         use obzenflow_runtime_services::metrics::DefaultMetricsConfig;
-        use obzenflow_core::{PipelineId, FlowId};
+        use obzenflow_core::{SystemId, FlowId};
         use obzenflow_adapters::monitoring::exporters::MetricsExporterBuilder;
         
         // Create stage-local journals using the builder pattern (FLOWIP-008)
         let flow_id = FlowId::new();
-        let pipeline_id = PipelineId::new();
+        let pipeline_id = SystemId::new();
         
         // Get the journal factory for this specific flow
         let mut journal_factory = journal_factory_provider(flow_id.clone())
@@ -148,12 +148,11 @@ macro_rules! build_typed_flow {
         // Create all journals upfront with proper ownership
         use obzenflow_core::journal::journal_name::JournalName;
         use obzenflow_core::journal::journal_owner::JournalOwner;
-        use obzenflow_infra::journal::JournalFactory;
         
-        let control_journal = journal_factory.create_journal(
-            JournalName::Control,
-            JournalOwner::pipeline(pipeline_id.clone())
-        ).map_err(|e| format!("Failed to create control journal: {:?}", e))?;
+        let control_journal = journal_factory.create_system_journal(
+            JournalName::System,
+            JournalOwner::system(pipeline_id.clone())
+        ).map_err(|e| format!("Failed to create system journal: {:?}", e))?;
         
         let mut stage_journals = HashMap::new();
         for (name, &stage_id) in name_to_id.iter() {
@@ -161,7 +160,7 @@ macro_rules! build_typed_flow {
             let descriptor = descriptors.get(name)
                 .ok_or_else(|| format!("Missing descriptor for stage {}", name))?;
             
-            let journal = journal_factory.create_journal(
+            let journal = journal_factory.create_chain_journal(
                 JournalName::Stage {
                     id: stage_id,
                     stage_type: descriptor.stage_type(),
@@ -219,9 +218,9 @@ macro_rules! build_typed_flow {
         use $crate::prelude::{PipelineBuilder, FlowHandle};
         use obzenflow_runtime_services::supervised_base::SupervisorBuilder;
         
-        let builder = PipelineBuilder::new(topology.clone(), Arc::new(stage_resources_set.pipeline_journal))
+        let builder = PipelineBuilder::new(topology.clone(), stage_resources_set.system_journal.clone())
             .with_stages(stages)
-            .with_metrics_journal(Arc::new(stage_resources_set.metrics_journal));
+            .with_stage_journals(stage_resources_set.stage_journals.clone());
         
         let builder = if let Some(exporter) = metrics_exporter {
             builder.with_metrics(exporter)

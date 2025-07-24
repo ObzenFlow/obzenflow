@@ -1,0 +1,325 @@
+//! System orchestration events (written to control journal)
+
+use serde::{Deserialize, Serialize};
+use crate::event::types::{WriterId, EventId};
+use crate::id::{StageId, SystemId};
+
+/// System orchestration event with metadata (written to control journal)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemEvent {
+    /// Unique event identifier
+    pub id: EventId,
+    
+    /// Which component created this event
+    pub writer_id: WriterId,
+    
+    /// The actual system event type
+    #[serde(flatten)]
+    pub event: SystemEventType,
+    
+    /// When this event was created (ms since epoch)
+    pub timestamp: u64,
+}
+
+/// Types of system events
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "system_event_type", rename_all = "snake_case")]
+pub enum SystemEventType {
+    /// Stage lifecycle events
+    #[serde(rename = "stage_lifecycle")]
+    StageLifecycle {
+        stage_id: StageId,
+        #[serde(flatten)]
+        event: StageLifecycleEvent,
+    },
+    
+    /// Pipeline lifecycle events
+    #[serde(rename = "pipeline_lifecycle")]
+    PipelineLifecycle(PipelineLifecycleEvent),
+    
+    /// Metrics subsystem coordination
+    #[serde(rename = "metrics_coordination")]
+    MetricsCoordination(MetricsCoordinationEvent),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "lifecycle_event", rename_all = "snake_case")]
+pub enum StageLifecycleEvent {
+    Running,
+    Draining,
+    Drained,
+    Completed,
+    Failed { 
+        error: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        recoverable: Option<bool>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "pipeline_event", rename_all = "snake_case")]
+pub enum PipelineLifecycleEvent {
+    Starting,
+    Running,
+    AllStagesCompleted,
+    Draining,
+    Drained,
+    Completed,
+    Failed { reason: String },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "metrics_event", rename_all = "snake_case")]
+pub enum MetricsCoordinationEvent {
+    Ready,
+    DrainRequested,
+    Drained,
+    Shutdown,
+}
+
+impl SystemEvent {
+    /// Create a new system event
+    pub fn new(writer_id: WriterId, event: SystemEventType) -> Self {
+        Self {
+            id: EventId::new(),
+            writer_id,
+            event,
+            timestamp: current_timestamp(),
+        }
+    }
+    
+    /// Helper for stages to create lifecycle events
+    pub fn stage_running(stage_id: StageId) -> Self {
+        Self::new(
+            WriterId::from(stage_id),
+            SystemEventType::StageLifecycle {
+                stage_id,
+                event: StageLifecycleEvent::Running,
+            }
+        )
+    }
+    
+    /// Helper for stages to create completed events
+    pub fn stage_completed(stage_id: StageId) -> Self {
+        Self::new(
+            WriterId::from(stage_id),
+            SystemEventType::StageLifecycle {
+                stage_id,
+                event: StageLifecycleEvent::Completed,
+            }
+        )
+    }
+    
+    /// Helper for stages to create failed events
+    pub fn stage_failed(stage_id: StageId, error: String, recoverable: bool) -> Self {
+        Self::new(
+            WriterId::from(stage_id),
+            SystemEventType::StageLifecycle {
+                stage_id,
+                event: StageLifecycleEvent::Failed { 
+                    error, 
+                    recoverable: Some(recoverable) 
+                },
+            }
+        )
+    }
+}
+
+/// Get current timestamp in milliseconds since epoch
+fn current_timestamp() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
+}
+
+/// Factory for creating SystemEvents with proper conventions
+pub struct SystemEventFactory {
+    writer_id: WriterId,
+}
+
+impl SystemEventFactory {
+    /// Create a new factory for system events
+    pub fn new(system_id: SystemId) -> Self {
+        Self { writer_id: WriterId::from(system_id) }
+    }
+    
+    // === Stage Lifecycle Events ===
+    
+    pub fn stage_running(&self, stage_id: StageId) -> SystemEvent {
+        SystemEvent::new(
+            self.writer_id,
+            SystemEventType::StageLifecycle {
+                stage_id,
+                event: StageLifecycleEvent::Running,
+            }
+        )
+    }
+    
+    pub fn stage_draining(&self, stage_id: StageId) -> SystemEvent {
+        SystemEvent::new(
+            self.writer_id,
+            SystemEventType::StageLifecycle {
+                stage_id,
+                event: StageLifecycleEvent::Draining,
+            }
+        )
+    }
+    
+    pub fn stage_drained(&self, stage_id: StageId) -> SystemEvent {
+        SystemEvent::new(
+            self.writer_id,
+            SystemEventType::StageLifecycle {
+                stage_id,
+                event: StageLifecycleEvent::Drained,
+            }
+        )
+    }
+    
+    pub fn stage_completed(&self, stage_id: StageId) -> SystemEvent {
+        SystemEvent::new(
+            self.writer_id,
+            SystemEventType::StageLifecycle {
+                stage_id,
+                event: StageLifecycleEvent::Completed,
+            }
+        )
+    }
+    
+    pub fn stage_failed(&self, stage_id: StageId, error: String, recoverable: bool) -> SystemEvent {
+        SystemEvent::new(
+            self.writer_id,
+            SystemEventType::StageLifecycle {
+                stage_id,
+                event: StageLifecycleEvent::Failed { 
+                    error, 
+                    recoverable: Some(recoverable) 
+                },
+            }
+        )
+    }
+    
+    // === Pipeline Lifecycle Events ===
+    
+    pub fn pipeline_starting(&self) -> SystemEvent {
+        SystemEvent::new(
+            self.writer_id,
+            SystemEventType::PipelineLifecycle(PipelineLifecycleEvent::Starting)
+        )
+    }
+    
+    pub fn pipeline_running(&self) -> SystemEvent {
+        SystemEvent::new(
+            self.writer_id,
+            SystemEventType::PipelineLifecycle(PipelineLifecycleEvent::Running)
+        )
+    }
+    
+    pub fn pipeline_all_stages_completed(&self) -> SystemEvent {
+        SystemEvent::new(
+            self.writer_id,
+            SystemEventType::PipelineLifecycle(PipelineLifecycleEvent::AllStagesCompleted)
+        )
+    }
+    
+    pub fn pipeline_draining(&self) -> SystemEvent {
+        SystemEvent::new(
+            self.writer_id,
+            SystemEventType::PipelineLifecycle(PipelineLifecycleEvent::Draining)
+        )
+    }
+    
+    pub fn pipeline_drained(&self) -> SystemEvent {
+        SystemEvent::new(
+            self.writer_id,
+            SystemEventType::PipelineLifecycle(PipelineLifecycleEvent::Drained)
+        )
+    }
+    
+    pub fn pipeline_completed(&self) -> SystemEvent {
+        SystemEvent::new(
+            self.writer_id,
+            SystemEventType::PipelineLifecycle(PipelineLifecycleEvent::Completed)
+        )
+    }
+    
+    pub fn pipeline_failed(&self, reason: String) -> SystemEvent {
+        SystemEvent::new(
+            self.writer_id,
+            SystemEventType::PipelineLifecycle(PipelineLifecycleEvent::Failed { reason })
+        )
+    }
+    
+    // === Metrics Coordination Events ===
+    
+    pub fn metrics_ready(&self) -> SystemEvent {
+        SystemEvent::new(
+            self.writer_id,
+            SystemEventType::MetricsCoordination(MetricsCoordinationEvent::Ready)
+        )
+    }
+    
+    pub fn metrics_drain_requested(&self) -> SystemEvent {
+        SystemEvent::new(
+            self.writer_id,
+            SystemEventType::MetricsCoordination(MetricsCoordinationEvent::DrainRequested)
+        )
+    }
+    
+    pub fn metrics_drained(&self) -> SystemEvent {
+        SystemEvent::new(
+            self.writer_id,
+            SystemEventType::MetricsCoordination(MetricsCoordinationEvent::Drained)
+        )
+    }
+    
+    pub fn metrics_shutdown(&self) -> SystemEvent {
+        SystemEvent::new(
+            self.writer_id,
+            SystemEventType::MetricsCoordination(MetricsCoordinationEvent::Shutdown)
+        )
+    }
+}
+
+// Implement JournalEvent for SystemEvent
+use crate::event::journal_event::{JournalEvent, Sealed};
+
+// Implement the sealed trait first
+impl Sealed for SystemEvent {}
+
+impl JournalEvent for SystemEvent {
+    fn id(&self) -> &EventId {
+        &self.id
+    }
+    
+    fn writer_id(&self) -> &WriterId {
+        &self.writer_id
+    }
+    
+    fn event_type_name(&self) -> &str {
+        match &self.event {
+            SystemEventType::StageLifecycle { event, .. } => match event {
+                StageLifecycleEvent::Running => "system.stage.running",
+                StageLifecycleEvent::Draining => "system.stage.draining",
+                StageLifecycleEvent::Drained => "system.stage.drained",
+                StageLifecycleEvent::Completed => "system.stage.completed",
+                StageLifecycleEvent::Failed { .. } => "system.stage.failed",
+            },
+            SystemEventType::PipelineLifecycle(event) => match event {
+                PipelineLifecycleEvent::Starting => "system.pipeline.starting",
+                PipelineLifecycleEvent::Running => "system.pipeline.running",
+                PipelineLifecycleEvent::AllStagesCompleted => "system.pipeline.all_stages_completed",
+                PipelineLifecycleEvent::Draining => "system.pipeline.draining",
+                PipelineLifecycleEvent::Drained => "system.pipeline.drained",
+                PipelineLifecycleEvent::Completed => "system.pipeline.completed",
+                PipelineLifecycleEvent::Failed { .. } => "system.pipeline.failed",
+            },
+            SystemEventType::MetricsCoordination(event) => match event {
+                MetricsCoordinationEvent::Ready => "system.metrics.ready",
+                MetricsCoordinationEvent::DrainRequested => "system.metrics.drain_requested",
+                MetricsCoordinationEvent::Drained => "system.metrics.drained",
+                MetricsCoordinationEvent::Shutdown => "system.metrics.shutdown",
+            },
+        }
+    }
+}

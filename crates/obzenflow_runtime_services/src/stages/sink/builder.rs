@@ -1,10 +1,12 @@
 //! Builder for sink stages
 
 use std::sync::Arc;
-use obzenflow_core::WriterId;
 
-use crate::messaging::reactive_journal::ReactiveJournal;
+use obzenflow_core::journal::journal::Journal;
+use obzenflow_core::{ChainEvent, StageId};
+use obzenflow_core::event::SystemEvent;
 use crate::message_bus::FsmMessageBus;
+use crate::stages::resources_builder::StageResources;
 use crate::stages::common::handlers::SinkHandler;
 use crate::metrics::instrumentation::StageInstrumentation;
 use crate::supervised_base::{
@@ -23,8 +25,7 @@ use super::fsm::{SinkState, SinkContext, SinkEvent, SinkAction};
 pub struct SinkBuilder<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> {
     handler: H,
     config: SinkConfig,
-    journal: Arc<ReactiveJournal>,
-    bus: Arc<FsmMessageBus>,
+    resources: StageResources,
     instrumentation: Option<Arc<StageInstrumentation>>,
 }
 
@@ -33,14 +34,12 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> SinkBuild
     pub fn new(
         handler: H,
         config: SinkConfig,
-        journal: Arc<ReactiveJournal>,
-        bus: Arc<FsmMessageBus>,
+        resources: StageResources,
     ) -> Self {
         Self {
             handler,
             config,
-            journal,
-            bus,
+            resources,
             instrumentation: None,
         }
     }
@@ -72,9 +71,12 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
             self.config.stage_id,
             self.config.stage_name.clone(),
             self.config.flow_name.clone(),
-            self.journal.clone(),
-            self.bus.clone(),
-            self.config.upstream_stages.clone(),
+            self.resources.flow_id.clone(),
+            self.resources.data_journal.clone(),
+            self.resources.system_journal.clone(),
+            self.resources.upstream_journals.clone(),
+            self.resources.message_bus.clone(),
+            self.resources.upstream_stages.clone(),
             instrumentation,
         );
         
@@ -82,8 +84,8 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
         let supervisor = SinkSupervisor {
             name: format!("sink_{}", self.config.stage_name),
             context: Arc::new(context.clone()),
-            journal: self.journal.clone(),
-            writer_id: WriterId::new(), // Will be replaced during init
+            data_journal: self.resources.data_journal.clone(),
+            system_journal: self.resources.system_journal.clone(),
             stage_id: self.config.stage_id,
         };
         
@@ -140,14 +142,6 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
         self.supervisor.configure_fsm(builder)
     }
 
-    fn journal(&self) -> &Arc<ReactiveJournal> {
-        self.supervisor.journal()
-    }
-
-    fn writer_id(&self) -> &WriterId {
-        self.supervisor.writer_id()
-    }
-
     fn name(&self) -> &str {
         self.supervisor.name()
     }
@@ -159,6 +153,18 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> crate::su
 #[async_trait::async_trait]
 impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSupervised for HandlerSupervisedWithExternalEvents<H> {
     type Handler = H;
+    
+    fn writer_id(&self) -> obzenflow_core::WriterId {
+        self.supervisor.writer_id()
+    }
+    
+    fn stage_id(&self) -> StageId {
+        self.supervisor.stage_id()
+    }
+    
+    async fn write_completion_event(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.supervisor.write_completion_event().await
+    }
     
     async fn dispatch_state(
         &mut self,

@@ -3,6 +3,7 @@
 //! Examples: Aggregators, windowing operations, session tracking
 
 use obzenflow_core::{ChainEvent, Result};
+use obzenflow_core::event::ChainEventContent;
 use async_trait::async_trait;
 
 /// Handler for stateful processing stages
@@ -16,6 +17,7 @@ use async_trait::async_trait;
 /// ```rust
 /// use obzenflow_runtime_services::stages::common::handlers::StatefulHandler;
 /// use obzenflow_core::{ChainEvent, EventId, WriterId, Result};
+/// use obzenflow_core::event::ChainEventContent;
 /// use serde_json::json;
 /// use async_trait::async_trait;
 /// 
@@ -35,7 +37,7 @@ use async_trait::async_trait;
 ///     type State = AggregatorState;
 ///     
 ///     fn process(&self, state: &Self::State, event: ChainEvent) -> (Self::State, Vec<ChainEvent>) {
-///         let value = event.payload["value"].as_f64().unwrap_or(0.0);
+///         let value = event.payload()["value"].as_f64().unwrap_or(0.0);
 ///         
 ///         // Create NEW state (functional approach)
 ///         let new_state = AggregatorState {
@@ -46,7 +48,7 @@ use async_trait::async_trait;
 ///         // Check if window is complete
 ///         if new_state.count >= self.window_size {
 ///             // Emit aggregation and reset
-///             let output = vec![ChainEvent::new(
+///             let output = vec![ChainEvent::data(
 ///                 EventId::new(),
 ///                 self.writer_id.clone(),
 ///                 "metrics",
@@ -63,6 +65,10 @@ use async_trait::async_trait;
 ///     
 ///     fn initial_state(&self) -> Self::State {
 ///         AggregatorState::default()
+///     }
+///     
+///     async fn drain(&mut self, _state: &Self::State) -> Result<Vec<ChainEvent>> {
+///         Ok(vec![])
 ///     }
 /// }
 /// ```

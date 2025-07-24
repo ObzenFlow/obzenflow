@@ -4,7 +4,7 @@
 
 // Core types
 pub use obzenflow_core::event::chain_event::ChainEvent;
-pub use obzenflow_core::journal::writer_id::WriterId;
+pub use obzenflow_core::WriterId;
 
 // Supervision
 pub use obzenflow_runtime_services::pipeline::{FlowHandle, PipelineBuilder};

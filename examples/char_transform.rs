@@ -7,10 +7,11 @@ use obzenflow_dsl_infra::{flow, source, transform, sink};
 use obzenflow_runtime_services::stages::common::handlers::{
     FiniteSourceHandler, TransformHandler, SinkHandler
 };
-use obzenflow_infra::journal::DiskJournal;
-use obzenflow_core::event::event_id::EventId;
-use obzenflow_core::event::chain_event::ChainEvent;
-use obzenflow_core::journal::writer_id::WriterId;
+use obzenflow_infra::journal::disk_journals;
+use obzenflow_core::event::WriterId;
+use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
+use obzenflow_core::event::payloads::delivery_payload::{DeliveryPayload, DeliveryMethod};
+use obzenflow_core::id::StageId;
 // Monitoring taxonomies are no longer needed with FLOWIP-056-666
 // Metrics are automatically collected by MetricsAggregator from the event journal
 use serde_json::json;
@@ -19,6 +20,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 
 /// Source that emits one `Char` event per character from sample sentences
+#[derive(Debug, Clone)]
 struct TextCharSource {
     sentences: Vec<String>,
     chars: Vec<char>,
@@ -55,7 +57,7 @@ impl TextCharSource {
             start_idx,
             current_index: 0,
             announced: 0,
-            writer_id: WriterId::new(),
+            writer_id: WriterId::from(StageId::new()),
         }
     }
 }
@@ -73,8 +75,7 @@ impl FiniteSourceHandler for TextCharSource {
             }
             
             let ch = self.chars[idx];
-            Some(ChainEvent::new(
-                EventId::new(),
+            Some(ChainEventFactory::data_event(
                 self.writer_id.clone(),
                 "Char",
                 json!({ "ch": ch.to_string() })
@@ -90,6 +91,7 @@ impl FiniteSourceHandler for TextCharSource {
 }
 
 /// First Stage – Capitalize letters
+#[derive(Debug, Clone)]
 struct CapStage;
 
 impl CapStage {
@@ -98,16 +100,26 @@ impl CapStage {
     }
 }
 
+#[async_trait]
 impl TransformHandler for CapStage {
-    fn process(&self, mut event: ChainEvent) -> Vec<ChainEvent> {
-        if event.event_type == "Char" {
-            if let Some(ch) = event.payload["ch"].as_str().and_then(|s| s.chars().next()) {
+    fn process(&self, event: ChainEvent) -> Vec<ChainEvent> {
+        if event.event_type() == "Char" {
+            let payload = event.payload();
+            if let Some(ch) = payload["ch"].as_str().and_then(|s| s.chars().next()) {
                 let out = if ch.is_ascii_alphabetic() { ch.to_ascii_uppercase() } else { ch };
-                event.payload["ch"] = json!(out.to_string());
-                return vec![event];
+                return vec![ChainEventFactory::derived_data_event(
+                    event.writer_id.clone(),
+                    &event,
+                    "Char",
+                    json!({ "ch": out.to_string() })
+                )];
             }
         }
         vec![]
+    }
+    
+    async fn drain(&mut self) -> obzenflow_core::Result<()> {
+        Ok(())
     }
 }
 
@@ -120,6 +132,7 @@ fn digit_word(d: char) -> &'static str {
     }
 }
 
+#[derive(Debug, Clone)]
 struct DigitWordStage;
 
 impl DigitWordStage {
@@ -128,18 +141,20 @@ impl DigitWordStage {
     }
 }
 
+#[async_trait]
 impl TransformHandler for DigitWordStage {
     fn process(&self, event: ChainEvent) -> Vec<ChainEvent> {
-        if event.event_type == "Char" {
-            if let Some(ch) = event.payload["ch"].as_str().and_then(|s| s.chars().next()) {
+        if event.event_type() == "Char" {
+            let payload = event.payload();
+            if let Some(ch) = payload["ch"].as_str().and_then(|s| s.chars().next()) {
                 let frag = if ch.is_ascii_digit() {
                     digit_word(ch).to_string()
                 } else {
                     ch.to_string()
                 };
-                return vec![ChainEvent::new(
-                    EventId::new(),
+                return vec![ChainEventFactory::derived_data_event(
                     event.writer_id.clone(),
+                    &event,
                     "OutFragment",
                     json!({ "frag": frag })
                 )];
@@ -147,9 +162,14 @@ impl TransformHandler for DigitWordStage {
         }
         vec![]
     }
+    
+    async fn drain(&mut self) -> obzenflow_core::Result<()> {
+        Ok(())
+    }
 }
 
 /// Sink – collects output fragments into a string buffer
+#[derive(Debug, Clone)]
 struct TextCollectorSink {
     buf: Arc<std::sync::Mutex<String>>,
 }
@@ -164,19 +184,35 @@ impl TextCollectorSink {
 
 #[async_trait]
 impl SinkHandler for TextCollectorSink {
-    fn consume(&mut self, event: ChainEvent) -> obzenflow_core::Result<()> {
-        if event.event_type == "OutFragment" {
-            if let Some(frag) = event.payload["frag"].as_str() {
+    async fn consume(&mut self, event: ChainEvent) -> obzenflow_core::Result<DeliveryPayload> {
+        let start = std::time::Instant::now();
+        let mut bytes_processed = 0;
+        
+        if event.event_type() == "OutFragment" {
+            let payload = event.payload();
+            if let Some(frag) = payload["frag"].as_str() {
                 let mut b = self.buf.lock().unwrap();
                 b.push_str(frag);
+                bytes_processed = frag.len() as u64;
             }
         }
-        Ok(())
+        
+        let elapsed = start.elapsed().as_millis() as u64;
+        
+        Ok(DeliveryPayload::success(
+            "memory_buffer",
+            DeliveryMethod::Custom("InMemoryCollector".to_string()),
+            elapsed,
+            Some(bytes_processed),
+        ))
     }
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Set environment to use console exporter for nice summaries
+    std::env::set_var("OBZENFLOW_METRICS_EXPORTER", "console");
+    
     // Initialize tracing for better error messages
     tracing_subscriber::fmt()
         .with_env_filter("obzenflow=debug,char_transform=debug")
@@ -197,12 +233,11 @@ async fn main() -> Result<()> {
     // Create a journal for the flow
     let journal_path = std::path::PathBuf::from("target/char-transform-logs");
     std::fs::create_dir_all(&journal_path)?;
-    let journal = Arc::new(DiskJournal::new(journal_path, "char_transform").await?);
 
     // Create the flow using the new flow! macro
     let handle = flow! {
         name: "char_transform",
-        journal: journal,
+        journals: disk_journals(journal_path.clone()),
         middleware: [],
         
         stages: {
@@ -221,14 +256,24 @@ async fn main() -> Result<()> {
     
     println!("📌 Pipeline created, starting execution...");
     
-    // Start the pipeline
-    handle.run().await
+    // Run the flow to completion and get the metrics exporter
+    let metrics_exporter = handle.run_with_metrics().await
         .map_err(|e| anyhow::anyhow!("Failed to run pipeline: {:?}", e))?;
 
     println!("\n✅ Pipeline completed!\n");
 
     let result = final_buffer.lock().unwrap().clone();
     println!("🔍 Final text:\n{}", result);
+
+    // Get the metrics summary after completion
+    if let Some(exporter) = metrics_exporter {
+        let summary = exporter
+            .render_metrics()
+            .map_err(|e| anyhow::anyhow!("Failed to render metrics: {}", e))?;
+        println!("\n📊 Pipeline Metrics:\n{}", summary);
+    } else {
+        println!("\nNo metrics exporter configured");
+    }
 
     // Cleanup
     println!("\nJournal written to: target/char-transform-logs/char_transform.log");

@@ -5,7 +5,9 @@
 //! start emitting events until the pipeline is ready.
 
 use obzenflow_fsm::{StateVariant, EventVariant, FsmContext, FsmAction};
-use obzenflow_core::{ChainEvent, EventId, WriterId, Journal};
+use obzenflow_core::{ChainEvent, EventId, WriterId, StageId, FlowId};
+use obzenflow_core::event::{ChainEventFactory, SystemEvent};
+use obzenflow_core::journal::journal::Journal;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::marker::PhantomData;
@@ -227,8 +229,14 @@ pub struct FiniteSourceContext<H: FiniteSourceHandler> {
     /// Flow name for flow context
     pub flow_name: String,
     
-    /// Journal for writing events
-    pub journal: Arc<crate::messaging::reactive_journal::ReactiveJournal>,
+    /// Flow ID from pipeline
+    pub flow_id: FlowId,
+    
+    /// Data journal for writing generated events
+    pub data_journal: Arc<dyn Journal<ChainEvent>>,
+    
+    /// System journal for writing lifecycle events
+    pub system_journal: Arc<dyn Journal<SystemEvent>>,
     
     /// Message bus for pipeline communication
     pub bus: Arc<crate::message_bus::FsmMessageBus>,
@@ -246,7 +254,9 @@ impl<H: FiniteSourceHandler> FiniteSourceContext<H> {
         stage_id: obzenflow_core::StageId,
         stage_name: String,
         flow_name: String,
-        journal: Arc<crate::messaging::reactive_journal::ReactiveJournal>,
+        flow_id: FlowId,
+        data_journal: Arc<dyn Journal<ChainEvent>>,
+        system_journal: Arc<dyn Journal<SystemEvent>>,
         bus: Arc<crate::message_bus::FsmMessageBus>,
         instrumentation: Arc<StageInstrumentation>,
     ) -> Self {
@@ -255,7 +265,9 @@ impl<H: FiniteSourceHandler> FiniteSourceContext<H> {
             stage_id,
             stage_name,
             flow_name,
-            journal,
+            flow_id,
+            data_journal,
+            system_journal,
             bus,
             writer_id: Arc::new(RwLock::new(None)),
             instrumentation,
@@ -303,10 +315,9 @@ impl<H: FiniteSourceHandler + Send + Sync + 'static> FsmAction for FiniteSourceA
     async fn execute(&self, ctx: &Self::Context) -> Result<(), String> {
         match self {
             FiniteSourceAction::AllocateResources => {
-                // In the new architecture, ReactiveJournal already has its writer_id
-                // Just get it from the journal
-                let writer_id = ctx.journal.writer_id.clone();
-                *ctx.writer_id.write().await = Some(writer_id);
+                // Create WriterId from our StageId
+                let writer_id = WriterId::from(ctx.stage_id.clone());
+                *ctx.writer_id.write().await = Some(writer_id.clone());
                 
                 tracing::info!(
                     stage_name = %ctx.stage_name,
@@ -322,18 +333,13 @@ impl<H: FiniteSourceHandler + Send + Sync + 'static> FsmAction for FiniteSourceA
                     .as_ref()
                     .ok_or_else(|| "No writer ID available to send EOF".to_string())?;
                 
-                let eof_event = ChainEvent::new(
-                    EventId::new(),
+                let eof_event = ChainEventFactory::eof_event(
                     writer_id.clone(),
-                    "control.eof",
-                    serde_json::json!({
-                        "stage_id": ctx.stage_id.to_string(),
-                        "stage_name": ctx.stage_name,
-                    }),
+                    true, // natural EOF for finite sources
                 );
                 
-                ctx.journal
-                    .write(eof_event, None)
+                ctx.data_journal
+                    .append(eof_event, None)
                     .await
                     .map_err(|e| format!("Failed to send EOF: {}", e))?;
                 
@@ -346,24 +352,19 @@ impl<H: FiniteSourceHandler + Send + Sync + 'static> FsmAction for FiniteSourceA
             
             FiniteSourceAction::SendError { message } => {
                 let writer_id_guard = ctx.writer_id.read().await;
-                let writer_id = writer_id_guard
+                let writer_id_guard = ctx.writer_id.read().await;
+                let _writer_id = writer_id_guard
                     .as_ref()
                     .ok_or_else(|| "No writer ID available to send error".to_string())?;
                 
-                let error_event = ChainEvent::new(
-                    EventId::new(),
-                    writer_id.clone(),
-                    ChainEvent::SYSTEM_ERROR,
-                    serde_json::json!({
-                        "stage_id": ctx.stage_id.to_string(),
-                        "stage_name": ctx.stage_name,
-                        "error": message,
-                        "timestamp": chrono::Utc::now().to_rfc3339(),
-                    }),
+                let error_event = SystemEvent::stage_failed(
+                    ctx.stage_id,
+                    message.clone(),
+                    false // not recoverable
                 );
                 
-                ctx.journal
-                    .write_control_event(error_event)
+                ctx.system_journal
+                    .append(error_event, None)
                     .await
                     .map_err(|e| format!("Failed to send error event: {}", e))?;
                 
@@ -377,31 +378,18 @@ impl<H: FiniteSourceHandler + Send + Sync + 'static> FsmAction for FiniteSourceA
             
             FiniteSourceAction::WriteStageCompleted => {
                 let writer_id_guard = ctx.writer_id.read().await;
-                let writer_id = writer_id_guard
+                let writer_id_guard = ctx.writer_id.read().await;
+                let _writer_id = writer_id_guard
                     .as_ref()
                     .ok_or_else(|| "No writer ID available to send completion event".to_string())?;
                 
-                let mut completion_event = ChainEvent::new(
-                    EventId::new(),
-                    writer_id.clone(),
-                    ChainEvent::SYSTEM_STAGE_COMPLETED,
-                    serde_json::json!({
-                        "stage_id": ctx.stage_id.to_string(),
-                        "stage_name": ctx.stage_name,
-                        "timestamp": chrono::Utc::now().to_rfc3339(),
-                    }),
+                // Write completion event to system journal
+                let completion_event = SystemEvent::stage_completed(
+                    ctx.stage_id
                 );
                 
-                // Set flow context
-                completion_event.flow_context = obzenflow_core::event::flow_context::FlowContext {
-                    flow_name: ctx.flow_name.clone(),
-                    flow_id: format!("{}-{}", ctx.flow_name, ctx.stage_id),
-                    stage_name: ctx.stage_name.clone(),
-                    stage_type: obzenflow_core::event::flow_context::StageType::Source,
-                };
-                
-                ctx.journal
-                    .write_control_event(completion_event)
+                ctx.system_journal
+                    .append(completion_event, None)
                     .await
                     .map_err(|e| format!("Failed to send completion event: {}", e))?;
                 

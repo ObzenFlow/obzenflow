@@ -26,7 +26,7 @@ use obzenflow_core::ChainEvent;
 ///         if self.index < self.items.len() {
 ///             let item = self.items[self.index].clone();
 ///             self.index += 1;
-///             Some(ChainEvent::new(
+///             Some(ChainEvent::data(
 ///                 EventId::new(),
 ///                 self.writer_id,
 ///                 "data",
@@ -80,7 +80,7 @@ pub trait FiniteSourceHandler: Send + Sync {
 ///         let now = Instant::now();
 ///         if now.duration_since(self.last_beat) >= self.interval {
 ///             self.last_beat = now;
-///             Some(ChainEvent::new(
+///             Some(ChainEvent::data(
 ///                 EventId::new(),
 ///                 self.writer_id,
 ///                 "heartbeat",

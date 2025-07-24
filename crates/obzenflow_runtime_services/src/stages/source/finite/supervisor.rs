@@ -1,12 +1,11 @@
 //! Finite source supervisor implementation using HandlerSupervised pattern
 
 use std::sync::Arc;
-use obzenflow_core::{WriterId, Journal};
-use obzenflow_core::event::flow_context::FlowContext;
+use obzenflow_core::journal::journal::Journal;
+use obzenflow_core::{ChainEvent, StageId, WriterId};
+use obzenflow_core::event::SystemEvent;
+use obzenflow_core::event::context::FlowContext;
 use obzenflow_fsm::{FsmBuilder, Transition};
-use obzenflow_core::StageId;
-
-use crate::messaging::reactive_journal::ReactiveJournal;
 use crate::stages::common::handlers::FiniteSourceHandler;
 use crate::supervised_base::{EventLoopDirective, HandlerSupervised};
 use crate::supervised_base::base::Supervisor;
@@ -24,11 +23,11 @@ pub(crate) struct FiniteSourceSupervisor<H: FiniteSourceHandler + Clone + std::f
     /// The FSM context containing all mutable state
     pub(crate) context: Arc<FiniteSourceContext<H>>,
     
-    /// Journal reference
-    pub(crate) journal: Arc<ReactiveJournal>,
+    /// Data journal for writing generated events
+    pub(crate) data_journal: Arc<dyn Journal<ChainEvent>>,
     
-    /// Writer ID for this source
-    pub(crate) writer_id: WriterId,
+    /// System journal for lifecycle events
+    pub(crate) system_journal: Arc<dyn Journal<SystemEvent>>,
     
     /// Stage ID
     pub(crate) stage_id: StageId,
@@ -144,14 +143,6 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> S
                 .done()
     }
     
-    fn journal(&self) -> &Arc<ReactiveJournal> {
-        &self.journal
-    }
-    
-    fn writer_id(&self) -> &WriterId {
-        &self.writer_id
-    }
-    
     fn name(&self) -> &str {
         &self.name
     }
@@ -160,6 +151,23 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> S
 #[async_trait::async_trait]
 impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSupervised for FiniteSourceSupervisor<H> {
     type Handler = H;
+    
+    fn writer_id(&self) -> WriterId {
+        WriterId::from(self.stage_id)
+    }
+    
+    fn stage_id(&self) -> StageId {
+        self.stage_id
+    }
+    
+    async fn write_completion_event(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let event = SystemEvent::stage_completed(self.stage_id);
+        self.system_journal
+            .append(event, None)
+            .await
+            .map(|_| ())
+            .map_err(|e| format!("Failed to write completion event: {}", e).into())
+    }
     
     async fn dispatch_state(
         &mut self,
@@ -200,22 +208,24 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> H
                     
                     // We have work - increment loops with work
                     self.context.instrumentation.event_loops_with_work_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    
-                    // Add flow context
-                    event.flow_context = FlowContext {
-                        flow_name: self.context.flow_name.clone(),
-                        flow_id: format!("{}-{}", self.context.flow_name, self.context.stage_id),
-                        stage_name: self.context.stage_name.clone(),
-                        stage_type: obzenflow_core::event::flow_context::StageType::Source,
-                    };
-                    
+
                     // Enrich with runtime context
-                    event.runtime_context = Some(self.context.instrumentation.snapshot());
+                    let flow_context = FlowContext {
+                        flow_name: self.context.flow_name.clone(),
+                        flow_id: self.context.flow_id.to_string(),
+                        stage_name: self.context.stage_name.clone(),
+                        stage_type: obzenflow_core::event::context::StageType::FiniteSource,
+                    };
+
+                    let enriched_event = event
+                        .with_flow_context(flow_context)
+                        .with_runtime_context(self.context.instrumentation.snapshot());
                     
-                    // Write event to journal using new journal.write() API
-                    self.context.journal
-                        .write(event, None)
-                        .await?;
+                    // Write event to data journal
+                    self.context.data_journal
+                        .append(enriched_event, None)
+                        .await
+                        .map_err(|e| format!("Failed to write event: {}", e))?;
                     
                     tracing::trace!(
                         stage_name = %self.context.stage_name,

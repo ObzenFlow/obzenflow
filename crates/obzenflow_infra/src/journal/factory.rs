@@ -9,7 +9,8 @@ use obzenflow_core::{
         journal_name::JournalName,
         journal_owner::JournalOwner,
         journal_error::JournalError,
-    }
+    },
+    event::{JournalEvent, ChainEvent, SystemEvent},
 };
 use std::sync::Arc;
 use std::path::PathBuf;
@@ -37,7 +38,7 @@ impl DiskJournalFactory {
         Ok(Self { base_path, flow_id })
     }
     
-    pub fn create_journal(&self, name: JournalName, owner: JournalOwner) -> Result<Arc<dyn Journal>, JournalError> {
+    pub fn create_chain_journal(&self, name: JournalName, owner: JournalOwner) -> Result<Arc<dyn Journal<ChainEvent>>, JournalError> {
         let flow_path = self.base_path.join("flows").join(self.flow_id.to_string());
         let journal_path = flow_path.join(name.to_filename());
         
@@ -50,7 +51,23 @@ impl DiskJournalFactory {
                 })?;
         }
         
-        Ok(Arc::new(DiskJournal::with_owner(journal_path, owner)?))
+        Ok(Arc::new(DiskJournal::<ChainEvent>::with_owner(journal_path, owner)?))
+    }
+    
+    pub fn create_system_journal(&self, name: JournalName, owner: JournalOwner) -> Result<Arc<dyn Journal<SystemEvent>>, JournalError> {
+        let flow_path = self.base_path.join("flows").join(self.flow_id.to_string());
+        let journal_path = flow_path.join(name.to_filename());
+        
+        // Create the file NOW if it doesn't exist
+        if !journal_path.exists() {
+            std::fs::File::create(&journal_path)
+                .map_err(|e| JournalError::Implementation {
+                    message: format!("Failed to create journal file: {}", journal_path.display()),
+                    source: Box::new(e),
+                })?;
+        }
+        
+        Ok(Arc::new(DiskJournal::<SystemEvent>::with_owner(journal_path, owner)?))
     }
 }
 
@@ -58,41 +75,34 @@ impl DiskJournalFactory {
 pub struct MemoryJournalFactory {
     flow_id: FlowId,
     // Keep created journals so we can return the same instance for the same name
-    journals: HashMap<JournalName, Arc<dyn Journal>>,
+    chain_journals: HashMap<JournalName, Arc<dyn Journal<ChainEvent>>>,
+    system_journals: HashMap<JournalName, Arc<dyn Journal<SystemEvent>>>,
 }
 
 impl MemoryJournalFactory {
     pub fn new(flow_id: FlowId) -> Self {
         Self {
             flow_id,
-            journals: HashMap::new(),
+            chain_journals: HashMap::new(),
+            system_journals: HashMap::new(),
         }
     }
     
-    pub fn create_journal(&mut self, name: JournalName, owner: JournalOwner) -> Arc<dyn Journal> {
-        self.journals
+    pub fn create_chain_journal(&mut self, name: JournalName, owner: JournalOwner) -> Arc<dyn Journal<ChainEvent>> {
+        self.chain_journals
             .entry(name)
-            .or_insert_with(|| Arc::new(MemoryJournal::with_owner(owner)))
+            .or_insert_with(|| Arc::new(MemoryJournal::<ChainEvent>::with_owner(owner)))
+            .clone()
+    }
+    
+    pub fn create_system_journal(&mut self, name: JournalName, owner: JournalOwner) -> Arc<dyn Journal<SystemEvent>> {
+        self.system_journals
+            .entry(name)
+            .or_insert_with(|| Arc::new(MemoryJournal::<SystemEvent>::with_owner(owner)))
             .clone()
     }
 }
 
-/// Common factory trait
-pub trait JournalFactory {
-    fn create_journal(&mut self, name: JournalName, owner: JournalOwner) -> Result<Arc<dyn Journal>, JournalError>;
-}
-
-impl JournalFactory for DiskJournalFactory {
-    fn create_journal(&mut self, name: JournalName, owner: JournalOwner) -> Result<Arc<dyn Journal>, JournalError> {
-        self.create_journal(name, owner)
-    }
-}
-
-impl JournalFactory for MemoryJournalFactory {
-    fn create_journal(&mut self, name: JournalName, owner: JournalOwner) -> Result<Arc<dyn Journal>, JournalError> {
-        Ok(self.create_journal(name, owner))
-    }
-}
 
 /// Simple factory functions for the DSL
 pub fn disk_journals(base_path: PathBuf) -> impl Fn(FlowId) -> Result<DiskJournalFactory, JournalError> {

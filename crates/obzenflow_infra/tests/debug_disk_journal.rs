@@ -1,8 +1,8 @@
 use obzenflow_infra::journal::disk::disk_journal::DiskJournal;
 use obzenflow_core::journal::journal::Journal;
-use obzenflow_core::event::chain_event::ChainEvent;
-use obzenflow_core::event::event_id::EventId;
-use obzenflow_core::journal::writer_id::WriterId;
+use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
+use obzenflow_core::event::EventId;
+use obzenflow_core::{WriterId, StageId};
 use serde_json::json;
 use std::path::PathBuf;
 use uuid::Uuid;
@@ -15,18 +15,17 @@ async fn debug_flight_delays_issue() {
     std::fs::create_dir_all(&journal_path).unwrap();
     
     println!("Creating DiskJournal...");
-    let journal = DiskJournal::new(journal_path.clone(), "test_journal").await.unwrap();
+    let journal = DiskJournal::new(journal_path.clone(), "test_journal").unwrap();
     
     println!("Testing single journal append...");
-    let writer_id = WriterId::new();
-    let event = ChainEvent::new(
-        EventId::new(),
-        writer_id.clone(),
+    let writer_id = WriterId::from(StageId::new());
+    let event = ChainEventFactory::data_event(
+        writer_id,
         "test.event",
         json!({"test": "data"})
     );
     
-    match journal.append(&writer_id, event, None).await {
+    match journal.append(event, None).await {
         Ok(_) => println!("✅ Journal append successful!"),
         Err(e) => {
             println!("❌ Journal append failed: {}", e);
@@ -40,11 +39,10 @@ async fn debug_flight_delays_issue() {
     
     for i in 0..8 {  // Same number as flight delays
         let journal_clone = journal.clone();
-        let writer = WriterId::new();
+        let writer = WriterId::from(StageId::new());
         let handle = tokio::spawn(async move {
-            let event = ChainEvent::new(
-                EventId::new(),
-                writer.clone(),
+            let event = ChainEventFactory::data_event(
+                writer,
                 "FlightRecord",
                 json!({
                     "carrier": "AA",
@@ -52,7 +50,7 @@ async fn debug_flight_delays_issue() {
                     "test": "concurrent_write"
                 })
             );
-            journal_clone.append(&writer, event, None).await
+            journal_clone.append(event, None).await
         });
         handles.push(handle);
     }

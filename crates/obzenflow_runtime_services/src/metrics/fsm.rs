@@ -6,9 +6,12 @@
 
 use obzenflow_fsm::{FsmBuilder, StateMachine, Transition, StateVariant, EventVariant, FsmContext, FsmAction};
 use obzenflow_core::{EventId, Journal, ChainEvent};
+use obzenflow_core::id::SystemId;
+use obzenflow_core::event::WriterId;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use obzenflow_core::event::status::processing_status::ProcessingStatus;
 
 // Histogram configuration constants
 const HISTOGRAM_MIN_MS: u64 = 1;        // 1ms minimum
@@ -61,7 +64,7 @@ pub enum MetricsAggregatorEvent {
     
     /// Process a batch of events
     ProcessBatch {
-        events: Vec<obzenflow_core::EventEnvelope>,
+        events: Vec<obzenflow_core::EventEnvelope<obzenflow_core::ChainEvent>>,
     },
     
     /// Time to export metrics
@@ -100,7 +103,7 @@ pub enum MetricsAggregatorAction {
     
     /// Update metrics from an event
     UpdateMetrics {
-        envelope: obzenflow_core::EventEnvelope,
+        envelope: obzenflow_core::EventEnvelope<obzenflow_core::ChainEvent>,
     },
     
     /// Export metrics snapshot
@@ -115,12 +118,16 @@ pub enum MetricsAggregatorAction {
 /// Context for the FSM - contains everything actions need to do their work
 #[derive(Clone)]
 pub struct MetricsAggregatorContext {
-    pub journal: Arc<crate::messaging::reactive_journal::ReactiveJournal>,
+    /// System journal for reporting
+    pub system_journal: Arc<dyn Journal<obzenflow_core::event::SystemEvent>>,
+    
+    /// Subscription to read from all stage journals
+    pub subscription: Arc<RwLock<Option<crate::messaging::upstream_subscription::UpstreamSubscription<ChainEvent>>>>,
+    
     pub exporter: Option<Arc<dyn obzenflow_core::metrics::MetricsExporter>>,
     pub metrics_store: Arc<RwLock<MetricsStore>>,
     pub export_interval_secs: u64,
-    pub writer_id: Arc<RwLock<Option<obzenflow_core::WriterId>>>,
-    pub subscription: Arc<RwLock<Option<crate::messaging::reactive_journal::JournalSubscription>>>,
+    pub system_id: SystemId,
     pub export_timer: Arc<tokio::sync::Mutex<Option<tokio::time::Interval>>>,
 }
 
@@ -169,20 +176,27 @@ impl Default for StageMetrics {
 }
 
 impl MetricsAggregatorContext {
-    pub fn new(
-        journal: Arc<crate::messaging::reactive_journal::ReactiveJournal>,
+    pub async fn new(
+        stage_journals: Vec<(obzenflow_core::StageId, Arc<dyn Journal<ChainEvent>>)>,
+        system_journal: Arc<dyn Journal<obzenflow_core::event::SystemEvent>>,
         exporter: Option<Arc<dyn obzenflow_core::metrics::MetricsExporter>>,
         export_interval_secs: u64,
-    ) -> Self {
-        Self {
-            journal,
+        system_id: SystemId,
+    ) -> Result<Self, String> {
+        // Create the subscription from stage journals
+        let subscription = crate::messaging::upstream_subscription::UpstreamSubscription::new(&stage_journals)
+            .await
+            .map_err(|e| format!("Failed to create upstream subscription: {}", e))?;
+        
+        Ok(Self {
+            system_journal,
+            subscription: Arc::new(RwLock::new(Some(subscription))),
             exporter,
             metrics_store: Arc::new(RwLock::new(MetricsStore::default())),
             export_interval_secs,
-            writer_id: Arc::new(RwLock::new(None)),
-            subscription: Arc::new(RwLock::new(None)),
+            system_id,
             export_timer: Arc::new(tokio::sync::Mutex::new(None)),
-        }
+        })
     }
 }
 
@@ -230,8 +244,8 @@ impl FsmAction for MetricsAggregatorAction {
 
                 // Check for errors from processing outcome
                 if matches!(
-                    event.processing_info.outcome,
-                    obzenflow_core::event::processing_outcome::ProcessingOutcome::Error(_)
+                    event.processing_info.status,
+                    ProcessingStatus::Error(_)
                 ) {
                     metrics.errors += 1;
                 }
@@ -371,10 +385,7 @@ impl FsmAction for MetricsAggregatorAction {
             
             MetricsAggregatorAction::PublishDrainComplete { last_event_id } => {
                 // Get writer ID from context
-                let writer_id_guard = ctx.writer_id.read().await;
-                let writer_id = writer_id_guard
-                    .as_ref()
-                    .ok_or_else(|| "No writer ID available to publish drain event".to_string())?;
+                let system_writer_id = WriterId::from(ctx.system_id);
                 
                 // Build the drain complete event
                 let mut payload = serde_json::json!({});
@@ -382,17 +393,19 @@ impl FsmAction for MetricsAggregatorAction {
                     payload["last_event_id"] = serde_json::json!(id.to_string());
                 }
                 
-                let drain_event = obzenflow_core::ChainEvent::new(
-                    obzenflow_core::EventId::new(),
-                    writer_id.clone(),
-                    ChainEvent::SYSTEM_METRICS_DRAINED,
-                    payload
+                // Metrics aggregator publishes SystemEvent to system journal
+                let drain_event = obzenflow_core::event::SystemEvent::new(
+                    system_writer_id,
+                    obzenflow_core::event::SystemEventType::MetricsCoordination(
+                        obzenflow_core::event::MetricsCoordinationEvent::Drained
+                    )
                 );
                 
-                // Publish to journal
-                ctx.journal
-                    .append(writer_id, drain_event, None)
+                // Publish to system journal
+                ctx.system_journal
+                    .append(drain_event, None)
                     .await
+                    .map(|_| ())
                     .map_err(|e| format!("Failed to publish drain complete event: {}", e))?;
                 
                 tracing::info!("Published metrics drain complete event");

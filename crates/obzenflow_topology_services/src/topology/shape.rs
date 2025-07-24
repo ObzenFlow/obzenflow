@@ -3,6 +3,7 @@
 //! Inspired by Akka Streams - everything is a Stage with a Shape
 
 use serde::{Deserialize, Serialize};
+use obzenflow_core::event::context::StageType;
 
 /// Port identifier for connecting stages
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -58,18 +59,15 @@ impl Shape {
     
     /// Simple classification for backwards compatibility
     pub fn stage_type(&self) -> StageType {
-        match self {
-            Shape::Source { .. } => StageType::Source,
-            Shape::Sink { .. } => StageType::Sink,
-            _ => StageType::Transform,
-        }
+        use obzenflow_core::event::context::SimpleStageType;
+        
+        let simple = match self {
+            Shape::Source { .. } => SimpleStageType::Source,
+            Shape::Sink { .. } => SimpleStageType::Sink,
+            _ => SimpleStageType::Transform,
+        };
+        
+        simple.into()
     }
 }
 
-/// Simple stage type classification (legacy support)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum StageType {
-    Source,
-    Transform, 
-    Sink,
-}

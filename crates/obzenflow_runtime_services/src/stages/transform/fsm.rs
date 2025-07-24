@@ -4,7 +4,11 @@
 //! They start processing immediately without waiting for a start signal.
 
 use obzenflow_fsm::{StateVariant, EventVariant, FsmContext, FsmAction};
-use obzenflow_core::{ChainEvent, EventId, WriterId};
+use obzenflow_core::{ChainEvent, EventId, WriterId, FlowId};
+use obzenflow_core::event::{ChainEventFactory, SystemEvent};
+use obzenflow_core::journal::journal::Journal;
+use obzenflow_core::event::JournalEvent;
+use obzenflow_core::StageId;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::marker::PhantomData;
@@ -13,6 +17,7 @@ use tokio::sync::RwLock;
 use crate::stages::common::handlers::TransformHandler;
 use crate::stages::common::control_strategies::ControlEventStrategy;
 use crate::metrics::instrumentation::StageInstrumentation;
+use crate::messaging::UpstreamSubscription;
 
 // ============================================================================
 // FSM States
@@ -242,8 +247,17 @@ pub struct TransformContext<H: TransformHandler> {
     /// Flow name for flow context
     pub flow_name: String,
     
-    /// Journal for reading/writing events
-    pub journal: Arc<crate::messaging::reactive_journal::ReactiveJournal>,
+    /// Flow ID from pipeline
+    pub flow_id: FlowId,
+    
+    /// Data journal for writing chain events
+    pub data_journal: Arc<dyn Journal<ChainEvent>>,
+    
+    /// System journal for writing lifecycle events
+    pub system_journal: Arc<dyn Journal<SystemEvent>>,
+    
+    /// Upstream journals for reading events
+    pub upstream_journals: Vec<(StageId, Arc<dyn Journal<ChainEvent>>)>,
     
     /// Message bus for pipeline communication
     pub bus: Arc<crate::message_bus::FsmMessageBus>,
@@ -252,7 +266,7 @@ pub struct TransformContext<H: TransformHandler> {
     pub writer_id: Arc<RwLock<Option<WriterId>>>,
     
     /// Subscription to upstream events
-    pub subscription: Arc<RwLock<Option<crate::messaging::reactive_journal::JournalSubscription>>>,
+    pub subscription: Arc<RwLock<Option<UpstreamSubscription<ChainEvent>>>>,
     
     /// Processing task handle (moved from supervisor to follow FSM patterns)
     pub processing_task: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
@@ -276,9 +290,12 @@ impl<H: TransformHandler> TransformContext<H> {
         stage_id: obzenflow_core::StageId,
         stage_name: String,
         flow_name: String,
-        journal: Arc<crate::messaging::reactive_journal::ReactiveJournal>,
+        flow_id: FlowId,
+        data_journal: Arc<dyn Journal<ChainEvent>>,
+        system_journal: Arc<dyn Journal<SystemEvent>>,
+        upstream_journals: Vec<(StageId, Arc<dyn Journal<ChainEvent>>)>,
         bus: Arc<crate::message_bus::FsmMessageBus>,
-        upstream_stages: Vec<obzenflow_core::StageId>,
+        upstream_stages: Vec<StageId>,
         control_strategy: Arc<dyn ControlEventStrategy>,
         instrumentation: Arc<StageInstrumentation>,
     ) -> Self {
@@ -287,7 +304,10 @@ impl<H: TransformHandler> TransformContext<H> {
             stage_id,
             stage_name,
             flow_name,
-            journal,
+            flow_id,
+            data_journal,
+            system_journal,
+            upstream_journals,
             bus,
             writer_id: Arc::new(RwLock::new(None)),
             subscription: Arc::new(RwLock::new(None)),
@@ -313,14 +333,12 @@ impl<H: TransformHandler + Send + Sync + 'static> FsmAction for TransformAction<
     async fn execute(&self, ctx: &Self::Context) -> Result<(), String> {
         match self {
             TransformAction::AllocateResources => {
-                // In the new architecture, ReactiveJournal already has its writer_id
-                // Just get it from the journal
-                let writer_id = ctx.journal.writer_id.clone();
+                // Create WriterId from our StageId
+                let writer_id = WriterId::from(ctx.stage_id.clone());
                 *ctx.writer_id.write().await = Some(writer_id);
                 
-                // Create subscription - will automatically subscribe to upstream journals
-                // The new architecture (FLOWIP-008) handles upstream filtering internally
-                let subscription = ctx.journal.subscribe().await
+                // Create subscription to upstream journals
+                let subscription = UpstreamSubscription::new(&ctx.upstream_journals).await
                     .map_err(|e| format!("Failed to create subscription: {:?}", e))?;
                 
                 *ctx.subscription.write().await = Some(subscription);
@@ -338,19 +356,13 @@ impl<H: TransformHandler + Send + Sync + 'static> FsmAction for TransformAction<
                     .as_ref()
                     .ok_or_else(|| "No writer ID available to publish running event".to_string())?;
                 
-                let running_event = ChainEvent::new(
-                    EventId::new(),
-                    writer_id.clone(),
-                    ChainEvent::SYSTEM_STAGE_RUNNING,
-                    serde_json::json!({
-                        "stage_id": ctx.stage_id.to_string(),
-                        "stage_name": ctx.stage_name,
-                        "timestamp": chrono::Utc::now().to_rfc3339(),
-                    })
+                // Write lifecycle event to system journal
+                let running_event = SystemEvent::stage_running(
+                    ctx.stage_id
                 );
                 
-                ctx.journal
-                    .write_control_event(running_event)
+                ctx.system_journal
+                    .append(running_event, None)
                     .await
                     .map_err(|e| format!("Failed to publish running event: {}", e))?;
                 
@@ -371,15 +383,14 @@ impl<H: TransformHandler + Send + Sync + 'static> FsmAction for TransformAction<
                 let eof_event = if let Some(buffered) = ctx.buffered_eof.write().await.take() {
                     buffered
                 } else {
-                    ChainEvent::eof(
-                        EventId::new(),
+                    ChainEventFactory::eof_event(
                         writer_id.clone(),
                         true, // natural EOF
                     )
                 };
                 
-                ctx.journal
-                    .write(eof_event, None)
+                ctx.data_journal
+                    .append(eof_event, None)
                     .await
                     .map_err(|e| format!("Failed to forward EOF: {}", e))?;
                 
@@ -396,27 +407,13 @@ impl<H: TransformHandler + Send + Sync + 'static> FsmAction for TransformAction<
                     .as_ref()
                     .ok_or_else(|| "No writer ID available to send completion".to_string())?;
                 
-                let mut completion_event = ChainEvent::new(
-                    EventId::new(),
-                    writer_id.clone(),
-                    ChainEvent::SYSTEM_STAGE_COMPLETED,
-                    serde_json::json!({
-                        "stage_id": ctx.stage_id.to_string(),
-                        "stage_name": ctx.stage_name,
-                        "timestamp": chrono::Utc::now().to_rfc3339(),
-                    })
+                // Write completion event to system journal
+                let completion_event = SystemEvent::stage_completed(
+                    ctx.stage_id
                 );
                 
-                // Populate flow context for completion
-                completion_event.flow_context = obzenflow_core::event::flow_context::FlowContext {
-                    flow_name: ctx.flow_name.clone(),
-                    flow_id: "default".to_string(),
-                    stage_name: ctx.stage_name.clone(),
-                    stage_type: obzenflow_core::event::flow_context::StageType::Transform,
-                };
-                
-                ctx.journal
-                    .write_control_event(completion_event)
+                ctx.system_journal
+                    .append(completion_event, None)
                     .await
                     .map_err(|e| format!("Failed to write completion event: {}", e))?;
                 

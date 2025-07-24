@@ -2,15 +2,14 @@
 //!
 //! Provides optimal sequential writes and natural event ordering
 
-use obzenflow_core::event::chain_event::ChainEvent;
+use obzenflow_core::event::JournalEvent;
 use obzenflow_core::event::event_envelope::EventEnvelope;
-use obzenflow_core::event::vector_clock::{VectorClock, CausalOrderingService};
-use obzenflow_core::journal::writer_id::WriterId;
+use obzenflow_core::event::identity::{JournalWriterId, WriterId, EventId};
 use obzenflow_core::journal::journal_owner::JournalOwner;
-use obzenflow_core::event::event_id::EventId;
 use obzenflow_core::journal::journal::Journal;
 use obzenflow_core::journal::journal_error::JournalError;
 use obzenflow_core::journal::journal_reader::JournalReader;
+use obzenflow_core::id::JournalId;
 use async_trait::async_trait;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -22,19 +21,20 @@ use std::io::{BufRead, BufReader};
 use std::fs::File as StdFile;
 use std::collections::HashMap;
 use ulid::Ulid;
-use chrono::{DateTime, Utc};
-use serde::{Serialize, Deserialize};
+use chrono::Utc;
 use std::io::SeekFrom;
-
+use obzenflow_core::event::vector_clock::{VectorClock, CausalOrderingService};
 use super::disk_journal_reader::DiskJournalReader;
 use super::log_record::LogRecord;
 
 /// Single append-only log for a flow execution
 ///
 /// Uses a mutex to ensure atomic writes from multiple writers
-pub struct DiskJournal {
+pub struct DiskJournal<T: JournalEvent> {
     /// Owner of this journal (if any)
     owner: Option<JournalOwner>,
+    /// Journal ID for this instance
+    journal_id: JournalId,
     /// Path to the log file
     path: PathBuf,
     /// Atomic write offset for tracking file position
@@ -45,9 +45,10 @@ pub struct DiskJournal {
     write_lock: Arc<Mutex<()>>,
     /// Track vector clocks for each writer
     writer_clocks: Arc<RwLock<HashMap<WriterId, VectorClock>>>,
+    _phantom: std::marker::PhantomData<T>,
 }
 
-impl DiskJournal {
+impl<T: JournalEvent> DiskJournal<T> {
     /// Create a new flow event log
     pub fn new(base_path: PathBuf, flow_id: &str) -> Result<Self, JournalError> {
         std::fs::create_dir_all(&base_path)
@@ -82,13 +83,11 @@ impl DiskJournal {
                     source: Box::new(e),
                 })?;
                 if !line.trim().is_empty() {
-                    if let Ok(record) = serde_json::from_str::<LogRecord>(&line) {
+                    if let Ok(record) = serde_json::from_str::<LogRecord<T>>(&line) {
                         index.insert(record.event_id, offset);
 
                         // Update writer clocks
-                        if let Ok(writer_id) = WriterId::try_from(record.writer_id.as_str()) {
-                            writer_clocks.insert(writer_id, record.vector_clock);
-                        }
+                        writer_clocks.insert(record.writer_id, record.vector_clock);
                     }
                     offset += line.len() as u64 + 1; // +1 for newline
                 }
@@ -97,11 +96,13 @@ impl DiskJournal {
 
         Ok(Self {
             owner: None,
+            journal_id: JournalId::new(),
             path: log_path,
             write_offset: Arc::new(AtomicU64::new(write_offset)),
             index: Arc::new(RwLock::new(index)),
             write_lock: Arc::new(Mutex::new(())),
             writer_clocks: Arc::new(RwLock::new(writer_clocks)),
+            _phantom: std::marker::PhantomData,
         })
     }
 
@@ -141,13 +142,11 @@ impl DiskJournal {
                     source: Box::new(e),
                 })?;
                 if !line.trim().is_empty() {
-                    if let Ok(record) = serde_json::from_str::<LogRecord>(&line) {
+                    if let Ok(record) = serde_json::from_str::<LogRecord<T>>(&line) {
                         index.insert(record.event_id, offset);
 
                         // Update writer clocks
-                        if let Ok(writer_id) = WriterId::try_from(record.writer_id.as_str()) {
-                            writer_clocks.insert(writer_id, record.vector_clock);
-                        }
+                        writer_clocks.insert(record.writer_id, record.vector_clock);
                     }
                     offset += line.len() as u64 + 1; // +1 for newline
                 }
@@ -156,16 +155,18 @@ impl DiskJournal {
 
         Ok(Self {
             owner: Some(owner),
+            journal_id: JournalId::new(),
             path: log_path,
             write_offset: Arc::new(AtomicU64::new(write_offset)),
             index: Arc::new(RwLock::new(index)),
             write_lock: Arc::new(Mutex::new(())),
             writer_clocks: Arc::new(RwLock::new(writer_clocks)),
+            _phantom: std::marker::PhantomData,
         })
     }
 
     /// Read all events from disk (internal helper)
-    async fn read_all_raw(&self) -> Result<Vec<EventEnvelope>, JournalError> {
+    async fn read_all_raw(&self) -> Result<Vec<EventEnvelope<T>>, JournalError> {
         let mut events = Vec::new();
 
         if !self.path.exists() {
@@ -186,20 +187,14 @@ impl DiskJournal {
                 source: Box::new(e),
             })? {
             if !line.trim().is_empty() {
-                let record: LogRecord = serde_json::from_str(&line)
+                let record: LogRecord<T> = serde_json::from_str(&line)
                     .map_err(|e| JournalError::Implementation {
                         message: "Failed to parse record".to_string(),
                         source: Box::new(e),
                     })?;
 
-                let writer_id = WriterId::try_from(record.writer_id.as_str())
-                    .map_err(|_| JournalError::Implementation {
-                        message: format!("Invalid writer ID: {}", record.writer_id),
-                        source: "Invalid WriterId format".into(),
-                    })?;
-
                 events.push(EventEnvelope {
-                    writer_id,
+                    journal_writer_id: JournalWriterId::from(self.journal_id),
                     vector_clock: record.vector_clock,
                     timestamp: record.timestamp,
                     event: record.event,
@@ -211,31 +206,36 @@ impl DiskJournal {
     }
 }
 
-impl Clone for DiskJournal {
+impl<T: JournalEvent> Clone for DiskJournal<T> {
     fn clone(&self) -> Self {
         Self {
             owner: self.owner.clone(),
+            journal_id: self.journal_id,
             path: self.path.clone(),
             write_offset: self.write_offset.clone(),
             index: self.index.clone(),
             write_lock: self.write_lock.clone(),
             writer_clocks: self.writer_clocks.clone(),
+            _phantom: std::marker::PhantomData,
         }
     }
 }
 
 #[async_trait]
-impl Journal for DiskJournal {
+impl<T: JournalEvent + 'static> Journal<T> for DiskJournal<T> {
+    fn id(&self) -> &JournalId {
+        &self.journal_id
+    }
+
     fn owner(&self) -> Option<&JournalOwner> {
         self.owner.as_ref()
     }
 
     async fn append(
         &self,
-        writer_id: &WriterId,
-        event: ChainEvent,
-        parent: Option<&EventEnvelope>
-    ) -> Result<EventEnvelope, JournalError> {
+        event: T,
+        parent: Option<&EventEnvelope<T>>
+    ) -> Result<EventEnvelope<T>, JournalError> {
         // Safety check: Ensure journal has an owner before allowing writes
         if self.owner.is_none() {
             return Err(JournalError::Implementation {
@@ -243,11 +243,14 @@ impl Journal for DiskJournal {
                 source: "Unowned journal write attempt".into(),
             });
         }
+        // Get writer_id from the event
+        let writer_id = event.writer_id().clone();
+        
         // Get or create vector clock for this writer
         let mut vector_clock = {
             let writer_clocks = self.writer_clocks.read().await;
             writer_clocks
-                .get(writer_id)
+                .get(&writer_id)
                 .cloned()
                 .unwrap_or_else(VectorClock::new)
         };
@@ -262,16 +265,17 @@ impl Journal for DiskJournal {
 
         // Create envelope
         let envelope = EventEnvelope {
-            writer_id: writer_id.clone(),
+            journal_writer_id: JournalWriterId::from(self.journal_id),
             vector_clock: vector_clock.clone(),
             timestamp: Utc::now(),
             event: event.clone(),
         };
 
         // Create log record
-        let record = LogRecord {
-            event_id: event.id.as_ulid(),
-            writer_id: writer_id.to_string(),
+        let record = LogRecord::<T> {
+            event_id: event.id().as_ulid(),
+            writer_id: writer_id.clone(),
+            journal_id: self.journal_id,
             vector_clock: vector_clock.clone(),
             timestamp: envelope.timestamp,
             event,
@@ -320,12 +324,12 @@ impl Journal for DiskJournal {
 
         // Update writer's clock
         self.writer_clocks.write().await
-            .insert(writer_id.clone(), vector_clock);
+            .insert(writer_id, vector_clock);
 
         Ok(envelope)
     }
 
-    async fn read_causally_ordered(&self) -> Result<Vec<EventEnvelope>, JournalError> {
+    async fn read_causally_ordered(&self) -> Result<Vec<EventEnvelope<T>>, JournalError> {
         let mut events = self.read_all_raw().await?;
 
         // Sort by vector clock for causal ordering
@@ -340,12 +344,12 @@ impl Journal for DiskJournal {
         Ok(events)
     }
 
-    async fn read_causally_after(&self, after_event_id: &EventId) -> Result<Vec<EventEnvelope>, JournalError> {
+    async fn read_causally_after(&self, after_event_id: &EventId) -> Result<Vec<EventEnvelope<T>>, JournalError> {
         let all_events = self.read_causally_ordered().await?;
 
         // Find the position of the reference event
         let position = all_events.iter()
-            .position(|e| &e.event.id == after_event_id);
+            .position(|e| e.event.id() == after_event_id);
 
         match position {
             Some(pos) => Ok(all_events.into_iter().skip(pos + 1).collect()),
@@ -353,7 +357,7 @@ impl Journal for DiskJournal {
         }
     }
 
-    async fn read_event(&self, event_id: &EventId) -> Result<Option<EventEnvelope>, JournalError> {
+    async fn read_event(&self, event_id: &EventId) -> Result<Option<EventEnvelope<T>>, JournalError> {
         let ulid = event_id.as_ulid();
 
         // Check index
@@ -388,20 +392,14 @@ impl Journal for DiskJournal {
                 message: "Failed to read line".to_string(),
                 source: Box::new(e),
             })? {
-            let record: LogRecord = serde_json::from_str(&line)
+            let record: LogRecord<T> = serde_json::from_str(&line)
                 .map_err(|e| JournalError::Implementation {
                     message: "Failed to parse record".to_string(),
                     source: Box::new(e),
                 })?;
 
-            let writer_id = WriterId::try_from(record.writer_id.as_str())
-                .map_err(|_| JournalError::Implementation {
-                    message: format!("Invalid writer ID: {}", record.writer_id),
-                    source: "Invalid WriterId format".into(),
-                })?;
-
             Ok(Some(EventEnvelope {
-                writer_id,
+                journal_writer_id: JournalWriterId::from(self.journal_id),
                 vector_clock: record.vector_clock,
                 timestamp: record.timestamp,
                 event: record.event,
@@ -411,12 +409,12 @@ impl Journal for DiskJournal {
         }
     }
     
-    async fn reader(&self) -> Result<Box<dyn JournalReader>, JournalError> {
-        Ok(Box::new(DiskJournalReader::new(self.path.clone()).await?))
+    async fn reader(&self) -> Result<Box<dyn JournalReader<T>>, JournalError> {
+        Ok(Box::new(DiskJournalReader::new(self.path.clone(), self.journal_id).await?))
     }
     
-    async fn reader_from(&self, position: u64) -> Result<Box<dyn JournalReader>, JournalError> {
-        Ok(Box::new(DiskJournalReader::from_position(self.path.clone(), position).await?))
+    async fn reader_from(&self, position: u64) -> Result<Box<dyn JournalReader<T>>, JournalError> {
+        Ok(Box::new(DiskJournalReader::from_position(self.path.clone(), self.journal_id, position).await?))
     }
 }
 
@@ -424,6 +422,9 @@ impl Journal for DiskJournal {
 mod tests {
     use super::*;
     use uuid::Uuid;
+    use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
+    use obzenflow_core::id::{StageId, SystemId};
+    use obzenflow_core::journal::journal_owner::JournalOwner;
 
     #[tokio::test]
     async fn test_basic_append_and_read() {
@@ -434,27 +435,26 @@ mod tests {
         let test_stage_id = obzenflow_core::StageId::new();
         let owner = obzenflow_core::JournalOwner::stage(test_stage_id);
         let log_path = test_dir.join("test_flow_1.log");
-        let log = DiskJournal::with_owner(log_path, owner).unwrap();
+        let log = DiskJournal::<ChainEvent>::with_owner(log_path, owner).unwrap();
 
-        let writer_id = WriterId::new();
-        let event = ChainEvent::new(
-            EventId::new(),
-            writer_id.clone(),
+        let writer_id = WriterId::from(StageId::new());
+        let event = ChainEventFactory::data_event(
+            writer_id,
             "test.event",
             serde_json::json!({"data": "test value"})
         );
 
         // Append event
-        let envelope = log.append(&writer_id, event.clone(), None).unwrap();
+        let envelope = log.append(event.clone(), None).await.unwrap();
 
         // Read back
-        let events = log.read_causally_ordered().unwrap();
+        let events = log.read_causally_ordered().await.unwrap();
         assert_eq!(events.len(), 1);
-        assert_eq!(events[0].event.event_type, "test.event");
-        assert_eq!(events[0].event.payload["data"], "test value");
+        assert_eq!(events[0].event.event_type(), "test.event");
+        assert_eq!(events[0].event.payload()["data"], "test value");
 
         // Read by ID
-        let event_by_id = log.read_event(&envelope.event.id).unwrap();
+        let event_by_id = log.read_event(&envelope.event.id).await.unwrap();
         assert!(event_by_id.is_some());
         assert_eq!(event_by_id.unwrap().event.id, envelope.event.id);
         
@@ -468,31 +468,29 @@ mod tests {
         let test_dir = std::path::PathBuf::from(format!("target/test-logs/test_causal_ordering_{}", test_id));
         std::fs::create_dir_all(&test_dir).unwrap();
         // Create a test journal with a proper owner
-        let test_pipeline_id = obzenflow_core::PipelineId::new();
-        let owner = obzenflow_core::JournalOwner::pipeline(test_pipeline_id);
+        let test_system_id = obzenflow_core::SystemId::new();
+        let owner = obzenflow_core::JournalOwner::system(test_system_id);
         let log_path = test_dir.join("test_flow_2.log");
-        let log = DiskJournal::with_owner(log_path, owner).unwrap();
+        let log = DiskJournal::<ChainEvent>::with_owner(log_path, owner).unwrap();
 
-        let writer1 = WriterId::new();
-        let writer2 = WriterId::new();
+        let writer1 = WriterId::from(StageId::new());
+        let writer2 = WriterId::from(StageId::new());
 
         // First event from writer1
-        let event1 = ChainEvent::new(
-            EventId::new(),
-            writer1.clone(),
+        let event1 = ChainEventFactory::data_event(
+            writer1,
             "event.1",
             serde_json::json!({"seq": 1})
         );
-        let envelope1 = log.append(&writer1, event1, None).unwrap();
+        let envelope1 = log.append(event1, None).await.unwrap();
 
         // Second event from writer2, causally dependent on event1
-        let event2 = ChainEvent::new(
-            EventId::new(),
-            writer2.clone(),
+        let event2 = ChainEventFactory::data_event(
+            writer2,
             "event.2",
             serde_json::json!({"seq": 2})
         );
-        let envelope2 = log.append(&writer2, event2, Some(&envelope1)).unwrap();
+        let envelope2 = log.append(event2, Some(&envelope1)).await.unwrap();
 
         // Verify vector clocks show causal relationship
         assert!(CausalOrderingService::happened_before(
@@ -501,7 +499,7 @@ mod tests {
         ));
 
         // Read all events
-        let events = log.read_causally_ordered().unwrap();
+        let events = log.read_causally_ordered().await.unwrap();
         assert_eq!(events.len(), 2);
 
         // Verify causal order
@@ -518,10 +516,10 @@ mod tests {
         let test_dir = std::path::PathBuf::from(format!("target/test-logs/test_concurrent_writers_{}", test_id));
         std::fs::create_dir_all(&test_dir).unwrap();
         // Create a test journal with a proper owner
-        let test_metrics_id = obzenflow_core::MetricsId::new();
-        let owner = obzenflow_core::JournalOwner::metrics(test_metrics_id);
+        let test_system_id = obzenflow_core::SystemId::new();
+        let owner = obzenflow_core::JournalOwner::system(test_system_id);
         let log_path = test_dir.join("test_flow_3.log");
-        let log = Arc::new(DiskJournal::with_owner(log_path, owner).unwrap());
+        let log = Arc::new(DiskJournal::<ChainEvent>::with_owner(log_path, owner).unwrap());
 
         // Spawn multiple concurrent writers
         let mut handles = vec![];
@@ -529,30 +527,29 @@ mod tests {
         for i in 0..5 {
             let log_clone = log.clone();
             let handle = tokio::spawn(async move {
-                let writer_id = WriterId::new();
-                let event = ChainEvent::new(
-                    EventId::new(),
-                    writer_id.clone(),
+                let writer_id = WriterId::from(StageId::new());
+                let event = ChainEventFactory::data_event(
+                    writer_id,
                     "concurrent.event",
                     serde_json::json!({"writer": i})
                 );
-                log_clone.append(&writer_id, event, None).await
+                log_clone.append(event, None).await
             });
             handles.push(handle);
         }
 
         // Wait for all writers
         for handle in handles {
-            handle.unwrap().unwrap();
+            handle.await.unwrap().unwrap();
         }
 
         // Verify all events were written
-        let events = log.read_causally_ordered().unwrap();
+        let events = log.read_causally_ordered().await.unwrap();
         assert_eq!(events.len(), 5);
 
         // Verify each event has unique writer
         let writer_ids: std::collections::HashSet<_> =
-            events.iter().map(|e| e.writer_id.to_string()).collect();
+            events.iter().map(|e| e.event.writer_id().as_ulid().to_string()).collect();
         assert_eq!(writer_ids.len(), 5);
         
         // Cleanup

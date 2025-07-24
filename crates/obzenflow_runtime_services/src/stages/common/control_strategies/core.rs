@@ -5,26 +5,27 @@
 
 use std::time::Duration;
 use obzenflow_core::event::event_envelope::EventEnvelope;
+use obzenflow_core::ChainEvent;
 
 /// Strategy for handling control events in stage supervisors
 pub trait ControlEventStrategy: Send + Sync {
     /// Handle an EOF event
-    fn handle_eof(&self, envelope: &EventEnvelope, ctx: &mut ProcessingContext) -> ControlEventAction;
+    fn handle_eof(&self, envelope: &EventEnvelope<ChainEvent>, ctx: &mut ProcessingContext) -> ControlEventAction;
     
     /// Handle a watermark event
-    fn handle_watermark(&self, _envelope: &EventEnvelope, _ctx: &mut ProcessingContext) -> ControlEventAction {
+    fn handle_watermark(&self, _envelope: &EventEnvelope<ChainEvent>, _ctx: &mut ProcessingContext) -> ControlEventAction {
         // Default: always forward watermarks
         ControlEventAction::Forward
     }
     
     /// Handle a checkpoint event (when implemented)
-    fn handle_checkpoint(&self, _envelope: &EventEnvelope, _ctx: &mut ProcessingContext) -> ControlEventAction {
+    fn handle_checkpoint(&self, _envelope: &EventEnvelope<ChainEvent>, _ctx: &mut ProcessingContext) -> ControlEventAction {
         // Default: always forward checkpoints
         ControlEventAction::Forward
     }
     
     /// Handle a drain signal (when implemented)
-    fn handle_drain(&self, _envelope: &EventEnvelope, _ctx: &mut ProcessingContext) -> ControlEventAction {
+    fn handle_drain(&self, _envelope: &EventEnvelope<ChainEvent>, _ctx: &mut ProcessingContext) -> ControlEventAction {
         // Default: always forward drain signals
         ControlEventAction::Forward
     }
@@ -58,7 +59,7 @@ pub struct ProcessingContext {
     pub custom_state: std::collections::HashMap<String, String>,
     
     /// Buffered EOF event for retry scenarios
-    pub buffered_eof: Option<EventEnvelope>,
+    pub buffered_eof: Option<EventEnvelope<ChainEvent>>,
 }
 
 impl ProcessingContext {

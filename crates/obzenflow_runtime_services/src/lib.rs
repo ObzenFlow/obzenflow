@@ -41,7 +41,7 @@ pub mod prelude {
     
     // Event flow
     pub use crate::messaging::{
-        JournalSubscription, ReactiveJournal, ReactiveJournalBuilder, JournalSet,
+        UpstreamSubscription,
     };
     
     // Metrics

@@ -8,5 +8,7 @@ pub mod stage_descriptor;
 mod stage_macros;
 
 // Re-export all public items
+#[allow(unused_imports)]
 pub use dsl::*;
+#[allow(unused_imports)]
 pub use stage_macros::*;

@@ -90,10 +90,10 @@ impl CountingSink {
 
 impl SinkHandler for CountingSink {
     fn consume(&mut self, event: ChainEvent) -> obzenflow_core::Result<()> {
-        match &event.processing_info.outcome {
+        match &event.processing_info.status {
             obzenflow_core::event::processing_outcome::ProcessingOutcome::Error(_) => {
                 self.error_count += 1;
-                println!("Sink received error event: {:?}", event.processing_info.outcome);
+                println!("Sink received error event: {:?}", event.processing_info.status);
             }
             _ => {
                 self.success_count += 1;

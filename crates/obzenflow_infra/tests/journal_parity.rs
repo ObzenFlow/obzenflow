@@ -3,10 +3,10 @@
 use obzenflow_infra::journal::{DiskJournal, MemoryJournal};
 use obzenflow_core::Journal;
 use obzenflow_core::event::{
-    chain_event::ChainEvent,
-    event_id::EventId,
+    chain_event::{ChainEvent, ChainEventFactory},
+    EventId,
 };
-use obzenflow_core::journal::writer_id::WriterId;
+use obzenflow_core::{WriterId, StageId};
 use serde_json::json;
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -17,53 +17,48 @@ async fn test_journal_parity() {
     let temp_dir = TempDir::new().unwrap();
     let disk_journal = Arc::new(
         DiskJournal::new(temp_dir.path().to_path_buf(), "parity_test")
-            .await
             .unwrap()
-    ) as Arc<dyn Journal + Send + Sync>;
+    ) as Arc<dyn Journal<ChainEvent> + Send + Sync>;
     
-    let memory_journal = Arc::new(MemoryJournal::new()) as Arc<dyn Journal + Send + Sync>;
+    let memory_journal = Arc::new(MemoryJournal::new()) as Arc<dyn Journal<ChainEvent> + Send + Sync>;
     
     // Test data
-    let writer1 = WriterId::new();
-    let writer2 = WriterId::new();
+    let writer1 = WriterId::from(StageId::new());
+    let writer2 = WriterId::from(StageId::new());
     
     // Test both journals with identical operations
     for journal in [&disk_journal, &memory_journal] {
         // Event 1: No parent
-        let event1 = ChainEvent::new(
-            EventId::new(),
-            writer1.clone(),
+        let event1 = ChainEventFactory::data_event(
+            writer1,
             "test.first",
             json!({ "value": 42 })
         );
-        let envelope1 = journal.append(&writer1, event1, None).await.unwrap();
+        let envelope1 = journal.append(event1, None).await.unwrap();
         
         // Event 2: Child of event 1
-        let event2 = ChainEvent::new(
-            EventId::new(),
-            writer1.clone(),
+        let event2 = ChainEventFactory::data_event(
+            writer1,
             "test.second",
             json!({ "value": 84 })
         );
-        let envelope2 = journal.append(&writer1, event2, Some(&envelope1)).await.unwrap();
+        let envelope2 = journal.append(event2, Some(&envelope1)).await.unwrap();
         
         // Event 3: From different writer, no parent
-        let event3 = ChainEvent::new(
-            EventId::new(),
-            writer2.clone(),
+        let event3 = ChainEventFactory::data_event(
+            writer2,
             "test.parallel",
             json!({ "value": 100 })
         );
-        let _envelope3 = journal.append(&writer2, event3, None).await.unwrap();
+        let _envelope3 = journal.append(event3, None).await.unwrap();
         
         // Event 4: Child of event 2
-        let event4 = ChainEvent::new(
-            EventId::new(),
-            writer1.clone(),
+        let event4 = ChainEventFactory::data_event(
+            writer1,
             "test.third",
             json!({ "value": 168 })
         );
-        journal.append(&writer1, event4, Some(&envelope2)).await.unwrap();
+        journal.append(event4, Some(&envelope2)).await.unwrap();
     }
     
     // Compare results
@@ -77,14 +72,14 @@ async fn test_journal_parity() {
     // Compare each event
     for (i, (disk_event, memory_event)) in disk_events.iter().zip(memory_events.iter()).enumerate() {
         assert_eq!(
-            disk_event.event.event_type, 
-            memory_event.event.event_type,
+            disk_event.event.event_type(), 
+            memory_event.event.event_type(),
             "Event type mismatch at index {}", i
         );
         
         assert_eq!(
-            disk_event.event.payload,
-            memory_event.event.payload,
+            disk_event.event.payload(),
+            memory_event.event.payload(),
             "Payload mismatch at index {}", i
         );
         

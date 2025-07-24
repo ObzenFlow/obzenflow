@@ -4,6 +4,7 @@
 //! and keeps file handles open for optimal performance.
 
 use crate::event::event_envelope::EventEnvelope;
+use crate::event::JournalEvent;
 use super::journal_error::JournalError;
 use async_trait::async_trait;
 
@@ -12,12 +13,15 @@ use async_trait::async_trait;
 /// This trait is designed to solve the O(n²) performance problem with large journals
 /// by keeping file handles open and tracking position, similar to database cursors.
 #[async_trait]
-pub trait JournalReader: Send + Sync {
+pub trait JournalReader<T>: Send + Sync 
+where
+    T: JournalEvent
+{
     /// Read the next event from the current position
     /// 
     /// Returns None if no more events are available (EOF).
     /// This method should be efficient - O(1) regardless of journal size.
-    async fn next(&mut self) -> Result<Option<EventEnvelope>, JournalError>;
+    async fn next(&mut self) -> Result<Option<EventEnvelope<T>>, JournalError>;
     
     /// Skip forward by n events without reading them
     /// 

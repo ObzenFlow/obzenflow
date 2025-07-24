@@ -5,110 +5,111 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use obzenflow_core::{StageId, PipelineId, FlowId, JournalOwner, WriterId};
+use obzenflow_core::{StageId, FlowId, ChainEvent, SystemId};
+use obzenflow_core::event::SystemEvent;
 use obzenflow_core::journal::journal::Journal;
-use crate::messaging::reactive_journal::{ReactiveJournal, ReactiveJournalBuilder};
 use crate::message_bus::FsmMessageBus;
 use obzenflow_topology_services::topology::Topology;
 
 /// Resources provided to stage creation
 #[derive(Clone)]
 pub struct StageResources {
-    pub journal: Arc<ReactiveJournal>,
+    /// Flow execution ID (from pipeline)
+    pub flow_id: FlowId,
+    
+    /// Stage's own journal for writing data events
+    pub data_journal: Arc<dyn Journal<ChainEvent>>,
+    
+    /// Shared system journal for lifecycle events
+    pub system_journal: Arc<dyn Journal<SystemEvent>>,
+    
+    /// Upstream journals for reading events
+    pub upstream_journals: Vec<(StageId, Arc<dyn Journal<ChainEvent>>)>,
+    
+    /// Message bus for FSM communication
     pub message_bus: Arc<FsmMessageBus>,
+    
+    /// List of upstream stage IDs
     pub upstream_stages: Vec<StageId>,
 }
 
 /// Builder for creating all stage resources with proper wiring
 pub struct StageResourcesBuilder {
     flow_id: FlowId,
-    pipeline_id: PipelineId,
+    pipeline_system_id: SystemId,
     topology: Arc<Topology>,
-    control_journal: Arc<dyn Journal>,
-    stage_journals: HashMap<StageId, Arc<dyn Journal>>,
+    system_journal: Arc<dyn Journal<SystemEvent>>,
+    stage_journals: HashMap<StageId, Arc<dyn Journal<ChainEvent>>>,
 }
 
 impl StageResourcesBuilder {
     /// Create a new builder
     pub fn new(
         flow_id: FlowId,
-        pipeline_id: PipelineId,
+        pipeline_system_id: SystemId,
         topology: Arc<Topology>,
-        control_journal: Arc<dyn Journal>,
-        stage_journals: HashMap<StageId, Arc<dyn Journal>>,
+        system_journal: Arc<dyn Journal<SystemEvent>>,
+        stage_journals: HashMap<StageId, Arc<dyn Journal<ChainEvent>>>,
     ) -> Self {
         Self {
             flow_id,
-            pipeline_id,
+            pipeline_system_id,
             topology,
-            control_journal,
+            system_journal,
             stage_journals,
         }
     }
     
     /// Build all resources for all stages
     pub fn build(self) -> Result<StageResourcesSet, String> {
-        // Create the topology map for ReactiveJournalBuilder
-        let mut topology_map = HashMap::new();
-        for stage_info in self.topology.stages() {
-            let stage_id = stage_info.id;
-            let upstream_ids = self.topology.upstream_stages(stage_id);
-            topology_map.insert(stage_id, upstream_ids);
-        }
-        
-        // Build stage-local journals using ReactiveJournalBuilder with pre-created journals
-        let journal_builder = ReactiveJournalBuilder::new(
-            topology_map,
-            self.control_journal.clone(),
-            self.stage_journals.clone(),
-            self.pipeline_id.clone(),
-        );
-        
-        let journal_set = journal_builder.build()
-            .map_err(|e| format!("Failed to build stage-local journals: {:?}", e))?;
-        
         // Create shared message bus
         let message_bus = Arc::new(FsmMessageBus::new());
         
         // Build stage resources for each stage
         let mut stage_resources = HashMap::new();
-        let mut stage_journals = journal_set.stage_journals;
         
-        // Keep track of raw stage journals for metrics aggregator
-        let mut raw_stage_journals: Vec<(StageId, Arc<dyn Journal>)> = Vec::new();
+        // Keep track of all stage journals for metrics aggregator
+        let mut all_stage_journals: Vec<(StageId, Arc<dyn Journal<ChainEvent>>)> = Vec::new();
         
         for stage_info in self.topology.stages() {
             let stage_id = stage_info.id;
-            let stage_journal = stage_journals.remove(&stage_id)
-                .ok_or_else(|| format!("No journal found for stage {:?}", stage_id))?;
             
-            let upstream_stages = self.topology.upstream_stages(stage_id);
+            // Get the stage's own journal
+            let data_journal = self.stage_journals.get(&stage_id)
+                .ok_or_else(|| format!("No journal found for stage {:?}", stage_id))?
+                .clone();
             
-            // Keep a reference to the raw journal for metrics
-            raw_stage_journals.push((stage_id, stage_journal.my_journal.clone()));
+            // Keep a reference for metrics aggregator
+            all_stage_journals.push((stage_id, data_journal.clone()));
+            
+            // Get upstream journals
+            let upstream_ids = self.topology.upstream_stages(stage_id);
+            let upstream_journals: Vec<(StageId, Arc<dyn Journal<ChainEvent>>)> = upstream_ids
+                .iter()
+                .filter_map(|upstream_id| {
+                    self.stage_journals.get(upstream_id).map(|journal| {
+                        (*upstream_id, journal.clone())
+                    })
+                })
+                .collect();
             
             let resources = StageResources {
-                journal: Arc::new(stage_journal),
+                flow_id: self.flow_id.clone(),
+                data_journal,
+                system_journal: self.system_journal.clone(),
+                upstream_journals,
                 message_bus: message_bus.clone(),
-                upstream_stages,
+                upstream_stages: upstream_ids,
             };
             
             stage_resources.insert(stage_id, resources);
         }
         
-        // Create metrics aggregator's ReactiveJournal that reads from ALL stage journals
-        let metrics_journal = ReactiveJournal::new(
-            journal_set.pipeline_journal.control_journal.clone(), // Writes to control journal
-            WriterId::new(),
-            journal_set.pipeline_journal.control_journal.clone(),
-            raw_stage_journals, // Reads from ALL stage journals
-        );
-        
         Ok(StageResourcesSet {
             flow_id: self.flow_id,
-            pipeline_id: self.pipeline_id,
-            pipeline_journal: journal_set.pipeline_journal,
-            metrics_journal,
+            pipeline_system_id: self.pipeline_system_id,
+            system_journal: self.system_journal,
+            stage_journals: all_stage_journals,
             stage_resources,
             message_bus,
         })
@@ -120,14 +121,14 @@ pub struct StageResourcesSet {
     /// Flow execution ID
     pub flow_id: FlowId,
     
-    /// Pipeline ID
-    pub pipeline_id: PipelineId,
+    /// Pipeline system ID
+    pub pipeline_system_id: SystemId,
     
-    /// Pipeline's reactive journal (writes to control journal)
-    pub pipeline_journal: ReactiveJournal,
+    /// System journal for orchestration events
+    pub system_journal: Arc<dyn Journal<SystemEvent>>,
     
-    /// Metrics aggregator's reactive journal (reads from ALL stage journals)
-    pub metrics_journal: ReactiveJournal,
+    /// All stage journals (for metrics aggregator to read)
+    pub stage_journals: Vec<(StageId, Arc<dyn Journal<ChainEvent>>)>,
     
     /// Resources for each stage
     pub stage_resources: HashMap<StageId, StageResources>,

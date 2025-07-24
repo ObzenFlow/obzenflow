@@ -7,10 +7,10 @@ use obzenflow_core::journal::journal::Journal;
 use obzenflow_core::journal::journal_error::JournalError;
 use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::journal::journal_reader::JournalReader;
-use obzenflow_core::event::chain_event::ChainEvent;
+use obzenflow_core::event::JournalEvent;
 use obzenflow_core::event::event_envelope::EventEnvelope;
-use obzenflow_core::event::event_id::EventId;
-use obzenflow_core::journal::writer_id::WriterId;
+use obzenflow_core::event::identity::{JournalWriterId, WriterId, EventId};
+use obzenflow_core::id::JournalId;
 use obzenflow_core::event::vector_clock::{VectorClock, CausalOrderingService};
 use async_trait::async_trait;
 use std::sync::{Arc, Mutex};
@@ -19,19 +19,23 @@ use chrono::Utc;
 
 /// In-memory journal for testing
 #[derive(Clone)]
-pub struct MemoryJournal {
+pub struct MemoryJournal<T: JournalEvent> {
     owner: Option<JournalOwner>,
-    events: Arc<Mutex<Vec<EventEnvelope>>>,
-    vector_clocks: Arc<Mutex<HashMap<WriterId, VectorClock>>>,
+    journal_id: JournalId,
+    events: Arc<Mutex<Vec<EventEnvelope<T>>>>,
+    writer_clocks: Arc<Mutex<HashMap<WriterId, VectorClock>>>,
+    _phantom: std::marker::PhantomData<T>,
 }
 
-impl MemoryJournal {
+impl<T: JournalEvent> MemoryJournal<T> {
     /// Create a new in-memory journal without an owner
     pub fn new() -> Self {
         Self {
             owner: None,
+            journal_id: JournalId::new(),
             events: Arc::new(Mutex::new(Vec::new())),
-            vector_clocks: Arc::new(Mutex::new(HashMap::new())),
+            writer_clocks: Arc::new(Mutex::new(HashMap::new())),
+            _phantom: std::marker::PhantomData,
         }
     }
 
@@ -39,8 +43,10 @@ impl MemoryJournal {
     pub fn with_owner(owner: JournalOwner) -> Self {
         Self {
             owner: Some(owner),
+            journal_id: JournalId::new(),
             events: Arc::new(Mutex::new(Vec::new())),
-            vector_clocks: Arc::new(Mutex::new(HashMap::new())),
+            writer_clocks: Arc::new(Mutex::new(HashMap::new())),
+            _phantom: std::marker::PhantomData,
         }
     }
 
@@ -56,17 +62,20 @@ impl MemoryJournal {
 }
 
 #[async_trait]
-impl Journal for MemoryJournal {
+impl<T: JournalEvent> Journal<T> for MemoryJournal<T> {
+    fn id(&self) -> &JournalId {
+        &self.journal_id
+    }
+
     fn owner(&self) -> Option<&JournalOwner> {
         self.owner.as_ref()
     }
 
     async fn append(
         &self,  // Note: &self, not &mut self
-        writer_id: &WriterId,
-        event: ChainEvent,
-        parent: Option<&EventEnvelope>
-    ) -> Result<EventEnvelope, JournalError> {
+        event: T,
+        parent: Option<&EventEnvelope<T>>
+    ) -> Result<EventEnvelope<T>, JournalError> {
         // Safety check: Ensure journal has an owner before allowing writes
         if self.owner.is_none() {
             return Err(JournalError::Implementation {
@@ -74,11 +83,14 @@ impl Journal for MemoryJournal {
                 source: "Unowned journal write attempt".into(),
             });
         }
-        let mut clocks = self.vector_clocks.lock().unwrap();
-
+        // Get writer_id from the event
+        let writer_id = event.writer_id().clone();
+        
+        let mut clocks = self.writer_clocks.lock().unwrap();
+        
         // Get or create vector clock for this writer
         let mut vector_clock = clocks
-            .get(writer_id)
+            .get(&writer_id)
             .cloned()
             .unwrap_or_else(VectorClock::new);
 
@@ -96,7 +108,7 @@ impl Journal for MemoryJournal {
 
         // Create envelope with proper vector clock
         let envelope = EventEnvelope {
-            writer_id: writer_id.clone(),
+            journal_writer_id: JournalWriterId::from(self.journal_id),
             vector_clock,
             timestamp: Utc::now(),
             event,
@@ -109,7 +121,7 @@ impl Journal for MemoryJournal {
         Ok(envelope)
     }
 
-    async fn read_causally_ordered(&self) -> Result<Vec<EventEnvelope>, JournalError> {
+    async fn read_causally_ordered(&self) -> Result<Vec<EventEnvelope<T>>, JournalError> {
         let events = self.events.lock().unwrap();
         let mut events_copy = events.clone();
         drop(events);
@@ -126,12 +138,12 @@ impl Journal for MemoryJournal {
         Ok(events_copy)
     }
 
-    async fn read_causally_after(&self, after_event_id: &EventId) -> Result<Vec<EventEnvelope>, JournalError> {
+    async fn read_causally_after(&self, after_event_id: &EventId) -> Result<Vec<EventEnvelope<T>>, JournalError> {
         let all_events = self.read_causally_ordered().await?;
 
         // Find the position of the reference event
         let position = all_events.iter()
-            .position(|e| &e.event.id == after_event_id);
+            .position(|e| e.event.id() == after_event_id);
 
         match position {
             Some(pos) => Ok(all_events.into_iter().skip(pos + 1).collect()),
@@ -139,14 +151,14 @@ impl Journal for MemoryJournal {
         }
     }
 
-    async fn read_event(&self, event_id: &EventId) -> Result<Option<EventEnvelope>, JournalError> {
+    async fn read_event(&self, event_id: &EventId) -> Result<Option<EventEnvelope<T>>, JournalError> {
         let events = self.events.lock().unwrap();
         Ok(events.iter()
-            .find(|e| &e.event.id == event_id)
+            .find(|e| e.event.id() == event_id)
             .cloned())
     }
     
-    async fn reader(&self) -> Result<Box<dyn JournalReader>, JournalError> {
+    async fn reader(&self) -> Result<Box<dyn JournalReader<T>>, JournalError> {
         // TODO: Implement MemoryJournalReader
         Err(JournalError::Implementation {
             message: "MemoryJournalReader not yet implemented".to_string(),
@@ -154,7 +166,7 @@ impl Journal for MemoryJournal {
         })
     }
     
-    async fn reader_from(&self, _position: u64) -> Result<Box<dyn JournalReader>, JournalError> {
+    async fn reader_from(&self, _position: u64) -> Result<Box<dyn JournalReader<T>>, JournalError> {
         // TODO: Implement MemoryJournalReader
         Err(JournalError::Implementation {
             message: "MemoryJournalReader not yet implemented".to_string(),
@@ -167,6 +179,8 @@ impl Journal for MemoryJournal {
 mod tests {
     use super::*;
     use serde_json::json;
+    use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
+    use obzenflow_core::id::StageId;
 
     #[tokio::test]
     async fn test_memory_journal_basic_operations() {
@@ -174,26 +188,24 @@ mod tests {
         let test_stage_id = obzenflow_core::StageId::new();
         let owner = obzenflow_core::JournalOwner::stage(test_stage_id);
         let journal = MemoryJournal::with_owner(owner);
-        let writer1 = WriterId::new();
-        let writer2 = WriterId::new();
+        let writer1 = WriterId::from(StageId::new());
+        let writer2 = WriterId::from(StageId::new());
 
         // First event from writer1
-        let event1 = ChainEvent::new(
-            EventId::new(),
-            writer1.clone(),
+        let event1 = ChainEventFactory::data_event(
+            writer1,
             "test.event.1",
             json!({"data": "first"})
         );
-        let envelope1 = journal.append(&writer1, event1, None).await.unwrap();
+        let envelope1 = journal.append(event1, None).await.unwrap();
 
         // Second event from writer2, with parent
-        let event2 = ChainEvent::new(
-            EventId::new(),
-            writer2.clone(),
+        let event2 = ChainEventFactory::data_event(
+            writer2,
             "test.event.2",
             json!({"data": "second"})
         );
-        let envelope2 = journal.append(&writer2, event2, Some(&envelope1)).await.unwrap();
+        let envelope2 = journal.append(event2, Some(&envelope1)).await.unwrap();
 
         // Verify causal relationship
         assert!(CausalOrderingService::happened_before(
@@ -218,7 +230,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_memory_journal_event_not_found() {
-        let journal = MemoryJournal::new();
+        let journal = MemoryJournal::<ChainEvent>::new();
         let unknown_id = EventId::new();
 
         // Should return None for unknown event
@@ -233,41 +245,38 @@ mod tests {
     #[tokio::test]
     async fn test_memory_journal_causal_ordering() {
         // Create a test journal with a proper owner
-        let test_pipeline_id = obzenflow_core::PipelineId::new();
-        let owner = obzenflow_core::JournalOwner::pipeline(test_pipeline_id);
+        let test_system_id = obzenflow_core::SystemId::new();
+        let owner = obzenflow_core::JournalOwner::system(test_system_id);
         let journal = MemoryJournal::with_owner(owner);
-        let writer = WriterId::new();
+        let writer = WriterId::from(StageId::new());
 
         // Create a chain of events
-        let event1 = ChainEvent::new(
-            EventId::new(),
-            writer.clone(),
+        let event1 = ChainEventFactory::data_event(
+            writer,
             "event.1",
             json!({"seq": 1})
         );
-        let envelope1 = journal.append(&writer, event1, None).await.unwrap();
+        let envelope1 = journal.append(event1, None).await.unwrap();
 
-        let event2 = ChainEvent::new(
-            EventId::new(),
-            writer.clone(),
+        let event2 = ChainEventFactory::data_event(
+            writer,
             "event.2",
             json!({"seq": 2})
         );
-        let envelope2 = journal.append(&writer, event2, Some(&envelope1)).await.unwrap();
+        let envelope2 = journal.append(event2, Some(&envelope1)).await.unwrap();
 
-        let event3 = ChainEvent::new(
-            EventId::new(),
-            writer.clone(),
+        let event3 = ChainEventFactory::data_event(
+            writer,
             "event.3",
             json!({"seq": 3})
         );
-        let _envelope3 = journal.append(&writer, event3, Some(&envelope2)).await.unwrap();
+        journal.append(event3, Some(&envelope2)).await.unwrap();
 
         // Verify causal ordering
         let ordered = journal.read_causally_ordered().await.unwrap();
         assert_eq!(ordered.len(), 3);
         for (i, event) in ordered.iter().enumerate() {
-            assert_eq!(event.event.payload["seq"], i + 1);
+            assert_eq!(event.event.payload()["seq"], i + 1);
         }
     }
 }

@@ -2,6 +2,7 @@
 
 use super::super::{ControlEventStrategy, ControlEventAction, ProcessingContext};
 use obzenflow_core::event::event_envelope::EventEnvelope;
+use obzenflow_core::ChainEvent;
 
 /// Composite strategy that stacks multiple strategies
 /// 
@@ -18,7 +19,7 @@ impl CompositeStrategy {
 }
 
 impl ControlEventStrategy for CompositeStrategy {
-    fn handle_eof(&self, envelope: &EventEnvelope, ctx: &mut ProcessingContext) -> ControlEventAction {
+    fn handle_eof(&self, envelope: &EventEnvelope<ChainEvent>, ctx: &mut ProcessingContext) -> ControlEventAction {
         // Start with the least restrictive action
         let mut result = ControlEventAction::Forward;
         
@@ -31,7 +32,7 @@ impl ControlEventStrategy for CompositeStrategy {
         result
     }
     
-    fn handle_checkpoint(&self, envelope: &EventEnvelope, ctx: &mut ProcessingContext) -> ControlEventAction {
+    fn handle_checkpoint(&self, envelope: &EventEnvelope<ChainEvent>, ctx: &mut ProcessingContext) -> ControlEventAction {
         let mut result = ControlEventAction::Forward;
         
         for strategy in &self.strategies {
@@ -42,7 +43,7 @@ impl ControlEventStrategy for CompositeStrategy {
         result
     }
     
-    fn handle_watermark(&self, envelope: &EventEnvelope, ctx: &mut ProcessingContext) -> ControlEventAction {
+    fn handle_watermark(&self, envelope: &EventEnvelope<ChainEvent>, ctx: &mut ProcessingContext) -> ControlEventAction {
         let mut result = ControlEventAction::Forward;
         
         for strategy in &self.strategies {
@@ -53,7 +54,7 @@ impl ControlEventStrategy for CompositeStrategy {
         result
     }
     
-    fn handle_drain(&self, envelope: &EventEnvelope, ctx: &mut ProcessingContext) -> ControlEventAction {
+    fn handle_drain(&self, envelope: &EventEnvelope<ChainEvent>, ctx: &mut ProcessingContext) -> ControlEventAction {
         let mut result = ControlEventAction::Forward;
         
         for strategy in &self.strategies {

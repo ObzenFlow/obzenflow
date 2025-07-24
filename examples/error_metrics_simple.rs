@@ -89,7 +89,7 @@ impl SinkHandler for LoggingSink {
     fn consume(&mut self, event: ChainEvent) -> obzenflow_core::Result<()> {
         self.total_count += 1;
         println!("Sink received event #{}: type={}, outcome={:?}", 
-            self.total_count, event.event_type, event.processing_info.outcome);
+            self.total_count, event.event_type, event.processing_info.status);
         Ok(())
     }
 }

@@ -1,12 +1,13 @@
 //! Transform supervisor implementation using HandlerSupervised pattern
 
 use std::sync::Arc;
-use obzenflow_core::{WriterId, Journal, ChainEvent, EventEnvelope};
-use obzenflow_core::event::flow_context::FlowContext;
+use obzenflow_core::{EventEnvelope};
+use obzenflow_core::journal::journal::Journal;
+use obzenflow_core::{ChainEvent, StageId};
+use obzenflow_core::event::SystemEvent;
+use obzenflow_core::event::context::FlowContext;
+use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_fsm::{FsmBuilder, Transition};
-use obzenflow_core::StageId;
-
-use crate::messaging::reactive_journal::ReactiveJournal;
 use crate::stages::common::handlers::TransformHandler;
 use crate::stages::common::control_strategies::{ControlEventAction, ProcessingContext};
 use crate::supervised_base::{EventLoopDirective, HandlerSupervised};
@@ -26,11 +27,11 @@ pub(crate) struct TransformSupervisor<H: TransformHandler + Clone + std::fmt::De
     /// The FSM context containing all mutable state
     pub(crate) context: Arc<TransformContext<H>>,
     
-    /// Journal reference
-    pub(crate) journal: Arc<ReactiveJournal>,
+    /// Data journal for chain events
+    pub(crate) data_journal: Arc<dyn Journal<ChainEvent>>,
     
-    /// Writer ID for this transform
-    pub(crate) writer_id: WriterId,
+    /// System journal for lifecycle events
+    pub(crate) system_journal: Arc<dyn Journal<SystemEvent>>,
     
     /// Stage ID
     pub(crate) stage_id: StageId,
@@ -165,14 +166,6 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Supe
                 .done()
     }
     
-    fn journal(&self) -> &Arc<ReactiveJournal> {
-        &self.journal
-    }
-    
-    fn writer_id(&self) -> &WriterId {
-        &self.writer_id
-    }
-    
     fn name(&self) -> &str {
         &self.name
     }
@@ -181,6 +174,23 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Supe
 #[async_trait::async_trait]
 impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSupervised for TransformSupervisor<H> {
     type Handler = H;
+    
+    fn writer_id(&self) -> obzenflow_core::WriterId {
+        obzenflow_core::WriterId::from(self.stage_id)
+    }
+    
+    fn stage_id(&self) -> StageId {
+        self.stage_id
+    }
+    
+    async fn write_completion_event(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let event = SystemEvent::stage_completed(self.stage_id);
+        self.system_journal
+            .append(event, None)
+            .await
+            .map(|_| ())
+            .map_err(|e| format!("Failed to write completion event: {}", e).into())
+    }
     
     async fn dispatch_state(
         &mut self,
@@ -214,35 +224,29 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Hand
                                 "Transform processing event"
                             );
                             
-                            // Processing context for control events
-                            let mut processing_ctx = ProcessingContext::new();
-                                // Check if this is a control event
-                                if let Some(control_type) = envelope.event.as_control_type() {
-                                    // Handle control events with strategy
-                                    let action = match control_type {
-                                        ChainEvent::EOF_EVENT_TYPE => {
+                            // Match on event content to determine how to process
+                            match &envelope.event.content {
+                                obzenflow_core::event::ChainEventContent::FlowControl(signal) => {
+                                    // Processing context for control events
+                                    let mut processing_ctx = ProcessingContext::new();
+                                    
+                                    // Get the action from the control strategy
+                                    let action = match signal {
+                                        FlowControlPayload::Eof { .. } => {
                                             tracing::info!(
                                                 stage_name = %self.context.stage_name,
                                                 "Transform received EOF from upstream"
                                             );
                                             self.context.control_strategy.handle_eof(&envelope, &mut processing_ctx)
                                         }
-                                        ChainEvent::WATERMARK_EVENT_TYPE => {
+                                        FlowControlPayload::Watermark { .. } => {
                                             self.context.control_strategy.handle_watermark(&envelope, &mut processing_ctx)
                                         }
-                                        ChainEvent::CHECKPOINT_EVENT_TYPE => {
+                                        FlowControlPayload::Checkpoint { .. } => {
                                             self.context.control_strategy.handle_checkpoint(&envelope, &mut processing_ctx)
                                         }
-                                        ChainEvent::DRAIN_EVENT_TYPE => {
+                                        FlowControlPayload::Drain => {
                                             self.context.control_strategy.handle_drain(&envelope, &mut processing_ctx)
-                                        }
-                                        _ => {
-                                            tracing::debug!(
-                                                stage_name = %self.context.stage_name,
-                                                control_type = control_type,
-                                                "Unknown control event"
-                                            );
-                                            ControlEventAction::Forward
                                         }
                                     };
                                     
@@ -250,7 +254,7 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Hand
                                     match action {
                                         ControlEventAction::Forward => {
                                             // Forward control events immediately
-                                            if control_type != ChainEvent::EOF_EVENT_TYPE {
+                                            if !envelope.event.is_eof() {
                                                 self.forward_control_event(&envelope).await?;
                                             } else {
                                                 // Buffer EOF for draining state
@@ -262,7 +266,7 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Hand
                                         ControlEventAction::Delay(duration) => {
                                             tracing::info!(
                                                 stage_name = %self.context.stage_name,
-                                                control_type = control_type,
+                                                event_type = envelope.event.event_type(),
                                                 duration = ?duration,
                                                 "Delaying control event"
                                             );
@@ -273,23 +277,24 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Hand
                                         ControlEventAction::Retry => {
                                             tracing::info!(
                                                 stage_name = %self.context.stage_name,
-                                                control_type = control_type,
+                                                event_type = envelope.event.event_type(),
                                                 "Retry requested, buffering event"
                                             );
-                                            if control_type == ChainEvent::EOF_EVENT_TYPE {
+                                            if envelope.event.is_eof() {
                                                 processing_ctx.buffered_eof = Some(envelope.clone());
                                             }
                                         }
                                         ControlEventAction::Skip => {
                                             tracing::warn!(
                                                 stage_name = %self.context.stage_name,
-                                                control_type = control_type,
+                                                event_type = envelope.event.event_type(),
                                                 "Skipping control event (dangerous!)"
                                             );
                                             // Don't forward, don't process
                                         }
                                     }
-                                } else {
+                                }
+                                obzenflow_core::event::ChainEventContent::Data { .. } => {
                                     // Process normal data event with instrumentation
                                     let handler = self.context.handler.clone();
                                     let event_to_process = envelope.event.clone();
@@ -305,21 +310,23 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Hand
                                     match result {
                                         Ok(transformed_events) => {
                                             // Write transformed events using new journal.write() API
-                                            for mut event in transformed_events {
-                                                // Add flow context
-                                                event.flow_context = FlowContext {
-                                                    flow_name: self.context.flow_name.clone(),
-                                                    flow_id: format!("{}-{}", self.context.flow_name, self.context.stage_id),
-                                                    stage_name: self.context.stage_name.clone(),
-                                                    stage_type: obzenflow_core::event::flow_context::StageType::Transform,
-                                                };
-                                                
+                                            for event in transformed_events {
                                                 // Enrich with runtime context
-                                                event.runtime_context = Some(self.context.instrumentation.snapshot());
+                                                let flow_context = FlowContext {
+                                                    flow_name: self.context.flow_name.clone(),
+                                                    flow_id: self.context.flow_id.to_string(),
+                                                    stage_name: self.context.stage_name.clone(),
+                                                    stage_type: obzenflow_core::event::context::StageType::Transform,
+                                                };
+
+                                                let enriched_event = event
+                                                    .with_flow_context(flow_context)
+                                                    .with_runtime_context(self.context.instrumentation.snapshot());
                                                 
-                                                self.context.journal
-                                                    .write(event, Some(&envelope))
-                                                    .await?;
+                                                self.context.data_journal
+                                                    .append(enriched_event, Some(&envelope))
+                                                    .await
+                                                    .map_err(|e| format!("Failed to write transformed event: {}", e))?;
                                             }
                                         }
                                         Err(e) => {
@@ -332,6 +339,11 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Hand
                                         }
                                     }
                                 }
+                                _ => {
+                                    // Other content types we don't recognize - forward them
+                                    self.forward_control_event(&envelope).await?;
+                                }
+                            }
                         }
                         Err(e) => {
                             tracing::error!(
@@ -380,20 +392,22 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Hand
                                 ).await?;
                                 
                                 // Write transformed events using new journal.write() API
-                                for mut event in transformed_events {
-                                    event.flow_context = FlowContext {
+                                for event in transformed_events {
+                                    let flow_context = FlowContext {
                                         flow_name: self.context.flow_name.clone(),
-                                        flow_id: format!("{}-{}", self.context.flow_name, self.context.stage_id),
+                                        flow_id: self.context.flow_id.to_string(),
                                         stage_name: self.context.stage_name.clone(),
-                                        stage_type: obzenflow_core::event::flow_context::StageType::Transform,
+                                        stage_type: obzenflow_core::event::context::StageType::Transform,
                                     };
+
+                                    let enriched_event = event
+                                        .with_flow_context(flow_context)
+                                        .with_runtime_context(self.context.instrumentation.snapshot());
                                     
-                                    // Enrich with runtime context
-                                    event.runtime_context = Some(self.context.instrumentation.snapshot());
-                                    
-                                    self.context.journal
-                                        .write(event, Some(&envelope))
-                                        .await?;
+                                    self.context.data_journal
+                                        .append(enriched_event, Some(&envelope))
+                                        .await
+                                        .map_err(|e| format!("Failed to write transformed event: {}", e))?;
                                 }
                             }
                             Ok(EventLoopDirective::Continue)
@@ -433,14 +447,12 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Hand
 
 impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> TransformSupervisor<H> {
     /// Helper to forward control events
-    async fn forward_control_event(&self, envelope: &EventEnvelope) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let writer_id_guard = self.context.writer_id.read().await;
-        if let Some(writer_id) = writer_id_guard.as_ref() {
-            let forward_event = envelope.event.clone();
-            self.context.journal
-                .write(forward_event, Some(envelope))
-                .await?;
-        }
+    async fn forward_control_event(&self, envelope: &EventEnvelope<ChainEvent>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let forward_event = envelope.event.clone();
+        self.context.data_journal
+            .append(forward_event, Some(envelope))
+            .await
+            .map_err(|e| format!("Failed to forward control event: {}", e))?;
         Ok(())
     }
 }

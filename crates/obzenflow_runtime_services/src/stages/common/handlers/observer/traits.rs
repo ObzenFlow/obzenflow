@@ -33,7 +33,7 @@ use obzenflow_core::{ChainEvent, Result};
 ///     fn observe(&self, event: &ChainEvent) -> Result<()> {
 ///         match self.log_level {
 ///             LogLevel::Debug => debug!("Event: {:?}", event),
-///             LogLevel::Info => info!("Event type: {}", event.event_type),
+///             LogLevel::Info => info!("Event type: {}", event.event_type()),
 ///         }
 ///         Ok(())
 ///     }

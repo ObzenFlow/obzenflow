@@ -3,7 +3,7 @@
 //! This trait defines the interface that all stage supervisors must implement
 //! so the Pipeline FSM can coordinate them properly.
 
-use obzenflow_core::StageId;
+use obzenflow_core::{StageId, event::context::StageType};
 use std::fmt;
 
 /// Error type for stage operations
@@ -97,32 +97,6 @@ pub trait StageHandle: Send + Sync {
     async fn force_shutdown(&self) -> Result<(), StageError>;
 }
 
-/// Stage type for pipeline coordination decisions
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StageType {
-    FiniteSource,
-    InfiniteSource,
-    Transform,
-    Sink,
-    Stateful,
-}
-
-impl StageType {
-    /// Check if this is a source that needs explicit start
-    pub fn is_source(&self) -> bool {
-        matches!(self, StageType::FiniteSource | StageType::InfiniteSource)
-    }
-    
-    /// Check if this stage generates events
-    pub fn generates_events(&self) -> bool {
-        self.is_source()
-    }
-    
-    /// Check if this stage consumes events
-    pub fn consumes_events(&self) -> bool {
-        !self.is_source()
-    }
-}
 
 /// Type-erased stage handle for pipeline storage
 pub type BoxedStageHandle = Box<dyn StageHandle>;

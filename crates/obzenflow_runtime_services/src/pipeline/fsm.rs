@@ -4,11 +4,14 @@
 
 use crate::message_bus::FsmMessageBus;
 use obzenflow_core::StageId;
-use obzenflow_fsm::{FsmBuilder, StateMachine, Transition, StateVariant, EventVariant, FsmAction};
-use obzenflow_core::{Journal, ChainEvent};
+use obzenflow_core::id::SystemId;
+use obzenflow_core::journal::journal::Journal;
+use obzenflow_core::event::{SystemEvent, WriterId, ChainEvent, ChainEventFactory, ChainEventContent, SystemEventFactory, constants};
+use obzenflow_fsm::{FsmBuilder, StateMachine, Transition, StateVariant, EventVariant, FsmAction, FsmContext};
 use std::sync::Arc;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use tokio::sync::RwLock;
+use obzenflow_core::event::payloads::observability_payload::{MetricsLifecycle, ObservabilityPayload};
 use crate::supervised_base::SupervisorHandle;
 
 /// Pipeline states
@@ -47,7 +50,7 @@ pub enum PipelineEvent {
     Run,
     Shutdown,  // Source has completed
     BeginDrain,  // Start draining all stages
-    StageCompleted { envelope: obzenflow_core::EventEnvelope },
+    StageCompleted { envelope: obzenflow_core::EventEnvelope<SystemEvent> },
     AllStagesCompleted,
     Error { message: String },
 }
@@ -80,20 +83,23 @@ pub enum PipelineAction {
     DrainMetrics,
     StartCompletionSubscription,
     ProcessCompletionEvents,
-    HandleStageCompleted { envelope: obzenflow_core::EventEnvelope },
+    HandleStageCompleted { envelope: obzenflow_core::EventEnvelope<SystemEvent> },
 }
 
 /// Pipeline context - holds all mutable state
 #[derive(Clone)]
 pub struct PipelineContext {
+    /// System ID for this pipeline component
+    pub system_id: SystemId,
+    
     /// Message bus for communication
     pub bus: Arc<FsmMessageBus>,
     
     /// Topology for structure queries
     pub topology: Arc<obzenflow_topology_services::topology::Topology>,
     
-    /// Journal for event flow
-    pub journal: Arc<crate::messaging::reactive_journal::ReactiveJournal>,
+    /// System journal for pipeline orchestration events
+    pub system_journal: Arc<dyn Journal<SystemEvent>>,
     
     /// Stage supervisors by ID
     pub stage_supervisors: Arc<RwLock<HashMap<StageId, crate::stages::common::stage_handle::BoxedStageHandle>>>,
@@ -104,23 +110,20 @@ pub struct PipelineContext {
     /// Running stages tracking (for startup coordination)
     pub running_stages: Arc<RwLock<std::collections::HashSet<StageId>>>,
     
-    /// Subscription for stage completion events
-    pub completion_subscription: Arc<RwLock<Option<crate::messaging::JournalSubscription>>>,
+    /// Reader for stage completion events from system journal
+    pub completion_reader: Arc<RwLock<Option<Box<dyn obzenflow_core::journal::journal_reader::JournalReader<SystemEvent>>>>>,
     
     /// Metrics exporter for accessing aggregated metrics
     pub metrics_exporter: Option<Arc<dyn obzenflow_core::metrics::MetricsExporter>>,
     
-    /// Metrics journal that reads from all stage journals
-    pub metrics_journal: Option<Arc<crate::messaging::reactive_journal::ReactiveJournal>>,
+    /// Stage data journals (for metrics aggregator)
+    pub stage_data_journals: Arc<RwLock<Vec<(StageId, Arc<dyn Journal<ChainEvent>>)>>>,
     
-    /// TODO: Add metrics handle once MetricsAggregatorBuilder is implemented
+    // TODO: Add metrics handle once MetricsAggregatorBuilder is implemented
     // pub metrics_handle: Option<MetricsHandle>,
-    
-    /// Writer ID for journal events (immutable after creation)
-    pub writer_id: obzenflow_core::WriterId,
 }
 
-impl obzenflow_fsm::FsmContext for PipelineContext {}
+impl FsmContext for PipelineContext {}
 
 // Implement FsmAction for PipelineAction
 #[async_trait::async_trait]
@@ -208,18 +211,21 @@ impl FsmAction for PipelineAction {
             
             PipelineAction::BeginDrain => {
                 // Publish drain event to journal for stages to pick up
-                let writer_id = context.writer_id.clone();
+                let writer_id = WriterId::from(context.system_id);
                 
-                let drain_event = obzenflow_core::ChainEvent::new(
-                    obzenflow_core::EventId::new(),
-                    writer_id.clone(),
-                    ChainEvent::SYSTEM_PIPELINE_DRAIN,
+                let drain_event = ChainEventFactory::system_data_event(
+                    writer_id,
+                    constants::system::pipeline::DRAIN,
                     serde_json::json!({
                         "timestamp": chrono::Utc::now().to_rfc3339(),
                     })
                 );
                 
-                context.journal.append(&writer_id, drain_event, None).await
+                // Create SystemEventFactory locally to create consistent pipeline lifecycle event
+                let system_event_factory = SystemEventFactory::new(context.system_id);
+                let drain_system_event = system_event_factory.pipeline_draining();
+                
+                context.system_journal.append(drain_system_event, None).await
                     .map_err(|e| format!("Failed to publish drain event: {}", e))?;
                     
                 tracing::info!("Published drain event to journal");
@@ -229,32 +235,12 @@ impl FsmAction for PipelineAction {
                 // Get flow name from context or use default
                 let flow_name = "default"; // TODO: Get from first completed stage event
                 
-                // Register writer for pipeline
-                // In the new architecture, ReactiveJournal already has its writer_id
-                let writer_id = context.journal.writer_id.clone();
+                // Create SystemEventFactory locally to create consistent pipeline lifecycle event
+                let system_event_factory = SystemEventFactory::new(context.system_id);
+                let pipeline_completed = system_event_factory.pipeline_completed();
                 
-                let supervisors = context.stage_supervisors.read().await;
-                let mut pipeline_completed = obzenflow_core::ChainEvent::new(
-                    obzenflow_core::EventId::new(),
-                    writer_id.clone(),
-                    ChainEvent::SYSTEM_PIPELINE_COMPLETED,
-                    serde_json::json!({
-                        "timestamp": chrono::Utc::now().to_rfc3339(),
-                        "completed_stages": supervisors.len(),
-                    })
-                );
-                drop(supervisors);
-                
-                // Set flow context for pipeline completion event
-                pipeline_completed.flow_context = obzenflow_core::event::flow_context::FlowContext {
-                    flow_name: flow_name.to_string(),
-                    flow_id: "default".to_string(),
-                    stage_name: "pipeline".to_string(),
-                    stage_type: obzenflow_core::event::flow_context::StageType::Transform,
-                };
-                
-                context.journal.write_control_event(pipeline_completed).await
-                    .map_err(|e| format!("Failed to write pipeline completion event: {}", e))?;
+                context.system_journal.append(pipeline_completed, None).await
+                    .map_err(|e| format!("Failed to write pipeline completed event: {}", e))?;
                     
                 tracing::info!("Pipeline completion event written");
             }
@@ -266,23 +252,26 @@ impl FsmAction for PipelineAction {
             
             PipelineAction::StartMetricsAggregator => {
                 tracing::info!("StartMetricsAggregator action triggered");
-                // Start metrics aggregator if we have an exporter and metrics journal
-                if let (Some(exporter), Some(metrics_journal)) = (context.metrics_exporter.clone(), context.metrics_journal.clone()) {
-                    tracing::info!("Found metrics exporter and metrics journal, starting metrics aggregator");
-                    let journal = metrics_journal;
+                // Start metrics aggregator if we have an exporter
+                if let Some(exporter) = context.metrics_exporter.clone() {
+                    tracing::info!("Found metrics exporter, starting metrics aggregator");
                     
-                    // Subscribe to control journal - will filter for metrics ready in recv loop
-                    let mut ready_subscription = journal
-                        .subscribe()
-                        .await
-                        .map_err(|e| format!("Failed to subscribe for metrics ready: {}", e))?;
+                    // Get stage journals from context
+                    let stage_journals = context.stage_data_journals.read().await.clone();
+                    
+                    if stage_journals.is_empty() {
+                        tracing::warn!("No stage journals available for metrics aggregator");
+                        return Ok(());
+                    }
+                    
+                    let system_journal = context.system_journal.clone();
                     
                     // Spawn metrics aggregator using the builder pattern
                     tokio::spawn(async move {
                         use crate::metrics::MetricsAggregatorBuilder;
                         use crate::supervised_base::SupervisorBuilder;
                         
-                        match MetricsAggregatorBuilder::new(journal, exporter)
+                        match MetricsAggregatorBuilder::new(stage_journals, system_journal, exporter)
                             .with_export_interval(10) // 10 second interval
                             .build()
                             .await
@@ -302,20 +291,31 @@ impl FsmAction for PipelineAction {
                         }
                     });
                     
+                    // Subscribe to system journal to wait for metrics ready event
+                    let mut ready_reader = context.system_journal
+                        .reader()
+                        .await
+                        .map_err(|e| format!("Failed to create system journal reader: {}", e))?;
+                    
                     // Wait for metrics aggregator to be ready
                     let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
                     loop {
-                        match tokio::time::timeout_at(deadline, ready_subscription.recv()).await {
-                            Ok(Ok(event)) => {
+                        match tokio::time::timeout_at(deadline, ready_reader.next()).await {
+                            Ok(Ok(Some(envelope))) => {
                                 // Check if this is the metrics ready event
-                                if event.event.event_type == ChainEvent::SYSTEM_METRICS_READY {
+                                if let obzenflow_core::event::SystemEventType::MetricsCoordination(
+                                    obzenflow_core::event::MetricsCoordinationEvent::Ready
+                                ) = &envelope.event.event {
                                     tracing::info!("Metrics aggregator is ready");
                                     break;
                                 }
                                 // Otherwise continue waiting for the right event
                             }
+                            Ok(Ok(None)) => {
+                                // No more events, continue waiting
+                            }
                             Ok(Err(e)) => {
-                                return Err(format!("Failed to receive metrics ready event: {}", e).into());
+                                return Err(format!("Failed to read metrics ready event: {}", e).into());
                             }
                             Err(_) => {
                                 return Err("Timeout waiting for metrics aggregator to be ready".into());
@@ -323,61 +323,73 @@ impl FsmAction for PipelineAction {
                         }
                     }
                 } else {
-                    tracing::warn!("No metrics exporter or metrics journal configured in pipeline context");
+                    tracing::info!("No metrics exporter configured, skipping metrics aggregator");
                 }
             }
             
             PipelineAction::DrainMetrics => {
-                tracing::info!("Requesting metrics drain via journal");
+                tracing::info!("Requesting metrics drain via data journals");
                 
-                let writer_id = context.writer_id.clone();
+                let writer_id = WriterId::from(context.system_id);
                 
-                // 1. Publish drain request to journal
-                let drain_event = obzenflow_core::ChainEvent::new(
-                    obzenflow_core::EventId::new(),
-                    writer_id.clone(),
-                    ChainEvent::SYSTEM_METRICS_DRAIN,
-                    serde_json::json!({}),
-                );
+                // 1. Create the proper drain event (FlowSignalPayload::Drain)
+                // Pipeline (system component) creates ChainEvent with system writer ID
+                let drain_event = ChainEventFactory::drain_event(writer_id);
                 
-                context.journal
-                    .write_control_event(drain_event)
+                // 2. Publish drain request to ALL stage data journals 
+                // (metrics aggregator reads from these journals)
+                let stage_journals = context.stage_data_journals.read().await;
+                for (stage_id, journal) in stage_journals.iter() {
+                    journal.append(drain_event.clone(), None)
+                        .await
+                        .map_err(|e| format!("Failed to publish drain event to stage {:?}: {}", stage_id, e))?;
+                }
+                drop(stage_journals);
+                
+                // 3. Wait for drain completion event from system journal
+                // The metrics aggregator will publish MetricsCoordination::Drained event when done
+                let mut reader = context.system_journal.reader()
                     .await
-                    .map_err(|e| format!("Failed to publish drain event: {}", e))?;
+                    .map_err(|e| format!("Failed to create reader for drain completion: {}", e))?;
                 
-                // 2. Subscribe and wait for drain completion event
-                let mut subscription = context.journal
-                    .subscribe()
-                    .await
-                    .map_err(|e| format!("Failed to subscribe for drain completion: {}", e))?;
-                
-                // Wait for the specific drain completion event
-                // No timeout - let metrics aggregator take as much time as it needs
+                // Wait for the specific drain completion event with a reasonable timeout
+                let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(10);
                 loop {
-                    match subscription.recv().await {
-                        Ok(event) => {
-                            if event.event.event_type == ChainEvent::SYSTEM_METRICS_DRAINED {
+                    match tokio::time::timeout_at(deadline, reader.next()).await {
+                        Ok(Ok(Some(envelope))) => {
+                            if matches!(
+                                &envelope.event.event,
+                                obzenflow_core::event::SystemEventType::MetricsCoordination(
+                                    obzenflow_core::event::MetricsCoordinationEvent::Drained
+                                )
+                            ) {
                                 tracing::info!("Metrics successfully drained");
                                 break;
                             }
                             // Otherwise continue waiting for the right event
                         }
-                        Err(e) => return Err(format!("Failed to receive drain completion: {}", e).into()),
+                        Ok(Ok(None)) => {
+                            // No more events, continue waiting
+                        }
+                        Ok(Err(e)) => return Err(format!("Failed to receive drain completion: {}", e).into()),
+                        Err(_) => {
+                            tracing::warn!("Timeout waiting for metrics drain completion, proceeding anyway");
+                            break;
+                        }
                     }
                 }
             }
             
             PipelineAction::StartCompletionSubscription => {
-                // Create subscription to control journal - will receive ALL control events
-                // The new architecture (FLOWIP-008) doesn't filter at subscription time
-                let subscription = context.journal
-                    .subscribe()
+                // Create reader for system journal - will receive system events
+                let reader = context.system_journal
+                    .reader()
                     .await
-                    .map_err(|e| format!("Failed to create control subscription: {:?}", e))?;
+                    .map_err(|e| format!("Failed to create system journal reader: {:?}", e))?;
                 
-                *context.completion_subscription.write().await = Some(subscription);
+                *context.completion_reader.write().await = Some(reader);
                 
-                tracing::info!("Started subscription for control journal events");
+                tracing::info!("Started reader for system journal events");
             }
             
             PipelineAction::ProcessCompletionEvents => {
@@ -391,34 +403,19 @@ impl FsmAction for PipelineAction {
             PipelineAction::HandleStageCompleted { envelope } => {
                 let event = &envelope.event;
                 
-                // Get stage info from the event payload
-                let stage_name = event
-                    .payload
-                    .get("stage_name")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("unknown");
-                
-                // Get stage ID from the event payload (not writer registry)
-                let stage_id_str = event
-                    .payload
-                    .get("stage_id")
-                    .and_then(|v| v.as_str());
-                
-                if let Some(stage_id_str) = stage_id_str {
-                    // Parse the stage ID (handle "stage_" prefix if present)
-                    let ulid_str = if stage_id_str.starts_with("stage_") {
-                        &stage_id_str[6..]
-                    } else {
-                        stage_id_str
-                    };
+                // Extract stage_id from the SystemEvent structure
+                if let obzenflow_core::event::SystemEventType::StageLifecycle { 
+                    stage_id, 
+                    event: obzenflow_core::event::StageLifecycleEvent::Completed 
+                } = &event.event {
+                    let stage_id = *stage_id;
                     
-                    let stage_id = match ulid_str.parse::<ulid::Ulid>() {
-                        Ok(ulid) => StageId::from_ulid(ulid),
-                        Err(_) => {
-                            tracing::warn!("Failed to parse stage ID from event: {}", stage_id_str);
-                            return Ok(());
-                        }
-                    };
+                    // Get stage name from topology
+                    let stage_name = context.topology
+                        .stages()
+                        .find(|info| info.id == stage_id)
+                        .map(|info| info.name.clone())
+                        .unwrap_or_else(|| "unknown".to_string());
                     
                     tracing::info!("Stage completed: {} ({})", stage_name, stage_id);
                     
@@ -445,27 +442,17 @@ impl FsmAction for PipelineAction {
                     if completed.len() >= total_stages {
                         tracing::info!("All {} stages have completed!", total_stages);
                         
-                        // Write an event that the pipeline supervisor itself will pick up
-                        let writer_id = context.writer_id.clone();
-                        let all_complete_event = obzenflow_core::ChainEvent::new(
-                            obzenflow_core::EventId::new(),
-                            writer_id.clone(),
-                            ChainEvent::SYSTEM_PIPELINE_ALL_STAGES_COMPLETED,
-                            serde_json::json!({
-                                "total_stages": total_stages,
-                                "completed_stages": completed.len()
-                            }),
-                        );
+                        // Write a SystemEvent that the pipeline supervisor will pick up
+                        let system_event_factory = SystemEventFactory::new(context.system_id);
+                        let all_stages_completed_event = system_event_factory.pipeline_all_stages_completed();
                         
-                        context.journal
-                            .append(&writer_id, all_complete_event, None)
-                            .await
-                            .map_err(|e| format!("Failed to publish all stages completed event: {}", e))?;
+                        context.system_journal.append(all_stages_completed_event, None).await
+                            .map_err(|e| format!("Failed to write all stages completed event: {}", e))?;
                     }
                 } else {
                     tracing::warn!(
-                        "Stage completed event missing stage_id in payload: {:?}",
-                        event.payload
+                        "HandleStageCompleted called with non-completed stage event: {:?}",
+                        event.event
                     );
                 }
             }

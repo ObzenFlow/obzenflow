@@ -3,6 +3,7 @@
 //! Examples: Data enrichers, filters, mappers, routers
 
 use obzenflow_core::{ChainEvent, Result};
+use obzenflow_core::event::ChainEventContent;
 use async_trait::async_trait;
 
 /// Handler for stateless transform stages
@@ -16,6 +17,7 @@ use async_trait::async_trait;
 /// ```rust
 /// use obzenflow_runtime_services::stages::common::handlers::TransformHandler;
 /// use obzenflow_core::{ChainEvent, Result};
+/// use obzenflow_core::event::ChainEventContent;
 /// use std::collections::HashMap;
 /// use serde_json::{json, Value};
 /// use async_trait::async_trait;
@@ -28,8 +30,10 @@ use async_trait::async_trait;
 /// impl TransformHandler for DataEnricher {
 ///     fn process(&self, mut event: ChainEvent) -> Vec<ChainEvent> {
 ///         // Enrich event with cached metadata
-///         if let Some(metadata) = self.cache.get(&event.event_type) {
-///             event.payload["metadata"] = metadata.clone();
+///         if let Some(metadata) = self.cache.get(&event.event_type()) {
+///             if let ChainEventContent::Data { ref mut payload, .. } = event.content {
+///                 payload["metadata"] = metadata.clone();
+///             }
 ///         }
 ///         vec![event]
 ///     }

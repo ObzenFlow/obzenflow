@@ -5,42 +5,41 @@
 
 use obzenflow_core::Journal;
 use obzenflow_core::event::{
-    chain_event::ChainEvent,
-    event_id::EventId,
+    chain_event::{ChainEvent, ChainEventFactory},
+    EventId,
 };
-use obzenflow_core::WriterId;
+use obzenflow_core::{WriterId, StageId};
 use obzenflow_infra::journal::MemoryJournal;
+use serde_json::json;
 
 #[tokio::test]
 async fn test_journal_causal_ordering() {
     let journal = MemoryJournal::new();
     
     // Simulate a simple pipeline: source -> transform -> sink
-    let source_writer = WriterId::new();
-    let transform_writer = WriterId::new();
-    let sink_writer = WriterId::new();
+    let source_writer = WriterId::from(StageId::new());
+    let transform_writer = WriterId::from(StageId::new());
+    let sink_writer = WriterId::from(StageId::new());
     
     // Source emits first event
-    let source_event = ChainEvent::new(
-        EventId::new(),
-        source_writer.clone(),
+    let source_event = ChainEventFactory::data_event(
+        source_writer,
         "data.received",
-        serde_json::json!({
+        json!({
             "sensor": "temperature",
             "value": 23.5
         })
     );
     
-    let source_envelope = journal.append(&source_writer, source_event, None)
+    let source_envelope = journal.append(source_event, None)
         .await
         .expect("Failed to append source event");
     
     // Transform processes the source event
-    let transform_event = ChainEvent::new(
-        EventId::new(),
-        transform_writer.clone(),
+    let transform_event = ChainEventFactory::data_event(
+        transform_writer,
         "data.transformed",
-        serde_json::json!({
+        json!({
             "sensor": "temperature",
             "celsius": 23.5,
             "fahrenheit": 74.3
@@ -48,24 +47,21 @@ async fn test_journal_causal_ordering() {
     );
     
     let transform_envelope = journal.append(
-        &transform_writer, 
         transform_event, 
         Some(&source_envelope)  // Parent relationship
     ).await.expect("Failed to append transform event");
     
     // Sink acknowledges the transformed data
-    let sink_event = ChainEvent::new(
-        EventId::new(),
-        sink_writer.clone(),
+    let sink_event = ChainEventFactory::data_event(
+        sink_writer,
         "data.stored",
-        serde_json::json!({
+        json!({
             "location": "timeseries_db",
             "status": "success"
         })
     );
     
     let _sink_envelope = journal.append(
-        &sink_writer,
         sink_event,
         Some(&transform_envelope)  // Parent relationship
     ).await.expect("Failed to append sink event");
@@ -75,16 +71,16 @@ async fn test_journal_causal_ordering() {
     assert_eq!(all_events.len(), 3);
     
     // Verify event types in order
-    assert_eq!(all_events[0].event.event_type, "data.received");
-    assert_eq!(all_events[1].event.event_type, "data.transformed");
-    assert_eq!(all_events[2].event.event_type, "data.stored");
+    assert_eq!(all_events[0].event.event_type(), "data.received");
+    assert_eq!(all_events[1].event.event_type(), "data.transformed");
+    assert_eq!(all_events[2].event.event_type(), "data.stored");
     
     // Read events after the source event
     let after_source = journal.read_causally_after(&source_envelope.event.id)
         .await
         .expect("Failed to read after source");
     assert_eq!(after_source.len(), 2);
-    assert_eq!(after_source[0].event.event_type, "data.transformed");
+    assert_eq!(after_source[0].event.event_type(), "data.transformed");
 }
 
 #[tokio::test]
@@ -92,46 +88,42 @@ async fn test_journal_parallel_writers() {
     let journal = MemoryJournal::new();
     
     // Simulate parallel workers processing in parallel
-    let worker1 = WriterId::new();
-    let worker2 = WriterId::new();
-    let worker3 = WriterId::new();
+    let worker1 = WriterId::from(StageId::new());
+    let worker2 = WriterId::from(StageId::new());
+    let worker3 = WriterId::from(StageId::new());
     
     // All workers start processing at the same time (no parent)
-    let event1 = ChainEvent::new(
-        EventId::new(),
-        worker1.clone(),
+    let event1 = ChainEventFactory::data_event(
+        worker1,
         "work.started",
-        serde_json::json!({"worker": 1, "task": "process_batch_1"})
+        json!({"worker": 1, "task": "process_batch_1"})
     );
     
-    let event2 = ChainEvent::new(
-        EventId::new(),
-        worker2.clone(),
+    let event2 = ChainEventFactory::data_event(
+        worker2,
         "work.started",
-        serde_json::json!({"worker": 2, "task": "process_batch_2"})
+        json!({"worker": 2, "task": "process_batch_2"})
     );
     
-    let event3 = ChainEvent::new(
-        EventId::new(),
-        worker3.clone(),
+    let event3 = ChainEventFactory::data_event(
+        worker3,
         "work.started",
-        serde_json::json!({"worker": 3, "task": "process_batch_3"})
+        json!({"worker": 3, "task": "process_batch_3"})
     );
     
     // Append in parallel (in practice these would be concurrent)
-    let _envelope1 = journal.append(&worker1, event1, None).await.unwrap();
-    let envelope2 = journal.append(&worker2, event2, None).await.unwrap();
-    let _envelope3 = journal.append(&worker3, event3, None).await.unwrap();
+    let _envelope1 = journal.append(event1, None).await.unwrap();
+    let envelope2 = journal.append(event2, None).await.unwrap();
+    let _envelope3 = journal.append(event3, None).await.unwrap();
     
     // Worker 2 finishes first and emits result
-    let result_event = ChainEvent::new(
-        EventId::new(),
-        worker2.clone(),
+    let result_event = ChainEventFactory::data_event(
+        worker2,
         "work.completed",
-        serde_json::json!({"worker": 2, "result": "batch_2_processed"})
+        json!({"worker": 2, "result": "batch_2_processed"})
     );
     
-    let _result_envelope = journal.append(&worker2, result_event, Some(&envelope2))
+    let _result_envelope = journal.append(result_event, Some(&envelope2))
         .await.unwrap();
     
     // Read all events
@@ -140,10 +132,10 @@ async fn test_journal_parallel_writers() {
     
     // Count events by type
     let start_count = all_events.iter()
-        .filter(|e| e.event.event_type == "work.started")
+        .filter(|e| e.event.event_type() == "work.started")
         .count();
     let complete_count = all_events.iter()
-        .filter(|e| e.event.event_type == "work.completed")
+        .filter(|e| e.event.event_type() == "work.completed")
         .count();
     
     assert_eq!(start_count, 3);
@@ -153,23 +145,22 @@ async fn test_journal_parallel_writers() {
 #[tokio::test]
 async fn test_journal_event_chain() {
     let journal = MemoryJournal::new();
-    let writer = WriterId::new();
+    let writer = WriterId::from(StageId::new());
     
     // Create a chain of events
     let mut previous_envelope = None;
     
     for i in 0..5 {
-        let event = ChainEvent::new(
-            EventId::new(),
-            writer.clone(),
+        let event = ChainEventFactory::data_event(
+            writer,
             "chain.link",
-            serde_json::json!({
+            json!({
                 "sequence": i,
                 "data": format!("Event {}", i)
             })
         );
         
-        let envelope = journal.append(&writer, event, previous_envelope.as_ref())
+        let envelope = journal.append(event, previous_envelope.as_ref())
             .await
             .expect("Failed to append chain event");
             
@@ -182,13 +173,16 @@ async fn test_journal_event_chain() {
     
     // Verify sequence
     for (i, envelope) in chain.iter().enumerate() {
-        let sequence = envelope.event.payload["sequence"].as_u64().unwrap();
+        let payload = envelope.event.payload();
+        let sequence = payload["sequence"].as_u64().unwrap();
         assert_eq!(sequence, i as u64);
     }
     
     // Read from middle of chain
     let mid_chain = journal.read_causally_after(&chain[2].event.id).await.unwrap();
     assert_eq!(mid_chain.len(), 2);
-    assert_eq!(mid_chain[0].event.payload["sequence"], 3);
-    assert_eq!(mid_chain[1].event.payload["sequence"], 4);
+    let payload0 = mid_chain[0].event.payload();
+    let payload1 = mid_chain[1].event.payload();
+    assert_eq!(payload0["sequence"], 3);
+    assert_eq!(payload1["sequence"], 4);
 }

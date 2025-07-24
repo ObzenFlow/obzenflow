@@ -3,9 +3,9 @@
 //! Maintains an open file handle and tracks position for O(1) sequential reads.
 
 use obzenflow_core::event::event_envelope::EventEnvelope;
-use obzenflow_core::event::chain_event::ChainEvent;
-use obzenflow_core::event::vector_clock::VectorClock;
-use obzenflow_core::journal::writer_id::WriterId;
+use obzenflow_core::event::JournalEvent;
+use obzenflow_core::event::identity::{JournalWriterId, WriterId};
+use obzenflow_core::id::JournalId;
 use obzenflow_core::journal::journal_error::JournalError;
 use obzenflow_core::journal::journal_reader::JournalReader;
 use async_trait::async_trait;
@@ -16,20 +16,23 @@ use std::path::PathBuf;
 use super::log_record::LogRecord;
 
 /// Efficient reader for DiskJournal that maintains position
-pub struct DiskJournalReader {
+pub struct DiskJournalReader<T: JournalEvent> {
     /// Buffered reader over the file
     reader: BufReader<File>,
     /// Current position (number of events read)
     position: u64,
     /// Path to the journal file (for error messages)
     path: PathBuf,
+    /// Journal ID for creating JournalWriterId
+    journal_id: JournalId,
     /// Whether we've reached EOF
     at_end: bool,
+    _phantom: std::marker::PhantomData<T>,
 }
 
-impl DiskJournalReader {
+impl<T: JournalEvent> DiskJournalReader<T> {
     /// Create a new reader starting from the beginning
-    pub async fn new(path: PathBuf) -> Result<Self, JournalError> {
+    pub async fn new(path: PathBuf, journal_id: JournalId) -> Result<Self, JournalError> {
         // If file doesn't exist, create an empty reader at EOF
         if !path.exists() {
             // Create empty file
@@ -43,7 +46,9 @@ impl DiskJournalReader {
                 reader: BufReader::new(file),
                 position: 0,
                 path,
+                journal_id,
                 at_end: true,
+                _phantom: std::marker::PhantomData,
             });
         }
         
@@ -57,12 +62,14 @@ impl DiskJournalReader {
             reader: BufReader::new(file),
             position: 0,
             path,
+            journal_id,
             at_end: false,
+            _phantom: std::marker::PhantomData,
         })
     }
     
     /// Create a new reader starting from a specific position
-    pub async fn from_position(path: PathBuf, start_position: u64) -> Result<Self, JournalError> {
+    pub async fn from_position(path: PathBuf, journal_id: JournalId, start_position: u64) -> Result<Self, JournalError> {
         let file = File::open(&path).await
             .map_err(|e| JournalError::Implementation {
                 message: format!("Failed to open journal file: {}", path.display()),
@@ -83,7 +90,9 @@ impl DiskJournalReader {
                         reader,
                         position,
                         path,
+                        journal_id,
                         at_end: true,
+                        _phantom: std::marker::PhantomData,
                     });
                 }
                 Ok(_) => {
@@ -104,14 +113,16 @@ impl DiskJournalReader {
             reader,
             position,
             path,
+            journal_id,
             at_end: false,
+            _phantom: std::marker::PhantomData,
         })
     }
 }
 
 #[async_trait]
-impl JournalReader for DiskJournalReader {
-    async fn next(&mut self) -> Result<Option<EventEnvelope>, JournalError> {
+impl<T: JournalEvent> JournalReader<T> for DiskJournalReader<T> {
+    async fn next(&mut self) -> Result<Option<EventEnvelope<T>>, JournalError> {
         // Remove the early return for at_end - we want to retry after EOF
         // to check for new events (like tail -f behavior)
         
@@ -136,22 +147,15 @@ impl JournalReader for DiskJournalReader {
                     }
                     
                     // Parse the log record
-                    let record: LogRecord = serde_json::from_str(&line)
+                    let record: LogRecord<T> = serde_json::from_str(&line)
                         .map_err(|e| JournalError::Implementation {
                             message: format!("Failed to parse journal record at position {}", self.position),
                             source: Box::new(e),
                         })?;
                     
-                    // Convert WriterId
-                    let writer_id = WriterId::try_from(record.writer_id.as_str())
-                        .map_err(|_| JournalError::Implementation {
-                            message: format!("Invalid writer ID: {}", record.writer_id),
-                            source: "Invalid WriterId format".into(),
-                        })?;
-                    
                     // Create envelope
                     let envelope = EventEnvelope {
-                        writer_id,
+                        journal_writer_id: JournalWriterId::from(self.journal_id),
                         vector_clock: record.vector_clock,
                         timestamp: record.timestamp,
                         event: record.event,
@@ -217,7 +221,9 @@ impl JournalReader for DiskJournalReader {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use obzenflow_core::{ChainEvent, EventId, WriterId};
+    use obzenflow_core::{ChainEvent, EventId, WriterId, StageId, JournalId};
+    use obzenflow_core::event::chain_event::ChainEventFactory;
+    use obzenflow_core::event::vector_clock::VectorClock;
     use std::io::Write;
     use tempfile::NamedTempFile;
     use chrono::Utc;
@@ -230,30 +236,32 @@ mod tests {
         let path = temp_file.path().to_path_buf();
         
         // Write some test records
-        let writer_id = WriterId::new();
+        let writer_id = WriterId::from(StageId::new());
+        let journal_id = JournalId::new();
         for i in 0..5 {
+            let event = ChainEventFactory::data_event(
+                writer_id,
+                "test.event",
+                serde_json::json!({"index": i}),
+            );
             let record = LogRecord {
+                journal_id,
                 event_id: Ulid::new(),
-                writer_id: writer_id.to_string(),
+                writer_id,
                 vector_clock: VectorClock::new(),
                 timestamp: Utc::now(),
-                event: ChainEvent::new(
-                    EventId::new(),
-                    writer_id.clone(),
-                    "test.event",
-                    serde_json::json!({"index": i}),
-                ),
+                event,
             };
             writeln!(temp_file, "{}", serde_json::to_string(&record).unwrap()).unwrap();
         }
         temp_file.flush().unwrap();
         
         // Create reader and read all events
-        let mut reader = DiskJournalReader::new(path).await.unwrap();
-        
+        let mut reader = DiskJournalReader::<ChainEvent>::new(path, journal_id).await.unwrap();
+
         for i in 0..5 {
             let envelope = reader.next().await.unwrap().expect("Should have event");
-            assert_eq!(envelope.event.payload["index"], i);
+            assert_eq!(envelope.event.payload()["index"], i);
             assert_eq!(reader.position(), i as u64 + 1);
         }
         
@@ -269,40 +277,42 @@ mod tests {
         let path = temp_file.path().to_path_buf();
         
         // Write some test records
-        let writer_id = WriterId::new();
+        let writer_id = WriterId::from(StageId::new());
+        let journal_id = JournalId::new();
         for i in 0..10 {
+            let event = ChainEventFactory::data_event(
+                writer_id,
+                "test.event",
+                serde_json::json!({"index": i}),
+            );
             let record = LogRecord {
+                journal_id,
                 event_id: Ulid::new(),
-                writer_id: writer_id.to_string(),
+                writer_id,
                 vector_clock: VectorClock::new(),
                 timestamp: Utc::now(),
-                event: ChainEvent::new(
-                    EventId::new(),
-                    writer_id.clone(),
-                    "test.event",
-                    serde_json::json!({"index": i}),
-                ),
+                event,
             };
             writeln!(temp_file, "{}", serde_json::to_string(&record).unwrap()).unwrap();
         }
         temp_file.flush().unwrap();
         
         // Create reader and skip first 5
-        let mut reader = DiskJournalReader::new(path.clone()).await.unwrap();
+        let mut reader = DiskJournalReader::<ChainEvent>::new(path.clone(), journal_id).await.unwrap();
         let skipped = reader.skip(5).await.unwrap();
         assert_eq!(skipped, 5);
         assert_eq!(reader.position(), 5);
         
         // Read next event (should be index 5)
         let envelope = reader.next().await.unwrap().expect("Should have event");
-        assert_eq!(envelope.event.payload["index"], 5);
+        assert_eq!(envelope.event.payload()["index"], 5);
         
         // Create new reader from position 7
-        let mut reader2 = DiskJournalReader::from_position(path, 7).await.unwrap();
+        let mut reader2 = DiskJournalReader::<ChainEvent>::from_position(path, journal_id, 7).await.unwrap();
         assert_eq!(reader2.position(), 7);
         
         // Should read index 7
         let envelope = reader2.next().await.unwrap().expect("Should have event");
-        assert_eq!(envelope.event.payload["index"], 7);
+        assert_eq!(envelope.event.payload()["index"], 7);
     }
 }

@@ -449,9 +449,9 @@ mod tests {
     }
     
     fn create_test_envelope(flow: &str, stage: &str, processing_time_ms: u64, outcome: ProcessingOutcome) -> EventEnvelope {
-        let mut event = ChainEvent::new(
+        let mut event = ChainEvent::data(
             EventId::new(),
-            WriterId::new(),
+            WriterId::from(StageId::new()),
             "data.test",
             json!({}),
         );
@@ -469,7 +469,7 @@ mod tests {
             ..Default::default()
         };
         
-        EventEnvelope::new(WriterId::new(), event)
+        EventEnvelope::new(obzenflow_core::journal::journal_writer_id::JournalWriterId::new(), event)
     }
     
     #[tokio::test]
@@ -534,8 +534,10 @@ mod tests {
             let mut aggregator = agg.lock().unwrap();
             
             // State metrics control event
-            let state_event = ChainEvent::control(
-                ChainEvent::CONTROL_METRICS_STATE,
+            let state_event = ChainEvent::data(
+                EventId::new(),
+                WriterId::from(StageId::new()),
+                obzenflow_core::event::constants::control::metrics::STATE,
                 json!({
                     "in_flight": 7
                 })
@@ -546,7 +548,7 @@ mod tests {
                 stage_name: "source1".to_string(),
                 ..Default::default()
             };
-            let wrapped = EventEnvelope::new(WriterId::new(), envelope);
+            let wrapped = EventEnvelope::new(obzenflow_core::journal::journal_writer_id::JournalWriterId::new(), envelope);
             aggregator.process_event(&wrapped);
             
             // Resource metrics control event
@@ -563,7 +565,7 @@ mod tests {
                 stage_name: "source1".to_string(),
                 ..Default::default()
             };
-            let wrapped = EventEnvelope::new(WriterId::new(), envelope);
+            let wrapped = EventEnvelope::new(obzenflow_core::journal::journal_writer_id::JournalWriterId::new(), envelope);
             aggregator.process_event(&wrapped);
         }
         
@@ -603,9 +605,9 @@ mod tests {
             let correlation_id = CorrelationId::new();
             
             // Source event
-            let mut source_event = ChainEvent::new(
+            let mut source_event = ChainEvent::data(
                 EventId::new(),
-                WriterId::new(),
+                WriterId::from(StageId::new()),
                 "order_created",
                 json!({"order_id": "123"}),
             );
@@ -615,7 +617,7 @@ mod tests {
                 flow_name: "order_processing".to_string(),
                 flow_id: "flow_456".to_string(),
                 stage_name: "order_api".to_string(),
-                stage_type: StageType::Source,
+                stage_type: StageType::InfiniteSource,
             };
             source_event.processing_info = ProcessingInfo {
                 processing_time_ms: 10,
@@ -623,7 +625,7 @@ mod tests {
                 ..Default::default()
             };
             
-            let source_envelope = EventEnvelope::new(WriterId::new(), source_event);
+            let source_envelope = EventEnvelope::new(obzenflow_core::journal::journal_writer_id::JournalWriterId::new(), source_event);
             aggregator.process_event(&source_envelope);
             
             // Manually insert completion for testing

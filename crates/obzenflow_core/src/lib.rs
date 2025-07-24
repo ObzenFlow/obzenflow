@@ -12,17 +12,17 @@ pub mod metrics;
 
 // Re-export key types for convenience
 pub use error::Result;
-pub use event::event_id::EventId;
-pub use journal::writer_id::WriterId;
-pub use event::vector_clock::VectorClock;
+pub use event::EventId;
+pub use event::{WriterId, JournalWriterId};
 pub use event::chain_event::ChainEvent;
 pub use event::event_envelope::EventEnvelope;
 pub use journal::journal::Journal;
 pub use journal::journal_error::JournalError;
 pub use journal::journal_owner::JournalOwner;
+pub use event::context::runtime_context;
 
 // Re-export typed IDs
-pub use id::{StageId, PipelineId, MetricsId, FlowId};
+pub use id::{StageId, FlowId, JournalId, SystemId};
 
 // Re-export Ulid for convenience since it's used in many IDs
 pub use ulid::Ulid;

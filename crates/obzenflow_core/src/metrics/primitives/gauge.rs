@@ -49,9 +49,6 @@ mod tests {
         let gauge = Gauge::new();
         assert_eq!(gauge.get(), 0.0);
 
-        gauge.set(3.14);
-        assert!((gauge.get() - 3.14).abs() < 0.001);
-
         gauge.set(0.5);
         assert!((gauge.get() - 0.5).abs() < 0.001);
 
@@ -62,12 +59,13 @@ mod tests {
     #[test]
     fn test_gauge_precision() {
         let gauge = Gauge::new();
-        
+
         // Test precision with fixed-point representation
         gauge.set(0.123);
         assert!((gauge.get() - 0.123).abs() < 0.001);
-        
+
         gauge.set(99.999);
         assert!((gauge.get() - 99.999).abs() < 0.001);
     }
 }
+

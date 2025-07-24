@@ -5,14 +5,18 @@
 //! data is written before shutdown.
 
 use obzenflow_fsm::{StateVariant, EventVariant, FsmContext, FsmAction};
-use obzenflow_core::{ChainEvent, EventId, WriterId};
+use obzenflow_core::{ChainEvent, EventId, WriterId, StageId, FlowId};
+use obzenflow_core::event::{ChainEventFactory, SystemEvent};
+use obzenflow_core::journal::journal::Journal;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::marker::PhantomData;
+use futures::TryFutureExt;
 use tokio::sync::RwLock;
-
+use obzenflow_core::event::context::{FlowContext, StageType};
 use crate::stages::common::handlers::SinkHandler;
 use crate::metrics::instrumentation::StageInstrumentation;
+use crate::messaging::UpstreamSubscription;
 
 // ============================================================================
 // FSM States
@@ -259,8 +263,17 @@ pub struct SinkContext<H: SinkHandler> {
     /// Flow name for flow context
     pub flow_name: String,
     
-    /// Journal for reading events and writing control events
-    pub journal: Arc<crate::messaging::reactive_journal::ReactiveJournal>,
+    /// Flow ID from pipeline
+    pub flow_id: FlowId,
+    
+    /// Data journal for writing delivery events
+    pub data_journal: Arc<dyn Journal<ChainEvent>>,
+    
+    /// System journal for writing lifecycle events
+    pub system_journal: Arc<dyn Journal<SystemEvent>>,
+    
+    /// Upstream journals for reading events
+    pub upstream_journals: Vec<(StageId, Arc<dyn Journal<ChainEvent>>)>,
     
     /// Message bus for pipeline communication
     pub bus: Arc<crate::message_bus::FsmMessageBus>,
@@ -269,7 +282,7 @@ pub struct SinkContext<H: SinkHandler> {
     pub writer_id: Arc<RwLock<Option<WriterId>>>,
     
     /// Subscription to upstream events
-    pub subscription: Arc<RwLock<Option<crate::messaging::reactive_journal::JournalSubscription>>>,
+    pub subscription: Arc<RwLock<Option<UpstreamSubscription<ChainEvent>>>>,
     
     /// Processing task handle (moved from supervisor to follow FSM patterns)
     pub processing_task: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
@@ -290,9 +303,12 @@ impl<H: SinkHandler> SinkContext<H> {
         stage_id: obzenflow_core::StageId,
         stage_name: String,
         flow_name: String,
-        journal: Arc<crate::messaging::reactive_journal::ReactiveJournal>,
+        flow_id: FlowId,
+        data_journal: Arc<dyn Journal<ChainEvent>>,
+        system_journal: Arc<dyn Journal<SystemEvent>>,
+        upstream_journals: Vec<(StageId, Arc<dyn Journal<ChainEvent>>)>,
         bus: Arc<crate::message_bus::FsmMessageBus>,
-        upstream_stages: Vec<obzenflow_core::StageId>,
+        upstream_stages: Vec<StageId>,
         instrumentation: Arc<StageInstrumentation>,
     ) -> Self {
         Self {
@@ -300,7 +316,10 @@ impl<H: SinkHandler> SinkContext<H> {
             stage_id,
             stage_name,
             flow_name,
-            journal,
+            flow_id,
+            data_journal,
+            system_journal,
+            upstream_journals,
             bus,
             writer_id: Arc::new(RwLock::new(None)),
             subscription: Arc::new(RwLock::new(None)),
@@ -325,14 +344,12 @@ impl<H: SinkHandler + Send + Sync + 'static> FsmAction for SinkAction<H> {
     async fn execute(&self, ctx: &Self::Context) -> Result<(), String> {
         match self {
             SinkAction::AllocateResources => {
-                // In the new architecture, ReactiveJournal already has its writer_id
-                // Just get it from the journal
-                let writer_id = ctx.journal.writer_id.clone();
+                // Create WriterId from our StageId
+                let writer_id = WriterId::from(ctx.stage_id.clone());
                 *ctx.writer_id.write().await = Some(writer_id);
                 
-                // Create subscription - will automatically subscribe to upstream journals
-                // The new architecture (FLOWIP-008) handles upstream filtering internally
-                let subscription = ctx.journal.subscribe().await
+                // Create subscription from upstream journals
+                let subscription = UpstreamSubscription::new(&ctx.upstream_journals).await
                     .map_err(|e| format!("Failed to create subscription: {:?}", e))?;
                 
                 *ctx.subscription.write().await = Some(subscription);
@@ -345,24 +362,10 @@ impl<H: SinkHandler + Send + Sync + 'static> FsmAction for SinkAction<H> {
             }
             
             SinkAction::PublishRunning => {
-                let writer_id_guard = ctx.writer_id.read().await;
-                let writer_id = writer_id_guard
-                    .as_ref()
-                    .ok_or_else(|| "No writer ID available to publish running event".to_string())?;
+                let running_event = SystemEvent::stage_running(ctx.stage_id);
                 
-                let running_event = ChainEvent::new(
-                    EventId::new(),
-                    writer_id.clone(),
-                    ChainEvent::SYSTEM_STAGE_RUNNING,
-                    serde_json::json!({
-                        "stage_id": ctx.stage_id.to_string(),
-                        "stage_name": ctx.stage_name,
-                        "timestamp": chrono::Utc::now().to_rfc3339(),
-                    })
-                );
-                
-                ctx.journal
-                    .write_control_event(running_event)
+                ctx.system_journal
+                    .append(running_event, None)
                     .await
                     .map_err(|e| format!("Failed to publish running event: {}", e))?;
                 
@@ -374,32 +377,11 @@ impl<H: SinkHandler + Send + Sync + 'static> FsmAction for SinkAction<H> {
             }
             
             SinkAction::SendCompletion => {
-                let writer_id_guard = ctx.writer_id.read().await;
-                let writer_id = writer_id_guard
-                    .as_ref()
-                    .ok_or_else(|| "No writer ID available to send completion".to_string())?;
+                // Write completion event to system journal
+                let completion_event = SystemEvent::stage_completed(ctx.stage_id);
                 
-                let mut completion_event = ChainEvent::new(
-                    EventId::new(),
-                    writer_id.clone(),
-                    ChainEvent::SYSTEM_STAGE_COMPLETED,
-                    serde_json::json!({
-                        "stage_id": ctx.stage_id.to_string(),
-                        "stage_name": ctx.stage_name,
-                        "timestamp": chrono::Utc::now().to_rfc3339(),
-                    })
-                );
-                
-                // Populate flow context for completion
-                completion_event.flow_context = obzenflow_core::event::flow_context::FlowContext {
-                    flow_name: ctx.flow_name.clone(),
-                    flow_id: "default".to_string(),
-                    stage_name: ctx.stage_name.clone(),
-                    stage_type: obzenflow_core::event::flow_context::StageType::Sink,
-                };
-                
-                ctx.journal
-                    .write_control_event(completion_event)
+                ctx.system_journal
+                    .append(completion_event, None)
                     .await
                     .map_err(|e| format!("Failed to write completion event: {}", e))?;
                 
@@ -409,20 +391,47 @@ impl<H: SinkHandler + Send + Sync + 'static> FsmAction for SinkAction<H> {
                 );
                 Ok(())
             }
-            
+
             SinkAction::FlushBuffers => {
                 *ctx.is_flushing.write().await = true;
-                
+
                 let mut handler = ctx.handler.write().await;
-                handler.flush()
-                    .map_err(|e| format!("Failed to flush: {:?}", e))?;
-                
+
+                match handler.flush().await {
+                    Ok(Some(payload)) => {
+                        // grab a copy of the WriterId or crash; this should never be None after init
+                        let writer_id = ctx
+                            .writer_id
+                            .read()
+                            .await
+                            .as_ref()
+                            .expect("writer_id not initialised")
+                            .clone();
+
+
+                        let flow_ctx = FlowContext {
+                            flow_name:  ctx.flow_name.clone(),
+                            flow_id:    ctx.flow_id.to_string(),
+                            stage_name: ctx.stage_name.clone(),
+                            stage_type: StageType::Sink,   // or whatever enum case
+                        };
+
+                        let evt = ChainEventFactory::delivery_event(writer_id, payload)
+                            .with_flow_context(flow_ctx)
+                            .with_runtime_context(ctx.instrumentation.snapshot());
+
+                        ctx.data_journal.append(evt, None)
+                            .await
+                            .map_err(|e| format!("Failed to write delivery receipt: {e}"))?;
+
+                    }
+                    Ok(None) => { /* flush succeeded, nothing to record */ }
+                    Err(e) => return Err(format!("Failed to flush: {e:?}").into()),
+                }
+
                 *ctx.is_flushing.write().await = false;
-                
-                tracing::info!(
-                    stage_name = %ctx.stage_name,
-                    "Sink flushed buffers"
-                );
+
+                tracing::info!(stage_name=%ctx.stage_name, "Sink flushed buffers");
                 Ok(())
             }
             

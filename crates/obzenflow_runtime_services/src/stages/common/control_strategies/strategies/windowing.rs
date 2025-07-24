@@ -3,6 +3,7 @@
 use std::time::{Duration, Instant};
 use super::super::{ControlEventStrategy, ControlEventAction, ProcessingContext};
 use obzenflow_core::event::event_envelope::EventEnvelope;
+use obzenflow_core::ChainEvent;
 
 /// Strategy that delays EOF to allow time-based windows to complete
 /// 
@@ -47,7 +48,7 @@ impl WindowingStrategy {
 }
 
 impl ControlEventStrategy for WindowingStrategy {
-    fn handle_eof(&self, _envelope: &EventEnvelope, ctx: &mut ProcessingContext) -> ControlEventAction {
+    fn handle_eof(&self, _envelope: &EventEnvelope<ChainEvent>, ctx: &mut ProcessingContext) -> ControlEventAction {
         if !self.is_window_complete() {
             if let Some(remaining) = self.remaining_window_time() {
                 tracing::info!(

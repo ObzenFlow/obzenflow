@@ -4,7 +4,9 @@
 //! such as source, transform, and sink supervisors.
 
 use super::base::{EventLoopDirective, Supervisor};
-use obzenflow_fsm::{FsmAction, StateVariant};
+use obzenflow_fsm::FsmAction;
+use obzenflow_core::event::WriterId;
+use obzenflow_core::StageId;
 use tokio::task::JoinHandle;
 
 /// Trait for handler-supervised components
@@ -19,6 +21,15 @@ pub trait HandlerSupervised: Supervisor {
         &mut self,
         state: &Self::State,
     ) -> Result<EventLoopDirective<Self::Event>, Box<dyn std::error::Error + Send + Sync>>;
+    
+    /// Get the writer ID for this component
+    fn writer_id(&self) -> WriterId;
+    
+    /// Get the stage ID for this component
+    fn stage_id(&self) -> StageId;
+    
+    /// Write a completion event when the stage terminates
+    async fn write_completion_event(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
 }
 
 /// Extension trait to add run functionality to any HandlerSupervised type
@@ -70,8 +81,7 @@ pub trait HandlerSupervisedExt: HandlerSupervised {
                 }
 
                 EventLoopDirective::Terminate => {
-                    self.write_completion_event(machine.state().variant_name())
-                        .await?;
+                    self.write_completion_event().await?;
                     break;
                 }
             }

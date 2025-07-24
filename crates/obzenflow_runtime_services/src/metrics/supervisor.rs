@@ -3,14 +3,16 @@
 //! The supervisor owns the FSM directly and runs autonomously.
 //! Once started, all communication happens through journal events only.
 
-use obzenflow_core::{WriterId, ChainEvent};
+use obzenflow_core::ChainEvent;
+use obzenflow_core::event::{WriterId, ChainEventFactory};
 use obzenflow_fsm::FsmBuilder;
 use serde_json::json;
 use std::sync::Arc;
-
-use crate::messaging::reactive_journal::ReactiveJournal;
+use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use crate::supervised_base::{EventLoopDirective, SelfSupervised};
 use crate::supervised_base::base::Supervisor;
+use obzenflow_core::journal::journal::Journal;
+use obzenflow_core::event::SystemEvent;
 
 use super::fsm::{
     MetricsAggregatorAction, MetricsAggregatorContext, MetricsAggregatorEvent,
@@ -25,11 +27,8 @@ pub(crate) struct MetricsAggregatorSupervisor {
     /// Metrics context (contains all mutable state)
     pub(crate) context: Arc<MetricsAggregatorContext>,
 
-    /// Reactive journal (immutable reference)
-    pub(crate) journal: Arc<ReactiveJournal>,
-
-    /// Writer ID for journal events (immutable after creation)
-    pub(crate) writer_id: WriterId,
+    /// System journal for writing metrics ready event
+    pub(crate) system_journal: Arc<dyn Journal<SystemEvent>>,
 }
 
 // Implement base Supervisor trait
@@ -193,14 +192,6 @@ impl Supervisor for MetricsAggregatorSupervisor {
                 .done()
     }
 
-    fn journal(&self) -> &Arc<ReactiveJournal> {
-        &self.journal
-    }
-
-    fn writer_id(&self) -> &WriterId {
-        &self.writer_id
-    }
-
     fn name(&self) -> &str {
         &self.name
     }
@@ -209,18 +200,47 @@ impl Supervisor for MetricsAggregatorSupervisor {
 // Implement SelfSupervised with ALL the logic - no separate impl blocks!
 #[async_trait::async_trait]
 impl SelfSupervised for MetricsAggregatorSupervisor {
+    fn writer_id(&self) -> WriterId {
+        WriterId::from(self.context.system_id)
+    }
+    
+    async fn write_completion_event(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let event = obzenflow_core::event::SystemEvent::new(
+            self.writer_id(),
+            obzenflow_core::event::SystemEventType::MetricsCoordination(
+                obzenflow_core::event::MetricsCoordinationEvent::Shutdown
+            )
+        );
+        
+        self.system_journal
+            .append(event, None)
+            .await
+            .map(|_| ())
+            .map_err(|e| format!("Failed to write metrics shutdown event: {}", e).into())
+    }
+    
     async fn dispatch_state(
         &mut self,
         state: &Self::State,
     ) -> Result<EventLoopDirective<Self::Event>, Box<dyn std::error::Error + Send + Sync>> {
         match state {
             MetricsAggregatorState::Initializing => {
-                // Subscribe to journal - will receive all events
-                let subscription = self.subscribe().await?;
-                *self.context.subscription.write().await = Some(subscription);
+                // Subscription is already created in the context during builder
 
-                // Publish ready event
-                self.write_event(ChainEvent::SYSTEM_METRICS_READY, json!({})).await?;
+                // Publish ready event to system journal
+                // Metrics aggregator creates SystemEvent directly
+                let event = obzenflow_core::event::SystemEvent::new(
+                    WriterId::from(self.context.system_id),
+                    obzenflow_core::event::SystemEventType::MetricsCoordination(
+                        obzenflow_core::event::MetricsCoordinationEvent::Ready
+                    )
+                );
+                
+                self.system_journal
+                    .append(event, None)
+                    .await
+                    .map(|_| ())
+                    .map_err(|e| format!("Failed to write ready event: {}", e))?;
 
                 tracing::info!("Metrics aggregator published ready event");
 
@@ -268,8 +288,13 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                     result = subscription.recv() => {
                         match result {
                             Ok(envelope) => {
-                                // Check for drain event 
-                                if envelope.event.event_type == ChainEvent::SYSTEM_METRICS_DRAIN {
+                                // Check for drain event - FlowSignalPayload::Drain
+                                if matches!(
+                                    &envelope.event.content, 
+                                    obzenflow_core::event::ChainEventContent::FlowControl(
+                                        FlowControlPayload::Drain
+                                    )
+                                ) {
                                     tracing::info!("Metrics aggregator received drain event");
                                     // Clear the timer when transitioning away from Running
                                     *self.context.export_timer.lock().await = None;

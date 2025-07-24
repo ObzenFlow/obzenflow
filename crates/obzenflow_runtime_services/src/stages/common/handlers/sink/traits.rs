@@ -1,75 +1,75 @@
-//! Handler trait for sink stages that consume events
+//! Handler trait for **sink stages** that *consume* events and emit a
+//! delivery receipt.
 //!
-//! Examples: Database writers, file outputs, API clients
+//! Typical sinks: database writers, file outputs, HTTP/REST clients, Kafka
+//! producers.  The runtime journals each `DeliveryPayload` so delivery
+//! success, partials, and failures are durable and queryable.
+//!
+//! ## Quick start
+//! ```rust
+//! use obzenflow_runtime_services::stages::common::handlers::SinkHandler;
+//! use obzenflow_core::{ChainEvent, Result};
+//! use async_trait::async_trait;
+//! use std::collections::HashMap;
+//! use reqwest::Client;
+//!
+//! use obzenflow_core::event::payloads::delivery_payload::DeliveryPayload;
+//!
+//! /// Minimal HTTP POST sink.
+//! struct HttpSink {
+//!     client: reqwest::Client,
+//!     url:    String,
+//! }
+//!
+//! #[async_trait]
+//! impl SinkHandler for HttpSink {
+//!     async fn consume(&mut self, event: ChainEvent) -> Result<DeliveryPayload> {
+//!         let start = std::time::Instant::now();
+//!         let body  = event.payload().to_string();
+//!         let resp  = self.client.post(&self.url).body(body).send().await?;
+//!         let elapsed = start.elapsed().as_millis() as u64;
+//!
+//!         let headers: HashMap<_, _> = resp.headers().iter()
+//!             .map(|(k,v)| (k.to_string(), v.to_str().unwrap_or_default().to_string()))
+//!             .collect();
+//!
+//!         Ok(DeliveryPayload::http_post_success(
+//!             &self.url,
+//!             elapsed,
+//!             Some(resp.content_length().unwrap_or(0)),
+//!             Some(headers),
+//!             Some(resp.status().to_string()),
+//!         ))
+//!     }
+//! }
+//! ```
 
-use obzenflow_core::{ChainEvent, Result};
 use async_trait::async_trait;
+use obzenflow_core::{ChainEvent, Result};
+use obzenflow_core::event::payloads::delivery_payload::DeliveryPayload;
 
-/// Handler for sink stages that consume events
-/// 
-/// Sinks are the endpoints of the pipeline - they:
-/// - Write to databases, files, or external systems
-/// - Have special flushing semantics for data durability
-/// - Consume events without producing outputs
-/// 
-/// # Example
-/// ```rust
-/// use obzenflow_runtime_services::stages::common::handlers::SinkHandler;
-/// use obzenflow_core::{ChainEvent, Result};
-/// use async_trait::async_trait;
-/// 
-/// struct FileSink {
-///     file: std::sync::Mutex<Vec<String>>,
-///     buffer: Vec<String>,
-/// }
-/// 
-/// #[async_trait]
-/// impl SinkHandler for FileSink {
-///     fn consume(&mut self, event: ChainEvent) -> Result<()> {
-///         // Extract data from event and buffer it
-///         if let Some(data) = event.payload.get("data").and_then(|v| v.as_str()) {
-///             self.buffer.push(data.to_string());
-///             if self.buffer.len() >= 100 {
-///                 self.flush()?;
-///             }
-///         }
-///         Ok(())
-///     }
-///     
-///     fn flush(&mut self) -> Result<()> {
-///         // Write buffered data to file
-///         if let Ok(mut file) = self.file.lock() {
-///             file.extend(self.buffer.drain(..));
-///         }
-///         Ok(())
-///     }
-/// }
-/// 
-/// // Drain is handled by the flush() method
-/// ```
+/// Trait every **sink stage** must implement.
 #[async_trait]
 pub trait SinkHandler: Send + Sync {
-    /// Consume an event
-    /// 
-    /// Returns an error if the event cannot be processed
-    fn consume(&mut self, event: ChainEvent) -> Result<()>;
-    
-    /// Flush any buffered data
-    /// 
-    /// Called during shutdown to ensure no data loss:
-    /// - Database sinks: commit transactions
-    /// - File sinks: fsync to disk
-    /// - Network sinks: flush buffers
-    fn flush(&mut self) -> Result<()> {
-        Ok(())
+    /// Consume a single event and return a `DeliveryPayload` describing
+    /// the outcome (success, partial, or failure).
+    ///
+    /// Returning `Err(_)` means the handler itself experienced an unrecoverable
+    /// failure *before* it could build a coherent receipt (e.g., panicked,
+    /// network down, etc.).
+    async fn consume(&mut self, event: ChainEvent) -> Result<DeliveryPayload>;
+
+    /// Flush in‑memory buffers **and optionally** emit a `DeliveryPayload`
+    /// capturing the flush action (e.g., `DeliveryResult::Success` for a batch
+    /// commit).  Default impl returns `Ok(None)` so simple sinks can ignore it.
+    async fn flush(&mut self) -> Result<Option<DeliveryPayload>> {
+        Ok(None)
     }
-    
-    /// Perform graceful shutdown and cleanup
-    /// 
-    /// This is called during draining to ensure all data is persisted
-    /// and resources are properly released. Default implementation
-    /// just calls flush().
-    async fn drain(&mut self) -> Result<()> {
-        self.flush()
+
+    /// Draining hook called during graceful shutdown.
+    /// Default behaviour delegates to `flush()` so most sinks only override
+    /// one method.
+    async fn drain(&mut self) -> Result<Option<DeliveryPayload>> {
+        self.flush().await
     }
 }

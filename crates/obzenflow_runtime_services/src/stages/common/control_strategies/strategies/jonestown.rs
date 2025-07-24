@@ -2,6 +2,7 @@
 
 use super::super::{ControlEventStrategy, ControlEventAction, ProcessingContext};
 use obzenflow_core::event::event_envelope::EventEnvelope;
+use obzenflow_core::ChainEvent;
 
 /// The default "Jonestown Protocol" strategy
 /// 
@@ -12,7 +13,7 @@ use obzenflow_core::event::event_envelope::EventEnvelope;
 pub struct JonestownStrategy;
 
 impl ControlEventStrategy for JonestownStrategy {
-    fn handle_eof(&self, _envelope: &EventEnvelope, _ctx: &mut ProcessingContext) -> ControlEventAction {
+    fn handle_eof(&self, _envelope: &EventEnvelope<ChainEvent>, _ctx: &mut ProcessingContext) -> ControlEventAction {
         // Simple and direct: forward EOF immediately
         ControlEventAction::Forward
     }

@@ -3,6 +3,7 @@
 use std::time::Duration;
 use super::super::{ControlEventStrategy, ControlEventAction, ProcessingContext};
 use obzenflow_core::event::event_envelope::EventEnvelope;
+use obzenflow_core::ChainEvent;
 
 /// Strategy that retries processing before accepting EOF
 /// 
@@ -60,7 +61,7 @@ impl BackoffStrategy {
 }
 
 impl ControlEventStrategy for RetryStrategy {
-    fn handle_eof(&self, _envelope: &EventEnvelope, ctx: &mut ProcessingContext) -> ControlEventAction {
+    fn handle_eof(&self, _envelope: &EventEnvelope<ChainEvent>, ctx: &mut ProcessingContext) -> ControlEventAction {
         if ctx.eof_attempts < self.max_attempts {
             // Still have attempts left
             ctx.eof_attempts += 1;

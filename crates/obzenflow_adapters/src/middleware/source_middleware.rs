@@ -3,7 +3,8 @@
 //! This module provides middleware capabilities for both FiniteSourceHandler 
 //! and InfiniteSourceHandler implementations.
 
-use obzenflow_core::{ChainEvent, EventId, WriterId};
+use obzenflow_core::{ChainEvent, EventId, WriterId, StageId};
+use obzenflow_core::event::ChainEventFactory;
 use obzenflow_runtime_services::stages::common::handlers::{
     FiniteSourceHandler, InfiniteSourceHandler
 };
@@ -57,8 +58,7 @@ impl<H: FiniteSourceHandler> MiddlewareFiniteSource<H> {
 impl<H: FiniteSourceHandler> FiniteSourceHandler for MiddlewareFiniteSource<H> {
     fn next(&mut self) -> Option<ChainEvent> {
         // Create a synthetic event for middleware to process
-        let synthetic_event = ChainEvent::new(
-            EventId::new(),
+        let synthetic_event = ChainEventFactory::data_event(
             self.writer_id.clone(),
             "system.source.next",
             serde_json::json!({
@@ -175,8 +175,7 @@ impl<H: InfiniteSourceHandler> MiddlewareInfiniteSource<H> {
 impl<H: InfiniteSourceHandler> InfiniteSourceHandler for MiddlewareInfiniteSource<H> {
     fn next(&mut self) -> Option<ChainEvent> {
         // Create a synthetic event for middleware to process
-        let synthetic_event = ChainEvent::new(
-            EventId::new(),
+        let synthetic_event = ChainEventFactory::data_event(
             self.writer_id.clone(),
             "system.source.next",
             serde_json::json!({

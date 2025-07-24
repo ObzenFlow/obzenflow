@@ -11,5 +11,5 @@ pub use memory::MemoryJournal;
 pub use disk::disk_journal::DiskJournal;
 
 // Re-export factory
-pub use factory::{DiskJournalFactory, MemoryJournalFactory, JournalFactory};
+pub use factory::{DiskJournalFactory, MemoryJournalFactory};
 pub use factory::{disk_journals, memory_journals};

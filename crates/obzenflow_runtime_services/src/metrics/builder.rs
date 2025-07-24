@@ -9,37 +9,48 @@ use super::{
     config::DefaultMetricsConfig,
 };
 use crate::{
-    messaging::reactive_journal::ReactiveJournal,
     supervised_base::{
         SupervisorBuilder, BuilderError, ChannelBuilder, HandleBuilder, StandardHandle,
         SelfSupervisedExt, SupervisorTaskBuilder,
     },
 };
-use obzenflow_core::{metrics::MetricsExporter, WriterId};
+use obzenflow_core::{
+    metrics::MetricsExporter,
+    journal::journal::Journal,
+    event::{ChainEvent, SystemEvent},
+    StageId,
+};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
 /// Builder for creating a metrics aggregator with proper FSM lifecycle
 pub struct MetricsAggregatorBuilder {
-    reactive_journal: Arc<ReactiveJournal>,
+    /// All stage journals to read metrics from
+    stage_journals: Vec<(StageId, Arc<dyn Journal<ChainEvent>>)>,
+    
+    /// System journal for reporting
+    system_journal: Arc<dyn Journal<SystemEvent>>,
+    
+    /// Metrics exporter
     exporter: Arc<dyn MetricsExporter>,
+    
     config: DefaultMetricsConfig,
     export_interval_secs: u64,
-    writer_id: Option<WriterId>,
 }
 
 impl MetricsAggregatorBuilder {
     /// Create a new metrics aggregator builder
     pub fn new(
-        reactive_journal: Arc<ReactiveJournal>,
+        stage_journals: Vec<(StageId, Arc<dyn Journal<ChainEvent>>)>,
+        system_journal: Arc<dyn Journal<SystemEvent>>,
         exporter: Arc<dyn MetricsExporter>,
     ) -> Self {
         Self {
-            reactive_journal,
+            stage_journals,
+            system_journal,
             exporter,
             config: DefaultMetricsConfig::default(),
             export_interval_secs: 10, // Default to 10 seconds
-            writer_id: None,
         }
     }
     
@@ -55,11 +66,6 @@ impl MetricsAggregatorBuilder {
         self
     }
     
-    /// Set a specific writer ID (optional - will generate one if not provided)
-    pub fn with_writer_id(mut self, writer_id: WriterId) -> Self {
-        self.writer_id = Some(writer_id);
-        self
-    }
 }
 
 #[async_trait::async_trait]
@@ -68,25 +74,21 @@ impl SupervisorBuilder for MetricsAggregatorBuilder {
     type Error = BuilderError;
     
     async fn build(self) -> Result<Self::Handle, Self::Error> {
-        // Register writer with journal
-        let stage_id = obzenflow_core::StageId::new();
-        let writer_id = if let Some(id) = self.writer_id {
-            id
-        } else {
-            // In the new architecture, ReactiveJournal already has its writer_id
-            self.reactive_journal.writer_id.clone()
-        };
+        // Create system ID for metrics aggregator
+        let system_id = obzenflow_core::id::SystemId::new();
         
         // Create metrics context with all mutable state
-        let metrics_context = Arc::new(MetricsAggregatorContext {
-            journal: self.reactive_journal.clone(),
-            exporter: Some(self.exporter),
-            export_interval_secs: self.export_interval_secs,
-            metrics_store: Arc::new(RwLock::new(Default::default())),
-            writer_id: Arc::new(RwLock::new(Some(writer_id))),
-            subscription: Arc::new(RwLock::new(None)),
-            export_timer: Arc::new(tokio::sync::Mutex::new(None)),
-        });
+        let metrics_context = Arc::new(
+            MetricsAggregatorContext::new(
+                self.stage_journals.clone(),
+                self.system_journal.clone(),
+                Some(self.exporter),
+                self.export_interval_secs,
+                system_id,
+            )
+            .await
+            .map_err(|e| BuilderError::Other(e))?
+        );
         
         // Create channels for supervisor communication
         // Even though metrics runs autonomously, we still create channels
@@ -100,8 +102,7 @@ impl SupervisorBuilder for MetricsAggregatorBuilder {
         let supervisor = MetricsAggregatorSupervisor {
             name: "metrics_aggregator".to_string(),
             context: metrics_context.clone(),
-            journal: self.reactive_journal.clone(),
-            writer_id,
+            system_journal: self.system_journal.clone(),
         };
         
         // Clone what we need for the task
@@ -112,7 +113,7 @@ impl SupervisorBuilder for MetricsAggregatorBuilder {
         let supervisor_task = SupervisorTaskBuilder::<MetricsAggregatorSupervisor>::new("metrics_aggregator")
             .spawn(move || async move {
                 // Run the supervisor directly - metrics doesn't need external events
-                let mut supervisor_with_state_updates = supervisor;
+                let supervisor_with_state_updates = supervisor;
                 
                 // We'll update state manually in dispatch_state
                 // This is simpler than the wrapper pattern for autonomous supervisors

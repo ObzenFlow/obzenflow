@@ -4,7 +4,8 @@
 //! such as the metrics aggregator and pipeline supervisor.
 
 use super::base::{EventLoopDirective, Supervisor};
-use obzenflow_fsm::{FsmAction, StateVariant};
+use obzenflow_fsm::FsmAction;
+use obzenflow_core::event::WriterId;
 use std::sync::Arc;
 
 /// Trait that self-supervised components MUST implement
@@ -23,6 +24,12 @@ pub trait SelfSupervised: Supervisor {
         &mut self,
         state: &Self::State,
     ) -> Result<EventLoopDirective<Self::Event>, Box<dyn std::error::Error + Send + Sync>>;
+    
+    /// Get the writer ID for this component
+    fn writer_id(&self) -> WriterId;
+    
+    /// Write a completion event when the component terminates
+    async fn write_completion_event(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
 }
 
 /// Extension trait to add run functionality to any SelfSupervised type
@@ -74,8 +81,7 @@ pub trait SelfSupervisedExt: SelfSupervised {
                 }
 
                 EventLoopDirective::Terminate => {
-                    self.write_completion_event(machine.state().variant_name())
-                        .await?;
+                    self.write_completion_event().await?;
                     break;
                 }
             }
