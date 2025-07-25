@@ -12,6 +12,7 @@ use obzenflow_core::event::WriterId;
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryPayload, DeliveryMethod};
 use obzenflow_core::id::StageId;
+use obzenflow_core::time::MetricsDuration;
 // Monitoring taxonomies are no longer needed with FLOWIP-056-666
 // Metrics are automatically collected by MetricsAggregator from the event journal
 use serde_json::json;
@@ -185,7 +186,6 @@ impl TextCollectorSink {
 #[async_trait]
 impl SinkHandler for TextCollectorSink {
     async fn consume(&mut self, event: ChainEvent) -> obzenflow_core::Result<DeliveryPayload> {
-        let start = std::time::Instant::now();
         let mut bytes_processed = 0;
         
         if event.event_type() == "OutFragment" {
@@ -197,12 +197,9 @@ impl SinkHandler for TextCollectorSink {
             }
         }
         
-        let elapsed = start.elapsed().as_millis() as u64;
-        
         Ok(DeliveryPayload::success(
             "memory_buffer",
             DeliveryMethod::Custom("InMemoryCollector".to_string()),
-            elapsed,
             Some(bytes_processed),
         ))
     }

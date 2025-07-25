@@ -80,7 +80,7 @@ impl TransformHandler for OrderValidator {
         } else {
             // Set success outcome with processing time
             event.processing_info.status = ProcessingOutcome::Success;
-            event.processing_info.processing_time_ms = 10;
+            event.processing_info.processing_time_ns = 10_000_000; // 10ms in nanoseconds
             event.event_type = "order.validated".to_string();
             vec![event]
         }

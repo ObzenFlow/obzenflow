@@ -6,24 +6,23 @@
 
 use obzenflow_fsm::{FsmBuilder, StateMachine, Transition, StateVariant, EventVariant, FsmContext, FsmAction};
 use obzenflow_core::{EventId, Journal, ChainEvent};
-use obzenflow_core::id::SystemId;
+use obzenflow_core::id::{SystemId, StageId};
 use obzenflow_core::event::WriterId;
+use obzenflow_core::time::MetricsDuration;
+use obzenflow_core::metrics::{Percentile, StageMetadata};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use obzenflow_core::event::status::processing_status::ProcessingStatus;
+use obzenflow_core::event::chain_event::ChainEventContent;
+use std::collections::HashMap;
 
-// Histogram configuration constants
-const HISTOGRAM_MIN_MS: u64 = 1;        // 1ms minimum
-const HISTOGRAM_MAX_MS: u64 = 60_000;   // 60 seconds maximum  
+// Histogram configuration constants (in microseconds for precision)
+const HISTOGRAM_MIN_US: u64 = 1;        // 1 microsecond minimum
+const HISTOGRAM_MAX_US: u64 = 60_000_000;   // 60 seconds maximum  
 const HISTOGRAM_SIGFIGS: u8 = 3;        // 3 significant figures
 
-// Percentile constants
-const QUANTILE_P50: f64 = 0.5;
-const QUANTILE_P90: f64 = 0.9;
-const QUANTILE_P95: f64 = 0.95;
-const QUANTILE_P99: f64 = 0.99;
-const QUANTILE_P999: f64 = 0.999;
+// Percentile constants - now using the Percentile enum
 
 /// FSM states for metrics aggregator lifecycle
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -129,13 +128,18 @@ pub struct MetricsAggregatorContext {
     pub export_interval_secs: u64,
     pub system_id: SystemId,
     pub export_timer: Arc<tokio::sync::Mutex<Option<tokio::time::Interval>>>,
+    pub stage_metadata: HashMap<StageId, StageMetadata>,
 }
 
 /// Simple metrics storage
 #[derive(Default)]
 pub struct MetricsStore {
-    pub stage_metrics: std::collections::HashMap<String, StageMetrics>,
+    pub stage_metrics: std::collections::HashMap<StageId, StageMetrics>,
     pub last_event_id: Option<EventId>,
+    pub flow_start_time: Option<std::time::Instant>,
+    pub first_event_time: Option<std::time::Instant>,
+    pub last_event_time: Option<std::time::Instant>,
+    pub total_events_processed: u64,
 }
 
 #[derive(Clone)]
@@ -143,7 +147,7 @@ pub struct StageMetrics {
     pub events_in: u64,
     pub events_out: u64,
     pub errors: u64,
-    pub total_processing_time_ms: u64,
+    pub total_processing_time: MetricsDuration,
     pub event_count: u64,
     pub processing_time_histogram: hdrhistogram::Histogram<u64>,
     // Runtime context metrics (FLOWIP-056c)
@@ -151,6 +155,9 @@ pub struct StageMetrics {
     pub last_failures_total: Option<u64>,
     pub event_loops_total: u64,
     pub event_loops_with_work_total: u64,
+    // Stage-specific timing for accurate rate calculation
+    pub first_event_time: Option<std::time::Instant>,
+    pub last_event_time: Option<std::time::Instant>,
 }
 
 impl Default for StageMetrics {
@@ -159,18 +166,20 @@ impl Default for StageMetrics {
             events_in: 0,
             events_out: 0,
             errors: 0,
-            total_processing_time_ms: 0,
+            total_processing_time: MetricsDuration::ZERO,
             event_count: 0,
             // Create histogram with configured bounds
             processing_time_histogram: hdrhistogram::Histogram::new_with_bounds(
-                HISTOGRAM_MIN_MS, 
-                HISTOGRAM_MAX_MS, 
+                HISTOGRAM_MIN_US, 
+                HISTOGRAM_MAX_US, 
                 HISTOGRAM_SIGFIGS
             ).expect("Failed to create histogram"),
             last_in_flight: None,
             last_failures_total: None,
             event_loops_total: 0,
             event_loops_with_work_total: 0,
+            first_event_time: None,
+            last_event_time: None,
         }
     }
 }
@@ -182,6 +191,7 @@ impl MetricsAggregatorContext {
         exporter: Option<Arc<dyn obzenflow_core::metrics::MetricsExporter>>,
         export_interval_secs: u64,
         system_id: SystemId,
+        stage_metadata: HashMap<StageId, StageMetadata>,
     ) -> Result<Self, String> {
         // Create the subscription from stage journals
         let subscription = crate::messaging::upstream_subscription::UpstreamSubscription::new(&stage_journals)
@@ -196,6 +206,7 @@ impl MetricsAggregatorContext {
             export_interval_secs,
             system_id,
             export_timer: Arc::new(tokio::sync::Mutex::new(None)),
+            stage_metadata,
         })
     }
 }
@@ -225,22 +236,103 @@ impl FsmAction for MetricsAggregatorAction {
                 if event.is_control() || event.is_system() {
                     return Ok(());
                 }
+                
+                // Track flow timing for rate calculation
+                let now = std::time::Instant::now();
+                if store.first_event_time.is_none() {
+                    store.first_event_time = Some(now);
+                    store.flow_start_time = Some(now);
+                }
+                store.last_event_time = Some(now);
+                store.total_events_processed += 1;
+                
+                // Handle delivery events separately
+                if event.is_delivery() {
+                    if let ChainEventContent::Delivery(payload) = &event.content {
+                        // Process delivery event from sink
+                        let stage_id = event.flow_context.stage_id;
+                        
+                        let metrics = store
+                            .stage_metrics
+                            .entry(stage_id)
+                            .or_insert_with(StageMetrics::default);
+                        
+                        // Count delivery event
+                        metrics.events_in += 1;
+                        metrics.events_out += 1;
+                        
+                        // Track stage timing
+                        let now = std::time::Instant::now();
+                        if metrics.first_event_time.is_none() {
+                            metrics.first_event_time = Some(now);
+                        }
+                        metrics.last_event_time = Some(now);
+                        
+                        // Check for delivery errors
+                        if let obzenflow_core::event::payloads::delivery_payload::DeliveryResult::Failed { .. } = &payload.result {
+                            metrics.errors += 1;
+                        }
+                        
+                        // Record delivery processing time
+                        let duration = payload.processing_duration;
+                        let duration_us = duration.as_micros();
+                        
+                        metrics.total_processing_time = metrics.total_processing_time.saturating_add(duration);
+                        metrics.event_count += 1;
+                        
+                        // Record in histogram
+                        let clamped_duration = duration_us.max(HISTOGRAM_MIN_US).min(HISTOGRAM_MAX_US);
+                        if let Err(e) = metrics.processing_time_histogram.record(clamped_duration) {
+                            tracing::warn!("Failed to record delivery duration in histogram: {:?}", e);
+                        }
+                        
+                        // Extract runtime context metrics if available (same as regular events)
+                        if let Some(runtime_ctx) = &event.runtime_context {
+                            tracing::trace!(
+                                "Runtime context for delivery {:?}: in_flight={}, fsm_state={}",
+                                stage_id,
+                                runtime_ctx.in_flight,
+                                runtime_ctx.fsm_state
+                            );
+                            
+                            // Store latest runtime metrics for export
+                            metrics.last_in_flight = Some(runtime_ctx.in_flight);
+                            metrics.last_failures_total = Some(runtime_ctx.failures_total);
+                            
+                            // Update cumulative event loop counters (take max to handle resets)
+                            metrics.event_loops_total = metrics.event_loops_total.max(runtime_ctx.event_loops_total);
+                            metrics.event_loops_with_work_total = metrics.event_loops_with_work_total.max(runtime_ctx.event_loops_with_work_total);
+                        }
+                        
+                        tracing::debug!(
+                            "Updated metrics for delivery {:?}: events={}, errors={}, processing_time={}",
+                            stage_id,
+                            metrics.events_in,
+                            metrics.errors,
+                            duration
+                        );
+                    }
+                    return Ok(());
+                }
 
-                // Process data events - extract metrics from flow context
-                let stage_name = &event.flow_context.stage_name;
-                let flow_name = &event.flow_context.flow_name;
-
-                // Create a key combining flow and stage name
-                let key = format!("{}:{}", flow_name, stage_name);
+                // Process regular data events - extract metrics from flow context
+                let stage_id = event.flow_context.stage_id;
 
                 let metrics = store
                     .stage_metrics
-                    .entry(key.clone())
+                    .entry(stage_id)
                     .or_insert_with(StageMetrics::default);
 
                 // Count the event
                 metrics.events_in += 1;
                 metrics.events_out += 1; // For now, treat as both in and out
+                
+                // Track stage timing
+                let now = std::time::Instant::now();
+                if metrics.first_event_time.is_none() {
+                    metrics.first_event_time = Some(now);
+                }
+                metrics.last_event_time = Some(now);
 
                 // Check for errors from processing outcome
                 if matches!(
@@ -251,13 +343,14 @@ impl FsmAction for MetricsAggregatorAction {
                 }
 
                 // Record processing time
-                let duration_ms = event.processing_info.processing_time_ms;
-                metrics.total_processing_time_ms += duration_ms;
+                let duration = event.processing_info.processing_time;
+                let duration_us = duration.as_micros();  // Convert to microseconds for histogram
+                
+                metrics.total_processing_time = metrics.total_processing_time.saturating_add(duration);
                 metrics.event_count += 1;
                 
-                // Record in histogram for percentiles
-                // Clamp to histogram bounds
-                let clamped_duration = duration_ms.max(HISTOGRAM_MIN_MS).min(HISTOGRAM_MAX_MS);
+                // Record in histogram as microseconds for precision
+                let clamped_duration = duration_us.max(HISTOGRAM_MIN_US).min(HISTOGRAM_MAX_US);
                 if let Err(e) = metrics.processing_time_histogram.record(clamped_duration) {
                     tracing::warn!("Failed to record duration in histogram: {:?}", e);
                 }
@@ -267,8 +360,8 @@ impl FsmAction for MetricsAggregatorAction {
                     // These are point-in-time snapshots from the FSM instrumentation
                     // We could store them for trend analysis or immediate export
                     tracing::trace!(
-                        "Runtime context for {}: in_flight={}, fsm_state={}",
-                        key,
+                        "Runtime context for {:?}: in_flight={}, fsm_state={}",
+                        stage_id,
                         runtime_ctx.in_flight,
                         runtime_ctx.fsm_state
                     );
@@ -283,14 +376,14 @@ impl FsmAction for MetricsAggregatorAction {
                 }
 
                 tracing::debug!(
-                    "Updated metrics for {}: events={}, errors={}, avg_time={}ms",
-                    key,
+                    "Updated metrics for {:?}: events={}, errors={}, avg_time={}",
+                    stage_id,
                     metrics.events_in,
                     metrics.errors,
                     if metrics.event_count > 0 {
-                        metrics.total_processing_time_ms / metrics.event_count
+                        MetricsDuration::from_nanos(metrics.total_processing_time.as_nanos() / metrics.event_count)
                     } else {
-                        0
+                        MetricsDuration::ZERO
                     }
                 );
                 
@@ -309,65 +402,99 @@ impl FsmAction for MetricsAggregatorAction {
                     );
 
                     // Convert stage metrics to snapshot format
-                    for (stage_key, metrics) in &store.stage_metrics {
+                    for (stage_id, metrics) in &store.stage_metrics {
                         // Use events_in as the event count
                         snapshot
                             .event_counts
-                            .insert(stage_key.clone(), metrics.events_in);
+                            .insert(*stage_id, metrics.events_in);
 
                         snapshot
                             .error_counts
-                            .insert(stage_key.clone(), metrics.errors);
+                            .insert(*stage_id, metrics.errors);
 
                         // Add processing time histogram with real percentiles
                         if metrics.event_count > 0 {
                             let histogram = &metrics.processing_time_histogram;
                             
-                            // Extract real percentiles from HdrHistogram and convert to seconds
+                            // Extract real percentiles from HdrHistogram and export as nanoseconds
                             let mut percentiles = std::collections::HashMap::new();
-                            percentiles.insert("p50".to_string(), histogram.value_at_quantile(QUANTILE_P50) as f64 / 1000.0);
-                            percentiles.insert("p90".to_string(), histogram.value_at_quantile(QUANTILE_P90) as f64 / 1000.0);
-                            percentiles.insert("p95".to_string(), histogram.value_at_quantile(QUANTILE_P95) as f64 / 1000.0);
-                            percentiles.insert("p99".to_string(), histogram.value_at_quantile(QUANTILE_P99) as f64 / 1000.0);
-                            percentiles.insert("p999".to_string(), histogram.value_at_quantile(QUANTILE_P999) as f64 / 1000.0);
+                            // Convert microseconds from histogram to nanoseconds for export
+                            for p in Percentile::all() {
+                                let value = histogram.value_at_quantile(p.quantile());
+                                percentiles.insert(*p, (value * 1_000) as f64);
+                            }
 
                             let hist_snapshot = obzenflow_core::metrics::HistogramSnapshot {
                                 count: histogram.len(),
-                                sum: (metrics.total_processing_time_ms as f64) / 1000.0,
-                                min: histogram.min() as f64 / 1000.0,
-                                max: histogram.max() as f64 / 1000.0,
+                                sum: metrics.total_processing_time.as_nanos() as f64,  // Export as nanoseconds
+                                min: (histogram.min() * 1_000) as f64,  // Convert from microseconds to nanoseconds
+                                max: (histogram.max() * 1_000) as f64,  // Convert from microseconds to nanoseconds
                                 percentiles,
                             };
 
                             snapshot
                                 .processing_times
-                                .insert(stage_key.clone(), hist_snapshot);
+                                .insert(*stage_id, hist_snapshot);
                         }
                         
                         // Add runtime context metrics if available (FLOWIP-056c)
                         if let Some(in_flight) = metrics.last_in_flight {
-                            snapshot.in_flight.insert(stage_key.clone(), in_flight as f64);
+                            snapshot.in_flight.insert(*stage_id, in_flight as f64);
                         }
                         // events_behind removed - calculate in PromQL instead
                         
                         if let Some(failures_total) = metrics.last_failures_total {
-                            snapshot.failures_total.insert(stage_key.clone(), failures_total);
+                            snapshot.failures_total.insert(*stage_id, failures_total);
                         }
                         // Event loop metrics are cumulative counters
-                        snapshot.event_loops_total.insert(stage_key.clone(), metrics.event_loops_total);
-                        snapshot.event_loops_with_work_total.insert(stage_key.clone(), metrics.event_loops_with_work_total);
+                        snapshot.event_loops_total.insert(*stage_id, metrics.event_loops_total);
+                        snapshot.event_loops_with_work_total.insert(*stage_id, metrics.event_loops_with_work_total);
 
                         tracing::debug!(
-                            "Exported metrics for {}: events={}, errors={}, avg_time={}ms",
-                            stage_key,
+                            "Exported metrics for {:?}: events={}, errors={}, avg_time={}",
+                            stage_id,
                             metrics.events_in,
                             metrics.errors,
                             if metrics.event_count > 0 {
-                                metrics.total_processing_time_ms / metrics.event_count
+                                MetricsDuration::from_nanos(metrics.total_processing_time.as_nanos() / metrics.event_count)
                             } else {
-                                0
+                                MetricsDuration::ZERO
                             }
                         );
+                    }
+
+                    // Add flow-level metrics
+                    if let (Some(first_time), Some(last_time)) = (store.first_event_time, store.last_event_time) {
+                        let flow_duration = last_time.duration_since(first_time);
+                        let flow_metrics = obzenflow_core::metrics::FlowMetricsSnapshot {
+                            journeys_opened: 0, // Not implemented yet
+                            journeys_sealed: 0, // Not implemented yet
+                            e2e_latency: obzenflow_core::metrics::HistogramSnapshot::default(), // Not implemented yet
+                            flow_duration: MetricsDuration::from(flow_duration),
+                            total_events_processed: store.total_events_processed,
+                        };
+                        snapshot.flow_metrics = Some(flow_metrics);
+                    }
+                    
+                    // Add stage metadata
+                    snapshot.stage_metadata = ctx.stage_metadata.clone();
+                    
+                    // Add stage timestamps for rate calculation
+                    // Convert from Instant to DateTime by calculating offset from snapshot time
+                    let now = std::time::Instant::now();
+                    let now_utc = chrono::Utc::now();
+                    
+                    for (stage_id, metrics) in &store.stage_metrics {
+                        if let Some(first_time) = metrics.first_event_time {
+                            let elapsed_since_first = now.duration_since(first_time);
+                            let first_datetime = now_utc - chrono::Duration::from_std(elapsed_since_first).unwrap_or_default();
+                            snapshot.stage_first_event_time.insert(*stage_id, first_datetime);
+                        }
+                        if let Some(last_time) = metrics.last_event_time {
+                            let elapsed_since_last = now.duration_since(last_time);
+                            let last_datetime = now_utc - chrono::Duration::from_std(elapsed_since_last).unwrap_or_default();
+                            snapshot.stage_last_event_time.insert(*stage_id, last_datetime);
+                        }
                     }
 
                     drop(store); // Release the lock before exporting

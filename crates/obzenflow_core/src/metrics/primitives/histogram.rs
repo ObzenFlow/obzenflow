@@ -164,7 +164,7 @@ impl Histogram {
     
     /// Create a snapshot of the histogram for export
     pub fn snapshot(&self) -> crate::metrics::HistogramSnapshot {
-        use crate::metrics::HistogramSnapshot;
+        use crate::metrics::{HistogramSnapshot, Percentile};
         use std::collections::HashMap;
         
         let count = self.count();
@@ -190,10 +190,10 @@ impl Histogram {
             };
             
             // Calculate standard percentiles
-            percentiles.insert("0.5".to_string(), find_percentile((count as f64 * 0.5) as u64));
-            percentiles.insert("0.9".to_string(), find_percentile((count as f64 * 0.9) as u64));
-            percentiles.insert("0.95".to_string(), find_percentile((count as f64 * 0.95) as u64));
-            percentiles.insert("0.99".to_string(), find_percentile((count as f64 * 0.99) as u64));
+            percentiles.insert(Percentile::P50, find_percentile((count as f64 * 0.5) as u64));
+            percentiles.insert(Percentile::P90, find_percentile((count as f64 * 0.9) as u64));
+            percentiles.insert(Percentile::P95, find_percentile((count as f64 * 0.95) as u64));
+            percentiles.insert(Percentile::P99, find_percentile((count as f64 * 0.99) as u64));
         }
         
         HistogramSnapshot {

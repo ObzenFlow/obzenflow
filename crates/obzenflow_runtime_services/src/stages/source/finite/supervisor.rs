@@ -214,6 +214,7 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> H
                         flow_name: self.context.flow_name.clone(),
                         flow_id: self.context.flow_id.to_string(),
                         stage_name: self.context.stage_name.clone(),
+                        stage_id: self.stage_id.clone(),
                         stage_type: obzenflow_core::event::context::StageType::FiniteSource,
                     };
 

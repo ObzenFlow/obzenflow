@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use crate::time::MetricsDuration;
 
 // ────────────────────────────────────────────────────────────────────────────
 // Core payload
@@ -22,7 +23,7 @@ pub struct DeliveryPayload {
     pub delivery_method: DeliveryMethod,
 
     /// Performance
-    pub processing_duration_ms: u64,
+    pub processing_duration: MetricsDuration,
     pub bytes_processed: Option<u64>,
 
     /// When + any middleware extensions
@@ -84,7 +85,6 @@ impl DeliveryPayload {
     pub fn success(
         destination: impl Into<String>,
         method: DeliveryMethod,
-        processing_duration_ms: u64,
         bytes_processed: Option<u64>,
     ) -> Self {
         Self {
@@ -94,7 +94,7 @@ impl DeliveryPayload {
             },
             destination: destination.into(),
             delivery_method: method,
-            processing_duration_ms,
+            processing_duration: MetricsDuration::ZERO,  // Will be set by middleware
             bytes_processed,
             processed_at: Utc::now(),
             middleware_context: None,
@@ -107,7 +107,6 @@ impl DeliveryPayload {
         method: DeliveryMethod,
         error_type: impl Into<String>,
         error_msg:  impl Into<String>,
-        processing_duration_ms: u64,
         final_attempt: bool,
     ) -> Self {
         Self {
@@ -119,7 +118,7 @@ impl DeliveryPayload {
             },
             destination: destination.into(),
             delivery_method: method,
-            processing_duration_ms,
+            processing_duration: MetricsDuration::ZERO,  // Will be set by middleware
             bytes_processed: None,
             processed_at: Utc::now(),
             middleware_context: None,
@@ -130,7 +129,6 @@ impl DeliveryPayload {
     pub fn partial(
         destination: impl Into<String>,
         method: DeliveryMethod,
-        processing_duration_ms: u64,
         ok:  u64,
         bad: u64,
         summary: impl Into<String>,
@@ -145,7 +143,7 @@ impl DeliveryPayload {
             },
             destination: destination.into(),
             delivery_method: method,
-            processing_duration_ms,
+            processing_duration: MetricsDuration::ZERO,  // Will be set by middleware
             bytes_processed: None,
             processed_at: Utc::now(),
             middleware_context: None,
@@ -155,7 +153,6 @@ impl DeliveryPayload {
     /// HTTP‑specific convenience (kept from your earlier helper).
     pub fn http_post_success(
         url: impl Into<String>,
-        processing_duration_ms: u64,
         bytes: Option<u64>,
         headers: Option<HashMap<String, String>>,
         confirmation: Option<String>,
@@ -164,7 +161,7 @@ impl DeliveryPayload {
         Self {
             destination: url.clone(),
             delivery_method: DeliveryMethod::HttpPost { url },
-            processing_duration_ms,
+            processing_duration: MetricsDuration::ZERO,  // Will be set by middleware
             bytes_processed: bytes,
             result: DeliveryResult::Success {
                 confirmation,
@@ -173,5 +170,26 @@ impl DeliveryPayload {
             processed_at: Utc::now(),
             middleware_context: None,
         }
+    }
+}
+
+// Builder-style methods for enhancing payloads
+impl DeliveryPayload {
+    /// Update the processing duration (builder style)
+    pub fn with_processing_duration(mut self, duration: MetricsDuration) -> Self {
+        self.processing_duration = duration;
+        self
+    }
+    
+    /// Update the middleware context (builder style)
+    pub fn with_middleware_context(mut self, context: Value) -> Self {
+        self.middleware_context = Some(context);
+        self
+    }
+    
+    /// Update bytes processed (builder style)
+    pub fn with_bytes_processed(mut self, bytes: u64) -> Self {
+        self.bytes_processed = Some(bytes);
+        self
     }
 }

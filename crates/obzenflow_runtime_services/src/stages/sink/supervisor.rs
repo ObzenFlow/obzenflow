@@ -9,6 +9,7 @@ use obzenflow_core::event::{SystemEvent, EventEnvelope, ChainEventFactory};
 use obzenflow_core::event::context::{FlowContext, StageType};
 use obzenflow_core::event::context::causality_context::CausalityContext;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
+use obzenflow_core::time::MetricsDuration;
 use obzenflow_fsm::{FsmBuilder, Transition};
 use crate::stages::common::handlers::SinkHandler;
 use crate::supervised_base::{EventLoopDirective, HandlerSupervised};
@@ -246,6 +247,7 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                             flow_name: self.context.flow_name.clone(),
                                             flow_id: self.context.flow_id.to_string(),
                                             stage_name: self.context.stage_name.clone(),
+                                            stage_id: self.stage_id.clone(),
                                             stage_type: obzenflow_core::event::context::StageType::Sink,
                                         };
 
@@ -268,7 +270,6 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                             DeliveryMethod::Noop,                                  // or HttpPost { url: … } etc.
                                             "sink_error",
                                             e.to_string(),
-                                            /* processing_duration_ms */ 0,
                                             /* final_attempt */ false,
                                         );
 
@@ -285,6 +286,7 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                             flow_name:  self.context.flow_name.clone(),
                                             flow_id:    self.context.flow_id.to_string(),
                                             stage_name: self.context.stage_name.clone(),
+                                            stage_id: self.stage_id.clone(),
                                             stage_type: StageType::Sink,
                                         };
 

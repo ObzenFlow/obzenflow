@@ -47,12 +47,14 @@ fn create_system_middleware(
     config: &StageConfig, 
     stage_type: StageType,
 ) -> Vec<Box<dyn Middleware>> {
+    tracing::info!("Creating system middleware for stage '{}' of type {:?}", config.name, stage_type);
     vec![
         Box::new(TimingMiddleware::new(&config.name)),
         Box::new(SystemEnrichmentMiddleware::new(
             config.flow_name.clone(),
             config.flow_name.clone(), // flow_id same as flow_name for now
             config.name.clone(),
+            config.stage_id,
             stage_type,
         )),
         Box::new(OutcomeEnrichmentMiddleware::new(&config.name)),

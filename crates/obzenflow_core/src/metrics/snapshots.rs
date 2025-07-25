@@ -5,6 +5,10 @@
 
 use std::collections::HashMap;
 use serde::{Serialize, Deserialize};
+use crate::time::MetricsDuration;
+use crate::id::StageId;
+use crate::metrics::Percentile;
+use crate::event::context::StageType;
 
 /// Snapshot of application-level metrics derived from the event stream
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -13,65 +17,73 @@ pub struct AppMetricsSnapshot {
     pub timestamp: chrono::DateTime<chrono::Utc>,
     
     /// Event counts by stage
-    pub event_counts: HashMap<String, u64>,
+    pub event_counts: HashMap<StageId, u64>,
     
     /// Error counts by stage
-    pub error_counts: HashMap<String, u64>,
+    pub error_counts: HashMap<StageId, u64>,
     
     /// Processing time histograms by stage (in seconds)
-    pub processing_times: HashMap<String, HistogramSnapshot>,
+    pub processing_times: HashMap<StageId, HistogramSnapshot>,
     
     /// In-flight events by stage
-    pub in_flight: HashMap<String, f64>,
-    
+    pub in_flight: HashMap<StageId, f64>,
     
     /// CPU usage ratio by stage (0.0-1.0)
-    pub cpu_usage_ratio: HashMap<String, f64>,
+    pub cpu_usage_ratio: HashMap<StageId, f64>,
     
     /// Memory usage in bytes by stage
-    pub memory_bytes: HashMap<String, f64>,
+    pub memory_bytes: HashMap<StageId, f64>,
     
     /// SAAFE metrics - anomalies total by stage
-    pub anomalies_total: HashMap<String, u64>,
+    pub anomalies_total: HashMap<StageId, u64>,
     
     /// SAAFE metrics - amendments total by stage
-    pub amendments_total: HashMap<String, u64>,
+    pub amendments_total: HashMap<StageId, u64>,
     
     /// SAAFE metrics - saturation ratio by stage (0.0-1.0)
-    pub saturation_ratio: HashMap<String, f64>,
+    pub saturation_ratio: HashMap<StageId, f64>,
     
     /// SAAFE metrics - failures total by stage (critical failures)
-    pub failures_total: HashMap<String, u64>,
+    pub failures_total: HashMap<StageId, u64>,
     
     /// USE metrics - event loops total by stage
-    pub event_loops_total: HashMap<String, u64>,
+    pub event_loops_total: HashMap<StageId, u64>,
     
     /// USE metrics - event loops with work by stage
-    pub event_loops_with_work_total: HashMap<String, u64>,
+    pub event_loops_with_work_total: HashMap<StageId, u64>,
     
     /// Flow-level latency histograms by flow name (in seconds)
-    pub flow_latency_seconds: HashMap<String, HistogramSnapshot>,
+    pub flow_latency_seconds: HashMap<StageId, HistogramSnapshot>,
     
     /// Dropped events by flow name
-    pub dropped_events: HashMap<String, f64>,
+    pub dropped_events: HashMap<StageId, f64>,
     
     /// Circuit breaker state by stage (0=closed, 0.5=half_open, 1=open)
-    pub circuit_breaker_state: HashMap<String, f64>,
+    pub circuit_breaker_state: HashMap<StageId, f64>,
     
     /// Circuit breaker rejection rate by stage (0.0-1.0)
-    pub circuit_breaker_rejection_rate: HashMap<String, f64>,
+    pub circuit_breaker_rejection_rate: HashMap<StageId, f64>,
     
     /// Circuit breaker consecutive failures by stage
-    pub circuit_breaker_consecutive_failures: HashMap<String, f64>,
+    pub circuit_breaker_consecutive_failures: HashMap<StageId, f64>,
     
     /// Rate limiter delay rate by stage (0.0-1.0)
-    pub rate_limiter_delay_rate: HashMap<String, f64>,
+    pub rate_limiter_delay_rate: HashMap<StageId, f64>,
     
     /// Rate limiter utilization by stage (0.0-1.0)
-    pub rate_limiter_utilization: HashMap<String, f64>,
+    pub rate_limiter_utilization: HashMap<StageId, f64>,
     
     /// Flow-level metrics (if journey events are implemented)
     pub flow_metrics: Option<FlowMetricsSnapshot>,
+    
+    /// Stage metadata for display and categorization
+    pub stage_metadata: HashMap<StageId, StageMetadata>,
+    
+    /// First event time for each stage (for rate calculation)
+    pub stage_first_event_time: HashMap<StageId, chrono::DateTime<chrono::Utc>>,
+    
+    /// Last event time for each stage (for rate calculation)  
+    pub stage_last_event_time: HashMap<StageId, chrono::DateTime<chrono::Utc>>,
 }
 
 /// Snapshot of infrastructure-level metrics from direct observation
@@ -84,7 +96,7 @@ pub struct InfraMetricsSnapshot {
     pub journal_metrics: JournalMetricsSnapshot,
     
     /// Stage-level infrastructure metrics
-    pub stage_metrics: HashMap<String, StageInfraMetrics>,
+    pub stage_metrics: HashMap<StageId, StageInfraMetrics>,
 }
 
 /// Histogram data for a single metric
@@ -103,7 +115,7 @@ pub struct HistogramSnapshot {
     pub max: f64,
     
     /// Percentiles (0.5, 0.9, 0.95, 0.99)
-    pub percentiles: HashMap<String, f64>,
+    pub percentiles: HashMap<Percentile, f64>,
 }
 
 /// Flow-level metrics (for future journey events)
@@ -117,6 +129,12 @@ pub struct FlowMetricsSnapshot {
     
     /// End-to-end latency histogram
     pub e2e_latency: HistogramSnapshot,
+    
+    /// Total duration of the flow (wall clock time)
+    pub flow_duration: MetricsDuration,
+    
+    /// Total number of events processed across all stages
+    pub total_events_processed: u64,
 }
 
 /// Journal performance metrics
@@ -144,6 +162,19 @@ pub struct StageInfraMetrics {
     pub in_flight: u64,
 }
 
+/// Stage metadata for display and categorization
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StageMetadata {
+    /// Human-readable stage name (e.g., "event_source", "processor", "event_sink")
+    pub name: String,
+    
+    /// Stage type for categorization
+    pub stage_type: StageType,
+    
+    /// Flow name this stage belongs to
+    pub flow_name: String,
+}
+
 impl Default for AppMetricsSnapshot {
     fn default() -> Self {
         Self {
@@ -168,6 +199,9 @@ impl Default for AppMetricsSnapshot {
             rate_limiter_delay_rate: HashMap::new(),
             rate_limiter_utilization: HashMap::new(),
             flow_metrics: None,
+            stage_metadata: HashMap::new(),
+            stage_first_event_time: HashMap::new(),
+            stage_last_event_time: HashMap::new(),
         }
     }
 }

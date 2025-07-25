@@ -15,13 +15,14 @@ use crate::{
     },
 };
 use obzenflow_core::{
-    metrics::MetricsExporter,
+    metrics::{MetricsExporter, StageMetadata},
     journal::journal::Journal,
     event::{ChainEvent, SystemEvent},
     StageId,
 };
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use std::collections::HashMap;
 
 /// Builder for creating a metrics aggregator with proper FSM lifecycle
 pub struct MetricsAggregatorBuilder {
@@ -33,6 +34,9 @@ pub struct MetricsAggregatorBuilder {
     
     /// Metrics exporter
     exporter: Arc<dyn MetricsExporter>,
+    
+    /// Stage metadata for display and categorization
+    stage_metadata: HashMap<StageId, StageMetadata>,
     
     config: DefaultMetricsConfig,
     export_interval_secs: u64,
@@ -49,6 +53,7 @@ impl MetricsAggregatorBuilder {
             stage_journals,
             system_journal,
             exporter,
+            stage_metadata: HashMap::new(),
             config: DefaultMetricsConfig::default(),
             export_interval_secs: 10, // Default to 10 seconds
         }
@@ -63,6 +68,12 @@ impl MetricsAggregatorBuilder {
     /// Set the export interval in seconds
     pub fn with_export_interval(mut self, seconds: u64) -> Self {
         self.export_interval_secs = seconds;
+        self
+    }
+    
+    /// Set stage metadata for display and categorization
+    pub fn with_stage_metadata(mut self, metadata: HashMap<StageId, StageMetadata>) -> Self {
+        self.stage_metadata = metadata;
         self
     }
     
@@ -85,6 +96,7 @@ impl SupervisorBuilder for MetricsAggregatorBuilder {
                 Some(self.exporter),
                 self.export_interval_secs,
                 system_id,
+                self.stage_metadata,
             )
             .await
             .map_err(|e| BuilderError::Other(e))?

@@ -5,6 +5,7 @@
 
 use obzenflow_core::{ChainEvent, Result};
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryPayload, DeliveryResult, DeliveryMethod};
+use obzenflow_core::time::MetricsDuration;
 use obzenflow_runtime_services::stages::common::handlers::SinkHandler;
 use super::{Middleware, MiddlewareAction, ErrorAction, MiddlewareContext};
 use async_trait::async_trait;
@@ -66,7 +67,6 @@ impl<H: SinkHandler> MiddlewareSink<H> {
                     return Ok(DeliveryPayload::success(
                         "middleware_sink",
                         DeliveryMethod::Noop,
-                        0, // processing_duration_ms
                         None, // bytes_processed
                     ));
                 },
@@ -75,7 +75,6 @@ impl<H: SinkHandler> MiddlewareSink<H> {
                     return Ok(DeliveryPayload::success(
                         "middleware_sink",
                         DeliveryMethod::Noop,
-                        0, // processing_duration_ms
                         None, // bytes_processed
                     ));
                 }
@@ -90,7 +89,31 @@ impl<H: SinkHandler> MiddlewareSink<H> {
                 for middleware in &self.middleware_chain {
                     middleware.post_handle(&event, &empty, &mut ctx);
                 }
-                Ok(payload)
+                
+                // Extract timing from context if available (set by TimingMiddleware)
+                let enhanced_payload = if let Some(start_value) = ctx.get_baggage("processing_start_nanos") {
+                    if let Some(start_nanos) = start_value.as_u64() {
+                        let now_nanos = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap()
+                            .as_nanos() as u64;
+                        let duration_nanos = now_nanos - start_nanos;
+                        let duration = MetricsDuration::from_nanos(duration_nanos);
+                        
+                        tracing::debug!(
+                            "SinkMiddleware: Enriching delivery payload with processing_duration={}",
+                            duration
+                        );
+                        
+                        payload.with_processing_duration(duration)
+                    } else {
+                        payload
+                    }
+                } else {
+                    payload
+                };
+                
+                Ok(enhanced_payload)
             }
             Err(e) => {
                 // Give each middleware a chance to handle the error
@@ -102,7 +125,6 @@ impl<H: SinkHandler> MiddlewareSink<H> {
                             return Ok(DeliveryPayload::success(
                                 "middleware_sink",
                                 DeliveryMethod::Noop,
-                                0, // processing_duration_ms
                                 None, // bytes_processed
                             ));
                         },
@@ -207,7 +229,6 @@ mod tests {
             Ok(DeliveryPayload::success(
                 "test_sink",
                 DeliveryMethod::Noop,
-                100,
                 None
             ))
         }

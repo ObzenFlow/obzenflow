@@ -3,19 +3,19 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
-use obzenflow_adapters::middleware::{circuit_breaker, rate_limit};
 use obzenflow_core::{
-    event::{chain_event::ChainEvent, event_id::EventId},
-    journal::writer_id::WriterId,
+    event::chain_event::{ChainEvent, ChainEventFactory},
+    WriterId,
+    id::StageId,
+    time::MetricsDuration,
 };
 use obzenflow_dsl_infra::{flow, sink, source, transform};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime_services::stages::common::handlers::{
     FiniteSourceHandler, SinkHandler, TransformHandler,
 };
-use obzenflow_runtime_services::supervised_base::SupervisorHandle;
+use obzenflow_core::event::payloads::delivery_payload::{DeliveryPayload, DeliveryMethod};
 use serde_json::json;
-use tokio::time::Duration;
 
 /// Simple source that generates 100 events
 #[derive(Clone, Debug)]
@@ -28,7 +28,7 @@ impl TestSource {
     fn new() -> Self {
         Self {
             count: 0,
-            writer_id: WriterId::new(),
+            writer_id: WriterId::from(StageId::new()),
         }
     }
 }
@@ -44,8 +44,7 @@ impl FiniteSourceHandler for TestSource {
         // Every 10th event will fail
         let should_fail = self.count % 10 == 0;
 
-        Some(ChainEvent::new(
-            EventId::new(),
+        Some(ChainEventFactory::data_event(
             self.writer_id.clone(),
             "test.request",
             json!({
@@ -69,19 +68,29 @@ impl TransformHandler for TestTransform {
     fn process(&self, event: ChainEvent) -> Vec<ChainEvent> {
         // Add some processing time
         let start = std::time::Instant::now();
-        std::thread::sleep(Duration::from_millis(5));
+        std::thread::sleep(std::time::Duration::from_millis(5));
         let elapsed = start.elapsed();
 
-        if event.payload["should_fail"].as_bool().unwrap_or(false) {
+        let payload = event.payload();
+        if payload["should_fail"].as_bool().unwrap_or(false) {
             // Return error event
-            let mut error = event.clone();
-            error.event_type = "error".to_string();
-            error.payload["_debug_sleep_ms"] = serde_json::json!(elapsed.as_millis());
-            vec![error]
+            let mut error_payload = payload.clone();
+            error_payload["_debug_sleep_ms"] = serde_json::json!(elapsed.as_millis());
+            vec![ChainEventFactory::derived_data_event(
+                event.writer_id.clone(),
+                &event,
+                "error",
+                error_payload,
+            )]
         } else {
-            let mut result = event;
-            result.payload["_debug_sleep_ms"] = serde_json::json!(elapsed.as_millis());
-            vec![result]
+            let mut result_payload = payload.clone();
+            result_payload["_debug_sleep_ms"] = serde_json::json!(elapsed.as_millis());
+            vec![ChainEventFactory::derived_data_event(
+                event.writer_id.clone(),
+                &event,
+                event.event_type(),
+                result_payload,
+            )]
         }
     }
 
@@ -102,22 +111,33 @@ impl TestSink {
     }
 }
 
+#[async_trait]
 impl SinkHandler for TestSink {
-    fn consume(&mut self, _event: ChainEvent) -> obzenflow_core::Result<()> {
+    async fn consume(&mut self, _event: ChainEvent) -> obzenflow_core::Result<DeliveryPayload> {
         self.count += 1;
-        Ok(())
+        
+        Ok(DeliveryPayload::success(
+            "test_sink",
+            DeliveryMethod::Custom("InMemory".to_string()),
+            Some(1), // One event processed
+        ))
     }
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Set environment to use console exporter for nice summaries
+    std::env::set_var("OBZENFLOW_METRICS_EXPORTER", "console");
+    
     // Initialize logging
     tracing_subscriber::fmt()
-        .with_env_filter("obzenflow=debug,raw_metrics_demo=debug")
+        .with_env_filter("obzenflow=debug,raw_metrics_demo_10k=debug")
+        .with_target(true)
+        .with_thread_ids(true)
         .init();
 
-    println!("🚀 Raw Metrics Demo - Showing Prometheus Output");
-    println!("==============================================\n");
+    println!("🚀 Flow Metrics Demo - 10K Events");
+    println!("===================================\n");
 
     // Create journal path for disk journals
     let journal_path = std::path::PathBuf::from("target/raw_metrics_demo_journal");
@@ -157,74 +177,15 @@ async fn main() -> Result<()> {
 
     println!("\n✅ Flow completed!");
 
-    // Get the metrics text after completion
-    let metrics_text = if let Some(exporter) = metrics_exporter {
-        exporter
+    // Get the metrics summary after completion
+    if let Some(exporter) = metrics_exporter {
+        let summary = exporter
             .render_metrics()
-            .map_err(|e| anyhow::anyhow!("Failed to render metrics: {}", e))?
+            .map_err(|e| anyhow::anyhow!("Failed to render metrics: {}", e))?;
+        println!("{}", summary);
     } else {
-        "No metrics exporter configured".to_string()
-    };
-
-    println!("{}", "=".repeat(80));
-    println!("RAW PROMETHEUS METRICS OUTPUT (This is what Grafana scrapes):");
-    println!("{}", "=".repeat(80));
-    println!();
-    println!("{}", metrics_text);
-    println!();
-    println!("{}", "=".repeat(80));
-
-    // Parse and display summary
-    println!("\n📊 Summary:");
-
-    // Count total events
-    let source_events: u64 = metrics_text
-        .lines()
-        .filter(|l| l.starts_with("obzenflow_events_total") && l.contains("event_source"))
-        .filter_map(|l| l.split_whitespace().last())
-        .filter_map(|v| v.parse::<u64>().ok())
-        .sum();
-
-    let sink_events: u64 = metrics_text
-        .lines()
-        .filter(|l| l.starts_with("obzenflow_events_total") && l.contains("event_sink"))
-        .filter_map(|l| l.split_whitespace().last())
-        .filter_map(|v| v.parse::<u64>().ok())
-        .sum();
-
-    println!("  Source generated: {} events", source_events);
-    println!("  Sink consumed: {} events", sink_events);
-
-    // Check dropped events
-    if let Some(dropped_line) = metrics_text
-        .lines()
-        .find(|l| l.starts_with("obzenflow_dropped_events"))
-    {
-        if let Some(count) = dropped_line.split_whitespace().last() {
-            println!("  Dropped events: {}", count);
-        }
+        println!("No metrics exporter configured");
     }
-
-    // Check circuit breaker state
-    if let Some(cb_line) = metrics_text
-        .lines()
-        .find(|l| l.contains("obzenflow_circuit_breaker_state"))
-    {
-        if cb_line.ends_with("1") {
-            println!("  Circuit breaker: OPEN ⚠️");
-        } else if cb_line.ends_with("0.5") {
-            println!("  Circuit breaker: HALF-OPEN ⚡");
-        } else {
-            println!("  Circuit breaker: CLOSED ✅");
-        }
-    }
-
-    println!("\n💡 Key Metrics Explained:");
-    println!("  - events_total: Total events processed by each stage");
-    println!("  - duration_seconds: Processing time histograms");
-    println!("  - dropped_events: Events lost in the pipeline");
-    println!("  - circuit_breaker_state: 0=closed, 1=open, 0.5=half-open");
-    println!("  - rate_limiter_*: Rate limiting metrics");
 
     Ok(())
 }

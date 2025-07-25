@@ -436,10 +436,11 @@ mod tests {
         ChainEvent,
         EventId,
         WriterId,
+        StageId,
         EventEnvelope,
-        event::processing_outcome::ProcessingOutcome,
-        event::flow_context::{FlowContext, StageType},
-        event::processing_info::ProcessingInfo,
+        event::status::processing_status::ProcessingStatus,
+        event::context::{FlowContext, StageType, ProcessingContext},
+        time::Duration,
     };
     use serde_json::json;
     
@@ -448,7 +449,7 @@ mod tests {
         Arc::new(Mutex::new(agg))
     }
     
-    fn create_test_envelope(flow: &str, stage: &str, processing_time_ms: u64, outcome: ProcessingOutcome) -> EventEnvelope {
+    fn create_test_envelope(flow: &str, stage: &str, processing_time_ms: u64, outcome: ProcessingStatus) -> EventEnvelope {
         let mut event = ChainEvent::data(
             EventId::new(),
             WriterId::from(StageId::new()),
@@ -463,9 +464,9 @@ mod tests {
             stage_type: StageType::Transform,
         };
         
-        event.processing_info = ProcessingInfo {
-            processing_time_ms,
-            outcome,
+        event.processing_info = ProcessingContext {
+            processing_time: Duration::from_millis(processing_time_ms),
+            status: outcome,
             ..Default::default()
         };
         
@@ -494,15 +495,15 @@ mod tests {
             let mut aggregator = agg.lock().unwrap();
             
             // Success event
-            let envelope1 = create_test_envelope("test_flow", "transform1", 100, ProcessingOutcome::Success);
+            let envelope1 = create_test_envelope("test_flow", "transform1", 100, ProcessingStatus::Success);
             aggregator.process_event(&envelope1);
             
             // Error event
-            let envelope2 = create_test_envelope("test_flow", "transform1", 50, ProcessingOutcome::Error("test error".to_string()));
+            let envelope2 = create_test_envelope("test_flow", "transform1", 50, ProcessingStatus::Error("test error".to_string()));
             aggregator.process_event(&envelope2);
             
             // Another stage
-            let envelope3 = create_test_envelope("test_flow", "transform2", 200, ProcessingOutcome::Success);
+            let envelope3 = create_test_envelope("test_flow", "transform2", 200, ProcessingStatus::Success);
             aggregator.process_event(&envelope3);
         }
         
@@ -619,9 +620,9 @@ mod tests {
                 stage_name: "order_api".to_string(),
                 stage_type: StageType::InfiniteSource,
             };
-            source_event.processing_info = ProcessingInfo {
-                processing_time_ms: 10,
-                outcome: ProcessingOutcome::Success,
+            source_event.processing_info = ProcessingContext {
+                processing_time: Duration::from_millis(10),
+                status: ProcessingStatus::Success,
                 ..Default::default()
             };
             

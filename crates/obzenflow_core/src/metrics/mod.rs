@@ -7,9 +7,13 @@ pub mod observer;
 pub mod exporter;
 pub mod snapshots;
 pub mod primitives;
+pub mod percentile;
+
 pub use exporter::{MetricsExporter, NoOpMetricsExporter};
 pub use snapshots::{
     AppMetricsSnapshot, InfraMetricsSnapshot, HistogramSnapshot,
-    FlowMetricsSnapshot, JournalMetricsSnapshot, StageInfraMetrics
+    FlowMetricsSnapshot, JournalMetricsSnapshot, StageInfraMetrics,
+    StageMetadata
 };
 pub use primitives::{Counter, Gauge, Histogram};
+pub use percentile::{Percentile, PercentileExt};

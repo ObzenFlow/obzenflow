@@ -6,7 +6,7 @@ use crate::message_bus::FsmMessageBus;
 use obzenflow_core::StageId;
 use obzenflow_core::id::SystemId;
 use obzenflow_core::journal::journal::Journal;
-use obzenflow_core::event::{SystemEvent, WriterId, ChainEvent, ChainEventFactory, ChainEventContent, SystemEventFactory, constants};
+use obzenflow_core::event::{SystemEvent, WriterId, ChainEvent, ChainEventFactory, ChainEventContent, SystemEventFactory, constants, context::StageType};
 use obzenflow_fsm::{FsmBuilder, StateMachine, Transition, StateVariant, EventVariant, FsmAction, FsmContext};
 use std::sync::Arc;
 use std::collections::HashMap;
@@ -266,12 +266,29 @@ impl FsmAction for PipelineAction {
                     
                     let system_journal = context.system_journal.clone();
                     
+                    // Build stage metadata from topology and stage supervisors
+                    let supervisors = context.stage_supervisors.read().await;
+                    let mut stage_metadata = std::collections::HashMap::new();
+                    
+                    for (stage_id, stage_handle) in supervisors.iter() {
+                        if let Some(stage_info) = context.topology.stage_info(*stage_id) {
+                            let metadata = obzenflow_core::metrics::StageMetadata {
+                                name: stage_info.name.clone(),
+                                stage_type: stage_handle.stage_type(),
+                                flow_name: context.topology.flow_name(),
+                            };
+                            stage_metadata.insert(*stage_id, metadata);
+                        }
+                    }
+                    drop(supervisors);
+                    
                     // Spawn metrics aggregator using the builder pattern
                     tokio::spawn(async move {
                         use crate::metrics::MetricsAggregatorBuilder;
                         use crate::supervised_base::SupervisorBuilder;
                         
                         match MetricsAggregatorBuilder::new(stage_journals, system_journal, exporter)
+                            .with_stage_metadata(stage_metadata)
                             .with_export_interval(10) // 10 second interval
                             .build()
                             .await

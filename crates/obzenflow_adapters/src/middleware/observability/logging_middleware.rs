@@ -183,7 +183,6 @@ mod tests {
                 Ok(DeliveryPayload::success(
                     "test_sink",               // destination
                     DeliveryMethod::Noop,      // no real I/O
-                    0,                         // processing_duration_ms
                     None,                      // bytes_processed
                 ))
             }

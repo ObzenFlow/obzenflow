@@ -5,6 +5,7 @@
 
 use crate::middleware::{Middleware, MiddlewareAction, ErrorAction, MiddlewareContext, MiddlewareFactory};
 use obzenflow_core::event::chain_event::ChainEvent;
+use obzenflow_core::time::MetricsDuration;
 use obzenflow_runtime_services::pipeline::config::StageConfig;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -27,13 +28,21 @@ impl TimingMiddleware {
 }
 
 impl Middleware for TimingMiddleware {
-    fn pre_handle(&self, _event: &ChainEvent, ctx: &mut MiddlewareContext) -> MiddlewareAction {
+    fn pre_handle(&self, event: &ChainEvent, ctx: &mut MiddlewareContext) -> MiddlewareAction {
         // Record the start time in the context as nanoseconds since epoch
         let start_nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos() as u64;
         ctx.set_baggage("processing_start_nanos", serde_json::json!(start_nanos));
+        
+        tracing::trace!(
+            "TimingMiddleware[{}]: pre_handle for event {} at {}ns",
+            self.stage_name,
+            event.id,
+            start_nanos
+        );
+        
         MiddlewareAction::Continue
     }
     
@@ -55,25 +64,23 @@ impl Middleware for TimingMiddleware {
                     .unwrap()
                     .as_nanos() as u64;
                 let duration_nanos = now_nanos - start_nanos;
-                let duration_ms = duration_nanos / 1_000_000;
+                let duration = MetricsDuration::from_nanos(duration_nanos);
                 
-                // Add processing time to the event's processing_info
-                event.processing_info.processing_time_ms = duration_ms;
+                // Store duration
+                event.processing_info.processing_time = duration;
 
-                tracing::debug!(
-                    "TimingMiddleware: Added {}ms processing time to event {} (stage: {}) [{}ns total]", 
-                    duration_ms, 
-                    event.id,
+                tracing::info!(
+                    "TimingMiddleware[{}]: Set processing_time={} for event {}", 
                     self.stage_name,
-                    duration_nanos
+                    duration,
+                    event.id,
                 );
                 
                 // Log warning if timing seems too low for processor stage
-                if self.stage_name.contains("processor") && duration_ms < 5 {
+                if self.stage_name.contains("processor") && duration.as_nanos() < 5_000_000 {
                     tracing::warn!(
-                        "TimingMiddleware: Processor timing seems too low: {}ms ({}ns) for event {}",
-                        duration_ms,
-                        duration_nanos,
+                        "TimingMiddleware: Processor timing seems too low: {} for event {}",
+                        duration,
                         event.id
                     );
                 }
@@ -98,7 +105,6 @@ mod tests {
     use obzenflow_core::{EventId, WriterId, StageId};
     use serde_json::json;
     use std::thread;
-    use std::time::Duration;
     use obzenflow_core::event::ChainEventFactory;
 
     #[test]
@@ -120,14 +126,14 @@ mod tests {
         assert!(ctx.get_baggage("processing_start_nanos").is_some());
         
         // Simulate some processing time
-        thread::sleep(Duration::from_millis(10));
+        thread::sleep(MetricsDuration::from_millis(10).to_std());
         
         // Pre-write should add the timing
         let mut result_event = event.clone();
         middleware.pre_write(&mut result_event, &ctx);
         
-        // Check that processing time was added
-        assert!(result_event.processing_info.processing_time_ms >= 9); // Allow for timing variance
+        // Check that processing time was added (in nanoseconds)
+        assert!(result_event.processing_info.processing_time.as_nanos() >= 9_000_000); // Allow for timing variance
     }
     
     #[test]
@@ -144,8 +150,8 @@ mod tests {
         // Pre-write should handle missing start time gracefully
         middleware.pre_write(&mut event, &ctx);
         
-        // Processing time should remain at default (0)
-        assert_eq!(event.processing_info.processing_time_ms, 0);
+        // Processing time should remain at default (ZERO)
+        assert_eq!(event.processing_info.processing_time, MetricsDuration::ZERO);
     }
 }
 

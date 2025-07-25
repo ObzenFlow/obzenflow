@@ -3,7 +3,6 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
-use obzenflow_adapters::middleware::rate_limit;
 use obzenflow_core::{
     event::chain_event::{ChainEvent, ChainEventFactory},
     WriterId,
@@ -36,7 +35,7 @@ impl TestSource {
 
 impl FiniteSourceHandler for TestSource {
     fn next(&mut self) -> Option<ChainEvent> {
-        if self.count >= 20 {
+        if self.count >= 10_000 {
             return None;
         }
 
@@ -56,7 +55,7 @@ impl FiniteSourceHandler for TestSource {
     }
 
     fn is_complete(&self) -> bool {
-        self.count >= 20
+        self.count >= 10_000
     }
 }
 
@@ -127,24 +126,20 @@ impl SinkHandler for TestSink {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Set environment to use console exporter for nice summaries
-    std::env::set_var("OBZENFLOW_METRICS_EXPORTER", "console");
+    // Set environment to use prometheus exporter
+    std::env::set_var("OBZENFLOW_METRICS_EXPORTER", "prometheus");
     
-    // Initialize logging with rate limiter at trace level to see detailed traces
+    // Initialize logging
     tracing_subscriber::fmt()
-        .with_env_filter("obzenflow=debug,raw_metrics_demo=debug,obzenflow_adapters::middleware::rate_limiter=trace")
+        .with_env_filter("obzenflow=info,raw_metrics_demo_prometheus_10k=info")
         .with_target(true)
         .with_thread_ids(true)
         .init();
 
-    println!("🚀 Flow Metrics Demo - Console Summary");
-    println!("=====================================\n");
-
     // Create journal path for disk journals
-    let journal_path = std::path::PathBuf::from("target/raw_metrics_demo_journal");
-    println!("📁 Using DiskJournal at: {}", journal_path.display());
+    let journal_path = std::path::PathBuf::from("target/raw_metrics_prometheus_demo_journal");
 
-    println!("📊 Creating flow with automatic metrics...\n");
+    println!("▶️  Running flow...\n");
 
     // Create flow with middleware
     let flow_handle = flow! {
@@ -157,9 +152,7 @@ async fn main() -> Result<()> {
             src = source!("event_source" => TestSource::new());
 
             // Transform with middleware
-            trans = transform!("processor" => TestTransform, [
-                rate_limit(0.5)  // 0.5 events per second
-            ]);
+            trans = transform!("processor" => TestTransform, []);
 
             // Sink
             snk = sink!("event_sink" => TestSink::new());
@@ -178,14 +171,12 @@ async fn main() -> Result<()> {
     // Run the flow to completion and get the metrics exporter
     let metrics_exporter = flow_handle.run_with_metrics().await?;
 
-    println!("\n✅ Flow completed!");
-
-    // Get the metrics summary after completion
+    // Get the Prometheus metrics output
     if let Some(exporter) = metrics_exporter {
-        let summary = exporter
+        let prometheus_output = exporter
             .render_metrics()
             .map_err(|e| anyhow::anyhow!("Failed to render metrics: {}", e))?;
-        println!("{}", summary);
+        println!("{}", prometheus_output);
     } else {
         println!("No metrics exporter configured");
     }

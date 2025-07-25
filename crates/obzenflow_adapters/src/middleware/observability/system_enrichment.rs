@@ -8,6 +8,7 @@ use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::context::{FlowContext, StageType};
 use obzenflow_core::event::CorrelationId;
 use obzenflow_core::event::payloads::correlation_payload::CorrelationPayload;
+use obzenflow_core::StageId;
 use obzenflow_runtime_services::pipeline::config::StageConfig;
 
 /// Middleware that ensures events have proper flow context
@@ -19,6 +20,7 @@ pub struct SystemEnrichmentMiddleware {
     flow_name: String,
     flow_id: String,
     stage_name: String,
+    stage_id: StageId,
     stage_type: StageType,
 }
 
@@ -28,12 +30,14 @@ impl SystemEnrichmentMiddleware {
         flow_name: impl Into<String>,
         flow_id: impl Into<String>,
         stage_name: impl Into<String>,
+        stage_id: StageId,
         stage_type: StageType,
     ) -> Self {
         Self {
             flow_name: flow_name.into(),
             flow_id: flow_id.into(),
             stage_name: stage_name.into(),
+            stage_id,
             stage_type,
         }
     }
@@ -61,6 +65,7 @@ impl Middleware for SystemEnrichmentMiddleware {
                 flow_name: self.flow_name.clone(),
                 flow_id: self.flow_id.clone(),
                 stage_name: self.stage_name.clone(),
+                stage_id: self.stage_id.clone(),
                 stage_type: self.stage_type,
             };
             
@@ -81,6 +86,7 @@ impl Middleware for SystemEnrichmentMiddleware {
                     self.stage_name
                 );
                 event.flow_context.stage_name = self.stage_name.clone();
+                event.flow_context.stage_id = self.stage_id.clone();
                 event.flow_context.stage_type = self.stage_type;
             }
         }
@@ -134,6 +140,7 @@ impl Middleware for SystemEnrichmentMiddleware {
         if event.is_lifecycle() {
             // Control events should always have the context of the stage that generated them
             event.flow_context.stage_name = self.stage_name.clone();
+            event.flow_context.stage_id = self.stage_id.clone();
             event.flow_context.stage_type = self.stage_type;
         }
     }
@@ -152,6 +159,7 @@ mod tests {
             "test_flow",
             "flow-123",
             "test_stage",
+            StageId::new(),
             StageType::Transform
         );
         let ctx = MiddlewareContext::new();
@@ -181,6 +189,7 @@ mod tests {
             "test_flow",
             "flow-123", 
             "http_source",
+            StageId::new(),
             StageType::InfiniteSource
         );
         let ctx = MiddlewareContext::new();
@@ -213,6 +222,7 @@ mod tests {
             "test_flow",
             "flow-456",
             "validation",
+            StageId::new(),
             StageType::Transform
         );
         let ctx = MiddlewareContext::new();
@@ -240,6 +250,7 @@ mod tests {
             "test_flow",
             "flow-789",
             "rate_limiter_source",
+            StageId::new(),
             StageType::FiniteSource  // Even sources shouldn't add correlation to control events
         );
         let ctx = MiddlewareContext::new();
@@ -267,6 +278,7 @@ mod tests {
             "test_flow",
             "flow-999",
             "postgres_sink",
+            StageId::new(),
             StageType::Sink
         );
         let ctx = MiddlewareContext::new();
@@ -322,6 +334,7 @@ impl MiddlewareFactory for SystemEnrichmentMiddlewareFactory {
             &self.flow_name,
             &self.flow_id,
             &config.name,
+            config.stage_id,
             self.stage_type,
         ))
     }

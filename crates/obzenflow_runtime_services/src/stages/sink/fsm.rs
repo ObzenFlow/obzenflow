@@ -413,6 +413,7 @@ impl<H: SinkHandler + Send + Sync + 'static> FsmAction for SinkAction<H> {
                             flow_name:  ctx.flow_name.clone(),
                             flow_id:    ctx.flow_id.to_string(),
                             stage_name: ctx.stage_name.clone(),
+                            stage_id: ctx.stage_id.clone(),
                             stage_type: StageType::Sink,   // or whatever enum case
                         };
 
