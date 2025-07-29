@@ -1422,10 +1422,12 @@ name = "obzenflow_dsl_infra"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "indexmap",
  "obzenflow_adapters",
  "obzenflow_core",
  "obzenflow_runtime_services",
  "obzenflow_topology_services",
+ "serde",
  "tokio",
  "tokio-test",
  "tracing",

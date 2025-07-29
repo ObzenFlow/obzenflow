@@ -381,6 +381,7 @@ impl Middleware for RateLimiterMiddleware {
 }
 
 /// Factory for creating rate limiter middleware
+#[derive(Clone)]
 pub struct RateLimiterFactory {
     events_per_second: f64,
     burst_capacity: Option<f64>,

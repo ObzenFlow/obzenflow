@@ -7,6 +7,7 @@
 pub mod dsl;
 pub mod prelude;
 pub mod stage_handle_adapter;
+pub mod middleware_resolution;
 
 // Re-export modules
 pub use dsl::*;

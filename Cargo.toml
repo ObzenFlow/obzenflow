@@ -88,3 +88,7 @@ path = "examples/rate_limiting.rs"
 [[example]]
 name = "payment_gateway_resilience_example"
 path = "examples/payment_gateway_resilience_example.rs"
+
+[[example]]
+name = "flow_middleware_config"
+path = "examples/flow_middleware_config.rs"

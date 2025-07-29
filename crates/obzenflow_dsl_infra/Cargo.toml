@@ -7,7 +7,7 @@ license = "MIT OR Apache-2.0"
 publish = false
 
 [dependencies]
-# Internal dependencies - all layers needed for DSL (except infra)
+# Internal dependencies - all layers needed for DSL
 obzenflow_core = { path = "../obzenflow_core" }
 obzenflow_topology_services = { path = "../obzenflow_topology_services" }
 obzenflow_runtime_services = { path = "../obzenflow_runtime_services" }
@@ -17,6 +17,8 @@ obzenflow_adapters = { path = "../obzenflow_adapters" }
 tokio = { version = "1", features = ["full"] }
 async-trait = "0.1"
 tracing = "0.1"
+indexmap = "2.0"
+serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
 tokio-test = "0.4"

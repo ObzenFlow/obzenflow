@@ -45,8 +45,13 @@ macro_rules! flow {
                 ));
             )*
             
+            // Create closure for flow middleware
+            let create_flow_middleware = || vec![
+                $(Box::new($flow_mw) as Box<dyn obzenflow_adapters::middleware::MiddlewareFactory>),*
+            ];
+            
             // Build the flow
-            $crate::build_typed_flow!($flow_name, $journals, stages, connections, [$($flow_mw),*])
+            $crate::build_typed_flow!($flow_name, $journals, stages, connections, create_flow_middleware)
         }
     }};
     
@@ -88,8 +93,13 @@ macro_rules! flow {
                 ));
             )*
             
+            // Create closure for flow middleware
+            let create_flow_middleware = || vec![
+                $(Box::new($flow_mw) as Box<dyn obzenflow_adapters::middleware::MiddlewareFactory>),*
+            ];
+            
             // Build the flow with default name
-            $crate::build_typed_flow!("default", $journals, stages, connections, [$($flow_mw),*])
+            $crate::build_typed_flow!("default", $journals, stages, connections, create_flow_middleware)
         }
     }};
 }
@@ -97,7 +107,7 @@ macro_rules! flow {
 /// Build the actual flow from collected stages and connections
 #[macro_export]
 macro_rules! build_typed_flow {
-    ($flow_name:expr, $journals:expr, $stages:expr, $connections:expr, [$($flow_mw:expr),*]) => {{
+    ($flow_name:expr, $journals:expr, $stages:expr, $connections:expr, $create_flow_middleware:expr) => {{
         use $crate::prelude::*;
         use std::sync::Arc;
         use std::collections::HashMap;
@@ -105,6 +115,7 @@ macro_rules! build_typed_flow {
         let journal_factory_provider = $journals;
         let stages = $stages;
         let connections = $connections;
+        let create_flow_middleware = $create_flow_middleware;
         
         // Build topology
         let mut builder = TopologyBuilder::new();
@@ -196,6 +207,8 @@ macro_rules! build_typed_flow {
         let mut stages = Vec::new();
         let mut stage_resources = stage_resources_set.stage_resources;
         
+        // We need to create wrapped descriptors that will merge middleware
+        // This is done by wrapping the existing descriptors
         for (name, id) in name_to_id {
             if let Some(descriptor) = descriptors.remove(&name) {
                 let config = StageConfig {
@@ -208,7 +221,12 @@ macro_rules! build_typed_flow {
                 let resources = stage_resources.remove(&id)
                     .ok_or_else(|| format!("No resources found for stage {:?}", id))?;
                 
-                let handle = descriptor.create_handle(config, resources).await
+                // Create handle with fresh flow middleware
+                let handle = descriptor.create_handle_with_flow_middleware(
+                    config, 
+                    resources,
+                    create_flow_middleware()  // Fresh factories for each stage
+                ).await
                     .map_err(|e| format!("Failed to create stage '{}': {}", name, e))?;
                 stages.push(handle);
             }

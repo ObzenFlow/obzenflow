@@ -101,6 +101,17 @@ pub trait StageDescriptor: Send + Sync {
         self: Box<Self>, 
         config: StageConfig, 
         resources: StageResources
+    ) -> Result<BoxedStageHandle, String> {
+        // Default implementation without flow middleware
+        self.create_handle_with_flow_middleware(config, resources, vec![]).await
+    }
+    
+    /// Create the handle for this stage with flow-level middleware
+    async fn create_handle_with_flow_middleware(
+        self: Box<Self>, 
+        config: StageConfig, 
+        resources: StageResources,
+        flow_middleware: Vec<Box<dyn MiddlewareFactory>>
     ) -> Result<BoxedStageHandle, String>;
     
     /// Get a debug representation
@@ -126,10 +137,11 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> S
         StageType::FiniteSource
     }
     
-    async fn create_handle(
+    async fn create_handle_with_flow_middleware(
         self: Box<Self>, 
         config: StageConfig, 
-        resources: StageResources
+        resources: StageResources,
+        flow_middleware: Vec<Box<dyn MiddlewareFactory>>
     ) -> Result<BoxedStageHandle, String> {
         let writer_id = WriterId::from(config.stage_id);
         
@@ -137,16 +149,29 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> S
         let instrumentation_config = InstrumentationConfig::default();
         let instrumentation = Arc::new(StageInstrumentation::new_with_config(instrumentation_config));
         
+        // Resolve flow and stage middleware
+        let resolved = crate::middleware_resolution::resolve_middleware(
+            flow_middleware,
+            self.middleware,
+            &config.name
+        );
+        
+        // Log the resolution
+        crate::middleware_resolution::log_resolved_middleware(
+            &config.name,
+            &resolved
+        );
+        
         // Create system middleware with instrumentation
         let mut all_middleware = create_system_middleware(
             &config, 
             StageType::FiniteSource
         );
         
-        // Add user middleware
-        let user_middleware: Vec<Box<dyn Middleware>> = self.middleware
+        // Add resolved user middleware
+        let user_middleware: Vec<Box<dyn Middleware>> = resolved.middleware
             .into_iter()
-            .map(|factory| factory.create(&config))
+            .map(|spec| spec.factory.create(&config))
             .collect();
         all_middleware.extend(user_middleware);
         
@@ -206,10 +231,11 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
         StageType::InfiniteSource
     }
     
-    async fn create_handle(
+    async fn create_handle_with_flow_middleware(
         self: Box<Self>, 
         config: StageConfig, 
-        resources: StageResources
+        resources: StageResources,
+        flow_middleware: Vec<Box<dyn MiddlewareFactory>>
     ) -> Result<BoxedStageHandle, String> {
         let writer_id = WriterId::from(config.stage_id);
         
@@ -217,16 +243,29 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
         let instrumentation_config = InstrumentationConfig::default();
         let instrumentation = Arc::new(StageInstrumentation::new_with_config(instrumentation_config));
         
+        // Resolve flow and stage middleware
+        let resolved = crate::middleware_resolution::resolve_middleware(
+            flow_middleware,
+            self.middleware,
+            &config.name
+        );
+        
+        // Log the resolution
+        crate::middleware_resolution::log_resolved_middleware(
+            &config.name,
+            &resolved
+        );
+        
         // Create system middleware with instrumentation
         let mut all_middleware = create_system_middleware(
             &config, 
             StageType::InfiniteSource
         );
         
-        // Add user middleware
-        let user_middleware: Vec<Box<dyn Middleware>> = self.middleware
+        // Add resolved user middleware
+        let user_middleware: Vec<Box<dyn Middleware>> = resolved.middleware
             .into_iter()
-            .map(|factory| factory.create(&config))
+            .map(|spec| spec.factory.create(&config))
             .collect();
         all_middleware.extend(user_middleware);
         
@@ -286,10 +325,11 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stag
         StageType::Transform
     }
     
-    async fn create_handle(
+    async fn create_handle_with_flow_middleware(
         self: Box<Self>, 
         config: StageConfig, 
-        resources: StageResources
+        resources: StageResources,
+        flow_middleware: Vec<Box<dyn MiddlewareFactory>>
     ) -> Result<BoxedStageHandle, String> {
         // Validate middleware safety
         for factory in &self.middleware {
@@ -308,10 +348,28 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stag
             }
         }
         
-        // Create control strategy from middleware factories
+        // Create control strategy before moving middleware
         let control_strategy = create_control_strategy_from_factories(
             &self.middleware,
             &self.name,
+        );
+        
+        // Resolve flow and stage middleware
+        let resolved = crate::middleware_resolution::resolve_middleware(
+            flow_middleware,
+            self.middleware,
+            &config.name
+        );
+        
+        // Log the resolution
+        crate::middleware_resolution::log_resolved_middleware(
+            &config.name,
+            &resolved
+        );
+        
+        tracing::warn!(
+            "Control strategy created from stage middleware only - flow middleware not included for stage '{}'",
+            &config.name
         );
         
         // Create instrumentation configuration
@@ -324,10 +382,10 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stag
             StageType::Transform
         );
         
-        // Add user middleware
-        let user_middleware: Vec<Box<dyn Middleware>> = self.middleware
+        // Add resolved user middleware
+        let user_middleware: Vec<Box<dyn Middleware>> = resolved.middleware
             .into_iter()
-            .map(|factory| factory.create(&config))
+            .map(|spec| spec.factory.create(&config))
             .collect();
         all_middleware.extend(user_middleware);
         
@@ -393,10 +451,11 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
         StageType::Sink
     }
     
-    async fn create_handle(
+    async fn create_handle_with_flow_middleware(
         self: Box<Self>, 
         config: StageConfig, 
-        resources: StageResources
+        resources: StageResources,
+        flow_middleware: Vec<Box<dyn MiddlewareFactory>>
     ) -> Result<BoxedStageHandle, String> {
         // Validate middleware safety
         for factory in &self.middleware {
@@ -415,10 +474,23 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
             }
         }
         
-        // Create control strategy from middleware factories
+        // Create control strategy before moving middleware
         let _control_strategy = create_control_strategy_from_factories(
-            &self.middleware,
+            &self.middleware,  // TODO: Use resolved middleware once MiddlewareFactory supports clone
             &self.name,
+        );
+        
+        // Resolve flow and stage middleware
+        let resolved = crate::middleware_resolution::resolve_middleware(
+            flow_middleware,
+            self.middleware,
+            &config.name
+        );
+        
+        // Log the resolution
+        crate::middleware_resolution::log_resolved_middleware(
+            &config.name,
+            &resolved
         );
         
         // Create instrumentation configuration
@@ -431,10 +503,10 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
             StageType::Sink
         );
         
-        // Add user middleware
-        let user_middleware: Vec<Box<dyn Middleware>> = self.middleware
+        // Add resolved user middleware
+        let user_middleware: Vec<Box<dyn Middleware>> = resolved.middleware
             .into_iter()
-            .map(|factory| factory.create(&config))
+            .map(|spec| spec.factory.create(&config))
             .collect();
         all_middleware.extend(user_middleware);
         
