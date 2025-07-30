@@ -127,6 +127,9 @@ pub struct FlowMetricsSnapshot {
     /// Number of sealed journeys
     pub journeys_sealed: u64,
     
+    /// Number of abandoned journeys (timed out)
+    pub journeys_abandoned: u64,
+    
     /// End-to-end latency histogram
     pub e2e_latency: HistogramSnapshot,
     
@@ -135,6 +138,24 @@ pub struct FlowMetricsSnapshot {
     
     /// Total number of events processed across all stages
     pub total_events_processed: u64,
+    
+    /// Events entering from sources only
+    pub events_in: u64,
+    
+    /// Events exiting through sinks only
+    pub events_out: u64,
+    
+    /// Total errors across all stages
+    pub errors_total: u64,
+    
+    /// Total event loops across all stages
+    pub event_loops_total: u64,
+    
+    /// Event loops with work across all stages
+    pub event_loops_with_work_total: u64,
+    
+    /// Active journeys count (saturation metric)
+    pub saturation_journeys: u64,
 }
 
 /// Journal performance metrics

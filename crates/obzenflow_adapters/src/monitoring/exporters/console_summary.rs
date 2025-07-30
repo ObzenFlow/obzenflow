@@ -78,37 +78,6 @@ impl ConsoleSummaryExporter {
             // Calculate total events (should be sum of all stages but avoiding double counting)
             let total_events = source_events.max(sink_events).max(transform_events);
             
-            // Flow-level metrics
-            summary.push_str("📈 Flow Summary:\n");
-            
-            // Calculate rate from flow metrics if available
-            let rate_str = if let Some(flow_metrics) = &snapshot.flow_metrics {
-                let duration_secs = flow_metrics.flow_duration.as_secs_f64();
-                if duration_secs > 0.0 && flow_metrics.total_events_processed > 0 {
-                    format!("{:.1}", flow_metrics.total_events_processed as f64 / duration_secs)
-                } else {
-                    "N/A".to_string()
-                }
-            } else {
-                "N/A".to_string()
-            };
-            
-            summary.push_str(&format!("  Rate:        {} events/sec", rate_str));
-            
-            summary.push_str(&format!("  Total Events: {}", total_events));
-            
-            summary.push_str(&format!("  Total Errors: {} ({:.1}%)\n\n", 
-                total_errors,
-                if total_events > 0 {
-                    (total_errors as f64 / total_events as f64) * 100.0
-                } else {
-                    0.0
-                }
-            ));
-            
-            // Per-stage RED metrics
-            summary.push_str("📊 RED Metrics by Stage:\n");
-            
             // Format duration helper
             let format_duration = |ms: f64| -> String {
                 if ms < 0.01 {
@@ -121,6 +90,89 @@ impl ConsoleSummaryExporter {
                     format!("{:.0}ms", ms)  // No decimal places for >= 10ms
                 }
             };
+            
+            // Flow-level metrics
+            summary.push_str("📈 Flow Summary:\n");
+            
+            if let Some(flow_metrics) = &snapshot.flow_metrics {
+                // Calculate rate from flow metrics
+                let duration_secs = flow_metrics.flow_duration.as_secs_f64();
+                let rate = if duration_secs > 0.0 && flow_metrics.events_in > 0 {
+                    flow_metrics.events_in as f64 / duration_secs
+                } else {
+                    0.0
+                };
+                
+                summary.push_str(&format!("  Rate:              {:.1} events/sec\n", rate));
+                summary.push_str(&format!("  Events In:         {} (from sources)\n", flow_metrics.events_in));
+                summary.push_str(&format!("  Events Out:        {} (to sinks)\n", flow_metrics.events_out));
+                summary.push_str(&format!("  Errors:            {} ({:.1}%)\n", 
+                    flow_metrics.errors_total,
+                    if flow_metrics.events_in > 0 {
+                        (flow_metrics.errors_total as f64 / flow_metrics.events_in as f64) * 100.0
+                    } else {
+                        0.0
+                    }
+                ));
+                
+                // Journey metrics
+                summary.push_str("\n🚀 Journey Tracking:\n");
+                summary.push_str(&format!("  Started:           {}\n", flow_metrics.journeys_opened));
+                summary.push_str(&format!("  Completed:         {}\n", flow_metrics.journeys_sealed));
+                let abandoned = flow_metrics.journeys_opened.saturating_sub(flow_metrics.journeys_sealed);
+                summary.push_str(&format!("  Abandoned:         {} ({:.1}%)\n", 
+                    abandoned,
+                    if flow_metrics.journeys_opened > 0 {
+                        (abandoned as f64 / flow_metrics.journeys_opened as f64) * 100.0
+                    } else {
+                        0.0
+                    }
+                ));
+                summary.push_str(&format!("  Active:            {} (saturation)\n", flow_metrics.saturation_journeys));
+                
+                // E2E latency percentiles
+                if flow_metrics.e2e_latency.count > 0 {
+                    summary.push_str("\n⏱️  E2E Latency:\n");
+                    let p50 = flow_metrics.e2e_latency.percentiles.get(&Percentile::P50)
+                        .map(|&v| format_duration(v / 1_000_000.0))
+                        .unwrap_or_else(|| "N/A".to_string());
+                    let p90 = flow_metrics.e2e_latency.percentiles.get(&Percentile::P90)
+                        .map(|&v| format_duration(v / 1_000_000.0))
+                        .unwrap_or_else(|| "N/A".to_string());
+                    let p99 = flow_metrics.e2e_latency.percentiles.get(&Percentile::P99)
+                        .map(|&v| format_duration(v / 1_000_000.0))
+                        .unwrap_or_else(|| "N/A".to_string());
+                    summary.push_str(&format!("  p50: {}, p90: {}, p99: {}\n", p50, p90, p99));
+                }
+                
+                // Utilization
+                let utilization = if flow_metrics.event_loops_total > 0 {
+                    flow_metrics.event_loops_with_work_total as f64 / flow_metrics.event_loops_total as f64 * 100.0
+                } else {
+                    0.0
+                };
+                summary.push_str(&format!("\n📊 Utilization:     {:.1}%", utilization));
+                if utilization > 90.0 {
+                    summary.push_str(" ⚠️");
+                }
+                summary.push_str("\n\n");
+            } else {
+                // Fallback to stage-based calculations
+                let rate_str = "N/A";
+                summary.push_str(&format!("  Rate:        {} events/sec", rate_str));
+                summary.push_str(&format!("  Total Events: {}", total_events));
+                summary.push_str(&format!("  Total Errors: {} ({:.1}%)\n\n", 
+                    total_errors,
+                    if total_events > 0 {
+                        (total_errors as f64 / total_events as f64) * 100.0
+                    } else {
+                        0.0
+                    }
+                ));
+            }
+            
+            // Per-stage RED metrics
+            summary.push_str("📊 RED Metrics by Stage:\n");
             
             // Collect and sort stages by type and name
             let mut stages: Vec<(&StageId, &StageMetadata)> = snapshot.stage_metadata.iter().collect();

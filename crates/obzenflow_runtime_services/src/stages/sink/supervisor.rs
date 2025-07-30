@@ -257,7 +257,8 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                         )
                                             .with_flow_context(flow_context)
                                             .with_runtime_context(self.context.instrumentation.snapshot())
-                                            .with_causality(CausalityContext::with_parent(envelope.event.id));
+                                            .with_causality(CausalityContext::with_parent(envelope.event.id))
+                                            .with_correlation_from(&envelope.event);
 
                                         self.context
                                             .data_journal
@@ -293,7 +294,8 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                         let fail_event = ChainEventFactory::delivery_event(writer_id, fail_payload)
                                             .with_flow_context(flow_ctx)
                                             .with_runtime_context(self.context.instrumentation.snapshot())
-                                            .with_causality(CausalityContext::with_parent(envelope.event.id));
+                                            .with_causality(CausalityContext::with_parent(envelope.event.id))
+                                            .with_correlation_from(&envelope.event);
 
                                         self.context
                                             .data_journal

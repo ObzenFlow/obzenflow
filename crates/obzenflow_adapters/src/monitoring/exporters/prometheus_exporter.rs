@@ -384,22 +384,81 @@ impl PrometheusExporter {
         
         // Flow metrics (if available)
         if let Some(ref flow_metrics) = snapshot.flow_metrics {
-            // Journey counts
-            writeln!(output, "# HELP obzenflow_journeys_opened_total Number of event journeys started")?;
-            writeln!(output, "# TYPE obzenflow_journeys_opened_total counter")?;
-            writeln!(output, "obzenflow_journeys_opened_total {}", flow_metrics.journeys_opened)?;
+            // Get flow name from stage metadata (all stages belong to same flow)
+            let flow_name = snapshot.stage_metadata.values()
+                .next()
+                .map(|m| m.flow_name.as_str())
+                .unwrap_or("unknown");
+            
+            // Journey tracking counters
+            writeln!(output, "# HELP obzenflow_flow_journeys_started_total Number of event journeys started")?;
+            writeln!(output, "# TYPE obzenflow_flow_journeys_started_total counter")?;
+            writeln!(output, "obzenflow_flow_journeys_started_total{{flow=\"{}\"}} {}", flow_name, flow_metrics.journeys_opened)?;
             writeln!(output)?;
             
-            writeln!(output, "# HELP obzenflow_journeys_sealed_total Number of event journeys completed")?;
-            writeln!(output, "# TYPE obzenflow_journeys_sealed_total counter")?;
-            writeln!(output, "obzenflow_journeys_sealed_total {}", flow_metrics.journeys_sealed)?;
+            writeln!(output, "# HELP obzenflow_flow_journeys_completed_total Number of event journeys completed")?;
+            writeln!(output, "# TYPE obzenflow_flow_journeys_completed_total counter")?;
+            writeln!(output, "obzenflow_flow_journeys_completed_total{{flow=\"{}\"}} {}", flow_name, flow_metrics.journeys_sealed)?;
             writeln!(output)?;
             
-            // Dropped events (opened - sealed)
-            let dropped = flow_metrics.journeys_opened.saturating_sub(flow_metrics.journeys_sealed);
-            writeln!(output, "# HELP obzenflow_dropped_events_total Number of events that didn't complete their journey")?;
-            writeln!(output, "# TYPE obzenflow_dropped_events_total gauge")?;
-            writeln!(output, "obzenflow_dropped_events_total {}", dropped)?;
+            writeln!(output, "# HELP obzenflow_flow_journeys_abandoned_total Number of event journeys abandoned")?;
+            writeln!(output, "# TYPE obzenflow_flow_journeys_abandoned_total counter")?;
+            writeln!(output, "obzenflow_flow_journeys_abandoned_total{{flow=\"{}\"}} {}", flow_name, flow_metrics.journeys_abandoned)?;
+            writeln!(output)?;
+            
+            // Event counts
+            writeln!(output, "# HELP obzenflow_flow_events_in_total Events entering from sources")?;
+            writeln!(output, "# TYPE obzenflow_flow_events_in_total counter")?;
+            writeln!(output, "obzenflow_flow_events_in_total{{flow=\"{}\"}} {}", flow_name, flow_metrics.events_in)?;
+            writeln!(output)?;
+            
+            writeln!(output, "# HELP obzenflow_flow_events_out_total Events exiting through sinks")?;
+            writeln!(output, "# TYPE obzenflow_flow_events_out_total counter")?;
+            writeln!(output, "obzenflow_flow_events_out_total{{flow=\"{}\"}} {}", flow_name, flow_metrics.events_out)?;
+            writeln!(output)?;
+            
+            writeln!(output, "# HELP obzenflow_flow_errors_total Total errors across all stages")?;
+            writeln!(output, "# TYPE obzenflow_flow_errors_total counter")?;
+            writeln!(output, "obzenflow_flow_errors_total{{flow=\"{}\"}} {}", flow_name, flow_metrics.errors_total)?;
+            writeln!(output)?;
+            
+            // Work tracking
+            writeln!(output, "# HELP obzenflow_flow_event_loops_total Total event loops across all stages")?;
+            writeln!(output, "# TYPE obzenflow_flow_event_loops_total counter")?;
+            writeln!(output, "obzenflow_flow_event_loops_total{{flow=\"{}\"}} {}", flow_name, flow_metrics.event_loops_total)?;
+            writeln!(output)?;
+            
+            writeln!(output, "# HELP obzenflow_flow_event_loops_with_work_total Event loops with work across all stages")?;
+            writeln!(output, "# TYPE obzenflow_flow_event_loops_with_work_total counter")?;
+            writeln!(output, "obzenflow_flow_event_loops_with_work_total{{flow=\"{}\"}} {}", flow_name, flow_metrics.event_loops_with_work_total)?;
+            writeln!(output)?;
+            
+            // Gauges
+            let utilization = if flow_metrics.event_loops_total > 0 {
+                flow_metrics.event_loops_with_work_total as f64 / flow_metrics.event_loops_total as f64
+            } else {
+                0.0
+            };
+            writeln!(output, "# HELP obzenflow_flow_utilization Flow utilization (0.0-1.0)")?;
+            writeln!(output, "# TYPE obzenflow_flow_utilization gauge")?;
+            writeln!(output, "obzenflow_flow_utilization{{flow=\"{}\"}} {}", flow_name, utilization)?;
+            writeln!(output)?;
+            
+            writeln!(output, "# HELP obzenflow_flow_saturation_journeys Active journeys (backpressure indicator)")?;
+            writeln!(output, "# TYPE obzenflow_flow_saturation_journeys gauge")?;
+            writeln!(output, "obzenflow_flow_saturation_journeys{{flow=\"{}\"}} {}", flow_name, flow_metrics.saturation_journeys)?;
+            writeln!(output)?;
+            
+            // Journey duration histogram
+            writeln!(output, "# HELP obzenflow_flow_journey_duration_seconds End-to-end journey duration")?;
+            writeln!(output, "# TYPE obzenflow_flow_journey_duration_seconds histogram")?;
+            self.render_histogram(
+                output,
+                "obzenflow_flow_journey_duration_seconds",
+                &[("flow", flow_name)],
+                &flow_metrics.e2e_latency,
+                1_000_000_000.0, // Convert nanoseconds to seconds
+            )?;
             writeln!(output)?;
         }
         
