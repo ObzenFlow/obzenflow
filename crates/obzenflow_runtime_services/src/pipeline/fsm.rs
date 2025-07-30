@@ -190,14 +190,15 @@ impl FsmAction for PipelineAction {
             }
             
             PipelineAction::NotifySourceStart => {
-                // Find the source stage (stage with no upstreams) and trigger FSM transition
+                // Find ALL source stages (stages with no upstreams) and trigger FSM transition
                 let supervisors = context.stage_supervisors.read().await;
-                let source_id = supervisors.iter()
-                    .find(|(stage_id, _)| context.topology.upstream_stages(**stage_id).is_empty())
-                    .map(|(stage_id, _)| *stage_id);
+                let source_ids: Vec<_> = supervisors.iter()
+                    .filter(|(stage_id, _)| context.topology.upstream_stages(**stage_id).is_empty())
+                    .map(|(stage_id, _)| *stage_id)
+                    .collect();
                 drop(supervisors);
                     
-                if let Some(source_id) = source_id {
+                for source_id in source_ids {
                     tracing::info!("Starting source stage: {:?}", source_id);
                     
                     // Get the source supervisor and send Start event
@@ -206,6 +207,7 @@ impl FsmAction for PipelineAction {
                         stage.start().await
                             .map_err(|e| format!("Failed to start source stage: {}", e))?;
                     }
+                    drop(supervisors);
                 }
             }
             
