@@ -39,6 +39,35 @@ impl CausalityContext {
     pub fn parent_count(&self) -> usize {
         self.parent_ids.len()
     }
+    
+    /// Check if this event is in a cycle (event ID appears in its own lineage)
+    pub fn contains_cycle(&self, event_id: &EventId) -> bool {
+        self.parent_ids.contains(event_id)
+    }
+    
+    /// Get the full lineage including the given event
+    pub fn full_lineage(&self, event_id: EventId) -> Vec<EventId> {
+        let mut lineage = vec![event_id];
+        lineage.extend(self.parent_ids.clone());
+        lineage
+    }
+    
+    /// Find the cycle if one exists
+    pub fn find_cycle(&self, event_id: &EventId) -> Option<Vec<EventId>> {
+        if let Some(pos) = self.parent_ids.iter().position(|id| id == event_id) {
+            // Return the cycle: from the repeated event to the end
+            let mut cycle = self.parent_ids[pos..].to_vec();
+            cycle.push(*event_id); // Complete the cycle
+            Some(cycle)
+        } else {
+            None
+        }
+    }
+    
+    /// Get the depth of the lineage (number of ancestors)
+    pub fn depth(&self) -> usize {
+        self.parent_ids.len()
+    }
 }
 
 impl Default for CausalityContext {

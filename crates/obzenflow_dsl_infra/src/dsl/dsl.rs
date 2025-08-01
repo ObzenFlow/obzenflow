@@ -3,6 +3,31 @@
 //! This is now a clean implementation using the let bindings approach that
 //! separates stage declaration from topology definition.
 
+/// Parse topology edges supporting both |> and <| operators
+#[macro_export]
+macro_rules! parse_topology {
+    // Base case - no more edges
+    ($connections:expr,) => {};
+    
+    // Forward edge: from |> to;
+    ($connections:expr, $from:ident |> $to:ident; $($rest:tt)*) => {
+        $connections.push((
+            stringify!($from).to_string(),
+            stringify!($to).to_string()
+        ));
+        $crate::parse_topology!($connections, $($rest)*);
+    };
+    
+    // Backward edge: from <| to; (reversed)
+    ($connections:expr, $from:ident <| $to:ident; $($rest:tt)*) => {
+        $connections.push((
+            stringify!($to).to_string(),    // Note: reversed!
+            stringify!($from).to_string()
+        ));
+        $crate::parse_topology!($connections, $($rest)*);
+    };
+}
+
 /// The main flow! macro using the clean typed approach
 #[macro_export]
 macro_rules! flow {
@@ -17,7 +42,9 @@ macro_rules! flow {
         },
         
         topology: {
-            $($from:ident |> $to:ident;)*
+            $(
+                $edge:tt
+            )*
         }
     } => {{
         async move {
@@ -38,12 +65,10 @@ macro_rules! flow {
             
             // Create connections
             let mut connections: Vec<(String, String)> = Vec::new();
-            $(
-                connections.push((
-                    stringify!($from).to_string(), 
-                    stringify!($to).to_string()
-                ));
-            )*
+            
+            // Parse topology edges
+            $crate::parse_topology!(connections, $($edge)*);
+            
             
             // Create closure for flow middleware
             let create_flow_middleware = || vec![
@@ -65,7 +90,9 @@ macro_rules! flow {
         },
         
         topology: {
-            $($from:ident |> $to:ident;)*
+            $(
+                $edge:tt
+            )*
         }
     } => {{
         async move {
@@ -86,12 +113,10 @@ macro_rules! flow {
             
             // Create connections
             let mut connections: Vec<(String, String)> = Vec::new();
-            $(
-                connections.push((
-                    stringify!($from).to_string(), 
-                    stringify!($to).to_string()
-                ));
-            )*
+            
+            // Parse topology edges
+            $crate::parse_topology!(connections, $($edge)*);
+            
             
             // Create closure for flow middleware
             let create_flow_middleware = || vec![
@@ -166,6 +191,7 @@ macro_rules! build_typed_flow {
         ).map_err(|e| format!("Failed to create system journal: {:?}", e))?;
         
         let mut stage_journals = HashMap::new();
+        let mut error_journals = HashMap::new();
         for (name, &stage_id) in name_to_id.iter() {
             // Get the descriptor to access stage type and name
             let descriptor = descriptors.get(name)
@@ -180,6 +206,17 @@ macro_rules! build_typed_flow {
                 JournalOwner::stage(stage_id)
             ).map_err(|e| format!("Failed to create journal for stage {:?}: {:?}", stage_id, e))?;
             stage_journals.insert(stage_id, journal);
+            
+            // Create error journal for this stage (FLOWIP-082e)
+            let error_journal = journal_factory.create_chain_journal(
+                JournalName::Stage {
+                    id: stage_id,
+                    stage_type: descriptor.stage_type(),
+                    name: format!("{}_error", descriptor.name()),
+                },
+                JournalOwner::stage(stage_id)
+            ).map_err(|e| format!("Failed to create error journal for stage {:?}: {:?}", stage_id, e))?;
+            error_journals.insert(stage_id, error_journal);
         }
         
         // Use StageResourcesBuilder to handle all the complex wiring
@@ -191,6 +228,7 @@ macro_rules! build_typed_flow {
             topology.clone(),
             control_journal,
             stage_journals,
+            error_journals,
         );
         
         let stage_resources_set = resources_builder.build()
@@ -221,11 +259,31 @@ macro_rules! build_typed_flow {
                 let resources = stage_resources.remove(&id)
                     .ok_or_else(|| format!("No resources found for stage {:?}", id))?;
                 
-                // Create handle with fresh flow middleware
+                // Check if this stage is in a cycle and needs CycleGuard
+                let mut flow_middleware = create_flow_middleware();
+                let is_in_cycle = topology.is_in_cycle(id);
+                tracing::info!(
+                    "Checking stage '{}' (id={:?}) for cycles: {}",
+                    name,
+                    id,
+                    is_in_cycle
+                );
+                
+                if is_in_cycle {
+                    tracing::info!(
+                        "Stage '{}' detected in cycle, auto-attaching CycleGuard middleware",
+                        name
+                    );
+                    // Add CycleGuard middleware with a reasonable default (10 iterations)
+                    use obzenflow_adapters::middleware::control::cycle_guard;
+                    flow_middleware.push(cycle_guard(10));
+                }
+                
+                // Create handle with flow middleware (including CycleGuard if needed)
                 let handle = descriptor.create_handle_with_flow_middleware(
                     config, 
                     resources,
-                    create_flow_middleware()  // Fresh factories for each stage
+                    flow_middleware
                 ).await
                     .map_err(|e| format!("Failed to create stage '{}': {}", name, e))?;
                 stages.push(handle);
@@ -238,7 +296,8 @@ macro_rules! build_typed_flow {
         
         let builder = PipelineBuilder::new(topology.clone(), stage_resources_set.system_journal.clone())
             .with_stages(stages)
-            .with_stage_journals(stage_resources_set.stage_journals.clone());
+            .with_stage_journals(stage_resources_set.stage_journals.clone())
+            .with_error_journals(stage_resources_set.error_journals.clone());
         
         let builder = if let Some(exporter) = metrics_exporter {
             builder.with_metrics(exporter)

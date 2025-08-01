@@ -5,6 +5,7 @@
 
 use obzenflow_core::{ChainEvent, Result};
 use obzenflow_core::event::ChainEventFactory;
+use obzenflow_core::event::status::processing_status::ProcessingStatus;
 use obzenflow_runtime_services::stages::common::handlers::TransformHandler;
 use super::{Middleware, MiddlewareAction, MiddlewareContext};
 use async_trait::async_trait;
@@ -86,7 +87,11 @@ impl<H: TransformHandler> MiddlewareTransform<H> {
                     results.extend(control_events);
                     return results;
                 },
-                MiddlewareAction::Abort => return vec![],
+                MiddlewareAction::Abort => {
+                    let mut err = event.clone();
+                    err.processing_info.status = ProcessingStatus::Error("aborted by middleware".into());
+                    return vec![err];
+                },
             }
         }
         
@@ -128,6 +133,11 @@ impl<H: TransformHandler> MiddlewareTransform<H> {
 #[async_trait]
 impl<H: TransformHandler> TransformHandler for MiddlewareTransform<H> {
     fn process(&self, event: ChainEvent) -> Vec<ChainEvent> {
+        // Short-circuit if event already has Error status
+        if matches!(event.processing_info.status, ProcessingStatus::Error(_)) {
+            tracing::debug!("MiddlewareTransform: Skipping event with Error status: {:?}", event.processing_info.status);
+            return vec![event];
+        }
         self.apply_middleware(event, |e| self.inner.process(e))
     }
     

@@ -6,7 +6,8 @@
 use super::base::{EventLoopDirective, Supervisor};
 use obzenflow_fsm::FsmAction;
 use obzenflow_core::event::WriterId;
-use obzenflow_core::StageId;
+use obzenflow_core::{ChainEvent, StageId};
+use obzenflow_core::event::status::processing_status::ProcessingStatus;
 use tokio::task::JoinHandle;
 
 /// Trait for handler-supervised components
@@ -30,6 +31,19 @@ pub trait HandlerSupervised: Supervisor {
     
     /// Write a completion event when the stage terminates
     async fn write_completion_event(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
+    
+    /// Helper method to run a processing function only if the event doesn't have Error status
+    /// If the event has Error status, it's passed through unchanged
+    fn run_if_not_error<F>(&self, event: ChainEvent, next: F) -> Vec<ChainEvent>
+    where
+        F: FnOnce(ChainEvent) -> Vec<ChainEvent>,
+    {
+        if matches!(event.processing_info.status, ProcessingStatus::Error(_)) {
+            vec![event] // pass straight through
+        } else {
+            next(event)
+        }
+    }
 }
 
 /// Extension trait to add run functionality to any HandlerSupervised type

@@ -4,6 +4,9 @@ use crate::topology::DirectedEdge;
 use crate::validation::TopologyError;
 
 /// Complete topology with efficient traversal
+/// 
+/// As of FLOWIP-082, topologies support cycles to enable feedback loops,
+/// retry patterns, and iterative processing via the `<|` operator
 #[derive(Debug, Clone)]
 pub struct Topology {
     stages: HashMap<StageId, StageInfo>,
@@ -16,7 +19,7 @@ pub struct Topology {
 }
 
 impl Topology {
-    /// Construct and validate topology
+    /// Construct and validate topology (enforces acyclic constraint for backward compatibility)
     pub fn new(stages: Vec<StageInfo>, edges: Vec<DirectedEdge>) -> Result<Self, TopologyError> {
         let stage_map: HashMap<StageId, StageInfo> = stages
             .into_iter()
@@ -58,9 +61,22 @@ impl Topology {
             upstream.entry(edge.to).or_default().insert(edge.from);
         }
 
-        // Validate no cycles using topological sort
-        crate::validation::validate_acyclic(&stage_map, &downstream)?;
-
+        // Note: As of FLOWIP-082, we no longer enforce acyclic constraints
+        // Cycles are now allowed in topologies to support feedback loops,
+        // retry patterns, and iterative processing
+        
+        // However, self-cycles (stage -> stage) are forbidden
+        for edge in &edges {
+            if edge.from == edge.to {
+                let stage_name = stage_map.get(&edge.from)
+                    .map(|s| s.name.clone())
+                    .unwrap_or_else(|| edge.from.to_string());
+                return Err(TopologyError::SelfCycle { 
+                    stage: stage_name 
+                });
+            }
+        }
+        
         // Detect disconnected components
         if let Some(disconnected) = crate::validation::find_disconnected_stages(&stage_map, &downstream, &upstream) {
             return Err(TopologyError::DisconnectedStages { stages: disconnected });
@@ -201,7 +217,8 @@ impl Topology {
         }
     }
 
-    /// Calculate the maximum depth (longest path) in the DAG
+    /// Calculate the maximum depth (longest path) in the topology
+    /// For graphs with cycles, this returns the longest acyclic path
     fn calculate_max_depth(&self) -> usize {
         let mut depths: HashMap<StageId, usize> = HashMap::new();
         let sources = self.source_stages();
@@ -239,6 +256,44 @@ impl Topology {
             .get(&from)
             .map(|set| set.contains(&to))
             .unwrap_or(false)
+    }
+    
+    /// Check if a stage is part of a cycle (has a path back to itself)
+    pub fn is_in_cycle(&self, stage_id: StageId) -> bool {
+        // Use DFS to check if we can reach back to the stage from any of its downstream stages
+        let mut visited = HashSet::new();
+        
+        if let Some(downstream) = self.downstream.get(&stage_id) {
+            for &next_stage in downstream {
+                if self.has_path_dfs(next_stage, stage_id, &mut visited) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+    
+    /// Helper method for DFS path finding
+    fn has_path_dfs(&self, from: StageId, to: StageId, visited: &mut HashSet<StageId>) -> bool {
+        if from == to {
+            return true;
+        }
+        
+        if visited.contains(&from) {
+            return false;
+        }
+        
+        visited.insert(from);
+        
+        if let Some(downstream) = self.downstream.get(&from) {
+            for &next_stage in downstream {
+                if self.has_path_dfs(next_stage, to, visited) {
+                    return true;
+                }
+            }
+        }
+        
+        false
     }
 }
 
@@ -293,5 +348,54 @@ mod tests {
         assert_eq!(topology.downstream_stages(source).len(), 2);
         assert!(topology.downstream_stages(source).contains(&transform1));
         assert!(topology.downstream_stages(source).contains(&transform2));
+    }
+
+    #[test]
+    fn test_self_cycle_rejected() {
+        use crate::validation::TopologyError;
+        use crate::topology::DirectedEdge;
+        use crate::stages::{StageInfo, StageId};
+
+        let stage_id = StageId::new();
+        let stage = StageInfo::new(stage_id, "processor");
+        let stages = vec![stage.clone()];
+        
+        // Create self-cycle edge
+        let edges = vec![DirectedEdge::new(stage.id, stage.id)];
+
+        let result = super::Topology::new(stages, edges);
+        assert!(result.is_err());
+        
+        match result {
+            Err(TopologyError::SelfCycle { stage: name }) => {
+                assert_eq!(name, "processor");
+            }
+            _ => panic!("Expected SelfCycle error"),
+        }
+    }
+
+    #[test]
+    fn test_multi_stage_cycle_allowed() {
+        use crate::topology::DirectedEdge;
+        use crate::stages::{StageInfo, StageId};
+
+        let validator_id = StageId::new();
+        let fixer_id = StageId::new();
+        let validator = StageInfo::new(validator_id, "validator");
+        let fixer = StageInfo::new(fixer_id, "fixer");
+        let stages = vec![validator.clone(), fixer.clone()];
+        
+        // Create a cycle between two different stages (allowed)
+        let edges = vec![
+            DirectedEdge::new(validator.id, fixer.id),
+            DirectedEdge::new(fixer.id, validator.id),
+        ];
+
+        let result = super::Topology::new(stages, edges);
+        assert!(result.is_ok());
+        
+        let topology = result.unwrap();
+        assert!(topology.has_edge(validator.id, fixer.id));
+        assert!(topology.has_edge(fixer.id, validator.id));
     }
 }

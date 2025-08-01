@@ -32,6 +32,7 @@ pub struct PipelineBuilder {
     stages: Vec<BoxedStageHandle>,
     metrics_exporter: Option<Arc<dyn MetricsExporter>>,
     stage_journals: Option<Vec<(StageId, Arc<dyn Journal<ChainEvent>>)>>,
+    error_journals: Option<Vec<(StageId, Arc<dyn Journal<ChainEvent>>)>>,
 }
 
 impl PipelineBuilder {
@@ -43,6 +44,7 @@ impl PipelineBuilder {
             stages: Vec::new(),
             metrics_exporter: None,
             stage_journals: None,
+            error_journals: None,
         }
     }
 
@@ -64,6 +66,12 @@ impl PipelineBuilder {
         self
     }
 
+    /// Add error journals for error sink
+    pub fn with_error_journals(mut self, journals: Vec<(StageId, Arc<dyn Journal<ChainEvent>>)>) -> Self {
+        self.error_journals = Some(journals);
+        self
+    }
+
 }
 
 #[async_trait::async_trait]
@@ -73,6 +81,9 @@ impl SupervisorBuilder for PipelineBuilder {
 
     /// Build and start the pipeline, returning a FlowHandle
     async fn build(self) -> Result<Self::Handle, Self::Error> {
+        // ErrorSink will be automatically created by the flow DSL
+        // similar to how MetricsAggregator is created
+        
         // Create unique stage ID for the pipeline supervisor
         let _stage_id = StageId::new();
 
@@ -98,6 +109,7 @@ impl SupervisorBuilder for PipelineBuilder {
             running_stages: Arc::new(RwLock::new(std::collections::HashSet::new())),
             stage_supervisors: Arc::new(RwLock::new(stage_map)),
             stage_data_journals: Arc::new(RwLock::new(self.stage_journals.unwrap_or_default())),
+            stage_error_journals: Arc::new(RwLock::new(self.error_journals.unwrap_or_default())),
             completion_reader: Arc::new(RwLock::new(None)),
             metrics_exporter: self.metrics_exporter.clone(),
         });

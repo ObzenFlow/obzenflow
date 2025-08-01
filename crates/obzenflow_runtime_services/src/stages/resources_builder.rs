@@ -20,6 +20,9 @@ pub struct StageResources {
     /// Stage's own journal for writing data events
     pub data_journal: Arc<dyn Journal<ChainEvent>>,
     
+    /// Stage's own journal for writing error events (FLOWIP-082e)
+    pub error_journal: Arc<dyn Journal<ChainEvent>>,
+    
     /// Shared system journal for lifecycle events
     pub system_journal: Arc<dyn Journal<SystemEvent>>,
     
@@ -31,6 +34,9 @@ pub struct StageResources {
     
     /// List of upstream stage IDs
     pub upstream_stages: Vec<StageId>,
+    
+    /// All error journals from all stages (only populated for ErrorSink)
+    pub error_journals: Vec<(StageId, Arc<dyn Journal<ChainEvent>>)>,
 }
 
 /// Builder for creating all stage resources with proper wiring
@@ -40,6 +46,7 @@ pub struct StageResourcesBuilder {
     topology: Arc<Topology>,
     system_journal: Arc<dyn Journal<SystemEvent>>,
     stage_journals: HashMap<StageId, Arc<dyn Journal<ChainEvent>>>,
+    error_journals: HashMap<StageId, Arc<dyn Journal<ChainEvent>>>,
 }
 
 impl StageResourcesBuilder {
@@ -50,6 +57,7 @@ impl StageResourcesBuilder {
         topology: Arc<Topology>,
         system_journal: Arc<dyn Journal<SystemEvent>>,
         stage_journals: HashMap<StageId, Arc<dyn Journal<ChainEvent>>>,
+        error_journals: HashMap<StageId, Arc<dyn Journal<ChainEvent>>>,
     ) -> Self {
         Self {
             flow_id,
@@ -57,6 +65,7 @@ impl StageResourcesBuilder {
             topology,
             system_journal,
             stage_journals,
+            error_journals,
         }
     }
     
@@ -71,6 +80,9 @@ impl StageResourcesBuilder {
         // Keep track of all stage journals for metrics aggregator
         let mut all_stage_journals: Vec<(StageId, Arc<dyn Journal<ChainEvent>>)> = Vec::new();
         
+        // Keep track of all error journals for ErrorSink
+        let mut all_error_journals: Vec<(StageId, Arc<dyn Journal<ChainEvent>>)> = Vec::new();
+        
         for stage_info in self.topology.stages() {
             let stage_id = stage_info.id;
             
@@ -79,8 +91,16 @@ impl StageResourcesBuilder {
                 .ok_or_else(|| format!("No journal found for stage {:?}", stage_id))?
                 .clone();
             
+            // Get the stage's error journal
+            let error_journal = self.error_journals.get(&stage_id)
+                .ok_or_else(|| format!("No error journal found for stage {:?}", stage_id))?
+                .clone();
+            
             // Keep a reference for metrics aggregator
             all_stage_journals.push((stage_id, data_journal.clone()));
+            
+            // Keep a reference for ErrorSink
+            all_error_journals.push((stage_id, error_journal.clone()));
             
             // Get upstream journals
             let upstream_ids = self.topology.upstream_stages(stage_id);
@@ -96,10 +116,12 @@ impl StageResourcesBuilder {
             let resources = StageResources {
                 flow_id: self.flow_id.clone(),
                 data_journal,
+                error_journal,
                 system_journal: self.system_journal.clone(),
                 upstream_journals,
                 message_bus: message_bus.clone(),
                 upstream_stages: upstream_ids,
+                error_journals: Vec::new(),  // Will be populated specially for ErrorSink
             };
             
             stage_resources.insert(stage_id, resources);
@@ -110,6 +132,7 @@ impl StageResourcesBuilder {
             pipeline_system_id: self.pipeline_system_id,
             system_journal: self.system_journal,
             stage_journals: all_stage_journals,
+            error_journals: all_error_journals,
             stage_resources,
             message_bus,
         })
@@ -129,6 +152,9 @@ pub struct StageResourcesSet {
     
     /// All stage journals (for metrics aggregator to read)
     pub stage_journals: Vec<(StageId, Arc<dyn Journal<ChainEvent>>)>,
+    
+    /// All error journals (for ErrorSink to read) (FLOWIP-082e)
+    pub error_journals: Vec<(StageId, Arc<dyn Journal<ChainEvent>>)>,
     
     /// Resources for each stage
     pub stage_resources: HashMap<StageId, StageResources>,

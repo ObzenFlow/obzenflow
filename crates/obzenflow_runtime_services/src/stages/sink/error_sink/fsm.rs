@@ -1,6 +1,7 @@
-//! Sink stage FSM types and state machine definition
+//! Error sink stage FSM types and state machine definition
 //!
-//! Sinks consume events and write to external destinations.
+//! Error sinks consume error events from all stages' error journals
+//! and provide deduplication and hop budget enforcement.
 //! They have a unique "Flushing" state that ensures all buffered
 //! data is written before shutdown.
 
@@ -14,7 +15,7 @@ use std::marker::PhantomData;
 use futures::TryFutureExt;
 use tokio::sync::RwLock;
 use obzenflow_core::event::context::{FlowContext, StageType};
-use crate::stages::common::handlers::SinkHandler;
+use crate::stages::common::handlers::ErrorSinkHandler;
 use crate::metrics::instrumentation::StageInstrumentation;
 use crate::messaging::UpstreamSubscription;
 
@@ -22,9 +23,9 @@ use crate::messaging::UpstreamSubscription;
 // FSM States
 // ============================================================================
 
-/// FSM states for sink stages
+/// FSM states for error sink stages
 #[derive(Serialize, Deserialize)]
-pub enum SinkState<H> {
+pub enum ErrorSinkState<H> {
     /// Initial state - sink has been created but not initialized
     Created,
     
@@ -52,7 +53,7 @@ pub enum SinkState<H> {
 }
 
 // Manual implementations that don't require H to implement these traits
-impl<H> Clone for SinkState<H> {
+impl<H> Clone for ErrorSinkState<H> {
     fn clone(&self) -> Self {
         match self {
             Self::Created => Self::Created,
@@ -67,7 +68,7 @@ impl<H> Clone for SinkState<H> {
     }
 }
 
-impl<H> std::fmt::Debug for SinkState<H> {
+impl<H> std::fmt::Debug for ErrorSinkState<H> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Created => write!(f, "Created"),
@@ -82,32 +83,32 @@ impl<H> std::fmt::Debug for SinkState<H> {
     }
 }
 
-impl<H: Send + Sync> PartialEq for SinkState<H> {
+impl<H: Send + Sync> PartialEq for ErrorSinkState<H> {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
-            (SinkState::Created, SinkState::Created) => true,
-            (SinkState::Initialized, SinkState::Initialized) => true,
-            (SinkState::Running, SinkState::Running) => true,
-            (SinkState::Flushing, SinkState::Flushing) => true,
-            (SinkState::Draining, SinkState::Draining) => true,
-            (SinkState::Drained, SinkState::Drained) => true,
-            (SinkState::Failed(a), SinkState::Failed(b)) => a == b,
+            (ErrorSinkState::Created, ErrorSinkState::Created) => true,
+            (ErrorSinkState::Initialized, ErrorSinkState::Initialized) => true,
+            (ErrorSinkState::Running, ErrorSinkState::Running) => true,
+            (ErrorSinkState::Flushing, ErrorSinkState::Flushing) => true,
+            (ErrorSinkState::Draining, ErrorSinkState::Draining) => true,
+            (ErrorSinkState::Drained, ErrorSinkState::Drained) => true,
+            (ErrorSinkState::Failed(a), ErrorSinkState::Failed(b)) => a == b,
             _ => false,
         }
     }
 }
 
-impl<H: Send + Sync + 'static> StateVariant for SinkState<H> {
+impl<H: Send + Sync + 'static> StateVariant for ErrorSinkState<H> {
     fn variant_name(&self) -> &str {
         match self {
-            SinkState::Created => "Created",
-            SinkState::Initialized => "Initialized",
-            SinkState::Running => "Running",
-            SinkState::Flushing => "Flushing",  // Unique to sinks!
-            SinkState::Draining => "Draining",
-            SinkState::Drained => "Drained",
-            SinkState::Failed(_) => "Failed",
-            SinkState::_Phantom(_) => unreachable!("PhantomData variant"),
+            ErrorSinkState::Created => "Created",
+            ErrorSinkState::Initialized => "Initialized",
+            ErrorSinkState::Running => "Running",
+            ErrorSinkState::Flushing => "Flushing",  // Unique to sinks!
+            ErrorSinkState::Draining => "Draining",
+            ErrorSinkState::Drained => "Drained",
+            ErrorSinkState::Failed(_) => "Failed",
+            ErrorSinkState::_Phantom(_) => unreachable!("PhantomData variant"),
         }
     }
 }
@@ -116,8 +117,8 @@ impl<H: Send + Sync + 'static> StateVariant for SinkState<H> {
 // FSM Events
 // ============================================================================
 
-/// Events that can trigger sink state transitions
-pub enum SinkEvent<H> {
+/// Events that can trigger error sink state transitions
+pub enum ErrorSinkEvent<H> {
     /// Initialize the sink - open connections, create output files, etc.
     Initialize,
     
@@ -144,8 +145,8 @@ pub enum SinkEvent<H> {
     _Phantom(PhantomData<H>),
 }
 
-// Manual implementations for SinkEvent
-impl<H> Clone for SinkEvent<H> {
+// Manual implementations for ErrorSinkEvent
+impl<H> Clone for ErrorSinkEvent<H> {
     fn clone(&self) -> Self {
         match self {
             Self::Initialize => Self::Initialize,
@@ -160,7 +161,7 @@ impl<H> Clone for SinkEvent<H> {
     }
 }
 
-impl<H> std::fmt::Debug for SinkEvent<H> {
+impl<H> std::fmt::Debug for ErrorSinkEvent<H> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Initialize => write!(f, "Initialize"),
@@ -175,17 +176,17 @@ impl<H> std::fmt::Debug for SinkEvent<H> {
     }
 }
 
-impl<H: Send + Sync + 'static> EventVariant for SinkEvent<H> {
+impl<H: Send + Sync + 'static> EventVariant for ErrorSinkEvent<H> {
     fn variant_name(&self) -> &str {
         match self {
-            SinkEvent::Initialize => "Initialize",
-            SinkEvent::Ready => "Ready",
-            SinkEvent::ReceivedEOF => "ReceivedEOF",
-            SinkEvent::BeginFlush => "BeginFlush",      // Sink-specific!
-            SinkEvent::FlushComplete => "FlushComplete", // Sink-specific!
-            SinkEvent::BeginDrain => "BeginDrain",
-            SinkEvent::Error(_) => "Error",
-            SinkEvent::_Phantom(_) => unreachable!("PhantomData variant"),
+            ErrorSinkEvent::Initialize => "Initialize",
+            ErrorSinkEvent::Ready => "Ready",
+            ErrorSinkEvent::ReceivedEOF => "ReceivedEOF",
+            ErrorSinkEvent::BeginFlush => "BeginFlush",      // Sink-specific!
+            ErrorSinkEvent::FlushComplete => "FlushComplete", // Sink-specific!
+            ErrorSinkEvent::BeginDrain => "BeginDrain",
+            ErrorSinkEvent::Error(_) => "Error",
+            ErrorSinkEvent::_Phantom(_) => unreachable!("PhantomData variant"),
         }
     }
 }
@@ -194,8 +195,8 @@ impl<H: Send + Sync + 'static> EventVariant for SinkEvent<H> {
 // FSM Actions
 // ============================================================================
 
-/// Actions that sink FSM transitions can emit
-pub enum SinkAction<H> {
+/// Actions that error sink FSM transitions can emit
+pub enum ErrorSinkAction<H> {
     /// Allocate resources needed by the sink
     /// - Register writer ID with journal
     /// - Create subscription to upstream stages
@@ -217,8 +218,8 @@ pub enum SinkAction<H> {
     _Phantom(PhantomData<H>),
 }
 
-// Manual implementations for SinkAction
-impl<H> Clone for SinkAction<H> {
+// Manual implementations for ErrorSinkAction
+impl<H> Clone for ErrorSinkAction<H> {
     fn clone(&self) -> Self {
         match self {
             Self::AllocateResources => Self::AllocateResources,
@@ -231,7 +232,7 @@ impl<H> Clone for SinkAction<H> {
     }
 }
 
-impl<H> std::fmt::Debug for SinkAction<H> {
+impl<H> std::fmt::Debug for ErrorSinkAction<H> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::AllocateResources => write!(f, "AllocateResources"),
@@ -248,9 +249,9 @@ impl<H> std::fmt::Debug for SinkAction<H> {
 // FSM Context
 // ============================================================================
 
-/// Context for sink handlers - contains everything actions need
+/// Context for error sink handlers - contains everything actions need
 #[derive(Clone)]
-pub struct SinkContext<H: SinkHandler> {
+pub struct ErrorSinkContext<H: ErrorSinkHandler> {
     /// The handler instance that implements sink logic
     pub handler: Arc<RwLock<H>>,
     
@@ -269,11 +270,14 @@ pub struct SinkContext<H: SinkHandler> {
     /// Data journal for writing delivery events
     pub data_journal: Arc<dyn Journal<ChainEvent>>,
     
+    /// Error journal for writing error events (FLOWIP-082e)
+    pub error_journal: Arc<dyn Journal<ChainEvent>>,
+    
     /// System journal for writing lifecycle events
     pub system_journal: Arc<dyn Journal<SystemEvent>>,
     
-    /// Upstream journals for reading events
-    pub upstream_journals: Vec<(StageId, Arc<dyn Journal<ChainEvent>>)>,
+    /// All error journals from every stage in the flow (FLOWIP-082e)
+    pub error_journals: Vec<(StageId, Arc<dyn Journal<ChainEvent>>)>,
     
     /// Message bus for pipeline communication
     pub bus: Arc<crate::message_bus::FsmMessageBus>,
@@ -297,7 +301,7 @@ pub struct SinkContext<H: SinkHandler> {
     pub instrumentation: Arc<StageInstrumentation>,
 }
 
-impl<H: SinkHandler> SinkContext<H> {
+impl<H: ErrorSinkHandler> ErrorSinkContext<H> {
     pub fn new(
         handler: H,
         stage_id: obzenflow_core::StageId,
@@ -305,8 +309,9 @@ impl<H: SinkHandler> SinkContext<H> {
         flow_name: String,
         flow_id: FlowId,
         data_journal: Arc<dyn Journal<ChainEvent>>,
+        error_journal: Arc<dyn Journal<ChainEvent>>,
         system_journal: Arc<dyn Journal<SystemEvent>>,
-        upstream_journals: Vec<(StageId, Arc<dyn Journal<ChainEvent>>)>,
+        error_journals: Vec<(StageId, Arc<dyn Journal<ChainEvent>>)>,
         bus: Arc<crate::message_bus::FsmMessageBus>,
         upstream_stages: Vec<StageId>,
         instrumentation: Arc<StageInstrumentation>,
@@ -318,8 +323,9 @@ impl<H: SinkHandler> SinkContext<H> {
             flow_name,
             flow_id,
             data_journal,
+            error_journal,
             system_journal,
-            upstream_journals,
+            error_journals,
             bus,
             writer_id: Arc::new(RwLock::new(None)),
             subscription: Arc::new(RwLock::new(None)),
@@ -331,37 +337,37 @@ impl<H: SinkHandler> SinkContext<H> {
     }
 }
 
-impl<H: SinkHandler + 'static> FsmContext for SinkContext<H> {}
+impl<H: ErrorSinkHandler + 'static> FsmContext for ErrorSinkContext<H> {}
 
 // ============================================================================
 // FSM Action Implementation
 // ============================================================================
 
 #[async_trait::async_trait]
-impl<H: SinkHandler + Send + Sync + 'static> FsmAction for SinkAction<H> {
-    type Context = SinkContext<H>;
+impl<H: ErrorSinkHandler + Send + Sync + 'static> FsmAction for ErrorSinkAction<H> {
+    type Context = ErrorSinkContext<H>;
     
     async fn execute(&self, ctx: &Self::Context) -> Result<(), String> {
         match self {
-            SinkAction::AllocateResources => {
+            ErrorSinkAction::AllocateResources => {
                 // Create WriterId from our StageId
                 let writer_id = WriterId::from(ctx.stage_id.clone());
                 *ctx.writer_id.write().await = Some(writer_id);
                 
-                // Create subscription from upstream journals
-                let subscription = UpstreamSubscription::new(&ctx.upstream_journals).await
+                // Create subscription from all error journals
+                let subscription = UpstreamSubscription::new(&ctx.error_journals).await
                     .map_err(|e| format!("Failed to create subscription: {:?}", e))?;
                 
                 *ctx.subscription.write().await = Some(subscription);
                 
                 tracing::info!(
                     stage_name = %ctx.stage_name,
-                    "Sink allocated resources and created subscription"
+                    "Error sink allocated resources and created subscription"
                 );
                 Ok(())
             }
             
-            SinkAction::PublishRunning => {
+            ErrorSinkAction::PublishRunning => {
                 let running_event = SystemEvent::stage_running(ctx.stage_id);
                 
                 ctx.system_journal
@@ -371,12 +377,12 @@ impl<H: SinkHandler + Send + Sync + 'static> FsmAction for SinkAction<H> {
                 
                 tracing::info!(
                     stage_name = %ctx.stage_name,
-                    "Sink published running event"
+                    "Error sink published running event"
                 );
                 Ok(())
             }
             
-            SinkAction::SendCompletion => {
+            ErrorSinkAction::SendCompletion => {
                 // Write completion event to system journal
                 let completion_event = SystemEvent::stage_completed(ctx.stage_id);
                 
@@ -387,12 +393,12 @@ impl<H: SinkHandler + Send + Sync + 'static> FsmAction for SinkAction<H> {
                 
                 tracing::info!(
                     stage_name = %ctx.stage_name,
-                    "Sink sent completion event"
+                    "Error sink sent completion event"
                 );
                 Ok(())
             }
 
-            SinkAction::FlushBuffers => {
+            ErrorSinkAction::FlushBuffers => {
                 *ctx.is_flushing.write().await = true;
 
                 let mut handler = ctx.handler.write().await;
@@ -414,7 +420,7 @@ impl<H: SinkHandler + Send + Sync + 'static> FsmAction for SinkAction<H> {
                             flow_id:    ctx.flow_id.to_string(),
                             stage_name: ctx.stage_name.clone(),
                             stage_id: ctx.stage_id.clone(),
-                            stage_type: StageType::Sink,   // or whatever enum case
+                            stage_type: StageType::Sink,   // Error sink is a special sink
                         };
 
                         let evt = ChainEventFactory::delivery_event(writer_id, payload)
@@ -432,11 +438,11 @@ impl<H: SinkHandler + Send + Sync + 'static> FsmAction for SinkAction<H> {
 
                 *ctx.is_flushing.write().await = false;
 
-                tracing::info!(stage_name=%ctx.stage_name, "Sink flushed buffers");
+                tracing::info!(stage_name=%ctx.stage_name, "Error sink flushed buffers");
                 Ok(())
             }
             
-            SinkAction::Cleanup => {
+            ErrorSinkAction::Cleanup => {
                 // Call handler drain before stopping tasks
                 let mut handler = ctx.handler.write().await;
                 handler.drain().await
@@ -450,12 +456,12 @@ impl<H: SinkHandler + Send + Sync + 'static> FsmAction for SinkAction<H> {
                 
                 tracing::info!(
                     stage_name = %ctx.stage_name,
-                    "Sink cleaned up resources"
+                    "Error sink cleaned up resources"
                 );
                 Ok(())
             }
             
-            SinkAction::_Phantom(_) => unreachable!("PhantomData variant"),
+            ErrorSinkAction::_Phantom(_) => unreachable!("PhantomData variant"),
         }
     }
 }

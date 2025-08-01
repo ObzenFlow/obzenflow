@@ -677,8 +677,31 @@ impl ChainEventFactory {
         event.correlation_id = parent.correlation_id;
         event.correlation_payload = parent.correlation_payload.clone();
 
-        // Update causality - track the parent that caused this event
+        // FIX (FLOWIP-082): Propagate full lineage with depth limit
+        const DEFAULT_MAX_LINEAGE_DEPTH: usize = 100;
+        
+        // Add immediate parent
         event.causality = CausalityContext::with_parent(parent.id);
+        
+        // Get max depth from environment or use default
+        let max_depth = std::env::var("OBZENFLOW_MAX_LINEAGE_DEPTH")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(DEFAULT_MAX_LINEAGE_DEPTH);
+        
+        // Propagate ancestors up to depth limit
+        let ancestors_to_add = parent.causality.parent_ids
+            .iter()
+            .take(max_depth.saturating_sub(1));
+        
+        for ancestor in ancestors_to_add {
+            event.causality = event.causality.add_parent(*ancestor);
+        }
+        
+        // TODO: Log warning if we're truncating (requires tracing dependency)
+        // Currently we silently truncate at max_depth
+        #[allow(unused_variables)]
+        let truncated = parent.causality.parent_ids.len() >= max_depth;
 
         event
     }

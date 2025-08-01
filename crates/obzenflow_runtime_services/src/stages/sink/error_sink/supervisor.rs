@@ -1,4 +1,4 @@
-//! Sink supervisor implementation using HandlerSupervised pattern
+//! Error sink supervisor implementation using HandlerSupervised pattern
 
 use std::sync::Arc;
 use futures::TryFutureExt;
@@ -11,23 +11,23 @@ use obzenflow_core::event::context::causality_context::CausalityContext;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::time::MetricsDuration;
 use obzenflow_fsm::{FsmBuilder, Transition};
-use crate::stages::common::handlers::SinkHandler;
+use crate::stages::common::handlers::ErrorSinkHandler;
 use crate::supervised_base::{EventLoopDirective, HandlerSupervised};
 use crate::supervised_base::base::Supervisor;
 use crate::metrics::instrumentation::process_with_instrumentation;
 
 use super::fsm::{
-    SinkState, SinkEvent, SinkAction,
-    SinkContext,
+    ErrorSinkState, ErrorSinkEvent, ErrorSinkAction,
+    ErrorSinkContext,
 };
 
-/// Supervisor for sink stages
-pub(crate) struct SinkSupervisor<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> {
+/// Supervisor for error sink stages
+pub(crate) struct ErrorSinkSupervisor<H: ErrorSinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> {
     /// Supervisor name (for logging)
     pub(crate) name: String,
     
     /// The FSM context containing all mutable state
-    pub(crate) context: Arc<SinkContext<H>>,
+    pub(crate) context: Arc<ErrorSinkContext<H>>,
     
     /// Data journal for chain events
     pub(crate) data_journal: Arc<dyn Journal<ChainEvent>>,
@@ -39,14 +39,14 @@ pub(crate) struct SinkSupervisor<H: SinkHandler + Clone + std::fmt::Debug + Send
     pub(crate) stage_id: StageId,
 }
 
-// Implement Sealed directly for SinkSupervisor to satisfy Supervisor trait bound
-impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> crate::supervised_base::base::private::Sealed for SinkSupervisor<H> {}
+// Implement Sealed directly for ErrorSinkSupervisor to satisfy Supervisor trait bound
+impl<H: ErrorSinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> crate::supervised_base::base::private::Sealed for ErrorSinkSupervisor<H> {}
 
-impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Supervisor for SinkSupervisor<H> {
-    type State = SinkState<H>;
-    type Event = SinkEvent<H>;
-    type Context = SinkContext<H>;
-    type Action = SinkAction<H>;
+impl<H: ErrorSinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Supervisor for ErrorSinkSupervisor<H> {
+    type State = ErrorSinkState<H>;
+    type Event = ErrorSinkEvent<H>;
+    type Context = ErrorSinkContext<H>;
+    type Action = ErrorSinkAction<H>;
     
     fn configure_fsm(&self, builder: FsmBuilder<Self::State, Self::Event, Self::Context, Self::Action>) 
         -> FsmBuilder<Self::State, Self::Event, Self::Context, Self::Action> {
@@ -55,8 +55,8 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
             .when("Created")
                 .on("Initialize", |_state, _event, _ctx| async move {
                     Ok(Transition {
-                        next_state: SinkState::Initialized,
-                        actions: vec![SinkAction::AllocateResources],
+                        next_state: ErrorSinkState::Initialized,
+                        actions: vec![ErrorSinkAction::AllocateResources],
                     })
                 })
                 .done()
@@ -65,8 +65,8 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
             .when("Initialized")
                 .on("Ready", |_state, _event, _ctx| async move {
                     Ok(Transition {
-                        next_state: SinkState::Running,
-                        actions: vec![SinkAction::PublishRunning],
+                        next_state: ErrorSinkState::Running,
+                        actions: vec![ErrorSinkAction::PublishRunning],
                     })
                 })
                 .done()
@@ -75,23 +75,23 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
             .when("Running")
                 .on("ReceivedEOF", |_state, _event, _ctx| async move {
                     Ok(Transition {
-                        next_state: SinkState::Flushing,
-                        actions: vec![SinkAction::FlushBuffers],
+                        next_state: ErrorSinkState::Flushing,
+                        actions: vec![ErrorSinkAction::FlushBuffers],
                     })
                 })
                 .on("BeginFlush", |_state, _event, _ctx| async move {
                     Ok(Transition {
-                        next_state: SinkState::Flushing,
-                        actions: vec![SinkAction::FlushBuffers],
+                        next_state: ErrorSinkState::Flushing,
+                        actions: vec![ErrorSinkAction::FlushBuffers],
                     })
                 })
                 .on("Error", |_state, event, _ctx| {
                     let event = event.clone();
                     async move {
-                        if let SinkEvent::Error(msg) = event {
+                        if let ErrorSinkEvent::Error(msg) = event {
                             Ok(Transition {
-                                next_state: SinkState::Failed(msg),
-                                actions: vec![SinkAction::Cleanup],
+                                next_state: ErrorSinkState::Failed(msg),
+                                actions: vec![ErrorSinkAction::Cleanup],
                             })
                         } else {
                             unreachable!()
@@ -104,17 +104,17 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
             .when("Flushing")
                 .on("FlushComplete", |_state, _event, _ctx| async move {
                     Ok(Transition {
-                        next_state: SinkState::Draining,
+                        next_state: ErrorSinkState::Draining,
                         actions: vec![],
                     })
                 })
                 .on("Error", |_state, event, _ctx| {
                     let event = event.clone();
                     async move {
-                        if let SinkEvent::Error(msg) = event {
+                        if let ErrorSinkEvent::Error(msg) = event {
                             Ok(Transition {
-                                next_state: SinkState::Failed(msg),
-                                actions: vec![SinkAction::Cleanup],
+                                next_state: ErrorSinkState::Failed(msg),
+                                actions: vec![ErrorSinkAction::Cleanup],
                             })
                         } else {
                             unreachable!()
@@ -127,8 +127,8 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
             .when("Draining")
                 .on("BeginDrain", |_state, _event, _ctx| async move {
                     Ok(Transition {
-                        next_state: SinkState::Drained,
-                        actions: vec![SinkAction::SendCompletion, SinkAction::Cleanup],
+                        next_state: ErrorSinkState::Drained,
+                        actions: vec![ErrorSinkAction::SendCompletion, ErrorSinkAction::Cleanup],
                     })
                 })
                 .done()
@@ -139,17 +139,17 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
                     let event = event.clone();
                     let state = state.clone();
                     async move {
-                        if let SinkEvent::Error(msg) = event {
+                        if let ErrorSinkEvent::Error(msg) = event {
                             // If already failed, don't cleanup again
-                            if matches!(state, SinkState::Failed(_)) {
+                            if matches!(state, ErrorSinkState::Failed(_)) {
                                 Ok(Transition {
                                     next_state: state.clone(),
                                     actions: vec![],
                                 })
                             } else {
                                 Ok(Transition {
-                                    next_state: SinkState::Failed(msg),
-                                    actions: vec![SinkAction::Cleanup],
+                                    next_state: ErrorSinkState::Failed(msg),
+                                    actions: vec![ErrorSinkAction::Cleanup],
                                 })
                             }
                         } else {
@@ -166,7 +166,7 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
 }
 
 #[async_trait::async_trait]
-impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSupervised for SinkSupervisor<H> {
+impl<H: ErrorSinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSupervised for ErrorSinkSupervisor<H> {
     type Handler = H;
     
     fn writer_id(&self) -> WriterId {
@@ -191,17 +191,17 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
         state: &Self::State,
     ) -> Result<EventLoopDirective<Self::Event>, Box<dyn std::error::Error + Send + Sync>> {
         match state {
-            SinkState::Created => {
+            ErrorSinkState::Created => {
                 // Send initialize event
-                Ok(EventLoopDirective::Transition(SinkEvent::Initialize))
+                Ok(EventLoopDirective::Transition(ErrorSinkEvent::Initialize))
             }
             
-            SinkState::Initialized => {
+            ErrorSinkState::Initialized => {
                 // Auto-transition to ready
-                Ok(EventLoopDirective::Transition(SinkEvent::Ready))
+                Ok(EventLoopDirective::Transition(ErrorSinkEvent::Ready))
             }
             
-            SinkState::Running => {
+            ErrorSinkState::Running => {
                 // Track event loop
                 self.context.instrumentation.event_loops_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 
@@ -216,17 +216,17 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                             
                             tracing::trace!(
                                 stage_name = %self.context.stage_name,
-                                "Sink processing event"
+                                "Error sink processing event"
                             );
                             
                             // Check for EOF event
                             if envelope.event.is_eof() {
                                 tracing::info!(
                                     stage_name = %self.context.stage_name,
-                                    "Sink received EOF"
+                                    "Error sink received EOF"
                                 );
                                 drop(subscription_guard);
-                                return Ok(EventLoopDirective::Transition(SinkEvent::ReceivedEOF));
+                                return Ok(EventLoopDirective::Transition(ErrorSinkEvent::ReceivedEOF));
                             }
                             
                             // Only process data events with instrumentation (skip control/system events)
@@ -237,12 +237,12 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                     &self.context.instrumentation,
                                     || async {
                                         let mut handler = self.context.handler.write().await;
-                                        handler.consume(envelope_event).await   // ← returns Result<DeliveryPayload, Box<…>>
+                                        handler.process_error(envelope_event).await
                                     }
                                 ).await;
 
                                 match ack_result {
-                                    Ok(payload) => {
+                                    Ok(Some(payload)) => {
                                         let flow_context = FlowContext {
                                             flow_name: self.context.flow_name.clone(),
                                             flow_id: self.context.flow_id.to_string(),
@@ -264,6 +264,13 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                             .data_journal
                                             .append(delivery_event, Some(&envelope))
                                             .await?;
+                                    }
+                                    Ok(None) => {
+                                        // Event was filtered (duplicate or rate limited)
+                                        tracing::debug!(
+                                            stage_name = %self.context.stage_name,
+                                            "Error event filtered by handler"
+                                        );
                                     }
                                     Err(e) => {
                                         let fail_payload = DeliveryPayload::failed(
@@ -301,11 +308,11 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                             .data_journal
                                             .append(fail_event, Some(&envelope))
                                             .await
-                                            .map_err(|je| format!("Failed to journal sink failure: {je}"))?;
+                                            .map_err(|je| format!("Failed to journal error sink failure: {je}"))?;
 
                                         // propagate the original error up the FSM so the stage can decide
                                         // whether to retry or transition to an error state
-                                        return Err(format!("Sink consume failed: {e}").into());
+                                        return Err(format!("Error sink consume failed: {e}").into());
                                     }
                                 }
                             } else {
@@ -313,7 +320,7 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                 let envelope_event = envelope.event.clone();
                                 let mut handler = self.context.handler.write().await;
 
-                                if let Err(e) = handler.consume(envelope_event).await {   // ← add .await
+                                if let Err(e) = handler.process_error(envelope_event).await {
                                     tracing::error!(
                                         stage_name = %self.context.stage_name,
                                         error = ?e,
@@ -330,7 +337,7 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                             );
                             drop(subscription_guard);
                             return Ok(EventLoopDirective::Transition(
-                                SinkEvent::Error(format!("Subscription error: {}", e))
+                                ErrorSinkEvent::Error(format!("Subscription error: {}", e))
                             ));
                         }
                     }
@@ -342,28 +349,28 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                 Ok(EventLoopDirective::Continue)
             }
             
-            SinkState::Flushing => {
+            ErrorSinkState::Flushing => {
                 // Wait for flush to complete
                 // The actual flush happens in the action
-                Ok(EventLoopDirective::Transition(SinkEvent::FlushComplete))
+                Ok(EventLoopDirective::Transition(ErrorSinkEvent::FlushComplete))
             }
             
-            SinkState::Draining => {
+            ErrorSinkState::Draining => {
                 // Move to drained state
-                Ok(EventLoopDirective::Transition(SinkEvent::BeginDrain))
+                Ok(EventLoopDirective::Transition(ErrorSinkEvent::BeginDrain))
             }
             
-            SinkState::Drained => {
+            ErrorSinkState::Drained => {
                 // Terminal state
                 Ok(EventLoopDirective::Terminate)
             }
             
-            SinkState::Failed(_) => {
+            ErrorSinkState::Failed(_) => {
                 // Terminal state
                 Ok(EventLoopDirective::Terminate)
             }
             
-            SinkState::_Phantom(_) => {
+            ErrorSinkState::_Phantom(_) => {
                 unreachable!("PhantomData variant should never be instantiated")
             }
         }

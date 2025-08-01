@@ -81,6 +81,8 @@ pub enum PipelineAction {
     Cleanup,
     StartMetricsAggregator,
     DrainMetrics,
+    StartErrorSink,
+    DrainErrorSink,
     StartCompletionSubscription,
     ProcessCompletionEvents,
     HandleStageCompleted { envelope: obzenflow_core::EventEnvelope<SystemEvent> },
@@ -118,6 +120,9 @@ pub struct PipelineContext {
     
     /// Stage data journals (for metrics aggregator)
     pub stage_data_journals: Arc<RwLock<Vec<(StageId, Arc<dyn Journal<ChainEvent>>)>>>,
+    
+    /// Stage error journals (for error sink) (FLOWIP-082e)
+    pub stage_error_journals: Arc<RwLock<Vec<(StageId, Arc<dyn Journal<ChainEvent>>)>>>,
     
     // TODO: Add metrics handle once MetricsAggregatorBuilder is implemented
     // pub metrics_handle: Option<MetricsHandle>,
@@ -399,6 +404,97 @@ impl FsmAction for PipelineAction {
                 }
             }
             
+            PipelineAction::StartErrorSink => {
+                tracing::info!("StartErrorSink action triggered (FLOWIP-082e)");
+                
+                // Get error journals from context
+                let error_journals = context.stage_error_journals.read().await.clone();
+                
+                if error_journals.is_empty() {
+                    tracing::warn!("No error journals available for error sink");
+                    return Ok(());
+                }
+                
+                let system_journal = context.system_journal.clone();
+                let system_id = context.system_id;
+                
+                // Spawn error sink using the builder pattern (similar to metrics aggregator)
+                tokio::spawn(async move {
+                    use crate::stages::sink::error_sink::{ErrorSinkBuilder, ErrorSinkConfig};
+                    use crate::stages::common::handlers::error_sink_handler::DefaultErrorSinkHandler;
+                    use crate::supervised_base::SupervisorBuilder;
+                    use obzenflow_core::StageId;
+                    
+                    // Create ErrorSink configuration
+                    let error_sink_config = ErrorSinkConfig {
+                        stage_id: StageId::new(), // ErrorSink gets its own stage ID
+                        stage_name: "error_sink".to_string(),
+                        flow_name: "system".to_string(),
+                        all_stage_ids: error_journals.iter().map(|(id, _)| *id).collect(),
+                        dedupe_window_secs: 300, // 5 minute deduplication window
+                        batch_size: 100,
+                        rate_limit: 10.0, // 10 errors per second max
+                    };
+                    
+                    // Create handler with default implementation
+                    let handler = DefaultErrorSinkHandler::new(300, Some(10.0)); // 5 min dedup, 10 errors/sec
+                    
+                    // Create minimal resources for ErrorSink (it only needs error journals)
+                    use crate::stages::StageResources;
+                    use obzenflow_core::FlowId;
+                    let resources = StageResources {
+                        flow_id: FlowId::new(),
+                        data_journal: error_journals[0].1.clone(), // Dummy, not used
+                        error_journal: error_journals[0].1.clone(), // Dummy, not used  
+                        system_journal: system_journal.clone(),
+                        upstream_journals: vec![], // Will be overridden
+                        message_bus: Arc::new(crate::message_bus::FsmMessageBus::new()),
+                        upstream_stages: vec![],
+                        error_journals: error_journals.clone(), // This is what matters!
+                    };
+                    
+                    match ErrorSinkBuilder::new(handler, error_sink_config, resources)
+                        .with_error_journals(error_journals)
+                        .build()
+                        .await
+                    {
+                        Ok(handle) => {
+                            // For now, just wait for completion
+                            if let Err(e) = handle.wait_for_completion().await {
+                                tracing::error!("Error sink failed: {}", e);
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!("Failed to build error sink: {}", e);
+                        }
+                    }
+                });
+                
+                // Since ErrorSink doesn't publish a ready event (unlike metrics),
+                // we just proceed after spawning
+                tracing::info!("Error sink spawned successfully");
+            }
+            
+            PipelineAction::DrainErrorSink => {
+                tracing::info!("Draining error sink via error journals");
+                
+                let writer_id = WriterId::from(context.system_id);
+                let drain_event = ChainEventFactory::drain_event(writer_id);
+                
+                // Publish drain request to ALL error journals
+                let error_journals = context.stage_error_journals.read().await;
+                for (stage_id, journal) in error_journals.iter() {
+                    journal.append(drain_event.clone(), None)
+                        .await
+                        .map_err(|e| format!("Failed to publish drain event to error journal {:?}: {}", stage_id, e))?;
+                }
+                drop(error_journals);
+                
+                // Unlike metrics, ErrorSink doesn't need to signal completion
+                // It just processes whatever is in the journals
+                tracing::info!("Error journals drain requested");
+            }
+            
             PipelineAction::StartCompletionSubscription => {
                 // Create reader for system journal - will receive system events
                 let reader = context.system_journal
@@ -502,6 +598,7 @@ pub fn build_pipeline_fsm() -> PipelineFsm {
                     actions: vec![
                         PipelineAction::StartCompletionSubscription,
                         PipelineAction::StartMetricsAggregator,
+                        PipelineAction::StartErrorSink,
                         PipelineAction::NotifyStagesStart,
                     ],
                 })
@@ -567,6 +664,7 @@ pub fn build_pipeline_fsm() -> PipelineFsm {
                     next_state: PipelineState::Drained,
                     actions: vec![
                         PipelineAction::DrainMetrics,  // Drain metrics AFTER all stages complete
+                        PipelineAction::DrainErrorSink,  // Drain error sink too
                         PipelineAction::WritePipelineCompleted,
                         PipelineAction::Cleanup
                     ],

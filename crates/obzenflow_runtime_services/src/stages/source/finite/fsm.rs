@@ -235,6 +235,9 @@ pub struct FiniteSourceContext<H: FiniteSourceHandler> {
     /// Data journal for writing generated events
     pub data_journal: Arc<dyn Journal<ChainEvent>>,
     
+    /// Error journal for writing error events (FLOWIP-082e)
+    pub error_journal: Arc<dyn Journal<ChainEvent>>,
+    
     /// System journal for writing lifecycle events
     pub system_journal: Arc<dyn Journal<SystemEvent>>,
     
@@ -256,6 +259,7 @@ impl<H: FiniteSourceHandler> FiniteSourceContext<H> {
         flow_name: String,
         flow_id: FlowId,
         data_journal: Arc<dyn Journal<ChainEvent>>,
+        error_journal: Arc<dyn Journal<ChainEvent>>,
         system_journal: Arc<dyn Journal<SystemEvent>>,
         bus: Arc<crate::message_bus::FsmMessageBus>,
         instrumentation: Arc<StageInstrumentation>,
@@ -267,6 +271,7 @@ impl<H: FiniteSourceHandler> FiniteSourceContext<H> {
             flow_name,
             flow_id,
             data_journal,
+            error_journal,
             system_journal,
             bus,
             writer_id: Arc::new(RwLock::new(None)),

@@ -1,10 +1,10 @@
-//! Configuration for sink stages
+//! Configuration for journal sink stages
 
 use obzenflow_core::StageId;
 
-/// Configuration for a sink stage
+/// Configuration for a journal sink stage
 #[derive(Clone, Debug)]
-pub struct SinkConfig {
+pub struct JournalSinkConfig {
     /// Stage ID
     pub stage_id: StageId,
     

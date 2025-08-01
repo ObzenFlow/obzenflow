@@ -25,6 +25,11 @@ pub enum TopologyError {
     DisconnectedStages {
         stages: Vec<StageId>,
     },
+    
+    #[error("Self-cycle detected: stage '{stage}' connects to itself")]
+    SelfCycle {
+        stage: String,
+    },
 }
 
 /// Validate that the topology is acyclic using Kahn's algorithm

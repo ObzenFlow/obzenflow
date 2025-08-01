@@ -20,6 +20,10 @@ pub struct ProcessingContext {
     
     /// The outcome of processing
     pub status: ProcessingStatus,
+    
+    /// Remaining hops for error events before being dropped (FLOWIP-082e)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_hops_remaining: Option<u8>,
 }
 
 impl Default for ProcessingContext {
@@ -29,6 +33,7 @@ impl Default for ProcessingContext {
             processing_time: MetricsDuration::ZERO,
             event_time: 0,
             status: ProcessingStatus::Success,
+            error_hops_remaining: None,
         }
     }
 }

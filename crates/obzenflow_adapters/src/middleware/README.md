@@ -99,6 +99,57 @@ Control events written via `ctx.write_control_event()` are special ChainEvents t
 - Are observed by MetricsAggregator for monitoring
 - Must follow the current ChainEvent structure and requirements
 
+## Error Handling and Dead Letter Pattern
+
+### Transform Behavior with Error Events
+
+As of FLOWIP-082f, transforms automatically skip events marked with `ProcessingStatus::Error`. This creates a dead letter pattern where:
+
+1. **Middleware marks failures**: When detecting unrecoverable errors (e.g., cycle limits), middleware returns:
+   ```rust
+   let mut error_event = event.clone();
+   error_event.processing_info.status = ProcessingStatus::Error("Cycle limit exceeded");
+   return MiddlewareAction::Skip(vec![error_event]);
+   ```
+
+2. **Transforms skip error events**: Events with Error status pass through without processing
+   - Prevents error propagation and infinite loops
+   - Error events flow to sinks for observability
+   - Metrics still count error events
+
+3. **Sinks receive all events**: Including error events, allowing for:
+   - Dead letter queue implementation
+   - Error logging and monitoring
+   - Audit trail completeness
+
+### Example: Cycle Detection with Dead Letters
+
+```rust
+// In CycleGuardMiddleware
+if cycle_info.iterations > self.max_iterations {
+    // CRITICAL: Return the ORIGINAL event with error status
+    // Don't create a new event - that would perpetuate the cycle!
+    let mut error_event = event.clone();
+    error_event.processing_info.status = ProcessingStatus::Error(
+        format!("Cycle limit exceeded after {} iterations", cycle_info.iterations)
+    );
+    
+    // Add cycle metadata to the event
+    error_event.metadata.insert(
+        "cycle_guard_error".to_string(),
+        json!({
+            "reason": "cycle_limit_exceeded",
+            "iterations": cycle_info.iterations,
+            "max_allowed": self.max_iterations
+        })
+    );
+    
+    return MiddlewareAction::Skip(vec![error_event]);
+}
+```
+
+This ensures failed events are visible in metrics and can be handled appropriately by sinks.
+
 See `ChainEventFactory` methods in obzenflow_core for the current control event API. Key factory methods include:
 - `circuit_breaker_opened()`, `circuit_breaker_summary()`
 - `retry_exhausted()`

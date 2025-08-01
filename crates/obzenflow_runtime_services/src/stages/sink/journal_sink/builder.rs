@@ -1,4 +1,4 @@
-//! Builder for sink stages
+//! Builder for journal sink stages
 
 use std::sync::Arc;
 
@@ -16,24 +16,24 @@ use crate::supervised_base::{
 };
 use crate::supervised_base::base::Supervisor;
 
-use super::config::SinkConfig;
-use super::handle::SinkHandle;
-use super::supervisor::SinkSupervisor;
-use super::fsm::{SinkState, SinkContext, SinkEvent, SinkAction};
+use super::config::JournalSinkConfig;
+use super::handle::JournalSinkHandle;
+use super::supervisor::JournalSinkSupervisor;
+use super::fsm::{JournalSinkState, JournalSinkContext, JournalSinkEvent, JournalSinkAction};
 
-/// Builder for creating sink stages
-pub struct SinkBuilder<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> {
+/// Builder for creating journal sink stages
+pub struct JournalSinkBuilder<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> {
     handler: H,
-    config: SinkConfig,
+    config: JournalSinkConfig,
     resources: StageResources,
     instrumentation: Option<Arc<StageInstrumentation>>,
 }
 
-impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> SinkBuilder<H> {
-    /// Create a new sink builder
+impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> JournalSinkBuilder<H> {
+    /// Create a new journal sink builder
     pub fn new(
         handler: H,
-        config: SinkConfig,
+        config: JournalSinkConfig,
         resources: StageResources,
     ) -> Self {
         Self {
@@ -52,27 +52,28 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> SinkBuild
 }
 
 #[async_trait::async_trait]
-impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> SupervisorBuilder for SinkBuilder<H> {
-    type Handle = SinkHandle<H>;
+impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> SupervisorBuilder for JournalSinkBuilder<H> {
+    type Handle = JournalSinkHandle<H>;
     type Error = BuilderError;
     
     async fn build(self) -> Result<Self::Handle, Self::Error> {
         // Create channels for supervisor communication
         let (event_sender, event_receiver, state_watcher) = 
-            ChannelBuilder::new().build(SinkState::<H>::Created);
+            ChannelBuilder::new().build(JournalSinkState::<H>::Created);
         
         // Create instrumentation if not provided
         let instrumentation = self.instrumentation
             .unwrap_or_else(|| Arc::new(StageInstrumentation::new()));
         
         // Create context
-        let context = SinkContext::new(
+        let context = JournalSinkContext::new(
             self.handler,
             self.config.stage_id,
             self.config.stage_name.clone(),
             self.config.flow_name.clone(),
             self.resources.flow_id.clone(),
             self.resources.data_journal.clone(),
+            self.resources.error_journal.clone(),
             self.resources.system_journal.clone(),
             self.resources.upstream_journals.clone(),
             self.resources.message_bus.clone(),
@@ -81,7 +82,7 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
         );
         
         // Create supervisor (private - not exposed)
-        let supervisor = SinkSupervisor {
+        let supervisor = JournalSinkSupervisor {
             name: format!("sink_{}", self.config.stage_name),
             context: Arc::new(context.clone()),
             data_journal: self.resources.data_journal.clone(),
@@ -94,7 +95,7 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
         
         // Spawn the supervisor task
         let supervisor_name = format!("sink_{}", self.config.stage_name);
-        let task = SupervisorTaskBuilder::<SinkSupervisor<H>>::new(&supervisor_name)
+        let task = SupervisorTaskBuilder::<JournalSinkSupervisor<H>>::new(&supervisor_name)
             .spawn(move || async move {
                 // Create a wrapper that handles external events
                 let supervisor_with_events = HandlerSupervisedWithExternalEvents {
@@ -106,7 +107,7 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
                 // Run with the wrapper
                 HandlerSupervisedExt::run(
                     supervisor_with_events,
-                    SinkState::<H>::Created,
+                    JournalSinkState::<H>::Created,
                     context,
                 ).await
             });
@@ -123,17 +124,17 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
 
 /// Internal wrapper that bridges external events with the handler-supervised supervisor
 struct HandlerSupervisedWithExternalEvents<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> {
-    supervisor: SinkSupervisor<H>,
-    external_events: EventReceiver<SinkEvent<H>>,
-    state_watcher: StateWatcher<SinkState<H>>,
+    supervisor: JournalSinkSupervisor<H>,
+    external_events: EventReceiver<JournalSinkEvent<H>>,
+    state_watcher: StateWatcher<JournalSinkState<H>>,
 }
 
 // Delegate trait implementations to the inner supervisor
 impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Supervisor for HandlerSupervisedWithExternalEvents<H> {
-    type State = SinkState<H>;
-    type Event = SinkEvent<H>;
-    type Context = SinkContext<H>;
-    type Action = SinkAction<H>;
+    type State = JournalSinkState<H>;
+    type Event = JournalSinkEvent<H>;
+    type Context = JournalSinkContext<H>;
+    type Action = JournalSinkAction<H>;
 
     fn configure_fsm(
         &self,
@@ -184,9 +185,9 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
             }
             Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
                 // Channel closed, initiate shutdown only if not already failed
-                if !matches!(state, SinkState::Failed(_)) {
+                if !matches!(state, JournalSinkState::Failed(_)) {
                     return Ok(EventLoopDirective::Transition(
-                        SinkEvent::Error("External control channel closed".to_string()),
+                        JournalSinkEvent::Error("External control channel closed".to_string()),
                     ));
                 }
             }

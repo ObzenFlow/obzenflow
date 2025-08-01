@@ -73,6 +73,7 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> S
             self.config.flow_name.clone(),
             self.resources.flow_id,
             self.resources.data_journal.clone(),
+            self.resources.error_journal.clone(),
             self.resources.system_journal.clone(),
             self.resources.message_bus.clone(),
             instrumentation,

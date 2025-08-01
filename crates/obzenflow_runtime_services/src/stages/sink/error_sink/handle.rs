@@ -1,15 +1,15 @@
-//! Handle for sink stages
+//! Handle for error sink stages
 
 use crate::supervised_base::{StandardHandle, HandleError, SupervisorHandle};
-use crate::stages::common::handlers::SinkHandler;
+use crate::stages::common::handlers::ErrorSinkHandler;
 
-use super::fsm::{SinkEvent, SinkState};
+use super::fsm::{ErrorSinkEvent, ErrorSinkState};
 
-/// Type alias for the sink handle
-pub type SinkHandle<H = Box<dyn SinkHandler>> = StandardHandle<SinkEvent<H>, SinkState<H>>;
+/// Type alias for the error sink handle
+pub type ErrorSinkHandle<H = Box<dyn ErrorSinkHandler>> = StandardHandle<ErrorSinkEvent<H>, ErrorSinkState<H>>;
 
-/// Extension trait for sink-specific convenience methods
-pub trait SinkHandleExt<H> {
+/// Extension trait for error sink-specific convenience methods
+pub trait ErrorSinkHandleExt<H> {
     /// Initialize the sink
     fn initialize(&self) -> impl std::future::Future<Output = Result<(), HandleError>> + Send;
     
@@ -35,42 +35,42 @@ pub trait SinkHandleExt<H> {
     fn is_flushing(&self) -> bool;
 }
 
-impl<H: SinkHandler + Send + Sync + 'static> SinkHandleExt<H> for SinkHandle<H> {
+impl<H: ErrorSinkHandler + Send + Sync + 'static> ErrorSinkHandleExt<H> for ErrorSinkHandle<H> {
     async fn initialize(&self) -> Result<(), HandleError> {
-        self.send_event(SinkEvent::<H>::Initialize).await
+        self.send_event(ErrorSinkEvent::<H>::Initialize).await
     }
     
     async fn ready(&self) -> Result<(), HandleError> {
-        self.send_event(SinkEvent::<H>::Ready).await
+        self.send_event(ErrorSinkEvent::<H>::Ready).await
     }
     
     async fn received_eof(&self) -> Result<(), HandleError> {
-        self.send_event(SinkEvent::<H>::ReceivedEOF).await
+        self.send_event(ErrorSinkEvent::<H>::ReceivedEOF).await
     }
     
     async fn begin_flush(&self) -> Result<(), HandleError> {
-        self.send_event(SinkEvent::<H>::BeginFlush).await
+        self.send_event(ErrorSinkEvent::<H>::BeginFlush).await
     }
     
     async fn flush_complete(&self) -> Result<(), HandleError> {
-        self.send_event(SinkEvent::<H>::FlushComplete).await
+        self.send_event(ErrorSinkEvent::<H>::FlushComplete).await
     }
     
     async fn begin_drain(&self) -> Result<(), HandleError> {
-        self.send_event(SinkEvent::<H>::BeginDrain).await
+        self.send_event(ErrorSinkEvent::<H>::BeginDrain).await
     }
     
     fn is_terminal(&self) -> bool {
         matches!(
             self.current_state(),
-            SinkState::<H>::Drained | SinkState::<H>::Failed(_)
+            ErrorSinkState::<H>::Drained | ErrorSinkState::<H>::Failed(_)
         )
     }
     
     fn is_flushing(&self) -> bool {
         matches!(
             self.current_state(),
-            SinkState::<H>::Flushing
+            ErrorSinkState::<H>::Flushing
         )
     }
 }

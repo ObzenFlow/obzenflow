@@ -19,21 +19,27 @@ fn test_valid_topology_creation() {
 }
 
 #[test]
-fn test_cycle_detection() {
+fn test_cycles_allowed() {
+    // As of FLOWIP-082, cycles are now allowed in topologies
     let mut builder = TopologyBuilder::new();
     let s1 = builder.add_stage(Some("stage1".to_string()));
-    let _s2 = builder.add_stage(Some("stage2".to_string()));
+    let s2 = builder.add_stage(Some("stage2".to_string()));
     let s3 = builder.add_stage(Some("stage3".to_string()));
     builder.add_edge(s3, s1); // Create cycle: s1 -> s2 -> s3 -> s1
     
     match builder.build() {
-        Err(TopologyError::CycleDetected { stages }) => {
-            // Should detect the cycle
-            assert!(!stages.is_empty());
-            assert!(stages.len() >= 3); // At least the 3 stages in the cycle
+        Ok(topology) => {
+            // Cycles should now be allowed
+            let metrics = topology.metrics();
+            assert_eq!(metrics.num_stages, 3);
+            assert_eq!(metrics.num_edges, 3); // Including the back edge
+            
+            // Verify the cycle exists
+            assert!(topology.has_edge(s1, s2));
+            assert!(topology.has_edge(s2, s3));
+            assert!(topology.has_edge(s3, s1)); // The back edge
         }
-        Ok(_) => panic!("Expected cycle detection to fail"),
-        Err(e) => panic!("Unexpected error: {}", e),
+        Err(e) => panic!("Cycles should be allowed as of FLOWIP-082, but got error: {}", e),
     }
 }
 
@@ -165,5 +171,45 @@ fn test_isolated_node_detection() {
         }
         Ok(_) => panic!("Expected disconnected stage detection"),
         Err(e) => panic!("Unexpected error: {}", e),
+    }
+}
+
+#[test]
+fn test_document_processor_retry_pattern() {
+    // Test the document processing retry pattern from FLOWIP-082
+    let mut builder = TopologyBuilder::new();
+    
+    // Create stages
+    let source = builder.add_stage(Some("source".to_string()));
+    let validator = builder.add_stage(Some("validator".to_string()));
+    builder.reset_current(); // Break chain to control edges manually
+    let storage = builder.add_stage(Some("storage".to_string()));
+    
+    // Create fixer stage separately to control edges
+    builder.reset_current();
+    let fixer = builder.add_stage(Some("fixer".to_string()));
+    
+    // Main flow: source -> validator -> storage
+    builder.add_edge(validator, storage);
+    
+    // Retry flow
+    builder.add_edge(validator, fixer);    // Failed docs go to fixer
+    builder.add_edge(fixer, validator);    // Fixed docs return to validator (cycle!)
+    
+    match builder.build() {
+        Ok(topology) => {
+            // Verify the topology structure
+            assert_eq!(topology.num_stages(), 4);
+            
+            // Verify main flow
+            assert_eq!(topology.downstream_stages(source), vec![validator]);
+            assert!(topology.downstream_stages(validator).contains(&storage));
+            assert!(topology.downstream_stages(validator).contains(&fixer));
+            
+            // Verify retry cycle
+            assert_eq!(topology.downstream_stages(fixer), vec![validator]);
+            assert_eq!(topology.upstream_stages(validator).len(), 2); // from source and fixer
+        }
+        Err(e) => panic!("Document processor pattern should be valid, but got: {}", e),
     }
 }

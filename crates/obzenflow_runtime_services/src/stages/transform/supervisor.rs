@@ -295,39 +295,65 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Hand
                                     }
                                 }
                                 obzenflow_core::event::ChainEventContent::Data { .. } => {
-                                    // Process normal data event with instrumentation
+                                    // Process data event with instrumentation
                                     let handler = self.context.handler.clone();
                                     let event_to_process = envelope.event.clone();
                                     
-                                    // Use process_with_instrumentation HOF
+                                    // Use run_if_not_error to handle error events
+                                    if matches!(event_to_process.processing_info.status, obzenflow_core::event::status::processing_status::ProcessingStatus::Error(_)) {
+                                        tracing::info!(
+                                            "Transform supervisor {} received error event {}: {:?}",
+                                            self.context.stage_name,
+                                            event_to_process.id,
+                                            event_to_process.processing_info.status
+                                        );
+                                    }
+                                    let events_to_process = self.run_if_not_error(event_to_process, |e| {
+                                        handler.process(e)
+                                    });
+                                    
+                                    // Process with instrumentation
                                     let result = process_with_instrumentation(
                                         &self.context.instrumentation,
                                         || async move {
-                                            Ok(handler.process(event_to_process))
+                                            Ok(events_to_process)
                                         }
                                     ).await;
                                     
                                     match result {
                                         Ok(transformed_events) => {
-                                            // Write transformed events using new journal.write() API
+                                            // Write transformed events
                                             for event in transformed_events {
-                                                // Enrich with runtime context
-                                                let flow_context = FlowContext {
-                                                    flow_name: self.context.flow_name.clone(),
-                                                    flow_id: self.context.flow_id.to_string(),
-                                                    stage_name: self.context.stage_name.clone(),
-                                                    stage_id: self.stage_id.clone(),
-                                                    stage_type: obzenflow_core::event::context::StageType::Transform,
-                                                };
+                                                // Check if this is an error event that was passed through
+                                                if matches!(event.processing_info.status, obzenflow_core::event::status::processing_status::ProcessingStatus::Error(_)) {
+                                                    tracing::info!(
+                                                        stage_name = %self.context.stage_name,
+                                                        event_id = %event.id,
+                                                        "Writing error event to error journal (FLOWIP-082e)"
+                                                    );
+                                                    self.context.error_journal
+                                                        .append(event, Some(&envelope))
+                                                        .await
+                                                        .map_err(|e| format!("Failed to write error event: {}", e))?;
+                                                } else {
+                                                    // Enrich with runtime context
+                                                    let flow_context = FlowContext {
+                                                        flow_name: self.context.flow_name.clone(),
+                                                        flow_id: self.context.flow_id.to_string(),
+                                                        stage_name: self.context.stage_name.clone(),
+                                                        stage_id: self.stage_id.clone(),
+                                                        stage_type: obzenflow_core::event::context::StageType::Transform,
+                                                    };
 
-                                                let enriched_event = event
-                                                    .with_flow_context(flow_context)
-                                                    .with_runtime_context(self.context.instrumentation.snapshot());
-                                                
-                                                self.context.data_journal
-                                                    .append(enriched_event, Some(&envelope))
-                                                    .await
-                                                    .map_err(|e| format!("Failed to write transformed event: {}", e))?;
+                                                    let enriched_event = event
+                                                        .with_flow_context(flow_context)
+                                                        .with_runtime_context(self.context.instrumentation.snapshot());
+                                                    
+                                                    self.context.data_journal
+                                                        .append(enriched_event, Some(&envelope))
+                                                        .await
+                                                        .map_err(|e| format!("Failed to write transformed event: {}", e))?;
+                                                }
                                             }
                                         }
                                         Err(e) => {
@@ -385,31 +411,49 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Hand
                             if !envelope.event.is_control() {
                                 let envelope_event = envelope.event.clone();
                                 
+                                // Use run_if_not_error to handle error events
+                                let events_to_process = self.run_if_not_error(envelope_event, |e| {
+                                    self.context.handler.process(e)
+                                });
+                                
                                 let transformed_events = process_with_instrumentation(
                                     &self.context.instrumentation,
-                                    || async {
-                                        Ok(self.context.handler.process(envelope_event))
+                                    || async move {
+                                        Ok(events_to_process)
                                     }
                                 ).await?;
                                 
                                 // Write transformed events using new journal.write() API
                                 for event in transformed_events {
-                                    let flow_context = FlowContext {
-                                        flow_name: self.context.flow_name.clone(),
-                                        flow_id: self.context.flow_id.to_string(),
-                                        stage_name: self.context.stage_name.clone(),
-                                        stage_id: self.stage_id.clone(),
-                                        stage_type: obzenflow_core::event::context::StageType::Transform,
-                                    };
+                                    // Check if this is an error event that was passed through
+                                    if matches!(event.processing_info.status, obzenflow_core::event::status::processing_status::ProcessingStatus::Error(_)) {
+                                        tracing::info!(
+                                            stage_name = %self.context.stage_name,
+                                            event_id = %event.id,
+                                            "Writing error event to error journal during drain (FLOWIP-082e)"
+                                        );
+                                        self.context.error_journal
+                                            .append(event, Some(&envelope))
+                                            .await
+                                            .map_err(|e| format!("Failed to write error event during drain: {}", e))?;
+                                    } else {
+                                        let flow_context = FlowContext {
+                                            flow_name: self.context.flow_name.clone(),
+                                            flow_id: self.context.flow_id.to_string(),
+                                            stage_name: self.context.stage_name.clone(),
+                                            stage_id: self.stage_id.clone(),
+                                            stage_type: obzenflow_core::event::context::StageType::Transform,
+                                        };
 
-                                    let enriched_event = event
-                                        .with_flow_context(flow_context)
-                                        .with_runtime_context(self.context.instrumentation.snapshot());
-                                    
-                                    self.context.data_journal
-                                        .append(enriched_event, Some(&envelope))
-                                        .await
-                                        .map_err(|e| format!("Failed to write transformed event: {}", e))?;
+                                        let enriched_event = event
+                                            .with_flow_context(flow_context)
+                                            .with_runtime_context(self.context.instrumentation.snapshot());
+                                        
+                                        self.context.data_journal
+                                            .append(enriched_event, Some(&envelope))
+                                            .await
+                                            .map_err(|e| format!("Failed to write transformed event: {}", e))?;
+                                    }
                                 }
                             }
                             Ok(EventLoopDirective::Continue)

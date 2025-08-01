@@ -1,21 +1,20 @@
-//! Transform stage FSM types and state machine definition
+//! Journal sink stage FSM types and state machine definition
 //!
-//! Transforms process events from upstream stages and emit transformed events.
-//! They start processing immediately without waiting for a start signal.
+//! Journal sinks consume events and write to external destinations.
+//! They have a unique "Flushing" state that ensures all buffered
+//! data is written before shutdown.
 
 use obzenflow_fsm::{StateVariant, EventVariant, FsmContext, FsmAction};
-use obzenflow_core::{ChainEvent, EventId, WriterId, FlowId};
+use obzenflow_core::{ChainEvent, EventId, WriterId, StageId, FlowId};
 use obzenflow_core::event::{ChainEventFactory, SystemEvent};
 use obzenflow_core::journal::journal::Journal;
-use obzenflow_core::event::JournalEvent;
-use obzenflow_core::StageId;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::marker::PhantomData;
+use futures::TryFutureExt;
 use tokio::sync::RwLock;
-
-use crate::stages::common::handlers::TransformHandler;
-use crate::stages::common::control_strategies::ControlEventStrategy;
+use obzenflow_core::event::context::{FlowContext, StageType};
+use crate::stages::common::handlers::SinkHandler;
 use crate::metrics::instrumentation::StageInstrumentation;
 use crate::messaging::UpstreamSubscription;
 
@@ -23,22 +22,26 @@ use crate::messaging::UpstreamSubscription;
 // FSM States
 // ============================================================================
 
-/// FSM states for transform stages
+/// FSM states for journal sink stages
 #[derive(Serialize, Deserialize)]
-pub enum TransformState<H> {
-    /// Initial state - transform has been created but not initialized
+pub enum JournalSinkState<H> {
+    /// Initial state - sink has been created but not initialized
     Created,
     
-    /// Resources allocated, ready to start processing
+    /// Resources allocated (DB connections, file handles, etc.)
     Initialized,
     
-    /// Actively processing events from upstream stages
+    /// Actively consuming events and writing to destination
     Running,
     
-    /// Received EOF, finishing processing remaining events
+    /// UNIQUE TO SINKS: Flushing any buffered data before drain
+    /// This ensures no data loss during shutdown
+    Flushing,
+    
+    /// Flushing complete, waiting for remaining events
     Draining,
     
-    /// All events processed, EOF forwarded downstream
+    /// All events consumed, resources cleaned up
     Drained,
     
     /// Unrecoverable error occurred
@@ -49,12 +52,13 @@ pub enum TransformState<H> {
 }
 
 // Manual implementations that don't require H to implement these traits
-impl<H> Clone for TransformState<H> {
+impl<H> Clone for JournalSinkState<H> {
     fn clone(&self) -> Self {
         match self {
             Self::Created => Self::Created,
             Self::Initialized => Self::Initialized,
             Self::Running => Self::Running,
+            Self::Flushing => Self::Flushing,
             Self::Draining => Self::Draining,
             Self::Drained => Self::Drained,
             Self::Failed(msg) => Self::Failed(msg.clone()),
@@ -63,12 +67,13 @@ impl<H> Clone for TransformState<H> {
     }
 }
 
-impl<H> std::fmt::Debug for TransformState<H> {
+impl<H> std::fmt::Debug for JournalSinkState<H> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Created => write!(f, "Created"),
             Self::Initialized => write!(f, "Initialized"),
             Self::Running => write!(f, "Running"),
+            Self::Flushing => write!(f, "Flushing"),
             Self::Draining => write!(f, "Draining"),
             Self::Drained => write!(f, "Drained"),
             Self::Failed(msg) => write!(f, "Failed({:?})", msg),
@@ -77,30 +82,32 @@ impl<H> std::fmt::Debug for TransformState<H> {
     }
 }
 
-impl<H: Send + Sync> PartialEq for TransformState<H> {
+impl<H: Send + Sync> PartialEq for JournalSinkState<H> {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
-            (TransformState::Created, TransformState::Created) => true,
-            (TransformState::Initialized, TransformState::Initialized) => true,
-            (TransformState::Running, TransformState::Running) => true,
-            (TransformState::Draining, TransformState::Draining) => true,
-            (TransformState::Drained, TransformState::Drained) => true,
-            (TransformState::Failed(a), TransformState::Failed(b)) => a == b,
+            (JournalSinkState::Created, JournalSinkState::Created) => true,
+            (JournalSinkState::Initialized, JournalSinkState::Initialized) => true,
+            (JournalSinkState::Running, JournalSinkState::Running) => true,
+            (JournalSinkState::Flushing, JournalSinkState::Flushing) => true,
+            (JournalSinkState::Draining, JournalSinkState::Draining) => true,
+            (JournalSinkState::Drained, JournalSinkState::Drained) => true,
+            (JournalSinkState::Failed(a), JournalSinkState::Failed(b)) => a == b,
             _ => false,
         }
     }
 }
 
-impl<H: Send + Sync + 'static> StateVariant for TransformState<H> {
+impl<H: Send + Sync + 'static> StateVariant for JournalSinkState<H> {
     fn variant_name(&self) -> &str {
         match self {
-            TransformState::Created => "Created",
-            TransformState::Initialized => "Initialized",
-            TransformState::Running => "Running",
-            TransformState::Draining => "Draining",
-            TransformState::Drained => "Drained",
-            TransformState::Failed(_) => "Failed",
-            TransformState::_Phantom(_) => unreachable!("PhantomData variant"),
+            JournalSinkState::Created => "Created",
+            JournalSinkState::Initialized => "Initialized",
+            JournalSinkState::Running => "Running",
+            JournalSinkState::Flushing => "Flushing",  // Unique to sinks!
+            JournalSinkState::Draining => "Draining",
+            JournalSinkState::Drained => "Drained",
+            JournalSinkState::Failed(_) => "Failed",
+            JournalSinkState::_Phantom(_) => unreachable!("PhantomData variant"),
         }
     }
 }
@@ -109,22 +116,26 @@ impl<H: Send + Sync + 'static> StateVariant for TransformState<H> {
 // FSM Events
 // ============================================================================
 
-/// Events that can trigger transform state transitions
-pub enum TransformEvent<H> {
-    /// Initialize the transform
+/// Events that can trigger journal sink state transitions
+pub enum JournalSinkEvent<H> {
+    /// Initialize the sink - open connections, create output files, etc.
     Initialize,
     
-    /// Ready to start processing (transforms start immediately)
+    /// Ready to consume events
     Ready,
     
-    /// Received EOF from upstream
+    /// Received EOF from all upstream stages
     ReceivedEOF,
     
-    /// Begin draining process
-    BeginDrain,
+    /// Begin flush operation - write any buffered data
+    /// UNIQUE TO SINKS: Ensures no data loss
+    BeginFlush,
     
-    /// Draining complete
-    DrainComplete,
+    /// Flush operation completed successfully
+    FlushComplete,
+    
+    /// Begin graceful shutdown (after flush)
+    BeginDrain,
     
     /// Unrecoverable error occurred
     Error(String),
@@ -133,45 +144,48 @@ pub enum TransformEvent<H> {
     _Phantom(PhantomData<H>),
 }
 
-// Manual implementations for TransformEvent
-impl<H> Clone for TransformEvent<H> {
+// Manual implementations for JournalSinkEvent
+impl<H> Clone for JournalSinkEvent<H> {
     fn clone(&self) -> Self {
         match self {
             Self::Initialize => Self::Initialize,
             Self::Ready => Self::Ready,
             Self::ReceivedEOF => Self::ReceivedEOF,
+            Self::BeginFlush => Self::BeginFlush,
+            Self::FlushComplete => Self::FlushComplete,
             Self::BeginDrain => Self::BeginDrain,
-            Self::DrainComplete => Self::DrainComplete,
             Self::Error(msg) => Self::Error(msg.clone()),
             Self::_Phantom(_) => Self::_Phantom(PhantomData),
         }
     }
 }
 
-impl<H> std::fmt::Debug for TransformEvent<H> {
+impl<H> std::fmt::Debug for JournalSinkEvent<H> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Initialize => write!(f, "Initialize"),
             Self::Ready => write!(f, "Ready"),
             Self::ReceivedEOF => write!(f, "ReceivedEOF"),
+            Self::BeginFlush => write!(f, "BeginFlush"),
+            Self::FlushComplete => write!(f, "FlushComplete"),
             Self::BeginDrain => write!(f, "BeginDrain"),
-            Self::DrainComplete => write!(f, "DrainComplete"),
             Self::Error(msg) => write!(f, "Error({:?})", msg),
             Self::_Phantom(_) => write!(f, "_Phantom"),
         }
     }
 }
 
-impl<H: Send + Sync + 'static> EventVariant for TransformEvent<H> {
+impl<H: Send + Sync + 'static> EventVariant for JournalSinkEvent<H> {
     fn variant_name(&self) -> &str {
         match self {
-            TransformEvent::Initialize => "Initialize",
-            TransformEvent::Ready => "Ready",
-            TransformEvent::ReceivedEOF => "ReceivedEOF",
-            TransformEvent::BeginDrain => "BeginDrain",
-            TransformEvent::DrainComplete => "DrainComplete",
-            TransformEvent::Error(_) => "Error",
-            TransformEvent::_Phantom(_) => unreachable!("PhantomData variant"),
+            JournalSinkEvent::Initialize => "Initialize",
+            JournalSinkEvent::Ready => "Ready",
+            JournalSinkEvent::ReceivedEOF => "ReceivedEOF",
+            JournalSinkEvent::BeginFlush => "BeginFlush",      // Sink-specific!
+            JournalSinkEvent::FlushComplete => "FlushComplete", // Sink-specific!
+            JournalSinkEvent::BeginDrain => "BeginDrain",
+            JournalSinkEvent::Error(_) => "Error",
+            JournalSinkEvent::_Phantom(_) => unreachable!("PhantomData variant"),
         }
     }
 }
@@ -180,19 +194,21 @@ impl<H: Send + Sync + 'static> EventVariant for TransformEvent<H> {
 // FSM Actions
 // ============================================================================
 
-/// Actions that transform FSM transitions can emit
-pub enum TransformAction<H> {
-    /// Allocate resources (writer ID, subscriptions)
+/// Actions that journal sink FSM transitions can emit
+pub enum JournalSinkAction<H> {
+    /// Allocate resources needed by the sink
+    /// - Register writer ID with journal
+    /// - Create subscription to upstream stages
     AllocateResources,
     
     /// Publish running event to journal
     PublishRunning,
     
-    /// Forward EOF event downstream
-    ForwardEOF,
-    
     /// Send completion event to journal
     SendCompletion,
+    
+    /// Flush any buffered data to ensure durability
+    FlushBuffers,
     
     /// Clean up all resources
     Cleanup,
@@ -201,27 +217,27 @@ pub enum TransformAction<H> {
     _Phantom(PhantomData<H>),
 }
 
-// Manual implementations for TransformAction
-impl<H> Clone for TransformAction<H> {
+// Manual implementations for JournalSinkAction
+impl<H> Clone for JournalSinkAction<H> {
     fn clone(&self) -> Self {
         match self {
             Self::AllocateResources => Self::AllocateResources,
             Self::PublishRunning => Self::PublishRunning,
-            Self::ForwardEOF => Self::ForwardEOF,
             Self::SendCompletion => Self::SendCompletion,
+            Self::FlushBuffers => Self::FlushBuffers,
             Self::Cleanup => Self::Cleanup,
             Self::_Phantom(_) => Self::_Phantom(PhantomData),
         }
     }
 }
 
-impl<H> std::fmt::Debug for TransformAction<H> {
+impl<H> std::fmt::Debug for JournalSinkAction<H> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::AllocateResources => write!(f, "AllocateResources"),
             Self::PublishRunning => write!(f, "PublishRunning"),
-            Self::ForwardEOF => write!(f, "ForwardEOF"),
             Self::SendCompletion => write!(f, "SendCompletion"),
+            Self::FlushBuffers => write!(f, "FlushBuffers"),
             Self::Cleanup => write!(f, "Cleanup"),
             Self::_Phantom(_) => write!(f, "_Phantom"),
         }
@@ -232,13 +248,13 @@ impl<H> std::fmt::Debug for TransformAction<H> {
 // FSM Context
 // ============================================================================
 
-/// Context for transform handlers - contains everything actions need
+/// Context for journal sink handlers - contains everything actions need
 #[derive(Clone)]
-pub struct TransformContext<H: TransformHandler> {
-    /// The handler instance (stateless, so no RwLock needed)
-    pub handler: Arc<H>,
+pub struct JournalSinkContext<H: SinkHandler> {
+    /// The handler instance that implements sink logic
+    pub handler: Arc<RwLock<H>>,
     
-    /// This transform's stage ID
+    /// This sink's stage ID
     pub stage_id: obzenflow_core::StageId,
     
     /// Human-readable stage name for logging
@@ -250,7 +266,7 @@ pub struct TransformContext<H: TransformHandler> {
     /// Flow ID from pipeline
     pub flow_id: FlowId,
     
-    /// Data journal for writing chain events
+    /// Data journal for writing delivery events
     pub data_journal: Arc<dyn Journal<ChainEvent>>,
     
     /// Error journal for writing error events (FLOWIP-082e)
@@ -265,7 +281,7 @@ pub struct TransformContext<H: TransformHandler> {
     /// Message bus for pipeline communication
     pub bus: Arc<crate::message_bus::FsmMessageBus>,
     
-    /// Writer ID for this transform (initialized during setup)
+    /// Writer ID for this sink (initialized during setup)
     pub writer_id: Arc<RwLock<Option<WriterId>>>,
     
     /// Subscription to upstream events
@@ -277,17 +293,14 @@ pub struct TransformContext<H: TransformHandler> {
     /// Upstream stage IDs
     pub upstream_stages: Vec<obzenflow_core::StageId>,
     
-    /// Control event handling strategy
-    pub control_strategy: Arc<dyn ControlEventStrategy>,
-    
-    /// EOF event to forward when draining completes
-    pub buffered_eof: Arc<RwLock<Option<ChainEvent>>>,
+    /// Track if we're currently flushing
+    pub is_flushing: Arc<RwLock<bool>>,
     
     /// Stage instrumentation for metrics tracking
     pub instrumentation: Arc<StageInstrumentation>,
 }
 
-impl<H: TransformHandler> TransformContext<H> {
+impl<H: SinkHandler> JournalSinkContext<H> {
     pub fn new(
         handler: H,
         stage_id: obzenflow_core::StageId,
@@ -300,11 +313,10 @@ impl<H: TransformHandler> TransformContext<H> {
         upstream_journals: Vec<(StageId, Arc<dyn Journal<ChainEvent>>)>,
         bus: Arc<crate::message_bus::FsmMessageBus>,
         upstream_stages: Vec<StageId>,
-        control_strategy: Arc<dyn ControlEventStrategy>,
         instrumentation: Arc<StageInstrumentation>,
     ) -> Self {
         Self {
-            handler: Arc::new(handler),
+            handler: Arc::new(RwLock::new(handler)),
             stage_id,
             stage_name,
             flow_name,
@@ -318,31 +330,30 @@ impl<H: TransformHandler> TransformContext<H> {
             subscription: Arc::new(RwLock::new(None)),
             processing_task: Arc::new(RwLock::new(None)),
             upstream_stages,
-            control_strategy,
-            buffered_eof: Arc::new(RwLock::new(None)),
+            is_flushing: Arc::new(RwLock::new(false)),
             instrumentation,
         }
     }
 }
 
-impl<H: TransformHandler + 'static> FsmContext for TransformContext<H> {}
+impl<H: SinkHandler + 'static> FsmContext for JournalSinkContext<H> {}
 
 // ============================================================================
 // FSM Action Implementation
 // ============================================================================
 
 #[async_trait::async_trait]
-impl<H: TransformHandler + Send + Sync + 'static> FsmAction for TransformAction<H> {
-    type Context = TransformContext<H>;
+impl<H: SinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAction<H> {
+    type Context = JournalSinkContext<H>;
     
     async fn execute(&self, ctx: &Self::Context) -> Result<(), String> {
         match self {
-            TransformAction::AllocateResources => {
+            JournalSinkAction::AllocateResources => {
                 // Create WriterId from our StageId
                 let writer_id = WriterId::from(ctx.stage_id.clone());
                 *ctx.writer_id.write().await = Some(writer_id);
                 
-                // Create subscription to upstream journals
+                // Create subscription from upstream journals
                 let subscription = UpstreamSubscription::new(&ctx.upstream_journals).await
                     .map_err(|e| format!("Failed to create subscription: {:?}", e))?;
                 
@@ -350,21 +361,13 @@ impl<H: TransformHandler + Send + Sync + 'static> FsmAction for TransformAction<
                 
                 tracing::info!(
                     stage_name = %ctx.stage_name,
-                    "Transform allocated resources"
+                    "Sink allocated resources and created subscription"
                 );
                 Ok(())
             }
             
-            TransformAction::PublishRunning => {
-                let writer_id_guard = ctx.writer_id.read().await;
-                let writer_id = writer_id_guard
-                    .as_ref()
-                    .ok_or_else(|| "No writer ID available to publish running event".to_string())?;
-                
-                // Write lifecycle event to system journal
-                let running_event = SystemEvent::stage_running(
-                    ctx.stage_id
-                );
+            JournalSinkAction::PublishRunning => {
+                let running_event = SystemEvent::stage_running(ctx.stage_id);
                 
                 ctx.system_journal
                     .append(running_event, None)
@@ -373,49 +376,14 @@ impl<H: TransformHandler + Send + Sync + 'static> FsmAction for TransformAction<
                 
                 tracing::info!(
                     stage_name = %ctx.stage_name,
-                    "Transform published running event"
+                    "Sink published running event"
                 );
                 Ok(())
             }
             
-            TransformAction::ForwardEOF => {
-                let writer_id_guard = ctx.writer_id.read().await;
-                let writer_id = writer_id_guard
-                    .as_ref()
-                    .ok_or_else(|| "No writer ID available to forward EOF".to_string())?;
-                
-                // Get the buffered EOF event or create a new one
-                let eof_event = if let Some(buffered) = ctx.buffered_eof.write().await.take() {
-                    buffered
-                } else {
-                    ChainEventFactory::eof_event(
-                        writer_id.clone(),
-                        true, // natural EOF
-                    )
-                };
-                
-                ctx.data_journal
-                    .append(eof_event, None)
-                    .await
-                    .map_err(|e| format!("Failed to forward EOF: {}", e))?;
-                
-                tracing::info!(
-                    stage_name = %ctx.stage_name,
-                    "Transform forwarded EOF downstream"
-                );
-                Ok(())
-            }
-            
-            TransformAction::SendCompletion => {
-                let writer_id_guard = ctx.writer_id.read().await;
-                let writer_id = writer_id_guard
-                    .as_ref()
-                    .ok_or_else(|| "No writer ID available to send completion".to_string())?;
-                
+            JournalSinkAction::SendCompletion => {
                 // Write completion event to system journal
-                let completion_event = SystemEvent::stage_completed(
-                    ctx.stage_id
-                );
+                let completion_event = SystemEvent::stage_completed(ctx.stage_id);
                 
                 ctx.system_journal
                     .append(completion_event, None)
@@ -424,25 +392,75 @@ impl<H: TransformHandler + Send + Sync + 'static> FsmAction for TransformAction<
                 
                 tracing::info!(
                     stage_name = %ctx.stage_name,
-                    "Transform sent completion event"
+                    "Sink sent completion event"
                 );
                 Ok(())
             }
+
+            JournalSinkAction::FlushBuffers => {
+                *ctx.is_flushing.write().await = true;
+
+                let mut handler = ctx.handler.write().await;
+
+                match handler.flush().await {
+                    Ok(Some(payload)) => {
+                        // grab a copy of the WriterId or crash; this should never be None after init
+                        let writer_id = ctx
+                            .writer_id
+                            .read()
+                            .await
+                            .as_ref()
+                            .expect("writer_id not initialised")
+                            .clone();
+
+
+                        let flow_ctx = FlowContext {
+                            flow_name:  ctx.flow_name.clone(),
+                            flow_id:    ctx.flow_id.to_string(),
+                            stage_name: ctx.stage_name.clone(),
+                            stage_id: ctx.stage_id.clone(),
+                            stage_type: StageType::Sink,   // or whatever enum case
+                        };
+
+                        let evt = ChainEventFactory::delivery_event(writer_id, payload)
+                            .with_flow_context(flow_ctx)
+                            .with_runtime_context(ctx.instrumentation.snapshot());
+
+                        ctx.data_journal.append(evt, None)
+                            .await
+                            .map_err(|e| format!("Failed to write delivery receipt: {e}"))?;
+
+                    }
+                    Ok(None) => { /* flush succeeded, nothing to record */ }
+                    Err(e) => return Err(format!("Failed to flush: {e:?}").into()),
+                }
+
+                *ctx.is_flushing.write().await = false;
+
+                tracing::info!(stage_name=%ctx.stage_name, "Sink flushed buffers");
+                Ok(())
+            }
             
-            TransformAction::Cleanup => {
-                // Stop the processing task if any
+            JournalSinkAction::Cleanup => {
+                // Call handler drain before stopping tasks
+                let mut handler = ctx.handler.write().await;
+                handler.drain().await
+                    .map_err(|e| format!("Failed to drain handler: {:?}", e))?;
+                drop(handler);
+                
+                // Stop the processing task
                 if let Some(task) = ctx.processing_task.write().await.take() {
                     task.abort();
                 }
                 
                 tracing::info!(
                     stage_name = %ctx.stage_name,
-                    "Transform cleaned up resources"
+                    "Sink cleaned up resources"
                 );
                 Ok(())
             }
             
-            TransformAction::_Phantom(_) => unreachable!("PhantomData variant"),
+            JournalSinkAction::_Phantom(_) => unreachable!("PhantomData variant"),
         }
     }
 }

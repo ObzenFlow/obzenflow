@@ -72,19 +72,22 @@ fn test_diamond_topology() {
 }
 
 #[test]
-fn test_self_loop_detection() {
+fn test_self_loop_allowed() {
+    // As of FLOWIP-082, self-loops are allowed (they're just cycles of length 1)
     let mut builder = TopologyBuilder::new();
     let stage = builder.add_stage(Some("self_loop".to_string()));
     
-    // Try to create self-loop
+    // Create self-loop
     builder.add_edge(stage, stage);
     
     match builder.build() {
-        Err(TopologyError::CycleDetected { stages }) => {
-            assert!(stages.contains(&stage));
+        Ok(topology) => {
+            // Self-loop should be allowed
+            assert!(topology.has_edge(stage, stage));
+            assert_eq!(topology.downstream_stages(stage), vec![stage]);
+            assert_eq!(topology.upstream_stages(stage), vec![stage]);
         }
-        Ok(_) => panic!("Self-loop should be detected as cycle"),
-        Err(e) => panic!("Unexpected error: {}", e),
+        Err(e) => panic!("Self-loops should be allowed as of FLOWIP-082, but got: {}", e),
     }
 }
 
