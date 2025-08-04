@@ -401,6 +401,11 @@ impl PrometheusExporter {
             writeln!(output, "obzenflow_flow_journeys_completed_total{{flow=\"{}\"}} {}", flow_name, flow_metrics.journeys_sealed)?;
             writeln!(output)?;
             
+            writeln!(output, "# HELP obzenflow_flow_journeys_errored_total Number of event journeys that encountered errors")?;
+            writeln!(output, "# TYPE obzenflow_flow_journeys_errored_total counter")?;
+            writeln!(output, "obzenflow_flow_journeys_errored_total{{flow=\"{}\"}} {}", flow_name, flow_metrics.journeys_errored)?;
+            writeln!(output)?;
+            
             writeln!(output, "# HELP obzenflow_flow_journeys_abandoned_total Number of event journeys abandoned")?;
             writeln!(output, "# TYPE obzenflow_flow_journeys_abandoned_total counter")?;
             writeln!(output, "obzenflow_flow_journeys_abandoned_total{{flow=\"{}\"}} {}", flow_name, flow_metrics.journeys_abandoned)?;

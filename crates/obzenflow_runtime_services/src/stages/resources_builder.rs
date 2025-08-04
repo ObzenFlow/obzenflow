@@ -113,6 +113,13 @@ impl StageResourcesBuilder {
                 })
                 .collect();
             
+            // Check if this is the ErrorSink stage (FLOWIP-082g)
+            let error_journals_for_stage = if stage_info.name == "__error_sink" {
+                all_error_journals.clone()
+            } else {
+                Vec::new()
+            };
+            
             let resources = StageResources {
                 flow_id: self.flow_id.clone(),
                 data_journal,
@@ -121,7 +128,7 @@ impl StageResourcesBuilder {
                 upstream_journals,
                 message_bus: message_bus.clone(),
                 upstream_stages: upstream_ids,
-                error_journals: Vec::new(),  // Will be populated specially for ErrorSink
+                error_journals: error_journals_for_stage,
             };
             
             stage_resources.insert(stage_id, resources);

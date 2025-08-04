@@ -119,11 +119,11 @@ impl ConsoleSummaryExporter {
                 summary.push_str("\n🚀 Journey Tracking:\n");
                 summary.push_str(&format!("  Started:           {}\n", flow_metrics.journeys_opened));
                 summary.push_str(&format!("  Completed:         {}\n", flow_metrics.journeys_sealed));
-                let abandoned = flow_metrics.journeys_opened.saturating_sub(flow_metrics.journeys_sealed);
+                summary.push_str(&format!("  Errored:           {}\n", flow_metrics.journeys_errored));
                 summary.push_str(&format!("  Abandoned:         {} ({:.1}%)\n", 
-                    abandoned,
+                    flow_metrics.journeys_abandoned,
                     if flow_metrics.journeys_opened > 0 {
-                        (abandoned as f64 / flow_metrics.journeys_opened as f64) * 100.0
+                        (flow_metrics.journeys_abandoned as f64 / flow_metrics.journeys_opened as f64) * 100.0
                     } else {
                         0.0
                     }

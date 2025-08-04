@@ -127,6 +127,9 @@ pub struct FlowMetricsSnapshot {
     /// Number of sealed journeys
     pub journeys_sealed: u64,
     
+    /// Number of errored journeys
+    pub journeys_errored: u64,
+    
     /// Number of abandoned journeys (timed out)
     pub journeys_abandoned: u64,
     

@@ -222,11 +222,22 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> H
                         .with_flow_context(flow_context)
                         .with_runtime_context(self.context.instrumentation.snapshot());
                     
-                    // Write event to data journal
-                    self.context.data_journal
-                        .append(enriched_event, None)
-                        .await
-                        .map_err(|e| format!("Failed to write event: {}", e))?;
+                    // Apply run_if_not_error pattern (FLOWIP-082g)
+                    let events_to_write = self.run_if_not_error(enriched_event.clone(), |e| vec![e]);
+                    
+                    // Write events based on their status
+                    for event_to_write in events_to_write {
+                        let journal = if matches!(event_to_write.processing_info.status, obzenflow_core::event::status::processing_status::ProcessingStatus::Error(_)) {
+                            &self.context.error_journal
+                        } else {
+                            &self.context.data_journal
+                        };
+                        
+                        journal
+                            .append(event_to_write, None)
+                            .await
+                            .map_err(|e| format!("Failed to write event: {}", e))?;
+                    }
                     
                     tracing::trace!(
                         stage_name = %self.context.stage_name,

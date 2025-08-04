@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use crate::stages::{StageId, StageInfo};
 use crate::topology::DirectedEdge;
-use crate::validation::TopologyError;
+use crate::validation::{TopologyError, compute_sccs};
 
 /// Complete topology with efficient traversal
 /// 
@@ -16,6 +16,10 @@ pub struct Topology {
     // Using HashSet for O(1) contains() checks
     downstream: HashMap<StageId, HashSet<StageId>>,
     upstream: HashMap<StageId, HashSet<StageId>>,
+    
+    // Cached SCCs for cycle detection (FLOWIP-082g)
+    sccs: Vec<HashSet<StageId>>,
+    stages_in_cycles: HashSet<StageId>,
 }
 
 impl Topology {
@@ -82,11 +86,23 @@ impl Topology {
             return Err(TopologyError::DisconnectedStages { stages: disconnected });
         }
 
+        // Compute SCCs for cycle detection (FLOWIP-082g)
+        let sccs = compute_sccs(&stage_map, &downstream);
+        let mut stages_in_cycles = HashSet::new();
+        for scc in &sccs {
+            // All stages in an SCC with >1 stage are in a cycle
+            if scc.len() > 1 {
+                stages_in_cycles.extend(scc.iter().copied());
+            }
+        }
+        
         Ok(Self {
             stages: stage_map,
             edges,
             downstream,
-            upstream
+            upstream,
+            sccs,
+            stages_in_cycles,
         })
     }
 
@@ -260,40 +276,8 @@ impl Topology {
     
     /// Check if a stage is part of a cycle (has a path back to itself)
     pub fn is_in_cycle(&self, stage_id: StageId) -> bool {
-        // Use DFS to check if we can reach back to the stage from any of its downstream stages
-        let mut visited = HashSet::new();
-        
-        if let Some(downstream) = self.downstream.get(&stage_id) {
-            for &next_stage in downstream {
-                if self.has_path_dfs(next_stage, stage_id, &mut visited) {
-                    return true;
-                }
-            }
-        }
-        false
-    }
-    
-    /// Helper method for DFS path finding
-    fn has_path_dfs(&self, from: StageId, to: StageId, visited: &mut HashSet<StageId>) -> bool {
-        if from == to {
-            return true;
-        }
-        
-        if visited.contains(&from) {
-            return false;
-        }
-        
-        visited.insert(from);
-        
-        if let Some(downstream) = self.downstream.get(&from) {
-            for &next_stage in downstream {
-                if self.has_path_dfs(next_stage, to, visited) {
-                    return true;
-                }
-            }
-        }
-        
-        false
+        // Use cached SCC information (FLOWIP-082g)
+        self.stages_in_cycles.contains(&stage_id)
     }
 }
 
@@ -397,5 +381,50 @@ mod tests {
         let topology = result.unwrap();
         assert!(topology.has_edge(validator.id, fixer.id));
         assert!(topology.has_edge(fixer.id, validator.id));
+        
+        // Test SCC-based cycle detection (FLOWIP-082g)
+        assert!(topology.is_in_cycle(validator.id));
+        assert!(topology.is_in_cycle(fixer.id));
+    }
+    
+    #[test]
+    fn test_scc_cycle_detection() {
+        use crate::topology::DirectedEdge;
+        use crate::stages::{StageInfo, StageId};
+
+        // Create a more complex topology: A -> B -> C -> D
+        //                                  ^         |
+        //                                  +---------+
+        let a_id = StageId::new();
+        let b_id = StageId::new();
+        let c_id = StageId::new();
+        let d_id = StageId::new();
+        
+        let a = StageInfo::new(a_id, "a");
+        let b = StageInfo::new(b_id, "b");
+        let c = StageInfo::new(c_id, "c");
+        let d = StageInfo::new(d_id, "d");
+        
+        let stages = vec![a.clone(), b.clone(), c.clone(), d.clone()];
+        
+        let edges = vec![
+            DirectedEdge::new(a.id, b.id),
+            DirectedEdge::new(b.id, c.id),
+            DirectedEdge::new(c.id, d.id),
+            DirectedEdge::new(d.id, b.id), // Creates cycle B->C->D->B
+        ];
+
+        let result = super::Topology::new(stages, edges);
+        assert!(result.is_ok());
+        
+        let topology = result.unwrap();
+        
+        // A is not in a cycle
+        assert!(!topology.is_in_cycle(a.id));
+        
+        // B, C, D are all in the same cycle
+        assert!(topology.is_in_cycle(b.id));
+        assert!(topology.is_in_cycle(c.id));
+        assert!(topology.is_in_cycle(d.id));
     }
 }

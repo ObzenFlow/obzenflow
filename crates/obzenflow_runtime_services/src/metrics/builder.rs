@@ -7,6 +7,7 @@ use super::{
     supervisor::MetricsAggregatorSupervisor,
     fsm::{MetricsAggregatorContext, MetricsAggregatorEvent, MetricsAggregatorState},
     config::DefaultMetricsConfig,
+    inputs::MetricsInputs,
 };
 use crate::{
     supervised_base::{
@@ -26,8 +27,8 @@ use std::collections::HashMap;
 
 /// Builder for creating a metrics aggregator with proper FSM lifecycle
 pub struct MetricsAggregatorBuilder {
-    /// All stage journals to read metrics from
-    stage_journals: Vec<(StageId, Arc<dyn Journal<ChainEvent>>)>,
+    /// Metrics inputs containing stage and system journals
+    inputs: MetricsInputs,
     
     /// System journal for reporting
     system_journal: Arc<dyn Journal<SystemEvent>>,
@@ -43,14 +44,14 @@ pub struct MetricsAggregatorBuilder {
 }
 
 impl MetricsAggregatorBuilder {
-    /// Create a new metrics aggregator builder
+    /// Create a new metrics aggregator builder with MetricsInputs
     pub fn new(
-        stage_journals: Vec<(StageId, Arc<dyn Journal<ChainEvent>>)>,
+        inputs: MetricsInputs,
         system_journal: Arc<dyn Journal<SystemEvent>>,
         exporter: Arc<dyn MetricsExporter>,
     ) -> Self {
         Self {
-            stage_journals,
+            inputs,
             system_journal,
             exporter,
             stage_metadata: HashMap::new(),
@@ -91,7 +92,7 @@ impl SupervisorBuilder for MetricsAggregatorBuilder {
         // Create metrics context with all mutable state
         let metrics_context = Arc::new(
             MetricsAggregatorContext::new(
-                self.stage_journals.clone(),
+                self.inputs.clone(),
                 self.system_journal.clone(),
                 Some(self.exporter),
                 self.export_interval_secs,

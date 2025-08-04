@@ -37,7 +37,10 @@ pub struct PipelineBuilder {
 
 impl PipelineBuilder {
     /// Create a new pipeline builder
-    pub fn new(topology: Arc<Topology>, system_journal: Arc<dyn Journal<SystemEvent>>) -> Self {
+    pub fn new(
+        topology: Arc<Topology>, 
+        system_journal: Arc<dyn Journal<SystemEvent>>,
+    ) -> Self {
         Self {
             topology,
             system_journal,
@@ -71,6 +74,7 @@ impl PipelineBuilder {
         self.error_journals = Some(journals);
         self
     }
+
 
 }
 

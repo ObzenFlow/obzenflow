@@ -5,7 +5,7 @@ use crate::event::context::{FlowContext, IntentContext, ProcessingContext, Runti
 use crate::event::types::{CorrelationId, EventId, WriterId};
 use crate::id::StageId;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::Value;
 use crate::event::context::causality_context::CausalityContext;
 use crate::event::context::observability_context::ObservabilityContext;
 
@@ -192,6 +192,7 @@ impl ChainEvent {
     pub fn is_lifecycle(&self) -> bool {
         matches!(self.content, ChainEventContent::Observability(_))
     }
+
 
     /// Return a concise “category.kind” string for logging & metrics.
     pub fn event_type(&self) -> String {

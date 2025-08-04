@@ -156,6 +156,7 @@ macro_rules! build_typed_flow {
             builder.reset_current();
         }
         
+        
         // Add connections
         for (from, to) in connections {
             if let (Some(&from_id), Some(&to_id)) = 
@@ -294,7 +295,10 @@ macro_rules! build_typed_flow {
         use $crate::prelude::{PipelineBuilder, FlowHandle};
         use obzenflow_runtime_services::supervised_base::SupervisorBuilder;
         
-        let builder = PipelineBuilder::new(topology.clone(), stage_resources_set.system_journal.clone())
+        let builder = PipelineBuilder::new(
+                topology.clone(), 
+                stage_resources_set.system_journal.clone(),
+            )
             .with_stages(stages)
             .with_stage_journals(stage_resources_set.stage_journals.clone())
             .with_error_journals(stage_resources_set.error_journals.clone());

@@ -121,8 +121,14 @@ pub struct MetricsAggregatorContext {
     /// System journal for reporting
     pub system_journal: Arc<dyn Journal<obzenflow_core::event::SystemEvent>>,
     
-    /// Subscription to read from all stage journals
-    pub subscription: Arc<RwLock<Option<crate::messaging::upstream_subscription::UpstreamSubscription<ChainEvent>>>>,
+    /// Subscription to read from all stage data journals
+    pub data_subscription: Arc<RwLock<Option<crate::messaging::upstream_subscription::UpstreamSubscription<ChainEvent>>>>,
+    
+    /// Subscription to read from all error journals (FLOWIP-082g)
+    pub error_subscription: Arc<RwLock<Option<crate::messaging::upstream_subscription::UpstreamSubscription<ChainEvent>>>>,
+    
+    /// Whether to include error journals in metrics collection
+    pub include_error_journals: bool,
     
     pub exporter: Option<Arc<dyn obzenflow_core::metrics::MetricsExporter>>,
     pub metrics_store: Arc<RwLock<MetricsStore>>,
@@ -145,6 +151,7 @@ pub struct MetricsStore {
     pub active_journeys: HashMap<CorrelationId, JourneyState>,
     pub journeys_started: u64,
     pub journeys_completed: u64,
+    pub journeys_errored: u64,
     pub journeys_abandoned: u64,
     pub journey_durations: hdrhistogram::Histogram<u64>,
     
@@ -191,6 +198,7 @@ impl Default for MetricsStore {
             active_journeys: HashMap::new(),
             journeys_started: 0,
             journeys_completed: 0,
+            journeys_errored: 0,
             journeys_abandoned: 0,
             journey_durations: hdrhistogram::Histogram::new_with_bounds(
                 HISTOGRAM_MIN_US,
@@ -230,21 +238,32 @@ impl Default for StageMetrics {
 
 impl MetricsAggregatorContext {
     pub async fn new(
-        stage_journals: Vec<(obzenflow_core::StageId, Arc<dyn Journal<ChainEvent>>)>,
+        inputs: crate::metrics::inputs::MetricsInputs,
         system_journal: Arc<dyn Journal<obzenflow_core::event::SystemEvent>>,
         exporter: Option<Arc<dyn obzenflow_core::metrics::MetricsExporter>>,
         export_interval_secs: u64,
         system_id: SystemId,
         stage_metadata: HashMap<StageId, StageMetadata>,
     ) -> Result<Self, String> {
-        // Create the subscription from stage journals
-        let subscription = crate::messaging::upstream_subscription::UpstreamSubscription::new(&stage_journals)
+        // Create subscription for data journals
+        let data_subscription = crate::messaging::upstream_subscription::UpstreamSubscription::new(&inputs.stage_data_journals)
             .await
-            .map_err(|e| format!("Failed to create upstream subscription: {}", e))?;
+            .map_err(|e| format!("Failed to create data subscription: {}", e))?;
+        
+        // Create subscription for error journals (FLOWIP-082g)
+        let error_subscription = if !inputs.error_journals.is_empty() {
+            Some(crate::messaging::upstream_subscription::UpstreamSubscription::new(&inputs.error_journals)
+                .await
+                .map_err(|e| format!("Failed to create error subscription: {}", e))?)
+        } else {
+            None
+        };
         
         Ok(Self {
             system_journal,
-            subscription: Arc::new(RwLock::new(Some(subscription))),
+            data_subscription: Arc::new(RwLock::new(Some(data_subscription))),
+            error_subscription: Arc::new(RwLock::new(error_subscription)),
+            include_error_journals: true, // Default to true per FLOWIP-082g
             exporter,
             metrics_store: Arc::new(RwLock::new(MetricsStore::default())),
             export_interval_secs,
@@ -307,13 +326,18 @@ impl FsmAction for MetricsAggregatorAction {
                         
                         // Journey tracking for delivery events
                         if let Some(correlation_id) = &event.correlation_id {
-                            // Journey completes at sink
                             if let Some(journey) = store.active_journeys.remove(correlation_id) {
-                                store.journeys_completed += 1;
+                                // Journey completes successfully or errors at sink
+                                if has_error {
+                                    store.journeys_errored += 1;
+                                } else {
+                                    store.journeys_completed += 1;
+                                }
+                                
                                 let duration = journey.start_time.elapsed();
                                 let duration_us = duration.as_micros() as u64;
                                 
-                                // Record journey duration
+                                // Record journey duration (for both success and error)
                                 let clamped_duration = duration_us.max(HISTOGRAM_MIN_US).min(HISTOGRAM_MAX_US);
                                 if let Err(e) = store.journey_durations.record(clamped_duration) {
                                     tracing::warn!("Failed to record journey duration: {:?}", e);
@@ -510,6 +534,22 @@ impl FsmAction for MetricsAggregatorAction {
                 // Aggregate flow-level metrics
                 if matches!(event.processing_info.status, ProcessingStatus::Error(_)) {
                     store.flow_errors_total += 1;
+                    
+                    // Handle errored journeys (FLOWIP-082g)
+                    if let Some(correlation_id) = &event.correlation_id {
+                        // Journey errors on first error for this correlation_id
+                        if let Some(journey) = store.active_journeys.remove(correlation_id) {
+                            store.journeys_errored += 1;
+                            let duration = journey.start_time.elapsed();
+                            let duration_us = duration.as_micros() as u64;
+                            
+                            // Record journey duration at error time
+                            let clamped_duration = duration_us.max(HISTOGRAM_MIN_US).min(HISTOGRAM_MAX_US);
+                            if let Err(e) = store.journey_durations.record(clamped_duration) {
+                                tracing::warn!("Failed to record errored journey duration: {:?}", e);
+                            }
+                        }
+                    }
                 }
                 
                 // Note: Event loop aggregation happens during export, not here
@@ -612,8 +652,12 @@ impl FsmAction for MetricsAggregatorAction {
                             percentiles: journey_percentiles,
                         };
                         
-                        // Calculate abandoned journeys as per FLOWIP-050f "let it crash" philosophy
-                        let journeys_abandoned = store.journeys_started.saturating_sub(store.journeys_completed);
+                        // Calculate abandoned journeys per FLOWIP-082g formula
+                        // abandoned = started - completed - errored - active
+                        let journeys_abandoned = store.journeys_started
+                            .saturating_sub(store.journeys_completed)
+                            .saturating_sub(store.journeys_errored)
+                            .saturating_sub(store.active_journeys.len() as u64);
                         
                         // Aggregate event loops from all stages
                         let mut total_event_loops = 0u64;
@@ -626,6 +670,7 @@ impl FsmAction for MetricsAggregatorAction {
                         let flow_metrics = obzenflow_core::metrics::FlowMetricsSnapshot {
                             journeys_opened: store.journeys_started,
                             journeys_sealed: store.journeys_completed,
+                            journeys_errored: store.journeys_errored,
                             journeys_abandoned,
                             e2e_latency,
                             flow_duration: MetricsDuration::from(flow_duration),

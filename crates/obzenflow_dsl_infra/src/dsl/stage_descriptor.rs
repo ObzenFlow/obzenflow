@@ -8,8 +8,7 @@ use obzenflow_runtime_services::{
         common::{
             stage_handle::{BoxedStageHandle, StageEvent},
             handlers::{
-                FiniteSourceHandler, InfiniteSourceHandler, TransformHandler, SinkHandler,
-                ErrorSinkHandler
+                FiniteSourceHandler, InfiniteSourceHandler, TransformHandler, SinkHandler
             },
             control_strategies::{
                 ControlEventStrategy,
@@ -24,7 +23,6 @@ use obzenflow_runtime_services::{
         transform::{TransformBuilder, TransformConfig, TransformEvent, TransformState},
         sink::{
             journal_sink::{JournalSinkBuilder, JournalSinkConfig, JournalSinkEvent, JournalSinkState},
-            error_sink::{ErrorSinkBuilder, ErrorSinkConfig, ErrorSinkEvent, ErrorSinkState},
         },
     },
     pipeline::config::StageConfig,
@@ -655,92 +653,3 @@ fn check_sink_state<H>(state: &JournalSinkState<H>) -> crate::stage_handle_adapt
 // ErrorSink Descriptor (FLOWIP-082e)
 // ============================================================================
 
-/// Descriptor for error sink stages that consume error events from all stages
-pub struct ErrorSinkDescriptor<H: ErrorSinkHandler> {
-    pub name: String,
-    pub handler: H,
-    pub middleware: Vec<Box<dyn MiddlewareFactory>>,
-}
-
-#[async_trait]
-impl<H: ErrorSinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDescriptor for ErrorSinkDescriptor<H> {
-    fn name(&self) -> &str {
-        &self.name
-    }
-    
-    fn stage_type(&self) -> StageType {
-        StageType::Sink  // ErrorSink is a special type of Sink
-    }
-    
-    async fn create_handle_with_flow_middleware(
-        self: Box<Self>,
-        config: StageConfig,
-        resources: StageResources,
-        flow_middleware: Vec<Box<dyn MiddlewareFactory>>,
-    ) -> Result<BoxedStageHandle, String> {
-        // Get error journals from resources - they should already be populated
-        let error_journals = resources.error_journals.clone();
-        
-        // Create ErrorSink config
-        let error_sink_config = ErrorSinkConfig {
-            stage_id: config.stage_id,
-            stage_name: config.name.clone(),
-            flow_name: config.flow_name.clone(),
-            all_stage_ids: Vec::new(), // Not needed since we have error_journals directly
-            dedupe_window_secs: 300,
-            batch_size: 100,
-            rate_limit: 0.0,  // No rate limit by default
-        };
-        
-        // Create instrumentation
-        let instrumentation_config = InstrumentationConfig::default();
-        let instrumentation = Arc::new(StageInstrumentation::new_with_config(instrumentation_config));
-        
-        // Build ErrorSink with error journals
-        let handle = ErrorSinkBuilder::new(
-            self.handler.clone(),
-            error_sink_config,
-            resources.clone(),
-        )
-        .with_instrumentation(instrumentation.clone())
-        .with_error_journals(error_journals)
-        .build()
-        .await
-        .map_err(|e| format!("Failed to build error sink: {:?}", e))?;
-        
-        // Create adapter to bridge to StageHandle
-        let adapter = StageHandleAdapter::new(
-            handle,
-            config.stage_id,
-            config.name,
-            StageType::Sink,
-            move |event| translate_stage_event_to_error_sink(event),
-            |state| check_error_sink_state(state),
-        );
-        
-        Ok(Box::new(adapter) as BoxedStageHandle)
-    }
-}
-
-fn translate_stage_event_to_error_sink<H>(event: StageEvent) -> Result<ErrorSinkEvent<H>, String> {
-    match event {
-        StageEvent::Initialize => Ok(ErrorSinkEvent::Initialize),
-        StageEvent::Start => Ok(ErrorSinkEvent::Ready),
-        StageEvent::BeginDrain => Ok(ErrorSinkEvent::BeginDrain),
-        StageEvent::ForceShutdown => Ok(ErrorSinkEvent::Error("Force shutdown requested".to_string())),
-        _ => Err(format!("Unsupported stage event for error sink: {:?}", event)),
-    }
-}
-
-fn check_error_sink_state<H>(state: &ErrorSinkState<H>) -> crate::stage_handle_adapter::StageStatus {
-    use crate::stage_handle_adapter::StageStatus;
-    match state {
-        ErrorSinkState::Created => StageStatus::Created,
-        ErrorSinkState::Initialized => StageStatus::Ready,
-        ErrorSinkState::Running => StageStatus::Running,
-        ErrorSinkState::Flushing | ErrorSinkState::Draining => StageStatus::Draining,
-        ErrorSinkState::Drained => StageStatus::Drained,
-        ErrorSinkState::Failed(_) => StageStatus::Failed,
-        _ => StageStatus::Created,
-    }
-}

@@ -7,6 +7,7 @@ pub mod builder;
 pub mod handle;
 pub mod constants;
 pub mod instrumentation;
+pub mod inputs;
 
 // Re-export commonly used types
 // Note: MetricsAggregatorSupervisor is intentionally NOT exported - use MetricsAggregatorBuilder
@@ -21,3 +22,4 @@ pub use fsm::{
 pub use config::DefaultMetricsConfig;
 pub use builder::MetricsAggregatorBuilder;
 pub use handle::{MetricsHandle, MetricsHandleExt};
+pub use inputs::MetricsInputs;

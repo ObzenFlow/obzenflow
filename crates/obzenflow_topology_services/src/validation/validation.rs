@@ -32,6 +32,75 @@ pub enum TopologyError {
     },
 }
 
+/// Compute strongly connected components using Tarjan's algorithm (FLOWIP-082g)
+pub fn compute_sccs<T>(
+    stages: &HashMap<StageId, T>,
+    downstream: &HashMap<StageId, HashSet<StageId>>,
+) -> Vec<HashSet<StageId>> {
+    let mut index = 0;
+    let mut stack = Vec::new();
+    let mut indices = HashMap::new();
+    let mut lowlinks = HashMap::new();
+    let mut on_stack = HashSet::new();
+    let mut sccs = Vec::new();
+
+    fn strongconnect(
+        v: StageId,
+        downstream: &HashMap<StageId, HashSet<StageId>>,
+        index: &mut usize,
+        stack: &mut Vec<StageId>,
+        indices: &mut HashMap<StageId, usize>,
+        lowlinks: &mut HashMap<StageId, usize>,
+        on_stack: &mut HashSet<StageId>,
+        sccs: &mut Vec<HashSet<StageId>>,
+    ) {
+        indices.insert(v, *index);
+        lowlinks.insert(v, *index);
+        *index += 1;
+        stack.push(v);
+        on_stack.insert(v);
+
+        if let Some(neighbors) = downstream.get(&v) {
+            for &w in neighbors {
+                if !indices.contains_key(&w) {
+                    strongconnect(w, downstream, index, stack, indices, lowlinks, on_stack, sccs);
+                    let w_lowlink = *lowlinks.get(&w).unwrap();
+                    let v_lowlink = *lowlinks.get(&v).unwrap();
+                    lowlinks.insert(v, v_lowlink.min(w_lowlink));
+                } else if on_stack.contains(&w) {
+                    let w_index = *indices.get(&w).unwrap();
+                    let v_lowlink = *lowlinks.get(&v).unwrap();
+                    lowlinks.insert(v, v_lowlink.min(w_index));
+                }
+            }
+        }
+
+        if lowlinks.get(&v) == indices.get(&v) {
+            let mut scc = HashSet::new();
+            loop {
+                let w = stack.pop().unwrap();
+                on_stack.remove(&w);
+                scc.insert(w);
+                if w == v {
+                    break;
+                }
+            }
+            // Only include SCCs that are actual cycles (more than 1 node or self-loop)
+            if scc.len() > 1 || (scc.len() == 1 && downstream.get(&v).map(|s| s.contains(&v)).unwrap_or(false)) {
+                sccs.push(scc);
+            }
+        }
+    }
+
+    for &v in stages.keys() {
+        if !indices.contains_key(&v) {
+            strongconnect(v, downstream, &mut index, &mut stack, &mut indices, &mut lowlinks, &mut on_stack, &mut sccs);
+        }
+    }
+
+    sccs
+}
+
 /// Validate that the topology is acyclic using Kahn's algorithm
 pub fn validate_acyclic<T>(
     stages: &HashMap<StageId, T>,
@@ -331,5 +400,94 @@ mod tests {
         
         let disconnected = find_disconnected_stages(&stages, &downstream, &upstream);
         assert!(disconnected.is_none());
+    }
+    
+    #[test]
+    fn test_compute_sccs_simple_cycle() {
+        let mut stages = HashMap::new();
+        let s1 = StageId::new();
+        let s2 = StageId::new();
+        let s3 = StageId::new();
+        
+        stages.insert(s1, ());
+        stages.insert(s2, ());
+        stages.insert(s3, ());
+        
+        let mut downstream = HashMap::new();
+        
+        // Create a cycle: s1 -> s2 -> s3 -> s1
+        downstream.insert(s1, [s2].into_iter().collect());
+        downstream.insert(s2, [s3].into_iter().collect());
+        downstream.insert(s3, [s1].into_iter().collect());
+        
+        let sccs = compute_sccs(&stages, &downstream);
+        
+        // Should have one SCC containing all three stages
+        assert_eq!(sccs.len(), 1);
+        assert_eq!(sccs[0].len(), 3);
+        assert!(sccs[0].contains(&s1));
+        assert!(sccs[0].contains(&s2));
+        assert!(sccs[0].contains(&s3));
+    }
+    
+    #[test]
+    fn test_compute_sccs_multiple_components() {
+        let mut stages = HashMap::new();
+        let s1 = StageId::new();
+        let s2 = StageId::new();
+        let s3 = StageId::new();
+        let s4 = StageId::new();
+        let s5 = StageId::new();
+        
+        stages.insert(s1, ());
+        stages.insert(s2, ());
+        stages.insert(s3, ());
+        stages.insert(s4, ());
+        stages.insert(s5, ());
+        
+        let mut downstream = HashMap::new();
+        
+        // First cycle: s1 -> s2 -> s1
+        downstream.insert(s1, [s2].into_iter().collect());
+        downstream.insert(s2, [s1].into_iter().collect());
+        
+        // Second cycle: s3 -> s4 -> s5 -> s3
+        downstream.insert(s3, [s4].into_iter().collect());
+        downstream.insert(s4, [s5].into_iter().collect());
+        downstream.insert(s5, [s3].into_iter().collect());
+        
+        let sccs = compute_sccs(&stages, &downstream);
+        
+        // Should have two SCCs
+        assert_eq!(sccs.len(), 2);
+        
+        // Find the SCC sizes
+        let mut scc_sizes: Vec<usize> = sccs.iter().map(|scc| scc.len()).collect();
+        scc_sizes.sort();
+        
+        assert_eq!(scc_sizes, vec![2, 3]);
+    }
+    
+    #[test]
+    fn test_compute_sccs_no_cycles() {
+        let mut stages = HashMap::new();
+        let s1 = StageId::new();
+        let s2 = StageId::new();
+        let s3 = StageId::new();
+        
+        stages.insert(s1, ());
+        stages.insert(s2, ());
+        stages.insert(s3, ());
+        
+        let mut downstream = HashMap::new();
+        
+        // Linear DAG: s1 -> s2 -> s3
+        downstream.insert(s1, [s2].into_iter().collect());
+        downstream.insert(s2, [s3].into_iter().collect());
+        
+        let sccs = compute_sccs(&stages, &downstream);
+        
+        // Should have no SCCs (only cycles are returned)
+        assert_eq!(sccs.len(), 0);
     }
 }

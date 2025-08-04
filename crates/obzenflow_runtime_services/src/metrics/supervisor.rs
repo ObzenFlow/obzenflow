@@ -225,7 +225,7 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
     ) -> Result<EventLoopDirective<Self::Event>, Box<dyn std::error::Error + Send + Sync>> {
         match state {
             MetricsAggregatorState::Initializing => {
-                // Subscription is already created in the context during builder
+                // Subscriptions are already created in the context during builder
 
                 // Publish ready event to system journal
                 // Metrics aggregator creates SystemEvent directly
@@ -266,11 +266,14 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                     }
                 }
 
-                // Get subscription from context
-                let mut subscription_guard = self.context.subscription.write().await;
-                let subscription = subscription_guard
+                // Get both subscriptions from context
+                let mut data_subscription_guard = self.context.data_subscription.write().await;
+                let data_subscription = data_subscription_guard
                     .as_mut()
-                    .ok_or("No subscription available")?;
+                    .ok_or("No data subscription available")?;
+                    
+                let mut error_subscription_guard = self.context.error_subscription.write().await;
+                let error_subscription = error_subscription_guard.as_mut();
 
                 // Create a future for the timer tick
                 let timer_tick = async {
@@ -283,19 +286,35 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                     }
                 };
 
+                // Helper to check if either subscription has a drain event
+                let check_for_drain = |envelope: &obzenflow_core::EventEnvelope<ChainEvent>| {
+                    matches!(
+                        &envelope.event.content, 
+                        obzenflow_core::event::ChainEventContent::FlowControl(
+                            FlowControlPayload::Drain
+                        )
+                    )
+                };
+
+                // Build futures for subscriptions
+                let data_recv = data_subscription.recv();
+                let error_recv = async {
+                    if let Some(error_sub) = error_subscription {
+                        error_sub.recv().await
+                    } else {
+                        // If no error subscription, wait forever
+                        std::future::pending().await
+                    }
+                };
+
                 tokio::select! {
-                    // Process journal events one at a time
-                    result = subscription.recv() => {
+                    // Process data journal events
+                    result = data_recv => {
                         match result {
                             Ok(envelope) => {
-                                // Check for drain event - FlowSignalPayload::Drain
-                                if matches!(
-                                    &envelope.event.content, 
-                                    obzenflow_core::event::ChainEventContent::FlowControl(
-                                        FlowControlPayload::Drain
-                                    )
-                                ) {
-                                    tracing::info!("Metrics aggregator received drain event");
+                                // Check for drain event
+                                if check_for_drain(&envelope) {
+                                    tracing::info!("Metrics aggregator received drain event from data journal");
                                     // Clear the timer when transitioning away from Running
                                     *self.context.export_timer.lock().await = None;
                                     return Ok(EventLoopDirective::Transition(MetricsAggregatorEvent::StartDraining));
@@ -307,11 +326,37 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                                 }
                                 
                                 // Process single event through FSM
-                                // Metrics aggregator is special - it can batch in its action
                                 Ok(EventLoopDirective::Transition(MetricsAggregatorEvent::ProcessBatch { events: vec![envelope] }))
                             }
                             Err(e) => {
-                                tracing::error!("Failed to receive event: {}", e);
+                                tracing::error!("Failed to receive event from data journal: {}", e);
+                                Ok(EventLoopDirective::Continue)
+                            }
+                        }
+                    }
+                    
+                    // Process error journal events (FLOWIP-082g)
+                    result = error_recv => {
+                        match result {
+                            Ok(envelope) => {
+                                // Check for drain event
+                                if check_for_drain(&envelope) {
+                                    tracing::info!("Metrics aggregator received drain event from error journal");
+                                    // Clear the timer when transitioning away from Running
+                                    *self.context.export_timer.lock().await = None;
+                                    return Ok(EventLoopDirective::Transition(MetricsAggregatorEvent::StartDraining));
+                                }
+                                
+                                // Skip control and system events
+                                if envelope.event.is_control() || envelope.event.is_system() {
+                                    return Ok(EventLoopDirective::Continue);
+                                }
+                                
+                                // Process error event through FSM
+                                Ok(EventLoopDirective::Transition(MetricsAggregatorEvent::ProcessBatch { events: vec![envelope] }))
+                            }
+                            Err(e) => {
+                                tracing::error!("Failed to receive event from error journal: {}", e);
                                 Ok(EventLoopDirective::Continue)
                             }
                         }
@@ -337,30 +382,66 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                     ));
                 }
                 
-                // Process draining state
-                let mut subscription_guard = self.context.subscription.write().await;
-                let subscription = subscription_guard
+                // Process draining state - need to drain both data and error journals
+                let mut data_subscription_guard = self.context.data_subscription.write().await;
+                let data_subscription = data_subscription_guard
                     .as_mut()
-                    .ok_or("No subscription available")?;
+                    .ok_or("No data subscription available")?;
+                    
+                let mut error_subscription_guard = self.context.error_subscription.write().await;
+                let error_subscription = error_subscription_guard.as_mut();
 
-                // Try to get more events with timeout
-                match tokio::time::timeout(
-                    tokio::time::Duration::from_millis(50),
-                    subscription.recv(),
-                )
-                .await
-                {
-                    Ok(Ok(envelope)) => {
-                        // Skip control and system events even during draining
-                        if envelope.event.is_control() || envelope.event.is_system() {
-                            return Ok(EventLoopDirective::Continue);
-                        }
-                        // Got event, process it
-                        Ok(EventLoopDirective::Transition(MetricsAggregatorEvent::ProcessBatch { events: vec![envelope] }))
+                // Try both subscriptions with timeout
+                let data_recv = tokio::time::timeout(
+                    tokio::time::Duration::from_millis(25),
+                    data_subscription.recv(),
+                );
+                
+                let error_recv = async {
+                    if let Some(error_sub) = error_subscription {
+                        tokio::time::timeout(
+                            tokio::time::Duration::from_millis(25),
+                            error_sub.recv(),
+                        ).await
+                    } else {
+                        // If no error subscription, wait forever
+                        std::future::pending().await
                     }
-                    _ => {
-                        // No events or timeout - increment empty batch counter
-                        Ok(EventLoopDirective::Transition(MetricsAggregatorEvent::DrainEmptyBatch))
+                };
+
+                tokio::select! {
+                    result = data_recv => {
+                        match result {
+                            Ok(Ok(envelope)) => {
+                                // Skip control and system events even during draining
+                                if envelope.event.is_control() || envelope.event.is_system() {
+                                    return Ok(EventLoopDirective::Continue);
+                                }
+                                // Got event, process it
+                                Ok(EventLoopDirective::Transition(MetricsAggregatorEvent::ProcessBatch { events: vec![envelope] }))
+                            }
+                            _ => {
+                                // Try error journal next
+                                Ok(EventLoopDirective::Continue)
+                            }
+                        }
+                    }
+                    
+                    result = error_recv => {
+                        match result {
+                            Ok(Ok(envelope)) => {
+                                // Skip control and system events even during draining
+                                if envelope.event.is_control() || envelope.event.is_system() {
+                                    return Ok(EventLoopDirective::Continue);
+                                }
+                                // Got error event, process it
+                                Ok(EventLoopDirective::Transition(MetricsAggregatorEvent::ProcessBatch { events: vec![envelope] }))
+                            }
+                            _ => {
+                                // No events from either subscription - increment empty batch counter
+                                Ok(EventLoopDirective::Transition(MetricsAggregatorEvent::DrainEmptyBatch))
+                            }
+                        }
                     }
                 }
             }
