@@ -4,3 +4,4 @@
 
 pub mod journal;
 pub mod monitoring_backend;
+pub mod web;

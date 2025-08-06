@@ -10,6 +10,7 @@ pub mod id;
 pub mod journal;
 pub mod metrics;
 pub mod time;
+pub mod web;
 
 // Re-export key types for convenience
 pub use error::Result;

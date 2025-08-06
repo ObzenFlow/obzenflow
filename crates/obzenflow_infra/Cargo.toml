@@ -27,10 +27,19 @@ thiserror = "1"
 prometheus = { version = "0.13", optional = true }
 statsd = { version = "0.16", optional = true }
 
+# Web frameworks (optional)
+warp = { version = "0.3", optional = true }
+bytes = { version = "1.5", optional = true }
+axum = { version = "0.7", optional = true }
+tower = { version = "0.4", optional = true }
+hyper = { version = "1.0", optional = true }
+
 [features]
 default = []
 prometheus = ["dep:prometheus"]
 statsd = ["dep:statsd"]
+warp-server = ["dep:warp", "dep:bytes"]
+axum-server = ["dep:axum", "dep:tower", "dep:hyper"]
 
 [dev-dependencies]
 tokio-test = "0.4"
