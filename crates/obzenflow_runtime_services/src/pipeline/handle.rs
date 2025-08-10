@@ -81,6 +81,15 @@ impl FlowHandle {
         self.handle.state_receiver()
     }
     
+    /// Get the metrics exporter for concurrent access during flow execution
+    /// 
+    /// This allows starting a metrics server before running the flow,
+    /// enabling real-time monitoring of long-running flows.
+    /// The exporter is thread-safe and can be accessed concurrently.
+    pub fn metrics_exporter(&self) -> Option<Arc<dyn obzenflow_core::metrics::MetricsExporter>> {
+        self.metrics_exporter.clone()
+    }
+    
     /// Render metrics based on the wrapped exporter's format
     pub async fn render_metrics(&self) -> Result<String, FlowError> {
         if let Some(ref exporter) = self.metrics_exporter {
