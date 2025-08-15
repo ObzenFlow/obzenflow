@@ -9,7 +9,7 @@ publish = false
 [dependencies]
 # ObzenFlow dependencies - we need all layers for integration benchmarks
 obzenflow_core = { path = "../obzenflow_core" }
-obzenflow_topology_services = { path = "../obzenflow_topology_services" }
+obzenflow-topology = { path = "../../../obzenflow-topology" }
 obzenflow_runtime_services = { path = "../obzenflow_runtime_services" }
 obzenflow_adapters = { path = "../obzenflow_adapters" }
 obzenflow_dsl_infra = { path = "../obzenflow_dsl_infra" }

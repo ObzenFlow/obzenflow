@@ -9,7 +9,7 @@ publish = false
 [dependencies]
 # Internal dependencies
 obzenflow_core = { path = "../obzenflow_core" }
-obzenflow_topology_services = { path = "../obzenflow_topology_services" }
+obzenflow-topology = { path = "../../../obzenflow-topology" }
 obzenflow_fsm = { path = "../obzenflow_fsm" }
 
 # Service layer dependencies

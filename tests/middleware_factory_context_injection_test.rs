@@ -19,7 +19,7 @@ use obzenflow_runtime_services::stages::common::handlers::TransformHandler;
 use obzenflow_runtime_services::pipeline::config::StageConfig;
 use obzenflow_runtime_services::data_plane::journal_subscription::ReactiveJournal;
 use obzenflow_runtime_services::message_bus::FsmMessageBus;
-use obzenflow_topology_services::stages::StageId;
+use obzenflow_topology::StageId;
 use std::sync::Arc;
 
 // Simple test handler

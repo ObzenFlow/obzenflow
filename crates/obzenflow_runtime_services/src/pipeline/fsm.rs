@@ -96,7 +96,7 @@ pub struct PipelineContext {
     pub bus: Arc<FsmMessageBus>,
     
     /// Topology for structure queries
-    pub topology: Arc<obzenflow_topology_services::topology::Topology>,
+    pub topology: Arc<obzenflow_topology::Topology>,
     
     /// System journal for pipeline orchestration events
     pub system_journal: Arc<dyn Journal<SystemEvent>>,
@@ -174,7 +174,7 @@ impl FsmAction for PipelineAction {
                 // Start all non-source stages (transforms and sinks)
                 let supervisors = context.stage_supervisors.read().await;
                 let non_source_stages: Vec<_> = supervisors.iter()
-                    .filter(|(stage_id, stage)| !context.topology.upstream_stages(**stage_id).is_empty() || !stage.stage_type().is_source())
+                    .filter(|(stage_id, stage)| !context.topology.upstream_stages(stage_id.as_ulid()).is_empty() || !stage.stage_type().is_source())
                     .map(|(stage_id, _)| *stage_id)
                     .collect();
                 drop(supervisors);
@@ -196,7 +196,7 @@ impl FsmAction for PipelineAction {
                 // Find ALL source stages (stages with no upstreams) and trigger FSM transition
                 let supervisors = context.stage_supervisors.read().await;
                 let source_ids: Vec<_> = supervisors.iter()
-                    .filter(|(stage_id, _)| context.topology.upstream_stages(**stage_id).is_empty())
+                    .filter(|(stage_id, _)| context.topology.upstream_stages(stage_id.as_ulid()).is_empty())
                     .map(|(stage_id, _)| *stage_id)
                     .collect();
                 drop(supervisors);
@@ -276,7 +276,7 @@ impl FsmAction for PipelineAction {
                     let mut stage_metadata = std::collections::HashMap::new();
                     
                     for (stage_id, stage_handle) in supervisors.iter() {
-                        if let Some(stage_info) = context.topology.stage_info(*stage_id) {
+                        if let Some(stage_info) = context.topology.stages().find(|s| s.id == stage_id.as_ulid()) {
                             let metadata = obzenflow_core::metrics::StageMetadata {
                                 name: stage_info.name.clone(),
                                 stage_type: stage_handle.stage_type(),
@@ -441,7 +441,7 @@ impl FsmAction for PipelineAction {
                     // Get stage name from topology
                     let stage_name = context.topology
                         .stages()
-                        .find(|info| info.id == stage_id)
+                        .find(|info| info.id == stage_id.as_ulid())
                         .map(|info| info.name.clone())
                         .unwrap_or_else(|| "unknown".to_string());
                     
@@ -457,7 +457,7 @@ impl FsmAction for PipelineAction {
                     let expected_stages: std::collections::HashSet<StageId> = context
                         .topology
                         .stages()
-                        .map(|info| info.id)
+                        .map(|info| StageId::from_ulid(info.id))
                         .collect();
                     let total_stages = expected_stages.len();
                     

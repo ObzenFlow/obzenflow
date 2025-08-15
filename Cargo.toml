@@ -13,7 +13,6 @@ members = ["crates/*"]
 # Note: obzenflow_benchmarks is excluded from default-members as it's only for benchmarking
 default-members = [
     "crates/obzenflow_core",
-    "crates/obzenflow_topology_services",
     "crates/obzenflow_runtime_services",
     "crates/obzenflow_adapters",
     "crates/obzenflow_dsl_infra",
@@ -23,7 +22,7 @@ default-members = [
 [dependencies]
 # Internal workspace dependencies
 obzenflow_core = { path = "crates/obzenflow_core" }
-obzenflow_topology_services = { path = "crates/obzenflow_topology_services" }
+obzenflow-topology = { path = "../obzenflow-topology" }
 obzenflow_runtime_services = { path = "crates/obzenflow_runtime_services" }
 obzenflow_adapters = { path = "crates/obzenflow_adapters" }
 obzenflow_dsl_infra = { path = "crates/obzenflow_dsl_infra" }

@@ -72,7 +72,7 @@ async fn test_middleware_control_events_flow_to_journal() {
     
     // Register a writer for the transform
     let writer_id = journal.register_writer(
-        obzenflow_topology_services::stages::StageId::new(),
+        obzenflow_topology::StageId::new(),
         None
     ).await.unwrap();
     

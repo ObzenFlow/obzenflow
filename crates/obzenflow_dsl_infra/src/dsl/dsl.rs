@@ -149,7 +149,8 @@ macro_rules! build_typed_flow {
         
         // Add stages
         for (name, descriptor) in stages {
-            let id = builder.add_stage(Some(descriptor.name().to_string()));
+            let ulid_id = builder.add_stage(Some(descriptor.name().to_string()));
+            let id = StageId::from(ulid_id);
             name_to_id.insert(name.clone(), id);
             descriptors.insert(name, descriptor);
             // Break auto-connection
@@ -161,7 +162,8 @@ macro_rules! build_typed_flow {
         for (from, to) in connections {
             if let (Some(&from_id), Some(&to_id)) = 
                 (name_to_id.get(&from), name_to_id.get(&to)) {
-                builder.add_edge(from_id, to_id);
+                // Convert StageId back to Ulid for the topology builder
+                builder.add_edge(from_id.into(), to_id.into());
             }
         }
         
@@ -262,7 +264,7 @@ macro_rules! build_typed_flow {
                 
                 // Check if this stage is in a cycle and needs CycleGuard
                 let mut flow_middleware = create_flow_middleware();
-                let is_in_cycle = topology.is_in_cycle(id);
+                let is_in_cycle = topology.is_in_cycle(id.into());
                 tracing::info!(
                     "Checking stage '{}' (id={:?}) for cycles: {}",
                     name,

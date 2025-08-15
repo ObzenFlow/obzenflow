@@ -21,7 +21,8 @@ use obzenflow_core::event::{SystemEvent, ChainEvent};
 use obzenflow_core::metrics::MetricsExporter;
 use obzenflow_core::id::SystemId;
 use obzenflow_core::event::WriterId;
-use obzenflow_topology_services::{stages::StageId, topology::Topology};
+use obzenflow_core::StageId;
+use obzenflow_topology::Topology;
 use std::{collections::HashMap, sync::Arc};
 use tokio::sync::RwLock;
 
@@ -112,8 +113,12 @@ impl SupervisorBuilder for PipelineBuilder {
             completed_stages: Arc::new(RwLock::new(Vec::new())),
             running_stages: Arc::new(RwLock::new(std::collections::HashSet::new())),
             stage_supervisors: Arc::new(RwLock::new(stage_map)),
-            stage_data_journals: Arc::new(RwLock::new(self.stage_journals.unwrap_or_default())),
-            stage_error_journals: Arc::new(RwLock::new(self.error_journals.unwrap_or_default())),
+            stage_data_journals: Arc::new(RwLock::new(
+                self.stage_journals.unwrap_or_else(|| Vec::<(StageId, Arc<dyn Journal<ChainEvent>>)>::new())
+            )),
+            stage_error_journals: Arc::new(RwLock::new(
+                self.error_journals.unwrap_or_else(|| Vec::<(StageId, Arc<dyn Journal<ChainEvent>>)>::new())
+            )),
             completion_reader: Arc::new(RwLock::new(None)),
             metrics_exporter: self.metrics_exporter.clone(),
         });

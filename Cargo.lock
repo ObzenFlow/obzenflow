@@ -1399,12 +1399,12 @@ dependencies = [
  "criterion",
  "fastrand",
  "futures",
+ "obzenflow-topology",
  "obzenflow_adapters",
  "obzenflow_core",
  "obzenflow_dsl_infra",
  "obzenflow_infra",
  "obzenflow_runtime_services",
- "obzenflow_topology_services",
  "proptest",
  "serde",
  "serde_json",
@@ -1417,6 +1417,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "obzenflow-topology"
+version = "0.1.0"
+dependencies = [
+ "getrandom 0.2.16",
+ "serde",
+ "thiserror 1.0.69",
+ "ulid",
+]
+
+[[package]]
 name = "obzenflow_adapters"
 version = "0.1.0"
 dependencies = [
@@ -1425,9 +1435,9 @@ dependencies = [
  "chrono",
  "dashmap",
  "hdrhistogram",
+ "obzenflow-topology",
  "obzenflow_core",
  "obzenflow_runtime_services",
- "obzenflow_topology_services",
  "prometheus",
  "rand 0.9.1",
  "serde",
@@ -1450,12 +1460,12 @@ dependencies = [
  "criterion",
  "fastrand",
  "futures",
+ "obzenflow-topology",
  "obzenflow_adapters",
  "obzenflow_core",
  "obzenflow_dsl_infra",
  "obzenflow_infra",
  "obzenflow_runtime_services",
- "obzenflow_topology_services",
  "serde",
  "serde_json",
  "sysinfo",
@@ -1485,10 +1495,10 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "indexmap",
+ "obzenflow-topology",
  "obzenflow_adapters",
  "obzenflow_core",
  "obzenflow_runtime_services",
- "obzenflow_topology_services",
  "serde",
  "tokio",
  "tokio-test",
@@ -1519,11 +1529,11 @@ dependencies = [
  "bytes",
  "chrono",
  "hyper 1.6.0",
+ "obzenflow-topology",
  "obzenflow_adapters",
  "obzenflow_core",
  "obzenflow_dsl_infra",
  "obzenflow_runtime_services",
- "obzenflow_topology_services",
  "prometheus",
  "serde",
  "serde_json",
@@ -1549,28 +1559,13 @@ dependencies = [
  "futures",
  "hdrhistogram",
  "num_cpus",
+ "obzenflow-topology",
  "obzenflow_core",
  "obzenflow_fsm",
- "obzenflow_topology_services",
  "rand 0.8.5",
  "reqwest",
  "serde",
  "serde_json",
- "thiserror 1.0.69",
- "tokio",
- "tokio-test",
- "tracing",
- "ulid",
-]
-
-[[package]]
-name = "obzenflow_topology_services"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "futures",
- "obzenflow_core",
- "serde",
  "thiserror 1.0.69",
  "tokio",
  "tokio-test",

@@ -13,9 +13,8 @@ pub use obzenflow_runtime_services::pipeline::{FlowHandle, PipelineBuilder};
 pub use obzenflow_core::journal::journal::Journal;
 
 // Topology types
-pub use obzenflow_topology_services::builder::TopologyBuilder;
-pub use obzenflow_topology_services::stages::{StageId, StageInfo};
-pub use obzenflow_topology_services::topology::Topology;
+pub use obzenflow_topology::{TopologyBuilder, StageInfo, Topology};
+pub use obzenflow_core::id::StageId;
 
 // Middleware
 // FLOWIP-056-666: Monitoring middleware temporarily disabled pending redesign

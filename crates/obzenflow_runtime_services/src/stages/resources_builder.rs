@@ -9,7 +9,7 @@ use obzenflow_core::{StageId, FlowId, ChainEvent, SystemId};
 use obzenflow_core::event::SystemEvent;
 use obzenflow_core::journal::journal::Journal;
 use crate::message_bus::FsmMessageBus;
-use obzenflow_topology_services::topology::Topology;
+use obzenflow_topology::Topology;
 
 /// Resources provided to stage creation
 #[derive(Clone)]
@@ -84,7 +84,8 @@ impl StageResourcesBuilder {
         let mut all_error_journals: Vec<(StageId, Arc<dyn Journal<ChainEvent>>)> = Vec::new();
         
         for stage_info in self.topology.stages() {
-            let stage_id = stage_info.id;
+            let stage_ulid = stage_info.id;
+            let stage_id = StageId::from_ulid(stage_ulid);
             
             // Get the stage's own journal
             let data_journal = self.stage_journals.get(&stage_id)
@@ -103,12 +104,13 @@ impl StageResourcesBuilder {
             all_error_journals.push((stage_id, error_journal.clone()));
             
             // Get upstream journals
-            let upstream_ids = self.topology.upstream_stages(stage_id);
-            let upstream_journals: Vec<(StageId, Arc<dyn Journal<ChainEvent>>)> = upstream_ids
+            let upstream_ulids = self.topology.upstream_stages(stage_ulid);
+            let upstream_journals: Vec<(StageId, Arc<dyn Journal<ChainEvent>>)> = upstream_ulids
                 .iter()
-                .filter_map(|upstream_id| {
-                    self.stage_journals.get(upstream_id).map(|journal| {
-                        (*upstream_id, journal.clone())
+                .filter_map(|upstream_ulid| {
+                    let upstream_id = StageId::from_ulid(*upstream_ulid);
+                    self.stage_journals.get(&upstream_id).map(|journal| {
+                        (upstream_id, journal.clone())
                     })
                 })
                 .collect();
@@ -127,7 +129,7 @@ impl StageResourcesBuilder {
                 system_journal: self.system_journal.clone(),
                 upstream_journals,
                 message_bus: message_bus.clone(),
-                upstream_stages: upstream_ids,
+                upstream_stages: upstream_ulids.into_iter().map(StageId::from_ulid).collect(),
                 error_journals: error_journals_for_stage,
             };
             
