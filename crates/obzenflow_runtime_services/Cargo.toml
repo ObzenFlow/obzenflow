@@ -10,7 +10,7 @@ publish = false
 # Internal dependencies
 obzenflow_core = { path = "../obzenflow_core" }
 obzenflow-topology = { path = "../../../obzenflow-topology" }
-obzenflow_fsm = { path = "../obzenflow_fsm" }
+obzenflow-fsm = { path = "../../../obzenflow-fsm" }
 
 # Service layer dependencies
 tokio = { version = "1", features = ["full"] }
