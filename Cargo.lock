@@ -1429,13 +1429,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "obzenflow-idkit"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "ulid",
+]
+
+[[package]]
 name = "obzenflow-topology"
 version = "0.1.0"
 dependencies = [
- "getrandom 0.2.16",
+ "obzenflow-idkit",
+ "once_cell",
  "serde",
  "thiserror 1.0.69",
- "ulid",
 ]
 
 [[package]]
@@ -1515,6 +1523,7 @@ dependencies = [
  "tokio",
  "tokio-test",
  "tracing",
+ "ulid",
 ]
 
 [[package]]

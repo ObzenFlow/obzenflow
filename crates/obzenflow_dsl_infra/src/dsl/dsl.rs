@@ -137,6 +137,17 @@ macro_rules! build_typed_flow {
         use std::sync::Arc;
         use std::collections::HashMap;
         
+        // Helper functions for clean ID conversions
+        fn to_core_id(topology_id: obzenflow_topology::StageId) -> StageId {
+            // Convert topology's idkit Id to standard ulid crate's Ulid
+            StageId::from_ulid(topology_id.ulid())
+        }
+        
+        fn to_topology_id(core_id: StageId) -> obzenflow_topology::StageId {
+            // Convert standard ulid crate's Ulid to topology's idkit Id
+            obzenflow_topology::StageId::from_ulid(core_id.as_ulid())
+        }
+        
         let journal_factory_provider = $journals;
         let stages = $stages;
         let connections = $connections;
@@ -149,8 +160,8 @@ macro_rules! build_typed_flow {
         
         // Add stages
         for (name, descriptor) in stages {
-            let ulid_id = builder.add_stage(Some(descriptor.name().to_string()));
-            let id = StageId::from(ulid_id);
+            let topology_id = builder.add_stage(Some(descriptor.name().to_string()));
+            let id = to_core_id(topology_id);
             name_to_id.insert(name.clone(), id);
             descriptors.insert(name, descriptor);
             // Break auto-connection
@@ -162,8 +173,7 @@ macro_rules! build_typed_flow {
         for (from, to) in connections {
             if let (Some(&from_id), Some(&to_id)) = 
                 (name_to_id.get(&from), name_to_id.get(&to)) {
-                // Convert StageId back to Ulid for the topology builder
-                builder.add_edge(from_id.into(), to_id.into());
+                builder.add_edge(to_topology_id(from_id), to_topology_id(to_id));
             }
         }
         
@@ -264,7 +274,7 @@ macro_rules! build_typed_flow {
                 
                 // Check if this stage is in a cycle and needs CycleGuard
                 let mut flow_middleware = create_flow_middleware();
-                let is_in_cycle = topology.is_in_cycle(id.into());
+                let is_in_cycle = topology.is_in_cycle(to_topology_id(id));
                 tracing::info!(
                     "Checking stage '{}' (id={:?}) for cycles: {}",
                     name,

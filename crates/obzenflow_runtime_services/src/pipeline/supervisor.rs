@@ -11,6 +11,8 @@ use super::{
 use crate::supervised_base::{EventLoopDirective, SelfSupervised};
 use obzenflow_core::event::{SystemEvent, WriterId};
 use obzenflow_core::journal::journal::Journal;
+use obzenflow_core::StageId;
+use crate::id_conversions::StageIdExt;
 use std::sync::Arc;
 
 /// Pipeline supervisor - manages the lifecycle of a pipeline
@@ -232,7 +234,7 @@ impl SelfSupervised for PipelineSupervisor {
                 // First check if any stages are already running (they might have published before we subscribed)
                 let supervisors = self.pipeline_context.stage_supervisors.read().await;
                 for (stage_id, stage) in supervisors.iter() {
-                    if stage.is_ready() && !self.pipeline_context.topology.upstream_stages(stage_id.as_ulid()).is_empty() {
+                    if stage.is_ready() && !self.pipeline_context.topology.upstream_stages(stage_id.to_topology_id()).is_empty() {
                         // This is a non-source stage that's already running
                         self.pipeline_context.running_stages.write().await.insert(*stage_id);
                         tracing::info!("Stage '{}' was already running", stage.stage_name());
@@ -269,13 +271,13 @@ impl SelfSupervised for PipelineSupervisor {
                             // Get stage name from topology
                             let stage_info = self.pipeline_context.topology
                                 .stages()
-                                .find(|s| s.id == stage_id.as_ulid());
+                                .find(|s| s.id == stage_id.to_topology_id());
                             let stage_name = stage_info
                                 .map(|s| s.name.clone())
                                 .unwrap_or_else(|| "unknown".to_string());
                             
                             // Log based on stage type
-                            if self.pipeline_context.topology.upstream_stages(stage_id.as_ulid()).is_empty() {
+                            if self.pipeline_context.topology.upstream_stages(stage_id.to_topology_id()).is_empty() {
                                 tracing::debug!("Source stage '{}' is running (waiting for pipeline signal)", stage_name);
                             } else {
                                 tracing::info!("Stage '{}' is now running", stage_name);
@@ -295,7 +297,7 @@ impl SelfSupervised for PipelineSupervisor {
                 let non_source_stages: std::collections::HashSet<_> = topology
                     .stages()
                     .filter(|stage_info| !topology.upstream_stages(stage_info.id).is_empty())
-                    .map(|stage_info| obzenflow_core::StageId::from_ulid(stage_info.id))
+                    .map(|stage_info| StageId::from_topology_id(stage_info.id))
                     .collect();
                 
                 // Check if all non-source stages are in the running set
@@ -352,7 +354,7 @@ impl SelfSupervised for PipelineSupervisor {
                                         // Get stage name from topology
                                         let stage_info = self.pipeline_context.topology
                                             .stages()
-                                            .find(|s| s.id == stage_id.as_ulid());
+                                            .find(|s| s.id == stage_id.to_topology_id());
                                         let stage_name = stage_info
                                             .map(|s| s.name.clone())
                                             .unwrap_or_else(|| "unknown".to_string());
@@ -362,7 +364,7 @@ impl SelfSupervised for PipelineSupervisor {
                                     obzenflow_core::event::StageLifecycleEvent::Draining => {
                                         let stage_info = self.pipeline_context.topology
                                             .stages()
-                                            .find(|s| s.id == stage_id.as_ulid());
+                                            .find(|s| s.id == stage_id.to_topology_id());
                                         let stage_name = stage_info
                                             .map(|s| s.name.clone())
                                             .unwrap_or_else(|| "unknown".to_string());
@@ -372,7 +374,7 @@ impl SelfSupervised for PipelineSupervisor {
                                     obzenflow_core::event::StageLifecycleEvent::Drained => {
                                         let stage_info = self.pipeline_context.topology
                                             .stages()
-                                            .find(|s| s.id == stage_id.as_ulid());
+                                            .find(|s| s.id == stage_id.to_topology_id());
                                         let stage_name = stage_info
                                             .map(|s| s.name.clone())
                                             .unwrap_or_else(|| "unknown".to_string());
@@ -388,7 +390,7 @@ impl SelfSupervised for PipelineSupervisor {
                                     obzenflow_core::event::StageLifecycleEvent::Failed { error, .. } => {
                                         let stage_info = self.pipeline_context.topology
                                             .stages()
-                                            .find(|s| s.id == stage_id.as_ulid());
+                                            .find(|s| s.id == stage_id.to_topology_id());
                                         let stage_name = stage_info
                                             .map(|s| s.name.clone())
                                             .unwrap_or_else(|| "unknown".to_string());

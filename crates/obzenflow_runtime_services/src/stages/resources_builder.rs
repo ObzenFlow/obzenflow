@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use obzenflow_core::{StageId, FlowId, ChainEvent, SystemId};
+use crate::id_conversions::StageIdExt;
 use obzenflow_core::event::SystemEvent;
 use obzenflow_core::journal::journal::Journal;
 use crate::message_bus::FsmMessageBus;
@@ -85,7 +86,7 @@ impl StageResourcesBuilder {
         
         for stage_info in self.topology.stages() {
             let stage_ulid = stage_info.id;
-            let stage_id = StageId::from_ulid(stage_ulid);
+            let stage_id = StageId::from_topology_id(stage_ulid);
             
             // Get the stage's own journal
             let data_journal = self.stage_journals.get(&stage_id)
@@ -108,7 +109,7 @@ impl StageResourcesBuilder {
             let upstream_journals: Vec<(StageId, Arc<dyn Journal<ChainEvent>>)> = upstream_ulids
                 .iter()
                 .filter_map(|upstream_ulid| {
-                    let upstream_id = StageId::from_ulid(*upstream_ulid);
+                    let upstream_id = StageId::from_topology_id(*upstream_ulid);
                     self.stage_journals.get(&upstream_id).map(|journal| {
                         (upstream_id, journal.clone())
                     })
@@ -129,7 +130,7 @@ impl StageResourcesBuilder {
                 system_journal: self.system_journal.clone(),
                 upstream_journals,
                 message_bus: message_bus.clone(),
-                upstream_stages: upstream_ulids.into_iter().map(StageId::from_ulid).collect(),
+                upstream_stages: upstream_ulids.into_iter().map(StageId::from_topology_id).collect(),
                 error_journals: error_journals_for_stage,
             };
             

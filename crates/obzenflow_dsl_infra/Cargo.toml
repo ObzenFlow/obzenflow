@@ -19,6 +19,7 @@ async-trait = "0.1"
 tracing = "0.1"
 indexmap = "2.0"
 serde = { version = "1", features = ["derive"] }
+ulid = "1.0"  # Need this for ULID conversions in macros
 
 [dev-dependencies]
 tokio-test = "0.4"

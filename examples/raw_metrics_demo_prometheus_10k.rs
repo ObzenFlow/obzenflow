@@ -7,7 +7,6 @@ use obzenflow_core::{
     event::chain_event::{ChainEvent, ChainEventFactory},
     WriterId,
     id::StageId,
-    time::MetricsDuration,
 };
 use obzenflow_dsl_infra::{flow, sink, source, transform};
 use obzenflow_infra::journal::disk_journals;
