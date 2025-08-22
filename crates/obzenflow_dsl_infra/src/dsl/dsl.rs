@@ -158,11 +158,16 @@ macro_rules! build_typed_flow {
         let mut name_to_id = HashMap::new();
         let mut descriptors = HashMap::new();
         
-        // Add stages
+        // Add stages - use real ULID generation from core
         for (name, descriptor) in stages {
-            let topology_id = builder.add_stage(Some(descriptor.name().to_string()));
-            let id = to_core_id(topology_id);
-            name_to_id.insert(name.clone(), id);
+            // Generate a real ULID using the core crate's StageId::new()
+            let core_id = StageId::new();
+            let topology_id = to_topology_id(core_id);
+            
+            // Use add_stage_with_id to provide the real ULID
+            builder.add_stage_with_id(topology_id, Some(descriptor.name().to_string()));
+            
+            name_to_id.insert(name.clone(), core_id);
             descriptors.insert(name, descriptor);
             // Break auto-connection
             builder.reset_current();
