@@ -1,9 +1,14 @@
-//! Prometheus 100k Demo with Web Metrics Server
+//! Prometheus 100k Demo with FlowApplication Framework
 //! 
-//! This demo processes 100,000 events with a rate limiter and exposes metrics
-//! via an HTTP server that runs long enough to observe metrics in real-time.
+//! This demo processes 100,000 events with a rate limiter and uses the new
+//! FlowApplication framework for automatic server management.
 //! 
-//! Run with: cargo run -p obzenflow --example prometheus_100k_demo --features obzenflow_infra/warp-server
+//! Run with: cargo run -p obzenflow --example prometheus_100k_demo --features obzenflow_infra/warp-server -- --server
+//! 
+//! The --server flag will start the web server with:
+//! - /metrics endpoint for Prometheus metrics
+//! - /api/topology endpoint for flow structure
+//! - /health and /ready endpoints for monitoring
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -13,8 +18,8 @@ use obzenflow_core::{
     id::StageId,
 };
 use obzenflow_dsl_infra::{flow, sink, source, transform};
+use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_infra::web::start_metrics_server;
 use obzenflow_runtime_services::stages::common::handlers::{
     FiniteSourceHandler, SinkHandler, TransformHandler,
 };
@@ -236,101 +241,49 @@ impl SinkHandler for StatisticsSink {
 async fn main() -> Result<()> {
     // Set environment to use prometheus exporter
     std::env::set_var("OBZENFLOW_METRICS_EXPORTER", "prometheus");
-    
-    // Initialize logging
-    tracing_subscriber::fmt()
-        .with_env_filter("obzenflow=info,prometheus_100k_demo=info")
-        .init();
 
-    println!("🚀 Prometheus 100k Demo with Web Metrics Server");
-    println!("================================================");
+    println!("🚀 Prometheus 100k Demo with FlowApplication Framework");
+    println!("======================================================");
     println!("📊 Processing 100,000 events with rate limiting");
-    println!("🌐 Metrics will be available at http://localhost:9090/metrics\n");
+    println!("");
+    println!("Usage:");
+    println!("  Run with server:    cargo run -p obzenflow --example prometheus_100k_demo --features obzenflow_infra/warp-server -- --server");
+    println!("  Custom port:        cargo run -p obzenflow --example prometheus_100k_demo --features obzenflow_infra/warp-server -- --server --server-port 8080");
+    println!("  Without server:     cargo run -p obzenflow --example prometheus_100k_demo");
+    println!("");
 
-    // Create flow with metrics
-    let flow_handle = flow! {
-        name: "prometheus_100k_demo",
-        journals: disk_journals(std::path::PathBuf::from("target/prometheus_100k_demo_journal")),
-        middleware: [],
-        
-        stages: {
-            // Source generating 100k events
-            src = source!("high_volume_source" => HighVolumeSource::new(100_000));
+    // Use FlowApplication to handle everything
+    FlowApplication::run(async {
+        flow! {
+            name: "prometheus_100k_demo",
+            journals: disk_journals(std::path::PathBuf::from("target/prometheus_100k_demo_journal")),
+            middleware: [],
             
-            // Rate limited transform with 100ms delay
-            rate_limiter = transform!("rate_limiter" => RateLimitedTransform::new(100));
+            stages: {
+                // Source generating 100k events
+                src = source!("high_volume_source" => HighVolumeSource::new(100_000));
+                
+                // Rate limited transform with 100ms delay
+                rate_limiter = transform!("rate_limiter" => RateLimitedTransform::new(100));
+                
+                // Error-prone transform for testing error metrics
+                processor = transform!("error_processor" => ErrorProneTransform);
+                
+                // Statistics sink
+                snk = sink!("statistics_sink" => StatisticsSink::new());
+            },
             
-            // Error-prone transform for testing error metrics
-            processor = transform!("error_processor" => ErrorProneTransform);
-            
-            // Statistics sink
-            snk = sink!("statistics_sink" => StatisticsSink::new());
-        },
-        
-        topology: {
-            src |> rate_limiter;
-            rate_limiter |> processor;
-            processor |> snk;
+            topology: {
+                src |> rate_limiter;
+                rate_limiter |> processor;
+                processor |> snk;
+            }
         }
-    }
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to create flow: {}", e))
+    })
     .await
-    .map_err(|e| anyhow::anyhow!("Failed to create flow: {}", e))?;
+    .map_err(|e| anyhow::anyhow!("Application failed: {}", e))?;
 
-    println!("▶️  Starting metrics server and flow processing...\n");
-    
-    // Get the metrics exporter for concurrent access
-    let metrics_exporter = flow_handle.metrics_exporter();
-    
-    if let Some(exporter) = metrics_exporter {
-        // Start the metrics server in a background task
-        let server_handle = tokio::spawn(async move {
-            start_metrics_server(exporter, 9090).await
-        });
-        
-        println!("🌐 Metrics server started!");
-        println!("   📊 Metrics: http://localhost:9090/metrics");
-        println!("   ❤️  Health: http://localhost:9090/health");
-        println!("   ✅ Ready:  http://localhost:9090/ready\n");
-        
-        println!("📈 You can monitor live metrics while processing:");
-        println!("   curl http://localhost:9090/metrics");
-        println!("   Or open http://localhost:9090/metrics in your browser\n");
-        
-        println!("⏳ Processing 100k events... This will take several minutes due to rate limiting.\n");
-        
-        // Now run the flow
-        let flow_result = flow_handle.run().await;
-        
-        match flow_result {
-            Ok(_) => {
-                println!("\n✅ Flow processing completed successfully!");
-                println!("📊 Processed 100,000 events");
-            }
-            Err(e) => {
-                println!("\n❌ Flow processing error: {}", e);
-            }
-        }
-        
-        println!("\n📊 Final metrics are still available at http://localhost:9090/metrics");
-        println!("⏸️  Press Ctrl+C to stop the metrics server and exit...");
-        
-        // Keep the server running until Ctrl+C
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {
-                println!("\n👋 Shutting down metrics server...");
-            }
-            _ = server_handle => {
-                println!("\n⚠️  Metrics server stopped unexpectedly");
-            }
-        }
-    } else {
-        println!("\n⚠️  No metrics exporter available, running without web server");
-        
-        // Just run the flow without metrics server
-        flow_handle.run().await?;
-        println!("\n✅ Flow processing completed!");
-    }
-    
-    println!("👋 Demo completed!");
     Ok(())
 }
