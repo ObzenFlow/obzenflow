@@ -173,7 +173,9 @@ impl SupervisorBuilder for PipelineBuilder {
             .map_err(|e| BuilderError::Other(e.to_string()))?;
             
         // Wrap it in FlowHandle with pipeline-specific extras
-        Ok(FlowHandle::new(standard_handle, metrics_exporter))
+        // Clone topology for the handle (topology is Arc, so this is cheap)
+        let topology = Some(self.topology.clone());
+        Ok(FlowHandle::new(standard_handle, metrics_exporter, topology))
     }
 }
 

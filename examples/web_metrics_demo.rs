@@ -1,7 +1,15 @@
-//! Demo showing how to expose metrics via HTTP using the new web infrastructure
+//! Demo showing how to expose metrics and topology via HTTP using FlowApplication
 //! 
-//! This follows FLOWIP-057a web infrastructure pattern - simple one-line setup!
-//! Run with: cargo run --example web_metrics_demo --features "warp-server"
+//! This follows FLOWIP-057e user-centric design with Spring Boot-style framework.
+//! 
+//! Run without server:
+//!   cargo run --example web_metrics_demo
+//! 
+//! Run WITH visualization server:
+//!   cargo run --example web_metrics_demo --features obzenflow_infra/warp-server -- --server
+//!   
+//! Run with custom port:
+//!   cargo run --example web_metrics_demo --features obzenflow_infra/warp-server -- --server --server-port 8080
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -12,7 +20,7 @@ use obzenflow_core::{
 };
 use obzenflow_dsl_infra::{flow, sink, source, transform};
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_infra::web::start_metrics_server;
+use obzenflow_infra::application::FlowApplication;
 use obzenflow_runtime_services::stages::common::handlers::{
     FiniteSourceHandler, SinkHandler, TransformHandler,
 };
@@ -113,60 +121,34 @@ impl SinkHandler for TestSink {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize logging
-    tracing_subscriber::fmt()
-        .with_env_filter("obzenflow=debug,web_metrics_demo=info")
-        .init();
-
-    println!("🚀 Web Metrics Demo - FLOWIP-057a Implementation");
-    println!("================================================\n");
-
-    // Create flow with metrics
-    let flow_handle = flow! {
-        name: "web_metrics_demo",
-        journals: disk_journals(std::path::PathBuf::from("target/web_metrics_demo_journal")),
-        middleware: [],
-        
-        stages: {
-            src = source!("event_source" => TestSource::new(100));
-            trans = transform!("processor" => TestTransform);
-            snk = sink!("event_sink" => TestSink::new());
-        },
-        
-        topology: {
-            src |> trans;
-            trans |> snk;
+    // The FlowApplication framework handles EVERYTHING:
+    // - CLI parsing (--server, --server-port)
+    // - Logging initialization
+    // - Server lifecycle management
+    // - Graceful shutdown
+    
+    // Just call FlowApplication::run() with your flow - that's it!
+    FlowApplication::run(async {
+        flow! {
+            name: "web_metrics_demo",
+            journals: disk_journals(std::path::PathBuf::from("target/web_metrics_demo_journal")),
+            middleware: [],
+            
+            stages: {
+                src = source!("event_source" => TestSource::new(100));
+                trans = transform!("processor" => TestTransform);
+                snk = sink!("event_sink" => TestSink::new());
+            },
+            
+            topology: {
+                src |> trans;
+                trans |> snk;
+            }
         }
-    }
+        .await
+    })
     .await
-    .map_err(|e| anyhow::anyhow!("Failed to create flow: {}", e))?;
-
-    println!("▶️  Running flow...\n");
-    
-    // Run the flow and get metrics exporter
-    let metrics_exporter = flow_handle.run_with_metrics().await?;
-    
-    println!("✅ Flow completed!");
-    
-    // Start web server with ONE LINE if metrics are available! 🎉
-    if let Some(metrics) = metrics_exporter {
-        start_metrics_server(metrics, 9090).await?;
-        
-        println!("\n🌐 Metrics server started!");
-        println!("   📊 Metrics: http://localhost:9090/metrics");
-        println!("   ❤️  Health: http://localhost:9090/health");
-        println!("   ✅ Ready:  http://localhost:9090/ready\n");
-        
-        println!("📈 You can now view the final metrics via HTTP!");
-        println!("   curl http://localhost:9090/metrics");
-        
-        // Keep the server running
-        println!("\n⏸️  Press Ctrl+C to exit...");
-        tokio::signal::ctrl_c().await?;
-        println!("\n👋 Shutting down...");
-    } else {
-        println!("\n⚠️  No metrics exporter configured");
-    }
+    .map_err(|e| anyhow::anyhow!("Application error: {}", e))?;
     
     Ok(())
 }

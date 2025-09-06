@@ -1,6 +1,7 @@
 use super::fsm::{PipelineEvent, PipelineState};
 use crate::errors::FlowError;
 use crate::supervised_base::{SupervisorHandle, HandleError, StandardHandle};
+use obzenflow_topology::Topology;
 use std::sync::Arc;
 
 /// Flow handle for external control - the public API returned by the DSL
@@ -17,6 +18,9 @@ pub struct FlowHandle {
     
     /// Pipeline-specific: Metrics access (read-only)
     metrics_exporter: Option<Arc<dyn obzenflow_core::metrics::MetricsExporter>>,
+    
+    /// Flow topology for visualization (read-only)
+    topology: Option<Arc<Topology>>,
 }
 
 impl FlowHandle {
@@ -24,10 +28,12 @@ impl FlowHandle {
     pub(crate) fn new(
         handle: StandardHandle<PipelineEvent, PipelineState>,
         metrics_exporter: Option<Arc<dyn obzenflow_core::metrics::MetricsExporter>>,
+        topology: Option<Arc<Topology>>,
     ) -> Self {
         Self {
             handle,
             metrics_exporter,
+            topology,
         }
     }
     
@@ -88,6 +94,15 @@ impl FlowHandle {
     /// The exporter is thread-safe and can be accessed concurrently.
     pub fn metrics_exporter(&self) -> Option<Arc<dyn obzenflow_core::metrics::MetricsExporter>> {
         self.metrics_exporter.clone()
+    }
+    
+    /// Get the flow topology for visualization
+    /// 
+    /// This provides access to the flow's structure (stages and connections)
+    /// for visualization tools and monitoring dashboards.
+    /// The topology is immutable and thread-safe.
+    pub fn topology(&self) -> Option<Arc<Topology>> {
+        self.topology.clone()
     }
     
     /// Render metrics based on the wrapped exporter's format

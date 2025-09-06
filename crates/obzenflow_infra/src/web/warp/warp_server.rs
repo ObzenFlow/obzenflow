@@ -5,7 +5,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use warp::{Filter, Rejection, Reply};
+use warp::{Filter, Rejection, Reply, filters::BoxedFilter};
 use obzenflow_core::web::{
     HttpEndpoint, HttpMethod, Request, ServerConfig, WebError, WebServer,
     server::ServerShutdownHandle,
@@ -21,6 +21,24 @@ impl WarpServer {
     pub fn new() -> Self {
         Self {
             endpoints: Vec::new(),
+        }
+    }
+    
+    /// Build path filter from string path
+    fn build_path_filter(&self, path: &str) -> impl Filter<Extract = (), Error = Rejection> + Clone {
+        if path == "/" {
+            warp::path::end().boxed()
+        } else {
+            let segments: Vec<&str> = path.trim_start_matches('/')
+                .split('/')
+                .filter(|s| !s.is_empty())
+                .collect();
+            
+            let mut filter = warp::path(segments[0].to_string()).boxed();
+            for segment in &segments[1..] {
+                filter = filter.and(warp::path(segment.to_string())).boxed();
+            }
+            filter.and(warp::path::end()).boxed()
         }
     }
     
@@ -88,112 +106,232 @@ impl WarpServer {
         }
     }
     
-    /// Build Warp filter from endpoints
-    fn build_filter(&self) -> impl Filter<Extract = impl Reply, Error = Rejection> + Clone {
-        let mut routes = Vec::new();
+    /// Build Warp filter from endpoints  
+    fn build_filter(&self) -> BoxedFilter<(Box<dyn Reply>,)> {
+        let mut combined_route: Option<BoxedFilter<(Box<dyn Reply>,)>> = None;
         
         for endpoint in &self.endpoints {
             let endpoint = endpoint.clone();
-            let path = endpoint.path().to_string();
+            let path_str = endpoint.path().to_string();
             
-            // Create a filter for this endpoint
-            let route = warp::path::full()
-                .and(warp::method())
-                .and(warp::header::headers_cloned())
-                .and(warp::body::bytes())
-                .and_then({
-                    let endpoint = endpoint.clone();
-                    let path = path.clone();
-                    move |full_path: warp::path::FullPath, 
-                          method: warp::http::Method,
-                          headers: warp::http::HeaderMap,
-                          body: warp::hyper::body::Bytes| {
-                        let endpoint = endpoint.clone();
-                        let path = path.clone();
-                        async move {
-                            // Check if this endpoint handles this path
-                            if full_path.as_str() != path {
-                                return Err::<Box<dyn Reply>, Rejection>(warp::reject::not_found());
-                            }
-                            
-                            // Convert method
-                            let http_method = match method.as_str() {
-                                "GET" => HttpMethod::Get,
-                                "POST" => HttpMethod::Post,
-                                "PUT" => HttpMethod::Put,
-                                "DELETE" => HttpMethod::Delete,
-                                "PATCH" => HttpMethod::Patch,
-                                "HEAD" => HttpMethod::Head,
-                                "OPTIONS" => HttpMethod::Options,
-                                _ => return Err(warp::reject::not_found()),
-                            };
-                            
-                            // Check if endpoint handles this method
-                            let supported_methods = endpoint.methods();
-                            if !supported_methods.is_empty() && !supported_methods.contains(&http_method) {
-                                return Err(warp::reject::not_found());
-                            }
-                            
-                            // Convert headers
-                            let mut req_headers = HashMap::new();
-                            for (name, value) in headers.iter() {
-                                if let Ok(value_str) = value.to_str() {
-                                    req_headers.insert(name.to_string(), value_str.to_string());
-                                }
-                            }
-                            
-                            // Build request
-                            let request = Request {
-                                method: http_method,
-                                path: full_path.as_str().to_string(),
-                                headers: req_headers,
-                                query_params: HashMap::new(),
-                                body: body.to_vec(),
-                            };
-                            
-                            // Handle request
-                            match endpoint.handle(request).await {
-                                Ok(response) => {
-                                    // Build Warp response
-                                    let mut builder = warp::http::Response::builder()
-                                        .status(response.status);
-                                    
-                                    for (key, value) in response.headers {
-                                        builder = builder.header(key, value);
-                                    }
-                                    
-                                    let reply = builder
-                                        .body(response.body)
-                                        .map_err(|_| warp::reject::reject())?;
-                                    
-                                    Ok::<Box<dyn Reply>, Rejection>(Box::new(reply))
-                                }
-                                Err(_) => Err(warp::reject::reject()),
-                            }
-                        }
-                    }
-                })
-                .boxed();
+            // Create simple route for this endpoint
+            let route = self.build_simple_route(path_str, endpoint);
             
-            routes.push(route);
+            combined_route = match combined_route {
+                Some(existing) => Some(existing.or(route).unify().boxed()),
+                None => Some(route.boxed()),
+            };
         }
         
-        // Combine all routes with "or"
-        routes
-            .into_iter()
-            .reduce(|a, b| a.or(b).unify().boxed())
-            .unwrap_or_else(|| {
-                // If no routes, return 404 for everything
-                warp::any()
-                    .and_then(|| async { Err::<Box<dyn Reply>, Rejection>(warp::reject::not_found()) })
-                    .boxed()
-            })
+        // Return combined routes or 404 if none
+        combined_route.unwrap_or_else(|| {
+            warp::any()
+                .map(|| -> Box<dyn Reply> { 
+                    Box::new(warp::http::Response::builder()
+                        .status(404)
+                        .body(Vec::new())
+                        .unwrap())
+                })
+                .boxed()
+        })
+    }
+    
+    /// Build a simple route for an endpoint
+    fn build_simple_route(
+        &self,
+        path_str: String,
+        endpoint: Arc<dyn HttpEndpoint>,
+    ) -> impl Filter<Extract = (Box<dyn Reply>,), Error = Rejection> + Clone {
+        let path_filter = self.build_path_filter(&path_str);
+        
+        // Create GET/HEAD/DELETE routes (no body)
+        let get_route = warp::get()
+            .and(path_filter.clone())
+            .and(warp::header::headers_cloned())
+            .and_then({
+                let endpoint = endpoint.clone();
+                let path_str = path_str.clone();
+                move |headers: warp::http::HeaderMap| {
+                    handle_request_no_body(endpoint.clone(), HttpMethod::Get, headers, path_str.clone())
+                }
+            });
+            
+        let head_route = warp::head()
+            .and(path_filter.clone())
+            .and(warp::header::headers_cloned())
+            .and_then({
+                let endpoint = endpoint.clone();
+                let path_str = path_str.clone();
+                move |headers: warp::http::HeaderMap| {
+                    handle_request_no_body(endpoint.clone(), HttpMethod::Head, headers, path_str.clone())
+                }
+            });
+            
+        let delete_route = warp::delete()
+            .and(path_filter.clone())
+            .and(warp::header::headers_cloned())
+            .and_then({
+                let endpoint = endpoint.clone();
+                let path_str = path_str.clone();
+                move |headers: warp::http::HeaderMap| {
+                    handle_request_no_body(endpoint.clone(), HttpMethod::Delete, headers, path_str.clone())
+                }
+            });
+            
+        // Create POST/PUT/PATCH routes (with body)
+        let post_route = warp::post()
+            .and(path_filter.clone())
+            .and(warp::header::headers_cloned())
+            .and(warp::body::bytes())
+            .and_then({
+                let endpoint = endpoint.clone();
+                let path_str = path_str.clone();
+                move |headers: warp::http::HeaderMap, body: bytes::Bytes| {
+                    handle_request_with_body(endpoint.clone(), HttpMethod::Post, headers, body, path_str.clone())
+                }
+            });
+            
+        let put_route = warp::put()
+            .and(path_filter.clone())
+            .and(warp::header::headers_cloned())
+            .and(warp::body::bytes())
+            .and_then({
+                let endpoint = endpoint.clone();
+                let path_str = path_str.clone();
+                move |headers: warp::http::HeaderMap, body: bytes::Bytes| {
+                    handle_request_with_body(endpoint.clone(), HttpMethod::Put, headers, body, path_str.clone())
+                }
+            });
+            
+        let patch_route = warp::patch()
+            .and(path_filter.clone())
+            .and(warp::header::headers_cloned())
+            .and(warp::body::bytes())
+            .and_then({
+                let endpoint = endpoint.clone();
+                let path_str = path_str.clone();
+                move |headers: warp::http::HeaderMap, body: bytes::Bytes| {
+                    handle_request_with_body(endpoint.clone(), HttpMethod::Patch, headers, body, path_str.clone())
+                }
+            });
+        
+        // Combine all routes
+        get_route
+            .or(post_route)
+            .unify()
+            .or(put_route)
+            .unify()
+            .or(patch_route)
+            .unify()
+            .or(delete_route)
+            .unify()
+            .or(head_route)
+            .unify()
     }
 }
 
 impl Default for WarpServer {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Helper function to handle requests without body (GET, HEAD, DELETE, OPTIONS)
+async fn handle_request_no_body(
+    endpoint: Arc<dyn HttpEndpoint>,
+    method: HttpMethod,
+    headers: warp::http::HeaderMap,
+    path: String,
+) -> Result<Box<dyn Reply>, Rejection> {
+    // Check if endpoint supports this method
+    let supported_methods = endpoint.methods();
+    if !supported_methods.is_empty() && !supported_methods.contains(&method) {
+        return Err(warp::reject::not_found());
+    }
+    
+    // Convert headers
+    let mut req_headers = HashMap::new();
+    for (name, value) in headers.iter() {
+        if let Ok(value_str) = value.to_str() {
+            req_headers.insert(name.to_string(), value_str.to_string());
+        }
+    }
+    
+    let request = Request {
+        method,
+        path,
+        headers: req_headers,
+        query_params: HashMap::new(),
+        body: Vec::new(),
+    };
+    
+    // Handle request
+    match endpoint.handle(request).await {
+        Ok(response) => {
+            let mut builder = warp::http::Response::builder()
+                .status(response.status);
+            
+            for (key, value) in response.headers {
+                builder = builder.header(key, value);
+            }
+            
+            let reply = builder
+                .body(response.body)
+                .map_err(|_| warp::reject::reject())?;
+            
+            Ok(Box::new(reply) as Box<dyn Reply>)
+        }
+        Err(_) => Err(warp::reject::reject()),
+    }
+}
+
+/// Helper function to handle requests with body (POST, PUT, PATCH)
+async fn handle_request_with_body(
+    endpoint: Arc<dyn HttpEndpoint>,
+    method: HttpMethod,
+    headers: warp::http::HeaderMap,
+    body: bytes::Bytes,
+    path: String,
+) -> Result<Box<dyn Reply>, Rejection> {
+    // Check if endpoint supports this method
+    let supported_methods = endpoint.methods();
+    if !supported_methods.is_empty() && !supported_methods.contains(&method) {
+        return Err(warp::reject::not_found());
+    }
+    
+    // Convert headers
+    let mut req_headers = HashMap::new();
+    for (name, value) in headers.iter() {
+        if let Ok(value_str) = value.to_str() {
+            req_headers.insert(name.to_string(), value_str.to_string());
+        }
+    }
+    
+    let request = Request {
+        method,
+        path,
+        headers: req_headers,
+        query_params: HashMap::new(),
+        body: body.to_vec(),
+    };
+    
+    // Handle request
+    match endpoint.handle(request).await {
+        Ok(response) => {
+            let mut builder = warp::http::Response::builder()
+                .status(response.status);
+            
+            for (key, value) in response.headers {
+                builder = builder.header(key, value);
+            }
+            
+            let reply = builder
+                .body(response.body)
+                .map_err(|_| warp::reject::reject())?;
+            
+            Ok(Box::new(reply) as Box<dyn Reply>)
+        }
+        Err(_) => Err(warp::reject::reject()),
     }
 }
 

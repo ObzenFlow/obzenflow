@@ -10,7 +10,10 @@ pub mod warp;
 pub mod axum;
 
 pub mod factory;
-pub mod metrics_server;
+pub mod endpoints;
+
+#[cfg(feature = "warp-server")]
+pub mod web_server;
 
 // Re-export implementations when features are enabled
 #[cfg(feature = "warp-server")]
@@ -22,5 +25,6 @@ pub use self::axum::AxumServer;
 // Re-export factory functions
 pub use factory::*;
 
+// THE ONE AND ONLY web server function
 #[cfg(feature = "warp-server")]
-pub use metrics_server::start_metrics_server;
+pub use web_server::start_web_server;
