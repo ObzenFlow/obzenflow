@@ -352,8 +352,17 @@ impl WebServer for WarpServer {
         
         let routes = self.build_filter();
         
+        // Add CORS support for development
+        // This allows the UI (running on different port) to access the API
+        let cors = warp::cors()
+            .allow_any_origin()  // Allow any origin in development
+            .allow_methods(vec!["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"])
+            .allow_headers(vec!["Content-Type", "Accept"]);
+        
+        let routes_with_cors = routes.with(cors);
+        
         // Start the server
-        warp::serve(routes)
+        warp::serve(routes_with_cors)
             .run(addr)
             .await;
         
