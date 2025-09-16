@@ -1,9 +1,9 @@
-//! Prometheus 100k Demo with FlowApplication Framework
+//! Prometheus 1k Demo with FlowApplication Framework
 //! 
-//! This demo processes 100,000 events with a rate limiter and uses the new
-//! FlowApplication framework for automatic server management.
+//! This demo processes 1,000 events with a faster rate limiter for quick testing
+//! of pipeline completion and FSM state transitions.
 //! 
-//! Run with: cargo run -p obzenflow --example prometheus_100k_demo --features obzenflow_infra/warp-server -- --server
+//! Run with: cargo run -p obzenflow --example prometheus_1k_demo --features obzenflow_infra/warp-server -- --server
 //! 
 //! The --server flag will start the web server with:
 //! - /metrics endpoint for Prometheus metrics
@@ -27,7 +27,7 @@ use obzenflow_core::event::payloads::delivery_payload::{DeliveryPayload, Deliver
 use serde_json::json;
 use std::time::{Duration, Instant};
 
-/// Source that generates 100k events
+/// Source that generates 1k events
 #[derive(Clone, Debug)]
 struct HighVolumeSource {
     count: usize,
@@ -48,15 +48,16 @@ impl HighVolumeSource {
 impl FiniteSourceHandler for HighVolumeSource {
     fn next(&mut self) -> Option<ChainEvent> {
         if self.count >= self.total_events {
+            println!("🏁 Source complete: Generated {} total events", self.count);
             return None;
         }
 
         // Increment after we know we're emitting an event
         let current_id = self.count;
         self.count += 1;
-        
-        // Log progress every 10k events
-        if self.count % 10_000 == 0 {
+
+        // Log progress every 100 events for 1k demo
+        if self.count % 100 == 0 {
             println!("📊 Generated {} events...", self.count);
         }
 
@@ -73,7 +74,7 @@ impl FiniteSourceHandler for HighVolumeSource {
                 "id": current_id,
                 "priority": is_priority,
                 "should_fail": should_fail,
-                "batch": current_id / 1000,  // Group into batches of 1000
+                "batch": current_id / 100,  // Group into batches of 100
             }),
         ))
     }
@@ -102,7 +103,7 @@ impl RateLimitedTransform {
 #[async_trait]
 impl TransformHandler for RateLimitedTransform {
     fn process(&self, event: ChainEvent) -> Vec<ChainEvent> {
-        // Apply rate limiting with 100ms delay
+        // Apply rate limiting with configurable delay
         if self.delay_ms > 0 {
             std::thread::sleep(Duration::from_millis(self.delay_ms));
         }
@@ -143,11 +144,11 @@ impl TransformHandler for ErrorProneTransform {
     fn process(&self, event: ChainEvent) -> Vec<ChainEvent> {
         let payload = event.payload();
         
-        // Simulate variable processing time
+        // Simulate variable processing time (faster for testing)
         let base_delay = if payload["priority"].as_bool().unwrap_or(false) {
-            2  // Priority events are processed faster
+            1  // Priority events are processed faster
         } else {
-            5  // Normal events take longer
+            2  // Normal events take slightly longer
         };
         std::thread::sleep(Duration::from_millis(base_delay));
         
@@ -221,14 +222,30 @@ impl SinkHandler for StatisticsSink {
             self.success_count += 1;
         }
         
-        // Log progress every 10k events
-        if self.total_count % 10_000 == 0 {
+        // Log progress every 100 events for 1k demo
+        if self.total_count % 100 == 0 {
             let elapsed = self.start_time.unwrap().elapsed();
             let rate = self.total_count as f64 / elapsed.as_secs_f64();
             println!(
                 "📈 Processed {} events | Success: {} | Errors: {} | Rate: {:.0} events/sec",
                 self.total_count, self.success_count, self.error_count, rate
             );
+        }
+        
+        // Final summary when we hit 1000
+        if self.total_count == 1000 {
+            let elapsed = self.start_time.unwrap().elapsed();
+            let rate = self.total_count as f64 / elapsed.as_secs_f64();
+            println!("");
+            println!("✅ COMPLETED ALL 1000 EVENTS!");
+            println!("=====================================");
+            println!("📊 Final Statistics:");
+            println!("   Total: {}", self.total_count);
+            println!("   Success: {}", self.success_count);
+            println!("   Errors: {}", self.error_count);
+            println!("   Duration: {:.2}s", elapsed.as_secs_f64());
+            println!("   Rate: {:.0} events/sec", rate);
+            println!("=====================================");
         }
         
         Ok(DeliveryPayload::success(
@@ -244,26 +261,27 @@ async fn main() -> Result<()> {
     // Set environment to use prometheus exporter
     std::env::set_var("OBZENFLOW_METRICS_EXPORTER", "prometheus");
 
-    println!("🚀 Prometheus 100k Demo with FlowApplication Framework");
-    println!("======================================================");
-    println!("📊 Processing 100,000 events with rate limiting");
+    println!("🚀 Prometheus 1k Demo with FlowApplication Framework");
+    println!("=====================================================");
+    println!("📊 Processing 1,000 events with 10ms rate limiting");
+    println!("   (Faster than 100k demo for testing FSM transitions)");
     println!("");
     println!("Usage:");
-    println!("  Run with server:    cargo run -p obzenflow --example prometheus_100k_demo --features obzenflow_infra/warp-server -- --server");
-    println!("  Custom port:        cargo run -p obzenflow --example prometheus_100k_demo --features obzenflow_infra/warp-server -- --server --server-port 8080");
-    println!("  Without server:     cargo run -p obzenflow --example prometheus_100k_demo");
+    println!("  Run with server:    cargo run -p obzenflow --example prometheus_1k_demo --features obzenflow_infra/warp-server -- --server");
+    println!("  Custom port:        cargo run -p obzenflow --example prometheus_1k_demo --features obzenflow_infra/warp-server -- --server --server-port 8080");
+    println!("  Without server:     cargo run -p obzenflow --example prometheus_1k_demo");
     println!("");
 
     // Use FlowApplication to handle everything
     FlowApplication::run(async {
         flow! {
-            name: "prometheus_100k_demo",
-            journals: disk_journals(std::path::PathBuf::from("target/prometheus_100k_demo_journal")),
+            name: "prometheus_1k_demo",
+            journals: disk_journals(std::path::PathBuf::from("target/prometheus_1k_demo_journal")),
             middleware: [],
             
             stages: {
-                // Source generating 100k events
-                src = source!("high_volume_source" => HighVolumeSource::new(100_000));
+                // Source generating 1k events
+                src = source!("high_volume_source" => HighVolumeSource::new(1_000));
                 
                 // Rate limited transform with 100ms delay
                 rate_limiter = transform!("rate_limiter" => RateLimitedTransform::new(100));

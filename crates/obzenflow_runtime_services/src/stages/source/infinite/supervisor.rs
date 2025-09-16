@@ -70,7 +70,7 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
                 .on("Start", |_state, _event, _ctx| async move {
                     Ok(Transition {
                         next_state: InfiniteSourceState::Running,
-                        actions: vec![], // Emission happens in dispatch_state
+                        actions: vec![InfiniteSourceAction::PublishRunning],
                     })
                 })
                 .done()
@@ -242,7 +242,10 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
                             .await
                             .map_err(|e| format!("Failed to write event: {}", e))?;
                     }
-                    
+
+                    // Increment events processed counter after successful write
+                    self.context.instrumentation.events_processed_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
                     tracing::trace!(
                         stage_name = %self.context.stage_name,
                         "Infinite source emitted event"

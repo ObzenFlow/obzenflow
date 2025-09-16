@@ -301,7 +301,7 @@ impl FsmAction for PipelineAction {
                         
                         match MetricsAggregatorBuilder::new(inputs, system_journal, exporter)
                             .with_stage_metadata(stage_metadata)
-                            .with_export_interval(10) // 10 second interval
+                            .with_export_interval(1) // 10 second interval
                             .build()
                             .await
                         {

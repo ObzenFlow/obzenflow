@@ -61,21 +61,26 @@ impl StateVariant for MetricsAggregatorState {
 pub enum MetricsAggregatorEvent {
     /// Initialization complete, start processing
     StartRunning,
-    
+
     /// Process a batch of events
     ProcessBatch {
         events: Vec<obzenflow_core::EventEnvelope<obzenflow_core::ChainEvent>>,
     },
-    
+
+    /// Process a system event (FLOWIP-059b)
+    ProcessSystemEvent {
+        envelope: obzenflow_core::EventEnvelope<obzenflow_core::event::SystemEvent>,
+    },
+
     /// Time to export metrics
     ExportMetrics,
-    
+
     /// Start draining process (from journal control event)
     StartDraining,
-    
+
     /// Empty batch received during drain
     DrainEmptyBatch,
-    
+
     /// No more events available during drain
     DrainComplete {
         last_event_id: Option<EventId>,
@@ -87,6 +92,7 @@ impl EventVariant for MetricsAggregatorEvent {
         match self {
             MetricsAggregatorEvent::StartRunning => "StartRunning",
             MetricsAggregatorEvent::ProcessBatch { .. } => "ProcessBatch",
+            MetricsAggregatorEvent::ProcessSystemEvent { .. } => "ProcessSystemEvent",
             MetricsAggregatorEvent::ExportMetrics => "ExportMetrics",
             MetricsAggregatorEvent::StartDraining => "StartDraining",
             MetricsAggregatorEvent::DrainEmptyBatch => "DrainEmptyBatch",
@@ -100,15 +106,20 @@ impl EventVariant for MetricsAggregatorEvent {
 pub enum MetricsAggregatorAction {
     /// Initialize metrics collection
     Initialize,
-    
+
     /// Update metrics from an event
     UpdateMetrics {
         envelope: obzenflow_core::EventEnvelope<obzenflow_core::ChainEvent>,
     },
-    
+
+    /// Process system events from the system journal (FLOWIP-059b)
+    ProcessSystemEvent {
+        envelope: obzenflow_core::EventEnvelope<obzenflow_core::event::SystemEvent>,
+    },
+
     /// Export metrics snapshot
     ExportMetrics,
-    
+
     /// Publish drain complete event to journal
     PublishDrainComplete {
         last_event_id: Option<EventId>,
@@ -120,16 +131,19 @@ pub enum MetricsAggregatorAction {
 pub struct MetricsAggregatorContext {
     /// System journal for reporting
     pub system_journal: Arc<dyn Journal<obzenflow_core::event::SystemEvent>>,
-    
+
     /// Subscription to read from all stage data journals
     pub data_subscription: Arc<RwLock<Option<crate::messaging::upstream_subscription::UpstreamSubscription<ChainEvent>>>>,
-    
+
     /// Subscription to read from all error journals (FLOWIP-082g)
     pub error_subscription: Arc<RwLock<Option<crate::messaging::upstream_subscription::UpstreamSubscription<ChainEvent>>>>,
-    
+
+    /// Subscription to read from system journal for lifecycle events (FLOWIP-059b)
+    pub system_subscription: Arc<RwLock<Option<Box<dyn obzenflow_core::journal::journal_reader::JournalReader<obzenflow_core::event::SystemEvent>>>>>,
+
     /// Whether to include error journals in metrics collection
     pub include_error_journals: bool,
-    
+
     pub exporter: Option<Arc<dyn obzenflow_core::metrics::MetricsExporter>>,
     pub metrics_store: Arc<RwLock<MetricsStore>>,
     pub export_interval_secs: u64,
@@ -146,7 +160,7 @@ pub struct MetricsStore {
     pub first_event_time: Option<std::time::Instant>,
     pub last_event_time: Option<std::time::Instant>,
     pub total_events_processed: u64,
-    
+
     // Journey tracking
     pub active_journeys: HashMap<CorrelationId, JourneyState>,
     pub journeys_started: u64,
@@ -154,11 +168,16 @@ pub struct MetricsStore {
     pub journeys_errored: u64,
     pub journeys_abandoned: u64,
     pub journey_durations: hdrhistogram::Histogram<u64>,
-    
+
     // Flow-level aggregates
     pub flow_events_in: u64,
     pub flow_events_out: u64,
     pub flow_errors_total: u64,
+
+    // System event tracking (FLOWIP-059b - essential events only)
+    // Track all states each stage has been in: (StageId, state_name) -> true
+    pub stage_lifecycle_states: HashMap<(StageId, String), bool>,
+    pub pipeline_state: String,
 }
 
 #[derive(Clone, Debug)]
@@ -208,6 +227,8 @@ impl Default for MetricsStore {
             flow_events_in: 0,
             flow_events_out: 0,
             flow_errors_total: 0,
+            stage_lifecycle_states: HashMap::new(),
+            pipeline_state: String::new(),
         }
     }
 }
@@ -258,11 +279,18 @@ impl MetricsAggregatorContext {
         } else {
             None
         };
-        
+
+        // Create reader for system journal to receive lifecycle events (FLOWIP-059b)
+        let system_reader = system_journal
+            .reader()
+            .await
+            .map_err(|e| format!("Failed to create system journal reader: {:?}", e))?;
+
         Ok(Self {
             system_journal,
             data_subscription: Arc::new(RwLock::new(Some(data_subscription))),
             error_subscription: Arc::new(RwLock::new(error_subscription)),
+            system_subscription: Arc::new(RwLock::new(Some(system_reader))),
             include_error_journals: true, // Default to true per FLOWIP-082g
             exporter,
             metrics_store: Arc::new(RwLock::new(MetricsStore::default())),
@@ -287,6 +315,49 @@ impl FsmAction for MetricsAggregatorAction {
                 Ok(())
             }
             
+            MetricsAggregatorAction::ProcessSystemEvent { envelope } => {
+                // FLOWIP-059b: Process system journal events for lifecycle tracking
+                let mut store = ctx.metrics_store.write().await;
+
+                match &envelope.event.event {
+                    obzenflow_core::event::SystemEventType::StageLifecycle { stage_id, event } => {
+                        // Track ALL states each stage has been in (never overwrite)
+                        match event {
+                            obzenflow_core::event::StageLifecycleEvent::Running => {
+                                store.stage_lifecycle_states.insert((*stage_id, "running".to_string()), true);
+                                tracing::debug!("Stage {:?} transitioned to running", stage_id);
+                            }
+                            obzenflow_core::event::StageLifecycleEvent::Completed => {
+                                store.stage_lifecycle_states.insert((*stage_id, "completed".to_string()), true);
+                                tracing::debug!("Stage {:?} transitioned to completed", stage_id);
+                            }
+                            obzenflow_core::event::StageLifecycleEvent::Failed { .. } => {
+                                store.stage_lifecycle_states.insert((*stage_id, "failed".to_string()), true);
+                                tracing::debug!("Stage {:?} transitioned to failed", stage_id);
+                            }
+                            _ => {} // Skip draining, drained for now
+                        }
+                    }
+                    obzenflow_core::event::SystemEventType::PipelineLifecycle(event) => {
+                        // Track only essential pipeline events
+                        match event {
+                            obzenflow_core::event::PipelineLifecycleEvent::AllStagesCompleted => {
+                                store.pipeline_state = "all_stages_completed".to_string();
+                                tracing::info!("Pipeline: all stages completed");
+                            }
+                            obzenflow_core::event::PipelineLifecycleEvent::Completed => {
+                                store.pipeline_state = "completed".to_string();
+                                tracing::info!("Pipeline: completed");
+                            }
+                            _ => {} // Skip other pipeline events
+                        }
+                    }
+                    _ => {} // Skip MetricsCoordination and other event types
+                }
+
+                Ok(())
+            }
+
             MetricsAggregatorAction::UpdateMetrics { envelope } => {
                 let mut store = ctx.metrics_store.write().await;
 
@@ -687,6 +758,10 @@ impl FsmAction for MetricsAggregatorAction {
                     
                     // Add stage metadata
                     snapshot.stage_metadata = ctx.stage_metadata.clone();
+
+                    // FLOWIP-059b: Add lifecycle states
+                    snapshot.stage_lifecycle_states = store.stage_lifecycle_states.clone();
+                    snapshot.pipeline_state = store.pipeline_state.clone();
                     
                     // Add stage timestamps for rate calculation
                     // Convert from Instant to DateTime by calculating offset from snapshot time

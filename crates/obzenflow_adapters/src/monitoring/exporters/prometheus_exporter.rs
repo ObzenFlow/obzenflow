@@ -466,7 +466,41 @@ impl PrometheusExporter {
             )?;
             writeln!(output)?;
         }
-        
+
+        // Stage lifecycle state metrics (FLOWIP-059b - essential events only)
+        // Shows ALL states each stage has been in
+        if !snapshot.stage_lifecycle_states.is_empty() {
+            writeln!(output, "# HELP obzenflow_stage_lifecycle_state Stage lifecycle state (1 = stage has been in this state)")?;
+            writeln!(output, "# TYPE obzenflow_stage_lifecycle_state gauge")?;
+
+            for ((stage_id, state), &seen) in &snapshot.stage_lifecycle_states {
+                if seen {
+                    if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
+                        writeln!(
+                            output,
+                            "obzenflow_stage_lifecycle_state{{flow=\"{}\",stage=\"{}\",state=\"{}\"}} 1",
+                            escape_label(&metadata.flow_name),
+                            escape_label(&metadata.name),
+                            escape_label(state)
+                        )?;
+                    }
+                }
+            }
+            writeln!(output)?;
+        }
+
+        // Pipeline state metric (FLOWIP-059b)
+        if !snapshot.pipeline_state.is_empty() {
+            writeln!(output, "# HELP obzenflow_pipeline_state Pipeline lifecycle state")?;
+            writeln!(output, "# TYPE obzenflow_pipeline_state gauge")?;
+            writeln!(
+                output,
+                "obzenflow_pipeline_state{{state=\"{}\"}} 1",
+                escape_label(&snapshot.pipeline_state)
+            )?;
+            writeln!(output)?;
+        }
+
         Ok(())
     }
     

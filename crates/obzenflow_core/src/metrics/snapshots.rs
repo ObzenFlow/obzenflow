@@ -82,8 +82,15 @@ pub struct AppMetricsSnapshot {
     /// First event time for each stage (for rate calculation)
     pub stage_first_event_time: HashMap<StageId, chrono::DateTime<chrono::Utc>>,
     
-    /// Last event time for each stage (for rate calculation)  
+    /// Last event time for each stage (for rate calculation)
     pub stage_last_event_time: HashMap<StageId, chrono::DateTime<chrono::Utc>>,
+
+    /// Stage lifecycle states (FLOWIP-059b - essential events only)
+    /// Maps (StageId, state_name) to whether that state has been seen
+    pub stage_lifecycle_states: HashMap<(StageId, String), bool>,
+
+    /// Pipeline state (FLOWIP-059b)
+    pub pipeline_state: String,
 }
 
 /// Snapshot of infrastructure-level metrics from direct observation
@@ -226,6 +233,8 @@ impl Default for AppMetricsSnapshot {
             stage_metadata: HashMap::new(),
             stage_first_event_time: HashMap::new(),
             stage_last_event_time: HashMap::new(),
+            stage_lifecycle_states: HashMap::new(),
+            pipeline_state: String::new(),
         }
     }
 }

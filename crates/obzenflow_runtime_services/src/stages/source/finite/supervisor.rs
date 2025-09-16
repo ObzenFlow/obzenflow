@@ -70,7 +70,7 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> S
                 .on("Start", |_state, _event, _ctx| async move {
                     Ok(Transition {
                         next_state: FiniteSourceState::Running,
-                        actions: vec![], // Emission happens in dispatch_state
+                        actions: vec![FiniteSourceAction::PublishRunning],
                     })
                 })
                 .done()
@@ -195,13 +195,7 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> H
 
                 // Get next event from handler
                 let mut handler = self.context.handler.write().await;
-                
-                // Check if source is complete
-                if handler.is_complete() {
-                    drop(handler);
-                    return Ok(EventLoopDirective::Transition(FiniteSourceEvent::Completed));
-                }
-                
+
                 // Try to get next event
                 if let Some(mut event) = handler.next() {
                     drop(handler);
@@ -238,13 +232,23 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> H
                             .await
                             .map_err(|e| format!("Failed to write event: {}", e))?;
                     }
-                    
+
+                    // Increment events processed counter after successful write
+                    self.context.instrumentation.events_processed_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
                     tracing::trace!(
                         stage_name = %self.context.stage_name,
                         "Source emitted event"
                     );
+                } else {
+                    // No more events available, check if source is complete
+                    if handler.is_complete() {
+                        drop(handler);
+                        return Ok(EventLoopDirective::Transition(FiniteSourceEvent::Completed));
+                    }
+                    drop(handler);
                 }
-                
+
                 Ok(EventLoopDirective::Continue)
             }
             

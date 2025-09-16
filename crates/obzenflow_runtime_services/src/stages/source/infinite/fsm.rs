@@ -198,7 +198,10 @@ pub enum InfiniteSourceAction<H> {
     
     /// Send error event to journal for diagnostics
     SendError { message: String },
-    
+
+    /// Publish running lifecycle event
+    PublishRunning,
+
     /// Write stage completed event
     WriteStageCompleted,
     
@@ -300,6 +303,7 @@ impl<H> Clone for InfiniteSourceAction<H> {
             Self::AllocateResources => Self::AllocateResources,
             Self::SendEOF => Self::SendEOF,
             Self::SendError { message } => Self::SendError { message: message.clone() },
+            Self::PublishRunning => Self::PublishRunning,
             Self::WriteStageCompleted => Self::WriteStageCompleted,
             Self::Cleanup => Self::Cleanup,
             Self::_Phantom(_) => Self::_Phantom(std::marker::PhantomData),
@@ -313,6 +317,7 @@ impl<H> std::fmt::Debug for InfiniteSourceAction<H> {
             Self::AllocateResources => write!(f, "AllocateResources"),
             Self::SendEOF => write!(f, "SendEOF"),
             Self::SendError { message } => write!(f, "SendError({:?})", message),
+            Self::PublishRunning => write!(f, "PublishRunning"),
             Self::WriteStageCompleted => write!(f, "WriteStageCompleted"),
             Self::Cleanup => write!(f, "Cleanup"),
             Self::_Phantom(_) => write!(f, "_Phantom"),
@@ -387,7 +392,28 @@ impl<H: InfiniteSourceHandler + Send + Sync + 'static> FsmAction for InfiniteSou
                 );
                 Ok(())
             }
-            
+
+            InfiniteSourceAction::PublishRunning => {
+                let writer_id_guard = ctx.writer_id.read().await;
+                let _writer_id = writer_id_guard
+                    .as_ref()
+                    .ok_or_else(|| "No writer ID available to publish running event".to_string())?;
+
+                // Write running event to system journal
+                let running_event = SystemEvent::stage_running(ctx.stage_id);
+
+                ctx.system_journal
+                    .append(running_event, None)
+                    .await
+                    .map_err(|e| format!("Failed to publish running event: {}", e))?;
+
+                tracing::info!(
+                    stage_name = %ctx.stage_name,
+                    "Infinite source published running event"
+                );
+                Ok(())
+            }
+
             InfiniteSourceAction::WriteStageCompleted => {
                 let writer_id_guard = ctx.writer_id.read().await;
                 let writer_id_guard = ctx.writer_id.read().await;

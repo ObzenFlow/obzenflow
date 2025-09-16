@@ -55,6 +55,20 @@ impl Supervisor for MetricsAggregatorSupervisor {
             
             // Running state transitions
             .when("Running")
+                .on("ProcessSystemEvent", |_state, event: &MetricsAggregatorEvent, _ctx| {
+                    let event = event.clone();
+                    async move {
+                        if let MetricsAggregatorEvent::ProcessSystemEvent { envelope } = event {
+                            // Create action to process the system event
+                            Ok(obzenflow_fsm::Transition {
+                                next_state: MetricsAggregatorState::Running,
+                                actions: vec![MetricsAggregatorAction::ProcessSystemEvent { envelope }],
+                            })
+                        } else {
+                            Err("Invalid event for ProcessSystemEvent".to_string())
+                        }
+                    }
+                })
                 .on("ProcessBatch", |_state, event: &MetricsAggregatorEvent, _ctx| {
                     let event = event.clone();
                     async move {
@@ -266,14 +280,18 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                     }
                 }
 
-                // Get both subscriptions from context
+                // Get all subscriptions from context
                 let mut data_subscription_guard = self.context.data_subscription.write().await;
                 let data_subscription = data_subscription_guard
                     .as_mut()
                     .ok_or("No data subscription available")?;
-                    
+
                 let mut error_subscription_guard = self.context.error_subscription.write().await;
                 let error_subscription = error_subscription_guard.as_mut();
+
+                // FLOWIP-059b: Get system subscription for lifecycle events
+                let mut system_subscription_guard = self.context.system_subscription.write().await;
+                let system_subscription = system_subscription_guard.as_mut();
 
                 // Create a future for the timer tick
                 let timer_tick = async {
@@ -307,7 +325,36 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                     }
                 };
 
+                // FLOWIP-059b: Build future for system events
+                let system_recv = async {
+                    if let Some(system_sub) = system_subscription {
+                        match system_sub.next().await {
+                            Ok(Some(envelope)) => Ok(envelope),
+                            Ok(None) => Err("No system event available".to_string()),
+                            Err(e) => Err(format!("Error reading system events: {:?}", e)),
+                        }
+                    } else {
+                        // If no system subscription, wait forever
+                        std::future::pending().await
+                    }
+                };
+
                 tokio::select! {
+                    // FLOWIP-059b: Poll system events first (higher priority, lower volume)
+                    result = system_recv => {
+                        match result {
+                            Ok(envelope) => {
+                                // Process system event through FSM event
+                                Ok(EventLoopDirective::Transition(
+                                    MetricsAggregatorEvent::ProcessSystemEvent { envelope }
+                                ))
+                            }
+                            Err(_) => {
+                                // No system events or error, continue
+                                Ok(EventLoopDirective::Continue)
+                            }
+                        }
+                    }
                     // Process data journal events
                     result = data_recv => {
                         match result {
