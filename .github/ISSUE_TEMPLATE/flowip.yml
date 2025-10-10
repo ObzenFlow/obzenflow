@@ -13,11 +13,19 @@ body:
       placeholder: "FLOWIP-082"
     validations:
       required: true
-  - type: input
-    id: doc_path
+  - type: textarea
+    id: description
     attributes:
-      label: Doc path (relative)
-      placeholder: "docs/flowip-proposals/FLOWIP-082-cycles-backflow.md"
+      label: Description
+      placeholder: |
+        A brief one-paragraph summary of what this FLOWIP proposes.
+
+        See FLOWIP doc for full details: docs/flowip-proposals/FLOWIP-XXX-name.md
+      description: "Quick summary followed by a link to the FLOWIP doc"
+      value: |
+        [Quick summary here]
+
+        See FLOWIP doc for details: `docs/flowip-proposals/FLOWIP-XXX-*.md`
     validations:
       required: true
   - type: dropdown
