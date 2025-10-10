@@ -1,0 +1,61 @@
+name: "FLOWIP"
+description: "Track a FLOWIP that already exists in the repo"
+title: "[FLOWIP-XXX] <concise title> · <AREA>"
+labels: ["type/flowip"]
+body:
+  - type: markdown
+    attributes:
+      value: "Keep details in the doc; this issue is just a tracker."
+  - type: input
+    id: flowip_id
+    attributes:
+      label: FLOWIP ID
+      placeholder: "FLOWIP-082"
+    validations:
+      required: true
+  - type: input
+    id: doc_path
+    attributes:
+      label: Doc path (relative)
+      placeholder: "docs/flowip-proposals/FLOWIP-082-cycles-backflow.md"
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options: ["CONFIG","DSL","QUERY","MIDDLEWARE","OBSERVABILITY/METRICS","OBSERVABILITY/SLI-SLO","OBSERVABILITY/TRACING","OBSERVABILITY/LOGGING","OBSERVABILITY/HEALTH","OBSERVABILITY/UNIFIED","RUNTIME/FSM","RUNTIME/FLOW","RUNTIME/SOURCES","RUNTIME/SINKS","RUNTIME/STAGES","RUNTIME/PERFORMANCE","RUNTIME/CONTROL-FLOW","EVENTS/SCHEMA","EVENTS/FORMAT","JOURNAL","STATE","PATTERNS","TESTING","DISTRIBUTED","ACCELERATION","DOCS","BUGFIX"]
+    validations:
+      required: true
+  - type: dropdown
+    id: status
+    attributes:
+      label: Status
+      options: ["PROPOSED","IN REVIEW","ACCEPTED","REJECTED","DEFERRED"]
+      default: 0
+    validations:
+      required: true
+  - type: input
+    id: owner
+    attributes:
+      label: Owner
+      placeholder: "@kevinwebber"
+  - type: dropdown
+    id: priority
+    attributes:
+      label: Priority
+      options: ["P0","P1","P2","P3"]
+      default: 2
+    validations:
+      required: false
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: Dependencies (optional)
+      placeholder: "FLOWIP-050, FLOWIP-054a"
+      description: "List any FLOWIPs this depends on"
+    validations:
+      required: false
+  - type: markdown
+    attributes:
+      value: "**Note:** Ensure the FLOWIP doc exists at the specified path above."
