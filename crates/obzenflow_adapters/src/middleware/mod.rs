@@ -121,18 +121,17 @@
 //! The `common` module provides pre-built middleware for common patterns:
 //!
 //! ```rust
-//! use obzenflow_adapters::middleware::control::{rate_limit, RetryBuilder, RetryStrategy};
+//! use obzenflow_adapters::middleware::control::{rate_limit, CircuitBreakerBuilder};
 //! use obzenflow_adapters::middleware::observability::LoggingMiddleware;
 //! use std::time::Duration;
 //!
 //! // Rate limiting - limits events per second
 //! let rate_limiter = rate_limit(100.0);
 //!
-//! // Retry logic - uses exponential backoff
-//! let retry_middleware = RetryBuilder::new()
-//!     .strategy(RetryStrategy::Exponential { base: 2.0, max_delay: Duration::from_secs(60) })
-//!     .max_attempts(3)
-//!     .initial_delay(Duration::from_millis(100))
+//! // Circuit breaker with retry - integrated retry logic (standalone retry deleted)
+//! let circuit_breaker = CircuitBreakerBuilder::new(5)
+//!     .with_retry_exponential(3)
+//!     .cooldown(Duration::from_secs(60))
 //!     .build();
 //!
 //! // Logging - logs events and results
@@ -216,7 +215,6 @@ pub use observability::timing::TimingMiddleware;
 pub use control::{
     CircuitBreakerMiddleware, CircuitBreakerBuilder, circuit_breaker,
     RateLimiterMiddleware, RateLimiterFactory, rate_limit, rate_limit_with_burst,
-    RetryMiddleware, RetryBuilder, RetryStrategy,
 };
 
 // Re-export observability middleware for backward compatibility
