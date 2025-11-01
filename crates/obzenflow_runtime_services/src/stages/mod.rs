@@ -3,6 +3,7 @@
 pub mod common;
 pub mod source;
 pub mod transform;
+pub mod stateful;
 pub mod sink;
 pub mod resources_builder;
 

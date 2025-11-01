@@ -8,7 +8,7 @@ use obzenflow_runtime_services::{
         common::{
             stage_handle::{BoxedStageHandle, StageEvent},
             handlers::{
-                FiniteSourceHandler, InfiniteSourceHandler, TransformHandler, SinkHandler
+                FiniteSourceHandler, InfiniteSourceHandler, TransformHandler, SinkHandler, StatefulHandler
             },
             control_strategies::{
                 ControlEventStrategy,
@@ -21,6 +21,7 @@ use obzenflow_runtime_services::{
             infinite::{InfiniteSourceBuilder, InfiniteSourceConfig, InfiniteSourceEvent, InfiniteSourceState},
         },
         transform::{TransformBuilder, TransformConfig, TransformEvent, TransformState},
+        stateful::{StatefulBuilder, StatefulConfig, StatefulEvent, StatefulState},
         sink::{
             journal_sink::{JournalSinkBuilder, JournalSinkConfig, JournalSinkEvent, JournalSinkState},
         },
@@ -645,6 +646,142 @@ fn check_sink_state<H>(state: &JournalSinkState<H>) -> crate::stage_handle_adapt
         JournalSinkState::Flushing | JournalSinkState::Draining => StageStatus::Draining,
         JournalSinkState::Drained => StageStatus::Drained,
         JournalSinkState::Failed(_) => StageStatus::Failed,
+        _ => StageStatus::Created,
+    }
+}
+
+// ============================================================================
+// Stateful Descriptor (FLOWIP-080b)
+// ============================================================================
+
+/// Descriptor for stateful transform stages
+pub struct StatefulDescriptor<H: StatefulHandler + 'static> {
+    pub name: String,
+    pub handler: H,
+    pub middleware: Vec<Box<dyn MiddlewareFactory>>,
+}
+
+#[async_trait]
+impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDescriptor for StatefulDescriptor<H> {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn stage_type(&self) -> StageType {
+        StageType::Stateful
+    }
+
+    async fn create_handle_with_flow_middleware(
+        self: Box<Self>,
+        config: StageConfig,
+        resources: StageResources,
+        flow_middleware: Vec<Box<dyn MiddlewareFactory>>
+    ) -> Result<BoxedStageHandle, String> {
+        // Validate middleware safety
+        for factory in &self.middleware {
+            let validation_result = validate_middleware_safety(
+                factory.as_ref(),
+                StageType::Stateful,
+                &self.name,
+            );
+
+            if !validation_result.is_ok() {
+                for error in &validation_result.errors {
+                    tracing::error!("{}", error);
+                }
+            }
+        }
+
+        // Create control strategy before moving middleware
+        let control_strategy = create_control_strategy_from_factories(
+            &self.middleware,
+            &self.name,
+        );
+
+        // Resolve flow and stage middleware
+        let resolved = crate::middleware_resolution::resolve_middleware(
+            flow_middleware,
+            self.middleware,
+            &config.name
+        );
+
+        // Log the resolution
+        crate::middleware_resolution::log_resolved_middleware(
+            &config.name,
+            &resolved
+        );
+
+        tracing::warn!(
+            "Control strategy created from stage middleware only - flow middleware not included for stage '{}'",
+            &config.name
+        );
+
+        // Create instrumentation configuration
+        let instrumentation_config = InstrumentationConfig::default();
+        let instrumentation = Arc::new(StageInstrumentation::new_with_config(instrumentation_config));
+
+        // Note: Stateful handlers don't currently support middleware wrapping
+        // This is because they have an associated type (State) which makes trait objects difficult
+        // Future work: FLOWIP-080c could add middleware support via HKT or similar patterns
+
+        // Create the stage configuration
+        let stateful_config = StatefulConfig {
+            stage_id: config.stage_id,
+            stage_name: config.name.clone(),
+            flow_name: config.flow_name.clone(),
+            control_strategy: Some(control_strategy),
+            upstream_stages: resources.upstream_stages.clone(),
+        };
+
+        // Use the builder to create the handle
+        let handle = StatefulBuilder::new(
+            self.handler,
+            stateful_config,
+            resources.flow_id,
+            resources.data_journal,
+            resources.error_journal,
+            resources.system_journal,
+            resources.upstream_journals,
+            resources.message_bus,
+        )
+        .with_instrumentation(instrumentation)
+        .build()
+        .await
+        .map_err(|e| format!("Failed to build stateful stage: {:?}", e))?;
+
+        // Create adapter to bridge to StageHandle
+        let adapter = StageHandleAdapter::new(
+            handle,
+            config.stage_id,
+            config.name,
+            StageType::Stateful,
+            move |event| translate_stage_event_to_stateful(event),
+            |state| check_stateful_state(state),
+        );
+
+        Ok(Box::new(adapter) as BoxedStageHandle)
+    }
+}
+
+fn translate_stage_event_to_stateful<H>(event: StageEvent) -> Result<StatefulEvent<H>, String> {
+    match event {
+        StageEvent::Initialize => Ok(StatefulEvent::Initialize),
+        StageEvent::Start => Ok(StatefulEvent::Ready), // Stateful stages use Ready like transforms
+        StageEvent::BeginDrain => Ok(StatefulEvent::BeginDrain),
+        StageEvent::ForceShutdown => Ok(StatefulEvent::Error("Force shutdown requested".to_string())),
+        _ => Err(format!("Unsupported stage event for stateful: {:?}", event)),
+    }
+}
+
+fn check_stateful_state<H>(state: &StatefulState<H>) -> crate::stage_handle_adapter::StageStatus {
+    use crate::stage_handle_adapter::StageStatus;
+    match state {
+        StatefulState::Created => StageStatus::Created,
+        StatefulState::Initialized => StageStatus::Ready,
+        StatefulState::Accumulating | StatefulState::Emitting => StageStatus::Running,
+        StatefulState::Draining => StageStatus::Draining,
+        StatefulState::Drained => StageStatus::Drained,
+        StatefulState::Failed(_) => StageStatus::Failed,
         _ => StageStatus::Created,
     }
 }

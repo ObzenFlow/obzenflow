@@ -66,3 +66,19 @@ macro_rules! sink {
         }) as Box<dyn StageDescriptor>
     }};
 }
+
+/// Create a stateful stage descriptor
+#[macro_export]
+macro_rules! stateful {
+    ($name:literal => $handler:expr) => {
+        $crate::stateful!($name => $handler, [])
+    };
+    ($name:literal => $handler:expr, [$($mw:expr),*]) => {{
+        use $crate::dsl::stage_descriptor::{StageDescriptor, StatefulDescriptor};
+        Box::new(StatefulDescriptor {
+            name: $name.to_string(),
+            handler: $handler,
+            middleware: vec![$(Box::new($mw)),*],
+        }) as Box<dyn StageDescriptor>
+    }};
+}
