@@ -1,0 +1,340 @@
+//! Demo: Topology Patterns - Fan-In, Fan-Out, and Diamond Patterns
+//!
+//! This demonstrates how ObzenFlow naturally handles complex topologies through
+//! independent journal readers and multiple upstream subscriptions.
+//!
+//! **Reference Example for**: Topology patterns, ETL pipelines, multi-source/sink architectures
+//!
+//! Key concepts demonstrated:
+//! - Fan-in: Multiple sources → single aggregator
+//! - Fan-out: Single router → multiple sinks
+//! - Diamond pattern: Combines both (realistic ETL)
+//! - StatefulHandler for aggregation (no Arc<Mutex>)
+//! - Independent journal readers (no coordination needed)
+//! - Natural backpressure handling
+
+use anyhow::Result;
+use async_trait::async_trait;
+use obzenflow_core::{
+    event::chain_event::{ChainEvent, ChainEventFactory},
+    WriterId,
+    id::StageId,
+};
+use obzenflow_dsl_infra::{flow, sink, source, stateful, transform};
+use obzenflow_infra::application::FlowApplication;
+use obzenflow_infra::journal::disk_journals;
+use obzenflow_runtime_services::stages::common::handlers::{
+    FiniteSourceHandler, SinkHandler, StatefulHandler, TransformHandler,
+};
+use obzenflow_core::event::payloads::delivery_payload::{DeliveryPayload, DeliveryMethod};
+use serde_json::json;
+use std::collections::HashMap;
+
+/// Source that generates events from a specific data source
+#[derive(Clone, Debug)]
+struct DataSource {
+    source_name: String,
+    count: usize,
+    max_events: usize,
+    writer_id: WriterId,
+}
+
+impl DataSource {
+    fn new(source_name: &str, max_events: usize) -> Self {
+        Self {
+            source_name: source_name.to_string(),
+            count: 0,
+            max_events,
+            writer_id: WriterId::from(StageId::new()),
+        }
+    }
+}
+
+impl FiniteSourceHandler for DataSource {
+    fn next(&mut self) -> Option<ChainEvent> {
+        if self.count >= self.max_events {
+            return None;
+        }
+
+        self.count += 1;
+
+        Some(ChainEventFactory::data_event(
+            self.writer_id.clone(),
+            "data.raw",
+            json!({
+                "source": self.source_name.clone(),
+                "id": self.count,
+                "value": self.count * 10,
+            }),
+        ))
+    }
+
+    fn is_complete(&self) -> bool {
+        self.count >= self.max_events
+    }
+}
+
+/// State for aggregating data from multiple sources
+#[derive(Clone, Debug, Default)]
+struct AggregatorState {
+    /// Track event count per source
+    events_by_source: HashMap<String, usize>,
+    /// Track total value sum per source
+    value_by_source: HashMap<String, i64>,
+    /// Total events processed
+    total_events: usize,
+}
+
+/// Stateful aggregator that merges events from multiple upstream sources (FAN-IN)
+///
+/// This demonstrates fan-in pattern: multiple sources → single aggregator
+/// Each source has its own journal reader at independent positions
+#[derive(Clone, Debug)]
+struct MultiSourceAggregator {
+    writer_id: WriterId,
+}
+
+impl MultiSourceAggregator {
+    fn new() -> Self {
+        Self {
+            writer_id: WriterId::from(StageId::new()),
+        }
+    }
+}
+
+#[async_trait]
+impl StatefulHandler for MultiSourceAggregator {
+    type State = AggregatorState;
+
+    fn process(&self, state: &Self::State, event: ChainEvent) -> (Self::State, Vec<ChainEvent>) {
+        let payload = event.payload();
+        let source = payload["source"].as_str().unwrap_or("unknown").to_string();
+        let value = payload["value"].as_i64().unwrap_or(0);
+
+        let mut new_state = state.clone();
+
+        // Update statistics
+        *new_state.events_by_source.entry(source.clone()).or_insert(0) += 1;
+        *new_state.value_by_source.entry(source.clone()).or_insert(0) += value;
+        new_state.total_events += 1;
+
+        let event_count = *new_state.events_by_source.get(&source).unwrap();
+        let total_value = *new_state.value_by_source.get(&source).unwrap();
+
+        println!("[FAN-IN] Aggregator received event from '{}' (#{} from this source, total: {})",
+                 source, event_count, new_state.total_events);
+
+        // Enrich event with aggregation stats
+        let mut enriched = payload.clone();
+        enriched["aggregation"] = json!({
+            "total_events": new_state.total_events,
+            "source_event_count": event_count,
+            "source_total_value": total_value,
+            "sources_seen": new_state.events_by_source.len(),
+        });
+
+        let aggregated_event = ChainEventFactory::derived_data_event(
+            self.writer_id.clone(),
+            &event,
+            "data.aggregated",
+            enriched,
+        );
+
+        (new_state, vec![aggregated_event])
+    }
+
+    fn initial_state(&self) -> Self::State {
+        AggregatorState::default()
+    }
+
+    async fn drain(
+        &mut self,
+        state: &Self::State,
+    ) -> Result<Vec<ChainEvent>, Box<dyn std::error::Error + Send + Sync>> {
+        println!("\n[FAN-IN STATS] Aggregation complete:");
+        println!("  Total events: {}", state.total_events);
+        for (source, count) in &state.events_by_source {
+            let value = state.value_by_source.get(source).unwrap_or(&0);
+            println!("  {}: {} events, total value: {}", source, count, value);
+        }
+        Ok(vec![])
+    }
+}
+
+/// Router that sends events to different downstream stages based on criteria (FAN-OUT)
+///
+/// This demonstrates fan-out pattern: single router → multiple sinks
+/// Each downstream stage creates its own journal reader
+#[derive(Clone, Debug)]
+struct SmartRouter;
+
+#[async_trait]
+impl TransformHandler for SmartRouter {
+    fn process(&self, event: ChainEvent) -> Vec<ChainEvent> {
+        let payload = event.payload();
+        let value = payload["value"].as_i64().unwrap_or(0);
+        let source = payload["source"].as_str().unwrap_or("unknown");
+
+        // Route to different channels based on value
+        let route = if value < 30 {
+            "low"
+        } else if value < 70 {
+            "medium"
+        } else {
+            "high"
+        };
+
+        println!("[FAN-OUT] Router processing event from '{}' with value {} → route: {}",
+                 source, value, route);
+
+        // Enrich with routing info
+        let mut enriched = payload.clone();
+        enriched["route"] = json!(route);
+
+        vec![ChainEventFactory::derived_data_event(
+            event.writer_id.clone(),
+            &event,
+            "data.routed",
+            enriched,
+        )]
+    }
+
+    async fn drain(&mut self) -> obzenflow_core::Result<()> {
+        Ok(())
+    }
+}
+
+/// Sink that processes events for a specific priority
+#[derive(Clone, Debug)]
+struct PrioritySink {
+    name: String,
+    route_filter: String,
+    event_count: usize,
+}
+
+impl PrioritySink {
+    fn new(name: &str, route_filter: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            route_filter: route_filter.to_string(),
+            event_count: 0,
+        }
+    }
+}
+
+#[async_trait]
+impl SinkHandler for PrioritySink {
+    async fn consume(&mut self, event: ChainEvent) -> obzenflow_core::Result<DeliveryPayload> {
+        let payload = event.payload();
+        let route = payload["route"].as_str().unwrap_or("");
+
+        // Only process events matching our filter
+        if route == self.route_filter {
+            self.event_count += 1;
+            let source = payload["source"].as_str().unwrap_or("unknown");
+            let value = payload["value"].as_i64().unwrap_or(0);
+
+            println!("[SINK:{}] Processed event from '{}' (value: {}) - total: {}",
+                     self.name, source, value, self.event_count);
+        }
+
+        Ok(DeliveryPayload::success(
+            &self.name,
+            DeliveryMethod::Custom("Processed".to_string()),
+            Some(1),
+        ))
+    }
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    // Set environment to use console exporter
+    std::env::set_var("OBZENFLOW_METRICS_EXPORTER", "console");
+
+    println!("Topology Patterns Demo - Fan-In, Fan-Out, and Diamond Pattern");
+    println!("=============================================================\n");
+    println!("Demonstrating:");
+    println!("  • Fan-in: Multiple sources → single aggregator");
+    println!("  • Fan-out: Single router → multiple sinks");
+    println!("  • Diamond pattern: Realistic ETL topology");
+    println!("  • StatefulHandler for aggregation (no Arc<Mutex>)");
+    println!("  • Independent journal readers\n");
+
+    let journal_path = std::path::PathBuf::from("target/topology_patterns_demo_journal");
+
+    println!("Topology:");
+    println!("  kafka_source (5 events)  ──┐");
+    println!("  api_source (4 events)    ──┼──> aggregator (fan-in)");
+    println!("  file_source (6 events)   ──┘            │");
+    println!("                                           ▼");
+    println!("                                        router");
+    println!("                                           │");
+    println!("                         ┌─────────────────┼─────────────────┐");
+    println!("                         ▼                 ▼                 ▼");
+    println!("                    low_sink          med_sink          high_sink");
+    println!("                   (value<30)       (30≤value<70)      (value≥70)\n");
+
+    // Use FlowApplication for modern pattern
+    FlowApplication::run(async {
+        flow! {
+            name: "topology_patterns",
+            journals: disk_journals(journal_path.clone()),
+            middleware: [],
+
+            stages: {
+                // FAN-IN: Three sources feeding into one aggregator
+                kafka = source!("kafka_source" => DataSource::new("kafka", 5));
+                api = source!("api_source" => DataSource::new("api", 4));
+                file_src = source!("file_source" => DataSource::new("file", 6));
+
+                // Aggregator demonstrates fan-in with StatefulHandler
+                aggregator = stateful!("aggregator" => MultiSourceAggregator::new());
+
+                // Router distributes to multiple sinks
+                router = transform!("router" => SmartRouter);
+
+                // FAN-OUT: Three sinks receiving from one router
+                low_priority = sink!("low_sink" => PrioritySink::new("LOW", "low"));
+                med_priority = sink!("med_sink" => PrioritySink::new("MEDIUM", "medium"));
+                high_priority = sink!("high_sink" => PrioritySink::new("HIGH", "high"));
+            },
+
+            topology: {
+                // FAN-IN: Multiple sources to single aggregator
+                kafka |> aggregator;
+                api |> aggregator;
+                file_src |> aggregator;
+
+                // Processing chain
+                aggregator |> router;
+
+                // FAN-OUT: Single router to multiple sinks
+                // Each sink creates its own independent journal reader
+                router |> low_priority;
+                router |> med_priority;
+                router |> high_priority;
+            }
+        }
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to create flow: {:?}", e))
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("Application failed: {:?}", e))?;
+
+    println!("\n\nFlow completed successfully!");
+    println!("\nKey insights:");
+    println!("  • Fan-in: Aggregator subscribed to 3 upstream journals");
+    println!("    - Each source had independent journal reader");
+    println!("    - Round-robin reading ensures fairness");
+    println!("    - No special merge primitive needed");
+    println!("  • Fan-out: Each sink created its own journal reader");
+    println!("    - Readers progress independently");
+    println!("    - Natural backpressure (slow sinks don't block fast ones)");
+    println!("    - All sinks see all events (broadcast behavior)");
+    println!("  • Diamond pattern combines both:");
+    println!("    - Multiple inputs merged and processed");
+    println!("    - Results distributed to multiple outputs");
+    println!("    - Common in ETL, event routing, microservices");
+
+    Ok(())
+}

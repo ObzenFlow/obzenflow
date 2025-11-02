@@ -1,12 +1,15 @@
 //! Prometheus 1k Demo with FlowApplication Framework
-//! 
-//! This demo processes 1,000 events with a faster rate limiter for quick testing
-//! of pipeline completion and FSM state transitions.
-//! 
+//!
+//! This demo processes 1,000 events demonstrating:
+//! - Flow-level rate limiting middleware
+//! - Fan-out topology pattern (one stage to multiple downstream stages)
+//! - StatefulHandler for business-level event counting
+//! - Prometheus metrics via /metrics endpoint
+//!
 //! Run with: cargo run -p obzenflow --example prometheus_1k_demo --features obzenflow_infra/warp-server -- --server
-//! 
+//!
 //! The --server flag will start the web server with:
-//! - /metrics endpoint for Prometheus metrics
+//! - /metrics endpoint for Prometheus metrics (framework-level metrics)
 //! - /api/topology endpoint for flow structure
 //! - /health and /ready endpoints for monitoring
 
@@ -17,11 +20,12 @@ use obzenflow_core::{
     WriterId,
     id::StageId,
 };
-use obzenflow_dsl_infra::{flow, sink, source, transform};
+use obzenflow_dsl_infra::{flow, sink, source, transform, stateful};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
+use obzenflow_adapters::middleware::rate_limit;
 use obzenflow_runtime_services::stages::common::handlers::{
-    FiniteSourceHandler, SinkHandler, TransformHandler,
+    FiniteSourceHandler, SinkHandler, TransformHandler, StatefulHandler,
 };
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryPayload, DeliveryMethod};
 use serde_json::json;
@@ -61,9 +65,6 @@ impl FiniteSourceHandler for HighVolumeSource {
             println!("📊 Generated {} events...", self.count);
         }
 
-        // Every 10th event will be marked for special processing
-        let is_priority = current_id % 10 == 0;
-        
         // Every 100th event will simulate an error
         let should_fail = current_id % 100 == 0;
 
@@ -72,7 +73,6 @@ impl FiniteSourceHandler for HighVolumeSource {
             "data.request",
             json!({
                 "id": current_id,
-                "priority": is_priority,
                 "should_fail": should_fail,
                 "batch": current_id / 100,  // Group into batches of 100
             }),
@@ -84,57 +84,6 @@ impl FiniteSourceHandler for HighVolumeSource {
     }
 }
 
-/// Transform with rate limiting - processes events with a 100ms delay
-#[derive(Clone, Debug)]
-struct RateLimitedTransform {
-    last_process_time: Option<Instant>,
-    delay_ms: u64,
-}
-
-impl RateLimitedTransform {
-    fn new(delay_ms: u64) -> Self {
-        Self {
-            last_process_time: None,
-            delay_ms,
-        }
-    }
-}
-
-#[async_trait]
-impl TransformHandler for RateLimitedTransform {
-    fn process(&self, event: ChainEvent) -> Vec<ChainEvent> {
-        // Apply rate limiting with configurable delay
-        if self.delay_ms > 0 {
-            std::thread::sleep(Duration::from_millis(self.delay_ms));
-        }
-        
-        let mut payload = event.payload();
-        
-        // Simulate some processing work
-        let processing_start = Instant::now();
-        let mut sum = 0u64;
-        for i in 0..1000 {
-            sum = sum.wrapping_add(i);
-        }
-        let processing_time = processing_start.elapsed();
-        
-        payload["rate_limited"] = json!(true);
-        payload["processing_time_us"] = json!(processing_time.as_micros());
-        payload["checksum"] = json!(sum);
-        
-        vec![ChainEventFactory::derived_data_event(
-            event.writer_id.clone(),
-            &event,
-            "rate_limited.event",
-            payload,
-        )]
-    }
-
-    async fn drain(&mut self) -> obzenflow_core::Result<()> {
-        Ok(())
-    }
-}
-
 /// Transform that can fail on certain events
 #[derive(Clone, Debug)]
 struct ErrorProneTransform;
@@ -143,15 +92,7 @@ struct ErrorProneTransform;
 impl TransformHandler for ErrorProneTransform {
     fn process(&self, event: ChainEvent) -> Vec<ChainEvent> {
         let payload = event.payload();
-        
-        // Simulate variable processing time (faster for testing)
-        let base_delay = if payload["priority"].as_bool().unwrap_or(false) {
-            1  // Priority events are processed faster
-        } else {
-            2  // Normal events take slightly longer
-        };
-        std::thread::sleep(Duration::from_millis(base_delay));
-        
+
         // Check if this event should fail
         if payload["should_fail"].as_bool().unwrap_or(false) {
             // Return error event
@@ -185,71 +126,133 @@ impl TransformHandler for ErrorProneTransform {
     }
 }
 
-/// Sink that tracks statistics
-#[derive(Clone, Debug)]
-struct StatisticsSink {
-    success_count: usize,
-    error_count: usize,
-    total_count: usize,
+/// State for business-level event counting
+#[derive(Clone, Debug, Default)]
+struct EventCountState {
+    event_count: usize,
     start_time: Option<Instant>,
 }
 
-impl StatisticsSink {
+/// Stateful aggregator that counts successfully processed events
+/// Note: Only sees events that made it through the pipeline (not errors routed to error journal)
+#[derive(Debug, Clone)]
+struct EventCounter {
+    writer_id: WriterId,
+}
+
+impl EventCounter {
     fn new() -> Self {
         Self {
-            success_count: 0,
-            error_count: 0,
-            total_count: 0,
-            start_time: None,
+            writer_id: WriterId::from(StageId::new()),
         }
     }
 }
 
 #[async_trait]
-impl SinkHandler for StatisticsSink {
-    async fn consume(&mut self, event: ChainEvent) -> obzenflow_core::Result<DeliveryPayload> {
+impl StatefulHandler for EventCounter {
+    type State = EventCountState;
+
+    fn process(&self, state: &Self::State, _event: ChainEvent) -> (Self::State, Vec<ChainEvent>) {
+        let mut new_state = state.clone();
+
         // Initialize start time on first event
-        if self.start_time.is_none() {
-            self.start_time = Some(Instant::now());
+        if new_state.start_time.is_none() {
+            new_state.start_time = Some(Instant::now());
         }
-        
-        self.total_count += 1;
-        
-        // Count successes and errors
-        if event.event_type() == "error.event" {
-            self.error_count += 1;
-        } else {
-            self.success_count += 1;
+
+        new_state.event_count += 1;
+
+        // Log progress every 100 events
+        if new_state.event_count % 100 == 0 {
+            println!("📊 Counted {} events so far...", new_state.event_count);
         }
-        
-        // Log progress every 100 events for 1k demo
-        if self.total_count % 100 == 0 {
-            let elapsed = self.start_time.unwrap().elapsed();
-            let rate = self.total_count as f64 / elapsed.as_secs_f64();
-            println!(
-                "📈 Processed {} events | Success: {} | Errors: {} | Rate: {:.0} events/sec",
-                self.total_count, self.success_count, self.error_count, rate
-            );
-        }
-        
-        // Final summary when we hit 1000
-        if self.total_count == 1000 {
-            let elapsed = self.start_time.unwrap().elapsed();
-            let rate = self.total_count as f64 / elapsed.as_secs_f64();
-            println!("");
-            println!("✅ COMPLETED ALL 1000 EVENTS!");
-            println!("=====================================");
-            println!("📊 Final Statistics:");
-            println!("   Total: {}", self.total_count);
-            println!("   Success: {}", self.success_count);
-            println!("   Errors: {}", self.error_count);
-            println!("   Duration: {:.2}s", elapsed.as_secs_f64());
-            println!("   Rate: {:.0} events/sec", rate);
-            println!("=====================================");
-        }
-        
+
+        // Accumulate only - emit summary on drain
+        (new_state, vec![])
+    }
+
+    fn initial_state(&self) -> Self::State {
+        EventCountState::default()
+    }
+
+    async fn drain(
+        &mut self,
+        state: &Self::State,
+    ) -> Result<Vec<ChainEvent>, Box<dyn std::error::Error + Send + Sync>> {
+        // Calculate final statistics
+        let duration = state.start_time
+            .map(|start| start.elapsed())
+            .unwrap_or(Duration::from_secs(0));
+
+        // Emit final count event
+        Ok(vec![ChainEventFactory::data_event(
+            self.writer_id.clone(),
+            "EventCountSummary",
+            json!({
+                "events_counted": state.event_count,
+                "duration_secs": duration.as_secs_f64(),
+            }),
+        )])
+    }
+}
+
+/// Simple sink that consumes all events (simulates Kafka/S3 persistence)
+/// Framework metrics at /metrics show how many events were processed
+#[derive(Clone, Debug)]
+struct CompletionSink;
+
+impl CompletionSink {
+    fn new() -> Self {
+        Self
+    }
+}
+
+#[async_trait]
+impl SinkHandler for CompletionSink {
+    async fn consume(&mut self, _event: ChainEvent) -> obzenflow_core::Result<DeliveryPayload> {
         Ok(DeliveryPayload::success(
-            "statistics_sink",
+            "completion_sink",
+            DeliveryMethod::Custom("InMemory".to_string()),
+            Some(1),
+        ))
+    }
+}
+
+/// Sink that prints the aggregator's final summary
+#[derive(Clone, Debug)]
+struct SummarySink;
+
+impl SummarySink {
+    fn new() -> Self {
+        Self
+    }
+}
+
+#[async_trait]
+impl SinkHandler for SummarySink {
+    async fn consume(&mut self, event: ChainEvent) -> obzenflow_core::Result<DeliveryPayload> {
+        if event.event_type() == "EventCountSummary" {
+            let payload = event.payload();
+            let count = payload["events_counted"].as_u64().unwrap_or(0);
+            let duration = payload["duration_secs"].as_f64().unwrap_or(0.0);
+
+            println!("");
+            println!("=====================================");
+            println!("📊 Business-Level Event Count:");
+            println!("   Successfully processed: {} events", count);
+            println!("   Duration: {:.2}s", duration);
+            println!("   Note: 1000 generated - {} = {} errors (routed to error journal)", count, 1000 - count as u32);
+            println!("=====================================");
+            println!("");
+            println!("📈 To view framework-level Prometheus metrics:");
+            println!("   1. Run with --server flag");
+            println!("   2. Visit http://localhost:3000/metrics");
+            println!("   3. See detailed per-stage metrics, errors, latencies, etc.");
+            println!("=====================================");
+        }
+
+        Ok(DeliveryPayload::success(
+            "summary_sink",
             DeliveryMethod::Custom("InMemory".to_string()),
             Some(1),
         ))
@@ -263,8 +266,11 @@ async fn main() -> Result<()> {
 
     println!("🚀 Prometheus 1k Demo with FlowApplication Framework");
     println!("=====================================================");
-    println!("📊 Processing 1,000 events with 10ms rate limiting");
-    println!("   (Faster than 100k demo for testing FSM transitions)");
+    println!("📊 Processing 1,000 events demonstrating:");
+    println!("   • Flow-level rate limiting middleware");
+    println!("   • Fan-out topology (processor → counter + sink)");
+    println!("   • StatefulHandler for business-level counting");
+    println!("   • Framework Prometheus metrics");
     println!("");
     println!("Usage:");
     println!("  Run with server:    cargo run -p obzenflow --example prometheus_1k_demo --features obzenflow_infra/warp-server -- --server");
@@ -277,26 +283,37 @@ async fn main() -> Result<()> {
         flow! {
             name: "prometheus_1k_demo",
             journals: disk_journals(std::path::PathBuf::from("target/prometheus_1k_demo_journal")),
-            middleware: [],
-            
+
+            // Flow-level rate limiting (1000 events/sec) for fast processing
+            middleware: [
+                rate_limit(1000.0)
+            ],
+
             stages: {
                 // Source generating 1k events
                 src = source!("high_volume_source" => HighVolumeSource::new(1_000));
-                
-                // Rate limited transform with 100ms delay
-                rate_limiter = transform!("rate_limiter" => RateLimitedTransform::new(100));
-                
-                // Error-prone transform for testing error metrics
+
+                // Error-prone transform (every 100th event fails)
                 processor = transform!("error_processor" => ErrorProneTransform);
-                
-                // Statistics sink
-                snk = sink!("statistics_sink" => StatisticsSink::new());
+
+                // Fan-out branch 1: Stateful event counter
+                counter = stateful!("event_counter" => EventCounter::new());
+                counter_sink = sink!("summary_sink" => SummarySink::new());
+
+                // Fan-out branch 2: Completion sink
+                completion = sink!("completion_sink" => CompletionSink::new());
             },
-            
+
             topology: {
-                src |> rate_limiter;
-                rate_limiter |> processor;
-                processor |> snk;
+                // Linear processing
+                src |> processor;
+
+                // Fan-out: processor feeds both branches
+                processor |> counter;
+                processor |> completion;
+
+                // Counter emits summary to its sink
+                counter |> counter_sink;
             }
         }
         .await

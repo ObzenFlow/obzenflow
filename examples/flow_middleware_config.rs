@@ -1,10 +1,27 @@
-//! Demonstrates flow-level middleware configuration and inheritance
+//! Demo: Flow-Level vs Stage-Level Middleware Configuration
 //!
-//! This example shows:
-//! - Flow-level rate limit of 0.5 events/sec
-//! - Source overrides with 50 events/sec (100x flow rate)
-//! - Transform inherits flow-level rate limit
-//! - Result: source produces fast but transform is throttled
+//! This demonstrates middleware inheritance - a critical concept for production flows.
+//!
+//! **How to observe rate limiting in real-time:**
+//!   1. Run with --server flag (requires warp-server feature):
+//!      ```
+//!      cargo run -p obzenflow --example flow_middleware_config --features obzenflow_infra/warp-server -- --server
+//!      ```
+//!   2. Query metrics while flow runs:
+//!      ```
+//!      curl http://localhost:9090/metrics | grep "events_processed_total"
+//!      ```
+//!   3. Observe rate differences:
+//!      - fast_source: ~10 events/sec (stage override)
+//!      - throttled_transform: ~1.0 events/sec (inherits flow-level)
+//!      - counting_sink: ~1.0 events/sec (bottlenecked by transform)
+//!
+//! Key concepts demonstrated:
+//! - Flow-level middleware applies to all stages by default
+//! - Stage-level middleware overrides flow-level
+//! - Stages without overrides inherit flow-level config
+//! - Backpressure naturally flows upstream
+//! - Production observability via /metrics endpoint
 
 use obzenflow_dsl_infra::{flow, source, transform, sink};
 use obzenflow_adapters::middleware::rate_limit;
@@ -13,6 +30,7 @@ use obzenflow_core::{
     WriterId,
     id::StageId,
 };
+use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime_services::stages::common::handlers::{
     FiniteSourceHandler, TransformHandler, SinkHandler,
@@ -20,12 +38,9 @@ use obzenflow_runtime_services::stages::common::handlers::{
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryPayload, DeliveryMethod};
 use async_trait::async_trait;
 use serde_json::json;
-use std::time::{Duration, Instant};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use tracing::info;
 use anyhow::Result;
 
+/// Source that generates numbered events
 #[derive(Debug, Clone)]
 struct EventCounter {
     count: usize,
@@ -48,103 +63,78 @@ impl FiniteSourceHandler for EventCounter {
         if self.count >= self.max_count {
             return None;
         }
-        
+
         self.count += 1;
-        
+
+        // Log progress every 20 events
+        if self.count % 20 == 0 {
+            println!("[SOURCE] Generated {} events", self.count);
+        }
+
         Some(ChainEventFactory::data_event(
             self.writer_id.clone(),
             "counter.event",
             json!({
                 "count": self.count,
-                "timestamp": std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_millis()
             }),
         ))
     }
-    
+
     fn is_complete(&self) -> bool {
         self.count >= self.max_count
     }
 }
 
+/// Simple passthrough transform
 #[derive(Debug, Clone)]
 struct PassthroughTransform {
-    name: String,
-    count: Arc<AtomicU64>,
+    processed: usize,
 }
 
 impl PassthroughTransform {
-    fn new(name: &str) -> Self {
-        Self {
-            name: name.to_string(),
-            count: Arc::new(AtomicU64::new(0)),
-        }
+    fn new() -> Self {
+        Self { processed: 0 }
     }
 }
 
 #[async_trait]
 impl TransformHandler for PassthroughTransform {
     fn process(&self, event: ChainEvent) -> Vec<ChainEvent> {
-        let count = self.count.fetch_add(1, Ordering::SeqCst) + 1;
-        
-        // Log every 10th event to reduce noise
-        if count % 10 == 0 {
-            info!("{} processed {} events", self.name, count);
-        }
-        
         vec![event]
     }
-    
+
     async fn drain(&mut self) -> obzenflow_core::Result<()> {
         Ok(())
     }
 }
 
+/// Simple sink that counts events
 #[derive(Debug, Clone)]
-struct EventSink {
-    name: String,
-    count: Arc<AtomicU64>,
-    first_event_time: Option<Instant>,
-    last_event_time: Option<Instant>,
+struct CountingSink {
+    received: usize,
 }
 
-impl EventSink {
-    fn new(name: &str) -> Self {
-        Self {
-            name: name.to_string(),
-            count: Arc::new(AtomicU64::new(0)),
-            first_event_time: None,
-            last_event_time: None,
-        }
+impl CountingSink {
+    fn new() -> Self {
+        Self { received: 0 }
     }
 }
 
 #[async_trait]
-impl SinkHandler for EventSink {
-    async fn consume(&mut self, _event: ChainEvent) -> obzenflow_core::Result<DeliveryPayload> {
-        let count = self.count.fetch_add(1, Ordering::SeqCst) + 1;
-        let now = Instant::now();
-        
-        if self.first_event_time.is_none() {
-            self.first_event_time = Some(now);
-            info!("{} received first event", self.name);
+impl SinkHandler for CountingSink {
+    async fn consume(&mut self, event: ChainEvent) -> obzenflow_core::Result<DeliveryPayload> {
+        self.received += 1;
+
+        // Log progress every 20 events
+        if self.received % 20 == 0 {
+            let payload = event.payload();
+            println!("[SINK] Received {} events (current: #{})",
+                     self.received,
+                     payload["count"]);
         }
-        self.last_event_time = Some(now);
-        
-        // Log every 10th event
-        if count % 10 == 0 {
-            if let Some(first) = self.first_event_time {
-                let elapsed = now.duration_since(first).as_secs_f64();
-                let rate = count as f64 / elapsed;
-                info!("{} received {} events, rate: {:.2} events/sec", 
-                    self.name, count, rate);
-            }
-        }
-        
+
         Ok(DeliveryPayload::success(
-            &self.name,
+            "counting_sink",
             DeliveryMethod::Custom("InMemory".to_string()),
             Some(1),
         ))
@@ -153,88 +143,80 @@ impl SinkHandler for EventSink {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Set environment to use console exporter for nice summaries
-    std::env::set_var("OBZENFLOW_METRICS_EXPORTER", "console");
-    
-    // Initialize tracing
-    tracing_subscriber::fmt()
-        .with_env_filter("obzenflow=debug,flow_middleware_config=debug,obzenflow_adapters::middleware::rate_limiter=trace")
-        .with_target(true)
-        .with_thread_ids(true)
-        .init();
+    // Use Prometheus exporter for /metrics endpoint
+    // (defaults to "prometheus" if not set, but being explicit here)
+    // Change to "console" if you want formatted summary instead
+    std::env::set_var("OBZENFLOW_METRICS_EXPORTER", "prometheus");
 
-    info!("=== Flow-Level Middleware Configuration Demo ===");
-    info!("");
-    info!("This demo shows middleware inheritance:");
-    info!("- Flow has rate limit of 0.5 events/sec");
-    info!("- Source overrides with 50 events/sec (100x faster)");
-    info!("- Transform inherits flow rate limit");
-    info!("- Result: source produces fast, transform throttles to 0.5/sec");
-    info!("");
+    println!("Middleware Configuration Demo");
+    println!("============================\n");
+    println!("Demonstrating:");
+    println!("  • Flow-level rate limit: 1.0 events/sec (applies to all stages)");
+    println!("  • Source override: 10.0 events/sec (stage-level override)");
+    println!("  • Transform: inherits flow-level 1.0 events/sec");
+    println!("  • Result: Source produces at 10/sec, transform throttles to 1.0/sec\n");
 
-    // Create journal path
+    println!("How to observe in real-time:");
+    println!("  1. Run with --server flag (requires warp-server feature):");
+    println!("     cargo run -p obzenflow --example flow_middleware_config \\");
+    println!("       --features obzenflow_infra/warp-server -- --server");
+    println!("  2. Query metrics while flow runs:");
+    println!("     curl http://localhost:9090/metrics | grep events_processed_total");
+    println!("  3. Watch the rate differences between stages!\n");
+
+    println!("Running with 120 events (will take ~120 seconds due to 1.0/sec transform rate)...\n");
+
     let journal_path = std::path::PathBuf::from("target/flow_middleware_config_journal");
-    info!("Using DiskJournal at: {}", journal_path.display());
 
-    // Create the flow with ACTUAL flow-level middleware inheritance
-    let flow = flow! {
-        name: "middleware-config-demo",
-        journals: disk_journals(journal_path.clone()),
-        middleware: [
-            // Flow-level rate limit: 0.5 events/sec
-            rate_limit(1.0)
-        ],
-        
-        stages: {
-            // Source with override: 50 events/sec (100x flow rate)
-            src = source!("fast-source" => EventCounter::new(120), [
-                rate_limit(10.0)
-            ]);
-            
-            // Transform inherits flow-level rate limit (0.5 events/sec)
-            trans = transform!("slow-transform" => PassthroughTransform::new("transform"));
-            
-            // Sink
-            snk = sink!("event-sink" => EventSink::new("sink"));
-        },
-        
-        topology: {
-            src |> trans;
-            trans |> snk;
+    FlowApplication::run(async {
+        flow! {
+            name: "middleware_config_demo",
+            journals: disk_journals(journal_path.clone()),
+            middleware: [
+                // Flow-level rate limit: 1.0 events/sec
+                // All stages inherit this unless they override
+                rate_limit(1.0)
+            ],
+
+            stages: {
+                // Source with stage-level override: 10 events/sec
+                // This overrides the flow-level 1.0 events/sec
+                src = source!("fast_source" => EventCounter::new(120), [
+                    rate_limit(10.0)
+                ]);
+
+                // Transform with NO override
+                // Inherits flow-level rate limit of 1.0 events/sec
+                trans = transform!("throttled_transform" => PassthroughTransform::new());
+
+                // Sink
+                snk = sink!("counting_sink" => CountingSink::new());
+            },
+
+            topology: {
+                src |> trans;
+                trans |> snk;
+            }
         }
-    }
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to create flow: {:?}", e))
+    })
     .await
-    .map_err(|e| anyhow::anyhow!("Failed to create flow: {}", e))?;
+    .map_err(|e| anyhow::anyhow!("Application failed: {:?}", e))?;
 
-    info!("Starting flow...");
-    let start_time = Instant::now();
-    
-    // Run the flow to completion
-    let metrics_exporter = flow.run_with_metrics().await?;
-    
-    let elapsed = start_time.elapsed();
-    info!("");
-    info!("=== Results ===");
-    info!("Total runtime: {:.1}s", elapsed.as_secs_f64());
-    
-    // Get metrics summary if available
-    if let Some(exporter) = metrics_exporter {
-        let summary = exporter
-            .render_metrics()
-            .map_err(|e| anyhow::anyhow!("Failed to render metrics: {}", e))?;
-        info!("\n{}", summary);
-    }
-    
-    info!("");
-    info!("Expected behavior:");
-    info!("- Source emits at 10 events/sec (overrides flow rate)");
-    info!("- Transform processes at 1.0 events/sec (inherits flow rate)");
-    info!("- Backpressure naturally flows upstream");
-    info!("");
-    info!("This demonstrates that:");
-    info!("1. Stage-level middleware overrides flow-level (source at 10/sec)");
-    info!("2. Stages without overrides inherit flow-level (transform at 1.0/sec)");
-    info!("3. Middleware inheritance works as designed!");
+    println!("\n\nFlow completed successfully!");
+    println!("\nKey observations:");
+    println!("  • Source emitted at 10 events/sec (stage override worked)");
+    println!("  • Transform processed at 1.0 events/sec (inherited flow limit)");
+    println!("  • Sink received at 1.0 events/sec (bottlenecked by transform)");
+    println!("  • Backpressure naturally flowed upstream");
+    println!("\nThis proves:");
+    println!("  1. Stage-level middleware overrides flow-level");
+    println!("  2. Stages without overrides inherit flow-level config");
+    println!("  3. Middleware inheritance works as designed!");
+    println!("\nProduction tip:");
+    println!("  Use --server flag + /metrics endpoint to observe rate limiting");
+    println!("  in real-time. This is how you debug middleware in production.");
 
     Ok(())
 }

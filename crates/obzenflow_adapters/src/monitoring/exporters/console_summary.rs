@@ -35,10 +35,6 @@ impl ConsoleSummaryExporter {
         if let Some(snapshot) = app_snapshot.as_ref() {
             let mut summary = String::new();
             
-            summary.push_str("\n📊 Flow Summary:\n");
-            summary.push_str(&"=".repeat(50));
-            summary.push_str("\n\n");
-            
             // Count events by stage type
             let mut source_events = 0u64;
             let mut sink_events = 0u64;
@@ -92,7 +88,7 @@ impl ConsoleSummaryExporter {
             };
             
             // Flow-level metrics
-            summary.push_str("📈 Flow Summary:\n");
+            summary.push_str("Flow Summary:\n");
             
             if let Some(flow_metrics) = &snapshot.flow_metrics {
                 // Calculate rate from flow metrics
@@ -116,7 +112,7 @@ impl ConsoleSummaryExporter {
                 ));
                 
                 // Journey metrics
-                summary.push_str("\n🚀 Journey Tracking:\n");
+                summary.push_str("\nJourney Tracking:\n");
                 summary.push_str(&format!("  Started:           {}\n", flow_metrics.journeys_opened));
                 summary.push_str(&format!("  Completed:         {}\n", flow_metrics.journeys_sealed));
                 summary.push_str(&format!("  Errored:           {}\n", flow_metrics.journeys_errored));
@@ -132,7 +128,7 @@ impl ConsoleSummaryExporter {
                 
                 // E2E latency percentiles
                 if flow_metrics.e2e_latency.count > 0 {
-                    summary.push_str("\n⏱️  E2E Latency:\n");
+                    summary.push_str("\nE2E Latency:\n");
                     let p50 = flow_metrics.e2e_latency.percentiles.get(&Percentile::P50)
                         .map(|&v| format_duration(v / 1_000_000.0))
                         .unwrap_or_else(|| "N/A".to_string());
@@ -151,9 +147,9 @@ impl ConsoleSummaryExporter {
                 } else {
                     0.0
                 };
-                summary.push_str(&format!("\n📊 Utilization:     {:.1}%", utilization));
+                summary.push_str(&format!("\nUtilization:     {:.1}%", utilization));
                 if utilization > 90.0 {
-                    summary.push_str(" ⚠️");
+                    summary.push_str(" (WARNING)");
                 }
                 summary.push_str("\n\n");
             } else {
@@ -172,7 +168,7 @@ impl ConsoleSummaryExporter {
             }
             
             // Per-stage RED metrics
-            summary.push_str("📊 RED Metrics by Stage:\n");
+            summary.push_str("RED Metrics by Stage:\n");
             
             // Collect and sort stages by type and name
             let mut stages: Vec<(&StageId, &StageMetadata)> = snapshot.stage_metadata.iter().collect();
@@ -239,7 +235,7 @@ impl ConsoleSummaryExporter {
                         
                         // Warning for slow stages
                         if p99 > 100.0 {
-                            summary.push_str(" ⚠️");
+                            summary.push_str(" (WARNING: slow)");
                         }
                         summary.push_str("\n");
                     }
@@ -252,10 +248,10 @@ impl ConsoleSummaryExporter {
             // events_behind removed - calculate in PromQL instead
             let total_failures: u64 = snapshot.failures_total.values().sum();
             
-            summary.push_str("🔄 Runtime State:\n");
+            summary.push_str("Runtime State:\n");
             summary.push_str(&format!("\n  In Flight:   {} events", total_in_flight as u64));
             if total_in_flight > 50.0 {
-                summary.push_str(" ⚠️");
+                summary.push_str(" (WARNING: high)");
             }
             
             // events_behind removed - calculate in PromQL instead
@@ -268,27 +264,27 @@ impl ConsoleSummaryExporter {
                 let utilization = (loops_with_work as f64 / total_loops as f64) * 100.0;
                 summary.push_str(&format!("\n  Utilization: {:.1}%", utilization));
                 if utilization > 90.0 {
-                    summary.push_str(" ⚠️");
+                    summary.push_str(" (WARNING)");
                 }
             }
             summary.push_str("\n\n");
             
             // Event flow
-            summary.push_str("📊 Event Flow:\n");
+            summary.push_str("Event Flow:\n");
             summary.push_str(&format!("  Source → {} events\n", source_events));
             if transform_events > 0 {
                 summary.push_str(&format!("  Transform → {} events\n", transform_events));
             }
             summary.push_str(&format!("  Sink → {} events", sink_events));
-            
+
             if sink_events < source_events {
-                summary.push_str(&format!(" ⚠️  ({} missing)", source_events - sink_events));
+                summary.push_str(&format!(" (WARNING: {} missing)", source_events - sink_events));
             }
             summary.push_str("\n");
             
             // Errors, failures and drops
             if total_errors > 0 || total_failures > 0 || snapshot.dropped_events.values().sum::<f64>() > 0.0 {
-                summary.push_str("\n⚠️  Issues:\n");
+                summary.push_str("\nIssues:\n");
                 if total_errors > 0 {
                     summary.push_str(&format!("  Errors: {}\n", total_errors));
                 }

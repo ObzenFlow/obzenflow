@@ -74,8 +74,8 @@ impl TransformHandler for ProblematicProcessor {
         
         // Increment iteration counter
         payload["iterations"] = json!(iterations + 1);
-        
-        println!("🔄 Processing event {} (iteration {})", id, iterations + 1);
+
+        println!("Processing event {} (iteration {})", id, iterations + 1);
         println!("   Event ID: {}", event.id);
         println!("   Parent IDs: {:?}", event.causality.parent_ids);
         println!("   Correlation ID: {:?}", event.correlation_id);
@@ -116,9 +116,9 @@ impl SinkHandler for EventCounter {
         let payload = event.payload();
         let id = payload["id"].as_i64().unwrap_or(0);
         let iterations = payload["iterations"].as_i64().unwrap_or(0);
-        
-        println!("📊 {} received event {} after {} iterations", self.name, id, iterations);
-        
+
+        println!("{} received event {} after {} iterations", self.name, id, iterations);
+
         Ok(DeliveryPayload::success(
             &self.name,
             DeliveryMethod::Custom("Counted".to_string()),
@@ -127,11 +127,23 @@ impl SinkHandler for EventCounter {
     }
 }
 
+/// NOTE: This example uses the MANUAL flow pattern instead of FlowApplication.
+///
+/// Why? This demo needs programmatic access to the metrics exporter to display
+/// cycle statistics at the end. FlowApplication::run() doesn't expose the metrics
+/// exporter, so we use the manual pattern here.
+///
+/// Most examples should use FlowApplication for automatic lifecycle management,
+/// CLI args, and web server support. Use the manual pattern only when you need:
+/// - Direct access to FlowHandle or metrics exporter
+/// - Custom metrics processing/reporting
+/// - Embedding flows in larger applications
+/// - Custom lifecycle requirements
 #[tokio::main]
 async fn main() -> Result<()> {
     // Set environment to use console exporter
     std::env::set_var("OBZENFLOW_METRICS_EXPORTER", "console");
-    
+
     // Initialize logging - set to error to reduce noise even more
     tracing_subscriber::fmt()
         .with_env_filter("obzenflow=error,obzenflow_adapters::middleware::control::cycle_guard=debug")
@@ -139,8 +151,8 @@ async fn main() -> Result<()> {
         .with_thread_ids(false)
         .init();
 
-    println!("🛡️  Cycle Guard Demo - Preventing Infinite Loops");
-    println!("================================================\n");
+    println!("Cycle Guard Demo - Preventing Infinite Loops");
+    println!("============================================\n");
 
     let journal_path = std::path::PathBuf::from("target/cycle_guard_demo_journal");
 
@@ -175,16 +187,13 @@ async fn main() -> Result<()> {
     .await
     .map_err(|e| anyhow::anyhow!("Failed to create flow: {}", e))?;
 
-    println!("🔄 Running flow with cycle between processors...");
-    println!("⚠️  Processors always send events back to each other");
-    println!("🛡️  CycleGuardMiddleware will abort after 5 iterations\n");
+    println!("Running flow with cycle between processors...");
+    println!("- Processors always send events back to each other");
+    println!("- CycleGuardMiddleware will abort after max iterations\n");
 
     // Run the flow to completion
     let metrics_exporter = flow_handle.run_with_metrics().await?;
 
-    println!("\n📊 Flow Metrics Summary:");
-    println!("========================");
-    
     // Get the metrics summary after completion
     if let Some(exporter) = metrics_exporter {
         let summary = exporter
@@ -193,12 +202,12 @@ async fn main() -> Result<()> {
         println!("{}", summary);
     }
 
-    println!("\n✅ Flow completed successfully!");
-    println!("\n🔍 What happened:");
-    println!("- Each event was processed up to 5 times");
-    println!("- CycleGuardMiddleware aborted processing after 5 iterations");
-    println!("- Without the guard, this would run forever!");
-    println!("- This demonstrates the importance of safety measures with cycles");
+    println!("\nFlow completed successfully!");
+    println!("\nWhat happened:");
+    println!("- Each event was processed multiple times through the cycle");
+    println!("- CycleGuardMiddleware automatically aborted after max iterations");
+    println!("- Without the guard, this would run forever");
+    println!("- This demonstrates the framework's automatic cycle protection");
 
     Ok(())
 }

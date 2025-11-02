@@ -1,22 +1,19 @@
-//! Character-transform demo (v2):
+//! Character-transform demo
 //!   • Outputs each sentence on its own line.
 //!   • Pipeline = Source → CapStage → DigitWordStage → Sink
-//! Run with:  `cargo run --example char_transform`
+//! Run with:  `cargo run -p obzenflow --example char_transform`
 
-use obzenflow_dsl_infra::{flow, source, transform, sink};
+use obzenflow_dsl_infra::{flow, source, transform, stateful, sink};
 use obzenflow_runtime_services::stages::common::handlers::{
-    FiniteSourceHandler, TransformHandler, SinkHandler
+    FiniteSourceHandler, TransformHandler, StatefulHandler, SinkHandler
 };
+use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_core::event::WriterId;
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryPayload, DeliveryMethod};
 use obzenflow_core::id::StageId;
-use obzenflow_core::time::MetricsDuration;
-// Monitoring taxonomies are no longer needed with FLOWIP-056-666
-// Metrics are automatically collected by MetricsAggregator from the event journal
 use serde_json::json;
-use std::sync::Arc;
 use anyhow::Result;
 use async_trait::async_trait;
 
@@ -169,38 +166,89 @@ impl TransformHandler for DigitWordStage {
     }
 }
 
-/// Sink – collects output fragments into a string buffer
-#[derive(Debug, Clone)]
-struct TextCollectorSink {
-    buf: Arc<std::sync::Mutex<String>>,
+/// State for text accumulation
+#[derive(Clone, Debug, Default)]
+struct TextCollectorState {
+    buffer: String,
 }
 
-impl TextCollectorSink {
+/// Stateful stage that accumulates text fragments and emits final result
+#[derive(Debug, Clone)]
+struct TextCollector {
+    writer_id: WriterId,
+}
+
+impl TextCollector {
     fn new() -> Self {
         Self {
-            buf: Arc::new(std::sync::Mutex::new(String::new())),
+            writer_id: WriterId::from(StageId::new()),
         }
     }
 }
 
 #[async_trait]
-impl SinkHandler for TextCollectorSink {
-    async fn consume(&mut self, event: ChainEvent) -> obzenflow_core::Result<DeliveryPayload> {
-        let mut bytes_processed = 0;
-        
+impl StatefulHandler for TextCollector {
+    type State = TextCollectorState;
+
+    fn process(&self, state: &Self::State, event: ChainEvent) -> (Self::State, Vec<ChainEvent>) {
+        let mut new_state = state.clone();
+
         if event.event_type() == "OutFragment" {
             let payload = event.payload();
             if let Some(frag) = payload["frag"].as_str() {
-                let mut b = self.buf.lock().unwrap();
-                b.push_str(frag);
-                bytes_processed = frag.len() as u64;
+                new_state.buffer.push_str(frag);
             }
         }
-        
+
+        // Accumulate only - emit on drain
+        (new_state, vec![])
+    }
+
+    fn initial_state(&self) -> Self::State {
+        TextCollectorState::default()
+    }
+
+    async fn drain(
+        &mut self,
+        state: &Self::State,
+    ) -> Result<Vec<ChainEvent>, Box<dyn std::error::Error + Send + Sync>> {
+        // Emit final collected text
+        Ok(vec![ChainEventFactory::data_event(
+            self.writer_id.clone(),
+            "FinalText",
+            json!({
+                "text": state.buffer,
+            }),
+        )])
+    }
+}
+
+/// Sink that prints the final collected text
+#[derive(Clone, Debug)]
+struct FinalTextSink;
+
+impl FinalTextSink {
+    fn new() -> Self {
+        Self
+    }
+}
+
+#[async_trait]
+impl SinkHandler for FinalTextSink {
+    async fn consume(&mut self, event: ChainEvent) -> obzenflow_core::Result<DeliveryPayload> {
+        if event.event_type() == "FinalText" {
+            let payload = event.payload();
+            if let Some(text) = payload["text"].as_str() {
+                println!("\n🔍 Transformed output:\n");
+                println!("{}", text);
+                println!();
+            }
+        }
+
         Ok(DeliveryPayload::success(
-            "memory_buffer",
-            DeliveryMethod::Custom("InMemoryCollector".to_string()),
-            Some(bytes_processed),
+            "stdout",
+            DeliveryMethod::Custom("Print".to_string()),
+            Some(1),
         ))
     }
 }
@@ -209,70 +257,45 @@ impl SinkHandler for TextCollectorSink {
 async fn main() -> Result<()> {
     // Set environment to use console exporter for nice summaries
     std::env::set_var("OBZENFLOW_METRICS_EXPORTER", "console");
-    
-    // Initialize tracing for better error messages
-    tracing_subscriber::fmt()
-        .with_env_filter("obzenflow=debug,char_transform=debug")
-        .with_file(true)
-        .with_line_number(true)
-        .with_thread_ids(true)
-        .init();
 
-    println!("🚀 FlowState RS - Character Transform Demo (newline & 2-stage)");
-    println!("============================================================\n");
+    println!("🚀 FlowState RS - Character Transform Demo");
+    println!("===========================================\n");
+    println!("Demonstrating:");
+    println!("  • Multi-stage transformation pipeline");
+    println!("  • Character-level processing");
+    println!("  • StatefulHandler for text accumulation");
+    println!("  • Capitalize letters + convert digits to words\n");
 
-    // Create sink that collects output in memory
-    let sink = TextCollectorSink::new();
-    let final_buffer = sink.buf.clone();
+    // Use FlowApplication to handle everything
+    FlowApplication::run(async {
+        flow! {
+            name: "char_transform",
+            journals: disk_journals(std::path::PathBuf::from("target/char-transform-logs")),
+            middleware: [],
 
-    println!("⏳ Initializing pipeline...");
+            stages: {
+                src = source!("source" => TextCharSource::new());
+                cap = transform!("cap" => CapStage::new());
+                digit = transform!("digit" => DigitWordStage::new());
+                collector = stateful!("collector" => TextCollector::new());
+                printer = sink!("printer" => FinalTextSink::new());
+            },
 
-    // Create a journal for the flow
-    let journal_path = std::path::PathBuf::from("target/char-transform-logs");
-    std::fs::create_dir_all(&journal_path)?;
-
-    // Create the flow using the new flow! macro
-    let handle = flow! {
-        name: "char_transform",
-        journals: disk_journals(journal_path.clone()),
-        middleware: [],
-        
-        stages: {
-            src = source!("source" => TextCharSource::new());
-            cap = transform!("cap" => CapStage::new());
-            digit = transform!("digit" => DigitWordStage::new());
-            out = sink!("sink" => sink);
-        },
-        
-        topology: {
-            src |> cap;
-            cap |> digit;
-            digit |> out;
+            topology: {
+                src |> cap;
+                cap |> digit;
+                digit |> collector;
+                collector |> printer;
+            }
         }
-    }.await.map_err(|e| anyhow::anyhow!("Failed to create flow with DSL: {:?}", e))?;
-    
-    println!("📌 Pipeline created, starting execution...");
-    
-    // Run the flow to completion and get the metrics exporter
-    let metrics_exporter = handle.run_with_metrics().await
-        .map_err(|e| anyhow::anyhow!("Failed to run pipeline: {:?}", e))?;
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to create flow: {:?}", e))
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("Application failed: {:?}", e))?;
 
-    println!("\n✅ Pipeline completed!\n");
+    println!("\n✅ Pipeline completed!");
+    println!("📝 Check the journal for complete event history: target/char-transform-logs/");
 
-    let result = final_buffer.lock().unwrap().clone();
-    println!("🔍 Final text:\n{}", result);
-
-    // Get the metrics summary after completion
-    if let Some(exporter) = metrics_exporter {
-        let summary = exporter
-            .render_metrics()
-            .map_err(|e| anyhow::anyhow!("Failed to render metrics: {}", e))?;
-        println!("\n📊 Pipeline Metrics:\n{}", summary);
-    } else {
-        println!("\nNo metrics exporter configured");
-    }
-
-    // Cleanup
-    println!("\nJournal written to: target/char-transform-logs/char_transform.log");
     Ok(())
 }
