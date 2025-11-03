@@ -5,22 +5,25 @@ use obzenflow_topology::Topology;
 use std::sync::Arc;
 
 /// Flow handle for external control - the public API returned by the DSL
-/// 
+///
 /// This is a wrapper that combines:
 /// - A standard handle for FSM control (event sending, state watching, lifecycle)
 /// - Pipeline-specific functionality (metrics export)
-/// 
+///
 /// This is the only supervisor handle that gets exposed to DSL users,
 /// so it needs to provide all functionality they might need.
 pub struct FlowHandle {
     /// The standard handle for FSM control
     handle: StandardHandle<PipelineEvent, PipelineState>,
-    
+
     /// Pipeline-specific: Metrics access (read-only)
     metrics_exporter: Option<Arc<dyn obzenflow_core::metrics::MetricsExporter>>,
-    
+
     /// Flow topology for visualization (read-only)
     topology: Option<Arc<Topology>>,
+
+    /// User-specified flow name from flow! macro
+    flow_name: String,
 }
 
 impl FlowHandle {
@@ -29,11 +32,13 @@ impl FlowHandle {
         handle: StandardHandle<PipelineEvent, PipelineState>,
         metrics_exporter: Option<Arc<dyn obzenflow_core::metrics::MetricsExporter>>,
         topology: Option<Arc<Topology>>,
+        flow_name: String,
     ) -> Self {
         Self {
             handle,
             metrics_exporter,
             topology,
+            flow_name,
         }
     }
     
@@ -97,14 +102,22 @@ impl FlowHandle {
     }
     
     /// Get the flow topology for visualization
-    /// 
+    ///
     /// This provides access to the flow's structure (stages and connections)
     /// for visualization tools and monitoring dashboards.
     /// The topology is immutable and thread-safe.
     pub fn topology(&self) -> Option<Arc<Topology>> {
         self.topology.clone()
     }
-    
+
+    /// Get the user-specified flow name from the flow! macro
+    ///
+    /// This returns the name provided in the `name:` field of the flow! macro,
+    /// which may differ from the auto-generated topology-based name.
+    pub fn flow_name(&self) -> &str {
+        &self.flow_name
+    }
+
     /// Render metrics based on the wrapped exporter's format
     pub async fn render_metrics(&self) -> Result<String, FlowError> {
         if let Some(ref exporter) = self.metrics_exporter {

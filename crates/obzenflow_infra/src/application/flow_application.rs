@@ -117,8 +117,10 @@ impl FlowApplication {
                 ))?;
             let metrics = flow_handle.metrics_exporter();
             let has_metrics = metrics.is_some();
-            
-            let handle = start_web_server(topology, metrics, port).await
+
+            let flow_name = flow_handle.flow_name().to_string();
+
+            let handle = start_web_server(topology, flow_name, metrics, port).await
                 .map_err(|e| ApplicationError::ServerStartFailed(e.to_string()))?;
             
             tracing::info!("📊 Web server started on http://localhost:{}", port);

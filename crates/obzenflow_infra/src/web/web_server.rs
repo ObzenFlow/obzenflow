@@ -31,6 +31,7 @@ use std::collections::HashMap;
 #[cfg(feature = "warp-server")]
 pub async fn start_web_server(
     topology: Arc<Topology>,
+    flow_name: String,
     metrics_exporter: Option<Arc<dyn MetricsExporter>>,
     port: u16,
 ) -> Result<tokio::task::JoinHandle<()>, WebError> {
@@ -63,6 +64,7 @@ pub async fn start_web_server(
     server.register_endpoint(Box::new(TopologyHttpEndpoint::new(
         topology.clone(),
         Arc::new(stages_metadata),
+        flow_name,
     )))?;
     
     // Add metrics endpoint if exporter available

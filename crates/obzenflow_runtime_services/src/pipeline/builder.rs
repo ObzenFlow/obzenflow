@@ -34,12 +34,13 @@ pub struct PipelineBuilder {
     metrics_exporter: Option<Arc<dyn MetricsExporter>>,
     stage_journals: Option<Vec<(StageId, Arc<dyn Journal<ChainEvent>>)>>,
     error_journals: Option<Vec<(StageId, Arc<dyn Journal<ChainEvent>>)>>,
+    flow_name: Option<String>,
 }
 
 impl PipelineBuilder {
     /// Create a new pipeline builder
     pub fn new(
-        topology: Arc<Topology>, 
+        topology: Arc<Topology>,
         system_journal: Arc<dyn Journal<SystemEvent>>,
     ) -> Self {
         Self {
@@ -49,6 +50,7 @@ impl PipelineBuilder {
             metrics_exporter: None,
             stage_journals: None,
             error_journals: None,
+            flow_name: None,
         }
     }
 
@@ -76,6 +78,11 @@ impl PipelineBuilder {
         self
     }
 
+    /// Set the user-specified flow name from the flow! macro
+    pub fn with_flow_name(mut self, name: impl Into<String>) -> Self {
+        self.flow_name = Some(name.into());
+        self
+    }
 
 }
 
@@ -175,7 +182,8 @@ impl SupervisorBuilder for PipelineBuilder {
         // Wrap it in FlowHandle with pipeline-specific extras
         // Clone topology for the handle (topology is Arc, so this is cheap)
         let topology = Some(self.topology.clone());
-        Ok(FlowHandle::new(standard_handle, metrics_exporter, topology))
+        let flow_name = self.flow_name.unwrap_or_else(|| "unnamed_flow".to_string());
+        Ok(FlowHandle::new(standard_handle, metrics_exporter, topology, flow_name))
     }
 }
 

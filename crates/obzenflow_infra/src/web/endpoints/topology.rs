@@ -12,6 +12,7 @@ use obzenflow_core::StageId;
 /// JSON representation of flow topology for the API
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FlowTopologyResponse {
+    pub flow_name: String,
     pub stages: Vec<StageApiInfo>,
     pub edges: Vec<EdgeApiInfo>,
 }
@@ -39,6 +40,7 @@ pub struct EdgeApiInfo {
 pub struct TopologyHttpEndpoint {
     topology: Arc<obzenflow_topology::Topology>,
     stages_metadata: Arc<std::collections::HashMap<StageId, StageMetadata>>,
+    flow_name: String,
 }
 
 /// Additional metadata about stages (type and status)
@@ -96,10 +98,12 @@ impl TopologyHttpEndpoint {
     pub fn new(
         topology: Arc<obzenflow_topology::Topology>,
         stages_metadata: Arc<std::collections::HashMap<StageId, StageMetadata>>,
+        flow_name: String,
     ) -> Self {
         Self {
             topology,
             stages_metadata,
+            flow_name,
         }
     }
     
@@ -133,6 +137,7 @@ impl TopologyHttpEndpoint {
             .collect();
         
         FlowTopologyResponse {
+            flow_name: self.flow_name.clone(),
             stages,
             edges,
         }
