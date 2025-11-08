@@ -152,47 +152,39 @@ impl EventCounter {
 impl StatefulHandler for EventCounter {
     type State = EventCountState;
 
-    fn process(&self, state: &Self::State, _event: ChainEvent) -> (Self::State, Vec<ChainEvent>) {
-        let mut new_state = state.clone();
-
+    fn accumulate(&mut self, state: &mut Self::State, _event: ChainEvent) {
         // Initialize start time on first event
-        if new_state.start_time.is_none() {
-            new_state.start_time = Some(Instant::now());
+        if state.start_time.is_none() {
+            state.start_time = Some(Instant::now());
         }
 
-        new_state.event_count += 1;
+        state.event_count += 1;
 
         // Log progress every 100 events
-        if new_state.event_count % 100 == 0 {
-            println!("📊 Counted {} events so far...", new_state.event_count);
+        if state.event_count % 100 == 0 {
+            println!("📊 Counted {} events so far...", state.event_count);
         }
-
-        // Accumulate only - emit summary on drain
-        (new_state, vec![])
     }
 
     fn initial_state(&self) -> Self::State {
         EventCountState::default()
     }
 
-    async fn drain(
-        &mut self,
-        state: &Self::State,
-    ) -> Result<Vec<ChainEvent>, Box<dyn std::error::Error + Send + Sync>> {
+    fn create_events(&self, state: &Self::State) -> Vec<ChainEvent> {
         // Calculate final statistics
         let duration = state.start_time
             .map(|start| start.elapsed())
             .unwrap_or(Duration::from_secs(0));
 
         // Emit final count event
-        Ok(vec![ChainEventFactory::data_event(
+        vec![ChainEventFactory::data_event(
             self.writer_id.clone(),
             "EventCountSummary",
             json!({
                 "events_counted": state.event_count,
                 "duration_secs": duration.as_secs_f64(),
             }),
-        )])
+        )]
     }
 }
 

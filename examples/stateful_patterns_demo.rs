@@ -169,24 +169,21 @@ impl CounterHandler {
 impl StatefulHandler for CounterHandler {
     type State = CounterState;
 
-    fn process(&self, state: &Self::State, _event: ChainEvent) -> (Self::State, Vec<ChainEvent>) {
+    fn accumulate(&mut self, state: &mut Self::State, _event: ChainEvent) {
         // Accumulate only - emit on drain
-        (CounterState { count: state.count + 1 }, vec![])
+        state.count += 1;
     }
 
     fn initial_state(&self) -> Self::State {
         CounterState::default()
     }
 
-    async fn drain(
-        &mut self,
-        state: &Self::State,
-    ) -> Result<Vec<ChainEvent>, Box<dyn std::error::Error + Send + Sync>> {
-        Ok(vec![ChainEventFactory::data_event(
+    fn create_events(&self, state: &Self::State) -> Vec<ChainEvent> {
+        vec![ChainEventFactory::data_event(
             self.writer_id.clone(),
             "count_result",
             json!({ "total_count": state.count }),
-        )])
+        )]
     }
 }
 
@@ -211,24 +208,19 @@ impl AccumulatorHandler {
 impl StatefulHandler for AccumulatorHandler {
     type State = Vec<u64>;
 
-    fn process(&self, state: &Self::State, event: ChainEvent) -> (Self::State, Vec<ChainEvent>) {
-        let mut new_state = state.clone();
+    fn accumulate(&mut self, state: &mut Self::State, event: ChainEvent) {
         if let Some(value) = event.payload()["value"].as_u64() {
-            new_state.push(value);
+            state.push(value);
         }
-        (new_state, vec![])
     }
 
     fn initial_state(&self) -> Self::State {
         Vec::new()
     }
 
-    async fn drain(
-        &mut self,
-        state: &Self::State,
-    ) -> Result<Vec<ChainEvent>, Box<dyn std::error::Error + Send + Sync>> {
+    fn create_events(&self, state: &Self::State) -> Vec<ChainEvent> {
         // Emit one event per collected value
-        Ok(state
+        state
             .iter()
             .map(|&value| {
                 ChainEventFactory::data_event(
@@ -237,7 +229,7 @@ impl StatefulHandler for AccumulatorHandler {
                     json!({ "value": value }),
                 )
             })
-            .collect())
+            .collect()
     }
 }
 
@@ -262,24 +254,21 @@ impl SumHandler {
 impl StatefulHandler for SumHandler {
     type State = u64;
 
-    fn process(&self, state: &Self::State, event: ChainEvent) -> (Self::State, Vec<ChainEvent>) {
+    fn accumulate(&mut self, state: &mut Self::State, event: ChainEvent) {
         let value = event.payload()["value"].as_u64().unwrap_or(0);
-        (*state + value, vec![])
+        *state += value;
     }
 
     fn initial_state(&self) -> Self::State {
         0
     }
 
-    async fn drain(
-        &mut self,
-        state: &Self::State,
-    ) -> Result<Vec<ChainEvent>, Box<dyn std::error::Error + Send + Sync>> {
-        Ok(vec![ChainEventFactory::data_event(
+    fn create_events(&self, state: &Self::State) -> Vec<ChainEvent> {
+        vec![ChainEventFactory::data_event(
             self.writer_id.clone(),
             "sum_result",
             json!({ "total_sum": *state }),
-        )])
+        )]
     }
 }
 
@@ -304,29 +293,31 @@ impl ImmediateEmitter {
 impl StatefulHandler for ImmediateEmitter {
     type State = u64;
 
-    fn process(&self, state: &Self::State, _event: ChainEvent) -> (Self::State, Vec<ChainEvent>) {
-        let new_count = *state + 1;
+    fn accumulate(&mut self, state: &mut Self::State, _event: ChainEvent) {
+        *state += 1;
+    }
 
-        // Emit immediately during processing (not waiting for drain)
-        let progress = ChainEventFactory::data_event(
+    fn should_emit(&self, _state: &Self::State) -> bool {
+        // Emit immediately after every event
+        true
+    }
+
+    fn emit(&self, state: &mut Self::State) -> Vec<ChainEvent> {
+        // Emit progress update with current count
+        vec![ChainEventFactory::data_event(
             self.writer_id.clone(),
             "progress_update",
-            json!({ "current_count": new_count }),
-        );
-
-        (new_count, vec![progress])
+            json!({ "current_count": *state }),
+        )]
     }
 
     fn initial_state(&self) -> Self::State {
         0
     }
 
-    async fn drain(
-        &mut self,
-        _state: &Self::State,
-    ) -> Result<Vec<ChainEvent>, Box<dyn std::error::Error + Send + Sync>> {
+    fn create_events(&self, _state: &Self::State) -> Vec<ChainEvent> {
         // No drain emission - already emitted everything during processing
-        Ok(vec![])
+        vec![]
     }
 }
 

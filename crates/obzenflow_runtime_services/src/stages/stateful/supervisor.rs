@@ -75,8 +75,18 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Super
                 })
                 .done()
 
+            // Accumulating -> Emitting (when should_emit returns true)
             // Accumulating -> Draining (on EOF)
             .when("Accumulating")
+                .on("ShouldEmit", |_state, _event, ctx| async move {
+                    // Track state transition in instrumentation
+                    ctx.instrumentation.transition_to_state("Emitting");
+
+                    Ok(Transition {
+                        next_state: StatefulState::Emitting,
+                        actions: vec![], // Emission handled in dispatch_state
+                    })
+                })
                 .on("ReceivedEOF", |_state, _event, ctx| async move {
                     // Track state transition in instrumentation
                     ctx.instrumentation.transition_to_state("Draining");
@@ -307,69 +317,21 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                                     }
                                 }
                                 obzenflow_core::event::ChainEventContent::Data { .. } => {
-                                    // ✨ KEY DIFFERENCE: Process with stateful handler
-                                    let current_state = self.context.current_state.read().await.clone();
-                                    let event_to_process = envelope.event.clone();
+                                    // ✨ KEY DIFFERENCE: Accumulate without writing to journal
+                                    let mut current_state = self.context.current_state.write().await;
 
-                                    // Process with instrumentation and update state
-                                    let result = process_with_instrumentation(
-                                        &self.context.instrumentation,
-                                        || {
-                                            let handler = self.context.handler.clone();
-                                            async move {
-                                                // Call stateful handler.process()
-                                                Ok(handler.process(&current_state, event_to_process))
-                                            }
-                                        }
-                                    ).await;
+                                    // Clone handler to make it mutable
+                                    let mut handler = (*self.context.handler).clone();
 
-                                    match result {
-                                        Ok((new_state, output_events)) => {
-                                            // ✨ Update accumulated state
-                                            *self.context.current_state.write().await = new_state;
+                                    // Just accumulate - no instrumentation needed, we're just updating state!
+                                    handler.accumulate(&mut *current_state, envelope.event.clone());
 
-                                            // Write output events
-                                            for event in output_events {
-                                                // Check if this is an error event that was passed through
-                                                if matches!(event.processing_info.status, obzenflow_core::event::status::processing_status::ProcessingStatus::Error(_)) {
-                                                    tracing::info!(
-                                                        stage_name = %self.context.stage_name,
-                                                        event_id = %event.id,
-                                                        "Writing error event to error journal (FLOWIP-082e)"
-                                                    );
-                                                    self.context.error_journal
-                                                        .append(event, Some(&envelope))
-                                                        .await
-                                                        .map_err(|e| format!("Failed to write error event: {}", e))?;
-                                                } else {
-                                                    // Enrich with runtime context
-                                                    let flow_context = FlowContext {
-                                                        flow_name: self.context.flow_name.clone(),
-                                                        flow_id: self.context.flow_id.to_string(),
-                                                        stage_name: self.context.stage_name.clone(),
-                                                        stage_id: self.stage_id.clone(),
-                                                        stage_type: obzenflow_core::event::context::StageType::Stateful,
-                                                    };
-
-                                                    let enriched_event = event
-                                                        .with_flow_context(flow_context)
-                                                        .with_runtime_context(self.context.instrumentation.snapshot());
-
-                                                    self.context.data_journal
-                                                        .append(enriched_event, Some(&envelope))
-                                                        .await
-                                                        .map_err(|e| format!("Failed to write stateful output: {}", e))?;
-                                                }
-                                            }
-                                        }
-                                        Err(e) => {
-                                            tracing::error!(
-                                                stage_name = %self.context.stage_name,
-                                                error = ?e,
-                                                "Stateful processing error"
-                                            );
-                                            // Error already tracked by process_with_instrumentation
-                                        }
+                                    // Check if we should emit
+                                    if handler.should_emit(&*current_state) {
+                                        drop(current_state);
+                                        drop(subscription_guard);
+                                        // Transition to Emitting state
+                                        return Ok(EventLoopDirective::Transition(StatefulEvent::ShouldEmit));
                                     }
                                 }
                                 _ => {
@@ -399,19 +361,76 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
             }
 
             StatefulState::Emitting => {
-                // Future: emission strategies (FLOWIP-080c)
-                // For now, immediately return to Accumulating
-                tracing::debug!(
-                    stage_name = %self.context.stage_name,
-                    "Emission complete"
-                );
+                // ✨ Emit aggregated events to journal
+                let mut current_state = self.context.current_state.write().await;
+                let mut handler = (*self.context.handler).clone();
+
+                // Call emit to get the aggregated events
+                let events_to_emit = handler.emit(&mut *current_state);
+
+                // Wrap with instrumentation (following transform pattern)
+                let emit_result = process_with_instrumentation(
+                    &self.context.instrumentation,
+                    || async move {
+                        Ok(events_to_emit)
+                    }
+                ).await;
+
+                match emit_result {
+                    Ok(events) if !events.is_empty() => {
+                        let events_count = events.len();
+
+                        // Write all aggregated events
+                        for event in events {
+                            // Enrich with runtime context
+                            let flow_context = FlowContext {
+                                flow_name: self.context.flow_name.clone(),
+                                flow_id: self.context.flow_id.to_string(),
+                                stage_name: self.context.stage_name.clone(),
+                                stage_id: self.stage_id.clone(),
+                                stage_type: obzenflow_core::event::context::StageType::Stateful,
+                            };
+
+                            let enriched_event = event
+                                .with_flow_context(flow_context)
+                                .with_runtime_context(self.context.instrumentation.snapshot());
+
+                            // Write the aggregated event
+                            self.context.data_journal
+                                .append(enriched_event, None)
+                                .await
+                                .map_err(|e| format!("Failed to write aggregated event: {}", e))?;
+                        }
+
+                        tracing::debug!(
+                            stage_name = %self.context.stage_name,
+                            events_count = events_count,
+                            "Emitted aggregated events"
+                        );
+                    }
+                    Ok(_) => {
+                        tracing::debug!(
+                            stage_name = %self.context.stage_name,
+                            "No events to emit"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            stage_name = %self.context.stage_name,
+                            error = ?e,
+                            "Failed to emit aggregated event"
+                        );
+                    }
+                }
+
+                // Return to accumulating
                 Ok(EventLoopDirective::Transition(StatefulEvent::EmitComplete))
             }
 
             StatefulState::Draining => {
                 // ✨ Call handler.drain() to emit final accumulated state
                 let final_state = self.context.current_state.read().await.clone();
-                let mut handler = self.context.handler.as_ref().clone();
+                let handler = (*self.context.handler).clone();
 
                 tracing::info!(
                     stage_name = %self.context.stage_name,
@@ -428,7 +447,7 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
 
                 match drain_result {
                     Ok(drain_events) => {
-                        // Write drained events
+                        // Write the final aggregated events (if any)
                         for event in drain_events {
                             let flow_context = FlowContext {
                                 flow_name: self.context.flow_name.clone(),
@@ -445,7 +464,7 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                             self.context.data_journal
                                 .append(enriched_event, None)
                                 .await
-                                .map_err(|e| format!("Failed to write drained event: {}", e))?;
+                                .map_err(|e| format!("Failed to write final aggregated event: {}", e))?;
                         }
 
                         tracing::info!(

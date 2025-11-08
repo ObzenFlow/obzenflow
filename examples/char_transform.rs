@@ -1,60 +1,53 @@
-//! Character-transform demo
-//!   • Outputs each sentence on its own line.
-//!   • Pipeline = Source → CapStage → DigitWordStage → Sink
-//! Run with:  `cargo run -p obzenflow --example char_transform`
+//! Character Transform Demo
+//!
+//! Pipeline: Source → Transformer → Sink
+//!   • Source: Emits individual characters from sample sentences
+//!   • Transformer: Stateful handler that capitalizes letters and converts digits to words
+//!   • Sink: Prints the final transformed text
+//!
+//! This demonstrates:
+//!   - Character-level processing pipeline
+//!   - Clean use of StatefulHandler for accumulation and transformation
+//!   - Processing multiple sentences with proper formatting
+//!   - Drain-based final output
+//!
+//! Run with: `cargo run -p obzenflow --example char_transform`
 
-use obzenflow_dsl_infra::{flow, source, transform, stateful, sink};
-use obzenflow_runtime_services::stages::common::handlers::{
-    FiniteSourceHandler, TransformHandler, StatefulHandler, SinkHandler
-};
-use obzenflow_infra::application::FlowApplication;
-use obzenflow_infra::journal::disk_journals;
-use obzenflow_core::event::WriterId;
-use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
-use obzenflow_core::event::payloads::delivery_payload::{DeliveryPayload, DeliveryMethod};
-use obzenflow_core::id::StageId;
-use serde_json::json;
 use anyhow::Result;
 use async_trait::async_trait;
+use obzenflow_core::{
+    event::chain_event::{ChainEvent, ChainEventFactory},
+    event::payloads::delivery_payload::{DeliveryPayload, DeliveryMethod},
+    WriterId,
+    id::StageId,
+};
+use obzenflow_dsl_infra::{flow, sink, source, stateful};
+use obzenflow_infra::application::FlowApplication;
+use obzenflow_infra::journal::disk_journals;
+use obzenflow_runtime_services::stages::common::handlers::{
+    FiniteSourceHandler, SinkHandler, StatefulHandler,
+};
+use serde_json::json;
 
-/// Source that emits one `Char` event per character from sample sentences
-#[derive(Debug, Clone)]
+/// Source that emits individual characters from sample sentences
+#[derive(Clone, Debug)]
 struct TextCharSource {
     sentences: Vec<String>,
-    chars: Vec<char>,
-    start_idx: Vec<usize>,
-    current_index: usize,
-    announced: usize,
+    current_sentence: usize,
+    current_char: usize,
     writer_id: WriterId,
 }
 
 impl TextCharSource {
     fn new() -> Self {
-        let sentences = vec![
-            "Hello, FlowState!".to_string(),
-            "Rust makes systems programming fun.".to_string(),
-            "Numbers 1 2 3 should become words.".to_string(),
-            "How about 42 or 564?".to_string(),
-        ];
-
-        // flatten sentences with '\n' delimiter
-        let mut chars     = Vec::<char>::new();
-        let mut start_idx = Vec::<usize>::new();
-
-        for (i, s) in sentences.iter().enumerate() {
-            start_idx.push(chars.len());
-            chars.extend(s.chars());
-            if i + 1 < sentences.len() {          // newline between sentences, not after last
-                chars.push('\n');
-            }
-        }
-
         Self {
-            sentences,
-            chars,
-            start_idx,
-            current_index: 0,
-            announced: 0,
+            sentences: vec![
+                "hello 2024 world!".to_string(),
+                "42 is the answer.".to_string(),
+                "rust 1 python 0.".to_string(),
+            ],
+            current_sentence: 0,
+            current_char: 0,
             writer_id: WriterId::from(StageId::new()),
         }
     }
@@ -62,186 +55,178 @@ impl TextCharSource {
 
 impl FiniteSourceHandler for TextCharSource {
     fn next(&mut self) -> Option<ChainEvent> {
-        if self.current_index < self.chars.len() {
-            let idx = self.current_index;
-            self.current_index += 1;
-            
-            // Announce sentence start (console progress)
-            if self.announced < self.start_idx.len() && idx == self.start_idx[self.announced] {
-                println!("📝  Processing sentence: {}", self.sentences[self.announced]);
-                self.announced += 1;
-            }
-            
-            let ch = self.chars[idx];
+        // Check if we've processed all sentences
+        if self.current_sentence >= self.sentences.len() {
+            return None;
+        }
+
+        let sentence = &self.sentences[self.current_sentence];
+        let chars: Vec<char> = sentence.chars().collect();
+
+        if self.current_char < chars.len() {
+            let ch = chars[self.current_char];
+            self.current_char += 1;
+
+            // Emit character event
             Some(ChainEventFactory::data_event(
                 self.writer_id.clone(),
-                "Char",
-                json!({ "ch": ch.to_string() })
+                "char",
+                json!({
+                    "value": ch.to_string(),
+                    "sentence_idx": self.current_sentence,
+                    "char_idx": self.current_char - 1,
+                }),
             ))
         } else {
-            None
+            // Move to next sentence
+            self.current_sentence += 1;
+            self.current_char = 0;
+
+            // Emit newline between sentences
+            if self.current_sentence < self.sentences.len() {
+                Some(ChainEventFactory::data_event(
+                    self.writer_id.clone(),
+                    "char",
+                    json!({
+                        "value": "\n",
+                        "sentence_idx": self.current_sentence - 1,
+                        "char_idx": chars.len(),
+                    }),
+                ))
+            } else {
+                // Recursively call to handle end or get next character
+                self.next()
+            }
         }
     }
 
     fn is_complete(&self) -> bool {
-        self.current_index >= self.chars.len()
+        self.current_sentence >= self.sentences.len()
     }
 }
 
-/// First Stage – Capitalize letters
-#[derive(Debug, Clone)]
-struct CapStage;
-
-impl CapStage {
-    fn new() -> Self {
-        Self
-    }
-}
-
-#[async_trait]
-impl TransformHandler for CapStage {
-    fn process(&self, event: ChainEvent) -> Vec<ChainEvent> {
-        if event.event_type() == "Char" {
-            let payload = event.payload();
-            if let Some(ch) = payload["ch"].as_str().and_then(|s| s.chars().next()) {
-                let out = if ch.is_ascii_alphabetic() { ch.to_ascii_uppercase() } else { ch };
-                return vec![ChainEventFactory::derived_data_event(
-                    event.writer_id.clone(),
-                    &event,
-                    "Char",
-                    json!({ "ch": out.to_string() })
-                )];
-            }
-        }
-        vec![]
-    }
-    
-    async fn drain(&mut self) -> obzenflow_core::Result<()> {
-        Ok(())
-    }
-}
-
-/// Second Stage -- Digit → Word
-fn digit_word(d: char) -> &'static str {
-    match d {
-        '0' => "zero",  '1' => "one",   '2' => "two",  '3' => "three", '4' => "four",
-        '5' => "five",  '6' => "six",   '7' => "seven",'8' => "eight", '9' => "nine",
-        _   => "",
-    }
-}
-
-#[derive(Debug, Clone)]
-struct DigitWordStage;
-
-impl DigitWordStage {
-    fn new() -> Self {
-        Self
-    }
-}
-
-#[async_trait]
-impl TransformHandler for DigitWordStage {
-    fn process(&self, event: ChainEvent) -> Vec<ChainEvent> {
-        if event.event_type() == "Char" {
-            let payload = event.payload();
-            if let Some(ch) = payload["ch"].as_str().and_then(|s| s.chars().next()) {
-                let frag = if ch.is_ascii_digit() {
-                    digit_word(ch).to_string()
-                } else {
-                    ch.to_string()
-                };
-                return vec![ChainEventFactory::derived_data_event(
-                    event.writer_id.clone(),
-                    &event,
-                    "OutFragment",
-                    json!({ "frag": frag })
-                )];
-            }
-        }
-        vec![]
-    }
-    
-    async fn drain(&mut self) -> obzenflow_core::Result<()> {
-        Ok(())
-    }
-}
-
-/// State for text accumulation
+/// State for the text transformer
 #[derive(Clone, Debug, Default)]
-struct TextCollectorState {
-    buffer: String,
+struct TextTransformerState {
+    transformed_text: String,
+    sentence_count: usize,
 }
 
-/// Stateful stage that accumulates text fragments and emits final result
+/// Stateful handler that transforms characters as they accumulate
 #[derive(Debug, Clone)]
-struct TextCollector {
+struct TextTransformer {
     writer_id: WriterId,
 }
 
-impl TextCollector {
+impl TextTransformer {
     fn new() -> Self {
         Self {
             writer_id: WriterId::from(StageId::new()),
         }
     }
+
+    fn transform_char(&self, ch: char) -> String {
+        if ch.is_ascii_digit() {
+            // Convert digit to word
+            match ch {
+                '0' => "zero",
+                '1' => "one",
+                '2' => "two",
+                '3' => "three",
+                '4' => "four",
+                '5' => "five",
+                '6' => "six",
+                '7' => "seven",
+                '8' => "eight",
+                '9' => "nine",
+                _ => "",
+            }.to_string()
+        } else if ch.is_ascii_lowercase() {
+            // Capitalize letters
+            ch.to_uppercase().to_string()
+        } else {
+            // Keep everything else as-is (including newlines, punctuation, spaces)
+            ch.to_string()
+        }
+    }
 }
 
 #[async_trait]
-impl StatefulHandler for TextCollector {
-    type State = TextCollectorState;
+impl StatefulHandler for TextTransformer {
+    type State = TextTransformerState;
 
-    fn process(&self, state: &Self::State, event: ChainEvent) -> (Self::State, Vec<ChainEvent>) {
-        let mut new_state = state.clone();
-
-        if event.event_type() == "OutFragment" {
+    fn accumulate(&mut self, state: &mut Self::State, event: ChainEvent) {
+        if event.event_type() == "char" {
             let payload = event.payload();
-            if let Some(frag) = payload["frag"].as_str() {
-                new_state.buffer.push_str(frag);
+            if let Some(ch_str) = payload["value"].as_str() {
+                if let Some(ch) = ch_str.chars().next() {
+                    // Track sentence count for stats
+                    if ch == '\n' {
+                        state.sentence_count += 1;
+                    }
+
+                    // Transform and accumulate the character
+                    let transformed = self.transform_char(ch);
+                    state.transformed_text.push_str(&transformed);
+                }
             }
         }
-
-        // Accumulate only - emit on drain
-        (new_state, vec![])
     }
 
     fn initial_state(&self) -> Self::State {
-        TextCollectorState::default()
+        TextTransformerState::default()
     }
 
-    async fn drain(
-        &mut self,
-        state: &Self::State,
-    ) -> Result<Vec<ChainEvent>, Box<dyn std::error::Error + Send + Sync>> {
-        // Emit final collected text
-        Ok(vec![ChainEventFactory::data_event(
+    fn create_events(&self, state: &Self::State) -> Vec<ChainEvent> {
+        // Count the last sentence if it doesn't end with newline
+        let final_sentence_count = if state.transformed_text.ends_with('\n') {
+            state.sentence_count
+        } else {
+            state.sentence_count + 1
+        };
+
+        // Create the transformed text event
+        vec![ChainEventFactory::data_event(
             self.writer_id.clone(),
-            "FinalText",
+            "transformed_text",
             json!({
-                "text": state.buffer,
+                "text": state.transformed_text.clone(),
+                "sentences": final_sentence_count,
+                "characters": state.transformed_text.len(),
             }),
-        )])
+        )]
     }
+
+    // Note: We don't override should_emit, emit, or drain
+    // The defaults handle everything perfectly:
+    // - should_emit returns false (only emit on EOF)
+    // - emit calls create_events
+    // - drain calls create_events
 }
 
-/// Sink that prints the final collected text
+/// Sink that prints the final transformed text
 #[derive(Clone, Debug)]
-struct FinalTextSink;
+struct OutputSink;
 
-impl FinalTextSink {
+impl OutputSink {
     fn new() -> Self {
         Self
     }
 }
 
 #[async_trait]
-impl SinkHandler for FinalTextSink {
+impl SinkHandler for OutputSink {
     async fn consume(&mut self, event: ChainEvent) -> obzenflow_core::Result<DeliveryPayload> {
-        if event.event_type() == "FinalText" {
+        if event.event_type() == "transformed_text" {
             let payload = event.payload();
             if let Some(text) = payload["text"].as_str() {
                 println!("\n🔍 Transformed output:\n");
                 println!("{}", text);
-                println!();
+
+                if let (Some(sentences), Some(chars)) =
+                    (payload["sentences"].as_u64(), payload["characters"].as_u64()) {
+                    println!("\n📊 Stats: {} sentences, {} characters total", sentences, chars);
+                }
             }
         }
 
@@ -258,13 +243,16 @@ async fn main() -> Result<()> {
     // Set environment to use console exporter for nice summaries
     std::env::set_var("OBZENFLOW_METRICS_EXPORTER", "console");
 
-    println!("🚀 FlowState RS - Character Transform Demo");
-    println!("===========================================\n");
+    println!("🚀 Character Transform Demo");
+    println!("===========================\n");
     println!("Demonstrating:");
-    println!("  • Multi-stage transformation pipeline");
-    println!("  • Character-level processing");
-    println!("  • StatefulHandler for text accumulation");
-    println!("  • Capitalize letters + convert digits to words\n");
+    println!("  • Character-level processing with StatefulHandler");
+    println!("  • Capitalize letters + convert digits to words");
+    println!("  • Clean accumulation and transformation pattern\n");
+    println!("Input sentences:");
+    println!("  1. \"hello 2024 world!\"");
+    println!("  2. \"42 is the answer.\"");
+    println!("  3. \"rust 1 python 0.\"\n");
 
     // Use FlowApplication to handle everything
     FlowApplication::run(async {
@@ -275,17 +263,13 @@ async fn main() -> Result<()> {
 
             stages: {
                 src = source!("source" => TextCharSource::new());
-                cap = transform!("cap" => CapStage::new());
-                digit = transform!("digit" => DigitWordStage::new());
-                collector = stateful!("collector" => TextCollector::new());
-                printer = sink!("printer" => FinalTextSink::new());
+                transformer = stateful!("transformer" => TextTransformer::new());
+                output = sink!("output" => OutputSink::new());
             },
 
             topology: {
-                src |> cap;
-                cap |> digit;
-                digit |> collector;
-                collector |> printer;
+                src |> transformer;
+                transformer |> output;
             }
         }
         .await
@@ -295,7 +279,10 @@ async fn main() -> Result<()> {
     .map_err(|e| anyhow::anyhow!("Application failed: {:?}", e))?;
 
     println!("\n✅ Pipeline completed!");
-    println!("📝 Check the journal for complete event history: target/char-transform-logs/");
+    println!("\n💡 This demo shows clean use of StatefulHandler:");
+    println!("   - Only implement accumulate(), initial_state(), and create_events()");
+    println!("   - Framework handles should_emit, emit, and drain with sensible defaults");
+    println!("   - Could easily use .with_emission(EveryN::new(10)) to emit every 10 chars!");
 
     Ok(())
 }

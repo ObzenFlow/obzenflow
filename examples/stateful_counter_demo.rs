@@ -136,23 +136,18 @@ impl CounterHandler {
 impl StatefulHandler for CounterHandler {
     type State = CounterState;
 
-    fn process(&self, state: &Self::State, event: ChainEvent) -> (Self::State, Vec<ChainEvent>) {
+    fn accumulate(&mut self, state: &mut Self::State, event: ChainEvent) {
         // Extract value
         let value = event.payload()["value"].as_u64().unwrap_or(0);
 
-        // Create new state (functional update - no mutation!)
-        let new_state = CounterState {
-            count: state.count + 1,
-            sum: state.sum + value,
-        };
+        // Update state directly (now mutable)
+        state.count += 1;
+        state.sum += value;
 
         println!(
             "    📊 Stateful accumulated: count={}, sum={} (added {})",
-            new_state.count, new_state.sum, value
+            state.count, state.sum, value
         );
-
-        // Don't emit during accumulation - we'll emit on drain
-        (new_state, vec![])
     }
 
     fn initial_state(&self) -> Self::State {
@@ -160,7 +155,7 @@ impl StatefulHandler for CounterHandler {
         CounterState::default()
     }
 
-    async fn drain(&mut self, state: &Self::State) -> obzenflow_core::Result<Vec<ChainEvent>> {
+    fn create_events(&self, state: &Self::State) -> Vec<ChainEvent> {
         println!("\n    💧 Stateful DRAINING final state:");
         println!("       Total events: {}", state.count);
         println!("       Total sum: {}", state.sum);
@@ -180,9 +175,9 @@ impl StatefulHandler for CounterHandler {
                 })
             );
 
-            Ok(vec![result_event])
+            vec![result_event]
         } else {
-            Ok(vec![])
+            vec![]
         }
     }
 }

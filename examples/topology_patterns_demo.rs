@@ -83,6 +83,8 @@ struct AggregatorState {
     value_by_source: HashMap<String, i64>,
     /// Total events processed
     total_events: usize,
+    /// Current event being processed (for emission)
+    current_event: Option<ChainEvent>,
 }
 
 /// Stateful aggregator that merges events from multiple upstream sources (FAN-IN)
@@ -106,58 +108,72 @@ impl MultiSourceAggregator {
 impl StatefulHandler for MultiSourceAggregator {
     type State = AggregatorState;
 
-    fn process(&self, state: &Self::State, event: ChainEvent) -> (Self::State, Vec<ChainEvent>) {
+    fn accumulate(&mut self, state: &mut Self::State, event: ChainEvent) {
         let payload = event.payload();
         let source = payload["source"].as_str().unwrap_or("unknown").to_string();
         let value = payload["value"].as_i64().unwrap_or(0);
 
-        let mut new_state = state.clone();
-
         // Update statistics
-        *new_state.events_by_source.entry(source.clone()).or_insert(0) += 1;
-        *new_state.value_by_source.entry(source.clone()).or_insert(0) += value;
-        new_state.total_events += 1;
+        *state.events_by_source.entry(source.clone()).or_insert(0) += 1;
+        *state.value_by_source.entry(source.clone()).or_insert(0) += value;
+        state.total_events += 1;
 
-        let event_count = *new_state.events_by_source.get(&source).unwrap();
-        let total_value = *new_state.value_by_source.get(&source).unwrap();
+        let event_count = *state.events_by_source.get(&source).unwrap();
 
         println!("[FAN-IN] Aggregator received event from '{}' (#{} from this source, total: {})",
-                 source, event_count, new_state.total_events);
+                 source, event_count, state.total_events);
 
-        // Enrich event with aggregation stats
-        let mut enriched = payload.clone();
-        enriched["aggregation"] = json!({
-            "total_events": new_state.total_events,
-            "source_event_count": event_count,
-            "source_total_value": total_value,
-            "sources_seen": new_state.events_by_source.len(),
-        });
+        // Store the current event for emission
+        state.current_event = Some(event);
+    }
 
-        let aggregated_event = ChainEventFactory::derived_data_event(
-            self.writer_id.clone(),
-            &event,
-            "data.aggregated",
-            enriched,
-        );
+    fn should_emit(&self, state: &Self::State) -> bool {
+        // Emit after every event (immediate enrichment pattern)
+        state.current_event.is_some()
+    }
 
-        (new_state, vec![aggregated_event])
+    fn emit(&self, state: &mut Self::State) -> Vec<ChainEvent> {
+        if let Some(event) = state.current_event.take() {
+            let payload = event.payload();
+            let source = payload["source"].as_str().unwrap_or("unknown").to_string();
+
+            let event_count = *state.events_by_source.get(&source).unwrap_or(&0);
+            let total_value = *state.value_by_source.get(&source).unwrap_or(&0);
+
+            // Enrich event with aggregation stats
+            let mut enriched = payload.clone();
+            enriched["aggregation"] = json!({
+                "total_events": state.total_events,
+                "source_event_count": event_count,
+                "source_total_value": total_value,
+                "sources_seen": state.events_by_source.len(),
+            });
+
+            let aggregated_event = ChainEventFactory::derived_data_event(
+                self.writer_id.clone(),
+                &event,
+                "data.aggregated",
+                enriched,
+            );
+
+            vec![aggregated_event]
+        } else {
+            vec![]
+        }
     }
 
     fn initial_state(&self) -> Self::State {
         AggregatorState::default()
     }
 
-    async fn drain(
-        &mut self,
-        state: &Self::State,
-    ) -> Result<Vec<ChainEvent>, Box<dyn std::error::Error + Send + Sync>> {
+    fn create_events(&self, state: &Self::State) -> Vec<ChainEvent> {
         println!("\n[FAN-IN STATS] Aggregation complete:");
         println!("  Total events: {}", state.total_events);
         for (source, count) in &state.events_by_source {
             let value = state.value_by_source.get(source).unwrap_or(&0);
             println!("  {}: {} events, total value: {}", source, count, value);
         }
-        Ok(vec![])
+        vec![]
     }
 }
 

@@ -1,0 +1,201 @@
+//! TopN Leaderboard Demo - Using FLOWIP-080c TopN Accumulator
+//!
+//! Demonstrates the TopN accumulator for maintaining leaderboards
+//! and "hottest items" lists with bounded memory usage.
+//!
+//! Run with: cargo run --package obzenflow --example top_n_leaderboard
+
+use obzenflow_dsl_infra::{flow, source, stateful, sink};
+use obzenflow_runtime_services::stages::common::handlers::{
+    FiniteSourceHandler, SinkHandler
+};
+use obzenflow_runtime_services::stages::stateful::accumulators::TopN;
+use obzenflow_infra::application::FlowApplication;
+use obzenflow_infra::journal::disk_journals;
+use obzenflow_core::{
+    event::chain_event::{ChainEvent, ChainEventFactory},
+    event::payloads::delivery_payload::{DeliveryPayload, DeliveryMethod},
+    WriterId,
+    id::StageId,
+};
+use serde_json::json;
+use anyhow::Result;
+use async_trait::async_trait;
+
+/// Source that generates player score events
+#[derive(Clone, Debug)]
+struct GameScoreSource {
+    events: Vec<(String, f64, String)>, // (player, score, game_mode)
+    current_index: usize,
+    writer_id: WriterId,
+}
+
+impl GameScoreSource {
+    fn new() -> Self {
+        // Simulate player scores from various game modes
+        let events = vec![
+            ("Alice".to_string(), 1500.0, "Battle".to_string()),
+            ("Bob".to_string(), 2200.0, "Battle".to_string()),
+            ("Charlie".to_string(), 1800.0, "Racing".to_string()),
+            ("David".to_string(), 900.0, "Battle".to_string()),
+            ("Eve".to_string(), 3100.0, "Racing".to_string()),
+            ("Frank".to_string(), 2500.0, "Battle".to_string()),
+            ("Grace".to_string(), 1200.0, "Racing".to_string()),
+            ("Henry".to_string(), 2800.0, "Battle".to_string()),
+            ("Iris".to_string(), 1900.0, "Racing".to_string()),
+            ("Jack".to_string(), 3500.0, "Battle".to_string()),
+            // Some players play multiple times (score updates)
+            ("Alice".to_string(), 2100.0, "Battle".to_string()), // Alice improves!
+            ("Bob".to_string(), 1900.0, "Racing".to_string()),   // Bob tries racing
+            ("Charlie".to_string(), 2400.0, "Racing".to_string()), // Charlie improves!
+        ];
+
+        Self {
+            events,
+            current_index: 0,
+            writer_id: WriterId::from(StageId::new()),
+        }
+    }
+}
+
+impl FiniteSourceHandler for GameScoreSource {
+    fn next(&mut self) -> Option<ChainEvent> {
+        if self.current_index < self.events.len() {
+            let (player, score, game_mode) = &self.events[self.current_index];
+            self.current_index += 1;
+
+            println!("📊 Score Update: {} scored {:.0} points in {} mode",
+                player, score, game_mode);
+
+            Some(ChainEventFactory::data_event(
+                self.writer_id.clone(),
+                "game.score",
+                json!({
+                    "player": player,
+                    "score": score,
+                    "game_mode": game_mode,
+                    "timestamp": self.current_index, // Simulated timestamp
+                })
+            ))
+        } else {
+            None
+        }
+    }
+
+    fn is_complete(&self) -> bool {
+        self.current_index >= self.events.len()
+    }
+}
+
+/// Sink that displays the leaderboard
+#[derive(Clone, Debug)]
+struct LeaderboardDisplay;
+
+impl LeaderboardDisplay {
+    fn new() -> Self {
+        Self
+    }
+}
+
+#[async_trait]
+impl SinkHandler for LeaderboardDisplay {
+    async fn consume(&mut self, event: ChainEvent) -> obzenflow_core::Result<DeliveryPayload> {
+        if event.event_type() == "top_n_result" {
+            let payload = event.payload();
+            let top_n = payload["top_n"].as_array().unwrap();
+            let count = payload["count"].as_u64().unwrap();
+
+            println!("\n🏆 LEADERBOARD UPDATE 🏆");
+            println!("========================");
+            println!("Total Players Tracked: {}\n", count);
+
+            for (rank, entry) in top_n.iter().enumerate() {
+                let player = entry["key"].as_str().unwrap();
+                let score = entry["score"].as_f64().unwrap();
+                let metadata = &entry["metadata"];
+                let game_mode = metadata["game_mode"].as_str().unwrap_or("Unknown");
+
+                let medal = match rank {
+                    0 => "🥇",
+                    1 => "🥈",
+                    2 => "🥉",
+                    _ => "  ",
+                };
+
+                println!("{} #{}: {} - {:.0} points ({})",
+                    medal, rank + 1, player, score, game_mode);
+            }
+            println!("========================\n");
+        }
+
+        Ok(DeliveryPayload::success(
+            "leaderboard",
+            DeliveryMethod::Custom("Display".to_string()),
+            None,
+        ))
+    }
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    std::env::set_var("OBZENFLOW_METRICS_EXPORTER", "console");
+
+    println!("🎮 FlowState RS - TopN Leaderboard Demo");
+    println!("=======================================");
+    println!("✨ Using FLOWIP-080c TopN Accumulator");
+    println!("");
+    println!("This demo shows how TopN maintains a leaderboard");
+    println!("of the top 5 players by score, automatically");
+    println!("evicting lower scores as new high scores arrive.\n");
+
+    println!("Starting game score stream...\n");
+
+    FlowApplication::run(async {
+        flow! {
+            name: "leaderboard_demo",
+            journals: disk_journals(std::path::PathBuf::from("target/leaderboard-logs")),
+            middleware: [],
+
+            stages: {
+                scores = source!("scores" => GameScoreSource::new());
+
+                // TopN accumulator tracking top 5 players
+                // Note: This takes the LATEST score for each player
+                // (simulating score updates/improvements)
+                leaderboard = stateful!("leaderboard" =>
+                    TopN::new(5, |event: &ChainEvent| {
+                        let payload = event.payload();
+                        if event.event_type() == "game.score" {
+                            let player = payload["player"].as_str()?.to_string();
+                            let score = payload["score"].as_f64()?;
+                            Some((player, score, payload.clone()))
+                        } else {
+                            None
+                        }
+                    }).emit_on_eof()  // Emit final leaderboard at end
+                );
+
+                display = sink!("display" => LeaderboardDisplay::new());
+            },
+
+            topology: {
+                scores |> leaderboard;
+                leaderboard |> display;
+            }
+        }
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to create flow: {:?}", e))
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("Application failed: {:?}", e))?;
+
+    println!("✅ Leaderboard demo completed!");
+    println!("\n💡 Key Points:");
+    println!("   • TopN maintains exactly N items in memory");
+    println!("   • Automatically evicts lowest scores");
+    println!("   • Perfect for leaderboards, trending items, hot keys");
+    println!("   • O(N) memory usage regardless of stream size");
+    println!("\n📝 Journal written to: target/leaderboard-logs/");
+
+    Ok(())
+}

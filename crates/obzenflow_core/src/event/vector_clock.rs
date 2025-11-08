@@ -106,4 +106,37 @@ impl CausalOrderingService {
             None // Concurrent
         }
     }
+
+    /// Calculate L1 (Manhattan) distance between two vector clocks.
+    ///
+    /// This represents the total number of events that happened
+    /// between the two clock states across all writers.
+    ///
+    /// # Arguments
+    ///
+    /// * `a` - First vector clock
+    /// * `b` - Second vector clock
+    ///
+    /// # Returns
+    ///
+    /// The total causal distance as the sum of absolute differences
+    pub fn causal_distance(a: &VectorClock, b: &VectorClock) -> usize {
+        let mut distance = 0;
+
+        // Check all writers in both clocks
+        let mut all_writers: Vec<String> = a.clocks.keys().cloned().collect();
+        for writer in b.clocks.keys() {
+            if !all_writers.contains(writer) {
+                all_writers.push(writer.clone());
+            }
+        }
+
+        for writer in all_writers {
+            let seq_a = a.get(&writer);
+            let seq_b = b.get(&writer);
+            distance += seq_a.abs_diff(seq_b) as usize;
+        }
+
+        distance
+    }
 }

@@ -76,9 +76,6 @@ path = "examples/flow_monitoring_demo.rs"
 name = "news_to_script"
 path = "examples/news_to_script.rs"
 
-[[example]]
-name = "circuit_breaker_simple_example"
-path = "examples/circuit_breaker_simple_example.rs"
 
 [[example]]
 name = "rate_limiting"

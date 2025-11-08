@@ -47,12 +47,20 @@ pub mod fsm;
 pub mod handle;
 pub mod supervisor;
 
+// FLOWIP-080c: Composable primitives
+pub mod accumulators;
+pub mod emission;
+
 // Public API - only expose builder, handle, and essential types
 pub use builder::StatefulBuilder;
 pub use config::StatefulConfig;
 pub use handle::{StatefulHandle, StatefulHandleExt};
 pub use fsm::{StatefulState, StatefulEvent};
 pub use crate::stages::common::handlers::StatefulHandler;
+
+// FLOWIP-080c: Re-export commonly used primitives for convenience
+pub use accumulators::{Accumulator, GroupBy, Reduce, Conflate, StatefulWithEmission};
+pub use emission::{EmissionStrategy, OnEOF, EveryN, TimeWindow, EmitAlways};
 
 // Re-export control strategies for convenience
 pub use crate::stages::common::control_strategies::{
