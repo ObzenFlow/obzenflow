@@ -97,28 +97,38 @@ pub trait StatefulHandler: Send + Sync {
     /// when the FSM transitions to Emitting state.
     fn accumulate(&mut self, state: &mut Self::State, event: ChainEvent);
 
-    /// Check if we should transition from Accumulating to Emitting
-    ///
-    /// This is called after each accumulate() to determine if it's
-    /// time to emit the aggregated result.
-    fn should_emit(&self, state: &Self::State) -> bool;
-
-    /// Emit the aggregated result (called in Emitting state)
-    ///
-    /// Returns aggregated events to write to the journal.
-    /// - Most accumulators return ONE event (Reduce, TopN, TopNBy)
-    /// - GroupBy returns one event per group
-    /// - Conflate returns one event per key
-    ///
-    /// The state is mutable to allow resetting window counters while
-    /// keeping running totals.
-    fn emit(&self, state: &mut Self::State) -> Vec<ChainEvent>;
-
     /// Get the initial state for this handler
     fn initial_state(&self) -> Self::State;
 
+    /// Transform accumulated state into output events
+    ///
+    /// Called when emission is triggered (by emission strategy or drain).
+    /// Return the events you want to emit based on current state.
+    fn create_events(&self, state: &Self::State) -> Vec<ChainEvent>;
+
+    // --- Advanced methods with sensible defaults ---
+
+    /// Check if we should transition from Accumulating to Emitting
+    ///
+    /// Default: false (only emit on drain, i.e., OnEOF behavior)
+    /// Override this OR use .with_emission() for other strategies
+    fn should_emit(&self, _state: &Self::State) -> bool {
+        false
+    }
+
+    /// Emit the aggregated result (called in Emitting state)
+    ///
+    /// Default: Calls create_events()
+    /// Override only if you need to modify state during emission
+    fn emit(&self, state: &mut Self::State) -> Vec<ChainEvent> {
+        self.create_events(state)
+    }
+
     /// Emit final result during shutdown (called in Draining state)
     ///
-    /// Returns the final aggregated events if there's data to emit.
-    async fn drain(&self, state: &Self::State) -> Result<Vec<ChainEvent>>;
+    /// Default: Calls create_events()
+    /// Override only if drain behavior differs from normal emission
+    async fn drain(&self, state: &Self::State) -> Result<Vec<ChainEvent>> {
+        Ok(self.create_events(state))
+    }
 }

@@ -136,6 +136,10 @@ where
         }
     }
 
+    fn create_events(&self, state: &Self::State) -> Vec<ChainEvent> {
+        self.accumulator.emit(&state.inner)
+    }
+
     async fn drain(&self, state: &Self::State) -> Result<Vec<ChainEvent>> {
         // Always emit remaining state on drain if we have any
         let events = self.accumulator.emit(&state.inner);

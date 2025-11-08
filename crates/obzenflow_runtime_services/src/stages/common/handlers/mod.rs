@@ -12,5 +12,5 @@ pub use source::{FiniteSourceHandler, InfiniteSourceHandler};
 pub use transform::{TransformHandler};
 pub use sink::{SinkHandler};
 pub use observer::ObserverHandler;
-pub use stateful::StatefulHandler;
+pub use stateful::{StatefulHandler, StatefulHandlerExt, StatefulHandlerWithEmission};
 pub use resource_managed::ResourceManaged;
