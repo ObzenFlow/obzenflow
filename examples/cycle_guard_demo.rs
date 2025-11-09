@@ -1,7 +1,9 @@
-//! Demo: CycleGuardMiddleware preventing infinite loops
-//! 
+//! Demo: CycleGuardMiddleware preventing infinite loops (FLOWIP-080h)
+//!
 //! This demonstrates how the CycleGuardMiddleware can prevent infinite loops
 //! in topologies with cycles by limiting the number of iterations.
+//!
+//! **FLOWIP-080h Update**: Replaced 33-line ProblematicProcessor struct with Map helper
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -13,10 +15,11 @@ use obzenflow_core::{
 use obzenflow_dsl_infra::{flow, sink, source, transform};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime_services::stages::common::handlers::{
-    FiniteSourceHandler, SinkHandler, TransformHandler,
+    FiniteSourceHandler, SinkHandler,
 };
+// ✨ FLOWIP-080h: Import Map helper
+use obzenflow_runtime_services::stages::transform::Map;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryPayload, DeliveryMethod};
-use obzenflow_adapters::middleware::control::cycle_guard;
 use serde_json::json;
 
 /// Source that generates a few test events
@@ -61,17 +64,19 @@ impl FiniteSourceHandler for EventGenerator {
     }
 }
 
-/// A problematic processor that always sends events back (creates infinite loop!)
-#[derive(Clone, Debug)]
-struct ProblematicProcessor;
+// ============================================================================
+// FLOWIP-080h: Map Helper for Problematic Processor
+// ============================================================================
 
-#[async_trait]
-impl TransformHandler for ProblematicProcessor {
-    fn process(&self, event: ChainEvent) -> Vec<ChainEvent> {
+/// A problematic processor that always sends events back (creates infinite loop!)
+///
+/// Replaces 33-line ProblematicProcessor struct with a Map helper (FLOWIP-080h)
+fn problematic_processor() -> Map<impl Fn(ChainEvent) -> ChainEvent + Send + Sync + Clone> {
+    Map::new(|event| {
         let mut payload = event.payload();
         let id = payload["id"].as_i64().unwrap_or(0);
         let iterations = payload["iterations"].as_i64().unwrap_or(0);
-        
+
         // Increment iteration counter
         payload["iterations"] = json!(iterations + 1);
 
@@ -81,19 +86,15 @@ impl TransformHandler for ProblematicProcessor {
         println!("   Correlation ID: {:?}", event.correlation_id);
         println!("   Processing Status: {:?}", event.processing_info.status);
         println!("   Entry Event ID: {}", event.correlation_payload.as_ref().map(|p| p.entry_event_id.to_string()).unwrap_or_else(|| "None".to_string()));
-        
+
         // ALWAYS send the event back - this would create an infinite loop!
-        vec![ChainEventFactory::derived_data_event(
+        ChainEventFactory::derived_data_event(
             event.writer_id.clone(),
             &event,
             "test.event",  // Same type - will be processed again
             payload,
-        )]
-    }
-
-    async fn drain(&mut self) -> obzenflow_core::Result<()> {
-        Ok(())
-    }
+        )
+    })
 }
 
 /// Simple sink that counts events
@@ -164,13 +165,14 @@ async fn main() -> Result<()> {
 
         stages: {
             source = source!("source" => EventGenerator::new());
-            
+
+            // ✨ FLOWIP-080h: Using Map helper instead of ProblematicProcessor struct
             // First processor with cycle guard
-            processor1 = transform!("processor1" => ProblematicProcessor);
-            
+            processor1 = transform!("processor1" => problematic_processor());
+
             // Second processor to create a valid cycle
-            processor2 = transform!("processor2" => ProblematicProcessor);
-            
+            processor2 = transform!("processor2" => problematic_processor());
+
             sink = sink!("sink" => EventCounter::new("EventSink"));
         },
 

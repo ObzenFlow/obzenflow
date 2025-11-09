@@ -3,8 +3,9 @@
 
 use obzenflow_dsl_infra::{flow, source, transform, sink};
 use obzenflow_runtime_services::stages::common::handlers::{
-    FiniteSourceHandler, TransformHandler, SinkHandler
+    FiniteSourceHandler, SinkHandler
 };
+use obzenflow_runtime_services::stages::transform::Map;
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_core::{
@@ -59,31 +60,9 @@ impl FiniteSourceHandler for SimpleSource {
     }
 }
 
-// Simple transform that doubles values
-#[derive(Clone, Debug)]
-struct Doubler;
-
-#[async_trait]
-impl TransformHandler for Doubler {
-    fn process(&self, event: ChainEvent) -> Vec<ChainEvent> {
-        if let Some(value) = event.payload()["value"].as_u64() {
-            vec![ChainEventFactory::data_event(
-                WriterId::from(StageId::new()),
-                "doubled",
-                json!({
-                    "original": value,
-                    "doubled": value * 2,
-                }),
-            )]
-        } else {
-            vec![event]
-        }
-    }
-
-    async fn drain(&mut self) -> CoreResult<()> {
-        Ok(())
-    }
-}
+// Simple transform that doubles values - using Map helper (FLOWIP-080h)
+// Before: 24 lines of struct + impl TransformHandler
+// After: Just use Map::new() directly in the pipeline!
 
 // Simple sink that prints results
 #[derive(Clone, Debug)]
@@ -137,7 +116,21 @@ async fn main() -> Result<()> {
 
             stages: {
                 numbers = source!("numbers" => SimpleSource::new(5));
-                doubler = transform!("doubler" => Doubler);
+                // Using Map helper instead of custom Doubler struct (FLOWIP-080h)
+                doubler = transform!("doubler" => Map::new(|event| {
+                    if let Some(value) = event.payload()["value"].as_u64() {
+                        ChainEventFactory::data_event(
+                            WriterId::from(StageId::new()),
+                            "doubled",
+                            json!({
+                                "original": value,
+                                "doubled": value * 2,
+                            }),
+                        )
+                    } else {
+                        event
+                    }
+                }));
                 printer = sink!("printer" => Printer::new("output"));
             },
 

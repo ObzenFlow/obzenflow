@@ -1,4 +1,4 @@
-//! Demo: Topology Patterns - Fan-In, Fan-Out, and Diamond Patterns
+//! Demo: Topology Patterns - Fan-In, Fan-Out, and Diamond Patterns (FLOWIP-080h)
 //!
 //! This demonstrates how ObzenFlow naturally handles complex topologies through
 //! independent journal readers and multiple upstream subscriptions.
@@ -12,6 +12,8 @@
 //! - StatefulHandler for aggregation (no Arc<Mutex>)
 //! - Independent journal readers (no coordination needed)
 //! - Natural backpressure handling
+//!
+//! **FLOWIP-080h Update**: Replaced 38-line SmartRouter struct with Map helper
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -24,8 +26,10 @@ use obzenflow_dsl_infra::{flow, sink, source, stateful, transform};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime_services::stages::common::handlers::{
-    FiniteSourceHandler, SinkHandler, StatefulHandler, TransformHandler,
+    FiniteSourceHandler, SinkHandler, StatefulHandler,
 };
+// ✨ FLOWIP-080h: Import Map helper
+use obzenflow_runtime_services::stages::transform::Map;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryPayload, DeliveryMethod};
 use serde_json::json;
 use std::collections::HashMap;
@@ -177,16 +181,18 @@ impl StatefulHandler for MultiSourceAggregator {
     }
 }
 
+// ============================================================================
+// FLOWIP-080h: Map Helper for Smart Router
+// ============================================================================
+
 /// Router that sends events to different downstream stages based on criteria (FAN-OUT)
 ///
 /// This demonstrates fan-out pattern: single router → multiple sinks
 /// Each downstream stage creates its own journal reader
-#[derive(Clone, Debug)]
-struct SmartRouter;
-
-#[async_trait]
-impl TransformHandler for SmartRouter {
-    fn process(&self, event: ChainEvent) -> Vec<ChainEvent> {
+///
+/// Replaces 38-line SmartRouter struct with a Map helper (FLOWIP-080h)
+fn smart_router() -> Map<impl Fn(ChainEvent) -> ChainEvent + Send + Sync + Clone> {
+    Map::new(|event| {
         let payload = event.payload();
         let value = payload["value"].as_i64().unwrap_or(0);
         let source = payload["source"].as_str().unwrap_or("unknown");
@@ -204,20 +210,16 @@ impl TransformHandler for SmartRouter {
                  source, value, route);
 
         // Enrich with routing info
-        let mut enriched = payload.clone();
+        let mut enriched = payload;
         enriched["route"] = json!(route);
 
-        vec![ChainEventFactory::derived_data_event(
+        ChainEventFactory::derived_data_event(
             event.writer_id.clone(),
             &event,
             "data.routed",
             enriched,
-        )]
-    }
-
-    async fn drain(&mut self) -> obzenflow_core::Result<()> {
-        Ok(())
-    }
+        )
+    })
 }
 
 /// Sink that processes events for a specific priority
@@ -306,8 +308,8 @@ async fn main() -> Result<()> {
                 // Aggregator demonstrates fan-in with StatefulHandler
                 aggregator = stateful!("aggregator" => MultiSourceAggregator::new());
 
-                // Router distributes to multiple sinks
-                router = transform!("router" => SmartRouter);
+                // ✨ FLOWIP-080h: Router distributes to multiple sinks using Map helper
+                router = transform!("router" => smart_router());
 
                 // FAN-OUT: Three sinks receiving from one router
                 low_priority = sink!("low_sink" => PrioritySink::new("LOW", "low"));

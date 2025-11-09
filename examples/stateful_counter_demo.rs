@@ -1,4 +1,4 @@
-//! Stateful counter demo - demonstrates FLOWIP-080b stateful transform stages
+//! Stateful counter demo - demonstrates FLOWIP-080b stateful transform stages (FLOWIP-080h)
 //!
 //! Pipeline: Source → Transform → Stateful → Sink
 //!   • Source: Emits numbered events
@@ -11,6 +11,8 @@
 //!   - Functional state updates (no Arc<Mutex>!)
 //!   - drain() being called on EOF
 //!   - Integration with transform and sink stages
+//!
+//! **FLOWIP-080h Update**: Replaced 29-line EvenFilter struct with Filter helper
 //!
 //! Run with: `cargo run --example stateful_counter_demo`
 
@@ -25,8 +27,10 @@ use obzenflow_core::{
 use obzenflow_dsl_infra::{flow, sink, source, transform, stateful};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime_services::stages::common::handlers::{
-    FiniteSourceHandler, SinkHandler, StatefulHandler, TransformHandler,
+    FiniteSourceHandler, SinkHandler, StatefulHandler,
 };
+// ✨ FLOWIP-080h: Import Filter helper
+use obzenflow_runtime_services::stages::transform::Filter;
 use serde_json::json;
 
 // ============================================================================
@@ -74,37 +78,26 @@ impl FiniteSourceHandler for NumberSource {
 }
 
 // ============================================================================
-// Transform: Filter only even numbers
+// FLOWIP-080h: Filter Helper for Even Numbers
 // ============================================================================
 
-#[derive(Clone, Debug)]
-struct EvenFilter;
-
-impl EvenFilter {
-    fn new() -> Self {
-        Self
-    }
-}
-
-#[async_trait]
-impl TransformHandler for EvenFilter {
-    fn process(&self, event: ChainEvent) -> Vec<ChainEvent> {
+/// Filter that only passes even numbers (FLOWIP-080h)
+///
+/// Replaces 29-line EvenFilter struct with a Filter helper
+fn even_filter() -> Filter<impl Fn(&ChainEvent) -> bool + Send + Sync + Clone> {
+    Filter::new(|event| {
         if let Some(value) = event.payload()["value"].as_u64() {
-            if value % 2 == 0 {
+            let is_even = value % 2 == 0;
+            if is_even {
                 println!("  ✓ Transform passed (even): {}", value);
-                vec![event]
             } else {
                 println!("  ✗ Transform filtered (odd): {}", value);
-                vec![]
             }
+            is_even
         } else {
-            vec![event]
+            true // Pass through events without value field
         }
-    }
-
-    async fn drain(&mut self) -> obzenflow_core::Result<()> {
-        Ok(())
-    }
+    })
 }
 
 // ============================================================================
@@ -237,7 +230,8 @@ async fn main() -> Result<()> {
 
             stages: {
                 numbers = source!("numbers" => NumberSource::new(10));
-                evens = transform!("even_filter" => EvenFilter::new());
+                // ✨ FLOWIP-080h: Using Filter helper instead of EvenFilter struct
+                evens = transform!("even_filter" => even_filter());
                 counter = stateful!("counter" => CounterHandler::new());
                 output = sink!("print" => PrintSink::new());
             },

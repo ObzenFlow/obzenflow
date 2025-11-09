@@ -1,10 +1,12 @@
-//! Prometheus 1k Demo with FlowApplication Framework
+//! Prometheus 1k Demo with FlowApplication Framework (FLOWIP-080h)
 //!
 //! This demo processes 1,000 events demonstrating:
 //! - Flow-level rate limiting middleware
 //! - Fan-out topology pattern (one stage to multiple downstream stages)
 //! - StatefulHandler for business-level event counting
 //! - Prometheus metrics via /metrics endpoint
+//!
+//! **FLOWIP-080h Update**: Replaced 38-line ErrorProneTransform struct with Map helper
 //!
 //! Run with: cargo run -p obzenflow --example prometheus_1k_demo --features obzenflow_infra/warp-server -- --server
 //!
@@ -25,8 +27,10 @@ use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_adapters::middleware::rate_limit;
 use obzenflow_runtime_services::stages::common::handlers::{
-    FiniteSourceHandler, SinkHandler, TransformHandler, StatefulHandler,
+    FiniteSourceHandler, SinkHandler, StatefulHandler,
 };
+// ✨ FLOWIP-080h: Import Map helper
+use obzenflow_runtime_services::stages::transform::Map;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryPayload, DeliveryMethod};
 use serde_json::json;
 use std::time::{Duration, Instant};
@@ -84,46 +88,44 @@ impl FiniteSourceHandler for HighVolumeSource {
     }
 }
 
-/// Transform that can fail on certain events
-#[derive(Clone, Debug)]
-struct ErrorProneTransform;
+// ============================================================================
+// FLOWIP-080h: Map Helper for Error-Prone Transform
+// ============================================================================
 
-#[async_trait]
-impl TransformHandler for ErrorProneTransform {
-    fn process(&self, event: ChainEvent) -> Vec<ChainEvent> {
+/// Transform that can fail on certain events (FLOWIP-080h)
+///
+/// Replaces 38-line ErrorProneTransform struct with a Map helper
+fn error_prone_transform() -> Map<impl Fn(ChainEvent) -> ChainEvent + Send + Sync + Clone> {
+    Map::new(|event| {
         let payload = event.payload();
 
         // Check if this event should fail
         if payload["should_fail"].as_bool().unwrap_or(false) {
             // Return error event
-            let mut error_payload = payload.clone();
+            let mut error_payload = payload;
             error_payload["error"] = json!("Simulated processing error");
             error_payload["error_code"] = json!(500);
-            
-            vec![ChainEventFactory::derived_data_event(
+
+            ChainEventFactory::derived_data_event(
                 event.writer_id.clone(),
                 &event,
                 "error.event",
                 error_payload,
-            )]
+            )
         } else {
             // Successful processing
-            let mut result_payload = payload.clone();
+            let mut result_payload = payload;
             result_payload["processed"] = json!(true);
             result_payload["processing_stage"] = json!("error_prone_transform");
-            
-            vec![ChainEventFactory::derived_data_event(
+
+            ChainEventFactory::derived_data_event(
                 event.writer_id.clone(),
                 &event,
                 "processed.event",
                 result_payload,
-            )]
+            )
         }
-    }
-
-    async fn drain(&mut self) -> obzenflow_core::Result<()> {
-        Ok(())
-    }
+    })
 }
 
 /// State for business-level event counting
@@ -286,7 +288,8 @@ async fn main() -> Result<()> {
                 src = source!("high_volume_source" => HighVolumeSource::new(1_000));
 
                 // Error-prone transform (every 100th event fails)
-                processor = transform!("error_processor" => ErrorProneTransform);
+                // ✨ FLOWIP-080h: Using Map helper instead of ErrorProneTransform struct
+                processor = transform!("error_processor" => error_prone_transform());
 
                 // Fan-out branch 1: Stateful event counter
                 counter = stateful!("event_counter" => EventCounter::new());
