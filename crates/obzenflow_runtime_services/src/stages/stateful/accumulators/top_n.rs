@@ -1,4 +1,5 @@
 // FLOWIP-080c: TopN Accumulator
+// FLOWIP-080j: TopNTyped - Typed variant (Phase 4)
 //
 // Maintains the top N items by score, perfect for leaderboards, dashboards,
 // and "hottest items" scenarios. This is an exact algorithm (not probabilistic).
@@ -7,11 +8,13 @@ use super::Accumulator;
 use obzenflow_core::{ChainEvent, WriterId};
 use obzenflow_core::event::chain_event::ChainEventFactory;
 use obzenflow_core::id::StageId;
-use serde::{Serialize, Deserialize};
+use serde::{Serialize, Deserialize, de::DeserializeOwned};
 use serde_json::{json, Value};
-use std::collections::BinaryHeap;
+use std::collections::{BinaryHeap, HashMap};
 use std::cmp::{Ordering, Reverse};
 use std::fmt::Debug;
+use std::hash::Hash;
+use std::marker::PhantomData;
 
 /// Item in the top-N list with its score
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -314,5 +317,318 @@ mod tests {
         assert_eq!(top_n[0]["score"], 10.0);
         assert_eq!(top_n[1]["key"], "item2");
         assert_eq!(top_n[1]["score"], 2.0);
+    }
+}
+
+// ============================================================================
+// FLOWIP-080j: TopNTyped - Type-safe TopN accumulator
+// ============================================================================
+
+/// FLOWIP-080j: Type-safe TopN accumulator that works with domain types.
+///
+/// Maintains top N items by score. When duplicate keys arrive, **replaces** the old item.
+/// Perfect for leaderboards where you want the latest score.
+///
+/// # Type Parameters
+///
+/// * `T` - Input event type (must implement DeserializeOwned)
+/// * `K` - Key type for deduplication (must implement Hash + Eq)
+/// * `FKey` - Key extraction function: `Fn(&T) -> K`
+/// * `FScore` - Score extraction function: `Fn(&T) -> f64`
+///
+/// # Examples
+///
+/// ```rust
+/// use obzenflow_runtime_services::stages::stateful::accumulators::TopNTyped;
+///
+/// #[derive(Deserialize)]
+/// struct UserScore {
+///     user_id: String,
+///     score: f64,
+/// }
+///
+/// let top_users = TopNTyped::new(
+///     10,
+///     |event: &UserScore| event.user_id.clone(),
+///     |event: &UserScore| event.score
+/// ).emit_on_eof();
+/// ```
+#[derive(Clone)]
+pub struct TopNTyped<T, K, FKey, FScore>
+where
+    T: DeserializeOwned + Serialize + Send + Sync,
+    K: Hash + Eq + Clone + Debug + Serialize + DeserializeOwned + Send + Sync,
+    FKey: Fn(&T) -> K + Send + Sync + Clone,
+    FScore: Fn(&T) -> f64 + Send + Sync + Clone,
+{
+    n: usize,
+    key_fn: FKey,
+    score_fn: FScore,
+    writer_id: WriterId,
+    _phantom: PhantomData<(T, K)>,
+}
+
+impl<T, K, FKey, FScore> TopNTyped<T, K, FKey, FScore>
+where
+    T: DeserializeOwned + Serialize + Send + Sync + 'static,
+    K: Hash + Eq + Clone + Debug + Serialize + DeserializeOwned + Send + Sync + 'static,
+    FKey: Fn(&T) -> K + Send + Sync + Clone + 'static,
+    FScore: Fn(&T) -> f64 + Send + Sync + Clone + 'static,
+{
+    /// Create a new typed TopN accumulator.
+    ///
+    /// # Arguments
+    ///
+    /// * `n` - Maximum number of items to track
+    /// * `key_fn` - Function to extract the key from an event (for deduplication)
+    /// * `score_fn` - Function to extract the score from an event
+    pub fn new(n: usize, key_fn: FKey, score_fn: FScore) -> Self {
+        assert!(n > 0, "TopN must track at least 1 item");
+        Self {
+            n,
+            key_fn,
+            score_fn,
+            writer_id: WriterId::from(StageId::new()),
+            _phantom: PhantomData,
+        }
+    }
+
+    /// Configure to emit results when EOF is received.
+    pub fn emit_on_eof(self) -> super::StatefulWithEmission<Self, crate::stages::stateful::emission::OnEOF> {
+        super::StatefulWithEmission::new(self, crate::stages::stateful::emission::OnEOF::new())
+    }
+
+    /// Configure to emit results every N events.
+    pub fn emit_every_n(self, n: u64) -> super::StatefulWithEmission<Self, crate::stages::stateful::emission::EveryN> {
+        super::StatefulWithEmission::new(self, crate::stages::stateful::emission::EveryN::new(n))
+    }
+
+    /// Configure to emit results within a time window.
+    pub fn emit_within(self, duration: std::time::Duration) -> super::StatefulWithEmission<Self, crate::stages::stateful::emission::TimeWindow> {
+        super::StatefulWithEmission::new(self, crate::stages::stateful::emission::TimeWindow::new(duration))
+    }
+
+    /// Configure with a custom emission strategy.
+    pub fn with_emission<E>(self, emission: E) -> super::StatefulWithEmission<Self, E>
+    where
+        E: crate::stages::stateful::emission::EmissionStrategy,
+    {
+        super::StatefulWithEmission::new(self, emission)
+    }
+}
+
+impl<T, K, FKey, FScore> Debug for TopNTyped<T, K, FKey, FScore>
+where
+    T: DeserializeOwned + Serialize + Send + Sync + 'static,
+    K: Hash + Eq + Clone + Debug + Serialize + DeserializeOwned + Send + Sync + 'static,
+    FKey: Fn(&T) -> K + Send + Sync + Clone + 'static,
+    FScore: Fn(&T) -> f64 + Send + Sync + Clone + 'static,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TopNTyped")
+            .field("n", &self.n)
+            .field("writer_id", &self.writer_id)
+            .finish()
+    }
+}
+
+/// State for TopNTyped - stores items with serialized keys to avoid generic serialization complexity
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TopNTypedState {
+    /// Items stored by serialized key (for deduplication/replacement)
+    /// We serialize keys to avoid generic Serialize/Deserialize lifetime issues
+    items: HashMap<String, (f64, Value, Value)>,  // serialized_key -> (score, key_value, item_metadata)
+    /// Maximum number of items to keep
+    capacity: usize,
+}
+
+impl<T, K, FKey, FScore> Accumulator for TopNTyped<T, K, FKey, FScore>
+where
+    T: DeserializeOwned + Serialize + Send + Sync + 'static,
+    K: Hash + Eq + Clone + Debug + Serialize + DeserializeOwned + Send + Sync + 'static,
+    FKey: Fn(&T) -> K + Send + Sync + Clone + 'static,
+    FScore: Fn(&T) -> f64 + Send + Sync + Clone + 'static,
+{
+    type State = TopNTypedState;
+
+    fn accumulate(&self, state: &mut Self::State, event: ChainEvent) {
+        // TODO(FLOWIP-082a): Use TypedPayload::EVENT_TYPE when schemas are implemented
+        // Step 1: Deserialize ChainEvent → T
+        let input: T = match serde_json::from_value(event.payload().clone()) {
+            Ok(v) => v,
+            Err(_) => return,  // Skip events that don't match the type
+        };
+
+        // Step 2: Extract key and score
+        let key = (self.key_fn)(&input);
+        let score = (self.score_fn)(&input);
+
+        // Step 3: Serialize key and item for storage
+        let key_value = match serde_json::to_value(&key) {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+        let key_str = key_value.to_string();  // Use JSON string as HashMap key
+
+        let serialized = match serde_json::to_value(&input) {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+
+        // Step 4: Insert/replace in the map (deduplication)
+        state.items.insert(key_str, (score, key_value, serialized));
+
+        // Step 5: If we exceed capacity, remove the item with lowest score
+        if state.items.len() > state.capacity {
+            // Find the key with the minimum score
+            if let Some((min_key, _)) = state.items.iter()
+                .min_by(|(_, (score_a, _, _)), (_, (score_b, _, _))| {
+                    score_a.partial_cmp(score_b).unwrap_or(Ordering::Equal)
+                })
+                .map(|(k, v)| (k.clone(), v.clone()))
+            {
+                state.items.remove(&min_key);
+            }
+        }
+    }
+
+    fn initial_state(&self) -> Self::State {
+        TopNTypedState {
+            items: HashMap::new(),
+            capacity: self.n,
+        }
+    }
+
+    fn emit(&self, state: &Self::State) -> Vec<ChainEvent> {
+        // Convert to vec and sort by score descending
+        let mut items: Vec<_> = state.items.values()
+            .map(|(score, key_value, metadata)| {
+                (*score, key_value.clone(), metadata.clone())
+            })
+            .collect();
+
+        items.sort_by(|(score_a, _, _), (score_b, _, _)| {
+            score_b.partial_cmp(score_a).unwrap_or(Ordering::Equal)
+        });
+
+        // Create result event
+        vec![ChainEventFactory::data_event(
+            self.writer_id.clone(),
+            "top_n_result",
+            json!({
+                "top_n": items.iter().enumerate().map(|(idx, (score, key_value, metadata))| {
+                    json!({
+                        "rank": idx + 1,
+                        "key": key_value,
+                        "score": score,
+                        "metadata": metadata,
+                    })
+                }).collect::<Vec<_>>(),
+                "capacity": state.capacity,
+                "count": state.items.len(),
+            }),
+        )]
+    }
+
+    fn reset(&self, state: &mut Self::State) {
+        state.items.clear();
+    }
+}
+
+#[cfg(test)]
+mod tests_typed {
+    use super::*;
+    use serde::Deserialize;
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    struct UserScore {
+        user_id: String,
+        score: f64,
+    }
+
+    #[test]
+    fn test_top_n_typed_basic() {
+        let accumulator = TopNTyped::new(
+            3,
+            |event: &UserScore| event.user_id.clone(),
+            |event: &UserScore| event.score,
+        );
+
+        let mut state = accumulator.initial_state();
+
+        // Add some events
+        let event1 = ChainEventFactory::data_event(
+            WriterId::from(StageId::new()),
+            "test",
+            json!({"user_id": "alice", "score": 10.0}),
+        );
+        accumulator.accumulate(&mut state, event1);
+
+        let event2 = ChainEventFactory::data_event(
+            WriterId::from(StageId::new()),
+            "test",
+            json!({"user_id": "bob", "score": 20.0}),
+        );
+        accumulator.accumulate(&mut state, event2);
+
+        let event3 = ChainEventFactory::data_event(
+            WriterId::from(StageId::new()),
+            "test",
+            json!({"user_id": "charlie", "score": 15.0}),
+        );
+        accumulator.accumulate(&mut state, event3);
+
+        let event4 = ChainEventFactory::data_event(
+            WriterId::from(StageId::new()),
+            "test",
+            json!({"user_id": "david", "score": 5.0}),
+        );
+        accumulator.accumulate(&mut state, event4);
+
+        // Should keep top 3: bob (20), charlie (15), alice (10)
+        assert_eq!(state.items.len(), 3);
+
+        let results = accumulator.emit(&state);
+        let top_n = &results[0].payload()["top_n"];
+        assert_eq!(top_n[0]["key"], "bob");
+        assert_eq!(top_n[0]["score"], 20.0);
+        assert_eq!(top_n[1]["key"], "charlie");
+        assert_eq!(top_n[1]["score"], 15.0);
+        assert_eq!(top_n[2]["key"], "alice");
+        assert_eq!(top_n[2]["score"], 10.0);
+    }
+
+    #[test]
+    fn test_top_n_typed_replacement() {
+        let accumulator = TopNTyped::new(
+            3,
+            |event: &UserScore| event.user_id.clone(),
+            |event: &UserScore| event.score,
+        );
+
+        let mut state = accumulator.initial_state();
+
+        // Add alice with score 10
+        let event1 = ChainEventFactory::data_event(
+            WriterId::from(StageId::new()),
+            "test",
+            json!({"user_id": "alice", "score": 10.0}),
+        );
+        accumulator.accumulate(&mut state, event1);
+
+        // Replace alice with score 25 (should replace)
+        let event2 = ChainEventFactory::data_event(
+            WriterId::from(StageId::new()),
+            "test",
+            json!({"user_id": "alice", "score": 25.0}),
+        );
+        accumulator.accumulate(&mut state, event2);
+
+        assert_eq!(state.items.len(), 1);
+        // Find the entry with alice's key and check the score
+        let alice_entry = state.items.values().find(|(_, key_val, _)| {
+            key_val.as_str() == Some("alice")
+        }).unwrap();
+        assert_eq!(alice_entry.0, 25.0);
     }
 }

@@ -15,11 +15,11 @@ pub mod top_n;
 pub mod top_n_by;
 pub mod wrapper;
 
-pub use group_by::GroupBy;
-pub use reduce::Reduce;
-pub use conflate::Conflate;
-pub use top_n::TopN;
-pub use top_n_by::TopNBy;
+pub use group_by::{GroupBy, GroupByTyped};
+pub use reduce::{Reduce, ReduceTyped};
+pub use conflate::{Conflate, ConflateTyped};
+pub use top_n::{TopN, TopNTyped};
+pub use top_n_by::{TopNBy, TopNByTyped};
 pub use wrapper::{StatefulWithEmission, WrapperState};
 
 /// Core trait for accumulation logic.

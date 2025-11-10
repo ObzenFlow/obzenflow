@@ -20,7 +20,7 @@ use obzenflow_runtime_services::stages::common::handlers::{
 };
 use obzenflow_adapters::middleware::rate_limit;
 // ✨ FLOWIP-080c: Import the new stateful primitives
-use obzenflow_runtime_services::stages::stateful::accumulators::GroupBy;
+use obzenflow_runtime_services::stages::stateful::accumulators::GroupByTyped;
 // ✨ FLOWIP-080h: Import the new transform helpers (all typed!)
 use obzenflow_runtime_services::stages::transform::{FilterTyped, MapTyped};
 use obzenflow_infra::application::FlowApplication;
@@ -219,7 +219,7 @@ fn invalid_flights_filter() -> FilterTyped<
 // ============================================================================
 
 /// Categorized flight record with delay category
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct CategorizedFlight {
     carrier: String,
     delay_minutes: u32,
@@ -435,16 +435,18 @@ async fn main() -> Result<()> {
                 calc = transform!("calculator" => categorize_delays());
 
                 // ✨ FLOWIP-080c: GroupBy with OnEOF emission + Rate Limiting
-                // This replaces ~30 lines of manual StatefulHandler code!
+                // FLOWIP-080j: Typed stateful accumulator using GroupByTyped
+                // Type-safe aggregation - no manual ChainEvent manipulation!
                 // Adding rate_limit(2.0) to process max 2 events per second
                 agg = stateful!("aggregator" =>
-                    GroupBy::new("carrier", |event: &ChainEvent, stats: &mut CarrierStats| {
-                        if let Some(delay) = event.payload()["delay_minutes"].as_u64() {
-                            stats.total_delay += delay;
+                    GroupByTyped::new(
+                        |flight: &CategorizedFlight| flight.carrier.clone(),  // Type-safe key extraction
+                        |stats: &mut CarrierStats, flight: &CategorizedFlight| {  // CORRECTED: state first
+                            stats.total_delay += flight.delay_minutes as u64;  // Direct field access!
                             stats.flight_count += 1;
                             stats.average_delay = stats.total_delay as f64 / stats.flight_count as f64;
                         }
-                    }).emit_on_eof(),  // Emit results when pipeline completes
+                    ).emit_on_eof(),  // Emit results when pipeline completes
                     [rate_limit(2.0)]  // Process max 2 events per second
                 );
 

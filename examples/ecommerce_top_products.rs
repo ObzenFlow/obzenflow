@@ -1,6 +1,6 @@
-//! E-commerce Top Products Demo - Using FLOWIP-080c TopNBy Accumulator
+//! E-commerce Top Products Demo - Using FLOWIP-080j TopNByTyped Accumulator
 //!
-//! Demonstrates TopNBy for tracking best-selling products by total revenue,
+//! Demonstrates TopNByTyped for tracking best-selling products by total revenue,
 //! accumulating multiple orders for the same product throughout the day.
 //!
 //! Run with: cargo run --package obzenflow --example ecommerce_top_products
@@ -9,7 +9,7 @@ use obzenflow_dsl_infra::{flow, source, stateful, sink};
 use obzenflow_runtime_services::stages::common::handlers::{
     FiniteSourceHandler, SinkHandler
 };
-use obzenflow_runtime_services::stages::stateful::accumulators::TopNBy;
+use obzenflow_runtime_services::stages::stateful::accumulators::TopNByTyped;
 use obzenflow_adapters::middleware::rate_limit;
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
@@ -19,10 +19,23 @@ use obzenflow_core::{
     WriterId,
     id::StageId,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use anyhow::Result;
 use async_trait::async_trait;
-use std::time::Duration;
+
+// FLOWIP-080j: Domain types for type-safe accumulation
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct OrderEvent {
+    order_id: String,
+    product_id: String,
+    product_name: String,
+    category: String,
+    unit_price: f64,
+    quantity: u32,
+    total_value: f64,
+    timestamp: usize,
+}
 
 /// Source that generates e-commerce order events
 #[derive(Clone, Debug)]
@@ -169,7 +182,7 @@ async fn main() -> Result<()> {
 
     println!("🛒 FlowState RS - E-commerce Top Products Analytics");
     println!("===================================================");
-    println!("✨ Using FLOWIP-080c TopNBy Accumulator");
+    println!("✨ Using FLOWIP-080j TopNByTyped Accumulator");
     println!("");
     println!("This demo shows real-time tracking of best-selling");
     println!("products by total revenue, accumulating multiple");
@@ -186,10 +199,14 @@ async fn main() -> Result<()> {
             stages: {
                 orders = source!("orders" => OrderStreamSource::new());
 
-                // TopNBy accumulator tracking top 5 products by total revenue
-                // Simple field-based API - no boilerplate!
+                // FLOWIP-080j: TopNByTyped - Type-safe accumulation with no ChainEvent!
+                // Type-safe extraction functions instead of string field names
                 top_products = stateful!("top_products" =>
-                    TopNBy::new(5, "product_id", "total_value").emit_every_n(5),
+                    TopNByTyped::new(
+                        5,
+                        |order: &OrderEvent| order.product_id.clone(),  // Key extractor
+                        |order: &OrderEvent| order.total_value          // Score extractor
+                    ).emit_every_n(5),
                     [rate_limit(3.0)]   // Process max 3 orders per second for demo visibility
                 );
 
@@ -208,12 +225,12 @@ async fn main() -> Result<()> {
     .map_err(|e| anyhow::anyhow!("Application failed: {:?}", e))?;
 
     println!("✅ E-commerce analytics completed!");
-    println!("\n💡 Key Insights:");
-    println!("   • TopNBy accumulates values for duplicate keys");
+    println!("\n💡 Key Insights (FLOWIP-080j):");
+    println!("   • TopNByTyped: Type-safe key and score extraction");
+    println!("   • No ChainEvent manipulation - work with OrderEvent directly");
+    println!("   • Compile-time safety for field access");
     println!("   • Perfect for analytics: sales by product, activity by user, etc.");
-    println!("   • Emits both total and average metrics");
     println!("   • Memory bounded to N items regardless of stream size");
-    println!("   • Can combine with different emission strategies");
     println!("\n📝 Journal written to: target/ecommerce-logs/");
 
     Ok(())

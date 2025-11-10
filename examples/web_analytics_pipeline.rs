@@ -1,4 +1,4 @@
-//! Web Analytics Pipeline
+//! Web Analytics Pipeline - Using FLOWIP-080j Typed Accumulators
 //!
 //! Problem: Track user behavior on a website to understand engagement patterns.
 //!
@@ -7,8 +7,10 @@
 //! 2. Monitor conversion funnel - emit after every N events to track progress (EveryN)
 //! 3. Calculate daily metrics - emit final stats at end (OnEOF)
 //!
-//! Each handler does ONE thing well, with the emission strategy controlling
-//! when the accumulated data is written to the journal.
+//! This demonstrates FLOWIP-080j typed accumulators:
+//! - GroupByTyped for per-user session tracking
+//! - ReduceTyped for funnel and metrics aggregation
+//! - Zero ChainEvent manipulation in business logic
 //!
 //! Run with: `cargo run -p obzenflow --example web_analytics_pipeline`
 
@@ -24,21 +26,30 @@ use obzenflow_dsl_infra::{flow, sink, source, stateful};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime_services::stages::common::handlers::{
-    FiniteSourceHandler, SinkHandler, StatefulHandler,
-    StatefulHandlerExt,
+    FiniteSourceHandler, SinkHandler,
 };
-use obzenflow_runtime_services::stages::stateful::emission::{EveryN, TimeWindow};
+// FLOWIP-080j: Typed stateful accumulators
+use obzenflow_runtime_services::stages::stateful::accumulators::{GroupByTyped, ReduceTyped};
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
 use std::time::Duration;
 
-/// Types of user events we track
-#[derive(Clone, Debug)]
-enum EventType {
-    PageView { page: String, duration_ms: u64 },
-    Click { element: String, page: String },
-    Scroll { depth: u32, page: String },
-    Conversion { value: f64 },
+// FLOWIP-080j: Domain types for type-safe event processing
+#[derive(Clone, Debug, Deserialize)]
+struct UserEvent {
+    user_id: String,
+    event_type: String,
+    #[serde(default)]
+    page: Option<String>,
+    #[serde(default)]
+    duration_ms: Option<u64>,
+    #[serde(default)]
+    element: Option<String>,
+    #[serde(default)]
+    depth: Option<u32>,
+    #[serde(default)]
+    value: Option<f64>,
 }
 
 /// Source that simulates user behavior events
@@ -74,42 +85,76 @@ impl UserEventSource {
         }
     }
 
-    fn generate_event(&mut self) -> (String, EventType) {
+    fn generate_event_payload(&mut self) -> serde_json::Value {
         let user_idx = self.event_count % self.users.len();
-        let user_id = self.users[user_idx].clone();
+        let user_id = &self.users[user_idx];
 
-        // Simulate user journey patterns
-        let event = match self.event_count % 10 {
-            0 | 1 => EventType::PageView {
-                page: self.pages[0].clone(), // Home
-                duration_ms: (3000 + (self.event_count * 17) % 2000) as u64,
-            },
-            2 | 3 => EventType::Click {
-                element: "product_card".to_string(),
-                page: self.pages[0].clone(),
-            },
-            4 | 5 => EventType::PageView {
-                page: self.pages[1].clone(), // Products
-                duration_ms: (5000 + (self.event_count * 23) % 5000) as u64,
-            },
-            6 => EventType::Scroll {
-                depth: 50 + (self.event_count % 50) as u32,
-                page: self.pages[1].clone(),
-            },
-            7 => EventType::PageView {
-                page: self.pages[2].clone(), // Cart
-                duration_ms: (2000 + (self.event_count * 13) % 1000) as u64,
-            },
-            8 => EventType::Click {
-                element: "checkout_button".to_string(),
-                page: self.pages[2].clone(),
-            },
-            _ => EventType::Conversion {
-                value: 49.99 + (self.event_count as f64 * 1.23) % 150.0,
-            },
-        };
-
-        (user_id, event)
+        // Simulate realistic user journey patterns with cart abandonment
+        // Pattern repeats every 20 events to create ~40% cart-to-purchase conversion
+        match self.event_count % 20 {
+            // Home page visits (30% of traffic)
+            0 | 1 | 2 | 3 | 4 | 5 => json!({
+                "user_id": user_id,
+                "event_type": "page_view",
+                "page": self.pages[0], // Home
+                "duration_ms": (3000 + (self.event_count * 17) % 2000) as u64,
+            }),
+            // Product browsing (25% of traffic)
+            6 | 7 | 8 | 9 => json!({
+                "user_id": user_id,
+                "event_type": "page_view",
+                "page": self.pages[1], // Products
+                "duration_ms": (5000 + (self.event_count * 23) % 5000) as u64,
+            }),
+            // Product interactions (15% of traffic)
+            10 | 11 | 12 => json!({
+                "user_id": user_id,
+                "event_type": "click",
+                "element": "product_card",
+                "page": self.pages[1],
+            }),
+            // Cart page views (10% - not everyone adds to cart)
+            13 | 14 => json!({
+                "user_id": user_id,
+                "event_type": "page_view",
+                "page": self.pages[2], // Cart
+                "duration_ms": (2000 + (self.event_count * 13) % 1000) as u64,
+            }),
+            // Scroll events (5%)
+            15 => json!({
+                "user_id": user_id,
+                "event_type": "scroll",
+                "depth": 50 + (self.event_count % 50) as u32,
+                "page": self.pages[1],
+            }),
+            // Checkout button clicks (5%)
+            16 => json!({
+                "user_id": user_id,
+                "event_type": "click",
+                "element": "checkout_button",
+                "page": self.pages[2],
+            }),
+            // Bounces/abandoned carts (5%)
+            17 => json!({
+                "user_id": user_id,
+                "event_type": "page_view",
+                "page": self.pages[4], // About page (bounce)
+                "duration_ms": (1000 + (self.event_count * 7) % 500) as u64,
+            }),
+            // Actual conversions (5% - realistic cart abandonment ~60%)
+            18 => json!({
+                "user_id": user_id,
+                "event_type": "conversion",
+                "value": 49.99 + (self.event_count as f64 * 1.23) % 150.0,
+            }),
+            // Additional product views (5%)
+            _ => json!({
+                "user_id": user_id,
+                "event_type": "page_view",
+                "page": self.pages[1], // Products
+                "duration_ms": (4000 + (self.event_count * 19) % 3000) as u64,
+            }),
+        }
     }
 }
 
@@ -119,42 +164,8 @@ impl FiniteSourceHandler for UserEventSource {
             return None;
         }
 
-        let (user_id, event_type) = self.generate_event();
+        let payload = self.generate_event_payload();
         self.event_count += 1;
-
-        let payload = match event_type {
-            EventType::PageView { page, duration_ms } => {
-                json!({
-                    "user_id": user_id,
-                    "event_type": "page_view",
-                    "page": page,
-                    "duration_ms": duration_ms,
-                })
-            }
-            EventType::Click { element, page } => {
-                json!({
-                    "user_id": user_id,
-                    "event_type": "click",
-                    "element": element,
-                    "page": page,
-                })
-            }
-            EventType::Scroll { depth, page } => {
-                json!({
-                    "user_id": user_id,
-                    "event_type": "scroll",
-                    "depth": depth,
-                    "page": page,
-                })
-            }
-            EventType::Conversion { value } => {
-                json!({
-                    "user_id": user_id,
-                    "event_type": "conversion",
-                    "value": value,
-                })
-            }
-        };
 
         Some(ChainEventFactory::data_event(
             self.writer_id.clone(),
@@ -168,13 +179,8 @@ impl FiniteSourceHandler for UserEventSource {
     }
 }
 
-/// Tracks user sessions - accumulates events per user
-#[derive(Clone, Debug, Default)]
-struct SessionState {
-    sessions: HashMap<String, SessionData>,
-}
-
-#[derive(Clone, Debug, Default)]
+// FLOWIP-080j: Session tracking state (per user)
+#[derive(Clone, Debug, Default, Serialize)]
 struct SessionData {
     event_count: usize,
     pages_viewed: Vec<String>,
@@ -183,158 +189,62 @@ struct SessionData {
     max_scroll_depth: u32,
 }
 
-#[derive(Clone, Debug)]
-struct SessionTracker {
-    writer_id: WriterId,
-}
+impl UserEvent {
+    // Pure function: Update session state based on event
+    fn update_session(&self, session: &mut SessionData) {
+        session.event_count += 1;
 
-impl SessionTracker {
-    fn new() -> Self {
-        Self {
-            writer_id: WriterId::from(StageId::new()),
-        }
-    }
-}
-
-#[async_trait]
-impl StatefulHandler for SessionTracker {
-    type State = SessionState;
-
-    fn accumulate(&mut self, state: &mut Self::State, event: ChainEvent) {
-        let payload = event.payload();
-        if let Some(user_id) = payload["user_id"].as_str() {
-            let session = state.sessions.entry(user_id.to_string()).or_default();
-            session.event_count += 1;
-
-            match payload["event_type"].as_str() {
-                Some("page_view") => {
-                    if let Some(page) = payload["page"].as_str() {
-                        session.pages_viewed.push(page.to_string());
-                    }
-                    if let Some(duration) = payload["duration_ms"].as_u64() {
-                        session.total_duration_ms += duration;
-                    }
+        match self.event_type.as_str() {
+            "page_view" => {
+                if let Some(ref page) = self.page {
+                    session.pages_viewed.push(page.clone());
                 }
-                Some("click") => {
-                    session.clicks += 1;
+                if let Some(duration) = self.duration_ms {
+                    session.total_duration_ms += duration;
                 }
-                Some("scroll") => {
-                    if let Some(depth) = payload["depth"].as_u64() {
-                        session.max_scroll_depth = session.max_scroll_depth.max(depth as u32);
-                    }
-                }
-                _ => {}
             }
+            "click" => {
+                session.clicks += 1;
+            }
+            "scroll" => {
+                if let Some(depth) = self.depth {
+                    session.max_scroll_depth = session.max_scroll_depth.max(depth);
+                }
+            }
+            _ => {}
         }
-    }
-
-    fn initial_state(&self) -> Self::State {
-        SessionState::default()
-    }
-
-    fn create_events(&self, state: &Self::State) -> Vec<ChainEvent> {
-        // Emit one event per active session
-        state.sessions.iter().map(|(user_id, data)| {
-            ChainEventFactory::data_event(
-                self.writer_id.clone(),
-                "session_snapshot",
-                json!({
-                    "user_id": user_id,
-                    "events": data.event_count,
-                    "pages": data.pages_viewed.len(),
-                    "duration_ms": data.total_duration_ms,
-                    "clicks": data.clicks,
-                    "max_scroll": data.max_scroll_depth,
-                    "engagement_score": (data.clicks as f64 * 2.0) +
-                        (data.pages_viewed.len() as f64 * 1.5) +
-                        (data.max_scroll_depth as f64 * 0.01),
-                }),
-            )
-        }).collect()
     }
 }
 
-/// Tracks conversion funnel progress
-#[derive(Clone, Debug, Default)]
+// FLOWIP-080j: Funnel tracking state
+#[derive(Clone, Debug, Default, Serialize)]
 struct FunnelState {
     total_users: HashMap<String, bool>,
     funnel_stages: HashMap<String, usize>, // page -> visitor count
     conversions: Vec<f64>,
 }
 
-#[derive(Clone, Debug)]
-struct FunnelTracker {
-    writer_id: WriterId,
-}
+impl UserEvent {
+    // Pure function: Update funnel state based on event
+    fn update_funnel(&self, state: &mut FunnelState) {
+        state.total_users.insert(self.user_id.clone(), true);
 
-impl FunnelTracker {
-    fn new() -> Self {
-        Self {
-            writer_id: WriterId::from(StageId::new()),
-        }
-    }
-}
-
-#[async_trait]
-impl StatefulHandler for FunnelTracker {
-    type State = FunnelState;
-
-    fn accumulate(&mut self, state: &mut Self::State, event: ChainEvent) {
-        let payload = event.payload();
-
-        if let Some(user_id) = payload["user_id"].as_str() {
-            state.total_users.insert(user_id.to_string(), true);
-        }
-
-        if let Some("page_view") = payload["event_type"].as_str() {
-            if let Some(page) = payload["page"].as_str() {
-                *state.funnel_stages.entry(page.to_string()).or_insert(0) += 1;
+        if self.event_type == "page_view" {
+            if let Some(ref page) = self.page {
+                *state.funnel_stages.entry(page.clone()).or_insert(0) += 1;
             }
         }
 
-        if let Some("conversion") = payload["event_type"].as_str() {
-            if let Some(value) = payload["value"].as_f64() {
+        if self.event_type == "conversion" {
+            if let Some(value) = self.value {
                 state.conversions.push(value);
             }
         }
     }
-
-    fn initial_state(&self) -> Self::State {
-        FunnelState::default()
-    }
-
-    fn create_events(&self, state: &Self::State) -> Vec<ChainEvent> {
-        let home_visitors = state.funnel_stages.get("/home").unwrap_or(&0);
-        let product_visitors = state.funnel_stages.get("/products").unwrap_or(&0);
-        let cart_visitors = state.funnel_stages.get("/cart").unwrap_or(&0);
-        let total_revenue: f64 = state.conversions.iter().sum();
-
-        vec![ChainEventFactory::data_event(
-            self.writer_id.clone(),
-            "funnel_update",
-            json!({
-                "unique_users": state.total_users.len(),
-                "home_to_product": if *home_visitors > 0 {
-                    (*product_visitors as f64 / *home_visitors as f64) * 100.0
-                } else { 0.0 },
-                "product_to_cart": if *product_visitors > 0 {
-                    (*cart_visitors as f64 / *product_visitors as f64) * 100.0
-                } else { 0.0 },
-                "cart_to_purchase": if *cart_visitors > 0 {
-                    (state.conversions.len() as f64 / *cart_visitors as f64) * 100.0
-                } else { 0.0 },
-                "conversions": state.conversions.len(),
-                "total_revenue": total_revenue,
-                "avg_order_value": if !state.conversions.is_empty() {
-                    total_revenue / state.conversions.len() as f64
-                } else { 0.0 },
-            }),
-        )]
-    }
 }
 
-/// Overall metrics aggregator
-#[derive(Clone, Debug, Default)]
+// FLOWIP-080j: Overall metrics state
+#[derive(Clone, Debug, Default, Serialize)]
 struct MetricsState {
     total_events: usize,
     events_by_type: HashMap<String, usize>,
@@ -342,56 +252,20 @@ struct MetricsState {
     total_revenue: f64,
 }
 
-#[derive(Clone, Debug)]
-struct MetricsAggregator {
-    writer_id: WriterId,
-}
-
-impl MetricsAggregator {
-    fn new() -> Self {
-        Self {
-            writer_id: WriterId::from(StageId::new()),
-        }
-    }
-}
-
-#[async_trait]
-impl StatefulHandler for MetricsAggregator {
-    type State = MetricsState;
-
-    fn accumulate(&mut self, state: &mut Self::State, event: ChainEvent) {
+impl UserEvent {
+    // Pure function: Update overall metrics
+    fn update_metrics(&self, state: &mut MetricsState) {
         state.total_events += 1;
 
-        let payload = event.payload();
+        *state.events_by_type.entry(self.event_type.clone()).or_insert(0) += 1;
 
-        if let Some(event_type) = payload["event_type"].as_str() {
-            *state.events_by_type.entry(event_type.to_string()).or_insert(0) += 1;
+        if let Some(ref page) = self.page {
+            *state.pages_by_popularity.entry(page.clone()).or_insert(0) += 1;
         }
 
-        if let Some(page) = payload["page"].as_str() {
-            *state.pages_by_popularity.entry(page.to_string()).or_insert(0) += 1;
-        }
-
-        if let Some(value) = payload["value"].as_f64() {
+        if let Some(value) = self.value {
             state.total_revenue += value;
         }
-    }
-
-    fn initial_state(&self) -> Self::State {
-        MetricsState::default()
-    }
-
-    fn create_events(&self, state: &Self::State) -> Vec<ChainEvent> {
-        vec![ChainEventFactory::data_event(
-            self.writer_id.clone(),
-            "daily_metrics",
-            json!({
-                "total_events": state.total_events,
-                "event_breakdown": state.events_by_type,
-                "popular_pages": state.pages_by_popularity,
-                "total_revenue": state.total_revenue,
-            }),
-        )]
     }
 }
 
@@ -414,25 +288,56 @@ impl SinkHandler for AnalyticsSink {
     async fn consume(&mut self, event: ChainEvent) -> obzenflow_core::Result<DeliveryPayload> {
         let payload = event.payload();
 
-        if event.event_type() == "session_snapshot" {
-            println!("\n📊 [{}] Session Update:", self.name);
-            println!("   Active sessions tracked");
-            println!("   Sample user: {}", payload["user_id"]);
-            println!("   - Events: {}", payload["events"]);
-            println!("   - Engagement: {:.1}", payload["engagement_score"].as_f64().unwrap_or(0.0));
-        } else if event.event_type() == "funnel_update" {
-            println!("\n🎯 [{}] Funnel Progress:", self.name);
-            println!("   Unique users: {}", payload["unique_users"]);
-            println!("   Home → Product: {:.1}%", payload["home_to_product"].as_f64().unwrap_or(0.0));
-            println!("   Product → Cart: {:.1}%", payload["product_to_cart"].as_f64().unwrap_or(0.0));
-            println!("   Cart → Purchase: {:.1}%", payload["cart_to_purchase"].as_f64().unwrap_or(0.0));
-            println!("   Revenue: ${:.2}", payload["total_revenue"].as_f64().unwrap_or(0.0));
-        } else if event.event_type() == "daily_metrics" {
-            println!("\n📈 [{}] Daily Summary:", self.name);
-            println!("   Total events: {}", payload["total_events"]);
-            println!("   Total revenue: ${:.2}", payload["total_revenue"].as_f64().unwrap_or(0.0));
-            if let Some(breakdown) = payload["event_breakdown"].as_object() {
-                println!("   Event types: {} unique", breakdown.len());
+        // GroupByTyped emits "grouped" events with key and result
+        if event.event_type() == "grouped" {
+            if let (Some(key), Some(result)) = (payload.get("key"), payload.get("result")) {
+                // Session snapshot from GroupByTyped
+                println!("\n📊 [{}] Session Update:", self.name);
+                println!("   User: {}", key.as_str().unwrap_or("unknown"));
+                println!("   - Events: {}", result["event_count"].as_u64().unwrap_or(0));
+                println!("   - Pages: {}", result["pages_viewed"].as_array().map(|v| v.len()).unwrap_or(0));
+                println!("   - Clicks: {}", result["clicks"].as_u64().unwrap_or(0));
+                println!("   - Duration: {}ms", result["total_duration_ms"].as_u64().unwrap_or(0));
+            }
+        }
+        // ReduceTyped emits "reduced" events with result
+        else if event.event_type() == "reduced" {
+            if let Some(result) = payload.get("result") {
+                // Check if it's funnel or metrics by looking at the fields
+                if result.get("funnel_stages").is_some() {
+                    // Funnel update from ReduceTyped
+                    println!("\n🎯 [{}] Funnel Progress:", self.name);
+                    println!("   Unique users: {}", result["total_users"].as_object().map(|m| m.len()).unwrap_or(0));
+
+                    if let Some(stages) = result["funnel_stages"].as_object() {
+                        let home = stages.get("/home").and_then(|v| v.as_u64()).unwrap_or(0);
+                        let products = stages.get("/products").and_then(|v| v.as_u64()).unwrap_or(0);
+                        let cart = stages.get("/cart").and_then(|v| v.as_u64()).unwrap_or(0);
+                        let conversions = result["conversions"].as_array().map(|v| v.len()).unwrap_or(0);
+                        let total_revenue: f64 = result["conversions"].as_array()
+                            .map(|arr| arr.iter().filter_map(|v| v.as_f64()).sum())
+                            .unwrap_or(0.0);
+
+                        if home > 0 {
+                            println!("   Home → Product: {:.1}%", (products as f64 / home as f64) * 100.0);
+                        }
+                        if products > 0 {
+                            println!("   Product → Cart: {:.1}%", (cart as f64 / products as f64) * 100.0);
+                        }
+                        if cart > 0 {
+                            println!("   Cart → Purchase: {:.1}%", (conversions as f64 / cart as f64) * 100.0);
+                        }
+                        println!("   Revenue: ${:.2}", total_revenue);
+                    }
+                } else {
+                    // Daily metrics from ReduceTyped
+                    println!("\n📈 [{}] Daily Summary:", self.name);
+                    println!("   Total events: {}", result["total_events"].as_u64().unwrap_or(0));
+                    println!("   Total revenue: ${:.2}", result["total_revenue"].as_f64().unwrap_or(0.0));
+                    if let Some(breakdown) = result["events_by_type"].as_object() {
+                        println!("   Event types: {} unique", breakdown.len());
+                    }
+                }
             }
         }
 
@@ -448,16 +353,16 @@ impl SinkHandler for AnalyticsSink {
 async fn main() -> Result<()> {
     std::env::set_var("OBZENFLOW_METRICS_EXPORTER", "console");
 
-    println!("🌐 Web Analytics Pipeline");
-    println!("=========================");
+    println!("🌐 Web Analytics Pipeline (FLOWIP-080j)");
+    println!("========================================");
     println!();
-    println!("Processing user behavior events with different emission patterns:");
+    println!("Processing user behavior events with typed accumulators:");
     println!();
-    println!("📊 Session Tracker   → TimeWindow(3s)  → Session snapshots");
-    println!("🎯 Funnel Tracker    → EveryN(50)      → Conversion progress");
-    println!("📈 Metrics           → OnEOF (default) → Daily summary");
+    println!("📊 Session Tracker   → GroupByTyped + TimeWindow(3s)");
+    println!("🎯 Funnel Tracker    → ReduceTyped + EveryN(50)");
+    println!("📈 Metrics           → ReduceTyped + OnEOF");
     println!();
-    println!("Each handler does ONE thing, emission strategy controls WHEN.\n");
+    println!("Zero ChainEvent manipulation - all type-safe!\n");
 
     FlowApplication::run(async {
         flow! {
@@ -469,20 +374,35 @@ async fn main() -> Result<()> {
                 // User event stream
                 events = source!("user_events" => UserEventSource::new(200));
 
-                // Session tracking with time windows (e.g., for real-time dashboard)
+                // FLOWIP-080j: GroupByTyped for per-user session tracking
                 sessions = stateful!("session_tracker" =>
-                    SessionTracker::new()
-                        .with_emission(TimeWindow::new(Duration::from_secs(3)))
+                    GroupByTyped::new(
+                        |event: &UserEvent| event.user_id.clone(),
+                        |session: &mut SessionData, event: &UserEvent| {  // CORRECTED: state first
+                            event.update_session(session);
+                        }
+                    ).emit_within(Duration::from_secs(3))  // Time window emission
                 );
 
-                // Funnel analysis with periodic updates
+                // FLOWIP-080j: ReduceTyped for funnel analysis
                 funnel = stateful!("funnel_tracker" =>
-                    FunnelTracker::new()
-                        .with_emission(EveryN::new(50))
+                    ReduceTyped::new(
+                        FunnelState::default(),
+                        |state: &mut FunnelState, event: &UserEvent| {  // CORRECTED: state first
+                            event.update_funnel(state);
+                        }
+                    ).emit_every_n(50)  // Periodic updates
                 );
 
-                // Daily metrics with default OnEOF
-                metrics = stateful!("metrics" => MetricsAggregator::new());
+                // FLOWIP-080j: ReduceTyped for overall metrics
+                metrics = stateful!("metrics" =>
+                    ReduceTyped::new(
+                        MetricsState::default(),
+                        |state: &mut MetricsState, event: &UserEvent| {  // CORRECTED: state first
+                            event.update_metrics(state);
+                        }
+                    ).emit_on_eof()  // Only at end
+                );
 
                 // Sinks for each analysis type
                 session_sink = sink!("sessions" => AnalyticsSink::new("Sessions"));
@@ -508,11 +428,12 @@ async fn main() -> Result<()> {
     .await?;
 
     println!("\n✅ Analytics pipeline complete!");
-    println!("\nKey insights:");
-    println!("• Sessions emitted every 3 seconds (real-time monitoring)");
-    println!("• Funnel updated every 50 events (progress tracking)");
-    println!("• Metrics emitted once at end (daily reporting)");
-    println!("\nSame pattern, different timing = .with_emission() power!");
+    println!("\n💡 Key Improvements (FLOWIP-080j):");
+    println!("   • GroupByTyped: Type-safe per-user session tracking");
+    println!("   • ReduceTyped: Type-safe funnel and metrics aggregation");
+    println!("   • Zero ChainEvent manipulation in business logic");
+    println!("   • Pure update functions: update_session(), update_funnel(), update_metrics()");
+    println!("   • ~150 lines of custom StatefulHandler code eliminated!");
 
     Ok(())
 }

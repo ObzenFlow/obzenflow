@@ -1,4 +1,5 @@
 // FLOWIP-080c: TopNBy Accumulator (with aggregation)
+// FLOWIP-080j: TopNByTyped - Typed variant (Phase 4)
 //
 // Maintains the top N items by accumulated score, perfect for analytics
 // like "top products by sales", "top users by activity", etc.
@@ -7,11 +8,13 @@ use super::Accumulator;
 use obzenflow_core::{ChainEvent, WriterId};
 use obzenflow_core::event::chain_event::ChainEventFactory;
 use obzenflow_core::id::StageId;
-use serde::{Serialize, Deserialize};
+use serde::{Serialize, Deserialize, de::DeserializeOwned};
 use serde_json::{json, Value};
 use std::collections::{HashMap, BinaryHeap};
 use std::cmp::{Ordering, Reverse};
 use std::fmt::Debug;
+use std::hash::Hash;
+use std::marker::PhantomData;
 
 /// Aggregated item with accumulated score and metadata
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -466,5 +469,318 @@ mod tests {
         assert_eq!(top_n[1]["key"], "alice");
         assert_eq!(top_n[1]["total_score"], 150.0);
         assert_eq!(top_n[1]["avg_score"], 75.0);
+    }
+}
+
+// ============================================================================
+// FLOWIP-080j: TopNByTyped - Type-safe TopNBy accumulator
+// ============================================================================
+
+/// FLOWIP-080j: Type-safe TopNBy accumulator that works with domain types.
+///
+/// Maintains top N items by **accumulated** score. When duplicate keys arrive, **adds** to the total.
+/// Perfect for analytics: top products by total sales, top users by cumulative activity.
+///
+/// # Type Parameters
+///
+/// * `T` - Input event type (must implement DeserializeOwned)
+/// * `K` - Key type for grouping (must implement Hash + Eq)
+/// * `FKey` - Key extraction function: `Fn(&T) -> K`
+/// * `FScore` - Score extraction function: `Fn(&T) -> f64` (per event)
+///
+/// # Examples
+///
+/// ```rust
+/// use obzenflow_runtime_services::stages::stateful::accumulators::TopNByTyped;
+///
+/// #[derive(Deserialize)]
+/// struct OrderEvent {
+///     product_id: String,
+///     total_value: f64,
+/// }
+///
+/// let top_products = TopNByTyped::new(
+///     5,
+///     |order: &OrderEvent| order.product_id.clone(),
+///     |order: &OrderEvent| order.total_value
+/// ).emit_every_n(50);
+/// ```
+#[derive(Clone)]
+pub struct TopNByTyped<T, K, FKey, FScore>
+where
+    T: DeserializeOwned + Serialize + Send + Sync,
+    K: Hash + Eq + Clone + Debug + Serialize + DeserializeOwned + Send + Sync,
+    FKey: Fn(&T) -> K + Send + Sync + Clone,
+    FScore: Fn(&T) -> f64 + Send + Sync + Clone,
+{
+    n: usize,
+    key_fn: FKey,
+    score_fn: FScore,
+    writer_id: WriterId,
+    _phantom: PhantomData<(T, K)>,
+}
+
+impl<T, K, FKey, FScore> TopNByTyped<T, K, FKey, FScore>
+where
+    T: DeserializeOwned + Serialize + Send + Sync + 'static,
+    K: Hash + Eq + Clone + Debug + Serialize + DeserializeOwned + Send + Sync + 'static,
+    FKey: Fn(&T) -> K + Send + Sync + Clone + 'static,
+    FScore: Fn(&T) -> f64 + Send + Sync + Clone + 'static,
+{
+    /// Create a new typed TopNBy accumulator.
+    ///
+    /// # Arguments
+    ///
+    /// * `n` - Maximum number of items to track
+    /// * `key_fn` - Function to extract the key from an event (for grouping)
+    /// * `score_fn` - Function to extract the score from an event (will be accumulated)
+    pub fn new(n: usize, key_fn: FKey, score_fn: FScore) -> Self {
+        assert!(n > 0, "TopNBy must track at least 1 item");
+        Self {
+            n,
+            key_fn,
+            score_fn,
+            writer_id: WriterId::from(StageId::new()),
+            _phantom: PhantomData,
+        }
+    }
+
+    /// Configure to emit results when EOF is received.
+    pub fn emit_on_eof(self) -> super::StatefulWithEmission<Self, crate::stages::stateful::emission::OnEOF> {
+        super::StatefulWithEmission::new(self, crate::stages::stateful::emission::OnEOF::new())
+    }
+
+    /// Configure to emit results every N events.
+    pub fn emit_every_n(self, n: u64) -> super::StatefulWithEmission<Self, crate::stages::stateful::emission::EveryN> {
+        super::StatefulWithEmission::new(self, crate::stages::stateful::emission::EveryN::new(n))
+    }
+
+    /// Configure to emit results within a time window.
+    pub fn emit_within(self, duration: std::time::Duration) -> super::StatefulWithEmission<Self, crate::stages::stateful::emission::TimeWindow> {
+        super::StatefulWithEmission::new(self, crate::stages::stateful::emission::TimeWindow::new(duration))
+    }
+
+    /// Configure with a custom emission strategy.
+    pub fn with_emission<E>(self, emission: E) -> super::StatefulWithEmission<Self, E>
+    where
+        E: crate::stages::stateful::emission::EmissionStrategy,
+    {
+        super::StatefulWithEmission::new(self, emission)
+    }
+}
+
+impl<T, K, FKey, FScore> Debug for TopNByTyped<T, K, FKey, FScore>
+where
+    T: DeserializeOwned + Serialize + Send + Sync + 'static,
+    K: Hash + Eq + Clone + Debug + Serialize + DeserializeOwned + Send + Sync + 'static,
+    FKey: Fn(&T) -> K + Send + Sync + Clone + 'static,
+    FScore: Fn(&T) -> f64 + Send + Sync + Clone + 'static,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TopNByTyped")
+            .field("n", &self.n)
+            .field("writer_id", &self.writer_id)
+            .finish()
+    }
+}
+
+/// Aggregated item for TopNByTyped (serialized keys to avoid generic lifetime issues)
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AggregatedTypedItem {
+    pub key_value: Value,  // Serialized key
+    pub total_score: f64,
+    pub count: u64,
+    pub metadata: Value,  // Last seen item
+}
+
+/// State for TopNByTyped - accumulates scores per key
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TopNByTypedState {
+    /// All accumulated items by serialized key string
+    items: HashMap<String, AggregatedTypedItem>,
+    /// Maximum number of items to emit
+    capacity: usize,
+}
+
+impl<T, K, FKey, FScore> Accumulator for TopNByTyped<T, K, FKey, FScore>
+where
+    T: DeserializeOwned + Serialize + Send + Sync + 'static,
+    K: Hash + Eq + Clone + Debug + Serialize + DeserializeOwned + Send + Sync + 'static,
+    FKey: Fn(&T) -> K + Send + Sync + Clone + 'static,
+    FScore: Fn(&T) -> f64 + Send + Sync + Clone + 'static,
+{
+    type State = TopNByTypedState;
+
+    fn accumulate(&self, state: &mut Self::State, event: ChainEvent) {
+        // TODO(FLOWIP-082a): Use TypedPayload::EVENT_TYPE when schemas are implemented
+        // Step 1: Deserialize ChainEvent → T
+        let input: T = match serde_json::from_value(event.payload().clone()) {
+            Ok(v) => v,
+            Err(_) => return,  // Skip events that don't match the type
+        };
+
+        // Step 2: Extract key and score
+        let key = (self.key_fn)(&input);
+        let score = (self.score_fn)(&input);
+
+        // Step 3: Serialize key to string for HashMap lookup
+        let key_value = match serde_json::to_value(&key) {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+        let key_str = key_value.to_string();
+
+        // Step 4: Serialize the item for metadata
+        let serialized = match serde_json::to_value(&input) {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+
+        // Step 5: Accumulate score for this key
+        state.items.entry(key_str)
+            .and_modify(|item| {
+                item.total_score += score;
+                item.count += 1;
+                item.metadata = serialized.clone();  // Update to latest
+            })
+            .or_insert_with(|| AggregatedTypedItem {
+                key_value: key_value.clone(),
+                total_score: score,
+                count: 1,
+                metadata: serialized,
+            });
+    }
+
+    fn initial_state(&self) -> Self::State {
+        TopNByTypedState {
+            items: HashMap::new(),
+            capacity: self.n,
+        }
+    }
+
+    fn emit(&self, state: &Self::State) -> Vec<ChainEvent> {
+        // Convert to vec and sort by total_score descending
+        let mut items: Vec<_> = state.items.values().cloned().collect();
+        items.sort_by(|a, b| b.total_score.partial_cmp(&a.total_score).unwrap_or(Ordering::Equal));
+
+        // Take top N
+        let top_n: Vec<_> = items.into_iter().take(state.capacity).collect();
+
+        // Create result event
+        vec![ChainEventFactory::data_event(
+            self.writer_id.clone(),
+            "top_n_by_result",
+            json!({
+                "top_n": top_n.iter().enumerate().map(|(idx, item)| {
+                    json!({
+                        "rank": idx + 1,
+                        "key": item.key_value,
+                        "total_score": item.total_score,
+                        "count": item.count,
+                        "avg_score": item.total_score / item.count as f64,
+                        "metadata": item.metadata,
+                    })
+                }).collect::<Vec<_>>(),
+                "total_items": state.items.len(),
+                "capacity": state.capacity,
+            }),
+        )]
+    }
+
+    fn reset(&self, state: &mut Self::State) {
+        state.items.clear();
+    }
+}
+
+#[cfg(test)]
+mod tests_typed {
+    use super::*;
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    struct OrderEvent {
+        product_id: String,
+        sale_amount: f64,
+    }
+
+    #[test]
+    fn test_top_n_by_typed_accumulation() {
+        let accumulator = TopNByTyped::new(
+            3,
+            |order: &OrderEvent| order.product_id.clone(),
+            |order: &OrderEvent| order.sale_amount,
+        );
+
+        let mut state = accumulator.initial_state();
+
+        // Add multiple orders for same products
+        for (product, amount) in vec![
+            ("laptop", 1000.0),
+            ("phone", 500.0),
+            ("laptop", 1200.0),  // Second laptop sale
+            ("mouse", 30.0),
+            ("laptop", 1100.0),  // Third laptop sale
+            ("phone", 600.0),    // Second phone sale
+        ] {
+            let event = ChainEventFactory::data_event(
+                WriterId::from(StageId::new()),
+                "test",
+                json!({"product_id": product, "sale_amount": amount}),
+            );
+            accumulator.accumulate(&mut state, event);
+        }
+
+        // Laptop: 3300 (3 orders), Phone: 1100 (2 orders), Mouse: 30 (1 order)
+        let results = accumulator.emit(&state);
+        let top_n = &results[0].payload()["top_n"];
+
+        assert_eq!(top_n[0]["key"], "laptop");
+        assert_eq!(top_n[0]["total_score"], 3300.0);
+        assert_eq!(top_n[0]["count"], 3);
+
+        assert_eq!(top_n[1]["key"], "phone");
+        assert_eq!(top_n[1]["total_score"], 1100.0);
+        assert_eq!(top_n[1]["count"], 2);
+
+        assert_eq!(top_n[2]["key"], "mouse");
+        assert_eq!(top_n[2]["total_score"], 30.0);
+        assert_eq!(top_n[2]["count"], 1);
+    }
+
+    #[test]
+    fn test_top_n_by_typed_only_top_n() {
+        let accumulator = TopNByTyped::new(
+            2,  // Only top 2
+            |order: &OrderEvent| order.product_id.clone(),
+            |order: &OrderEvent| order.sale_amount,
+        );
+
+        let mut state = accumulator.initial_state();
+
+        // Add orders for 3 products
+        for (product, amount) in vec![
+            ("a", 100.0),
+            ("b", 200.0),
+            ("c", 300.0),
+        ] {
+            let event = ChainEventFactory::data_event(
+                WriterId::from(StageId::new()),
+                "test",
+                json!({"product_id": product, "sale_amount": amount}),
+            );
+            accumulator.accumulate(&mut state, event);
+        }
+
+        // All 3 are in state (we track all, emit top N)
+        assert_eq!(state.items.len(), 3);
+
+        let results = accumulator.emit(&state);
+        let top_n = &results[0].payload()["top_n"];
+
+        // But only top 2 are emitted
+        assert_eq!(top_n.as_array().unwrap().len(), 2);
+        assert_eq!(top_n[0]["key"], "c");
+        assert_eq!(top_n[0]["total_score"], 300.0);
+        assert_eq!(top_n[1]["key"], "b");
+        assert_eq!(top_n[1]["total_score"], 200.0);
     }
 }

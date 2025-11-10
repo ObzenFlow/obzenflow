@@ -1,12 +1,13 @@
-//! Prometheus 1k Demo with FlowApplication Framework (FLOWIP-080h)
+//! Prometheus 1k Demo with FlowApplication Framework (FLOWIP-080h & FLOWIP-080j)
 //!
 //! This demo processes 1,000 events demonstrating:
 //! - Flow-level rate limiting middleware
 //! - Fan-out topology pattern (one stage to multiple downstream stages)
-//! - StatefulHandler for business-level event counting
+//! - ReduceTyped for type-safe event counting (FLOWIP-080j)
 //! - Prometheus metrics via /metrics endpoint
 //!
 //! **FLOWIP-080h Update**: Replaced 38-line ErrorProneTransform struct with Map helper
+//! **FLOWIP-080j Update**: Replaced 59-line EventCounter StatefulHandler with ReduceTyped
 //!
 //! Run with: cargo run -p obzenflow --example prometheus_1k_demo --features obzenflow_infra/warp-server -- --server
 //!
@@ -27,11 +28,14 @@ use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_adapters::middleware::rate_limit;
 use obzenflow_runtime_services::stages::common::handlers::{
-    FiniteSourceHandler, SinkHandler, StatefulHandler,
+    FiniteSourceHandler, SinkHandler,
 };
 // ✨ FLOWIP-080h: Import Map helper
 use obzenflow_runtime_services::stages::transform::Map;
+// ✨ FLOWIP-080j: Import ReduceTyped for type-safe accumulation
+use obzenflow_runtime_services::stages::stateful::accumulators::ReduceTyped;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryPayload, DeliveryMethod};
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::time::{Duration, Instant};
 
@@ -89,6 +93,20 @@ impl FiniteSourceHandler for HighVolumeSource {
 }
 
 // ============================================================================
+// FLOWIP-080j: Domain Types
+// ============================================================================
+
+/// Successfully processed event from the error-prone transform
+#[derive(Debug, Clone, Deserialize)]
+struct ProcessedEvent {
+    id: usize,
+    should_fail: bool,
+    batch: usize,
+    processed: bool,
+    processing_stage: String,
+}
+
+// ============================================================================
 // FLOWIP-080h: Map Helper for Error-Prone Transform
 // ============================================================================
 
@@ -128,65 +146,21 @@ fn error_prone_transform() -> Map<impl Fn(ChainEvent) -> ChainEvent + Send + Syn
     })
 }
 
-/// State for business-level event counting
-#[derive(Clone, Debug, Default)]
+// ============================================================================
+// FLOWIP-080j: ReduceTyped for Type-Safe Event Counting
+// ============================================================================
+
+/// State for business-level event counting (FLOWIP-080j)
+#[derive(Clone, Debug, Serialize)]
 struct EventCountState {
     event_count: usize,
-    start_time: Option<Instant>,
 }
 
-/// Stateful aggregator that counts successfully processed events
-/// Note: Only sees events that made it through the pipeline (not errors routed to error journal)
-#[derive(Debug, Clone)]
-struct EventCounter {
-    writer_id: WriterId,
-}
-
-impl EventCounter {
-    fn new() -> Self {
+impl Default for EventCountState {
+    fn default() -> Self {
         Self {
-            writer_id: WriterId::from(StageId::new()),
+            event_count: 0,
         }
-    }
-}
-
-#[async_trait]
-impl StatefulHandler for EventCounter {
-    type State = EventCountState;
-
-    fn accumulate(&mut self, state: &mut Self::State, _event: ChainEvent) {
-        // Initialize start time on first event
-        if state.start_time.is_none() {
-            state.start_time = Some(Instant::now());
-        }
-
-        state.event_count += 1;
-
-        // Log progress every 100 events
-        if state.event_count % 100 == 0 {
-            println!("📊 Counted {} events so far...", state.event_count);
-        }
-    }
-
-    fn initial_state(&self) -> Self::State {
-        EventCountState::default()
-    }
-
-    fn create_events(&self, state: &Self::State) -> Vec<ChainEvent> {
-        // Calculate final statistics
-        let duration = state.start_time
-            .map(|start| start.elapsed())
-            .unwrap_or(Duration::from_secs(0));
-
-        // Emit final count event
-        vec![ChainEventFactory::data_event(
-            self.writer_id.clone(),
-            "EventCountSummary",
-            json!({
-                "events_counted": state.event_count,
-                "duration_secs": duration.as_secs_f64(),
-            }),
-        )]
     }
 }
 
@@ -225,18 +199,22 @@ impl SummarySink {
 #[async_trait]
 impl SinkHandler for SummarySink {
     async fn consume(&mut self, event: ChainEvent) -> obzenflow_core::Result<DeliveryPayload> {
-        if event.event_type() == "EventCountSummary" {
+        // ReduceTyped emits with event_type "reduced"
+        if event.event_type() == "reduced" {
             let payload = event.payload();
-            let count = payload["events_counted"].as_u64().unwrap_or(0);
-            let duration = payload["duration_secs"].as_f64().unwrap_or(0.0);
+            let result = &payload["result"];
+            let count = result["event_count"].as_u64().unwrap_or(0);
 
             println!("");
             println!("=====================================");
-            println!("📊 Business-Level Event Count:");
+            println!("📊 Business-Level Event Count (FLOWIP-080j):");
             println!("   Successfully processed: {} events", count);
-            println!("   Duration: {:.2}s", duration);
             println!("   Note: 1000 generated - {} = {} errors (routed to error journal)", count, 1000 - count as u32);
             println!("=====================================");
+            println!("");
+            println!("💡 Key Improvement:");
+            println!("   59-line EventCounter StatefulHandler → ReduceTyped helper");
+            println!("   Type-safe accumulation with zero ChainEvent manipulation!");
             println!("");
             println!("📈 To view framework-level Prometheus metrics:");
             println!("   1. Run with --server flag");
@@ -291,8 +269,21 @@ async fn main() -> Result<()> {
                 // ✨ FLOWIP-080h: Using Map helper instead of ErrorProneTransform struct
                 processor = transform!("error_processor" => error_prone_transform());
 
-                // Fan-out branch 1: Stateful event counter
-                counter = stateful!("event_counter" => EventCounter::new());
+                // Fan-out branch 1: Type-safe event counter (FLOWIP-080j)
+                // Replaces 59-line EventCounter StatefulHandler with ReduceTyped!
+                // Counts ProcessedEvent domain objects from the stream
+                counter = stateful!("event_counter" =>
+                    ReduceTyped::new(
+                        EventCountState::default(),
+                        |state: &mut EventCountState, _event: &ProcessedEvent| {
+                            state.event_count += 1;
+                            // Log progress every 100 events
+                            if state.event_count % 100 == 0 {
+                                println!("📊 Counted {} events so far...", state.event_count);
+                            }
+                        }
+                    ).emit_on_eof()
+                );
                 counter_sink = sink!("summary_sink" => SummarySink::new());
 
                 // Fan-out branch 2: Completion sink

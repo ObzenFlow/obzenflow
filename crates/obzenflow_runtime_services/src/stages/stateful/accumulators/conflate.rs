@@ -271,3 +271,446 @@ mod tests {
         assert!(state.is_empty());
     }
 }
+
+// ============================================================================
+// FLOWIP-080j: Typed Conflate - Type-safe latest-value tracking with domain types
+// ============================================================================
+
+use serde::{Serialize, de::DeserializeOwned};
+use std::marker::PhantomData;
+use std::hash::Hash;
+
+/// Typed Conflate for type-safe latest-value tracking with automatic serde
+///
+/// This version of Conflate works directly with domain types instead of ChainEvent,
+/// eliminating manual serialization/deserialization boilerplate. Keeps only the
+/// latest value per key, useful for state snapshots and materialized views.
+///
+/// # Type Parameters
+///
+/// * `T` - Input event type (must implement `DeserializeOwned + Serialize`)
+/// * `K` - Key type for grouping (must implement `Hash + Eq + Clone`)
+/// * `FKey` - Key extraction function: `Fn(&T) -> K`
+///
+/// # Examples
+///
+/// ```rust
+/// use obzenflow_runtime_services::stages::stateful::accumulators::Conflate;
+/// use serde::{Deserialize, Serialize};
+///
+/// #[derive(Debug, Clone, Deserialize, Serialize)]
+/// struct SensorReading {
+///     sensor_id: String,
+///     temperature: f64,
+///     timestamp: u64,
+/// }
+///
+/// let snapshot = Conflate::typed(
+///     |reading: &SensorReading| reading.sensor_id.clone()
+/// ).emit_always();
+/// ```
+#[derive(Clone)]
+pub struct ConflateTyped<T, K, FKey>
+where
+    T: DeserializeOwned + Serialize + Send + Sync + Clone + Debug,
+    K: Hash + Eq + Clone + Debug + Send + Sync,
+    FKey: Fn(&T) -> K + Send + Sync + Clone,
+{
+    key_fn: FKey,
+    writer_id: WriterId,
+    _phantom: PhantomData<(T, K)>,
+}
+
+impl<T, K, FKey> Debug for ConflateTyped<T, K, FKey>
+where
+    T: DeserializeOwned + Serialize + Send + Sync + Clone + Debug,
+    K: Hash + Eq + Clone + Debug + Send + Sync,
+    FKey: Fn(&T) -> K + Send + Sync + Clone,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ConflateTyped")
+            .field("input_type", &std::any::type_name::<T>())
+            .field("key_type", &std::any::type_name::<K>())
+            .field("writer_id", &self.writer_id)
+            .finish()
+    }
+}
+
+impl<T, K, FKey> ConflateTyped<T, K, FKey>
+where
+    T: DeserializeOwned + Serialize + Send + Sync + Clone + Debug,
+    K: Hash + Eq + Clone + Debug + Send + Sync,
+    FKey: Fn(&T) -> K + Send + Sync + Clone,
+{
+    /// Create a new typed Conflate accumulator.
+    ///
+    /// # Arguments
+    ///
+    /// * `key_fn` - Function to extract the key from input events
+    pub fn new(key_fn: FKey) -> Self {
+        Self {
+            key_fn,
+            writer_id: WriterId::from(StageId::new()),
+            _phantom: PhantomData,
+        }
+    }
+
+    /// Set a custom writer ID for emitted events.
+    pub fn with_writer_id(mut self, writer_id: WriterId) -> Self {
+        self.writer_id = writer_id;
+        self
+    }
+}
+
+impl<T, K, FKey> Accumulator for ConflateTyped<T, K, FKey>
+where
+    T: DeserializeOwned + Serialize + Send + Sync + Clone + Debug + 'static,
+    K: Hash + Eq + Clone + Debug + Serialize + Send + Sync + 'static,
+    FKey: Fn(&T) -> K + Send + Sync + Clone + 'static,
+{
+    type State = HashMap<K, T>;
+
+    fn accumulate(&self, state: &mut Self::State, event: ChainEvent) {
+        // Step 1: Deserialize ChainEvent → T
+        let input: T = match serde_json::from_value(event.payload().clone()) {
+            Ok(v) => v,
+            Err(_e) => {
+                // Deserialization failed - event doesn't match input type, skip silently
+                return;
+            }
+        };
+
+        // Step 2: Extract key using typed function
+        let key = (self.key_fn)(&input);
+
+        // Step 3: Store latest value (overwrites previous)
+        state.insert(key, input);
+    }
+
+    fn initial_state(&self) -> Self::State {
+        HashMap::new()
+    }
+
+    fn emit(&self, state: &Self::State) -> Vec<ChainEvent> {
+        // Emit all latest values as typed events
+        state
+            .values()
+            .map(|value| {
+                // TODO(FLOWIP-082a): Use TypedPayload::EVENT_TYPE when schemas are implemented
+                let payload = serde_json::to_value(value).unwrap_or_else(|_| json!(null));
+                ChainEventFactory::data_event(
+                    self.writer_id.clone(),
+                    "conflated",
+                    payload,
+                )
+            })
+            .collect()
+    }
+
+    fn reset(&self, state: &mut Self::State) {
+        state.clear();
+    }
+}
+
+/// Builder pattern methods for combining with emission strategies
+impl<T, K, FKey> ConflateTyped<T, K, FKey>
+where
+    T: DeserializeOwned + Serialize + Send + Sync + Clone + Debug + 'static,
+    K: Hash + Eq + Clone + Debug + Serialize + Send + Sync + 'static,
+    FKey: Fn(&T) -> K + Send + Sync + Clone + 'static,
+{
+    /// Combine with a custom emission strategy.
+    pub fn with_emission<E: EmissionStrategy + 'static>(
+        self,
+        emission: E,
+    ) -> StatefulWithEmission<Self, E> {
+        StatefulWithEmission::new(self, emission)
+    }
+
+    /// Emit only on EOF (completion).
+    pub fn emit_on_eof(self) -> StatefulWithEmission<Self, OnEOF> {
+        self.with_emission(OnEOF::new())
+    }
+
+    /// Emit every N events.
+    pub fn emit_every_n(self, count: u64) -> StatefulWithEmission<Self, EveryN> {
+        self.with_emission(EveryN::new(count))
+    }
+
+    /// Emit within a time window.
+    ///
+    /// Useful for periodic snapshots of current state.
+    pub fn emit_within(self, duration: Duration) -> StatefulWithEmission<Self, TimeWindow> {
+        self.with_emission(TimeWindow::new(duration))
+    }
+
+    /// Emit after every event.
+    ///
+    /// Creates a real-time materialized view where every change
+    /// immediately produces an updated snapshot.
+    pub fn emit_always(self) -> StatefulWithEmission<Self, EmitAlways> {
+        self.with_emission(EmitAlways)
+    }
+}
+
+/// Convenience constructor on original Conflate for creating typed variants
+impl Conflate {
+    /// Create a typed Conflate that works with domain types
+    ///
+    /// # Arguments
+    ///
+    /// * `key_fn` - Function to extract the key: `Fn(&T) -> K`
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use obzenflow_runtime_services::stages::stateful::accumulators::Conflate;
+    /// use serde::{Deserialize, Serialize};
+    ///
+    /// #[derive(Deserialize, Serialize, Clone)]
+    /// struct SensorReading { sensor_id: String, value: f64 }
+    ///
+    /// let snapshot = Conflate::typed(
+    ///     |reading: &SensorReading| reading.sensor_id.clone()
+    /// );
+    /// ```
+    pub fn typed<T, K, FKey>(key_fn: FKey) -> ConflateTyped<T, K, FKey>
+    where
+        T: DeserializeOwned + Serialize + Send + Sync + Clone + Debug,
+        K: Hash + Eq + Clone + Debug + Send + Sync,
+        FKey: Fn(&T) -> K + Send + Sync + Clone,
+    {
+        ConflateTyped::new(key_fn)
+    }
+}
+
+#[cfg(test)]
+mod typed_tests {
+    use super::*;
+    use obzenflow_core::event::chain_event::ChainEventFactory;
+    use serde::Deserialize;
+
+    #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+    struct SensorReading {
+        sensor_id: String,
+        temperature: f64,
+        timestamp: u64,
+    }
+
+    #[test]
+    fn test_conflate_typed_empty_state() {
+        let accumulator = ConflateTyped::new(|reading: &SensorReading| reading.sensor_id.clone());
+        let state = accumulator.initial_state();
+        assert!(state.is_empty());
+    }
+
+    #[test]
+    fn test_conflate_typed_keeps_latest() {
+        let accumulator = ConflateTyped::new(|reading: &SensorReading| reading.sensor_id.clone());
+        let mut state = accumulator.initial_state();
+
+        // First reading for sensor_1
+        let reading1 = SensorReading {
+            sensor_id: "sensor_1".to_string(),
+            temperature: 20.5,
+            timestamp: 1000,
+        };
+        let event1 = ChainEventFactory::data_event(
+            WriterId::from(StageId::new()),
+            "reading",
+            serde_json::to_value(&reading1).unwrap(),
+        );
+        accumulator.accumulate(&mut state, event1);
+
+        assert_eq!(state.len(), 1);
+        assert_eq!(state["sensor_1"].temperature, 20.5);
+
+        // Second reading for sensor_1 (should overwrite)
+        let reading2 = SensorReading {
+            sensor_id: "sensor_1".to_string(),
+            temperature: 21.0,
+            timestamp: 2000,
+        };
+        let event2 = ChainEventFactory::data_event(
+            WriterId::from(StageId::new()),
+            "reading",
+            serde_json::to_value(&reading2).unwrap(),
+        );
+        accumulator.accumulate(&mut state, event2);
+
+        // Should still have 1 entry, but with updated value
+        assert_eq!(state.len(), 1);
+        assert_eq!(state["sensor_1"].temperature, 21.0);
+        assert_eq!(state["sensor_1"].timestamp, 2000);
+    }
+
+    #[test]
+    fn test_conflate_typed_multiple_keys() {
+        let accumulator = ConflateTyped::new(|reading: &SensorReading| reading.sensor_id.clone());
+        let mut state = accumulator.initial_state();
+
+        let readings = vec![
+            ("sensor_1", 20.5, 1000),
+            ("sensor_2", 18.0, 1001),
+            ("sensor_1", 21.0, 2000), // Overwrites first sensor_1
+            ("sensor_3", 22.5, 2001),
+            ("sensor_2", 19.0, 3000), // Overwrites first sensor_2
+        ];
+
+        for (sensor_id, temp, timestamp) in readings {
+            let reading = SensorReading {
+                sensor_id: sensor_id.to_string(),
+                temperature: temp,
+                timestamp,
+            };
+            let event = ChainEventFactory::data_event(
+                WriterId::from(StageId::new()),
+                "reading",
+                serde_json::to_value(&reading).unwrap(),
+            );
+            accumulator.accumulate(&mut state, event);
+        }
+
+        // Should have 3 sensors with their latest values
+        assert_eq!(state.len(), 3);
+        assert_eq!(state["sensor_1"].temperature, 21.0);
+        assert_eq!(state["sensor_1"].timestamp, 2000);
+        assert_eq!(state["sensor_2"].temperature, 19.0);
+        assert_eq!(state["sensor_2"].timestamp, 3000);
+        assert_eq!(state["sensor_3"].temperature, 22.5);
+        assert_eq!(state["sensor_3"].timestamp, 2001);
+    }
+
+    #[test]
+    fn test_conflate_typed_emit_returns_all_latest() {
+        let accumulator = ConflateTyped::new(|reading: &SensorReading| reading.sensor_id.clone());
+        let mut state = accumulator.initial_state();
+
+        // Add multiple sensors
+        for (sensor_id, value) in &[("sensor_1", 10.0), ("sensor_2", 20.0), ("sensor_3", 30.0)] {
+            let reading = SensorReading {
+                sensor_id: sensor_id.to_string(),
+                temperature: *value,
+                timestamp: 1000,
+            };
+            let event = ChainEventFactory::data_event(
+                WriterId::from(StageId::new()),
+                "reading",
+                serde_json::to_value(&reading).unwrap(),
+            );
+            accumulator.accumulate(&mut state, event);
+        }
+
+        let emitted = accumulator.emit(&state);
+
+        // Should emit all 3 latest events
+        assert_eq!(emitted.len(), 3);
+
+        // Verify all values are present
+        let temperatures: Vec<f64> = emitted
+            .iter()
+            .map(|e| e.payload()["temperature"].as_f64().unwrap())
+            .collect();
+        assert!(temperatures.contains(&10.0));
+        assert!(temperatures.contains(&20.0));
+        assert!(temperatures.contains(&30.0));
+    }
+
+    #[test]
+    fn test_conflate_typed_reset() {
+        let accumulator = ConflateTyped::new(|reading: &SensorReading| reading.sensor_id.clone());
+        let mut state = accumulator.initial_state();
+
+        let reading = SensorReading {
+            sensor_id: "sensor_1".to_string(),
+            temperature: 25.0,
+            timestamp: 1000,
+        };
+        let event = ChainEventFactory::data_event(
+            WriterId::from(StageId::new()),
+            "reading",
+            serde_json::to_value(&reading).unwrap(),
+        );
+        accumulator.accumulate(&mut state, event);
+        assert_eq!(state.len(), 1);
+
+        accumulator.reset(&mut state);
+        assert!(state.is_empty());
+    }
+
+    #[test]
+    fn test_conflate_typed_skips_invalid_events() {
+        let accumulator = ConflateTyped::new(|reading: &SensorReading| reading.sensor_id.clone());
+        let mut state = accumulator.initial_state();
+
+        // Valid event
+        let valid_reading = SensorReading {
+            sensor_id: "sensor_1".to_string(),
+            temperature: 25.0,
+            timestamp: 1000,
+        };
+        let valid_event = ChainEventFactory::data_event(
+            WriterId::from(StageId::new()),
+            "reading",
+            serde_json::to_value(&valid_reading).unwrap(),
+        );
+
+        // Invalid event - wrong structure
+        let invalid_event = ChainEventFactory::data_event(
+            WriterId::from(StageId::new()),
+            "reading",
+            json!({ "invalid_field": "oops" }),
+        );
+
+        accumulator.accumulate(&mut state, valid_event);
+        accumulator.accumulate(&mut state, invalid_event);
+
+        // Only the valid event should have been processed
+        assert_eq!(state.len(), 1);
+        assert!(state.contains_key("sensor_1"));
+    }
+
+    #[test]
+    fn test_conflate_typed_numeric_keys() {
+        #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+        struct UserStatus {
+            user_id: u64,
+            status: String,
+            last_seen: u64,
+        }
+
+        let accumulator = ConflateTyped::new(|status: &UserStatus| status.user_id);
+        let mut state = accumulator.initial_state();
+
+        let updates = vec![
+            (1, "online", 1000),
+            (2, "offline", 1001),
+            (1, "away", 2000),   // Overwrites user 1
+            (3, "online", 2001),
+            (2, "online", 3000), // Overwrites user 2
+        ];
+
+        for (user_id, status, last_seen) in updates {
+            let user_status = UserStatus {
+                user_id,
+                status: status.to_string(),
+                last_seen,
+            };
+            let event = ChainEventFactory::data_event(
+                WriterId::from(StageId::new()),
+                "user_status",
+                serde_json::to_value(&user_status).unwrap(),
+            );
+            accumulator.accumulate(&mut state, event);
+        }
+
+        // Should have 3 users with their latest status
+        assert_eq!(state.len(), 3);
+        assert_eq!(state[&1].status, "away");
+        assert_eq!(state[&1].last_seen, 2000);
+        assert_eq!(state[&2].status, "online");
+        assert_eq!(state[&2].last_seen, 3000);
+        assert_eq!(state[&3].status, "online");
+        assert_eq!(state[&3].last_seen, 2001);
+    }
+}

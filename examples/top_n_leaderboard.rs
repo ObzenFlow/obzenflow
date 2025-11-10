@@ -1,6 +1,6 @@
-//! TopN Leaderboard Demo - Using FLOWIP-080c TopN Accumulator
+//! TopN Leaderboard Demo - Using FLOWIP-080j TopNTyped Accumulator
 //!
-//! Demonstrates the TopN accumulator for maintaining leaderboards
+//! Demonstrates the typed TopN accumulator for maintaining leaderboards
 //! and "hottest items" lists with bounded memory usage.
 //!
 //! Run with: cargo run --package obzenflow --example top_n_leaderboard
@@ -9,7 +9,7 @@ use obzenflow_dsl_infra::{flow, source, stateful, sink};
 use obzenflow_runtime_services::stages::common::handlers::{
     FiniteSourceHandler, SinkHandler
 };
-use obzenflow_runtime_services::stages::stateful::accumulators::TopN;
+use obzenflow_runtime_services::stages::stateful::accumulators::TopNTyped;
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_core::{
@@ -18,9 +18,19 @@ use obzenflow_core::{
     WriterId,
     id::StageId,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use anyhow::Result;
 use async_trait::async_trait;
+
+/// Domain type for game score events
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct GameScore {
+    player: String,
+    score: f64,
+    game_mode: String,
+    timestamp: usize,
+}
 
 /// Source that generates player score events
 #[derive(Clone, Debug)]
@@ -142,11 +152,11 @@ async fn main() -> Result<()> {
 
     println!("🎮 FlowState RS - TopN Leaderboard Demo");
     println!("=======================================");
-    println!("✨ Using FLOWIP-080c TopN Accumulator");
+    println!("✨ Using FLOWIP-080j TopNTyped Accumulator");
     println!("");
-    println!("This demo shows how TopN maintains a leaderboard");
-    println!("of the top 5 players by score, automatically");
-    println!("evicting lower scores as new high scores arrive.\n");
+    println!("This demo shows how TopNTyped maintains a leaderboard");
+    println!("of the top 5 players by score with type-safe operations,");
+    println!("automatically evicting lower scores as new high scores arrive.\n");
 
     println!("Starting game score stream...\n");
 
@@ -159,20 +169,15 @@ async fn main() -> Result<()> {
             stages: {
                 scores = source!("scores" => GameScoreSource::new());
 
-                // TopN accumulator tracking top 5 players
-                // Note: This takes the LATEST score for each player
-                // (simulating score updates/improvements)
+                // FLOWIP-080j: TopNTyped accumulator tracking top 5 players
+                // Note: This takes the LATEST score for each player (key = player name)
+                // When a player's score updates, it replaces the old entry
                 leaderboard = stateful!("leaderboard" =>
-                    TopN::new(5, |event: &ChainEvent| {
-                        let payload = event.payload();
-                        if event.event_type() == "game.score" {
-                            let player = payload["player"].as_str()?.to_string();
-                            let score = payload["score"].as_f64()?;
-                            Some((player, score, payload.clone()))
-                        } else {
-                            None
-                        }
-                    }).emit_on_eof()  // Emit final leaderboard at end
+                    TopNTyped::new(
+                        5,
+                        |score: &GameScore| score.player.clone(),  // Key: player name
+                        |score: &GameScore| score.score            // Score: points earned
+                    ).emit_on_eof()  // Emit final leaderboard at end
                 );
 
                 display = sink!("display" => LeaderboardDisplay::new());
