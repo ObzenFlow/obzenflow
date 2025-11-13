@@ -44,10 +44,12 @@
 
 use obzenflow_core::ChainEvent;
 use obzenflow_core::event::ChainEventFactory;
+use obzenflow_core::TypedPayload;
 use crate::stages::common::handlers::TransformHandler;
 use async_trait::async_trait;
 use serde::{Serialize, de::DeserializeOwned};
 use std::marker::PhantomData;
+
 
 /// Map helper for transform stages
 ///
@@ -145,18 +147,19 @@ where
 /// eliminating the need for manual serialization/deserialization boilerplate.
 /// Unlike TryMapWith, Map transformations always succeed - there's no error handling.
 ///
-/// The output event type is automatically derived from the output type's name.
+/// The output type O must implement TypedPayload to provide the event type name.
 ///
 /// # Type Parameters
 ///
 /// * `T` - Input type (must implement `DeserializeOwned`)
-/// * `O` - Output type (must implement `Serialize`)
+/// * `O` - Output type (must implement `Serialize + TypedPayload`)
 /// * `F` - Mapper function: `Fn(T) -> O`
 ///
 /// # Examples
 ///
 /// ```rust
 /// use obzenflow_runtime_services::stages::transform::helpers::MapTyped;
+/// use obzenflow_core::TypedPayload;
 /// use serde::{Deserialize, Serialize};
 ///
 /// #[derive(Deserialize)]
@@ -164,6 +167,10 @@ where
 ///
 /// #[derive(Serialize)]
 /// struct ProcessedData { value: i32, doubled: i32 }
+///
+/// impl TypedPayload for ProcessedData {
+///     const EVENT_TYPE: &'static str = "data.processed.v1";
+/// }
 ///
 /// let processor = MapTyped::new(|data: RawData| ProcessedData {
 ///     value: data.value,
@@ -174,7 +181,7 @@ where
 pub struct MapTyped<T, O, F>
 where
     T: DeserializeOwned + Send + Sync,
-    O: Serialize + Send + Sync,
+    O: Serialize + Send + Sync + TypedPayload,
     F: Fn(T) -> O + Send + Sync + Clone,
 {
     mapper: F,
@@ -184,12 +191,12 @@ where
 impl<T, O, F> MapTyped<T, O, F>
 where
     T: DeserializeOwned + Send + Sync,
-    O: Serialize + Send + Sync,
+    O: Serialize + Send + Sync + TypedPayload,
     F: Fn(T) -> O + Send + Sync + Clone,
 {
     /// Create a new typed Map helper
     ///
-    /// The output event type is automatically derived from the output type name.
+    /// Uses the compile-time constant `O::EVENT_TYPE` from the TypedPayload trait.
     ///
     /// # Arguments
     ///
@@ -198,6 +205,7 @@ where
     /// # Example
     /// ```rust
     /// use obzenflow_runtime_services::stages::transform::helpers::MapTyped;
+    /// use obzenflow_core::TypedPayload;
     /// use serde::{Deserialize, Serialize};
     ///
     /// #[derive(Deserialize)]
@@ -205,6 +213,10 @@ where
     ///
     /// #[derive(Serialize)]
     /// struct Output { x: i32, squared: i32 }
+    ///
+    /// impl TypedPayload for Output {
+    ///     const EVENT_TYPE: &'static str = "output.v1";
+    /// }
     ///
     /// let mapper = MapTyped::new(|input: Input| Output {
     ///     x: input.x,
@@ -222,7 +234,7 @@ where
 impl<T, O, F> std::fmt::Debug for MapTyped<T, O, F>
 where
     T: DeserializeOwned + Send + Sync,
-    O: Serialize + Send + Sync,
+    O: Serialize + Send + Sync + TypedPayload,
     F: Fn(T) -> O + Send + Sync + Clone,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -237,7 +249,7 @@ where
 impl<T, O, F> TransformHandler for MapTyped<T, O, F>
 where
     T: DeserializeOwned + Send + Sync + 'static,
-    O: Serialize + Send + Sync + 'static,
+    O: Serialize + Send + Sync + TypedPayload + 'static,
     F: Fn(T) -> O + Send + Sync + Clone + 'static,
 {
     fn process(&self, event: ChainEvent) -> Vec<ChainEvent> {
@@ -271,19 +283,11 @@ where
             }
         };
 
-        // TODO(FLOWIP-082a): Replace with TypedPayload::EVENT_TYPE when schemas are implemented
-        // Current approach: Extract type name at runtime as temporary solution
-        // Future: Prefer O::EVENT_TYPE (compile-time) if O implements TypedPayload trait
-        // Fallback: Keep type_name() for ad-hoc types without schemas
-        let event_type = std::any::type_name::<O>()
-            .split("::")
-            .last()
-            .unwrap_or(std::any::type_name::<O>());
-
+        // FLOWIP-082a: Use TypedPayload::EVENT_TYPE (compile-time constant)
         vec![ChainEventFactory::derived_data_event(
             event.writer_id.clone(),
             &event,
-            event_type,
+            O::EVENT_TYPE,
             payload,
         )]
     }
@@ -304,10 +308,12 @@ where
     /// Create a typed Map that works with domain types instead of ChainEvent
     ///
     /// This is a convenience method that delegates to MapTyped::new().
+    /// The output type O must implement TypedPayload.
     ///
     /// # Example
     /// ```rust
     /// use obzenflow_runtime_services::stages::transform::helpers::Map;
+    /// use obzenflow_core::TypedPayload;
     /// use serde::{Deserialize, Serialize};
     ///
     /// #[derive(Deserialize)]
@@ -315,6 +321,10 @@ where
     ///
     /// #[derive(Serialize)]
     /// struct Output { value: i32, processed: bool }
+    ///
+    /// impl TypedPayload for Output {
+    ///     const EVENT_TYPE: &'static str = "output.processed.v1";
+    /// }
     ///
     /// let mapper = Map::typed(|input: Input| Output {
     ///     value: input.value,
@@ -324,7 +334,7 @@ where
     pub fn typed<T, O, G>(mapper: G) -> MapTyped<T, O, G>
     where
         T: DeserializeOwned + Send + Sync,
-        O: Serialize + Send + Sync,
+        O: Serialize + Send + Sync + TypedPayload,
         G: Fn(T) -> O + Send + Sync + Clone,
     {
         MapTyped::new(mapper)
@@ -440,11 +450,15 @@ mod tests {
         name: String,
     }
 
-    #[derive(Debug, Clone, Serialize, PartialEq)]
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
     struct TestOutput {
         value: i32,
         name: String,
         doubled: i32,
+    }
+
+    impl obzenflow_core::TypedPayload for TestOutput {
+        const EVENT_TYPE: &'static str = "test.output";
     }
 
     #[tokio::test]
@@ -465,7 +479,7 @@ mod tests {
 
         let result = mapper.process(event);
         assert_eq!(result.len(), 1);
-        assert_eq!(result[0].event_type(), "TestOutput");
+        assert_eq!(result[0].event_type(), "test.output.v1");
         assert_eq!(result[0].payload()["value"], json!(21));
         assert_eq!(result[0].payload()["name"], json!("test"));
         assert_eq!(result[0].payload()["doubled"], json!(42));
@@ -489,7 +503,7 @@ mod tests {
 
         let result = mapper.process(event);
         assert_eq!(result.len(), 1);
-        assert_eq!(result[0].event_type(), "TestOutput");  // Derived from output type name
+        assert_eq!(result[0].event_type(), "test.output.v1");
         assert_eq!(result[0].payload()["value"], json!(50));
         assert_eq!(result[0].payload()["name"], json!("HELLO"));
         assert_eq!(result[0].payload()["doubled"], json!(10));
@@ -523,7 +537,6 @@ mod tests {
         assert!(debug_str.contains("MapTyped"));
         assert!(debug_str.contains("TestInput"));
         assert!(debug_str.contains("TestOutput"));
-        assert!(debug_str.contains("TestOutput")); // output_event_type
     }
 
     #[tokio::test]

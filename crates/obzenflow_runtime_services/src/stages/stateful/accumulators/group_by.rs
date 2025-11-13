@@ -6,7 +6,7 @@
 use super::Accumulator;
 use crate::stages::stateful::emission::{EmissionStrategy, OnEOF, EveryN, TimeWindow, EmitAlways};
 use crate::stages::stateful::accumulators::wrapper::StatefulWithEmission;
-use obzenflow_core::{ChainEvent, EventId, WriterId};
+use obzenflow_core::{ChainEvent, EventId, WriterId, TypedPayload};
 use obzenflow_core::event::ChainEventFactory;
 use obzenflow_core::id::StageId;
 use serde::{Serialize, de::DeserializeOwned};
@@ -375,7 +375,7 @@ pub struct GroupByTyped<T, K, S, FKey, FUpdate>
 where
     T: DeserializeOwned + Send + Sync,
     K: Hash + Eq + Clone + Debug + Send + Sync,
-    S: Default + Serialize + Send + Sync + Debug + Clone,
+    S: Default + Serialize + TypedPayload + Send + Sync + Debug + Clone,
     FKey: Fn(&T) -> K + Send + Sync + Clone,
     FUpdate: Fn(&mut S, &T) + Send + Sync + Clone,  // CORRECTED: state first, value second
 {
@@ -389,7 +389,7 @@ impl<T, K, S, FKey, FUpdate> Debug for GroupByTyped<T, K, S, FKey, FUpdate>
 where
     T: DeserializeOwned + Send + Sync,
     K: Hash + Eq + Clone + Debug + Send + Sync,
-    S: Default + Serialize + Send + Sync + Debug + Clone,
+    S: Default + Serialize + TypedPayload + Send + Sync + Debug + Clone,
     FKey: Fn(&T) -> K + Send + Sync + Clone,
     FUpdate: Fn(&mut S, &T) + Send + Sync + Clone,  // CORRECTED: state first, value second
 {
@@ -407,11 +407,14 @@ impl<T, K, S, FKey, FUpdate> GroupByTyped<T, K, S, FKey, FUpdate>
 where
     T: DeserializeOwned + Send + Sync,
     K: Hash + Eq + Clone + Debug + Send + Sync,
-    S: Default + Serialize + Send + Sync + Debug + Clone,
+    S: Default + Serialize + TypedPayload + Send + Sync + Debug + Clone,
     FKey: Fn(&T) -> K + Send + Sync + Clone,
     FUpdate: Fn(&mut S, &T) + Send + Sync + Clone,  // CORRECTED: state first, value second
 {
     /// Create a new typed GroupBy accumulator.
+    ///
+    /// Requires the state type `S` to implement `TypedPayload` for compile-time
+    /// event type resolution.
     ///
     /// # Arguments
     ///
@@ -437,7 +440,7 @@ impl<T, K, S, FKey, FUpdate> Accumulator for GroupByTyped<T, K, S, FKey, FUpdate
 where
     T: DeserializeOwned + Send + Sync + 'static,
     K: Hash + Eq + Clone + Debug + Serialize + Send + Sync + 'static,
-    S: Default + Serialize + Send + Sync + Debug + Clone + 'static,
+    S: Default + Serialize + TypedPayload + Send + Sync + Debug + Clone + 'static,
     FKey: Fn(&T) -> K + Send + Sync + Clone + 'static,
     FUpdate: Fn(&mut S, &T) + Send + Sync + Clone + 'static,  // CORRECTED: state first, value second
 {
@@ -469,14 +472,11 @@ where
         state
             .iter()
             .map(|(key, group_state)| {
-                // TODO(FLOWIP-082a): Use TypedPayload::EVENT_TYPE when schemas are implemented
-                // Current: Extract key/state type names at runtime
-                // Future: Prefer compile-time EVENT_TYPE from TypedPayload trait
                 let key_json = serde_json::to_value(key).unwrap_or_else(|_| json!(null));
 
                 ChainEventFactory::data_event(
                     self.writer_id.clone(),
-                    "aggregated",
+                    S::EVENT_TYPE,
                     json!({
                         "key": key_json,
                         "result": group_state,
@@ -496,7 +496,7 @@ impl<T, K, S, FKey, FUpdate> GroupByTyped<T, K, S, FKey, FUpdate>
 where
     T: DeserializeOwned + Send + Sync + 'static,
     K: Hash + Eq + Clone + Debug + Serialize + Send + Sync + 'static,
-    S: Default + Serialize + Send + Sync + Debug + Clone + 'static,
+    S: Default + Serialize + TypedPayload + Send + Sync + Debug + Clone + 'static,
     FKey: Fn(&T) -> K + Send + Sync + Clone + 'static,
     FUpdate: Fn(&mut S, &T) + Send + Sync + Clone + 'static,  // CORRECTED: state first, value second
 {
@@ -543,7 +543,7 @@ where
 impl<F, S> GroupBy<F, S>
 where
     F: Fn(&ChainEvent, &mut S) + Send + Sync + Clone,
-    S: Clone + Send + Sync + Debug + Default + Serialize,
+    S: Clone + Send + Sync + Debug + Default + Serialize + TypedPayload,
 {
     /// Create a typed GroupBy that works with domain types
     ///
@@ -597,10 +597,14 @@ mod typed_tests {
         quantity: u32,
     }
 
-    #[derive(Clone, Debug, Default, Serialize)]
+    #[derive(Clone, Debug, Default, Serialize, Deserialize)]
     struct CategoryStats {
         total_items: u64,
         total_revenue: i64,
+    }
+
+    impl obzenflow_core::TypedPayload for CategoryStats {
+        const EVENT_TYPE: &'static str = "category.stats";
     }
 
     #[test]
@@ -723,7 +727,7 @@ mod typed_tests {
         assert_eq!(emitted.len(), 2);
 
         for event in emitted {
-            assert_eq!(event.event_type(), "aggregated");
+            assert_eq!(event.event_type(), CategoryStats::EVENT_TYPE);
             let payload = event.payload();
             assert!(payload.get("key").is_some());
             assert!(payload.get("result").is_some());
@@ -812,10 +816,14 @@ mod typed_tests {
             amount: f64,
         }
 
-        #[derive(Clone, Debug, Default, Serialize)]
+        #[derive(Clone, Debug, Default, Serialize, Deserialize)]
         struct StoreStats {
             total_sales: f64,
             transaction_count: u64,
+        }
+
+        impl obzenflow_core::TypedPayload for StoreStats {
+            const EVENT_TYPE: &'static str = "store.stats";
         }
 
         let accumulator = GroupByTyped::new(

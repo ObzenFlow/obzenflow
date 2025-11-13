@@ -65,6 +65,7 @@
 
 use obzenflow_core::ChainEvent;
 use obzenflow_core::event::{ChainEventFactory, status::processing_status::ProcessingStatus};
+use obzenflow_core::TypedPayload;
 use crate::stages::common::handlers::TransformHandler;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -529,7 +530,7 @@ where
 pub struct TryMapWithTyped<T, O, F>
 where
     T: DeserializeOwned + Send + Sync,
-    O: Serialize + Send + Sync,
+    O: Serialize + Send + Sync + TypedPayload,
     F: Fn(T) -> Result<O, String> + Send + Sync + Clone,
 {
     converter: F,
@@ -540,19 +541,21 @@ where
 impl<T, O, F> TryMapWithTyped<T, O, F>
 where
     T: DeserializeOwned + Send + Sync,
-    O: Serialize + Send + Sync,
+    O: Serialize + Send + Sync + TypedPayload,
     F: Fn(T) -> Result<O, String> + Send + Sync + Clone,
 {
     /// Create a new typed TryMapWith helper
     ///
+    /// The output type O must implement TypedPayload to provide the event type name.
+    ///
     /// # Arguments
     ///
     /// * `converter` - Function that transforms T into Result<O, String>
-    /// * `output_event_type` - The event_type for successful conversions
     ///
     /// # Example
     /// ```rust
     /// use obzenflow_runtime_services::stages::transform::helpers::TryMapWithTyped;
+    /// use obzenflow_core::TypedPayload;
     /// use serde::{Deserialize, Serialize};
     ///
     /// #[derive(Deserialize)]
@@ -560,6 +563,10 @@ where
     ///
     /// #[derive(Serialize)]
     /// struct ValidatedFlight { carrier: String, validated: bool }
+    ///
+    /// impl TypedPayload for ValidatedFlight {
+    ///     const EVENT_TYPE: &'static str = "flight.validated.v1";
+    /// }
     ///
     /// let validator = TryMapWithTyped::new(|flight: Flight| {
     ///     if flight.carrier.is_empty() {
@@ -616,7 +623,7 @@ where
 impl<T, O, F> std::fmt::Debug for TryMapWithTyped<T, O, F>
 where
     T: DeserializeOwned + Send + Sync,
-    O: Serialize + Send + Sync,
+    O: Serialize + Send + Sync + TypedPayload,
     F: Fn(T) -> Result<O, String> + Send + Sync + Clone,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -632,7 +639,7 @@ where
 impl<T, O, F> TransformHandler for TryMapWithTyped<T, O, F>
 where
     T: DeserializeOwned + Send + Sync + 'static,
-    O: Serialize + Send + Sync + 'static,
+    O: Serialize + Send + Sync + TypedPayload + 'static,
     F: Fn(T) -> Result<O, String> + Send + Sync + Clone + 'static,
 {
     fn process(&self, event: ChainEvent) -> Vec<ChainEvent> {
@@ -656,19 +663,11 @@ where
                 // Step 3: Serialize O → ChainEvent payload
                 match serde_json::to_value(&output_value) {
                     Ok(payload) => {
-                        // TODO(FLOWIP-082a): Replace with TypedPayload::EVENT_TYPE when schemas are implemented
-                        // Current approach: Extract type name at runtime as temporary solution
-                        // Future: Prefer O::EVENT_TYPE (compile-time) if O implements TypedPayload trait
-                        // Fallback: Keep type_name() for ad-hoc types without schemas
-                        let event_type = std::any::type_name::<O>()
-                            .split("::")
-                            .last()
-                            .unwrap_or(std::any::type_name::<O>());
-
+                        // FLOWIP-082a: Use TypedPayload::EVENT_TYPE (compile-time constant)
                         vec![ChainEventFactory::derived_data_event(
                             event.writer_id.clone(),
                             &event,
-                            event_type,
+                            O::EVENT_TYPE,
                             payload,
                         )]
                     }
@@ -697,7 +696,7 @@ where
 impl<T, O, F> TryMapWithTyped<T, O, F>
 where
     T: DeserializeOwned + Send + Sync,
-    O: Serialize + Send + Sync,
+    O: Serialize + Send + Sync + TypedPayload,
     F: Fn(T) -> Result<O, String> + Send + Sync + Clone,
 {
     /// Handle errors according to the configured error strategy
@@ -770,7 +769,7 @@ where
     pub fn typed<T, O, G>(converter: G) -> TryMapWithTyped<T, O, G>
     where
         T: DeserializeOwned + Send + Sync,
-        O: Serialize + Send + Sync,
+        O: Serialize + Send + Sync + TypedPayload,
         G: Fn(T) -> Result<O, String> + Send + Sync + Clone,
     {
         TryMapWithTyped::new(converter)
@@ -1101,11 +1100,15 @@ mod tests {
         name: String,
     }
 
-    #[derive(Debug, Clone, Serialize, PartialEq)]
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
     struct TestOutput {
         value: i32,
         name: String,
         validated: bool,
+    }
+
+    impl obzenflow_core::TypedPayload for TestOutput {
+        const EVENT_TYPE: &'static str = "test.output.validated";
     }
 
     #[tokio::test]
@@ -1131,7 +1134,7 @@ mod tests {
 
         let result = validator.process(event);
         assert_eq!(result.len(), 1);
-        assert_eq!(result[0].event_type(), "TestOutput");
+        assert_eq!(result[0].event_type(), "test.output.validated.v1");
         assert_eq!(result[0].payload()["value"], json!(42));
         assert_eq!(result[0].payload()["name"], json!("test"));
         assert_eq!(result[0].payload()["validated"], json!(true));

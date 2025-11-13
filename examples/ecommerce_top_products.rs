@@ -1,4 +1,4 @@
-//! E-commerce Top Products Demo - Using FLOWIP-080j TopNByTyped Accumulator
+//! E-commerce Top Products Demo - Using FLOWIP-080j & FLOWIP-082a
 //!
 //! Demonstrates TopNByTyped for tracking best-selling products by total revenue,
 //! accumulating multiple orders for the same product throughout the day.
@@ -16,6 +16,7 @@ use obzenflow_infra::journal::disk_journals;
 use obzenflow_core::{
     event::chain_event::{ChainEvent, ChainEventFactory},
     event::payloads::delivery_payload::{DeliveryPayload, DeliveryMethod},
+    TypedPayload,
     WriterId,
     id::StageId,
 };
@@ -24,7 +25,7 @@ use serde_json::json;
 use anyhow::Result;
 use async_trait::async_trait;
 
-// FLOWIP-080j: Domain types for type-safe accumulation
+// FLOWIP-082a: Strongly-typed event with schema version
 #[derive(Debug, Clone, Deserialize, Serialize)]
 struct OrderEvent {
     order_id: String,
@@ -35,6 +36,11 @@ struct OrderEvent {
     quantity: u32,
     total_value: f64,
     timestamp: usize,
+}
+
+impl TypedPayload for OrderEvent {
+    const EVENT_TYPE: &'static str = "ecommerce.order";
+    const SCHEMA_VERSION: u32 = 1;
 }
 
 /// Source that generates e-commerce order events
@@ -90,9 +96,10 @@ impl FiniteSourceHandler for OrderStreamSource {
             println!("📦 Order #{}: {} x{} ({}) = ${:.2}",
                 self.current_index, product_name, quantity, product_id, order_value);
 
+            // ✨ FLOWIP-082a: Emit typed event using EVENT_TYPE constant
             Some(ChainEventFactory::data_event(
                 self.writer_id.clone(),
-                "order.placed",
+                OrderEvent::EVENT_TYPE,
                 json!({
                     "order_id": format!("ORD-{:04}", self.current_index),
                     "product_id": product_id,
@@ -127,7 +134,8 @@ impl SalesDashboard {
 #[async_trait]
 impl SinkHandler for SalesDashboard {
     async fn consume(&mut self, event: ChainEvent) -> obzenflow_core::Result<DeliveryPayload> {
-        if event.event_type() == "top_n_by_result" {
+        // ✨ FLOWIP-082a: TopNByTyped emits events with input type's EVENT_TYPE
+        if event.event_type() == OrderEvent::EVENT_TYPE {
             let payload = event.payload();
             let top_n = payload["top_n"].as_array().unwrap();
             let total_items = payload["total_items"].as_u64().unwrap();
@@ -182,7 +190,7 @@ async fn main() -> Result<()> {
 
     println!("🛒 FlowState RS - E-commerce Top Products Analytics");
     println!("===================================================");
-    println!("✨ Using FLOWIP-080j TopNByTyped Accumulator");
+    println!("✨ Using FLOWIP-080j TopNByTyped & FLOWIP-082a TypedPayload");
     println!("");
     println!("This demo shows real-time tracking of best-selling");
     println!("products by total revenue, accumulating multiple");
@@ -225,11 +233,16 @@ async fn main() -> Result<()> {
     .map_err(|e| anyhow::anyhow!("Application failed: {:?}", e))?;
 
     println!("✅ E-commerce analytics completed!");
-    println!("\n💡 Key Insights (FLOWIP-080j):");
-    println!("   • TopNByTyped: Type-safe key and score extraction");
+    println!("\n💡 Key Insights:");
+    println!("   FLOWIP-082a TypedPayload:");
+    println!("   • OrderEvent::EVENT_TYPE instead of \"order.placed\"");
+    println!("   • SCHEMA_VERSION for evolution tracking");
+    println!("   • Strongly-typed event structs");
+    println!("");
+    println!("   FLOWIP-080j TopNByTyped:");
+    println!("   • Type-safe key and score extraction");
     println!("   • No ChainEvent manipulation - work with OrderEvent directly");
     println!("   • Compile-time safety for field access");
-    println!("   • Perfect for analytics: sales by product, activity by user, etc.");
     println!("   • Memory bounded to N items regardless of stream size");
     println!("\n📝 Journal written to: target/ecommerce-logs/");
 

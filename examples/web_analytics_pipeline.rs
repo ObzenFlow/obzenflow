@@ -1,4 +1,4 @@
-//! Web Analytics Pipeline - Using FLOWIP-080j Typed Accumulators
+//! Web Analytics Pipeline - Using FLOWIP-080j & FLOWIP-082a
 //!
 //! Problem: Track user behavior on a website to understand engagement patterns.
 //!
@@ -7,9 +7,9 @@
 //! 2. Monitor conversion funnel - emit after every N events to track progress (EveryN)
 //! 3. Calculate daily metrics - emit final stats at end (OnEOF)
 //!
-//! This demonstrates FLOWIP-080j typed accumulators:
-//! - GroupByTyped for per-user session tracking
-//! - ReduceTyped for funnel and metrics aggregation
+//! This demonstrates:
+//! - FLOWIP-080j: GroupByTyped, ReduceTyped for typed accumulators
+//! - FLOWIP-082a: TypedPayload for strongly-typed events
 //! - Zero ChainEvent manipulation in business logic
 //!
 //! Run with: `cargo run -p obzenflow --example web_analytics_pipeline`
@@ -19,6 +19,7 @@ use async_trait::async_trait;
 use obzenflow_core::{
     event::chain_event::{ChainEvent, ChainEventFactory},
     event::payloads::delivery_payload::{DeliveryPayload, DeliveryMethod},
+    TypedPayload,
     WriterId,
     id::StageId,
 };
@@ -35,8 +36,8 @@ use serde_json::json;
 use std::collections::HashMap;
 use std::time::Duration;
 
-// FLOWIP-080j: Domain types for type-safe event processing
-#[derive(Clone, Debug, Deserialize)]
+// FLOWIP-082a: Strongly-typed domain events
+#[derive(Clone, Debug, Deserialize, Serialize)]
 struct UserEvent {
     user_id: String,
     event_type: String,
@@ -50,6 +51,11 @@ struct UserEvent {
     depth: Option<u32>,
     #[serde(default)]
     value: Option<f64>,
+}
+
+impl TypedPayload for UserEvent {
+    const EVENT_TYPE: &'static str = "analytics.user_event";
+    const SCHEMA_VERSION: u32 = 1;
 }
 
 /// Source that simulates user behavior events
@@ -167,9 +173,10 @@ impl FiniteSourceHandler for UserEventSource {
         let payload = self.generate_event_payload();
         self.event_count += 1;
 
+        // ✨ FLOWIP-082a: Emit typed event using EVENT_TYPE constant
         Some(ChainEventFactory::data_event(
             self.writer_id.clone(),
-            "user_event",
+            UserEvent::EVENT_TYPE,
             payload,
         ))
     }
@@ -179,14 +186,19 @@ impl FiniteSourceHandler for UserEventSource {
     }
 }
 
-// FLOWIP-080j: Session tracking state (per user)
-#[derive(Clone, Debug, Default, Serialize)]
+// FLOWIP-082a: Session tracking state (per user)
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct SessionData {
     event_count: usize,
     pages_viewed: Vec<String>,
     total_duration_ms: u64,
     clicks: usize,
     max_scroll_depth: u32,
+}
+
+impl TypedPayload for SessionData {
+    const EVENT_TYPE: &'static str = "analytics.session_data";
+    const SCHEMA_VERSION: u32 = 1;
 }
 
 impl UserEvent {
@@ -216,12 +228,17 @@ impl UserEvent {
     }
 }
 
-// FLOWIP-080j: Funnel tracking state
-#[derive(Clone, Debug, Default, Serialize)]
+// FLOWIP-082a: Funnel tracking state
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct FunnelState {
     total_users: HashMap<String, bool>,
     funnel_stages: HashMap<String, usize>, // page -> visitor count
     conversions: Vec<f64>,
+}
+
+impl TypedPayload for FunnelState {
+    const EVENT_TYPE: &'static str = "analytics.funnel_state";
+    const SCHEMA_VERSION: u32 = 1;
 }
 
 impl UserEvent {
@@ -243,13 +260,18 @@ impl UserEvent {
     }
 }
 
-// FLOWIP-080j: Overall metrics state
-#[derive(Clone, Debug, Default, Serialize)]
+// FLOWIP-082a: Overall metrics state
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct MetricsState {
     total_events: usize,
     events_by_type: HashMap<String, usize>,
     pages_by_popularity: HashMap<String, usize>,
     total_revenue: f64,
+}
+
+impl TypedPayload for MetricsState {
+    const EVENT_TYPE: &'static str = "analytics.metrics_state";
+    const SCHEMA_VERSION: u32 = 1;
 }
 
 impl UserEvent {
@@ -288,8 +310,8 @@ impl SinkHandler for AnalyticsSink {
     async fn consume(&mut self, event: ChainEvent) -> obzenflow_core::Result<DeliveryPayload> {
         let payload = event.payload();
 
-        // GroupByTyped emits "grouped" events with key and result
-        if event.event_type() == "grouped" {
+        // ✨ FLOWIP-082a: GroupByTyped emits with state's EVENT_TYPE
+        if event.event_type() == SessionData::EVENT_TYPE {
             if let (Some(key), Some(result)) = (payload.get("key"), payload.get("result")) {
                 // Session snapshot from GroupByTyped
                 println!("\n📊 [{}] Session Update:", self.name);
@@ -300,8 +322,8 @@ impl SinkHandler for AnalyticsSink {
                 println!("   - Duration: {}ms", result["total_duration_ms"].as_u64().unwrap_or(0));
             }
         }
-        // ReduceTyped emits "reduced" events with result
-        else if event.event_type() == "reduced" {
+        // ✨ FLOWIP-082a: ReduceTyped emits with state's EVENT_TYPE
+        else if event.event_type() == FunnelState::EVENT_TYPE || event.event_type() == MetricsState::EVENT_TYPE {
             if let Some(result) = payload.get("result") {
                 // Check if it's funnel or metrics by looking at the fields
                 if result.get("funnel_stages").is_some() {
@@ -353,8 +375,8 @@ impl SinkHandler for AnalyticsSink {
 async fn main() -> Result<()> {
     std::env::set_var("OBZENFLOW_METRICS_EXPORTER", "console");
 
-    println!("🌐 Web Analytics Pipeline (FLOWIP-080j)");
-    println!("========================================");
+    println!("🌐 Web Analytics Pipeline (FLOWIP-080j & 082a)");
+    println!("===============================================");
     println!();
     println!("Processing user behavior events with typed accumulators:");
     println!();
@@ -428,7 +450,13 @@ async fn main() -> Result<()> {
     .await?;
 
     println!("\n✅ Analytics pipeline complete!");
-    println!("\n💡 Key Improvements (FLOWIP-080j):");
+    println!("\n💡 Key Improvements:");
+    println!("   FLOWIP-082a TypedPayload:");
+    println!("   • UserEvent::EVENT_TYPE instead of \"user_event\"");
+    println!("   • SCHEMA_VERSION for all event types");
+    println!("   • Strongly-typed event structs");
+    println!("");
+    println!("   FLOWIP-080j Typed Accumulators:");
     println!("   • GroupByTyped: Type-safe per-user session tracking");
     println!("   • ReduceTyped: Type-safe funnel and metrics aggregation");
     println!("   • Zero ChainEvent manipulation in business logic");

@@ -6,7 +6,7 @@
 use super::Accumulator;
 use crate::stages::stateful::emission::{EmissionStrategy, OnEOF, EveryN, TimeWindow, EmitAlways};
 use crate::stages::stateful::accumulators::wrapper::StatefulWithEmission;
-use obzenflow_core::{ChainEvent, EventId, WriterId};
+use obzenflow_core::{ChainEvent, EventId, WriterId, TypedPayload};
 use obzenflow_core::event::ChainEventFactory;
 use obzenflow_core::id::StageId;
 use serde_json::json;
@@ -312,7 +312,7 @@ use std::hash::Hash;
 #[derive(Clone)]
 pub struct ConflateTyped<T, K, FKey>
 where
-    T: DeserializeOwned + Serialize + Send + Sync + Clone + Debug,
+    T: DeserializeOwned + Serialize + Send + Sync + Clone + Debug + TypedPayload,
     K: Hash + Eq + Clone + Debug + Send + Sync,
     FKey: Fn(&T) -> K + Send + Sync + Clone,
 {
@@ -323,7 +323,7 @@ where
 
 impl<T, K, FKey> Debug for ConflateTyped<T, K, FKey>
 where
-    T: DeserializeOwned + Serialize + Send + Sync + Clone + Debug,
+    T: DeserializeOwned + Serialize + Send + Sync + Clone + Debug + TypedPayload,
     K: Hash + Eq + Clone + Debug + Send + Sync,
     FKey: Fn(&T) -> K + Send + Sync + Clone,
 {
@@ -338,11 +338,14 @@ where
 
 impl<T, K, FKey> ConflateTyped<T, K, FKey>
 where
-    T: DeserializeOwned + Serialize + Send + Sync + Clone + Debug,
+    T: DeserializeOwned + Serialize + Send + Sync + Clone + Debug + TypedPayload,
     K: Hash + Eq + Clone + Debug + Send + Sync,
     FKey: Fn(&T) -> K + Send + Sync + Clone,
 {
     /// Create a new typed Conflate accumulator.
+    ///
+    /// Requires the input type `T` to implement `TypedPayload` for compile-time
+    /// event type resolution.
     ///
     /// # Arguments
     ///
@@ -364,7 +367,7 @@ where
 
 impl<T, K, FKey> Accumulator for ConflateTyped<T, K, FKey>
 where
-    T: DeserializeOwned + Serialize + Send + Sync + Clone + Debug + 'static,
+    T: DeserializeOwned + Serialize + Send + Sync + Clone + Debug + TypedPayload + 'static,
     K: Hash + Eq + Clone + Debug + Serialize + Send + Sync + 'static,
     FKey: Fn(&T) -> K + Send + Sync + Clone + 'static,
 {
@@ -396,11 +399,10 @@ where
         state
             .values()
             .map(|value| {
-                // TODO(FLOWIP-082a): Use TypedPayload::EVENT_TYPE when schemas are implemented
                 let payload = serde_json::to_value(value).unwrap_or_else(|_| json!(null));
                 ChainEventFactory::data_event(
                     self.writer_id.clone(),
-                    "conflated",
+                    T::EVENT_TYPE,
                     payload,
                 )
             })
@@ -415,7 +417,7 @@ where
 /// Builder pattern methods for combining with emission strategies
 impl<T, K, FKey> ConflateTyped<T, K, FKey>
 where
-    T: DeserializeOwned + Serialize + Send + Sync + Clone + Debug + 'static,
+    T: DeserializeOwned + Serialize + Send + Sync + Clone + Debug + TypedPayload + 'static,
     K: Hash + Eq + Clone + Debug + Serialize + Send + Sync + 'static,
     FKey: Fn(&T) -> K + Send + Sync + Clone + 'static,
 {
@@ -457,6 +459,8 @@ where
 impl Conflate {
     /// Create a typed Conflate that works with domain types
     ///
+    /// Requires the input type `T` to implement `TypedPayload`.
+    ///
     /// # Arguments
     ///
     /// * `key_fn` - Function to extract the key: `Fn(&T) -> K`
@@ -476,7 +480,7 @@ impl Conflate {
     /// ```
     pub fn typed<T, K, FKey>(key_fn: FKey) -> ConflateTyped<T, K, FKey>
     where
-        T: DeserializeOwned + Serialize + Send + Sync + Clone + Debug,
+        T: DeserializeOwned + Serialize + Send + Sync + Clone + Debug + TypedPayload,
         K: Hash + Eq + Clone + Debug + Send + Sync,
         FKey: Fn(&T) -> K + Send + Sync + Clone,
     {
@@ -495,6 +499,10 @@ mod typed_tests {
         sensor_id: String,
         temperature: f64,
         timestamp: u64,
+    }
+
+    impl obzenflow_core::TypedPayload for SensorReading {
+        const EVENT_TYPE: &'static str = "sensor.reading";
     }
 
     #[test]
@@ -677,6 +685,10 @@ mod typed_tests {
             user_id: u64,
             status: String,
             last_seen: u64,
+        }
+
+        impl obzenflow_core::TypedPayload for UserStatus {
+            const EVENT_TYPE: &'static str = "user.status";
         }
 
         let accumulator = ConflateTyped::new(|status: &UserStatus| status.user_id);

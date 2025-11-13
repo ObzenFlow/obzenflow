@@ -17,6 +17,7 @@ pub mod context;
 pub mod payloads;
 pub mod utils;
 pub mod status;
+pub mod schema;
 
 // Re-export main types at root level for convenience
 pub use types::{EventId, WriterId, JournalWriterId, CorrelationId};

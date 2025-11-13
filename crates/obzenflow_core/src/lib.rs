@@ -23,6 +23,9 @@ pub use journal::journal_error::JournalError;
 pub use journal::journal_owner::JournalOwner;
 pub use event::context::runtime_context;
 
+// Re-export schema types (FLOWIP-082a)
+pub use event::schema::TypedPayload;
+
 // Re-export typed IDs
 pub use id::{StageId, FlowId, JournalId, SystemId};
 

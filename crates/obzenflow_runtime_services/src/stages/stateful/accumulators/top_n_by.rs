@@ -5,7 +5,7 @@
 // like "top products by sales", "top users by activity", etc.
 
 use super::Accumulator;
-use obzenflow_core::{ChainEvent, WriterId};
+use obzenflow_core::{ChainEvent, WriterId, TypedPayload};
 use obzenflow_core::event::chain_event::ChainEventFactory;
 use obzenflow_core::id::StageId;
 use serde::{Serialize, Deserialize, de::DeserializeOwned};
@@ -508,7 +508,7 @@ mod tests {
 #[derive(Clone)]
 pub struct TopNByTyped<T, K, FKey, FScore>
 where
-    T: DeserializeOwned + Serialize + Send + Sync,
+    T: DeserializeOwned + Serialize + Send + Sync + TypedPayload,
     K: Hash + Eq + Clone + Debug + Serialize + DeserializeOwned + Send + Sync,
     FKey: Fn(&T) -> K + Send + Sync + Clone,
     FScore: Fn(&T) -> f64 + Send + Sync + Clone,
@@ -522,12 +522,15 @@ where
 
 impl<T, K, FKey, FScore> TopNByTyped<T, K, FKey, FScore>
 where
-    T: DeserializeOwned + Serialize + Send + Sync + 'static,
+    T: DeserializeOwned + Serialize + Send + Sync + TypedPayload + 'static,
     K: Hash + Eq + Clone + Debug + Serialize + DeserializeOwned + Send + Sync + 'static,
     FKey: Fn(&T) -> K + Send + Sync + Clone + 'static,
     FScore: Fn(&T) -> f64 + Send + Sync + Clone + 'static,
 {
     /// Create a new typed TopNBy accumulator.
+    ///
+    /// Requires the input type `T` to implement `TypedPayload` for compile-time
+    /// event type resolution.
     ///
     /// # Arguments
     ///
@@ -544,6 +547,15 @@ where
             _phantom: PhantomData,
         }
     }
+}
+
+impl<T, K, FKey, FScore> TopNByTyped<T, K, FKey, FScore>
+where
+    T: DeserializeOwned + Serialize + Send + Sync + TypedPayload + 'static,
+    K: Hash + Eq + Clone + Debug + Serialize + DeserializeOwned + Send + Sync + 'static,
+    FKey: Fn(&T) -> K + Send + Sync + Clone + 'static,
+    FScore: Fn(&T) -> f64 + Send + Sync + Clone + 'static,
+{
 
     /// Configure to emit results when EOF is received.
     pub fn emit_on_eof(self) -> super::StatefulWithEmission<Self, crate::stages::stateful::emission::OnEOF> {
@@ -571,7 +583,7 @@ where
 
 impl<T, K, FKey, FScore> Debug for TopNByTyped<T, K, FKey, FScore>
 where
-    T: DeserializeOwned + Serialize + Send + Sync + 'static,
+    T: DeserializeOwned + Serialize + Send + Sync + TypedPayload + 'static,
     K: Hash + Eq + Clone + Debug + Serialize + DeserializeOwned + Send + Sync + 'static,
     FKey: Fn(&T) -> K + Send + Sync + Clone + 'static,
     FScore: Fn(&T) -> f64 + Send + Sync + Clone + 'static,
@@ -604,7 +616,7 @@ pub struct TopNByTypedState {
 
 impl<T, K, FKey, FScore> Accumulator for TopNByTyped<T, K, FKey, FScore>
 where
-    T: DeserializeOwned + Serialize + Send + Sync + 'static,
+    T: DeserializeOwned + Serialize + Send + Sync + TypedPayload + 'static,
     K: Hash + Eq + Clone + Debug + Serialize + DeserializeOwned + Send + Sync + 'static,
     FKey: Fn(&T) -> K + Send + Sync + Clone + 'static,
     FScore: Fn(&T) -> f64 + Send + Sync + Clone + 'static,
@@ -612,7 +624,6 @@ where
     type State = TopNByTypedState;
 
     fn accumulate(&self, state: &mut Self::State, event: ChainEvent) {
-        // TODO(FLOWIP-082a): Use TypedPayload::EVENT_TYPE when schemas are implemented
         // Step 1: Deserialize ChainEvent → T
         let input: T = match serde_json::from_value(event.payload().clone()) {
             Ok(v) => v,
@@ -669,7 +680,7 @@ where
         // Create result event
         vec![ChainEventFactory::data_event(
             self.writer_id.clone(),
-            "top_n_by_result",
+            T::EVENT_TYPE,
             json!({
                 "top_n": top_n.iter().enumerate().map(|(idx, item)| {
                     json!({
@@ -700,6 +711,10 @@ mod tests_typed {
     struct OrderEvent {
         product_id: String,
         sale_amount: f64,
+    }
+
+    impl obzenflow_core::TypedPayload for OrderEvent {
+        const EVENT_TYPE: &'static str = "order.event";
     }
 
     #[test]

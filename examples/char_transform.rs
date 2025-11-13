@@ -1,4 +1,4 @@
-//! Character Transform Demo - Using FLOWIP-080h & FLOWIP-080j
+//! Character Transform Demo - Using FLOWIP-080h, FLOWIP-080j & FLOWIP-082a
 //!
 //! Pipeline: Source → Transformer → Sink
 //!   • Source: Emits individual characters from sample sentences
@@ -9,6 +9,7 @@
 //!   - Character-level processing pipeline
 //!   - FLOWIP-080h: MapTyped for type-safe character transformations
 //!   - FLOWIP-080j: ReduceTyped for type-safe accumulation
+//!   - FLOWIP-082a: TypedPayload for strongly-typed events
 //!   - Zero ChainEvent manipulation in business logic
 //!   - Processing multiple sentences with proper formatting
 //!
@@ -19,6 +20,7 @@ use async_trait::async_trait;
 use obzenflow_core::{
     event::chain_event::{ChainEvent, ChainEventFactory},
     event::payloads::delivery_payload::{DeliveryPayload, DeliveryMethod},
+    TypedPayload,
     WriterId,
     id::StageId,
 };
@@ -33,7 +35,6 @@ use obzenflow_runtime_services::stages::transform::MapTyped;
 // FLOWIP-080j: Typed stateful accumulators
 use obzenflow_runtime_services::stages::stateful::accumulators::ReduceTyped;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 
 /// Source that emits individual characters from sample sentences
 #[derive(Clone, Debug)]
@@ -73,15 +74,17 @@ impl FiniteSourceHandler for TextCharSource {
             let ch = chars[self.current_char];
             self.current_char += 1;
 
-            // Emit character event
+            // ✨ FLOWIP-082a: Emit typed character event
+            let char_event = CharEvent {
+                value: ch.to_string(),
+                sentence_idx: self.current_sentence,
+                char_idx: self.current_char - 1,
+            };
+
             Some(ChainEventFactory::data_event(
                 self.writer_id.clone(),
-                "char",
-                json!({
-                    "value": ch.to_string(),
-                    "sentence_idx": self.current_sentence,
-                    "char_idx": self.current_char - 1,
-                }),
+                CharEvent::EVENT_TYPE,
+                serde_json::to_value(&char_event).unwrap(),
             ))
         } else {
             // Move to next sentence
@@ -90,14 +93,17 @@ impl FiniteSourceHandler for TextCharSource {
 
             // Emit newline between sentences
             if self.current_sentence < self.sentences.len() {
+                // ✨ FLOWIP-082a: Emit typed newline event
+                let newline_event = CharEvent {
+                    value: "\n".to_string(),
+                    sentence_idx: self.current_sentence - 1,
+                    char_idx: chars.len(),
+                };
+
                 Some(ChainEventFactory::data_event(
                     self.writer_id.clone(),
-                    "char",
-                    json!({
-                        "value": "\n",
-                        "sentence_idx": self.current_sentence - 1,
-                        "char_idx": chars.len(),
-                    }),
+                    CharEvent::EVENT_TYPE,
+                    serde_json::to_value(&newline_event).unwrap(),
                 ))
             } else {
                 // Recursively call to handle end or get next character
@@ -111,12 +117,17 @@ impl FiniteSourceHandler for TextCharSource {
     }
 }
 
-// FLOWIP-080h: Domain types for type-safe transformations
-#[derive(Debug, Clone, Deserialize)]
+// FLOWIP-080h & FLOWIP-082a: Domain types for type-safe transformations
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct CharEvent {
     value: String,
     sentence_idx: usize,
     char_idx: usize,
+}
+
+impl TypedPayload for CharEvent {
+    const EVENT_TYPE: &'static str = "char";
+    const SCHEMA_VERSION: u32 = 1;
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -125,8 +136,13 @@ struct TransformedChar {
     is_newline: bool,
 }
 
+impl TypedPayload for TransformedChar {
+    const EVENT_TYPE: &'static str = "transformed_char";
+    const SCHEMA_VERSION: u32 = 1;
+}
+
 // FLOWIP-080j: Accumulated state for the reducer
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct TextAccumulator {
     transformed_text: String,
     sentence_count: usize,
@@ -143,6 +159,11 @@ impl Default for TextAccumulator {
             last_was_punctuation: false,
         }
     }
+}
+
+impl TypedPayload for TextAccumulator {
+    const EVENT_TYPE: &'static str = "text_accumulator";
+    const SCHEMA_VERSION: u32 = 1;
 }
 
 // Pure function: Transform a character (no ChainEvent!)
@@ -184,7 +205,8 @@ impl OutputSink {
 #[async_trait]
 impl SinkHandler for OutputSink {
     async fn consume(&mut self, event: ChainEvent) -> obzenflow_core::Result<DeliveryPayload> {
-        if event.event_type() == "reduced" {
+        // ✨ FLOWIP-082a: Check event type using constant (from ReduceTyped)
+        if event.event_type() == TextAccumulator::EVENT_TYPE {
             let payload = event.payload();
             if let Some(result) = payload["result"].as_object() {
                 if let Some(text) = result["transformed_text"].as_str() {
@@ -293,8 +315,12 @@ async fn main() -> Result<()> {
     .map_err(|e| anyhow::anyhow!("Application failed: {:?}", e))?;
 
     println!("\n✅ Pipeline completed!");
-    println!("\n💡 Key Improvements (FLOWIP-080h & 080j):");
-    println!("   FLOWIP-080h MapTyped:");
+    println!("\n💡 Key Improvements (FLOWIP-080h, 080j & 082a):");
+    println!("   FLOWIP-082a TypedPayload:");
+    println!("   • CharEvent::EVENT_TYPE instead of \"char\"");
+    println!("   • SCHEMA_VERSION for evolution tracking");
+    println!("   • Strongly-typed event structs");
+    println!("\n   FLOWIP-080h MapTyped:");
     println!("   • Type-safe: CharEvent → TransformedChar");
     println!("   • No ChainEvent manipulation");
     println!("   • Pure function: transform_char(ch)");

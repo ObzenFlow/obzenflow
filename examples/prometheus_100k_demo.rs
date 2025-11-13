@@ -1,13 +1,15 @@
-//! Prometheus 100k Demo with FlowApplication Framework (FLOWIP-080h & FLOWIP-080j)
+//! Prometheus 100k Demo with FlowApplication Framework (FLOWIP-080h, 080j & 082a)
 //!
 //! This demo processes 100,000 events demonstrating:
 //! - Flow-level rate limiting middleware
 //! - Fan-out topology pattern (one stage to multiple downstream stages)
 //! - ReduceTyped for type-safe event counting (FLOWIP-080j)
+//! - TypedPayload for strongly-typed events (FLOWIP-082a)
 //! - Prometheus metrics via /metrics endpoint
 //!
 //! **FLOWIP-080h Update**: Replaced 38-line ErrorProneTransform struct with Map helper
 //! **FLOWIP-080j Update**: Replaced 59-line EventCounter StatefulHandler with ReduceTyped
+//! **FLOWIP-082a Update**: Added TypedPayload with EVENT_TYPE and SCHEMA_VERSION constants
 //!
 //! Run with: cargo run -p obzenflow --example prometheus_100k_demo --features obzenflow_infra/warp-server -- --server
 //!
@@ -22,6 +24,7 @@ use obzenflow_core::{
     event::chain_event::{ChainEvent, ChainEventFactory},
     WriterId,
     id::StageId,
+    TypedPayload,
 };
 use obzenflow_dsl_infra::{flow, sink, source, transform, stateful};
 use obzenflow_infra::application::FlowApplication;
@@ -76,9 +79,10 @@ impl FiniteSourceHandler for HighVolumeSource {
         // Every 100th event will simulate an error
         let should_fail = current_id % 100 == 0;
 
+        // ✨ FLOWIP-082a: Emit typed event using EVENT_TYPE constant
         Some(ChainEventFactory::data_event(
             self.writer_id.clone(),
-            "data.request",
+            DataRequest::EVENT_TYPE,
             json!({
                 "id": current_id,
                 "should_fail": should_fail,
@@ -93,11 +97,24 @@ impl FiniteSourceHandler for HighVolumeSource {
 }
 
 // ============================================================================
-// FLOWIP-080j: Domain Types
+// FLOWIP-082a: Strongly-Typed Domain Events
 // ============================================================================
 
+/// Data request event from the source
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DataRequest {
+    id: usize,
+    should_fail: bool,
+    batch: usize,
+}
+
+impl TypedPayload for DataRequest {
+    const EVENT_TYPE: &'static str = "data.request";
+    const SCHEMA_VERSION: u32 = 1;
+}
+
 /// Successfully processed event from the error-prone transform
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct ProcessedEvent {
     id: usize,
     should_fail: bool,
@@ -106,11 +123,31 @@ struct ProcessedEvent {
     processing_stage: String,
 }
 
+impl TypedPayload for ProcessedEvent {
+    const EVENT_TYPE: &'static str = "processed.event";
+    const SCHEMA_VERSION: u32 = 1;
+}
+
+/// Error event from failed processing
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ErrorEvent {
+    id: usize,
+    should_fail: bool,
+    batch: usize,
+    error: String,
+    error_code: u32,
+}
+
+impl TypedPayload for ErrorEvent {
+    const EVENT_TYPE: &'static str = "error.event";
+    const SCHEMA_VERSION: u32 = 1;
+}
+
 // ============================================================================
 // FLOWIP-080h: Map Helper for Error-Prone Transform
 // ============================================================================
 
-/// Transform that can fail on certain events (FLOWIP-080h)
+/// Transform that can fail on certain events (FLOWIP-080h & FLOWIP-082a)
 ///
 /// Replaces 38-line ErrorProneTransform struct with a Map helper
 fn error_prone_transform() -> Map<impl Fn(ChainEvent) -> ChainEvent + Send + Sync + Clone> {
@@ -119,7 +156,7 @@ fn error_prone_transform() -> Map<impl Fn(ChainEvent) -> ChainEvent + Send + Syn
 
         // Check if this event should fail
         if payload["should_fail"].as_bool().unwrap_or(false) {
-            // Return error event
+            // ✨ FLOWIP-082a: Return typed error event
             let mut error_payload = payload;
             error_payload["error"] = json!("Simulated processing error");
             error_payload["error_code"] = json!(500);
@@ -127,11 +164,11 @@ fn error_prone_transform() -> Map<impl Fn(ChainEvent) -> ChainEvent + Send + Syn
             ChainEventFactory::derived_data_event(
                 event.writer_id.clone(),
                 &event,
-                "error.event",
+                ErrorEvent::EVENT_TYPE,
                 error_payload,
             )
         } else {
-            // Successful processing
+            // ✨ FLOWIP-082a: Successful processing with typed event
             let mut result_payload = payload;
             result_payload["processed"] = json!(true);
             result_payload["processing_stage"] = json!("error_prone_transform");
@@ -139,7 +176,7 @@ fn error_prone_transform() -> Map<impl Fn(ChainEvent) -> ChainEvent + Send + Syn
             ChainEventFactory::derived_data_event(
                 event.writer_id.clone(),
                 &event,
-                "processed.event",
+                ProcessedEvent::EVENT_TYPE,
                 result_payload,
             )
         }
@@ -151,7 +188,7 @@ fn error_prone_transform() -> Map<impl Fn(ChainEvent) -> ChainEvent + Send + Syn
 // ============================================================================
 
 /// State for business-level event counting (FLOWIP-080j)
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct EventCountState {
     event_count: usize,
 }
@@ -162,6 +199,11 @@ impl Default for EventCountState {
             event_count: 0,
         }
     }
+}
+
+impl TypedPayload for EventCountState {
+    const EVENT_TYPE: &'static str = "prometheus.event_count";
+    const SCHEMA_VERSION: u32 = 1;
 }
 
 /// Simple sink that consumes all events (simulates Kafka/S3 persistence)
@@ -199,8 +241,8 @@ impl SummarySink {
 #[async_trait]
 impl SinkHandler for SummarySink {
     async fn consume(&mut self, event: ChainEvent) -> obzenflow_core::Result<DeliveryPayload> {
-        // ReduceTyped emits with event_type "reduced"
-        if event.event_type() == "reduced" {
+        // ✨ FLOWIP-082a: ReduceTyped emits with state's EVENT_TYPE
+        if event.event_type() == EventCountState::EVENT_TYPE {
             let payload = event.payload();
             let result = &payload["result"];
             let count = result["event_count"].as_u64().unwrap_or(0);

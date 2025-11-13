@@ -6,7 +6,7 @@
 use super::Accumulator;
 use crate::stages::stateful::emission::{EmissionStrategy, OnEOF, EveryN, TimeWindow, EmitAlways};
 use crate::stages::stateful::accumulators::wrapper::StatefulWithEmission;
-use obzenflow_core::{ChainEvent, EventId, WriterId};
+use obzenflow_core::{ChainEvent, EventId, WriterId, TypedPayload};
 use obzenflow_core::event::ChainEventFactory;
 use obzenflow_core::id::StageId;
 use serde::Serialize;
@@ -329,7 +329,7 @@ use std::marker::PhantomData;
 pub struct ReduceTyped<T, S, F>
 where
     T: DeserializeOwned + Send + Sync,
-    S: Clone + Send + Sync + Debug + Serialize,
+    S: Clone + Send + Sync + Debug + Serialize + TypedPayload,
     F: Fn(&mut S, &T) + Send + Sync + Clone,
 {
     reduce_fn: F,
@@ -341,7 +341,7 @@ where
 impl<T, S, F> Debug for ReduceTyped<T, S, F>
 where
     T: DeserializeOwned + Send + Sync,
-    S: Clone + Send + Sync + Debug + Serialize,
+    S: Clone + Send + Sync + Debug + Serialize + TypedPayload,
     F: Fn(&mut S, &T) + Send + Sync + Clone,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -357,10 +357,13 @@ where
 impl<T, S, F> ReduceTyped<T, S, F>
 where
     T: DeserializeOwned + Send + Sync,
-    S: Clone + Send + Sync + Debug + Serialize,
+    S: Clone + Send + Sync + Debug + Serialize + TypedPayload,
     F: Fn(&mut S, &T) + Send + Sync + Clone,
 {
     /// Create a new typed Reduce accumulator.
+    ///
+    /// Requires the state type `S` to implement `TypedPayload` for compile-time
+    /// event type resolution.
     ///
     /// # Arguments
     ///
@@ -385,7 +388,7 @@ where
 impl<T, S, F> Accumulator for ReduceTyped<T, S, F>
 where
     T: DeserializeOwned + Send + Sync + 'static,
-    S: Clone + Send + Sync + Debug + Serialize + 'static,
+    S: Clone + Send + Sync + Debug + Serialize + TypedPayload + 'static,
     F: Fn(&mut S, &T) + Send + Sync + Clone + 'static,
 {
     type State = S;
@@ -409,10 +412,9 @@ where
     }
 
     fn emit(&self, state: &Self::State) -> Vec<ChainEvent> {
-        // TODO(FLOWIP-082a): Use TypedPayload::EVENT_TYPE when schemas are implemented
         vec![ChainEventFactory::data_event(
             self.writer_id.clone(),
-            "reduced",
+            S::EVENT_TYPE,
             json!({
                 "result": state,
             }),
@@ -428,7 +430,7 @@ where
 impl<T, S, F> ReduceTyped<T, S, F>
 where
     T: DeserializeOwned + Send + Sync + 'static,
-    S: Clone + Send + Sync + Debug + Serialize + 'static,
+    S: Clone + Send + Sync + Debug + Serialize + TypedPayload + 'static,
     F: Fn(&mut S, &T) + Send + Sync + Clone + 'static,
 {
     /// Combine with a custom emission strategy.
@@ -464,9 +466,11 @@ where
 impl<F, S> Reduce<F, S>
 where
     F: Fn(&mut S, &ChainEvent) + Send + Sync + Clone,
-    S: Clone + Send + Sync + Debug + Serialize,
+    S: Clone + Send + Sync + Debug + Serialize + TypedPayload,
 {
     /// Create a typed Reduce that works with domain types
+    ///
+    /// Requires the state type `S` to implement `TypedPayload`.
     ///
     /// # Arguments
     ///
@@ -514,11 +518,15 @@ mod typed_tests {
         quantity: u32,
     }
 
-    #[derive(Clone, Debug, Serialize, PartialEq)]
+    #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
     struct TransactionStats {
         total_amount: f64,
         total_quantity: u64,
         transaction_count: u64,
+    }
+
+    impl obzenflow_core::TypedPayload for TransactionStats {
+        const EVENT_TYPE: &'static str = "transaction.stats";
     }
 
     #[test]
@@ -577,6 +585,15 @@ mod typed_tests {
         assert_eq!(state.transaction_count, 2);
     }
 
+    #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+    struct Counter {
+        count: u64,
+    }
+
+    impl obzenflow_core::TypedPayload for Counter {
+        const EVENT_TYPE: &'static str = "counter";
+    }
+
     #[test]
     fn test_reduce_typed_counter() {
         #[derive(Deserialize)]
@@ -584,8 +601,8 @@ mod typed_tests {
             _data: String,
         }
 
-        let accumulator = ReduceTyped::new(0u64, |count: &mut u64, _event: &Event| {
-            *count += 1;
+        let accumulator = ReduceTyped::new(Counter { count: 0 }, |counter: &mut Counter, _event: &Event| {
+            counter.count += 1;
         });
 
         let mut state = accumulator.initial_state();
@@ -599,24 +616,24 @@ mod typed_tests {
             accumulator.accumulate(&mut state, event);
         }
 
-        assert_eq!(state, 5);
+        assert_eq!(state.count, 5);
     }
 
     #[test]
     fn test_reduce_typed_emit_format() {
         let accumulator = ReduceTyped::new(
-            100u64,
-            |count: &mut u64, _tx: &Transaction| {
-                *count += 1;
+            Counter { count: 100 },
+            |counter: &mut Counter, _tx: &Transaction| {
+                counter.count += 1;
             },
         );
 
-        let state = 105u64;
+        let state = Counter { count: 105 };
         let emitted = accumulator.emit(&state);
 
         assert_eq!(emitted.len(), 1);
-        assert_eq!(emitted[0].event_type(), "reduced");
-        assert_eq!(emitted[0].payload()["result"], 105);
+        assert_eq!(emitted[0].event_type(), Counter::EVENT_TYPE);
+        assert_eq!(emitted[0].payload()["result"]["count"], 105);
     }
 
     #[test]
@@ -647,9 +664,9 @@ mod typed_tests {
     #[test]
     fn test_reduce_typed_skips_invalid_events() {
         let accumulator = ReduceTyped::new(
-            0u64,
-            |count: &mut u64, _tx: &Transaction| {
-                *count += 1;
+            Counter { count: 0 },
+            |counter: &mut Counter, _tx: &Transaction| {
+                counter.count += 1;
             },
         );
 
@@ -673,7 +690,7 @@ mod typed_tests {
         accumulator.accumulate(&mut state, invalid_event);
 
         // Only the valid event should have been processed
-        assert_eq!(state, 1);
+        assert_eq!(state.count, 1);
     }
 
     #[test]
@@ -683,12 +700,16 @@ mod typed_tests {
             value: f64,
         }
 
-        #[derive(Clone, Debug, Serialize, PartialEq)]
+        #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
         struct Statistics {
             count: u64,
             sum: f64,
             min: f64,
             max: f64,
+        }
+
+        impl obzenflow_core::TypedPayload for Statistics {
+            const EVENT_TYPE: &'static str = "measurement.statistics";
         }
 
         let initial = Statistics {

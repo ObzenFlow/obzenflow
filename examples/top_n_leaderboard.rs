@@ -1,4 +1,4 @@
-//! TopN Leaderboard Demo - Using FLOWIP-080j TopNTyped Accumulator
+//! TopN Leaderboard Demo - Using FLOWIP-080j & FLOWIP-082a
 //!
 //! Demonstrates the typed TopN accumulator for maintaining leaderboards
 //! and "hottest items" lists with bounded memory usage.
@@ -15,6 +15,7 @@ use obzenflow_infra::journal::disk_journals;
 use obzenflow_core::{
     event::chain_event::{ChainEvent, ChainEventFactory},
     event::payloads::delivery_payload::{DeliveryPayload, DeliveryMethod},
+    TypedPayload,
     WriterId,
     id::StageId,
 };
@@ -23,13 +24,18 @@ use serde_json::json;
 use anyhow::Result;
 use async_trait::async_trait;
 
-/// Domain type for game score events
+/// Domain type for game score events (FLOWIP-082a)
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct GameScore {
     player: String,
     score: f64,
     game_mode: String,
     timestamp: usize,
+}
+
+impl TypedPayload for GameScore {
+    const EVENT_TYPE: &'static str = "game.score";
+    const SCHEMA_VERSION: u32 = 1;
 }
 
 /// Source that generates player score events
@@ -77,9 +83,10 @@ impl FiniteSourceHandler for GameScoreSource {
             println!("📊 Score Update: {} scored {:.0} points in {} mode",
                 player, score, game_mode);
 
+            // ✨ FLOWIP-082a: Emit typed event using EVENT_TYPE constant
             Some(ChainEventFactory::data_event(
                 self.writer_id.clone(),
-                "game.score",
+                GameScore::EVENT_TYPE,
                 json!({
                     "player": player,
                     "score": score,
@@ -110,7 +117,8 @@ impl LeaderboardDisplay {
 #[async_trait]
 impl SinkHandler for LeaderboardDisplay {
     async fn consume(&mut self, event: ChainEvent) -> obzenflow_core::Result<DeliveryPayload> {
-        if event.event_type() == "top_n_result" {
+        // ✨ FLOWIP-082a: TopNTyped emits with input type's EVENT_TYPE
+        if event.event_type() == GameScore::EVENT_TYPE {
             let payload = event.payload();
             let top_n = payload["top_n"].as_array().unwrap();
             let count = payload["count"].as_u64().unwrap();
@@ -152,7 +160,7 @@ async fn main() -> Result<()> {
 
     println!("🎮 FlowState RS - TopN Leaderboard Demo");
     println!("=======================================");
-    println!("✨ Using FLOWIP-080j TopNTyped Accumulator");
+    println!("✨ Using FLOWIP-080j TopNTyped & FLOWIP-082a TypedPayload");
     println!("");
     println!("This demo shows how TopNTyped maintains a leaderboard");
     println!("of the top 5 players by score with type-safe operations,");
@@ -196,7 +204,12 @@ async fn main() -> Result<()> {
 
     println!("✅ Leaderboard demo completed!");
     println!("\n💡 Key Points:");
-    println!("   • TopN maintains exactly N items in memory");
+    println!("   FLOWIP-082a TypedPayload:");
+    println!("   • GameScore::EVENT_TYPE instead of \"game.score\"");
+    println!("   • SCHEMA_VERSION for evolution tracking");
+    println!("");
+    println!("   FLOWIP-080j TopNTyped:");
+    println!("   • Maintains exactly N items in memory");
     println!("   • Automatically evicts lowest scores");
     println!("   • Perfect for leaderboards, trending items, hot keys");
     println!("   • O(N) memory usage regardless of stream size");
