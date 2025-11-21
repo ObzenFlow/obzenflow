@@ -4,21 +4,23 @@
 //! backpressure by blocking when out of tokens, ensuring no events are lost.
 
 use crate::middleware::{
-    Middleware, MiddlewareFactory, MiddlewareAction, MiddlewareContext,
-    ErrorAction, MiddlewareSafety,
+    ErrorAction, Middleware, MiddlewareAction, MiddlewareContext, MiddlewareFactory,
+    MiddlewareSafety,
 };
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
-use obzenflow_core::event::payloads::observability_payload::{ObservabilityPayload, MiddlewareLifecycle, RateLimiterEvent, MetricsLifecycle};
-use obzenflow_core::{EventId, WriterId, StageId};
-use obzenflow_runtime_services::pipeline::config::StageConfig;
 use obzenflow_core::event::context::StageType;
+use obzenflow_core::event::payloads::observability_payload::{
+    MetricsLifecycle, MiddlewareLifecycle, ObservabilityPayload, RateLimiterEvent,
+};
+use obzenflow_core::{EventId, StageId, WriterId};
+use obzenflow_runtime_services::pipeline::config::StageConfig;
 use obzenflow_runtime_services::stages::common::control_strategies::{
     ControlEventStrategy, WindowingStrategy,
 };
+use serde_json::json;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use serde_json::json;
-use tracing::{debug, trace, info};
+use tracing::{debug, info, trace};
 
 /// Token bucket rate limiter implementation
 #[derive(Debug)]
@@ -64,13 +66,18 @@ impl TokenBucket {
             was_exhausted: false,
         }
     }
-    
+
     /// Try to consume tokens, returns true if successful
     fn try_consume(&mut self, tokens: f64) -> bool {
         self.refill();
-        
-        trace!("try_consume: requested={}, available={}, capacity={}", tokens, self.tokens, self.capacity);
-        
+
+        trace!(
+            "try_consume: requested={}, available={}, capacity={}",
+            tokens,
+            self.tokens,
+            self.capacity
+        );
+
         if self.tokens >= tokens {
             self.tokens -= tokens;
             trace!("try_consume: SUCCESS, remaining tokens={}", self.tokens);
@@ -80,51 +87,56 @@ impl TokenBucket {
             false
         }
     }
-    
+
     /// Get time until enough tokens are available
     fn time_until_available(&mut self, tokens: f64) -> Option<Duration> {
         self.refill();
-        
+
         if self.tokens >= tokens {
             return None; // Already available
         }
-        
+
         let needed = tokens - self.tokens;
         let seconds_needed = needed / self.refill_rate;
         Some(Duration::from_secs_f64(seconds_needed))
     }
-    
+
     /// Refill tokens based on elapsed time
     fn refill(&mut self) {
         let now = Instant::now();
         let elapsed = now.duration_since(self.last_refill);
-        
+
         let tokens_to_add = elapsed.as_secs_f64() * self.refill_rate;
         let old_tokens = self.tokens;
         self.tokens = (self.tokens + tokens_to_add).min(self.capacity);
         self.last_refill = now;
-        
+
         if tokens_to_add > 0.0 {
-            trace!("refill: elapsed={:?}, added={}, old={}, new={}", 
-                elapsed, tokens_to_add, old_tokens, self.tokens);
+            trace!(
+                "refill: elapsed={:?}, added={}, old={}, new={}",
+                elapsed,
+                tokens_to_add,
+                old_tokens,
+                self.tokens
+            );
         }
     }
-    
+
     /// Get current token count (for monitoring)
     fn available_tokens(&mut self) -> f64 {
         self.refill();
         self.tokens
     }
-    
+
     /// Check if we've crossed the exhaustion threshold (< 10% capacity)
     fn is_exhausted(&self) -> bool {
         self.tokens < self.capacity * 0.1
     }
-    
+
     /// Check if we've crossed a threshold and should emit control event
     fn check_threshold_crossed(&mut self) -> Option<(&'static str, &'static str)> {
         let exhausted = self.is_exhausted();
-        
+
         if exhausted && !self.was_exhausted {
             self.was_exhausted = true;
             Some(("normal", "exhausted"))
@@ -151,7 +163,7 @@ impl RateLimiterMiddleware {
         // For very low rates, ensure we have at least 1 token capacity
         let capacity = burst_capacity.unwrap_or(events_per_second.max(1.0));
         let bucket = TokenBucket::new(capacity, events_per_second);
-        
+
         info!(
             events_per_second,
             burst_capacity = capacity,
@@ -159,7 +171,7 @@ impl RateLimiterMiddleware {
             initial_tokens = capacity,
             "Created rate limiter middleware"
         );
-        
+
         Self {
             bucket: Arc::new(Mutex::new(bucket)),
             cost_per_event,
@@ -171,26 +183,25 @@ impl RateLimiterMiddleware {
             })),
         }
     }
-    
-    
+
     /// Check if we should emit a summary and do so if needed
     fn maybe_emit_summary(&self, ctx: &mut MiddlewareContext) {
         let mut stats = self.stats.lock().unwrap();
         let bucket = self.bucket.lock().unwrap();
-        
+
         // Emit summary every 10 seconds or every 1000 requests
-        let should_emit = stats.last_summary.elapsed() >= Duration::from_secs(10) ||
-                         stats.requests_allowed + stats.requests_delayed >= 1000;
-        
+        let should_emit = stats.last_summary.elapsed() >= Duration::from_secs(10)
+            || stats.requests_allowed + stats.requests_delayed >= 1000;
+
         if should_emit {
             let consumption_rate = if stats.last_summary.elapsed().as_secs() > 0 {
                 stats.tokens_consumed / stats.last_summary.elapsed().as_secs_f64()
             } else {
                 0.0
             };
-            
+
             let utilization = 1.0 - (bucket.tokens / bucket.capacity);
-            
+
             info!(
                 window_duration_s = stats.last_summary.elapsed().as_secs(),
                 requests_allowed = stats.requests_allowed,
@@ -200,7 +211,7 @@ impl RateLimiterMiddleware {
                 utilization_pct = format!("{:.1}%", utilization * 100.0),
                 "Rate limiter summary"
             );
-            
+
             let event = ChainEventFactory::observability_event(
                 WriterId::from(StageId::new()),
                 ObservabilityPayload::Metrics(MetricsLifecycle::Custom {
@@ -217,10 +228,10 @@ impl RateLimiterMiddleware {
                         "utilization": utilization
                     }),
                     tags: None,
-                })
+                }),
             );
             ctx.write_control_event(event);
-            
+
             // Reset stats
             stats.requests_allowed = 0;
             stats.requests_delayed = 0;
@@ -237,20 +248,20 @@ impl Middleware for RateLimiterMiddleware {
             trace!(event_id = %event.id, event_type = %event.event_type(), "Control event bypassing rate limiter");
             return MiddlewareAction::Continue;
         }
-        
+
         let event_id = event.id.clone();
         let event_type = event.event_type();
         trace!(event_id = %event_id, event_type = %event_type, "Rate limiter processing event");
-        
+
         // Blocking loop - wait until we have tokens
         loop {
             let mut bucket = self.bucket.lock().unwrap();
-            
+
             if bucket.try_consume(self.cost_per_event) {
                 // Track successful consumption
                 self.stats.lock().unwrap().requests_allowed += 1;
                 self.stats.lock().unwrap().tokens_consumed += self.cost_per_event;
-                
+
                 let available = bucket.available_tokens();
                 debug!(
                     event_id = %event_id,
@@ -259,7 +270,7 @@ impl Middleware for RateLimiterMiddleware {
                     cost = self.cost_per_event,
                     "Rate limit passed - processing event immediately"
                 );
-                
+
                 // Check for threshold crossing
                 if let Some((from, to)) = bucket.check_threshold_crossed() {
                     info!(
@@ -269,7 +280,7 @@ impl Middleware for RateLimiterMiddleware {
                         capacity = bucket.capacity,
                         "Rate limiter state transition"
                     );
-                    
+
                     // Emit a window utilization event for state changes
                     let utilization = 1.0 - (bucket.tokens / bucket.capacity);
                     let event = ChainEventFactory::observability_event(
@@ -279,26 +290,31 @@ impl Middleware for RateLimiterMiddleware {
                                 utilization_percent: utilization * 100.0,
                                 events_in_window: 0, // This is a state transition event
                                 window_size_ms: 1000, // Default window
-                            }
-                        ))
+                            },
+                        )),
                     );
                     ctx.write_control_event(event);
                 }
-                
+
                 // We have tokens, allow the event
-                ctx.emit_event("rate_limiter", "event_allowed", json!({
-                    "event_id": event_id.to_string(),
-                    "available_tokens": bucket.available_tokens(),
-                }));
-                
+                ctx.emit_event(
+                    "rate_limiter",
+                    "event_allowed",
+                    json!({
+                        "event_id": event_id.to_string(),
+                        "available_tokens": bucket.available_tokens(),
+                    }),
+                );
+
                 drop(bucket); // Release lock before returning
                 return MiddlewareAction::Continue;
             }
-            
+
             // No tokens available - calculate wait time
-            let wait_time = bucket.time_until_available(self.cost_per_event)
+            let wait_time = bucket
+                .time_until_available(self.cost_per_event)
                 .unwrap_or(Duration::from_millis(10));
-            
+
             let available = bucket.available_tokens();
             info!(
                 event_id = %event_id,
@@ -309,10 +325,10 @@ impl Middleware for RateLimiterMiddleware {
                 "Rate limited - blocking for {:?}",
                 wait_time
             );
-            
+
             // Track this as a delayed request
             self.stats.lock().unwrap().requests_delayed += 1;
-            
+
             // Check for threshold crossing
             if let Some((from, to)) = bucket.check_threshold_crossed() {
                 info!(
@@ -322,30 +338,34 @@ impl Middleware for RateLimiterMiddleware {
                     capacity = bucket.capacity,
                     "Rate limiter state transition (exhausted)"
                 );
-                
+
                 // Emit a window utilization event when exhausted
                 let event = ChainEventFactory::observability_event(
                     WriterId::from(StageId::new()),
                     ObservabilityPayload::Middleware(MiddlewareLifecycle::RateLimiter(
                         RateLimiterEvent::WindowUtilization {
                             utilization_percent: 100.0, // Exhausted = 100% utilized
-                            events_in_window: 0, // This is a state transition event
-                            window_size_ms: 1000, // Default window
-                        }
-                    ))
+                            events_in_window: 0,        // This is a state transition event
+                            window_size_ms: 1000,       // Default window
+                        },
+                    )),
                 );
                 ctx.write_control_event(event);
             }
-            
-            ctx.emit_event("rate_limiter", "event_blocked", json!({
-                "event_id": event_id.to_string(),
-                "wait_time_ms": wait_time.as_millis(),
-                "available_tokens": bucket.available_tokens(),
-            }));
-            
+
+            ctx.emit_event(
+                "rate_limiter",
+                "event_blocked",
+                json!({
+                    "event_id": event_id.to_string(),
+                    "wait_time_ms": wait_time.as_millis(),
+                    "available_tokens": bucket.available_tokens(),
+                }),
+            );
+
             // Release lock before sleeping
             drop(bucket);
-            
+
             // Block until tokens should be available
             // For longer waits, use block_in_place to avoid blocking tokio worker threads
             if wait_time > Duration::from_millis(1) {
@@ -358,22 +378,27 @@ impl Middleware for RateLimiterMiddleware {
                 trace!(event_id = %event_id, "Using yield_now for wait <= 1ms");
                 std::thread::yield_now();
             }
-            
+
             info!(
                 event_id = %event_id,
                 event_type = %event_type,
                 "Rate limit released - attempting to process event"
             );
-            
+
             // Loop back to try again
         }
     }
-    
-    fn post_handle(&self, _event: &ChainEvent, _outputs: &[ChainEvent], ctx: &mut MiddlewareContext) {
+
+    fn post_handle(
+        &self,
+        _event: &ChainEvent,
+        _outputs: &[ChainEvent],
+        ctx: &mut MiddlewareContext,
+    ) {
         // Check if we should emit a summary
         self.maybe_emit_summary(ctx);
     }
-    
+
     fn on_error(&self, _event: &ChainEvent, _ctx: &mut MiddlewareContext) -> ErrorAction {
         // Don't consume tokens for errors
         ErrorAction::Propagate
@@ -397,13 +422,13 @@ impl RateLimiterFactory {
             cost_per_event: 1.0,
         }
     }
-    
+
     /// Set burst capacity (defaults to events_per_second)
     pub fn with_burst(mut self, capacity: f64) -> Self {
         self.burst_capacity = Some(capacity);
         self
     }
-    
+
     /// Set cost per event (for weighted rate limiting)
     pub fn with_cost(mut self, cost: f64) -> Self {
         self.cost_per_event = cost;
@@ -419,20 +444,22 @@ impl MiddlewareFactory for RateLimiterFactory {
             self.cost_per_event,
         ))
     }
-    
+
     fn name(&self) -> &str {
         "rate_limiter"
     }
-    
+
     fn create_control_strategy(&self) -> Option<Box<dyn ControlEventStrategy>> {
         // Need delay strategy to ensure we can flush delayed events before EOF
         // Calculate max delay based on burst capacity and rate
         let capacity = self.burst_capacity.unwrap_or(self.events_per_second);
         let max_drain_time = capacity / self.events_per_second;
-        
-        Some(Box::new(WindowingStrategy::new(Duration::from_secs_f64(max_drain_time))))
+
+        Some(Box::new(WindowingStrategy::new(Duration::from_secs_f64(
+            max_drain_time,
+        ))))
     }
-    
+
     fn supported_stage_types(&self) -> &[StageType] {
         // Rate limiting makes sense for all stage types
         &[
@@ -443,7 +470,7 @@ impl MiddlewareFactory for RateLimiterFactory {
             StageType::Stateful,
         ]
     }
-    
+
     fn safety_level(&self) -> MiddlewareSafety {
         // Rate limiting on sinks can cause backpressure
         MiddlewareSafety::Advanced
@@ -463,42 +490,42 @@ pub fn rate_limit_with_burst(events_per_second: f64, burst: f64) -> Box<dyn Midd
 #[cfg(test)]
 mod tests {
     use super::*;
-    use obzenflow_core::event::{EventId, WriterId, ChainEventFactory};
-    
+    use obzenflow_core::event::{ChainEventFactory, EventId, WriterId};
+
     #[test]
     fn test_token_bucket_basic() {
         let mut bucket = TokenBucket::new(10.0, 5.0); // 10 capacity, 5/sec refill
-        
+
         // Should start full
         assert!(bucket.try_consume(5.0));
         assert!(bucket.try_consume(5.0));
         assert!(!bucket.try_consume(5.0)); // Should fail
-        
+
         // Wait a bit and check refill
         std::thread::sleep(Duration::from_millis(200)); // 0.2 sec = 1 token
         assert!(bucket.try_consume(1.0)); // Should succeed
         assert!(!bucket.try_consume(1.0)); // Should fail again
     }
-    
+
     #[test]
     fn test_token_bucket_time_until_available() {
         let mut bucket = TokenBucket::new(10.0, 2.0); // 10 capacity, 2/sec refill
-        
+
         // Consume all tokens
         assert!(bucket.try_consume(10.0));
-        
+
         // Should need 2.5 seconds to get 5 tokens
         let wait = bucket.time_until_available(5.0).unwrap();
         assert!((wait.as_secs_f64() - 2.5).abs() < 0.1);
     }
-    
+
     #[test]
     fn test_rate_limiter_allows_bursts() {
         // Create middleware directly since the factory doesn't use the config
         let middleware = RateLimiterMiddleware::new(10.0, Some(20.0), 1.0);
-        
+
         let mut ctx = MiddlewareContext::new();
-        
+
         // Should allow burst of 20 events
         for i in 0..20 {
             let event = ChainEventFactory::data_event(
@@ -506,50 +533,48 @@ mod tests {
                 "test.event",
                 json!({ "index": i }),
             );
-            
+
             match middleware.pre_handle(&event, &mut ctx) {
-                MiddlewareAction::Continue => {},
+                MiddlewareAction::Continue => {}
                 other => panic!("Expected Continue for event {}, got {:?}", i, other),
             }
         }
-        
+
         // 21st event would block, but we can't easily test blocking in unit tests
         // The blocking behavior is tested in integration tests
     }
-    
+
     #[test]
     fn test_rate_limiter_control_events_pass_through() {
         // Create middleware directly since the factory doesn't use the config
         let middleware = RateLimiterMiddleware::new(1.0, None, 1.0);
-        
+
         let mut ctx = MiddlewareContext::new();
-        
+
         // Consume the one available token
-        let data_event = ChainEventFactory::data_event(
-            WriterId::from(StageId::new()),
-            "test.event",
-            json!({}),
-        );
+        let data_event =
+            ChainEventFactory::data_event(WriterId::from(StageId::new()), "test.event", json!({}));
 
         middleware.pre_handle(&data_event, &mut ctx);
-        
+
         // Control event should still pass through without blocking
-        let eof = ChainEventFactory::eof_event(
-            WriterId::from(StageId::new()),
-            true);
+        let eof = ChainEventFactory::eof_event(WriterId::from(StageId::new()), true);
 
         match middleware.pre_handle(&eof, &mut ctx) {
-            MiddlewareAction::Continue => {},
+            MiddlewareAction::Continue => {}
             other => panic!("Expected Continue for EOF, got {:?}", other),
         }
     }
-    
+
     #[test]
     fn test_rate_limiter_strategy_requirement() {
         let factory = RateLimiterFactory::new(100.0).with_burst(500.0);
-        
+
         let strategy = factory.create_control_strategy();
-        assert!(strategy.is_some(), "Expected windowing strategy for rate limiter");
+        assert!(
+            strategy.is_some(),
+            "Expected windowing strategy for rate limiter"
+        );
         // Can't easily test the window duration without exposing internals
     }
 }

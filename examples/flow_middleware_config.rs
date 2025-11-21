@@ -23,22 +23,22 @@
 //! - Backpressure naturally flows upstream
 //! - Production observability via /metrics endpoint
 
-use obzenflow_dsl_infra::{flow, source, transform, sink};
+use anyhow::Result;
+use async_trait::async_trait;
 use obzenflow_adapters::middleware::rate_limit;
+use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::{
     event::chain_event::{ChainEvent, ChainEventFactory},
-    WriterId,
     id::StageId,
+    WriterId,
 };
+use obzenflow_dsl_infra::{flow, sink, source, transform};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime_services::stages::common::handlers::{
-    FiniteSourceHandler, TransformHandler, SinkHandler,
+    FiniteSourceHandler, SinkHandler, TransformHandler,
 };
-use obzenflow_core::event::payloads::delivery_payload::{DeliveryPayload, DeliveryMethod};
-use async_trait::async_trait;
 use serde_json::json;
-use anyhow::Result;
 
 /// Source that generates numbered events
 #[derive(Debug, Clone)]
@@ -128,9 +128,10 @@ impl SinkHandler for CountingSink {
         // Log progress every 20 events
         if self.received % 20 == 0 {
             let payload = event.payload();
-            println!("[SINK] Received {} events (current: #{})",
-                     self.received,
-                     payload["count"]);
+            println!(
+                "[SINK] Received {} events (current: #{})",
+                self.received, payload["count"]
+            );
         }
 
         Ok(DeliveryPayload::success(

@@ -4,13 +4,13 @@
 //! such as the metrics aggregator and pipeline supervisor.
 
 use super::base::{EventLoopDirective, Supervisor};
-use obzenflow_fsm::FsmAction;
 use obzenflow_core::event::WriterId;
+use obzenflow_fsm::FsmAction;
 use std::sync::Arc;
 
 /// Trait that self-supervised components MUST implement
 /// This ensures they provide all required functionality
-/// 
+///
 /// By implementing SelfSupervised, you get:
 /// - Enforced implementation of build_state_machine()
 /// - Enforced implementation of dispatch_state()
@@ -24,10 +24,10 @@ pub trait SelfSupervised: Supervisor {
         &mut self,
         state: &Self::State,
     ) -> Result<EventLoopDirective<Self::Event>, Box<dyn std::error::Error + Send + Sync>>;
-    
+
     /// Get the writer ID for this component
     fn writer_id(&self) -> WriterId;
-    
+
     /// Write a completion event when the component terminates
     async fn write_completion_event(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
 }
@@ -47,46 +47,127 @@ pub trait SelfSupervisedExt: SelfSupervised {
         Self::Context: 'static,
         Self::Action: 'static,
     {
+        let supervisor_name = self.name().to_string();
+        let supervisor_writer = self.writer_id();
+        tracing::info!(
+            supervisor = %supervisor_name,
+            writer_id = ?supervisor_writer,
+            "SelfSupervised::run() starting with initial state: {:?}",
+            initial_state
+        );
         let context = Arc::new(context);
-        
+
         // Create the builder and let the supervisor configure it
+        tracing::debug!("Creating FSM builder");
         let builder = obzenflow_fsm::FsmBuilder::new(initial_state);
         let configured_builder = self.configure_fsm(builder);
-        
+
         // Build the state machine
+        tracing::debug!("Building FSM");
         let mut machine = configured_builder.build();
 
+        let mut iteration = 0;
         loop {
+            iteration += 1;
+
             // Get current state
             let current_state = machine.state().clone();
+            // tracing::debug!("Loop iteration {}: Current state: {:?}", iteration, current_state);
 
             // Get directive from the supervisor's dispatch logic
+            tracing::trace!("Calling dispatch_state for state: {:?}", current_state);
             let directive = self.dispatch_state(&current_state).await?;
+            tracing::debug!(
+                supervisor = %supervisor_name,
+                writer_id = ?supervisor_writer,
+                "Loop iteration {}: dispatch_state returned: {:?}",
+                iteration,
+                directive
+            );
 
             match directive {
-                EventLoopDirective::Continue => continue,
+                EventLoopDirective::Continue => {
+                    tracing::trace!(
+                        supervisor = %supervisor_name,
+                        writer_id = ?supervisor_writer,
+                        "Loop iteration {}: Got Continue directive, continuing loop",
+                        iteration
+                    );
+                    // Yield to prevent busy loop when waiting for external events
+                    tokio::task::yield_now().await;
+                    continue;
+                }
 
                 EventLoopDirective::Transition(event) => {
+                    tracing::debug!(
+                        supervisor = %supervisor_name,
+                        writer_id = ?supervisor_writer,
+                        "Loop iteration {}: Transitioning with event: {:?}",
+                        iteration,
+                        event
+                    );
                     let actions = machine
                         .handle(event, context.clone())
                         .await
                         .map_err(|e| format!("FSM error: {}", e))?;
 
-                    for action in actions {
+                    tracing::debug!(
+                        supervisor = %supervisor_name,
+                        writer_id = ?supervisor_writer,
+                        "Loop iteration {}: Got {} actions to execute",
+                        iteration,
+                        actions.len()
+                    );
+                    for (i, action) in actions.iter().enumerate() {
+                        tracing::debug!(
+                            supervisor = %supervisor_name,
+                            writer_id = ?supervisor_writer,
+                            "Loop iteration {}: Executing action {}/{}: {:?}",
+                            iteration,
+                            i + 1,
+                            actions.len(),
+                            action
+                        );
                         action
                             .execute(&context)
                             .await
                             .map_err(|e| format!("Action error: {}", e))?;
+                        tracing::debug!(
+                            supervisor = %supervisor_name,
+                            writer_id = ?supervisor_writer,
+                            "Loop iteration {}: Action {}/{} completed",
+                            iteration,
+                            i + 1,
+                            actions.len()
+                        );
                     }
+                    tracing::debug!(
+                        supervisor = %supervisor_name,
+                        writer_id = ?supervisor_writer,
+                        "Loop iteration {}: Transition complete, new state: {:?}",
+                        iteration,
+                        machine.state()
+                    );
                 }
 
                 EventLoopDirective::Terminate => {
+                    tracing::info!(
+                        supervisor = %supervisor_name,
+                        writer_id = ?supervisor_writer,
+                        "Loop iteration {}: Got Terminate directive",
+                        iteration
+                    );
                     self.write_completion_event().await?;
                     break;
                 }
             }
         }
 
+        tracing::info!(
+            supervisor = %supervisor_name,
+            writer_id = ?supervisor_writer,
+            "SelfSupervised::run() completed"
+        );
         Ok(())
     }
 }
@@ -96,4 +177,3 @@ impl<T: SelfSupervised> SelfSupervisedExt for T {}
 
 // Seal implementation - any type that implements SelfSupervised can be a Supervisor
 impl<T: SelfSupervised> super::base::private::Sealed for T {}
-

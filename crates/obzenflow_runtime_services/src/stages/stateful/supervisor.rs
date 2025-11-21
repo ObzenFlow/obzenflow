@@ -1,26 +1,25 @@
 //! Stateful supervisor implementation using HandlerSupervised pattern
 
-use std::sync::Arc;
-use obzenflow_core::{EventEnvelope};
-use obzenflow_core::journal::journal::Journal;
-use obzenflow_core::{ChainEvent, StageId};
-use obzenflow_core::event::SystemEvent;
+use crate::metrics::instrumentation::process_with_instrumentation;
+use crate::stages::common::control_strategies::{ControlEventAction, ProcessingContext};
+use crate::stages::common::handlers::StatefulHandler;
+use crate::supervised_base::base::Supervisor;
+use crate::supervised_base::{EventLoopDirective, HandlerSupervised};
 use obzenflow_core::event::context::FlowContext;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
-use obzenflow_fsm::{FsmBuilder, Transition};
-use crate::stages::common::handlers::StatefulHandler;
-use crate::stages::common::control_strategies::{ControlEventAction, ProcessingContext};
-use crate::supervised_base::{EventLoopDirective, HandlerSupervised};
-use crate::supervised_base::base::Supervisor;
-use crate::metrics::instrumentation::process_with_instrumentation;
+use obzenflow_core::event::SystemEvent;
+use obzenflow_core::journal::journal::Journal;
+use obzenflow_core::EventEnvelope;
+use obzenflow_core::{ChainEvent, StageId};
+use obzenflow_fsm::{EventVariant, FsmBuilder, StateVariant, Transition};
+use std::sync::Arc;
 
-use super::fsm::{
-    StatefulState, StatefulEvent, StatefulAction,
-    StatefulContext,
-};
+use super::fsm::{StatefulAction, StatefulContext, StatefulEvent, StatefulState};
 
 /// Supervisor for stateful stages
-pub(crate) struct StatefulSupervisor<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> {
+pub(crate) struct StatefulSupervisor<
+    H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
+> {
     /// Supervisor name (for logging)
     pub(crate) name: String,
 
@@ -38,16 +37,23 @@ pub(crate) struct StatefulSupervisor<H: StatefulHandler + Clone + std::fmt::Debu
 }
 
 // Implement Sealed directly for StatefulSupervisor to satisfy Supervisor trait bound
-impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> crate::supervised_base::base::private::Sealed for StatefulSupervisor<H> {}
+impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
+    crate::supervised_base::base::private::Sealed for StatefulSupervisor<H>
+{
+}
 
-impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Supervisor for StatefulSupervisor<H> {
+impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Supervisor
+    for StatefulSupervisor<H>
+{
     type State = StatefulState<H>;
     type Event = StatefulEvent<H>;
     type Context = StatefulContext<H>;
     type Action = StatefulAction<H>;
 
-    fn configure_fsm(&self, builder: FsmBuilder<Self::State, Self::Event, Self::Context, Self::Action>)
-        -> FsmBuilder<Self::State, Self::Event, Self::Context, Self::Action> {
+    fn configure_fsm(
+        &self,
+        builder: FsmBuilder<Self::State, Self::Event, Self::Context, Self::Action>,
+    ) -> FsmBuilder<Self::State, Self::Event, Self::Context, Self::Action> {
         builder
             // Created -> Initialized
             .when("Created")
@@ -78,6 +84,13 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Super
             // Accumulating -> Emitting (when should_emit returns true)
             // Accumulating -> Draining (on EOF)
             .when("Accumulating")
+                // Ready messages can reappear (ex: wide system subscriptions); ignore if already running
+                .on("Ready", |_state, _event, _ctx| async move {
+                    Ok(Transition {
+                        next_state: StatefulState::Accumulating,
+                        actions: vec![],
+                    })
+                })
                 .on("ShouldEmit", |_state, _event, ctx| async move {
                     // Track state transition in instrumentation
                     ctx.instrumentation.transition_to_state("Emitting");
@@ -117,6 +130,13 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Super
 
             // Emitting -> Accumulating (future: emission strategies)
             .when("Emitting")
+                // Ready can show up from late subscriptions; treat as no-op while emitting
+                .on("Ready", |_state, _event, _ctx| async move {
+                    Ok(Transition {
+                        next_state: StatefulState::Emitting,
+                        actions: vec![],
+                    })
+                })
                 .on("EmitComplete", |_state, _event, ctx| async move {
                     // Track state transition in instrumentation
                     ctx.instrumentation.transition_to_state("Accumulating");
@@ -187,6 +207,22 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Super
                     }
                 })
                 .done()
+
+            // Catch all unhandled events
+            .when_unhandled(|state, event, _ctx| {
+                let state_name = state.variant_name().to_string();
+                let event_name = event.variant_name().to_string();
+                async move {
+                    tracing::error!(
+                        supervisor = "StatefulSupervisor",
+                        state = %state_name,
+                        event = %event_name,
+                        "Unhandled event in FSM - this indicates a state machine configuration error"
+                    );
+                    // Return Err to propagate the error
+                    Err(format!("Unhandled event '{}' in state '{}' for StatefulSupervisor", event_name, state_name))
+                }
+            })
     }
 
     fn name(&self) -> &str {
@@ -195,7 +231,9 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Super
 }
 
 #[async_trait::async_trait]
-impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSupervised for StatefulSupervisor<H> {
+impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSupervised
+    for StatefulSupervisor<H>
+{
     type Handler = H;
 
     fn writer_id(&self) -> obzenflow_core::WriterId {
@@ -221,8 +259,8 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
     ) -> Result<EventLoopDirective<Self::Event>, Box<dyn std::error::Error + Send + Sync>> {
         match state {
             StatefulState::Created => {
-                // Send initialize event
-                Ok(EventLoopDirective::Transition(StatefulEvent::Initialize))
+                // Wait for explicit initialization from pipeline
+                Ok(EventLoopDirective::Continue)
             }
 
             StatefulState::Initialized => {
@@ -231,15 +269,23 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
             }
 
             StatefulState::Accumulating => {
-                self.context.instrumentation.event_loops_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.context
+                    .instrumentation
+                    .event_loops_total
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
                 // Process events from subscription
                 let mut subscription_guard = self.context.subscription.write().await;
                 if let Some(subscription) = subscription_guard.as_mut() {
                     match subscription.recv().await {
                         Ok(envelope) => {
+                            self.context.instrumentation.record_consumed(&envelope);
+
                             // We have work - increment loops with work
-                            self.context.instrumentation.event_loops_with_work_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            self.context
+                                .instrumentation
+                                .event_loops_with_work_total
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
                             tracing::debug!(
                                 stage_name = %self.context.stage_name,
@@ -259,17 +305,22 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                                                 stage_name = %self.context.stage_name,
                                                 "Stateful stage received EOF from upstream"
                                             );
-                                            self.context.control_strategy.handle_eof(&envelope, &mut processing_ctx)
+                                            self.context
+                                                .control_strategy
+                                                .handle_eof(&envelope, &mut processing_ctx)
                                         }
-                                        FlowControlPayload::Watermark { .. } => {
-                                            self.context.control_strategy.handle_watermark(&envelope, &mut processing_ctx)
-                                        }
-                                        FlowControlPayload::Checkpoint { .. } => {
-                                            self.context.control_strategy.handle_checkpoint(&envelope, &mut processing_ctx)
-                                        }
-                                        FlowControlPayload::Drain => {
-                                            self.context.control_strategy.handle_drain(&envelope, &mut processing_ctx)
-                                        }
+                                        FlowControlPayload::Watermark { .. } => self
+                                            .context
+                                            .control_strategy
+                                            .handle_watermark(&envelope, &mut processing_ctx),
+                                        FlowControlPayload::Checkpoint { .. } => self
+                                            .context
+                                            .control_strategy
+                                            .handle_checkpoint(&envelope, &mut processing_ctx),
+                                        FlowControlPayload::Drain => self
+                                            .context
+                                            .control_strategy
+                                            .handle_drain(&envelope, &mut processing_ctx),
                                     };
 
                                     // Execute the action
@@ -280,9 +331,12 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                                                 self.forward_control_event(&envelope).await?;
                                             } else {
                                                 // Buffer EOF for draining state
-                                                *self.context.buffered_eof.write().await = Some(envelope.event.clone());
+                                                *self.context.buffered_eof.write().await =
+                                                    Some(envelope.event.clone());
                                                 drop(subscription_guard);
-                                                return Ok(EventLoopDirective::Transition(StatefulEvent::ReceivedEOF));
+                                                return Ok(EventLoopDirective::Transition(
+                                                    StatefulEvent::ReceivedEOF,
+                                                ));
                                             }
                                         }
                                         ControlEventAction::Delay(duration) => {
@@ -303,7 +357,8 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                                                 "Retry requested, buffering event"
                                             );
                                             if envelope.event.is_eof() {
-                                                processing_ctx.buffered_eof = Some(envelope.clone());
+                                                processing_ctx.buffered_eof =
+                                                    Some(envelope.clone());
                                             }
                                         }
                                         ControlEventAction::Skip => {
@@ -318,7 +373,8 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                                 }
                                 obzenflow_core::event::ChainEventContent::Data { .. } => {
                                     // ✨ KEY DIFFERENCE: Accumulate without writing to journal
-                                    let mut current_state = self.context.current_state.write().await;
+                                    let mut current_state =
+                                        self.context.current_state.write().await;
 
                                     // Clone handler to make it mutable
                                     let mut handler = (*self.context.handler).clone();
@@ -331,7 +387,9 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                                         drop(current_state);
                                         drop(subscription_guard);
                                         // Transition to Emitting state
-                                        return Ok(EventLoopDirective::Transition(StatefulEvent::ShouldEmit));
+                                        return Ok(EventLoopDirective::Transition(
+                                            StatefulEvent::ShouldEmit,
+                                        ));
                                     }
                                 }
                                 _ => {
@@ -347,9 +405,9 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                                 "Subscription error"
                             );
                             drop(subscription_guard);
-                            return Ok(EventLoopDirective::Transition(
-                                StatefulEvent::Error(format!("Subscription error: {}", e))
-                            ));
+                            return Ok(EventLoopDirective::Transition(StatefulEvent::Error(
+                                format!("Subscription error: {}", e),
+                            )));
                         }
                     }
                 } else {
@@ -369,12 +427,11 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                 let events_to_emit = handler.emit(&mut *current_state);
 
                 // Wrap with instrumentation (following transform pattern)
-                let emit_result = process_with_instrumentation(
-                    &self.context.instrumentation,
-                    || async move {
+                let emit_result =
+                    process_with_instrumentation(&self.context.instrumentation, || async move {
                         Ok(events_to_emit)
-                    }
-                ).await;
+                    })
+                    .await;
 
                 match emit_result {
                     Ok(events) if !events.is_empty() => {
@@ -395,8 +452,10 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                                 .with_flow_context(flow_context)
                                 .with_runtime_context(self.context.instrumentation.snapshot());
 
+                            self.context.instrumentation.record_emitted(&enriched_event);
                             // Write the aggregated event
-                            self.context.data_journal
+                            self.context
+                                .data_journal
                                 .append(enriched_event, None)
                                 .await
                                 .map_err(|e| format!("Failed to write aggregated event: {}", e))?;
@@ -438,12 +497,11 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                 );
 
                 // Call handler.drain() with instrumentation
-                let drain_result = process_with_instrumentation(
-                    &self.context.instrumentation,
-                    || async move {
+                let drain_result =
+                    process_with_instrumentation(&self.context.instrumentation, || async move {
                         handler.drain(&final_state).await
-                    }
-                ).await;
+                    })
+                    .await;
 
                 match drain_result {
                     Ok(drain_events) => {
@@ -461,10 +519,14 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                                 .with_flow_context(flow_context)
                                 .with_runtime_context(self.context.instrumentation.snapshot());
 
-                            self.context.data_journal
+                            self.context.instrumentation.record_emitted(&enriched_event);
+                            self.context
+                                .data_journal
                                 .append(enriched_event, None)
                                 .await
-                                .map_err(|e| format!("Failed to write final aggregated event: {}", e))?;
+                                .map_err(|e| {
+                                    format!("Failed to write final aggregated event: {}", e)
+                                })?;
                         }
 
                         tracing::info!(
@@ -479,9 +541,9 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                             error = ?e,
                             "Drain error"
                         );
-                        Ok(EventLoopDirective::Transition(
-                            StatefulEvent::Error(format!("Drain error: {}", e))
-                        ))
+                        Ok(EventLoopDirective::Transition(StatefulEvent::Error(
+                            format!("Drain error: {}", e),
+                        )))
                     }
                 }
             }
@@ -505,9 +567,13 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
 
 impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StatefulSupervisor<H> {
     /// Helper to forward control events
-    async fn forward_control_event(&self, envelope: &EventEnvelope<ChainEvent>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    async fn forward_control_event(
+        &self,
+        envelope: &EventEnvelope<ChainEvent>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let forward_event = envelope.event.clone();
-        self.context.data_journal
+        self.context
+            .data_journal
             .append(forward_event, Some(envelope))
             .await
             .map_err(|e| format!("Failed to forward control event: {}", e))?;

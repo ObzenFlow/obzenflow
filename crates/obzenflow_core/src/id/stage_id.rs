@@ -1,8 +1,8 @@
 //! Stage identifier - globally unique identifier for pipeline stages
 
 use serde::{Deserialize, Serialize};
-use ulid::Ulid;
 use std::str::FromStr;
+use ulid::Ulid;
 
 /// Strongly typed stage identifier - globally unique
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -13,22 +13,22 @@ impl StageId {
     pub fn new() -> Self {
         StageId(Ulid::new())
     }
-    
+
     /// Create from a specific ULID (mainly for testing/deserialization)
     pub fn from_ulid(ulid: Ulid) -> Self {
         StageId(ulid)
     }
-    
+
     /// Get the underlying ULID
     pub fn as_ulid(&self) -> Ulid {
         self.0
     }
-    
+
     /// Get as u64 for compatibility (uses lower 64 bits of ULID)
     pub fn as_u64(&self) -> u64 {
-        self.0.0 as u64
+        self.0 .0 as u64
     }
-    
+
     /// Create a const stage ID (for special stages like control)
     /// Only use this for compile-time constants!
     pub const fn new_const(val: u128) -> Self {
@@ -60,10 +60,9 @@ impl From<StageId> for Ulid {
     }
 }
 
-
 impl FromStr for StageId {
     type Err = ulid::DecodeError;
-    
+
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         // Handle both "stage_ULID" format and raw ULID
         let ulid_str = s.strip_prefix("stage_").unwrap_or(s);
@@ -72,25 +71,24 @@ impl FromStr for StageId {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_stage_id_generation() {
         let id1 = StageId::new();
         let id2 = StageId::new();
         assert_ne!(id1, id2);
     }
-    
+
     #[test]
     fn test_stage_id_display() {
         let ulid = Ulid::new();
         let id = StageId::from_ulid(ulid);
         assert_eq!(format!("{}", id), format!("stage_{}", ulid));
     }
-    
+
     #[test]
     fn test_stage_id_serde() {
         let id = StageId::new();

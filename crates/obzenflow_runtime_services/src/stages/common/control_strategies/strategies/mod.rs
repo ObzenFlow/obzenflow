@@ -1,11 +1,11 @@
 //! Concrete implementations of control event handling strategies
 
+mod composite;
 mod jonestown;
 mod retry;
 mod windowing;
-mod composite;
 
-pub use jonestown::JonestownStrategy;
-pub use retry::{RetryStrategy, BackoffStrategy};
-pub use windowing::WindowingStrategy;
 pub use composite::CompositeStrategy;
+pub use jonestown::JonestownStrategy;
+pub use retry::{BackoffStrategy, RetryStrategy};
+pub use windowing::WindowingStrategy;

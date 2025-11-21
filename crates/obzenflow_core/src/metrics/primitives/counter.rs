@@ -1,7 +1,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Monotonically increasing counter
-/// 
+///
 /// Thread-safe atomic counter that can only increase or reset to zero.
 /// Used as the foundation for rate metrics, error counting, etc.
 #[derive(Debug)]

@@ -19,8 +19,8 @@ use anyhow::Result;
 use async_trait::async_trait;
 use obzenflow_core::{
     event::chain_event::{ChainEvent, ChainEventFactory},
-    WriterId,
     id::StageId,
+    WriterId,
 };
 use obzenflow_dsl_infra::{flow, sink, source, stateful, transform};
 use obzenflow_infra::application::FlowApplication;
@@ -29,10 +29,14 @@ use obzenflow_runtime_services::stages::common::handlers::{
     FiniteSourceHandler, SinkHandler, StatefulHandler,
 };
 // ✨ FLOWIP-080h: Import Map helper
+use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_runtime_services::stages::transform::Map;
-use obzenflow_core::event::payloads::delivery_payload::{DeliveryPayload, DeliveryMethod};
 use serde_json::json;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
 
 /// Source that generates events from a specific data source
 #[derive(Clone, Debug)]
@@ -68,7 +72,7 @@ impl FiniteSourceHandler for DataSource {
             json!({
                 "source": self.source_name.clone(),
                 "id": self.count,
-                "value": self.count * 10,
+                "value": self.count * 20,
             }),
         ))
     }
@@ -82,13 +86,17 @@ impl FiniteSourceHandler for DataSource {
 #[derive(Clone, Debug, Default)]
 struct AggregatorState {
     /// Track event count per source
-    events_by_source: HashMap<String, usize>,
+    events_by_source: BTreeMap<String, usize>,
     /// Track total value sum per source
-    value_by_source: HashMap<String, i64>,
+    value_by_source: BTreeMap<String, i64>,
+    /// Expected counts for audit
+    expected_counts: BTreeMap<String, usize>,
     /// Total events processed
     total_events: usize,
     /// Current event being processed (for emission)
     current_event: Option<ChainEvent>,
+    /// Flag when EOF has been observed for audit
+    eof_seen: bool,
 }
 
 /// Stateful aggregator that merges events from multiple upstream sources (FAN-IN)
@@ -98,13 +106,20 @@ struct AggregatorState {
 #[derive(Clone, Debug)]
 struct MultiSourceAggregator {
     writer_id: WriterId,
+    expected_counts: BTreeMap<String, usize>,
 }
 
 impl MultiSourceAggregator {
     fn new() -> Self {
         Self {
             writer_id: WriterId::from(StageId::new()),
+            expected_counts: BTreeMap::new(),
         }
+    }
+
+    fn with_expected(mut self, expected: BTreeMap<String, usize>) -> Self {
+        self.expected_counts = expected;
+        self
     }
 }
 
@@ -124,8 +139,10 @@ impl StatefulHandler for MultiSourceAggregator {
 
         let event_count = *state.events_by_source.get(&source).unwrap();
 
-        println!("[FAN-IN] Aggregator received event from '{}' (#{} from this source, total: {})",
-                 source, event_count, state.total_events);
+        println!(
+            "[FAN-IN] Aggregator received event from '{}' (#{} from this source, total: {})",
+            source, event_count, state.total_events
+        );
 
         // Store the current event for emission
         state.current_event = Some(event);
@@ -167,15 +184,51 @@ impl StatefulHandler for MultiSourceAggregator {
     }
 
     fn initial_state(&self) -> Self::State {
-        AggregatorState::default()
+        AggregatorState {
+            expected_counts: self.expected_counts.clone(),
+            eof_seen: false,
+            ..AggregatorState::default()
+        }
     }
 
     fn create_events(&self, state: &Self::State) -> Vec<ChainEvent> {
-        println!("\n[FAN-IN STATS] Aggregation complete:");
-        println!("  Total events: {}", state.total_events);
+        // Audit: verify counts match expectations, log loudly if not
+        for (src, expected) in &state.expected_counts {
+            let got = state.events_by_source.get(src).cloned().unwrap_or(0);
+            if got != *expected {
+                println!(
+                    "⚠️  AUDIT MISMATCH source={} expected={} got={}",
+                    src, expected, got
+                );
+            }
+        }
+
+        println!();
+        println!("╔══════════════════════════════════════╗");
+        println!("║           FAN-IN SUMMARY             ║");
+        println!("╠══════════════════════════════════════╣");
+        println!(
+            "║ Total events processed: {:>8}        ║",
+            state.total_events
+        );
+        println!("╠════════════════════════╦═════════════╣");
+        println!("║ Source                 ║ Events/Value║");
+        println!("╠════════════════════════╬═════════════╣");
         for (source, count) in &state.events_by_source {
             let value = state.value_by_source.get(source).unwrap_or(&0);
-            println!("  {}: {} events, total value: {}", source, count, value);
+            println!("║ {:<22} ║ {:>4} events / {:>4} ║", source, count, value);
+        }
+        println!("╚════════════════════════╩═════════════╝");
+
+        // Hard audit check for the demo: panic if any source is short
+        for (src, expected) in &state.expected_counts {
+            let got = state.events_by_source.get(src).cloned().unwrap_or(0);
+            if got != *expected {
+                panic!(
+                    "AUDIT FAILED: source={} expected={} got={} (eof_seen={})",
+                    src, expected, got, state.eof_seen
+                );
+            }
         }
         vec![]
     }
@@ -200,18 +253,22 @@ fn smart_router() -> Map<impl Fn(ChainEvent) -> ChainEvent + Send + Sync + Clone
         // Route to different channels based on value
         let route = if value < 30 {
             "low"
-        } else if value < 70 {
+        } else if value < 50 {
             "medium"
         } else {
             "high"
         };
 
-        println!("[FAN-OUT] Router processing event from '{}' with value {} → route: {}",
-                 source, value, route);
+        println!(
+            "[FAN-OUT] Router processing event from '{}' with value {} → route: {}",
+            source, value, route
+        );
 
         // Enrich with routing info
-        let mut enriched = payload;
+        let mut enriched = payload.clone();
         enriched["route"] = json!(route);
+        enriched["route_source"] = json!(source);
+        enriched["route_value"] = json!(value);
 
         ChainEventFactory::derived_data_event(
             event.writer_id.clone(),
@@ -222,20 +279,45 @@ fn smart_router() -> Map<impl Fn(ChainEvent) -> ChainEvent + Send + Sync + Clone
     })
 }
 
+fn print_sink_summary(name: &str, route: &str, count: usize) {
+    // Fixed width for deterministic alignment
+    println!();
+    println!("┌──────────────────────────────────────────────┐");
+    println!("│ FAN-OUT SINK SUMMARY {:>19} │", format!("({})", name));
+    println!("├──────────────────────────────────────────────┤");
+    println!("│ Route handled : {:<25}│", route);
+    println!("│ Events seen   : {:<25}│", count);
+    println!("└──────────────────────────────────────────────┘");
+}
+
+fn print_sink_summary_with_sources(
+    name: &str,
+    route: &str,
+    count: usize,
+    per_source: &BTreeMap<String, usize>,
+) {
+    print_sink_summary(name, route, count);
+    if !per_source.is_empty() {
+        println!("    per-source: {:?}", per_source);
+    }
+}
+
 /// Sink that processes events for a specific priority
 #[derive(Clone, Debug)]
 struct PrioritySink {
     name: String,
     route_filter: String,
-    event_count: usize,
+    event_count: Arc<AtomicUsize>,
+    per_source: BTreeMap<String, usize>,
 }
 
 impl PrioritySink {
-    fn new(name: &str, route_filter: &str) -> Self {
+    fn new(name: &str, route_filter: &str, counter: Arc<AtomicUsize>) -> Self {
         Self {
             name: name.to_string(),
             route_filter: route_filter.to_string(),
-            event_count: 0,
+            event_count: counter,
+            per_source: BTreeMap::new(),
         }
     }
 }
@@ -248,12 +330,15 @@ impl SinkHandler for PrioritySink {
 
         // Only process events matching our filter
         if route == self.route_filter {
-            self.event_count += 1;
+            let new_total = self.event_count.fetch_add(1, Ordering::Relaxed) + 1;
             let source = payload["source"].as_str().unwrap_or("unknown");
             let value = payload["value"].as_i64().unwrap_or(0);
+            *self.per_source.entry(source.to_string()).or_insert(0) += 1;
 
-            println!("[SINK:{}] Processed event from '{}' (value: {}) - total: {}",
-                     self.name, source, value, self.event_count);
+            println!(
+                "[SINK:{}] Processed event from '{}' (value: {}) - total: {}",
+                self.name, source, value, new_total
+            );
         }
 
         Ok(DeliveryPayload::success(
@@ -269,8 +354,8 @@ async fn main() -> Result<()> {
     // Set environment to use console exporter
     std::env::set_var("OBZENFLOW_METRICS_EXPORTER", "console");
 
-    println!("Topology Patterns Demo - Fan-In, Fan-Out, and Diamond Pattern");
-    println!("=============================================================\n");
+    println!("🕸️  Topology Patterns Demo - Fan-In, Fan-Out, and Diamond Pattern");
+    println!("================================================================\n");
     println!("Demonstrating:");
     println!("  • Fan-in: Multiple sources → single aggregator");
     println!("  • Fan-out: Single router → multiple sinks");
@@ -279,11 +364,14 @@ async fn main() -> Result<()> {
     println!("  • Independent journal readers\n");
 
     let journal_path = std::path::PathBuf::from("target/topology_patterns_demo_journal");
+    let low_counter = Arc::new(AtomicUsize::new(0));
+    let med_counter = Arc::new(AtomicUsize::new(0));
+    let high_counter = Arc::new(AtomicUsize::new(0));
 
     println!("Topology:");
     println!("  kafka_source (5 events)  ──┐");
     println!("  api_source (4 events)    ──┼──> aggregator (fan-in)");
-    println!("  file_source (6 events)   ──┘            │");
+    println!("  file_source (4 events)   ──┘            │");
     println!("                                           ▼");
     println!("                                        router");
     println!("                                           │");
@@ -293,7 +381,11 @@ async fn main() -> Result<()> {
     println!("                   (value<30)       (30≤value<70)      (value≥70)\n");
 
     // Use FlowApplication for modern pattern
-    FlowApplication::run(async {
+    let low_counter_flow = low_counter.clone();
+    let med_counter_flow = med_counter.clone();
+    let high_counter_flow = high_counter.clone();
+
+    FlowApplication::run(async move {
         flow! {
             name: "topology_patterns",
             journals: disk_journals(journal_path.clone()),
@@ -303,18 +395,24 @@ async fn main() -> Result<()> {
                 // FAN-IN: Three sources feeding into one aggregator
                 kafka = source!("kafka_source" => DataSource::new("kafka", 5));
                 api = source!("api_source" => DataSource::new("api", 4));
-                file_src = source!("file_source" => DataSource::new("file", 6));
+                file_src = source!("file_source" => DataSource::new("file", 4));
 
                 // Aggregator demonstrates fan-in with StatefulHandler
-                aggregator = stateful!("aggregator" => MultiSourceAggregator::new());
+                aggregator = stateful!("aggregator" => MultiSourceAggregator::new().with_expected({
+                    let mut m = BTreeMap::new();
+                    m.insert("kafka".to_string(), 5);
+                    m.insert("api".to_string(), 4);
+                    m.insert("file".to_string(), 4);
+                    m
+                }));
 
                 // ✨ FLOWIP-080h: Router distributes to multiple sinks using Map helper
                 router = transform!("router" => smart_router());
 
                 // FAN-OUT: Three sinks receiving from one router
-                low_priority = sink!("low_sink" => PrioritySink::new("LOW", "low"));
-                med_priority = sink!("med_sink" => PrioritySink::new("MEDIUM", "medium"));
-                high_priority = sink!("high_sink" => PrioritySink::new("HIGH", "high"));
+                low_priority = sink!("low_sink" => PrioritySink::new("LOW", "low", low_counter_flow.clone()));
+                med_priority = sink!("med_sink" => PrioritySink::new("MEDIUM", "medium", med_counter_flow.clone()));
+                high_priority = sink!("high_sink" => PrioritySink::new("HIGH", "high", high_counter_flow.clone()));
             },
 
             topology: {
@@ -338,6 +436,11 @@ async fn main() -> Result<()> {
     })
     .await
     .map_err(|e| anyhow::anyhow!("Application failed: {:?}", e))?;
+
+    // Deterministic, consolidated fan-out summaries
+    print_sink_summary("LOW", "low", low_counter.load(Ordering::Relaxed));
+    print_sink_summary("MEDIUM", "medium", med_counter.load(Ordering::Relaxed));
+    print_sink_summary("HIGH", "high", high_counter.load(Ordering::Relaxed));
 
     println!("\n\nFlow completed successfully!");
     println!("\nKey insights:");

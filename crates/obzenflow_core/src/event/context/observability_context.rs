@@ -9,15 +9,15 @@ pub struct ObservabilityContext {
     /// Metrics snapshots at event time
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metrics: Option<MetricsSnapshot>,
-    
+
     /// Middleware state and statistics
     #[serde(skip_serializing_if = "Option::is_none")]
     pub middleware: Option<MiddlewareStats>,
-    
+
     /// Service level indicators
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sli: Option<SliSnapshot>,
-    
+
     /// Custom observability data
     #[serde(skip_serializing_if = "Option::is_none")]
     pub custom: Option<Value>,

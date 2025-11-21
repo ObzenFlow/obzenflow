@@ -12,7 +12,7 @@
 //!
 //! # Example
 //!
-//! ```rust,ignore
+//! ```ignore,ignore
 //! use obzenflow_runtime_services::stages::common::handlers::StatefulHandler;
 //! use obzenflow_core::{ChainEvent, Result};
 //!
@@ -48,25 +48,23 @@ pub mod handle;
 pub mod supervisor;
 
 // FLOWIP-080c: Composable primitives
-pub mod accumulators;
-pub mod emission;
+pub mod strategies;
 
 // Public API - only expose builder, handle, and essential types
+pub use crate::stages::common::handlers::StatefulHandler;
 pub use builder::StatefulBuilder;
 pub use config::StatefulConfig;
+pub use fsm::{StatefulEvent, StatefulState};
 pub use handle::{StatefulHandle, StatefulHandleExt};
-pub use fsm::{StatefulState, StatefulEvent};
-pub use crate::stages::common::handlers::StatefulHandler;
 
-// FLOWIP-080c: Re-export commonly used primitives for convenience
-pub use accumulators::{Accumulator, GroupBy, Reduce, Conflate, StatefulWithEmission};
-pub use emission::{EmissionStrategy, OnEOF, EveryN, TimeWindow, EmitAlways};
+// FLOWIP-080c: Re-export commonly used strategies for convenience
+pub use strategies::accumulators::{Accumulator, Conflate, GroupBy, Reduce, StatefulWithEmission};
+pub use strategies::emissions::{EmissionStrategy, EmitAlways, EveryN, OnEOF, TimeWindow};
 
 // Re-export control strategies for convenience
 pub use crate::stages::common::control_strategies::{
-    ControlEventStrategy, ControlEventAction,
-    JonestownStrategy, RetryStrategy, BackoffStrategy,
-    WindowingStrategy, CompositeStrategy,
+    BackoffStrategy, CompositeStrategy, ControlEventAction, ControlEventStrategy,
+    JonestownStrategy, RetryStrategy, WindowingStrategy,
 };
 
 // Note: StatefulSupervisor is NOT exported! It's an implementation detail.

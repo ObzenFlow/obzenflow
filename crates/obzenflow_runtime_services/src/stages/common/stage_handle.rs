@@ -3,7 +3,7 @@
 //! This trait defines the interface that all stage supervisors must implement
 //! so the Pipeline FSM can coordinate them properly.
 
-use obzenflow_core::{StageId, event::context::StageType};
+use obzenflow_core::{event::context::StageType, StageId};
 use std::fmt;
 
 /// Error type for stage operations
@@ -24,7 +24,9 @@ pub enum StageError {
 impl fmt::Display for StageError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            StageError::InitializationFailed(msg) => write!(f, "Stage initialization failed: {}", msg),
+            StageError::InitializationFailed(msg) => {
+                write!(f, "Stage initialization failed: {}", msg)
+            }
             StageError::EventSendFailed(msg) => write!(f, "Failed to send event to stage: {}", msg),
             StageError::InvalidState(msg) => write!(f, "Invalid stage state: {}", msg),
             StageError::Timeout => write!(f, "Stage operation timed out"),
@@ -51,6 +53,7 @@ impl From<&str> for StageError {
 #[derive(Debug, Clone)]
 pub enum StageEvent {
     Initialize,
+    Ready,
     Start,
     BeginDrain,
     ForceShutdown,
@@ -68,35 +71,37 @@ pub enum StageEvent {
 pub trait StageHandle: Send + Sync {
     /// Get the stage ID
     fn stage_id(&self) -> StageId;
-    
+
     /// Get the stage name
     fn stage_name(&self) -> &str;
-    
+
     /// Get the stage type (for pipeline decisions)
     fn stage_type(&self) -> StageType;
-    
+
     /// Initialize the stage (allocate resources, create subscriptions)
     async fn initialize(&self) -> Result<(), StageError>;
-    
+
+    /// Move the stage into a ready state (sources: WaitingForGun; others may no-op)
+    async fn ready(&self) -> Result<(), StageError>;
+
     /// Start the stage (only sources need this, others can no-op)
     async fn start(&self) -> Result<(), StageError>;
-    
+
     /// Send an event to the stage FSM
     async fn send_event(&self, event: StageEvent) -> Result<(), StageError>;
-    
+
     /// Begin draining the stage
     async fn begin_drain(&self) -> Result<(), StageError>;
-    
+
     /// Check if the stage is ready
     fn is_ready(&self) -> bool;
-    
+
     /// Check if the stage is drained
     fn is_drained(&self) -> bool;
-    
+
     /// Force shutdown
     async fn force_shutdown(&self) -> Result<(), StageError>;
 }
-
 
 /// Type-erased stage handle for pipeline storage
 pub type BoxedStageHandle = Box<dyn StageHandle>;

@@ -24,9 +24,9 @@ use anyhow::Result;
 use async_trait::async_trait;
 use obzenflow_core::{
     event::chain_event::{ChainEvent, ChainEventFactory},
-    event::payloads::delivery_payload::{DeliveryPayload, DeliveryMethod},
-    WriterId,
+    event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload},
     id::StageId,
+    WriterId,
 };
 use obzenflow_dsl_infra::{flow, sink, source, stateful};
 use obzenflow_infra::application::FlowApplication;
@@ -375,7 +375,10 @@ async fn run_counter_pattern() -> Result<()> {
     })
     .await?;
 
-    println!("   ✅ Result: Emitted {} event(s) on drain", count1_clone.load(Ordering::Relaxed));
+    println!(
+        "   ✅ Result: Emitted {} event(s) on drain",
+        count1_clone.load(Ordering::Relaxed)
+    );
     println!("\n💡 State managed WITHOUT Arc<Mutex> anti-pattern!");
     Ok(())
 }
@@ -409,7 +412,10 @@ async fn run_accumulator_pattern() -> Result<()> {
     })
     .await?;
 
-    println!("   ✅ Result: Emitted {} event(s) on drain (should be 5, one per collected value)", count2_clone.load(Ordering::Relaxed));
+    println!(
+        "   ✅ Result: Emitted {} event(s) on drain (should be 5, one per collected value)",
+        count2_clone.load(Ordering::Relaxed)
+    );
     println!("\n💡 Demonstrates emitting multiple events from drain()!");
     Ok(())
 }
@@ -443,7 +449,10 @@ async fn run_sum_pattern() -> Result<()> {
     })
     .await?;
 
-    println!("   ✅ Result: Emitted {} event(s) on drain (sum 1+2+...+10 = 55)", count3_clone.load(Ordering::Relaxed));
+    println!(
+        "   ✅ Result: Emitted {} event(s) on drain (sum 1+2+...+10 = 55)",
+        count3_clone.load(Ordering::Relaxed)
+    );
     println!("\n💡 Numeric aggregation pattern works correctly!");
     Ok(())
 }
@@ -477,7 +486,10 @@ async fn run_immediate_pattern() -> Result<()> {
     })
     .await?;
 
-    println!("   ✅ Result: Emitted {} progress event(s) during Accumulating state", count4_clone.load(Ordering::Relaxed));
+    println!(
+        "   ✅ Result: Emitted {} progress event(s) during Accumulating state",
+        count4_clone.load(Ordering::Relaxed)
+    );
     println!("\n💡 Demonstrates immediate emission (not just on drain)!");
     Ok(())
 }
@@ -511,7 +523,10 @@ async fn run_empty_pattern() -> Result<()> {
     })
     .await?;
 
-    println!("   ✅ Result: Emitted {} event(s) on drain (count=0)", count5_clone.load(Ordering::Relaxed));
+    println!(
+        "   ✅ Result: Emitted {} event(s) on drain (count=0)",
+        count5_clone.load(Ordering::Relaxed)
+    );
     println!("\n💡 Edge case: drain() called even with zero input events!");
     Ok(())
 }

@@ -6,6 +6,9 @@ edition = "2021"
 license = "MIT OR Apache-2.0"
 publish = false
 
+[lib]
+doctest = false
+
 [dependencies]
 # Internal dependencies
 obzenflow_core = { path = "../obzenflow_core" }

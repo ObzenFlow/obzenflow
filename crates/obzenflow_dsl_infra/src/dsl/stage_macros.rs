@@ -82,3 +82,43 @@ macro_rules! stateful {
         }) as Box<dyn StageDescriptor>
     }};
 }
+
+/// Helper struct to pass reference stage variable and handler to join! macro
+pub struct JoinWithRef<H> {
+    pub reference_stage_var: &'static str,
+    pub handler: H,
+}
+
+/// Create a JoinWithRef struct for use with join! macro
+/// Takes the stage binding variable (identifier), not a string literal
+#[macro_export]
+macro_rules! with_ref {
+    ($ref_var:ident, $handler:expr) => {
+        $crate::dsl::JoinWithRef {
+            reference_stage_var: stringify!($ref_var),
+            handler: $handler,
+        }
+    };
+}
+
+/// Create a join stage descriptor
+/// For DSL usage, use with_ref! macro to specify reference
+/// Example: join!("enricher" => with_ref!(carriers, handler))
+#[macro_export]
+macro_rules! join {
+    ($name:literal => $join_with_ref:expr) => {
+        $crate::join!($name => $join_with_ref, [])
+    };
+    ($name:literal => $join_with_ref:expr, [$($mw:expr),*]) => {{
+        use $crate::dsl::stage_descriptor::{StageDescriptor, JoinDescriptor};
+        use obzenflow_core::id::StageId;
+        let jwr = $join_with_ref;
+        Box::new(JoinDescriptor {
+            name: $name.to_string(),
+            reference_stage_id: StageId::new(), // Placeholder, will be replaced by DSL
+            reference_stage_var: Some(jwr.reference_stage_var),
+            handler: jwr.handler,
+            middleware: vec![$(Box::new($mw)),*],
+        }) as Box<dyn StageDescriptor>
+    }};
+}

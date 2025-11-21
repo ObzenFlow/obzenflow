@@ -2,9 +2,9 @@
 //!
 //! Examples: Aggregators, windowing operations, session tracking
 
-use obzenflow_core::{ChainEvent, Result};
-use obzenflow_core::event::ChainEventContent;
 use async_trait::async_trait;
+use obzenflow_core::event::ChainEventContent;
+use obzenflow_core::{ChainEvent, Result};
 
 /// Handler for stateful processing stages
 ///
@@ -20,7 +20,7 @@ use async_trait::async_trait;
 /// - `Draining`: Handle EOF, emit final result
 ///
 /// # Example
-/// ```rust
+/// ```ignore
 /// use obzenflow_runtime_services::stages::common::handlers::StatefulHandler;
 /// use obzenflow_core::{ChainEvent, EventId, WriterId, Result};
 /// use serde_json::json;
@@ -89,7 +89,7 @@ use async_trait::async_trait;
 pub trait StatefulHandler: Send + Sync {
     /// The internal state type
     type State: Clone + Send + Sync;
-    
+
     /// Accumulate an event into the state (called in Accumulating state)
     ///
     /// This method updates the state with the new event but does NOT

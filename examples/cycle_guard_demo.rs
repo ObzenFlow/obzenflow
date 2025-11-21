@@ -9,17 +9,15 @@ use anyhow::Result;
 use async_trait::async_trait;
 use obzenflow_core::{
     event::chain_event::{ChainEvent, ChainEventFactory},
-    WriterId,
     id::StageId,
+    WriterId,
 };
 use obzenflow_dsl_infra::{flow, sink, source, transform};
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime_services::stages::common::handlers::{
-    FiniteSourceHandler, SinkHandler,
-};
+use obzenflow_runtime_services::stages::common::handlers::{FiniteSourceHandler, SinkHandler};
 // ✨ FLOWIP-080h: Import Map helper
+use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_runtime_services::stages::transform::Map;
-use obzenflow_core::event::payloads::delivery_payload::{DeliveryPayload, DeliveryMethod};
 use serde_json::json;
 
 /// Source that generates a few test events
@@ -55,7 +53,7 @@ impl FiniteSourceHandler for EventGenerator {
                     "id": self.count,
                     "iterations": 0,
                 }),
-            }
+            },
         ))
     }
 
@@ -85,13 +83,20 @@ fn problematic_processor() -> Map<impl Fn(ChainEvent) -> ChainEvent + Send + Syn
         println!("   Parent IDs: {:?}", event.causality.parent_ids);
         println!("   Correlation ID: {:?}", event.correlation_id);
         println!("   Processing Status: {:?}", event.processing_info.status);
-        println!("   Entry Event ID: {}", event.correlation_payload.as_ref().map(|p| p.entry_event_id.to_string()).unwrap_or_else(|| "None".to_string()));
+        println!(
+            "   Entry Event ID: {}",
+            event
+                .correlation_payload
+                .as_ref()
+                .map(|p| p.entry_event_id.to_string())
+                .unwrap_or_else(|| "None".to_string())
+        );
 
         // ALWAYS send the event back - this would create an infinite loop!
         ChainEventFactory::derived_data_event(
             event.writer_id.clone(),
             &event,
-            "test.event",  // Same type - will be processed again
+            "test.event", // Same type - will be processed again
             payload,
         )
     })
@@ -113,12 +118,18 @@ impl EventCounter {
 
 #[async_trait]
 impl SinkHandler for EventCounter {
-    async fn consume(&mut self, event: ChainEvent) -> Result<DeliveryPayload, Box<dyn std::error::Error + Send + Sync>> {
+    async fn consume(
+        &mut self,
+        event: ChainEvent,
+    ) -> Result<DeliveryPayload, Box<dyn std::error::Error + Send + Sync>> {
         let payload = event.payload();
         let id = payload["id"].as_i64().unwrap_or(0);
         let iterations = payload["iterations"].as_i64().unwrap_or(0);
 
-        println!("{} received event {} after {} iterations", self.name, id, iterations);
+        println!(
+            "{} received event {} after {} iterations",
+            self.name, id, iterations
+        );
 
         Ok(DeliveryPayload::success(
             &self.name,
@@ -147,7 +158,9 @@ async fn main() -> Result<()> {
 
     // Initialize logging - set to error to reduce noise even more
     tracing_subscriber::fmt()
-        .with_env_filter("obzenflow=error,obzenflow_adapters::middleware::control::cycle_guard=debug")
+        .with_env_filter(
+            "obzenflow=error,obzenflow_adapters::middleware::control::cycle_guard=debug",
+        )
         .with_target(false)
         .with_thread_ids(false)
         .init();
@@ -181,7 +194,7 @@ async fn main() -> Result<()> {
             source |> processor1;
             processor1 |> processor2;
             processor2 |> sink;
-            
+
             // PROBLEMATIC CYCLE: processors feed back to each other!
             processor1 <| processor2;
         }

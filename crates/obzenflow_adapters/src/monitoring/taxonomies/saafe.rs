@@ -11,45 +11,8 @@
 //!
 //! ## Metrics Available in ObzenFlow
 //!
-//! With FLOWIP-056-666, SAAFE metrics require a mix of automatic and custom metrics:
-//!
-//! | Metric | Prometheus Name | Description |
-//! |--------|----------------|-------------|
-//! | Saturation | `obzenflow_queue_depth` | Queue depth / backlog |
-//! | Amendments | *custom metric* | Requires application-specific tracking |
-//! | Anomalies | *custom metric* | Requires anomaly detection logic |
-//! | Failures | `obzenflow_errors_total` | Total processing failures |
-//! | Errors | `obzenflow_errors_total` | Total errors (same as failures) |
-//!
-//! ## Example Implementation
-//!
-//! For amendments and anomalies, emit custom control events:
-//!
-//! ```rust,no_run
-//! # use obzenflow_core::event::chain_event::ChainEvent;
-//! # use obzenflow_adapters::middleware::MiddlewareContext;
-//! # use serde_json::json;
-//! # let mut ctx = MiddlewareContext::new();
-//! // Emit amendment event
-//! ctx.write_control_event(ChainEvent::control(
-//!     ChainEvent::CONTROL_METRICS_CUSTOM,
-//!     json!({
-//!         "metric_type": "amendment",
-//!         "reason": "duplicate_removed",
-//!         "count": 1
-//!     })
-//! ));
-//!
-//! // Emit anomaly event
-//! ctx.write_control_event(ChainEvent::control(
-//!     ChainEvent::CONTROL_METRICS_CUSTOM,
-//!     json!({
-//!         "metric_type": "anomaly",
-//!         "severity": "high",
-//!         "description": "Unexpected spike in values"
-//!     })
-//! ));
-//! ```
+//! With FLOWIP-056-666, core metrics are emitted automatically from journals; consult
+//! obzenflow_adapters metrics documentation for current coverage.
 
 /// SAAFE taxonomy definition
 ///
@@ -59,10 +22,10 @@ pub struct SAAFE;
 impl SAAFE {
     /// Taxonomy name
     pub const NAME: &'static str = "SAAFE";
-    
+
     /// Human-readable description  
     pub const DESCRIPTION: &'static str = "Saturation, Amendments, Anomalies, Failures, Errors - comprehensive data pipeline monitoring";
-    
+
     /// Get Prometheus queries for SAAFE metrics
     pub fn prometheus_queries(flow_name: &str, stage_name: &str) -> Vec<(&'static str, String)> {
         vec![
@@ -90,7 +53,7 @@ impl SAAFE {
             // Note: Amendments and Anomalies require custom metrics
         ]
     }
-    
+
     /// Get Grafana dashboard JSON for SAAFE metrics
     pub fn grafana_dashboard(flow_name: &str) -> serde_json::Value {
         serde_json::json!({
@@ -131,37 +94,5 @@ impl SAAFE {
             ]
         })
     }
-    
-    /// Example code for emitting custom SAAFE metrics
-    pub fn custom_metric_examples() -> &'static str {
-        r#"
-// Track data amendments
-ctx.write_control_event(ChainEvent::control(
-    ChainEvent::CONTROL_METRICS_CUSTOM,
-    json!({
-        "metric_type": "saafe.amendment",
-        "stage": ctx.stage_name(),
-        "flow": ctx.flow_name(),
-        "amendment_type": "duplicate_removed",
-        "count": duplicate_count
-    })
-));
 
-// Track anomalies
-ctx.write_control_event(ChainEvent::control(
-    ChainEvent::CONTROL_METRICS_CUSTOM,
-    json!({
-        "metric_type": "saafe.anomaly", 
-        "stage": ctx.stage_name(),
-        "flow": ctx.flow_name(),
-        "anomaly_type": "value_spike",
-        "severity": "high",
-        "details": {
-            "expected_range": [0, 100],
-            "actual_value": 250
-        }
-    })
-));
-"#
-    }
 }

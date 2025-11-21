@@ -1,36 +1,77 @@
-//! Flight Delay Analysis Pipeline - FLOWIP-082a Event Schemas Demo
+//! Flight Delay Analysis Pipeline - FLOWIP-082a Event Schemas & FLOWIP-080l Join Demo
 //!
-//! This demonstrates event schema design using TypedPayload trait.
+//! This demonstrates event schema design using TypedPayload trait and
+//! typed join helpers for enriching stream data with reference data.
 //!
 //! **FLOWIP-082a Features**:
 //! - TypedPayload trait for compile-time event type resolution
 //! - Strongly-typed event structs instead of raw JSON
 //! - Schema version constants for evolution
 //!
+//! **FLOWIP-080l Features**:
+//! - WaitForReferenceJoin for enriching flight data with carrier details
+//! - Reference-first convention (carrier data loads before flights)
+//! - Type-safe join key extraction
+//!
 //! Run with: cargo run --package obzenflow --example flight_delays
 
-use obzenflow_dsl_infra::{flow, source, transform, stateful, sink};
-use obzenflow_runtime_services::stages::common::handlers::{
-    FiniteSourceHandler, TransformHandler, StatefulHandler, SinkHandler
-};
-use obzenflow_infra::application::FlowApplication;
-use obzenflow_infra::journal::disk_journals;
+use anyhow::Result;
+use async_trait::async_trait;
 use obzenflow_core::{
     event::chain_event::{ChainEvent, ChainEventFactory},
-    event::payloads::delivery_payload::{DeliveryPayload, DeliveryMethod},
-    WriterId,
-    TypedPayload,  // ✨ FLOWIP-082a
+    event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload},
     id::StageId,
+    TypedPayload, // ✨ FLOWIP-082a
+    WriterId,
 };
+use obzenflow_dsl_infra::{flow, join, sink, source, stateful, transform, with_ref};
+use obzenflow_infra::application::FlowApplication;
+use obzenflow_infra::journal::disk_journals;
+use obzenflow_runtime_services::stages::common::handlers::{
+    FiniteSourceHandler, JoinHandler, SinkHandler, StatefulHandler, TransformHandler,
+};
+use obzenflow_runtime_services::stages::join::InnerJoinBuilder;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
-use anyhow::Result;
-use async_trait::async_trait;
 
 // ============================================================================
-// FLOWIP-082a: Typed Event Schemas
+// FLOWIP-082a & FLOWIP-080l: Typed Event Schemas
 // ============================================================================
+
+/// Carrier details - reference data for airline carriers (FLOWIP-080l)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CarrierDetails {
+    carrier_code: String,
+    carrier_name: String,
+    country: String,
+    fleet_size: u32,
+}
+
+impl TypedPayload for CarrierDetails {
+    const EVENT_TYPE: &'static str = "carrier.details";
+    const SCHEMA_VERSION: u32 = 1;
+}
+
+/// Enriched flight - flight record with carrier details (FLOWIP-080l output)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct EnrichedFlight {
+    carrier_code: String,
+    carrier_name: String,
+    carrier_country: String,
+    date: String,
+    origin: String,
+    destination: String,
+    scheduled_duration: u32,
+    delay_minutes: u32,
+    flight_number: String,
+    delay_category: Option<String>,
+}
+
+impl TypedPayload for EnrichedFlight {
+    const EVENT_TYPE: &'static str = "flight.enriched";
+    const SCHEMA_VERSION: u32 = 1;
+}
 
 /// Flight record event - represents a single flight observation
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -66,6 +107,64 @@ impl TypedPayload for CarrierStatistics {
 }
 
 // ============================================================================
+// Source: Carrier Reference Data (FLOWIP-080l)
+// ============================================================================
+
+/// Source that provides carrier reference data
+#[derive(Clone, Debug)]
+struct CarrierDataSource {
+    carriers_emitted: usize,
+}
+
+impl CarrierDataSource {
+    fn new() -> Self {
+        Self {
+            carriers_emitted: 0,
+        }
+    }
+}
+
+#[async_trait]
+impl FiniteSourceHandler for CarrierDataSource {
+    fn next(&mut self) -> Option<ChainEvent> {
+        // Static carrier reference data
+        let carriers = vec![
+            ("AA", "American Airlines", "USA", 950),
+            ("UA", "United Airlines", "USA", 850),
+            ("DL", "Delta Air Lines", "USA", 900),
+            ("WN", "Southwest Airlines", "USA", 750),
+            ("BA", "British Airways", "UK", 290),
+            ("LH", "Lufthansa", "Germany", 340),
+            ("AF", "Air France", "France", 280),
+        ];
+
+        if self.carriers_emitted < carriers.len() {
+            let (code, name, country, fleet) = carriers[self.carriers_emitted];
+            self.carriers_emitted += 1;
+
+            let carrier = CarrierDetails {
+                carrier_code: code.to_string(),
+                carrier_name: name.to_string(),
+                country: country.to_string(),
+                fleet_size: fleet,
+            };
+
+            Some(ChainEventFactory::data_event(
+                WriterId::from(StageId::new()),
+                &CarrierDetails::versioned_event_type(),
+                serde_json::to_value(&carrier).unwrap(),
+            ))
+        } else {
+            None
+        }
+    }
+
+    fn is_complete(&self) -> bool {
+        self.carriers_emitted >= 7 // We have 7 carriers
+    }
+}
+
+// ============================================================================
 // Source: Flight Data
 // ============================================================================
 
@@ -80,14 +179,70 @@ struct FlightDataSource {
 impl FlightDataSource {
     fn new() -> Self {
         let flights = vec![
-            ("AA".to_string(), "2023-12-01".to_string(), "LAX".to_string(), "JFK".to_string(), 120, 15), // American Airlines, 15 min delay
-            ("DL".to_string(), "2023-12-01".to_string(), "ATL".to_string(), "ORD".to_string(), 90, 0),   // Delta, on time
-            ("UA".to_string(), "2023-12-01".to_string(), "SFO".to_string(), "LAX".to_string(), 60, 45),  // United, 45 min delay
-            ("AA".to_string(), "2023-12-01".to_string(), "DFW".to_string(), "MIA".to_string(), 180, 5),  // American Airlines, 5 min delay
-            ("SW".to_string(), "2023-12-01".to_string(), "LAS".to_string(), "PHX".to_string(), 75, 120), // Southwest, 2 hour delay
-            ("DL".to_string(), "2023-12-01".to_string(), "SEA".to_string(), "DEN".to_string(), 110, 8),  // Delta, 8 min delay
-            ("UA".to_string(), "2023-12-01".to_string(), "EWR".to_string(), "SFO".to_string(), 300, 0),  // United, on time
-            ("AA".to_string(), "2023-12-01".to_string(), "ORD".to_string(), "LAX".to_string(), 240, 25), // American Airlines, 25 min delay
+            (
+                "AA".to_string(),
+                "2023-12-01".to_string(),
+                "LAX".to_string(),
+                "JFK".to_string(),
+                120,
+                15,
+            ), // American Airlines, 15 min delay
+            (
+                "DL".to_string(),
+                "2023-12-01".to_string(),
+                "ATL".to_string(),
+                "ORD".to_string(),
+                90,
+                0,
+            ), // Delta, on time
+            (
+                "UA".to_string(),
+                "2023-12-01".to_string(),
+                "SFO".to_string(),
+                "LAX".to_string(),
+                60,
+                45,
+            ), // United, 45 min delay
+            (
+                "AA".to_string(),
+                "2023-12-01".to_string(),
+                "DFW".to_string(),
+                "MIA".to_string(),
+                180,
+                5,
+            ), // American Airlines, 5 min delay
+            (
+                "WN".to_string(),
+                "2023-12-01".to_string(),
+                "LAS".to_string(),
+                "PHX".to_string(),
+                75,
+                120,
+            ), // Southwest, 2 hour delay
+            (
+                "DL".to_string(),
+                "2023-12-01".to_string(),
+                "SEA".to_string(),
+                "DEN".to_string(),
+                110,
+                8,
+            ), // Delta, 8 min delay
+            (
+                "UA".to_string(),
+                "2023-12-01".to_string(),
+                "EWR".to_string(),
+                "SFO".to_string(),
+                300,
+                0,
+            ), // United, on time
+            (
+                "AA".to_string(),
+                "2023-12-01".to_string(),
+                "ORD".to_string(),
+                "LAX".to_string(),
+                240,
+                25,
+            ), // American Airlines, 25 min delay
         ];
 
         Self {
@@ -119,7 +274,7 @@ impl FiniteSourceHandler for FlightDataSource {
             // Emit event with TypedPayload's EVENT_TYPE
             Some(ChainEventFactory::data_event(
                 self.writer_id.clone(),
-                FlightRecord::EVENT_TYPE,
+                &FlightRecord::versioned_event_type(),
                 serde_json::to_value(&flight).unwrap(),
             ))
         } else {
@@ -150,11 +305,11 @@ impl FlightValidator {
 impl TransformHandler for FlightValidator {
     fn process(&self, event: ChainEvent) -> Vec<ChainEvent> {
         // ✨ FLOWIP-082a: Check event type using constant
-        if event.event_type() == FlightRecord::EVENT_TYPE {
+        if FlightRecord::event_type_matches(&event.event_type()) {
             // Validate that all required fields are present
-            let valid = event.payload().get("carrier").is_some() &&
-                        event.payload().get("delay_minutes").is_some() &&
-                        event.payload().get("scheduled_duration").is_some();
+            let valid = event.payload().get("carrier").is_some()
+                && event.payload().get("delay_minutes").is_some()
+                && event.payload().get("scheduled_duration").is_some();
 
             if valid {
                 vec![event]
@@ -190,8 +345,12 @@ impl DelayCalculator {
 impl TransformHandler for DelayCalculator {
     fn process(&self, event: ChainEvent) -> Vec<ChainEvent> {
         // ✨ FLOWIP-082a: Check event type using constant
-        if event.event_type() == FlightRecord::EVENT_TYPE {
-            if let Some(delay) = event.payload().get("delay_minutes").and_then(|v| v.as_u64()) {
+        if FlightRecord::event_type_matches(&event.event_type()) {
+            if let Some(delay) = event
+                .payload()
+                .get("delay_minutes")
+                .and_then(|v| v.as_u64())
+            {
                 // Categorize delay
                 let delay_category = if delay == 0 {
                     "on_time"
@@ -210,7 +369,7 @@ impl TransformHandler for DelayCalculator {
                 return vec![ChainEventFactory::derived_data_event(
                     event.writer_id.clone(),
                     &event,
-                    FlightRecord::EVENT_TYPE,
+                    &FlightRecord::versioned_event_type(),
                     payload,
                 )];
             }
@@ -222,6 +381,11 @@ impl TransformHandler for DelayCalculator {
         Ok(())
     }
 }
+
+// ============================================================================
+// Join: Enrich Flights with Carrier Details (FLOWIP-080l)
+// ============================================================================
+// (Moved inline to join! macro below)
 
 // ============================================================================
 // Stateful: Carrier Aggregation
@@ -252,13 +416,19 @@ impl StatefulHandler for CarrierAggregator {
     type State = CarrierStats;
 
     fn accumulate(&mut self, state: &mut Self::State, event: ChainEvent) {
-        // ✨ FLOWIP-082a: Check event type using constant
-        if event.event_type() == FlightRecord::EVENT_TYPE {
-            if let (Some(carrier), Some(delay)) = (
-                event.payload().get("carrier").and_then(|v| v.as_str()),
-                event.payload().get("delay_minutes").and_then(|v| v.as_u64()),
+        // ✨ FLOWIP-080l: Now processing enriched flights with carrier details
+        if EnrichedFlight::event_type_matches(&event.event_type()) {
+            if let (Some(carrier_name), Some(delay)) = (
+                event.payload().get("carrier_name").and_then(|v| v.as_str()),
+                event
+                    .payload()
+                    .get("delay_minutes")
+                    .and_then(|v| v.as_u64()),
             ) {
-                let entry = state.stats.entry(carrier.to_string()).or_insert((0, 0));
+                let entry = state
+                    .stats
+                    .entry(carrier_name.to_string())
+                    .or_insert((0, 0));
                 entry.0 += delay;
                 entry.1 += 1;
             }
@@ -270,28 +440,32 @@ impl StatefulHandler for CarrierAggregator {
     }
 
     fn create_events(&self, state: &Self::State) -> Vec<ChainEvent> {
-        // ✨ FLOWIP-082a: Emit typed CarrierStatistics events
-        state.stats.iter().map(|(carrier, (total_delay, flight_count))| {
-            let avg_delay = if *flight_count > 0 {
-                *total_delay as f64 / *flight_count as f64
-            } else {
-                0.0
-            };
+                // ✨ FLOWIP-082a: Emit typed CarrierStatistics events
+                state
+                    .stats
+                    .iter()
+                    .map(|(carrier, (total_delay, flight_count))| {
+                let avg_delay = if *flight_count > 0 {
+                    *total_delay as f64 / *flight_count as f64
+                } else {
+                    0.0
+                };
 
-            let stats = CarrierStatistics {
-                carrier: carrier.clone(),
-                total_delay: *total_delay,
-                flight_count: *flight_count,
-                average_delay: avg_delay,
-            };
+                let stats = CarrierStatistics {
+                    carrier: carrier.clone(),
+                    total_delay: *total_delay,
+                    flight_count: *flight_count,
+                    average_delay: avg_delay,
+                };
 
-            // Use TypedPayload's EVENT_TYPE
-            ChainEventFactory::data_event(
-                self.writer_id.clone(),
-                CarrierStatistics::EVENT_TYPE,
-                serde_json::to_value(&stats).unwrap(),
-            )
-        }).collect()
+                        // Use TypedPayload's EVENT_TYPE
+                        ChainEventFactory::data_event(
+                            self.writer_id.clone(),
+                            &CarrierStatistics::versioned_event_type(),
+                            serde_json::to_value(&stats).unwrap(),
+                        )
+                    })
+                    .collect()
     }
 }
 
@@ -301,11 +475,15 @@ impl StatefulHandler for CarrierAggregator {
 
 /// Sink that prints carrier statistics
 #[derive(Clone, Debug)]
-struct StatisticsPrinter;
+struct StatisticsPrinter {
+    header_printed: bool,
+}
 
 impl StatisticsPrinter {
     fn new() -> Self {
-        Self
+        Self {
+            header_printed: false,
+        }
     }
 }
 
@@ -313,15 +491,29 @@ impl StatisticsPrinter {
 impl SinkHandler for StatisticsPrinter {
     async fn consume(&mut self, event: ChainEvent) -> obzenflow_core::Result<DeliveryPayload> {
         // ✨ FLOWIP-082a: Check event type using constant
-        if event.event_type() == CarrierStatistics::EVENT_TYPE {
+        if CarrierStatistics::event_type_matches(&event.event_type()) {
+            if !self.header_printed {
+                println!("✈️  Carrier delay summary");
+                println!("-------------------------");
+                self.header_printed = true;
+            }
+
             let payload = event.payload();
             let carrier = payload["carrier"].as_str().unwrap_or("Unknown");
             let avg_delay = payload["average_delay"].as_f64().unwrap_or(0.0);
             let flight_count = payload["flight_count"].as_u64().unwrap_or(0);
 
-            let status = if avg_delay < 10.0 { "🟢" } else if avg_delay < 30.0 { "🟡" } else { "🔴" };
-            println!("  {} {}: {:.1} min avg delay ({} flights)",
-                status, carrier, avg_delay, flight_count);
+            let status = if avg_delay < 10.0 {
+                "🟢"
+            } else if avg_delay < 30.0 {
+                "🟡"
+            } else {
+                "🔴"
+            };
+            println!(
+                "  {} {}: {:.1} min avg delay ({} flights)",
+                status, carrier, avg_delay, flight_count
+            );
         }
         Ok(DeliveryPayload::success(
             "statistics_printer",
@@ -342,13 +534,17 @@ async fn main() -> Result<()> {
     println!("🛫 FlowState RS - Flight Delay Analysis");
     println!("========================================");
     println!("✨ FLOWIP-082a: TypedPayload Event Schemas");
+    println!("✨ FLOWIP-080l: Typed Join Helpers");
     println!("");
 
     println!("Features demonstrated:");
     println!("  • TypedPayload trait for compile-time event types");
     println!("  • Strongly-typed event structs (FlightRecord, CarrierStatistics)");
     println!("  • Schema version constants for evolution");
-    println!("  • EVENT_TYPE constants instead of string literals\n");
+    println!("  • EVENT_TYPE constants instead of string literals");
+    println!("  • WaitForReferenceJoin for enriching stream data");
+    println!("  • Reference-first convention (carriers load before flights)");
+    println!("  • Type-safe join key extraction\n");
 
     println!("Running delay analysis pipeline...\n");
 
@@ -360,17 +556,52 @@ async fn main() -> Result<()> {
             middleware: [],
 
             stages: {
-                src = source!("source" => FlightDataSource::new());
+                // Reference data source (FLOWIP-080l)
+                carriers = source!("carriers" => CarrierDataSource::new());
+
+                // Stream data source
+                flights = source!("flights" => FlightDataSource::new());
+
+                // Processing stages
                 val = transform!("validator" => FlightValidator::new());
                 calc = transform!("calculator" => DelayCalculator::new());
+
+                // Join stage to enrich flights with carrier details (FLOWIP-080l)
+                enricher = join!("enricher" => with_ref!(carriers,
+                    InnerJoinBuilder::<CarrierDetails, FlightRecord, EnrichedFlight>::new()
+                        .catalog_key(|carrier: &CarrierDetails| carrier.carrier_code.clone())
+                        .stream_key(|flight: &FlightRecord| flight.carrier.clone())
+                        .build(|carrier: CarrierDetails, flight: FlightRecord| EnrichedFlight {
+                            carrier_code: flight.carrier.clone(),
+                            carrier_name: carrier.carrier_name.clone(),
+                            carrier_country: carrier.country.clone(),
+                            date: flight.date.clone(),
+                            origin: flight.origin.clone(),
+                            destination: flight.destination.clone(),
+                            scheduled_duration: flight.scheduled_duration,
+                            delay_minutes: flight.delay_minutes,
+                            flight_number: flight.flight_number.clone(),
+                            delay_category: flight.delay_category.clone(),
+                        })
+                ));
+
+                // Aggregation and output
                 agg = stateful!("aggregator" => CarrierAggregator::new());
                 printer = sink!("printer" => StatisticsPrinter::new());
             },
 
             topology: {
-                src |> val;
+                // Stream processing pipeline
+                flights |> val;
                 val |> calc;
-                calc |> agg;
+
+                // Join: enriches stream with reference data (FLOWIP-080l)
+                // Reference (carriers) is specified via join!(...reference: carriers, ...)
+                // Only stream input appears in topology
+                calc |> enricher;
+
+                // Aggregation pipeline
+                enricher |> agg;
                 agg |> printer;
             }
         }
@@ -381,11 +612,19 @@ async fn main() -> Result<()> {
     .map_err(|e| anyhow::anyhow!("Application failed: {:?}", e))?;
 
     println!("\n✅ Analysis pipeline completed!");
+
     println!("\n💡 FLOWIP-082a Benefits:");
     println!("   • Type safety: FlightRecord::EVENT_TYPE instead of \"FlightRecord\"");
     println!("   • Schema evolution: SCHEMA_VERSION constants track changes");
     println!("   • Compile-time validation: TypedPayload trait enforces structure");
     println!("   • Documentation: Event types are self-documenting structs");
+
+    println!("\n💡 FLOWIP-080l Benefits:");
+    println!("   • No custom StatefulHandler needed for joins");
+    println!("   • Type-safe join keys prevent runtime errors");
+    println!("   • Reference-first convention eliminates confusion");
+    println!("   • 50% less boilerplate for join patterns");
+
     println!("\n📝 Journal written to: target/flight-delays-logs/");
 
     Ok(())

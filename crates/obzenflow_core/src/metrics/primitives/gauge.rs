@@ -68,4 +68,3 @@ mod tests {
         assert!((gauge.get() - 99.999).abs() < 0.001);
     }
 }
-

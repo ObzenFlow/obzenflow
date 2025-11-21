@@ -60,7 +60,9 @@ pub trait TypedPayload: Serialize + DeserializeOwned + Sized {
             ChainEventContent::Data {
                 event_type,
                 payload,
-            } if event_type == Self::EVENT_TYPE => serde_json::from_value(payload.clone()).ok(),
+            } if Self::event_type_matches(event_type) => {
+                serde_json::from_value(payload.clone()).ok()
+            }
             _ => None,
         }
     }
@@ -71,9 +73,10 @@ pub trait TypedPayload: Serialize + DeserializeOwned + Sized {
     ///
     /// Panics if serialization fails (should never happen for valid Serialize implementations)
     fn to_event(self, writer_id: WriterId) -> ChainEvent {
+        let event_type = Self::versioned_event_type();
         ChainEventFactory::data_event(
             writer_id,
-            Self::EVENT_TYPE,
+            &event_type,
             serde_json::to_value(self).expect("Serialization should not fail"),
         )
     }
@@ -87,7 +90,7 @@ pub trait TypedPayload: Serialize + DeserializeOwned + Sized {
                 event_type,
                 payload,
             } => {
-                if event_type != Self::EVENT_TYPE {
+                if !Self::event_type_matches(event_type) {
                     return Err(TypedPayloadError::TypeMismatch {
                         expected: Self::EVENT_TYPE,
                         actual: event_type.clone(),
@@ -104,13 +107,21 @@ pub trait TypedPayload: Serialize + DeserializeOwned + Sized {
             ChainEventContent::FlowControl(_) => {
                 Err(TypedPayloadError::WrongContentType("flow_signal"))
             }
-            ChainEventContent::Delivery(_) => {
-                Err(TypedPayloadError::WrongContentType("delivery"))
-            }
+            ChainEventContent::Delivery(_) => Err(TypedPayloadError::WrongContentType("delivery")),
             ChainEventContent::Observability(_) => {
                 Err(TypedPayloadError::WrongContentType("lifecycle"))
             }
         }
+    }
+
+    /// Fully qualified event type including schema version (e.g., "event.v1")
+    fn versioned_event_type() -> String {
+        format!("{}.v{}", Self::EVENT_TYPE, Self::SCHEMA_VERSION)
+    }
+
+    /// Accept current or legacy event type strings
+    fn event_type_matches(event_type: &str) -> bool {
+        event_type == Self::EVENT_TYPE || event_type == Self::versioned_event_type()
     }
 }
 

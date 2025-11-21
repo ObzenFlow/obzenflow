@@ -4,13 +4,13 @@
 //! following the same pattern as the journal abstractions.
 //! Concrete implementations are provided in obzenflow_infra.
 
-pub mod error;
 pub mod endpoint;
+pub mod error;
 pub mod server;
 pub mod types;
 
 // Re-export core types
+pub use endpoint::{EndpointMetadata, HttpEndpoint};
 pub use error::WebError;
-pub use endpoint::{HttpEndpoint, EndpointMetadata};
 pub use server::WebServer;
 pub use types::{HttpMethod, Request, Response, ServerConfig};

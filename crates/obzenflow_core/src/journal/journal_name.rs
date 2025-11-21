@@ -26,9 +26,13 @@ impl JournalName {
     pub fn to_filename(&self) -> String {
         match self {
             JournalName::System => "system.log".to_string(),
-            JournalName::Stage { id, stage_type, name } => {
+            JournalName::Stage {
+                id,
+                stage_type,
+                name,
+            } => {
                 format!("{:?}_{}_{}.log", stage_type, name, id)
-            },
+            }
         }
     }
 }

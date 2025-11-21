@@ -1,8 +1,8 @@
 //! Journal writer ID - identifies which journal wrote an envelope
 
+use crate::id::JournalId;
 use serde::{Deserialize, Serialize};
 use std::fmt;
-use crate::id::JournalId;
 
 /// Identifies the journal that wrote an event envelope
 /// This wraps JournalId to make it clear this is about envelope authorship
@@ -15,17 +15,17 @@ impl JournalWriterId {
     pub fn new() -> Self {
         JournalWriterId(JournalId::new())
     }
-    
+
     /// Create from an existing JournalId
     pub fn from_journal_id(journal_id: JournalId) -> Self {
         JournalWriterId(journal_id)
     }
-    
+
     /// Get the inner JournalId
     pub fn as_journal_id(&self) -> &JournalId {
         &self.0
     }
-    
+
     /// Convert to JournalId
     pub fn into_journal_id(self) -> JournalId {
         self.0

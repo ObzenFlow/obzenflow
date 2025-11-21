@@ -1,8 +1,7 @@
-
-use serde::{Deserialize, Serialize};
-use chrono::{DateTime, Utc};
-use crate::event::{JournalWriterId, JournalEvent};
 use crate::event::vector_clock::VectorClock;
+use crate::event::{JournalEvent, JournalWriterId};
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 
 /// Event envelope with vector clock for causal ordering
 ///
@@ -11,7 +10,7 @@ use crate::event::vector_clock::VectorClock;
 #[derive(Debug, Clone)]
 pub struct EventEnvelope<T>
 where
-    T: JournalEvent
+    T: JournalEvent,
 {
     /// Writer that created this event
     pub journal_writer_id: JournalWriterId,
@@ -26,7 +25,7 @@ where
 // Manual implementations to avoid serde trait bound issues
 impl<T> Serialize for EventEnvelope<T>
 where
-    T: JournalEvent
+    T: JournalEvent,
 {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -44,7 +43,7 @@ where
 
 impl<'de, T> Deserialize<'de> for EventEnvelope<T>
 where
-    T: JournalEvent
+    T: JournalEvent,
 {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -57,7 +56,7 @@ where
             timestamp: DateTime<Utc>,
             event: T,
         }
-        
+
         let data = EventEnvelopeData::<T>::deserialize(deserializer)?;
         Ok(EventEnvelope {
             journal_writer_id: data.journal_writer_id,
@@ -70,7 +69,7 @@ where
 
 impl<T> EventEnvelope<T>
 where
-    T: JournalEvent
+    T: JournalEvent,
 {
     pub fn new(journal_writer_id: JournalWriterId, event: T) -> Self {
         Self {

@@ -6,22 +6,22 @@
 //! is due to disk I/O versus other factors (middleware, task scheduling, etc).
 
 use criterion::{criterion_group, criterion_main, Criterion};
-use obzenflow_dsl_infra::{flow, source, transform, sink};
-use obzenflow_runtime_services::stages::common::handlers::{
-    FiniteSourceHandler, TransformHandler, SinkHandler
-};
-use obzenflow_infra::journal::MemoryJournal;
-use obzenflow_core::event::event_id::EventId;
 use obzenflow_core::event::chain_event::ChainEvent;
+use obzenflow_core::event::event_id::EventId;
 use obzenflow_core::journal::writer_id::WriterId;
+use obzenflow_dsl_infra::{flow, sink, source, transform};
+use obzenflow_infra::journal::MemoryJournal;
+use obzenflow_runtime_services::stages::common::handlers::{
+    FiniteSourceHandler, SinkHandler, TransformHandler,
+};
 // Monitoring taxonomies are no longer needed with FLOWIP-056-666
 // Metrics are automatically collected by MetricsAggregator from the event journal
+use async_trait::async_trait;
+use serde_json::json;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use serde_json::json;
 use tokio::runtime::Runtime;
-use async_trait::async_trait;
 
 const WARMUP_EVENT_COUNT: u64 = 10;
 const TEST_EVENT_COUNT: u64 = 100;
@@ -57,7 +57,7 @@ impl FiniteSourceHandler for TimestampedSource {
                         .duration_since(UNIX_EPOCH)
                         .unwrap()
                         .as_nanos() as u64,
-                })
+                }),
             ))
         } else {
             None
@@ -98,12 +98,17 @@ struct LatencySink {
 
 impl LatencySink {
     fn new(expected_count: u64) -> (Self, Arc<tokio::sync::Mutex<Vec<Duration>>>) {
-        let latencies = Arc::new(tokio::sync::Mutex::new(Vec::with_capacity(expected_count as usize)));
-        (Self {
-            expected_count,
-            received: Arc::new(AtomicU64::new(0)),
-            latencies: latencies.clone(),
-        }, latencies)
+        let latencies = Arc::new(tokio::sync::Mutex::new(Vec::with_capacity(
+            expected_count as usize,
+        )));
+        (
+            Self {
+                expected_count,
+                received: Arc::new(AtomicU64::new(0)),
+                latencies: latencies.clone(),
+            },
+            latencies,
+        )
     }
 }
 
@@ -111,18 +116,21 @@ impl LatencySink {
 impl SinkHandler for LatencySink {
     fn consume(&mut self, event: ChainEvent) -> obzenflow_core::Result<()> {
         if let (Some(emit_time_nanos), Some(event_id)) = (
-            event.payload.get("emit_time_nanos").and_then(|v| v.as_u64()),
-            event.payload.get("event_id").and_then(|v| v.as_u64())
+            event
+                .payload
+                .get("emit_time_nanos")
+                .and_then(|v| v.as_u64()),
+            event.payload.get("event_id").and_then(|v| v.as_u64()),
         ) {
             self.received.fetch_add(1, Ordering::Relaxed);
-            
+
             // Skip warmup events
             if event_id >= WARMUP_EVENT_COUNT {
                 let receive_time_nanos = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .unwrap()
                     .as_nanos() as u64;
-                
+
                 if receive_time_nanos > emit_time_nanos {
                     let latency = Duration::from_nanos(receive_time_nanos - emit_time_nanos);
                     let latencies = self.latencies.clone();
@@ -149,7 +157,7 @@ async fn run_100_stage_pipeline_memory() -> anyhow::Result<Duration> {
     let handle = flow! {
         journal: journal,
         middleware: [],
-        
+
         stages: {
             src = source!("source" => source);
             s1 = transform!("stage1" => PassthroughStage::new("stage1"));
@@ -253,7 +261,7 @@ async fn run_100_stage_pipeline_memory() -> anyhow::Result<Duration> {
             s99 = transform!("stage99" => PassthroughStage::new("stage99"));
             snk = sink!("sink" => sink);
         },
-        
+
         topology: {
             src |> s1;
             s1 |> s2;
@@ -356,14 +364,18 @@ async fn run_100_stage_pipeline_memory() -> anyhow::Result<Duration> {
             s98 |> s99;
             s99 |> snk;
         }
-    }.await.map_err(|e| anyhow::anyhow!("Failed to create flow: {:?}", e))?;
+    }
+    .await
+    .map_err(|e| anyhow::anyhow!("Failed to create flow: {:?}", e))?;
 
     // Start the pipeline
-    handle.run().await
+    handle
+        .run()
+        .await
         .map_err(|e| anyhow::anyhow!("Failed to run pipeline: {:?}", e))?;
 
     // Wait for completion
-    let timeout = Duration::from_secs(300);  // Extended timeout for true 100 stages
+    let timeout = Duration::from_secs(300); // Extended timeout for true 100 stages
     let start = Instant::now();
 
     while sink_clone.received.load(Ordering::Relaxed) < WARMUP_EVENT_COUNT + TEST_EVENT_COUNT {
@@ -380,7 +392,7 @@ async fn run_100_stage_pipeline_memory() -> anyhow::Result<Duration> {
     if collected.is_empty() {
         return Ok(Duration::ZERO);
     }
-    
+
     collected.sort();
     Ok(collected[collected.len() / 2])
 }
@@ -388,19 +400,19 @@ async fn run_100_stage_pipeline_memory() -> anyhow::Result<Duration> {
 fn bench_100_stage_latency_memory(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
     let mut group = c.benchmark_group("100_stage_latency_memory");
-    
-    group.sample_size(10);  // Minimum required by Criterion
-    group.measurement_time(Duration::from_secs(180));  // Extended measurement time for true 100 stages
+
+    group.sample_size(10); // Minimum required by Criterion
+    group.measurement_time(Duration::from_secs(180)); // Extended measurement time for true 100 stages
 
     group.bench_function("median_latency", |b| {
         b.to_async(&rt).iter_custom(|iters| async move {
             let mut total_latency = Duration::ZERO;
-            
+
             for _ in 0..iters {
                 let median = run_100_stage_pipeline_memory().await.unwrap();
                 total_latency = total_latency.saturating_add(median);
             }
-            
+
             total_latency
         });
     });

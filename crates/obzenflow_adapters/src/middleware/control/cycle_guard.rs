@@ -4,14 +4,11 @@
 //! a cycle and aborts processing if it exceeds the configured limit.
 
 use crate::middleware::{Middleware, MiddlewareAction, MiddlewareContext};
-use obzenflow_core::{
-    event::chain_event::ChainEvent,
-    event::CorrelationId,
-};
+use obzenflow_core::{event::chain_event::ChainEvent, event::CorrelationId};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tracing::{warn, debug};
+use tracing::{debug, warn};
 
 /// Entry in the cycle tracking map with timestamp for TTL
 #[derive(Debug, Clone)]
@@ -47,7 +44,7 @@ impl CycleGuardMiddleware {
             last_cleanup: Arc::new(Mutex::new(Instant::now())),
         }
     }
-    
+
     /// Create a new cycle guard with custom TTL
     pub fn with_ttl(max_iterations: usize, stage_name: impl Into<String>, ttl: Duration) -> Self {
         Self {
@@ -58,28 +55,26 @@ impl CycleGuardMiddleware {
             last_cleanup: Arc::new(Mutex::new(Instant::now())),
         }
     }
-    
+
     /// Clean up expired entries
     fn cleanup_expired_entries(&self) {
         let mut tracking = self.cycle_tracking.lock().unwrap();
         let now = Instant::now();
-        
+
         // Remove entries older than TTL
         tracking.retain(|correlation_id, entry| {
             let age = now.duration_since(entry.last_accessed);
             if age > self.entry_ttl {
                 debug!(
                     "CycleGuard[{}]: Removing expired entry for correlation {} (age: {:?})",
-                    self.stage_name,
-                    correlation_id,
-                    age
+                    self.stage_name, correlation_id, age
                 );
                 false
             } else {
                 true
             }
         });
-        
+
         debug!(
             "CycleGuard[{}]: Cleanup complete, {} entries remaining",
             self.stage_name,
@@ -94,27 +89,25 @@ impl Middleware for CycleGuardMiddleware {
         let Some(correlation_id) = &event.correlation_id else {
             return MiddlewareAction::Continue;
         };
-        
+
         // Check if we should run cleanup (every 60 seconds)
         {
             let mut last_cleanup = self.last_cleanup.lock().unwrap();
             let now = Instant::now();
             if now.duration_since(*last_cleanup) > Duration::from_secs(60) {
-                debug!(
-                    "CycleGuard[{}]: Running periodic cleanup",
-                    self.stage_name
-                );
+                debug!("CycleGuard[{}]: Running periodic cleanup", self.stage_name);
                 drop(last_cleanup); // Release lock before cleanup
                 self.cleanup_expired_entries();
                 *self.last_cleanup.lock().unwrap() = now;
             }
         }
-        
+
         let mut tracking = self.cycle_tracking.lock().unwrap();
         let now = Instant::now();
-        
+
         // Update or create entry
-        let entry = tracking.entry(*correlation_id)
+        let entry = tracking
+            .entry(*correlation_id)
             .and_modify(|e| {
                 e.iterations += 1;
                 e.last_accessed = now;
@@ -123,18 +116,14 @@ impl Middleware for CycleGuardMiddleware {
                 iterations: 1,
                 last_accessed: now,
             });
-        
+
         let iterations = entry.iterations;
-        
+
         debug!(
             "CycleGuard[{}]: Processing event {} with correlation {} (iteration {} of max {})",
-            self.stage_name,
-            event.id,
-            correlation_id,
-            iterations,
-            self.max_iterations
+            self.stage_name, event.id, correlation_id, iterations, self.max_iterations
         );
-        
+
         // Check if we've exceeded the limit
         if iterations > self.max_iterations {
             warn!(
@@ -145,10 +134,10 @@ impl Middleware for CycleGuardMiddleware {
                 self.max_iterations,
                 correlation_id
             );
-            
+
             // Return the ORIGINAL event with error status to break the cycle
             let mut error_event = event.clone();
-            
+
             // Set the error status with detailed information
             error_event.processing_info.status = obzenflow_core::event::status::processing_status::ProcessingStatus::Error(
                 format!(
@@ -159,16 +148,21 @@ impl Middleware for CycleGuardMiddleware {
                     self.stage_name
                 )
             );
-            
+
             // Return the original event with error status - transforms will skip it
             return MiddlewareAction::Skip(vec![error_event]);
         }
-        
+
         // Continue processing
         MiddlewareAction::Continue
     }
-    
-    fn post_handle(&self, _event: &ChainEvent, _results: &[ChainEvent], _ctx: &mut MiddlewareContext) {
+
+    fn post_handle(
+        &self,
+        _event: &ChainEvent,
+        _results: &[ChainEvent],
+        _ctx: &mut MiddlewareContext,
+    ) {
         // Cleanup is now handled periodically in pre_handle with TTL
     }
 }
@@ -181,11 +175,9 @@ pub struct CycleGuardMiddlewareFactory {
 impl CycleGuardMiddlewareFactory {
     /// Create a factory with default settings (10 iterations max)
     pub fn new() -> Self {
-        Self {
-            max_iterations: 10,
-        }
+        Self { max_iterations: 10 }
     }
-    
+
     /// Create a factory with custom iteration limit
     pub fn with_limit(max_iterations: usize) -> Self {
         Self { max_iterations }
@@ -205,7 +197,7 @@ impl MiddlewareFactory for CycleGuardMiddlewareFactory {
     fn create(&self, config: &StageConfig) -> Box<dyn Middleware> {
         Box::new(CycleGuardMiddleware::new(self.max_iterations, &config.name))
     }
-    
+
     fn name(&self) -> &str {
         "cycle_guard"
     }
@@ -215,4 +207,3 @@ impl MiddlewareFactory for CycleGuardMiddlewareFactory {
 pub fn cycle_guard(max_iterations: usize) -> Box<dyn MiddlewareFactory> {
     Box::new(CycleGuardMiddlewareFactory::with_limit(max_iterations))
 }
-

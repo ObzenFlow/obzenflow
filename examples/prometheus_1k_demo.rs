@@ -20,24 +20,21 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
+use obzenflow_adapters::middleware::rate_limit;
 use obzenflow_core::{
     event::chain_event::{ChainEvent, ChainEventFactory},
-    WriterId,
     id::StageId,
-    TypedPayload,
+    TypedPayload, WriterId,
 };
-use obzenflow_dsl_infra::{flow, sink, source, transform, stateful};
+use obzenflow_dsl_infra::{flow, sink, source, stateful, transform};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_adapters::middleware::rate_limit;
-use obzenflow_runtime_services::stages::common::handlers::{
-    FiniteSourceHandler, SinkHandler,
-};
+use obzenflow_runtime_services::stages::common::handlers::{FiniteSourceHandler, SinkHandler};
 // ✨ FLOWIP-080h: Import Map helper
 use obzenflow_runtime_services::stages::transform::Map;
 // ✨ FLOWIP-080j: Import ReduceTyped for type-safe accumulation
-use obzenflow_runtime_services::stages::stateful::accumulators::ReduceTyped;
-use obzenflow_core::event::payloads::delivery_payload::{DeliveryPayload, DeliveryMethod};
+use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
+use obzenflow_runtime_services::stages::stateful::strategies::accumulators::ReduceTyped;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::time::{Duration, Instant};
@@ -82,7 +79,7 @@ impl FiniteSourceHandler for HighVolumeSource {
         // ✨ FLOWIP-082a: Emit typed event using EVENT_TYPE constant
         Some(ChainEventFactory::data_event(
             self.writer_id.clone(),
-            DataRequest::EVENT_TYPE,
+            &DataRequest::versioned_event_type(),
             json!({
                 "id": current_id,
                 "should_fail": should_fail,
@@ -164,7 +161,7 @@ fn error_prone_transform() -> Map<impl Fn(ChainEvent) -> ChainEvent + Send + Syn
             ChainEventFactory::derived_data_event(
                 event.writer_id.clone(),
                 &event,
-                ErrorEvent::EVENT_TYPE,
+                &ErrorEvent::versioned_event_type(),
                 error_payload,
             )
         } else {
@@ -176,7 +173,7 @@ fn error_prone_transform() -> Map<impl Fn(ChainEvent) -> ChainEvent + Send + Syn
             ChainEventFactory::derived_data_event(
                 event.writer_id.clone(),
                 &event,
-                ProcessedEvent::EVENT_TYPE,
+                &ProcessedEvent::versioned_event_type(),
                 result_payload,
             )
         }
@@ -195,9 +192,7 @@ struct EventCountState {
 
 impl Default for EventCountState {
     fn default() -> Self {
-        Self {
-            event_count: 0,
-        }
+        Self { event_count: 0 }
     }
 }
 
@@ -242,7 +237,7 @@ impl SummarySink {
 impl SinkHandler for SummarySink {
     async fn consume(&mut self, event: ChainEvent) -> obzenflow_core::Result<DeliveryPayload> {
         // ✨ FLOWIP-082a: ReduceTyped emits with state's EVENT_TYPE
-        if event.event_type() == EventCountState::EVENT_TYPE {
+        if EventCountState::event_type_matches(&event.event_type()) {
             let payload = event.payload();
             let result = &payload["result"];
             let count = result["event_count"].as_u64().unwrap_or(0);
@@ -251,7 +246,11 @@ impl SinkHandler for SummarySink {
             println!("=====================================");
             println!("📊 Business-Level Event Count (FLOWIP-080j):");
             println!("   Successfully processed: {} events", count);
-            println!("   Note: 1000 generated - {} = {} errors (routed to error journal)", count, 1000 - count as u32);
+            println!(
+                "   Note: 1000 generated - {} = {} errors (routed to error journal)",
+                count,
+                1000 - count as u32
+            );
             println!("=====================================");
             println!("");
             println!("💡 Key Improvement:");

@@ -8,7 +8,7 @@ use obzenflow_fsm::{EventVariant, FsmAction, FsmContext, StateVariant};
 /// Directives that control a state's event loop
 #[derive(Debug, Clone)]
 pub enum EventLoopDirective<E> {
-    /// Continue running this state's event loop
+    /// Continue running this state's event loop (non-blocking)
     Continue,
 
     /// This state is done - transition via this event
@@ -25,7 +25,7 @@ pub mod private {
 
 /// Base trait that all supervisors must implement
 /// This enforces that every supervisor provides FSM building capabilities
-/// 
+///
 /// This trait is sealed - it can ONLY be implemented by types that also implement
 /// either SelfSupervised or HandlerSupervised. This prevents anyone from creating
 /// a "supervisor" that bypasses FSM patterns.
@@ -46,4 +46,3 @@ pub trait Supervisor: private::Sealed {
     /// Get the name of this supervised component
     fn name(&self) -> &str;
 }
-

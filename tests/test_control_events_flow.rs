@@ -1,12 +1,10 @@
 //! Simple test to verify control events flow through the system
 //! This is for FLOWIP-056-666 Phase 4.0 Task 4
 
-use obzenflow_adapters::middleware::{
-    MiddlewareTransform, TransformMiddlewareBuilder,
-};
-use obzenflow_runtime_services::stages::common::handlers::TransformHandler;
+use obzenflow_adapters::middleware::{Middleware, MiddlewareAction, MiddlewareContext};
+use obzenflow_adapters::middleware::{MiddlewareTransform, TransformMiddlewareBuilder};
 use obzenflow_core::{ChainEvent, EventId, WriterId};
-use obzenflow_adapters::middleware::{Middleware, MiddlewareContext, MiddlewareAction};
+use obzenflow_runtime_services::stages::common::handlers::TransformHandler;
 use serde_json::json;
 
 /// Test middleware that emits control events
@@ -21,12 +19,17 @@ impl Middleware for TestControlMiddleware {
                 "queue_depth": 10,
                 "in_flight": 3,
                 "max_queue_size": 100
-            })
+            }),
         ));
         MiddlewareAction::Continue
     }
-    
-    fn post_handle(&self, _event: &ChainEvent, _results: &[ChainEvent], ctx: &mut MiddlewareContext) {
+
+    fn post_handle(
+        &self,
+        _event: &ChainEvent,
+        _results: &[ChainEvent],
+        ctx: &mut MiddlewareContext,
+    ) {
         // Emit another control event
         ctx.write_control_event(ChainEvent::control(
             ChainEvent::CONTROL_MIDDLEWARE_SUMMARY,
@@ -36,7 +39,7 @@ impl Middleware for TestControlMiddleware {
                     "events_processed": 1,
                     "events_rejected": 0
                 }
-            })
+            }),
         ));
     }
 }
@@ -54,82 +57,87 @@ impl TransformHandler for PassthroughTransform {
 fn test_control_events_are_appended() {
     // Create transform with middleware
     let transform = PassthroughTransform;
-    let wrapped = MiddlewareTransform::new(transform)
-        .with_middleware(Box::new(TestControlMiddleware));
-    
+    let wrapped =
+        MiddlewareTransform::new(transform).with_middleware(Box::new(TestControlMiddleware));
+
     // Process an event
     let input_event = ChainEvent::new(
         EventId::new(),
         WriterId::new(),
         "test.data",
-        json!({"value": 42})
+        json!({"value": 42}),
     );
-    
+
     let results = wrapped.process(input_event);
-    
+
     // Should have 3 events: original + 2 control events
     assert_eq!(results.len(), 3, "Expected 1 data event + 2 control events");
-    
+
     // First is the data event
     assert!(!results[0].is_control());
     assert_eq!(results[0].event_type, "test.data");
-    
+
     // Second is CONTROL_METRICS_STATE
     assert!(results[1].is_control());
     assert_eq!(results[1].event_type, ChainEvent::CONTROL_METRICS_STATE);
     assert_eq!(results[1].payload["queue_depth"], 10);
-    
+
     // Third is CONTROL_MIDDLEWARE_SUMMARY
     assert!(results[2].is_control());
-    assert_eq!(results[2].event_type, ChainEvent::CONTROL_MIDDLEWARE_SUMMARY);
+    assert_eq!(
+        results[2].event_type,
+        ChainEvent::CONTROL_MIDDLEWARE_SUMMARY
+    );
     assert_eq!(results[2].payload["middleware"], "test_middleware");
-    
+
     println!("✓ Control events are properly appended to transform results");
 }
 
 #[test]
 fn test_circuit_breaker_emits_control_events() {
     use obzenflow_adapters::middleware::circuit_breaker::CircuitBreakerMiddleware;
-    
+
     let circuit_breaker = CircuitBreakerMiddleware::new(2); // Opens after 2 failures
     let transform = PassthroughTransform;
-    let wrapped = MiddlewareTransform::new(transform)
-        .with_middleware(Box::new(circuit_breaker));
-    
+    let wrapped = MiddlewareTransform::new(transform).with_middleware(Box::new(circuit_breaker));
+
     // First event - success
     let event1 = ChainEvent::new(
         EventId::new(),
         WriterId::new(),
         "test.success",
-        json!({"id": 1})
+        json!({"id": 1}),
     );
-    
+
     let results1 = wrapped.process(event1);
     println!("First event produced {} results", results1.len());
-    
+
     // Process some failures to trigger state change
     for i in 0..3 {
         let mut fail_event = ChainEvent::new(
             EventId::new(),
             WriterId::new(),
             "test.fail",
-            json!({"id": i + 2})
+            json!({"id": i + 2}),
         );
-        
+
         // Simulate failure by returning empty results
         let results = wrapped.process(fail_event);
-        
+
         println!("Failure {} produced {} results", i + 1, results.len());
-        
+
         // Check for control events
         for (idx, event) in results.iter().enumerate() {
             if event.is_control() {
                 println!("  Result[{}] is control event: {}", idx, event.event_type);
-                println!("  Payload: {}", serde_json::to_string_pretty(&event.payload).unwrap());
+                println!(
+                    "  Payload: {}",
+                    serde_json::to_string_pretty(&event.payload).unwrap()
+                );
             }
         }
     }
-    
+
     println!("✓ Circuit breaker middleware can emit control events");
 }
 
@@ -137,6 +145,6 @@ fn test_circuit_breaker_emits_control_events() {
 fn test_rate_limiter_emits_control_events() {
     // Note: RateLimiterMiddleware constructor is private, so we can't test it directly
     // This demonstrates the pattern would work if we could construct it
-    
+
     println!("✓ Rate limiter pattern verified in middleware tests");
 }

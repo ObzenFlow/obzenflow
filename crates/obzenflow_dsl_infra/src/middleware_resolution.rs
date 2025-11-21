@@ -3,9 +3,9 @@
 //! This module implements the SRE-first approach to middleware inheritance,
 //! tracking every decision for debugging and operational visibility.
 
-use obzenflow_adapters::middleware::MiddlewareFactory;
 use indexmap::IndexMap;
-use serde::{Serialize, Deserialize};
+use obzenflow_adapters::middleware::MiddlewareFactory;
+use serde::{Deserialize, Serialize};
 
 /// Tracks middleware origin for debugging and audit
 pub struct MiddlewareSpec {
@@ -20,7 +20,7 @@ pub enum MiddlewareSource {
     /// Middleware came from stage-level configuration
     Stage,
     /// Stage middleware that overrides flow middleware
-    StageOverride { 
+    StageOverride {
         overrode_type: String,
         overrode_config: String,
     },
@@ -75,7 +75,7 @@ pub fn resolve_middleware(
     let mut resolved: IndexMap<String, MiddlewareSpec> = IndexMap::new();
     let mut overrides = Vec::new();
     let mut warnings = Vec::new();
-    
+
     // Phase 1: Add flow middleware
     for factory in flow_middleware {
         let name = factory.name().to_string();
@@ -85,11 +85,11 @@ pub fn resolve_middleware(
         };
         resolved.insert(name, spec);
     }
-    
+
     // Phase 2: Apply stage middleware
     for factory in stage_middleware {
         let name = factory.name().to_string();
-        
+
         // Check for override
         if let Some(existing) = resolved.get(&name) {
             // Track the override
@@ -99,34 +99,31 @@ pub fn resolve_middleware(
                 stage_config: format_factory_config(&factory),
                 reason: OverrideReason::ExplicitOverride,
             });
-            
+
             // Check for suspicious overrides
             if let Some(warning) = check_override_safety(&existing.factory, &factory) {
                 warnings.push(warning);
             }
         }
-        
+
         // Determine source
         let source = if resolved.contains_key(&name) {
-            MiddlewareSource::StageOverride { 
+            MiddlewareSource::StageOverride {
                 overrode_type: name.clone(),
                 overrode_config: format_factory_config(&resolved[&name].factory),
             }
         } else {
             MiddlewareSource::Stage
         };
-        
+
         // Insert or override
-        let spec = MiddlewareSpec {
-            source,
-            factory,
-        };
+        let spec = MiddlewareSpec { source, factory };
         resolved.insert(name, spec);
     }
-    
+
     // Phase 3: Validate final configuration
     warnings.extend(validate_middleware_combination(&resolved, stage_name));
-    
+
     ResolvedMiddleware {
         middleware: resolved.into_values().collect(),
         overrides,
@@ -142,11 +139,11 @@ fn format_factory_config(factory: &Box<dyn MiddlewareFactory>) -> String {
         "rate_limiter" => {
             // TODO: Extract actual rate from factory
             "rate_limit(...)".to_string()
-        },
+        }
         "timeout" => {
             // TODO: Extract actual timeout from factory
             "timeout(...)".to_string()
-        },
+        }
         _ => format!("{}(...)", factory.name()),
     }
 }
@@ -166,9 +163,11 @@ fn check_override_safety(
                     "Stage '{}' overrides flow rate limiting - verify this is intentional",
                     stage_mw.name()
                 ),
-                suggestion: Some("Consider if this stage really needs different rate limiting".to_string()),
+                suggestion: Some(
+                    "Consider if this stage really needs different rate limiting".to_string(),
+                ),
             })
-        },
+        }
         ("timeout", "timeout") => {
             // Check for significantly different timeouts
             Some(ConfigWarning {
@@ -176,7 +175,7 @@ fn check_override_safety(
                 message: "Stage overrides flow timeout".to_string(),
                 suggestion: None,
             })
-        },
+        }
         _ => None,
     }
 }
@@ -187,11 +186,11 @@ fn validate_middleware_combination(
     stage_name: &str,
 ) -> Vec<ConfigWarning> {
     let mut warnings = Vec::new();
-    
+
     // Check for missing critical middleware
     let has_timeout = resolved.contains_key("timeout");
     let has_rate_limit = resolved.contains_key("rate_limiter");
-    
+
     if !has_timeout {
         warnings.push(ConfigWarning {
             level: WarnLevel::Medium,
@@ -199,16 +198,17 @@ fn validate_middleware_combination(
             suggestion: Some("Consider adding timeout middleware to prevent hanging".to_string()),
         });
     }
-    
+
     // Check for potentially conflicting middleware
     if resolved.contains_key("retry") && !resolved.contains_key("circuit_breaker") {
         warnings.push(ConfigWarning {
             level: WarnLevel::Low,
-            message: "Retry middleware without circuit breaker can cause cascading failures".to_string(),
+            message: "Retry middleware without circuit breaker can cause cascading failures"
+                .to_string(),
             suggestion: Some("Consider adding circuit breaker middleware".to_string()),
         });
     }
-    
+
     warnings
 }
 
@@ -221,7 +221,7 @@ pub fn log_resolved_middleware(stage_name: &str, resolved: &ResolvedMiddleware) 
         warning_count = resolved.warnings.len(),
         "Resolved middleware configuration"
     );
-    
+
     // Log each middleware with its source
     for spec in &resolved.middleware {
         tracing::debug!(
@@ -231,7 +231,7 @@ pub fn log_resolved_middleware(stage_name: &str, resolved: &ResolvedMiddleware) 
             "Middleware configured"
         );
     }
-    
+
     // Log overrides
     for override_record in &resolved.overrides {
         tracing::info!(
@@ -242,7 +242,7 @@ pub fn log_resolved_middleware(stage_name: &str, resolved: &ResolvedMiddleware) 
             "Middleware override detected"
         );
     }
-    
+
     // Log warnings
     for warning in &resolved.warnings {
         match warning.level {
@@ -271,6 +271,6 @@ pub fn log_resolved_middleware(stage_name: &str, resolved: &ResolvedMiddleware) 
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     // TODO: Add tests once we have mock MiddlewareFactory implementations
 }

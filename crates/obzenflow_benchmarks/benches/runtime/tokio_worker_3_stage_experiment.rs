@@ -3,7 +3,7 @@
 //! This benchmark investigates tokio scheduler behavior, NOT FlowState performance.
 //! It tests the hypothesis that tokio's default 4 worker threads create performance
 //! anomalies for pipelines with 3-4 concurrent tasks.
-//! 
+//!
 //! A 3-stage pipeline has 4 tasks: source + stage1 + stage2 + sink = 4 tasks
 //! With 4 worker threads, this creates a 1:1 task-to-worker ratio.
 //!
@@ -12,22 +12,22 @@
 
 use criterion::{criterion_group, criterion_main, Criterion};
 use obzenflow_benchmarks::prelude::*;
-use obzenflow_dsl_infra::{flow, source, transform, sink};
-use obzenflow_runtime_services::stages::common::handlers::{
-    FiniteSourceHandler, TransformHandler, SinkHandler
-};
-use obzenflow_infra::journal::DiskJournal;
-use obzenflow_core::event::event_id::EventId;
 use obzenflow_core::event::chain_event::ChainEvent;
+use obzenflow_core::event::event_id::EventId;
 use obzenflow_core::journal::writer_id::WriterId;
+use obzenflow_dsl_infra::{flow, sink, source, transform};
+use obzenflow_infra::journal::DiskJournal;
+use obzenflow_runtime_services::stages::common::handlers::{
+    FiniteSourceHandler, SinkHandler, TransformHandler,
+};
 // Monitoring removed per FLOWIP-056-666
+use async_trait::async_trait;
+use serde_json::json;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use serde_json::json;
-use tokio::runtime::{Runtime, Builder};
 use tempfile::tempdir;
-use async_trait::async_trait;
+use tokio::runtime::{Builder, Runtime};
 
 const WARMUP_EVENT_COUNT: u64 = 10;
 const TEST_EVENT_COUNT: u64 = 100;
@@ -63,7 +63,7 @@ impl FiniteSourceHandler for TimestampedSource {
                         .duration_since(UNIX_EPOCH)
                         .unwrap()
                         .as_nanos() as u64,
-                })
+                }),
             ))
         } else {
             None
@@ -104,12 +104,17 @@ struct LatencySink {
 
 impl LatencySink {
     fn new(expected_count: u64) -> (Self, Arc<tokio::sync::Mutex<Vec<Duration>>>) {
-        let latencies = Arc::new(tokio::sync::Mutex::new(Vec::with_capacity(expected_count as usize)));
-        (Self {
-            expected_count,
-            received: Arc::new(AtomicU64::new(0)),
-            latencies: latencies.clone(),
-        }, latencies)
+        let latencies = Arc::new(tokio::sync::Mutex::new(Vec::with_capacity(
+            expected_count as usize,
+        )));
+        (
+            Self {
+                expected_count,
+                received: Arc::new(AtomicU64::new(0)),
+                latencies: latencies.clone(),
+            },
+            latencies,
+        )
     }
 }
 
@@ -117,18 +122,21 @@ impl LatencySink {
 impl SinkHandler for LatencySink {
     fn consume(&mut self, event: ChainEvent) -> obzenflow_core::Result<()> {
         if let (Some(emit_time_nanos), Some(event_id)) = (
-            event.payload.get("emit_time_nanos").and_then(|v| v.as_u64()),
-            event.payload.get("event_id").and_then(|v| v.as_u64())
+            event
+                .payload
+                .get("emit_time_nanos")
+                .and_then(|v| v.as_u64()),
+            event.payload.get("event_id").and_then(|v| v.as_u64()),
         ) {
             self.received.fetch_add(1, Ordering::Relaxed);
-            
+
             // Skip warmup events
             if event_id >= WARMUP_EVENT_COUNT {
                 let receive_time_nanos = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .unwrap()
                     .as_nanos() as u64;
-                
+
                 if receive_time_nanos > emit_time_nanos {
                     let latency = Duration::from_nanos(receive_time_nanos - emit_time_nanos);
                     let latencies = self.latencies.clone();
@@ -143,70 +151,86 @@ impl SinkHandler for LatencySink {
 }
 
 /// Run a single 3-stage pipeline test with custom runtime
-async fn run_3_stage_pipeline_with_runtime(runtime_name: &str, rt: Arc<Runtime>) -> anyhow::Result<Duration> {
+async fn run_3_stage_pipeline_with_runtime(
+    runtime_name: &str,
+    rt: Arc<Runtime>,
+) -> anyhow::Result<Duration> {
     let handle = rt.handle();
     let runtime_name = runtime_name.to_string();
-    
-    Ok(handle.spawn(async move {
-        let temp_dir = tempdir().unwrap();
-        let journal_path = temp_dir.path().join(format!("three_stage_{}", runtime_name));
-        std::fs::create_dir_all(&journal_path).unwrap();
-        
-        let journal = Arc::new(DiskJournal::new(journal_path, "benchmark_3_stage").await.unwrap());
 
-        let source = TimestampedSource::new(WARMUP_EVENT_COUNT + TEST_EVENT_COUNT);
-        let (sink, latencies) = LatencySink::new(WARMUP_EVENT_COUNT + TEST_EVENT_COUNT);
-        let sink_clone = sink.clone();
+    Ok(handle
+        .spawn(async move {
+            let temp_dir = tempdir().unwrap();
+            let journal_path = temp_dir
+                .path()
+                .join(format!("three_stage_{}", runtime_name));
+            std::fs::create_dir_all(&journal_path).unwrap();
 
-        let handle = flow! {
-            journal: journal,
-            middleware: [],
-            
-            stages: {
-                src = source!("source" => source);
-                s1 = transform!("stage1" => PassthroughStage::new("stage1"));
-                s2 = transform!("stage2" => PassthroughStage::new("stage2"));
-                snk = sink!("sink" => sink);
-            },
-            
-            topology: {
-                src |> s1;
-                s1 |> s2;
-                s2 |> snk;
+            let journal = Arc::new(
+                DiskJournal::new(journal_path, "benchmark_3_stage")
+                    .await
+                    .unwrap(),
+            );
+
+            let source = TimestampedSource::new(WARMUP_EVENT_COUNT + TEST_EVENT_COUNT);
+            let (sink, latencies) = LatencySink::new(WARMUP_EVENT_COUNT + TEST_EVENT_COUNT);
+            let sink_clone = sink.clone();
+
+            let handle = flow! {
+                journal: journal,
+                middleware: [],
+
+                stages: {
+                    src = source!("source" => source);
+                    s1 = transform!("stage1" => PassthroughStage::new("stage1"));
+                    s2 = transform!("stage2" => PassthroughStage::new("stage2"));
+                    snk = sink!("sink" => sink);
+                },
+
+                topology: {
+                    src |> s1;
+                    s1 |> s2;
+                    s2 |> snk;
+                }
             }
-        }.await.unwrap();
+            .await
+            .unwrap();
 
-        // Start the pipeline
-        handle.run().await.unwrap();
+            // Start the pipeline
+            handle.run().await.unwrap();
 
-        // Wait for completion
-        let timeout = Duration::from_secs(60);  // Increased timeout for runtime experiments
-        let start = Instant::now();
+            // Wait for completion
+            let timeout = Duration::from_secs(60); // Increased timeout for runtime experiments
+            let start = Instant::now();
 
-        while sink_clone.received.load(Ordering::Relaxed) < WARMUP_EVENT_COUNT + TEST_EVENT_COUNT {
-            if start.elapsed() > timeout {
-                break;
+            while sink_clone.received.load(Ordering::Relaxed)
+                < WARMUP_EVENT_COUNT + TEST_EVENT_COUNT
+            {
+                if start.elapsed() > timeout {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
             }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
 
-        // Pipeline runs to completion
+            // Pipeline runs to completion
 
-        // Calculate median latency
-        let mut collected = latencies.lock().await.clone();
-        if collected.is_empty() {
-            return Duration::ZERO;
-        }
-        
-        collected.sort();
-        collected[collected.len() / 2]
-    }).await.unwrap())
+            // Calculate median latency
+            let mut collected = latencies.lock().await.clone();
+            if collected.is_empty() {
+                return Duration::ZERO;
+            }
+
+            collected.sort();
+            collected[collected.len() / 2]
+        })
+        .await
+        .unwrap())
 }
 
 fn bench_3_stage_with_different_workers(c: &mut Criterion) {
     let mut group = c.benchmark_group("3_stage_worker_experiments");
-    group.sample_size(10);  // Reduced to minimum for faster benchmarking
-    group.measurement_time(Duration::from_secs(45));  // Increased for runtime stability
+    group.sample_size(10); // Reduced to minimum for faster benchmarking
+    group.measurement_time(Duration::from_secs(45)); // Increased for runtime stability
 
     // Test 1: Default 4 workers (expecting worst performance - 1:1 ratio)
     let rt_4_workers = Arc::new(
@@ -215,7 +239,7 @@ fn bench_3_stage_with_different_workers(c: &mut Criterion) {
             .thread_name("flowstate-4w")
             .enable_all()
             .build()
-            .unwrap()
+            .unwrap(),
     );
 
     group.bench_function("4_workers_1to1_ratio", |b| {
@@ -224,12 +248,14 @@ fn bench_3_stage_with_different_workers(c: &mut Criterion) {
             let rt = rt.clone();
             async move {
                 let mut total_latency = Duration::ZERO;
-                
+
                 for _ in 0..iters {
-                    let median = run_3_stage_pipeline_with_runtime("4w", rt.clone()).await.unwrap();
+                    let median = run_3_stage_pipeline_with_runtime("4w", rt.clone())
+                        .await
+                        .unwrap();
                     total_latency = total_latency.saturating_add(median);
                 }
-                
+
                 total_latency
             }
         });
@@ -242,7 +268,7 @@ fn bench_3_stage_with_different_workers(c: &mut Criterion) {
             .thread_name("flowstate-3w")
             .enable_all()
             .build()
-            .unwrap()
+            .unwrap(),
     );
 
     group.bench_function("3_workers_avoid_ratio", |b| {
@@ -251,12 +277,14 @@ fn bench_3_stage_with_different_workers(c: &mut Criterion) {
             let rt = rt.clone();
             async move {
                 let mut total_latency = Duration::ZERO;
-                
+
                 for _ in 0..iters {
-                    let median = run_3_stage_pipeline_with_runtime("3w", rt.clone()).await.unwrap();
+                    let median = run_3_stage_pipeline_with_runtime("3w", rt.clone())
+                        .await
+                        .unwrap();
                     total_latency = total_latency.saturating_add(median);
                 }
-                
+
                 total_latency
             }
         });
@@ -269,7 +297,7 @@ fn bench_3_stage_with_different_workers(c: &mut Criterion) {
             .thread_name("flowstate-6w")
             .enable_all()
             .build()
-            .unwrap()
+            .unwrap(),
     );
 
     group.bench_function("6_workers_excess", |b| {
@@ -278,24 +306,21 @@ fn bench_3_stage_with_different_workers(c: &mut Criterion) {
             let rt = rt.clone();
             async move {
                 let mut total_latency = Duration::ZERO;
-                
+
                 for _ in 0..iters {
-                    let median = run_3_stage_pipeline_with_runtime("6w", rt.clone()).await.unwrap();
+                    let median = run_3_stage_pipeline_with_runtime("6w", rt.clone())
+                        .await
+                        .unwrap();
                     total_latency = total_latency.saturating_add(median);
                 }
-                
+
                 total_latency
             }
         });
     });
 
     // Test 4: Single-threaded runtime (no work-stealing)
-    let rt_single = Arc::new(
-        Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap()
-    );
+    let rt_single = Arc::new(Builder::new_current_thread().enable_all().build().unwrap());
 
     group.bench_function("single_threaded", |b| {
         let rt = rt_single.clone();
@@ -303,12 +328,14 @@ fn bench_3_stage_with_different_workers(c: &mut Criterion) {
             let rt = rt.clone();
             async move {
                 let mut total_latency = Duration::ZERO;
-                
+
                 for _ in 0..iters {
-                    let median = run_3_stage_pipeline_with_runtime("1t", rt.clone()).await.unwrap();
+                    let median = run_3_stage_pipeline_with_runtime("1t", rt.clone())
+                        .await
+                        .unwrap();
                     total_latency = total_latency.saturating_add(median);
                 }
-                
+
                 total_latency
             }
         });
@@ -321,19 +348,23 @@ fn bench_5_stage_control(c: &mut Criterion) {
     // Control: Run 5-stage pipeline with default runtime to compare
     let rt = Runtime::new().unwrap();
     let mut group = c.benchmark_group("5_stage_control");
-    group.sample_size(10);  // Minimum required by Criterion
-    group.measurement_time(Duration::from_secs(45));  // Increased for 5-stage stability
+    group.sample_size(10); // Minimum required by Criterion
+    group.measurement_time(Duration::from_secs(45)); // Increased for 5-stage stability
 
     group.bench_function("default_runtime", |b| {
         b.to_async(&rt).iter_custom(|iters| async move {
             let mut total_latency = Duration::ZERO;
-            
+
             for _ in 0..iters {
                 let temp_dir = tempdir().unwrap();
                 let journal_path = temp_dir.path().join("five_stage_control");
                 std::fs::create_dir_all(&journal_path).unwrap();
-                
-                let journal = Arc::new(DiskJournal::new(journal_path, "benchmark_5_stage").await.unwrap());
+
+                let journal = Arc::new(
+                    DiskJournal::new(journal_path, "benchmark_5_stage")
+                        .await
+                        .unwrap(),
+                );
 
                 let source = TimestampedSource::new(WARMUP_EVENT_COUNT + TEST_EVENT_COUNT);
                 let (sink, latencies) = LatencySink::new(WARMUP_EVENT_COUNT + TEST_EVENT_COUNT);
@@ -342,7 +373,7 @@ fn bench_5_stage_control(c: &mut Criterion) {
                 let handle = flow! {
                     journal: journal,
                     middleware: [],
-                    
+
                     stages: {
                         src = source!("source" => source);
                         s1 = transform!("stage1" => PassthroughStage::new("stage1"));
@@ -351,7 +382,7 @@ fn bench_5_stage_control(c: &mut Criterion) {
                         s4 = transform!("stage4" => PassthroughStage::new("stage4"));
                         snk = sink!("sink" => sink);
                     },
-                    
+
                     topology: {
                         src |> s1;
                         s1 |> s2;
@@ -359,16 +390,20 @@ fn bench_5_stage_control(c: &mut Criterion) {
                         s3 |> s4;
                         s4 |> snk;
                     }
-                }.await.unwrap();
+                }
+                .await
+                .unwrap();
 
                 // Start the pipeline
                 handle.run().await.unwrap();
 
                 // Wait for completion
-                let timeout = Duration::from_secs(60);  // Increased timeout for 5-stage control
+                let timeout = Duration::from_secs(60); // Increased timeout for 5-stage control
                 let start = Instant::now();
 
-                while sink_clone.received.load(Ordering::Relaxed) < WARMUP_EVENT_COUNT + TEST_EVENT_COUNT {
+                while sink_clone.received.load(Ordering::Relaxed)
+                    < WARMUP_EVENT_COUNT + TEST_EVENT_COUNT
+                {
                     if start.elapsed() > timeout {
                         break;
                     }
@@ -385,7 +420,7 @@ fn bench_5_stage_control(c: &mut Criterion) {
                     total_latency = total_latency.saturating_add(median);
                 }
             }
-            
+
             total_latency
         });
     });
@@ -393,5 +428,9 @@ fn bench_5_stage_control(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_3_stage_with_different_workers, bench_5_stage_control);
+criterion_group!(
+    benches,
+    bench_3_stage_with_different_workers,
+    bench_5_stage_control
+);
 criterion_main!(benches);

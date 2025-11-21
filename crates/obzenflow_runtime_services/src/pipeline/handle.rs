@@ -1,6 +1,6 @@
 use super::fsm::{PipelineEvent, PipelineState};
 use crate::errors::FlowError;
-use crate::supervised_base::{SupervisorHandle, HandleError, StandardHandle};
+use crate::supervised_base::{HandleError, StandardHandle, SupervisorHandle};
 use obzenflow_topology::Topology;
 use std::sync::Arc;
 
@@ -41,66 +41,81 @@ impl FlowHandle {
             flow_name,
         }
     }
-    
+
     /// Run the pipeline and wait for completion
     /// This is the primary method users should call after creating a flow
     pub async fn run(self) -> Result<(), FlowError> {
         // Send the Run event to transition from Materialized to Running
         // This will trigger NotifySourceStart action
+        let current_state = self.current_state();
+        tracing::debug!(
+            "FlowHandle::run() - Current pipeline state: {:?}",
+            current_state
+        );
+        tracing::info!("FlowHandle::run() - Sending PipelineEvent::Run to start flow");
         self.send_event(PipelineEvent::Run).await?;
-        
+        tracing::info!("FlowHandle::run() - Run event sent, waiting for completion");
+
         // Now wait for it to complete
-        self.wait_for_completion().await
+        let result = self.wait_for_completion().await;
+        tracing::info!(
+            "FlowHandle::run() - wait_for_completion returned: {:?}",
+            result
+        );
+        result
     }
-    
+
     /// Run the pipeline and wait for completion, returning the metrics exporter
     /// Use this when you need to access metrics after the flow completes
     /// Typically used with finite sources (not infinite sources)
-    pub async fn run_with_metrics(self) -> Result<Option<Arc<dyn obzenflow_core::metrics::MetricsExporter>>, FlowError> {
+    pub async fn run_with_metrics(
+        self,
+    ) -> Result<Option<Arc<dyn obzenflow_core::metrics::MetricsExporter>>, FlowError> {
         // Send the Run event to transition from Materialized to Running
         // This will trigger NotifySourceStart action
         self.send_event(PipelineEvent::Run).await?;
-        
+
         // Save metrics exporter before consuming self
         let metrics = self.metrics_exporter.clone();
-        
+
         // Now wait for it to complete
         self.wait_for_completion().await?;
-        
+
         Ok(metrics)
     }
-    
+
     /// Graceful shutdown by sending Shutdown event to FSM
     pub async fn shutdown(&self) -> Result<(), FlowError> {
         self.send_event(PipelineEvent::Shutdown).await
     }
-    
+
     /// Force shutdown by sending Error event to FSM
     pub async fn abort(&self, reason: &str) -> Result<(), FlowError> {
         self.send_event(PipelineEvent::Error {
             message: format!("Force abort: {}", reason),
-        }).await
+        })
+        .await
     }
-    
+
     /// Check if the pipeline is still running
     pub fn is_running(&self) -> bool {
         self.handle.is_running()
     }
-    
+
     /// Get a receiver for watching state changes
     pub fn state_receiver(&self) -> tokio::sync::watch::Receiver<PipelineState> {
         self.handle.state_receiver()
     }
-    
+
     /// Get the metrics exporter for concurrent access during flow execution
-    /// 
+    ///
     /// This allows starting a metrics server before running the flow,
     /// enabling real-time monitoring of long-running flows.
     /// The exporter is thread-safe and can be accessed concurrently.
     pub fn metrics_exporter(&self) -> Option<Arc<dyn obzenflow_core::metrics::MetricsExporter>> {
         self.metrics_exporter.clone()
     }
-    
+
     /// Get the flow topology for visualization
     ///
     /// This provides access to the flow's structure (stages and connections)
@@ -142,41 +157,36 @@ impl SupervisorHandle for FlowHandle {
     type Event = PipelineEvent;
     type State = PipelineState;
     type Error = FlowError;
-    
+
     async fn send_event(&self, event: Self::Event) -> Result<(), Self::Error> {
-        self.handle.send_event(event).await
-            .map_err(|e| match e {
-                HandleError::SupervisorNotRunning => {
-                    FlowError::ExecutionFailed(Box::new(std::io::Error::new(
-                        std::io::ErrorKind::BrokenPipe,
-                        "Pipeline supervisor is not running",
-                    )))
-                }
-                HandleError::SupervisorFailed(msg) => {
-                    FlowError::ExecutionFailed(Box::new(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        msg,
-                    )))
-                }
-                HandleError::SupervisorPanicked(msg) => {
-                    FlowError::ExecutionFailed(Box::new(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        format!("Task panicked: {}", msg),
-                    )))
-                }
-                _ => FlowError::ExecutionFailed(Box::new(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    e.to_string(),
-                ))),
-            })
+        self.handle.send_event(event).await.map_err(|e| match e {
+            HandleError::SupervisorNotRunning => {
+                FlowError::ExecutionFailed(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "Pipeline supervisor is not running",
+                )))
+            }
+            HandleError::SupervisorFailed(msg) => FlowError::ExecutionFailed(Box::new(
+                std::io::Error::new(std::io::ErrorKind::Other, msg),
+            )),
+            HandleError::SupervisorPanicked(msg) => FlowError::ExecutionFailed(Box::new(
+                std::io::Error::new(std::io::ErrorKind::Other, format!("Task panicked: {}", msg)),
+            )),
+            _ => FlowError::ExecutionFailed(Box::new(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                e.to_string(),
+            ))),
+        })
     }
-    
+
     fn current_state(&self) -> Self::State {
         self.handle.current_state()
     }
-    
+
     async fn wait_for_completion(self) -> Result<(), Self::Error> {
-        self.handle.wait_for_completion().await
+        self.handle
+            .wait_for_completion()
+            .await
             .map_err(|e| match e {
                 HandleError::SupervisorNotRunning => {
                     FlowError::ExecutionFailed(Box::new(std::io::Error::new(
@@ -184,12 +194,9 @@ impl SupervisorHandle for FlowHandle {
                         "Pipeline supervisor is not running",
                     )))
                 }
-                HandleError::SupervisorFailed(msg) => {
-                    FlowError::ExecutionFailed(Box::new(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        msg,
-                    )))
-                }
+                HandleError::SupervisorFailed(msg) => FlowError::ExecutionFailed(Box::new(
+                    std::io::Error::new(std::io::ErrorKind::Other, msg),
+                )),
                 HandleError::SupervisorPanicked(msg) => {
                     FlowError::ExecutionFailed(Box::new(std::io::Error::new(
                         std::io::ErrorKind::Other,

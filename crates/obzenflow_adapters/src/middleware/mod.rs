@@ -45,7 +45,7 @@
 //!
 //! ```rust
 //! use obzenflow_adapters::monitoring::taxonomies::red::RED;
-//! 
+//!
 //! // Get Prometheus queries for RED metrics
 //! let queries = RED::prometheus_queries("my_flow", "my_stage");
 //! ```
@@ -58,7 +58,7 @@
 //!
 //! ```rust
 //! use obzenflow_adapters::monitoring::taxonomies::use_taxonomy::USE;
-//! 
+//!
 //! // Get Prometheus queries for USE metrics
 //! let queries = USE::prometheus_queries("my_flow", "my_stage");
 //! ```
@@ -72,7 +72,7 @@
 //!
 //! ```rust
 //! use obzenflow_adapters::monitoring::taxonomies::golden_signals::GoldenSignals;
-//! 
+//!
 //! // Get Prometheus queries for Golden Signals metrics
 //! let queries = GoldenSignals::prometheus_queries("my_flow", "my_stage");
 //! ```
@@ -87,56 +87,19 @@
 //!
 //! ```rust
 //! use obzenflow_adapters::monitoring::taxonomies::saafe::SAAFE;
-//! 
+//!
 //! // Get Prometheus queries for SAAFE metrics
 //! let queries = SAAFE::prometheus_queries("my_flow", "my_stage");
 //! ```
 //!
 //! ## Applying Middleware to Handlers
 //!
-//! Use the handler extension traits to apply middleware:
-//!
-//! ```rust
-//! use obzenflow_adapters::middleware::{TransformHandlerExt, LoggingMiddleware};
-//! use obzenflow_runtime_services::stages::common::handlers::TransformHandler;
-//! use obzenflow_core::event::chain_event::ChainEvent;
-//!
-//! struct MyTransform;
-//!
-//! impl TransformHandler for MyTransform {
-//!     fn process(&self, event: ChainEvent) -> Vec<ChainEvent> {
-//!         vec![event]
-//!     }
-//! }
-//!
-//! // Apply middleware directly (monitoring middleware is created via factories in descriptors)
-//! let handler_with_middleware = MyTransform
-//!     .middleware()
-//!     .with(LoggingMiddleware::new())
-//!     .build();
-//! ```
+//! Use the handler extension traits to apply middleware (see builder APIs for current syntax).
 //!
 //! ## Common Middleware Utilities
 //!
-//! The `common` module provides pre-built middleware for common patterns:
-//!
-//! ```rust
-//! use obzenflow_adapters::middleware::control::{rate_limit, CircuitBreakerBuilder};
-//! use obzenflow_adapters::middleware::observability::LoggingMiddleware;
-//! use std::time::Duration;
-//!
-//! // Rate limiting - limits events per second
-//! let rate_limiter = rate_limit(100.0);
-//!
-//! // Circuit breaker with retry - integrated retry logic (standalone retry deleted)
-//! let circuit_breaker = CircuitBreakerBuilder::new(5)
-//!     .with_retry_exponential(3)
-//!     .cooldown(Duration::from_secs(60))
-//!     .build();
-//!
-//! // Logging - logs events and results
-//! let logging_middleware = LoggingMiddleware::new();
-//! ```
+//! The `common` module provides pre-built middleware for rate limiting, circuit breaking,
+//! and logging; refer to the current control/observability modules for up-to-date builders.
 //!
 //! ## Custom Middleware
 //!
@@ -145,9 +108,9 @@
 //! ```rust
 //! use obzenflow_adapters::middleware::{Middleware, MiddlewareAction, MiddlewareContext};
 //! use obzenflow_core::event::chain_event::ChainEvent;
-//! 
+//!
 //! struct MyCustomMiddleware;
-//! 
+//!
 //! impl Middleware for MyCustomMiddleware {
 //!     fn pre_handle(&self, event: &ChainEvent, _ctx: &mut MiddlewareContext) -> MiddlewareAction {
 //!         println!("Processing event: {:?}", event.id);
@@ -161,24 +124,24 @@
 //! ```
 
 // Core types
-mod middleware_trait;
 mod middleware_factory;
 mod middleware_safety;
+mod middleware_trait;
 
 // Handler-specific middleware adapters
-mod transform_middleware;
-mod source_middleware;
 mod sink_middleware;
+mod source_middleware;
+mod transform_middleware;
 
 // Common middleware utilities
+mod context;
 mod function;
 mod hints;
-mod context;
 
 // Middleware categories
 pub mod control;
-pub mod state;
 pub mod observability;
+pub mod state;
 mod system;
 // Dangerous middleware examples moved to examples/dangerous_examples.rs
 // Factory tests moved to tests/factory_tests.rs
@@ -191,41 +154,41 @@ mod system;
 // - SAAFE::prometheus_queries()
 
 // Core trait exports
-pub use middleware_trait::{Middleware, MiddlewareAction, ErrorAction};
 pub use middleware_factory::MiddlewareFactory;
 pub use middleware_safety::MiddlewareSafety;
+pub use middleware_trait::{ErrorAction, Middleware, MiddlewareAction};
 
 // Handler-specific exports
-pub use transform_middleware::{MiddlewareTransform, TransformHandlerExt, TransformMiddlewareBuilder};
-pub use source_middleware::{
-    MiddlewareFiniteSource, MiddlewareInfiniteSource,
-    FiniteSourceHandlerExt, InfiniteSourceHandlerExt,
-    FiniteSourceMiddlewareBuilder, InfiniteSourceMiddlewareBuilder
-};
 pub use sink_middleware::{MiddlewareSink, SinkHandlerExt, SinkMiddlewareBuilder};
+pub use source_middleware::{
+    FiniteSourceHandlerExt, FiniteSourceMiddlewareBuilder, InfiniteSourceHandlerExt,
+    InfiniteSourceMiddlewareBuilder, MiddlewareFiniteSource, MiddlewareInfiniteSource,
+};
+pub use transform_middleware::{
+    MiddlewareTransform, TransformHandlerExt, TransformMiddlewareBuilder,
+};
 
 // Common utilities
-pub use function::{FnMiddleware, middleware_fn};
 pub use context::{MiddlewareContext, MiddlewareEvent};
-pub use hints::{MiddlewareHints, RetryHint, Attempts, BackoffKind, BatchingHint};
-pub use state::windowing::{WindowingMiddleware, WindowingMiddlewareFactory};
+pub use function::{middleware_fn, FnMiddleware};
+pub use hints::{Attempts, BackoffKind, BatchingHint, MiddlewareHints, RetryHint};
 pub use observability::timing::TimingMiddleware;
+pub use state::windowing::{WindowingMiddleware, WindowingMiddlewareFactory};
 
 // Control middleware
 pub use control::{
-    CircuitBreakerMiddleware, CircuitBreakerBuilder, circuit_breaker,
-    RateLimiterMiddleware, RateLimiterFactory, rate_limit, rate_limit_with_burst,
+    circuit_breaker, rate_limit, rate_limit_with_burst, CircuitBreakerBuilder,
+    CircuitBreakerMiddleware, RateLimiterFactory, RateLimiterMiddleware,
 };
 
 // Re-export observability middleware for backward compatibility
 pub use observability::{
-    FlowBoundaryTracker, BoundaryTrackingMiddleware, BoundaryConfig, FlowMetrics,
-    LoggingMiddleware, SystemEnrichmentMiddleware
+    BoundaryConfig, BoundaryTrackingMiddleware, FlowBoundaryTracker, FlowMetrics,
+    LoggingMiddleware, SystemEnrichmentMiddleware,
 };
 
 // System middleware exports
 pub use system::{
-    OutcomeEnrichmentMiddleware, outcome_enrichment,
-    validate_middleware_safety, ValidationResult
+    outcome_enrichment, validate_middleware_safety, OutcomeEnrichmentMiddleware, ValidationResult,
 };
 // Monitoring is provided via taxonomy-specific methods

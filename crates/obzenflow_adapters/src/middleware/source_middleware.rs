@@ -1,14 +1,14 @@
 //! Middleware adapter for Source handlers
 //!
-//! This module provides middleware capabilities for both FiniteSourceHandler 
+//! This module provides middleware capabilities for both FiniteSourceHandler
 //! and InfiniteSourceHandler implementations.
 
-use obzenflow_core::{ChainEvent, EventId, WriterId, StageId};
-use obzenflow_core::event::ChainEventFactory;
-use obzenflow_runtime_services::stages::common::handlers::{
-    FiniteSourceHandler, InfiniteSourceHandler
-};
 use super::{Middleware, MiddlewareAction, MiddlewareContext};
+use obzenflow_core::event::ChainEventFactory;
+use obzenflow_core::{ChainEvent, EventId, StageId, WriterId};
+use obzenflow_runtime_services::stages::common::handlers::{
+    FiniteSourceHandler, InfiniteSourceHandler,
+};
 
 /// A FiniteSourceHandler wrapper that applies middleware
 pub struct MiddlewareFiniteSource<H: FiniteSourceHandler> {
@@ -47,7 +47,7 @@ impl<H: FiniteSourceHandler> MiddlewareFiniteSource<H> {
             writer_id,
         }
     }
-    
+
     /// Add middleware to the chain
     pub fn with_middleware(mut self, middleware: Box<dyn Middleware>) -> Self {
         self.middleware_chain.push(middleware);
@@ -67,12 +67,12 @@ impl<H: FiniteSourceHandler> FiniteSourceHandler for MiddlewareFiniteSource<H> {
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap()
                     .as_millis()
-            })
+            }),
         );
-        
+
         // Create ephemeral context for this processing
         let mut ctx = MiddlewareContext::new();
-        
+
         // Pre-processing phase
         for middleware in &self.middleware_chain {
             match middleware.pre_handle(&synthetic_event, &mut ctx) {
@@ -87,28 +87,28 @@ impl<H: FiniteSourceHandler> FiniteSourceHandler for MiddlewareFiniteSource<H> {
                         return Some(event);
                     }
                     return None;
-                },
+                }
                 MiddlewareAction::Abort => return None,
             }
         }
-        
+
         // Get next from inner source
         let result = self.inner.next();
-        
+
         // Post-processing phase (only if we got an event)
         if let Some(mut event) = result {
             let results = vec![event.clone()];
-            
+
             // Call post_handle for observation
             for middleware in &self.middleware_chain {
                 middleware.post_handle(&synthetic_event, &results, &mut ctx);
             }
-            
+
             // Now call pre_write to enrich the event before returning
             for middleware in &self.middleware_chain {
                 middleware.pre_write(&mut event, &ctx);
             }
-            
+
             // Return the enriched event
             Some(event)
         } else {
@@ -120,7 +120,7 @@ impl<H: FiniteSourceHandler> FiniteSourceHandler for MiddlewareFiniteSource<H> {
             None
         }
     }
-    
+
     fn is_complete(&self) -> bool {
         // Completion check is not intercepted by middleware
         self.inner.is_complete()
@@ -164,7 +164,7 @@ impl<H: InfiniteSourceHandler> MiddlewareInfiniteSource<H> {
             writer_id,
         }
     }
-    
+
     /// Add middleware to the chain
     pub fn with_middleware(mut self, middleware: Box<dyn Middleware>) -> Self {
         self.middleware_chain.push(middleware);
@@ -184,12 +184,12 @@ impl<H: InfiniteSourceHandler> InfiniteSourceHandler for MiddlewareInfiniteSourc
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap()
                     .as_millis()
-            })
+            }),
         );
-        
+
         // Create ephemeral context for this processing
         let mut ctx = MiddlewareContext::new();
-        
+
         // Pre-processing phase
         for middleware in &self.middleware_chain {
             match middleware.pre_handle(&synthetic_event, &mut ctx) {
@@ -204,28 +204,28 @@ impl<H: InfiniteSourceHandler> InfiniteSourceHandler for MiddlewareInfiniteSourc
                         return Some(event);
                     }
                     return None;
-                },
+                }
                 MiddlewareAction::Abort => return None,
             }
         }
-        
+
         // Get next from inner source
         let result = self.inner.next();
-        
+
         // Post-processing phase (only if we got an event)
         if let Some(mut event) = result {
             let results = vec![event.clone()];
-            
+
             // Call post_handle for observation
             for middleware in &self.middleware_chain {
                 middleware.post_handle(&synthetic_event, &results, &mut ctx);
             }
-            
+
             // Now call pre_write to enrich the event before returning
             for middleware in &self.middleware_chain {
                 middleware.pre_write(&mut event, &ctx);
             }
-            
+
             // Return the enriched event
             Some(event)
         } else {
@@ -270,13 +270,13 @@ impl<H: FiniteSourceHandler> FiniteSourceMiddlewareBuilder<H> {
             handler: MiddlewareFiniteSource::new(inner, writer_id),
         }
     }
-    
+
     /// Add a middleware to the chain
     pub fn with<M: Middleware + 'static>(mut self, middleware: M) -> Self {
         self.handler = self.handler.with_middleware(Box::new(middleware));
         self
     }
-    
+
     /// Build the final middleware-wrapped handler
     pub fn build(self) -> MiddlewareFiniteSource<H> {
         self.handler
@@ -294,13 +294,13 @@ impl<H: InfiniteSourceHandler> InfiniteSourceMiddlewareBuilder<H> {
             handler: MiddlewareInfiniteSource::new(inner, writer_id),
         }
     }
-    
+
     /// Add a middleware to the chain
     pub fn with<M: Middleware + 'static>(mut self, middleware: M) -> Self {
         self.handler = self.handler.with_middleware(Box::new(middleware));
         self
     }
-    
+
     /// Build the final middleware-wrapped handler
     pub fn build(self) -> MiddlewareInfiniteSource<H> {
         self.handler

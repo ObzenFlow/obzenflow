@@ -20,7 +20,4 @@ pub use config::JournalSinkConfig;
 pub use handle::{JournalSinkHandle, JournalSinkHandleExt};
 
 // Re-export FSM types for users who need them
-pub use fsm::{
-    JournalSinkState,
-    JournalSinkEvent,
-};
+pub use fsm::{JournalSinkEvent, JournalSinkState};

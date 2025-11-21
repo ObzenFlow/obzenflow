@@ -4,16 +4,18 @@
 //! cascading failures. It emits raw events that can be consumed by
 //! monitoring and SLI middleware.
 
+use crate::middleware::{Middleware, MiddlewareAction, MiddlewareContext, MiddlewareFactory};
 use obzenflow_core::event::chain_event::ChainEvent;
-use obzenflow_core::{EventId, WriterId, StageId};
+use obzenflow_core::event::payloads::observability_payload::{
+    CircuitBreakerEvent, MiddlewareLifecycle, ObservabilityPayload,
+};
+use obzenflow_core::event::ChainEventFactory;
+use obzenflow_core::{EventId, StageId, WriterId};
 use obzenflow_runtime_services::pipeline::config::StageConfig;
 use serde_json::json;
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use obzenflow_core::event::ChainEventFactory;
-use obzenflow_core::event::payloads::observability_payload::{CircuitBreakerEvent, MiddlewareLifecycle, ObservabilityPayload};
-use crate::middleware::{Middleware, MiddlewareAction, MiddlewareContext, MiddlewareFactory};
 
 /// Circuit breaker states
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,7 +84,7 @@ impl CircuitBreakerMiddleware {
     pub fn new(threshold: usize) -> Self {
         Self::with_cooldown(threshold, Duration::from_secs(60))
     }
-    
+
     /// Create a circuit breaker with custom cooldown duration
     pub fn with_cooldown(threshold: usize, cooldown: Duration) -> Self {
         Self {
@@ -101,60 +103,64 @@ impl CircuitBreakerMiddleware {
             last_state_change: Arc::new(Mutex::new(Instant::now())),
         }
     }
-    
+
     fn current_state(&self) -> CircuitState {
         CircuitState::from(self.state.load(Ordering::SeqCst))
     }
-    
+
     fn transition_to(&self, new_state: CircuitState, ctx: &mut MiddlewareContext) {
         let old_state = self.current_state();
         self.state.store(new_state as u8, Ordering::SeqCst);
-        
+
         // Update last state change
         *self.last_state_change.lock().unwrap() = Instant::now();
-        
+
         // Track when we open the circuit
         if new_state == CircuitState::Open {
             *self.opened_at.lock().unwrap() = Some(Instant::now());
         }
-        
+
         // Emit lifecycle event for state transition
         let event = match (old_state, new_state) {
             (CircuitState::Closed, CircuitState::Open) => {
                 let failure_count = self.failure_count.load(Ordering::Relaxed) as u64;
                 let success_count = self.success_count.load(Ordering::Relaxed) as u64;
                 let total = failure_count + success_count;
-                let error_rate = if total > 0 { failure_count as f64 / total as f64 } else { 0.0 };
-                
+                let error_rate = if total > 0 {
+                    failure_count as f64 / total as f64
+                } else {
+                    0.0
+                };
+
                 ChainEventFactory::circuit_breaker_opened(
                     WriterId::from(StageId::new()),
                     error_rate,
-                    failure_count
+                    failure_count,
                 )
-            },
-            (CircuitState::Open, CircuitState::HalfOpen) => {
-                ChainEventFactory::observability_event(
-                    WriterId::from(StageId::new()),
-                    ObservabilityPayload::Middleware(MiddlewareLifecycle::CircuitBreaker(
-                        CircuitBreakerEvent::HalfOpen { test_request_count: 0 }
-                    ))
-                )
-            },
+            }
+            (CircuitState::Open, CircuitState::HalfOpen) => ChainEventFactory::observability_event(
+                WriterId::from(StageId::new()),
+                ObservabilityPayload::Middleware(MiddlewareLifecycle::CircuitBreaker(
+                    CircuitBreakerEvent::HalfOpen {
+                        test_request_count: 0,
+                    },
+                )),
+            ),
             (CircuitState::HalfOpen, CircuitState::Closed) => {
                 let success_count = self.success_count.load(Ordering::Relaxed) as u64;
-                let recovery_duration_ms = self.last_state_change.lock().unwrap()
-                    .elapsed().as_millis() as u64;
-                
+                let recovery_duration_ms =
+                    self.last_state_change.lock().unwrap().elapsed().as_millis() as u64;
+
                 ChainEventFactory::observability_event(
                     WriterId::from(StageId::new()),
                     ObservabilityPayload::Middleware(MiddlewareLifecycle::CircuitBreaker(
-                        CircuitBreakerEvent::Closed { 
+                        CircuitBreakerEvent::Closed {
                             success_count,
-                            recovery_duration_ms
-                        }
-                    ))
+                            recovery_duration_ms,
+                        },
+                    )),
                 )
-            },
+            }
             _ => {
                 // For other transitions, use a generic metrics event
                 ChainEventFactory::metrics_state_snapshot(
@@ -165,20 +171,20 @@ impl CircuitBreakerMiddleware {
                             "to_state": format!("{:?}", new_state),
                             "timestamp": SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
                         }
-                    })
+                    }),
                 )
             }
         };
-        
+
         ctx.write_control_event(event);
-        
+
         tracing::info!(
             "Circuit breaker state transition: {:?} -> {:?}",
             old_state,
             new_state
         );
     }
-    
+
     fn should_attempt_reset(&self) -> bool {
         if let Some(opened_at) = *self.opened_at.lock().unwrap() {
             opened_at.elapsed() >= self.cooldown
@@ -186,14 +192,14 @@ impl CircuitBreakerMiddleware {
             false
         }
     }
-    
+
     fn maybe_emit_summary(&self, ctx: &mut MiddlewareContext) {
         let mut stats = self.stats.lock().unwrap();
-        
+
         // Emit summary every 10 seconds or every 1000 requests
-        let should_emit = stats.last_summary.elapsed() >= Duration::from_secs(10) ||
-                         stats.requests_processed + stats.requests_rejected >= 1000;
-        
+        let should_emit = stats.last_summary.elapsed() >= Duration::from_secs(10)
+            || stats.requests_processed + stats.requests_rejected >= 1000;
+
         if should_emit {
             // Emit a circuit breaker summary event
             let event = ChainEventFactory::circuit_breaker_summary(
@@ -204,13 +210,14 @@ impl CircuitBreakerMiddleware {
                 format!("{:?}", self.current_state()),
                 self.failure_count.load(Ordering::SeqCst),
                 if stats.requests_processed + stats.requests_rejected > 0 {
-                    stats.requests_rejected as f64 / (stats.requests_processed + stats.requests_rejected) as f64
+                    stats.requests_rejected as f64
+                        / (stats.requests_processed + stats.requests_rejected) as f64
                 } else {
                     0.0
-                }
+                },
             );
             ctx.write_control_event(event);
-            
+
             // Reset stats
             stats.requests_processed = 0;
             stats.requests_rejected = 0;
@@ -226,7 +233,7 @@ impl Middleware for CircuitBreakerMiddleware {
                 // Normal operation
                 MiddlewareAction::Continue
             }
-            
+
             CircuitState::Open => {
                 // Check if we should transition to half-open
                 if self.should_attempt_reset() {
@@ -236,61 +243,84 @@ impl Middleware for CircuitBreakerMiddleware {
                     self.pre_handle(_event, ctx)
                 } else {
                     // Reject the request and emit event
-                    let cooldown_remaining = if let Some(opened_at) = *self.opened_at.lock().unwrap() {
-                        self.cooldown.saturating_sub(opened_at.elapsed())
-                    } else {
-                        self.cooldown
-                    };
-                    
-                    ctx.emit_event("circuit_breaker", "rejected", json!({
-                        "reason": "circuit_open",
-                        "consecutive_failures": self.failure_count.load(Ordering::SeqCst),
-                        "threshold": self.threshold,
-                        "cooldown_remaining_ms": cooldown_remaining.as_millis()
-                    }));
-                    
+                    let cooldown_remaining =
+                        if let Some(opened_at) = *self.opened_at.lock().unwrap() {
+                            self.cooldown.saturating_sub(opened_at.elapsed())
+                        } else {
+                            self.cooldown
+                        };
+
+                    ctx.emit_event(
+                        "circuit_breaker",
+                        "rejected",
+                        json!({
+                            "reason": "circuit_open",
+                            "consecutive_failures": self.failure_count.load(Ordering::SeqCst),
+                            "threshold": self.threshold,
+                            "cooldown_remaining_ms": cooldown_remaining.as_millis()
+                        }),
+                    );
+
                     // Track rejection
                     self.stats.lock().unwrap().requests_rejected += 1;
-                    
+
                     MiddlewareAction::Skip(vec![])
                 }
             }
-            
+
             CircuitState::HalfOpen => {
                 // Allow one probe request through
-                if self.probe_in_flight.compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
+                if self
+                    .probe_in_flight
+                    .compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_ok()
+                {
                     // This is the probe request
-                    ctx.emit_event("circuit_breaker", "probe_started", json!({
-                        "reason": "testing_recovery"
-                    }));
+                    ctx.emit_event(
+                        "circuit_breaker",
+                        "probe_started",
+                        json!({
+                            "reason": "testing_recovery"
+                        }),
+                    );
                     ctx.set_baggage("circuit_breaker.is_probe", json!(true));
                     MiddlewareAction::Continue
                 } else {
                     // Another probe is already in flight, reject this request
-                    ctx.emit_event("circuit_breaker", "rejected", json!({
-                        "reason": "probe_in_progress"
-                    }));
-                    
+                    ctx.emit_event(
+                        "circuit_breaker",
+                        "rejected",
+                        json!({
+                            "reason": "probe_in_progress"
+                        }),
+                    );
+
                     // Track rejection
                     self.stats.lock().unwrap().requests_rejected += 1;
-                    
+
                     MiddlewareAction::Skip(vec![])
                 }
             }
         }
     }
-    
-    fn post_handle(&self, _event: &ChainEvent, outputs: &[ChainEvent], ctx: &mut MiddlewareContext) {
+
+    fn post_handle(
+        &self,
+        _event: &ChainEvent,
+        outputs: &[ChainEvent],
+        ctx: &mut MiddlewareContext,
+    ) {
         let is_success = !outputs.is_empty();
-        let is_probe = ctx.get_baggage("circuit_breaker.is_probe")
+        let is_probe = ctx
+            .get_baggage("circuit_breaker.is_probe")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
-        
+
         // Track successful processing
         if is_success {
             self.stats.lock().unwrap().requests_processed += 1;
         }
-        
+
         match self.current_state() {
             CircuitState::Closed => {
                 if is_success {
@@ -299,18 +329,22 @@ impl Middleware for CircuitBreakerMiddleware {
                 } else {
                     // Increment failure count
                     let failures = self.failure_count.fetch_add(1, Ordering::SeqCst) + 1;
-                    
+
                     if failures >= self.threshold {
                         // Open the circuit
                         self.transition_to(CircuitState::Open, ctx);
-                        
+
                         // Emit event about circuit opening
-                        ctx.emit_event("circuit_breaker", "opened", json!({
-                            "consecutive_failures": failures,
-                            "threshold": self.threshold,
-                            "reason": "failure_threshold_exceeded"
-                        }));
-                        
+                        ctx.emit_event(
+                            "circuit_breaker",
+                            "opened",
+                            json!({
+                                "consecutive_failures": failures,
+                                "threshold": self.threshold,
+                                "reason": "failure_threshold_exceeded"
+                            }),
+                        );
+
                         tracing::warn!(
                             "Circuit breaker opened after {} consecutive failures",
                             failures
@@ -318,7 +352,7 @@ impl Middleware for CircuitBreakerMiddleware {
                     }
                 }
             }
-            
+
             CircuitState::HalfOpen => {
                 if is_probe {
                     if is_success {
@@ -326,31 +360,39 @@ impl Middleware for CircuitBreakerMiddleware {
                         self.transition_to(CircuitState::Closed, ctx);
                         self.failure_count.store(0, Ordering::SeqCst);
                         self.probe_in_flight.store(0, Ordering::SeqCst);
-                        
-                        ctx.emit_event("circuit_breaker", "closed", json!({
-                            "reason": "probe_succeeded"
-                        }));
-                        
+
+                        ctx.emit_event(
+                            "circuit_breaker",
+                            "closed",
+                            json!({
+                                "reason": "probe_succeeded"
+                            }),
+                        );
+
                         tracing::info!("Circuit breaker probe succeeded, circuit closed");
                     } else {
                         // Probe failed, reopen the circuit
                         self.transition_to(CircuitState::Open, ctx);
                         self.probe_in_flight.store(0, Ordering::SeqCst);
-                        
-                        ctx.emit_event("circuit_breaker", "reopened", json!({
-                            "reason": "probe_failed"
-                        }));
-                        
+
+                        ctx.emit_event(
+                            "circuit_breaker",
+                            "reopened",
+                            json!({
+                                "reason": "probe_failed"
+                            }),
+                        );
+
                         tracing::warn!("Circuit breaker probe failed, circuit reopened");
                     }
                 }
             }
-            
+
             CircuitState::Open => {
                 // Nothing to do in post-handle for open state
             }
         }
-        
+
         // Check if we should emit a summary
         self.maybe_emit_summary(ctx);
     }
@@ -370,13 +412,13 @@ impl CircuitBreakerBuilder {
             cooldown: Duration::from_secs(60),
         }
     }
-    
+
     /// Set the cooldown duration before attempting to close the circuit
     pub fn cooldown(mut self, duration: Duration) -> Self {
         self.cooldown = duration;
         self
     }
-    
+
     /// Build the circuit breaker middleware factory
     pub fn build(self) -> Box<dyn MiddlewareFactory> {
         Box::new(CircuitBreakerFactory {
@@ -400,7 +442,7 @@ impl CircuitBreakerFactory {
             cooldown: Duration::from_secs(60),
         }
     }
-    
+
     /// Set the cooldown duration before attempting to close the circuit
     pub fn with_cooldown(mut self, duration: Duration) -> Self {
         self.cooldown = duration;
@@ -415,7 +457,7 @@ impl MiddlewareFactory for CircuitBreakerFactory {
             self.cooldown,
         ))
     }
-    
+
     fn name(&self) -> &str {
         "circuit_breaker"
     }
@@ -431,42 +473,47 @@ mod tests {
     use super::*;
 
     fn create_test_event() -> ChainEvent {
-        ChainEventFactory::data_event(
-            WriterId::from(StageId::new()),
-            "test",
-            json!({}),
-        )
+        ChainEventFactory::data_event(WriterId::from(StageId::new()), "test", json!({}))
     }
-    
+
     #[test]
     fn test_circuit_breaker_closed_to_open() {
         let cb = CircuitBreakerMiddleware::new(3);
-        
+
         // First 2 failures shouldn't open the circuit
         for _ in 0..2 {
             let event = create_test_event();
             let mut ctx = MiddlewareContext::new();
-            assert!(matches!(cb.pre_handle(&event, &mut ctx), MiddlewareAction::Continue));
+            assert!(matches!(
+                cb.pre_handle(&event, &mut ctx),
+                MiddlewareAction::Continue
+            ));
             cb.post_handle(&event, &vec![], &mut ctx); // Empty outputs = failure
         }
-        
+
         // Third failure should open the circuit
         let event = create_test_event();
         let mut ctx = MiddlewareContext::new();
-        assert!(matches!(cb.pre_handle(&event, &mut ctx), MiddlewareAction::Continue));
+        assert!(matches!(
+            cb.pre_handle(&event, &mut ctx),
+            MiddlewareAction::Continue
+        ));
         cb.post_handle(&event, &vec![], &mut ctx); // This triggers the opening
-        
+
         // Next request should be rejected
         let event = create_test_event();
         let mut ctx = MiddlewareContext::new();
-        assert!(matches!(cb.pre_handle(&event, &mut ctx), MiddlewareAction::Skip(_)));
+        assert!(matches!(
+            cb.pre_handle(&event, &mut ctx),
+            MiddlewareAction::Skip(_)
+        ));
         assert!(ctx.has_event("circuit_breaker", "rejected"));
     }
-    
+
     #[test]
     fn test_circuit_breaker_success_resets_count() {
         let cb = CircuitBreakerMiddleware::new(3);
-        
+
         // Two failures
         for _ in 0..2 {
             let event = create_test_event();
@@ -474,25 +521,31 @@ mod tests {
             let _ = cb.pre_handle(&event, &mut ctx);
             cb.post_handle(&event, &vec![], &mut ctx);
         }
-        
+
         // Success should reset the count
         let event = create_test_event();
         let mut ctx = MiddlewareContext::new();
         let _ = cb.pre_handle(&event, &mut ctx);
         let outputs = vec![create_test_event()]; // Non-empty = success
         cb.post_handle(&event, &outputs, &mut ctx);
-        
+
         // Should now need 3 more failures to open
         for _ in 0..2 {
             let event = create_test_event();
             let mut ctx = MiddlewareContext::new();
-            assert!(matches!(cb.pre_handle(&event, &mut ctx), MiddlewareAction::Continue));
+            assert!(matches!(
+                cb.pre_handle(&event, &mut ctx),
+                MiddlewareAction::Continue
+            ));
             cb.post_handle(&event, &vec![], &mut ctx);
         }
-        
+
         // Still closed
         let event = create_test_event();
         let mut ctx = MiddlewareContext::new();
-        assert!(matches!(cb.pre_handle(&event, &mut ctx), MiddlewareAction::Continue));
+        assert!(matches!(
+            cb.pre_handle(&event, &mut ctx),
+            MiddlewareAction::Continue
+        ));
     }
 }

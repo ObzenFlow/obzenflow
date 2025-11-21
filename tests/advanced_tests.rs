@@ -1,33 +1,33 @@
 // tests/advanced_tests.rs
-use obzenflow_dsl_infra::{flow, source, transform, sink};
-use obzenflow_runtime_services::stages::common::handlers::{
-    FiniteSourceHandler, TransformHandler, SinkHandler
-};
-use obzenflow_infra::journal::DiskJournal;
-use obzenflow_core::event::event_id::EventId;
 use obzenflow_core::event::chain_event::ChainEvent;
+use obzenflow_core::event::event_id::EventId;
 use obzenflow_core::journal::writer_id::WriterId;
+use obzenflow_dsl_infra::{flow, sink, source, transform};
+use obzenflow_infra::journal::DiskJournal;
+use obzenflow_runtime_services::stages::common::handlers::{
+    FiniteSourceHandler, SinkHandler, TransformHandler,
+};
 // FLOWIP-056-666: Monitoring middleware temporarily disabled pending redesign
+use anyhow::Result;
+use async_trait::async_trait;
 use serde_json::json;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tempfile::tempdir;
-use anyhow::Result;
-use async_trait::async_trait;
 
 /// Test using the DSL macros with EventStore
 #[tokio::test]
 async fn test_dsl_pipeline() -> Result<()> {
     let temp_dir = tempdir()?;
     let store_path = temp_dir.path().join("test_dsl_event_store");
-    
+
     // Define pipeline stages
     struct EventGenerator {
         events: Vec<(String, serde_json::Value)>,
         emitted: usize,
         writer_id: WriterId,
     }
-    
+
     impl EventGenerator {
         fn new() -> Self {
             let events = vec![
@@ -42,7 +42,7 @@ async fn test_dsl_pipeline() -> Result<()> {
             }
         }
     }
-    
+
     impl FiniteSourceHandler for EventGenerator {
         fn next(&mut self) -> Option<ChainEvent> {
             if self.emitted < self.events.len() {
@@ -58,20 +58,20 @@ async fn test_dsl_pipeline() -> Result<()> {
                 None
             }
         }
-        
+
         fn is_complete(&self) -> bool {
             self.emitted >= self.events.len()
         }
     }
-    
+
     struct Doubler;
-    
+
     impl Doubler {
         fn new() -> Self {
             Self
         }
     }
-    
+
     impl TransformHandler for Doubler {
         fn process(&self, mut event: ChainEvent) -> Vec<ChainEvent> {
             if let Some(value) = event.payload["value"].as_u64() {
@@ -81,20 +81,18 @@ async fn test_dsl_pipeline() -> Result<()> {
             vec![event]
         }
     }
-    
+
     #[derive(Clone)]
     struct Summer {
         total: Arc<AtomicU64>,
     }
-    
+
     impl Summer {
         fn new(total: Arc<AtomicU64>) -> Self {
-            Self {
-                total,
-            }
+            Self { total }
         }
     }
-    
+
     #[async_trait]
     impl SinkHandler for Summer {
         fn consume(&mut self, event: ChainEvent) -> obzenflow_core::Result<()> {
@@ -118,18 +116,20 @@ async fn test_dsl_pipeline() -> Result<()> {
         name: "dsl_transformation_test",
         journal: journal,
         middleware: [],
-        
+
         stages: {
             gen = source!("generator" => EventGenerator::new());
             dbl = transform!("doubler" => Doubler::new());
             sum = sink!("summer" => summer);
         },
-        
+
         topology: {
             gen |> dbl;
             dbl |> sum;
         }
-    }.await.map_err(|e| anyhow::anyhow!("Failed to create flow: {:?}", e))?;
+    }
+    .await
+    .map_err(|e| anyhow::anyhow!("Failed to create flow: {:?}", e))?;
 
     // Run the pipeline
     handle.run().await?;

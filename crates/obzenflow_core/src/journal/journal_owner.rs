@@ -9,14 +9,10 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum JournalOwner {
     /// System component owns this journal (pipeline, metrics, etc.)
-    System { 
-        system_id: SystemId,
-    },
-    
+    System { system_id: SystemId },
+
     /// Stage owns this journal (for stage-local data events)
-    Stage { 
-        stage_id: StageId,
-    },
+    Stage { stage_id: StageId },
 }
 
 impl JournalOwner {
@@ -24,12 +20,12 @@ impl JournalOwner {
     pub fn system(system_id: SystemId) -> Self {
         Self::System { system_id }
     }
-    
+
     /// Create a stage owner
     pub fn stage(stage_id: StageId) -> Self {
         Self::Stage { stage_id }
     }
-    
+
     /// Get a unique string representation for file/directory naming
     pub fn as_path_component(&self) -> String {
         match self {

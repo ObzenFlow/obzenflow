@@ -3,21 +3,21 @@
 //! Transforms process events from upstream stages and emit transformed events.
 //! They start processing immediately without waiting for a start signal.
 
-use obzenflow_fsm::{StateVariant, EventVariant, FsmContext, FsmAction};
-use obzenflow_core::{ChainEvent, EventId, WriterId, FlowId};
+use obzenflow_core::event::JournalEvent;
 use obzenflow_core::event::{ChainEventFactory, SystemEvent};
 use obzenflow_core::journal::journal::Journal;
-use obzenflow_core::event::JournalEvent;
 use obzenflow_core::StageId;
+use obzenflow_core::{ChainEvent, EventId, FlowId, WriterId};
+use obzenflow_fsm::{EventVariant, FsmAction, FsmContext, StateVariant};
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 use std::marker::PhantomData;
+use std::sync::Arc;
 use tokio::sync::RwLock;
 
-use crate::stages::common::handlers::TransformHandler;
-use crate::stages::common::control_strategies::ControlEventStrategy;
-use crate::metrics::instrumentation::StageInstrumentation;
 use crate::messaging::UpstreamSubscription;
+use crate::metrics::instrumentation::StageInstrumentation;
+use crate::stages::common::control_strategies::ControlEventStrategy;
+use crate::stages::common::handlers::TransformHandler;
 
 // ============================================================================
 // FSM States
@@ -28,22 +28,22 @@ use crate::messaging::UpstreamSubscription;
 pub enum TransformState<H> {
     /// Initial state - transform has been created but not initialized
     Created,
-    
+
     /// Resources allocated, ready to start processing
     Initialized,
-    
+
     /// Actively processing events from upstream stages
     Running,
-    
+
     /// Received EOF, finishing processing remaining events
     Draining,
-    
+
     /// All events processed, EOF forwarded downstream
     Drained,
-    
+
     /// Unrecoverable error occurred
     Failed(String),
-    
+
     #[serde(skip)]
     _Phantom(PhantomData<H>),
 }
@@ -113,22 +113,22 @@ impl<H: Send + Sync + 'static> StateVariant for TransformState<H> {
 pub enum TransformEvent<H> {
     /// Initialize the transform
     Initialize,
-    
+
     /// Ready to start processing (transforms start immediately)
     Ready,
-    
+
     /// Received EOF from upstream
     ReceivedEOF,
-    
+
     /// Begin draining process
     BeginDrain,
-    
+
     /// Draining complete
     DrainComplete,
-    
+
     /// Unrecoverable error occurred
     Error(String),
-    
+
     #[doc(hidden)]
     _Phantom(PhantomData<H>),
 }
@@ -184,19 +184,19 @@ impl<H: Send + Sync + 'static> EventVariant for TransformEvent<H> {
 pub enum TransformAction<H> {
     /// Allocate resources (writer ID, subscriptions)
     AllocateResources,
-    
+
     /// Publish running event to journal
     PublishRunning,
-    
+
     /// Forward EOF event downstream
     ForwardEOF,
-    
+
     /// Send completion event to journal
     SendCompletion,
-    
+
     /// Clean up all resources
     Cleanup,
-    
+
     #[doc(hidden)]
     _Phantom(PhantomData<H>),
 }
@@ -237,52 +237,52 @@ impl<H> std::fmt::Debug for TransformAction<H> {
 pub struct TransformContext<H: TransformHandler> {
     /// The handler instance (stateless, so no RwLock needed)
     pub handler: Arc<H>,
-    
+
     /// This transform's stage ID
     pub stage_id: obzenflow_core::StageId,
-    
+
     /// Human-readable stage name for logging
     pub stage_name: String,
-    
+
     /// Flow name for flow context
     pub flow_name: String,
-    
+
     /// Flow ID from pipeline
     pub flow_id: FlowId,
-    
+
     /// Data journal for writing chain events
     pub data_journal: Arc<dyn Journal<ChainEvent>>,
-    
+
     /// Error journal for writing error events (FLOWIP-082e)
     pub error_journal: Arc<dyn Journal<ChainEvent>>,
-    
+
     /// System journal for writing lifecycle events
     pub system_journal: Arc<dyn Journal<SystemEvent>>,
-    
+
     /// Upstream journals for reading events
     pub upstream_journals: Vec<(StageId, Arc<dyn Journal<ChainEvent>>)>,
-    
+
     /// Message bus for pipeline communication
     pub bus: Arc<crate::message_bus::FsmMessageBus>,
-    
+
     /// Writer ID for this transform (initialized during setup)
     pub writer_id: Arc<RwLock<Option<WriterId>>>,
-    
+
     /// Subscription to upstream events
     pub subscription: Arc<RwLock<Option<UpstreamSubscription<ChainEvent>>>>,
-    
+
     /// Processing task handle (moved from supervisor to follow FSM patterns)
     pub processing_task: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
-    
+
     /// Upstream stage IDs
     pub upstream_stages: Vec<obzenflow_core::StageId>,
-    
+
     /// Control event handling strategy
     pub control_strategy: Arc<dyn ControlEventStrategy>,
-    
+
     /// EOF event to forward when draining completes
     pub buffered_eof: Arc<RwLock<Option<ChainEvent>>>,
-    
+
     /// Stage instrumentation for metrics tracking
     pub instrumentation: Arc<StageInstrumentation>,
 }
@@ -334,56 +334,62 @@ impl<H: TransformHandler + 'static> FsmContext for TransformContext<H> {}
 #[async_trait::async_trait]
 impl<H: TransformHandler + Send + Sync + 'static> FsmAction for TransformAction<H> {
     type Context = TransformContext<H>;
-    
+
     async fn execute(&self, ctx: &Self::Context) -> Result<(), String> {
         match self {
             TransformAction::AllocateResources => {
                 // Create WriterId from our StageId
                 let writer_id = WriterId::from(ctx.stage_id.clone());
                 *ctx.writer_id.write().await = Some(writer_id);
-                
+
+                tracing::info!(
+                    stage_name = %ctx.stage_name,
+                    upstream_count = ctx.upstream_journals.len(),
+                    upstream_stages = ?ctx.upstream_journals.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+                    "Transform creating upstream subscription"
+                );
+
                 // Create subscription to upstream journals
-                let subscription = UpstreamSubscription::new(&ctx.upstream_journals).await
+                let subscription = UpstreamSubscription::new(&ctx.upstream_journals)
+                    .await
                     .map_err(|e| format!("Failed to create subscription: {:?}", e))?;
-                
+
                 *ctx.subscription.write().await = Some(subscription);
-                
+
                 tracing::info!(
                     stage_name = %ctx.stage_name,
                     "Transform allocated resources"
                 );
                 Ok(())
             }
-            
+
             TransformAction::PublishRunning => {
                 let writer_id_guard = ctx.writer_id.read().await;
                 let writer_id = writer_id_guard
                     .as_ref()
                     .ok_or_else(|| "No writer ID available to publish running event".to_string())?;
-                
+
                 // Write lifecycle event to system journal
-                let running_event = SystemEvent::stage_running(
-                    ctx.stage_id
-                );
-                
+                let running_event = SystemEvent::stage_running(ctx.stage_id);
+
                 ctx.system_journal
                     .append(running_event, None)
                     .await
                     .map_err(|e| format!("Failed to publish running event: {}", e))?;
-                
+
                 tracing::info!(
                     stage_name = %ctx.stage_name,
                     "Transform published running event"
                 );
                 Ok(())
             }
-            
+
             TransformAction::ForwardEOF => {
                 let writer_id_guard = ctx.writer_id.read().await;
                 let writer_id = writer_id_guard
                     .as_ref()
                     .ok_or_else(|| "No writer ID available to forward EOF".to_string())?;
-                
+
                 // Get the buffered EOF event or create a new one
                 let eof_event = if let Some(buffered) = ctx.buffered_eof.write().await.take() {
                     buffered
@@ -393,55 +399,53 @@ impl<H: TransformHandler + Send + Sync + 'static> FsmAction for TransformAction<
                         true, // natural EOF
                     )
                 };
-                
+
                 ctx.data_journal
                     .append(eof_event, None)
                     .await
                     .map_err(|e| format!("Failed to forward EOF: {}", e))?;
-                
+
                 tracing::info!(
                     stage_name = %ctx.stage_name,
                     "Transform forwarded EOF downstream"
                 );
                 Ok(())
             }
-            
+
             TransformAction::SendCompletion => {
                 let writer_id_guard = ctx.writer_id.read().await;
                 let writer_id = writer_id_guard
                     .as_ref()
                     .ok_or_else(|| "No writer ID available to send completion".to_string())?;
-                
+
                 // Write completion event to system journal
-                let completion_event = SystemEvent::stage_completed(
-                    ctx.stage_id
-                );
-                
+                let completion_event = SystemEvent::stage_completed(ctx.stage_id);
+
                 ctx.system_journal
                     .append(completion_event, None)
                     .await
                     .map_err(|e| format!("Failed to write completion event: {}", e))?;
-                
+
                 tracing::info!(
                     stage_name = %ctx.stage_name,
                     "Transform sent completion event"
                 );
                 Ok(())
             }
-            
+
             TransformAction::Cleanup => {
                 // Stop the processing task if any
                 if let Some(task) = ctx.processing_task.write().await.take() {
                     task.abort();
                 }
-                
+
                 tracing::info!(
                     stage_name = %ctx.stage_name,
                     "Transform cleaned up resources"
                 );
                 Ok(())
             }
-            
+
             TransformAction::_Phantom(_) => unreachable!("PhantomData variant"),
         }
     }

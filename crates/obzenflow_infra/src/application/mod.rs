@@ -9,4 +9,4 @@ mod flow_application;
 
 pub use config::FlowConfig;
 pub use error::ApplicationError;
-pub use flow_application::FlowApplication;
+pub use flow_application::{FlowApplication, FlowApplicationBuilder, LogLevel};

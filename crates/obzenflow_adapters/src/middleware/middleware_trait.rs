@@ -7,20 +7,20 @@ use super::MiddlewareContext;
 use obzenflow_core::event::chain_event::ChainEvent;
 
 /// Trait for composable middleware that wraps Step behavior.
-/// 
+///
 /// Middleware follows a three-phase interaction model:
 /// 1. **Pre-processing** (`pre_handle`): Before the step processes the event
 /// 2. **Post-processing** (`post_handle`): After successful processing  
 /// 3. **Error handling** (`on_error`): When something goes wrong
-/// 
+///
 /// ## Example Implementation
-/// 
+///
 /// ```rust
 /// use obzenflow_adapters::middleware::{Middleware, MiddlewareAction, MiddlewareContext};
 /// use obzenflow_core::ChainEvent;
-/// 
+///
 /// struct LoggingMiddleware;
-/// 
+///
 /// impl Middleware for LoggingMiddleware {
 ///     fn pre_handle(&self, event: &ChainEvent, _ctx: &mut MiddlewareContext) -> MiddlewareAction {
 ///         println!("Processing event: {:?}", event.id);
@@ -34,7 +34,7 @@ use obzenflow_core::event::chain_event::ChainEvent;
 /// ```
 pub trait Middleware: Send + Sync {
     /// Called before the inner step processes the event.
-    /// 
+    ///
     /// Use this to:
     /// - Implement rate limiting (return `Skip` or `Abort`)
     /// - Add caching (return `Skip` with cached results)
@@ -46,18 +46,23 @@ pub trait Middleware: Send + Sync {
     }
 
     /// Called after the inner step successfully processes the event.
-    /// 
+    ///
     /// Use this to:
     /// - Observe results (but not modify them)
     /// - Record success metrics
     /// - Perform side effects like logging
     /// - Emit middleware events based on outcomes
-    fn post_handle(&self, _event: &ChainEvent, _results: &[ChainEvent], _ctx: &mut MiddlewareContext) {
+    fn post_handle(
+        &self,
+        _event: &ChainEvent,
+        _results: &[ChainEvent],
+        _ctx: &mut MiddlewareContext,
+    ) {
         // Default: no-op
     }
 
     /// Called when an error occurs during processing.
-    /// 
+    ///
     /// Use this to:
     /// - Implement retry logic (return `Retry`)
     /// - Convert errors to events (return `Recover`)
@@ -67,17 +72,17 @@ pub trait Middleware: Send + Sync {
     }
 
     /// Called before each result event is written to the journal.
-    /// 
+    ///
     /// This hook enables event enrichment with timing data, flow context,
     /// and other metadata needed for observability. The event is mutable,
     /// allowing middleware to add fields following the "wide events" pattern.
-    /// 
+    ///
     /// Use this to:
     /// - Add processing time to events
     /// - Ensure flow context is populated
     /// - Enrich events with deployment/environment info
     /// - Add correlation IDs for tracing
-    /// 
+    ///
     /// Default implementation is a no-op for backward compatibility.
     fn pre_write(&self, _event: &mut ChainEvent, _ctx: &MiddlewareContext) {
         // Default: no-op

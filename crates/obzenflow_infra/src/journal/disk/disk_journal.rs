@@ -2,30 +2,48 @@
 //!
 //! Provides optimal sequential writes and natural event ordering
 
-use obzenflow_core::event::JournalEvent;
-use obzenflow_core::event::event_envelope::EventEnvelope;
-use obzenflow_core::event::identity::{JournalWriterId, WriterId, EventId};
-use obzenflow_core::journal::journal_owner::JournalOwner;
-use obzenflow_core::journal::journal::Journal;
-use obzenflow_core::journal::journal_error::JournalError;
-use obzenflow_core::journal::journal_reader::JournalReader;
-use obzenflow_core::id::JournalId;
-use async_trait::async_trait;
-use std::path::PathBuf;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use tokio::sync::{RwLock, Mutex};
-use tokio::io::{AsyncWriteExt, AsyncBufReadExt, AsyncSeekExt};
-use tokio::fs::File;
-use std::io::{BufRead, BufReader};
-use std::fs::File as StdFile;
-use std::collections::HashMap;
-use ulid::Ulid;
-use chrono::Utc;
-use std::io::SeekFrom;
-use obzenflow_core::event::vector_clock::{VectorClock, CausalOrderingService};
 use super::disk_journal_reader::DiskJournalReader;
 use super::log_record::LogRecord;
+use async_trait::async_trait;
+use chrono::Utc;
+use crc32fast::Hasher;
+use obzenflow_core::event::event_envelope::EventEnvelope;
+use obzenflow_core::event::identity::{EventId, JournalWriterId, WriterId};
+use obzenflow_core::event::vector_clock::{CausalOrderingService, VectorClock};
+use obzenflow_core::event::JournalEvent;
+use obzenflow_core::id::JournalId;
+use obzenflow_core::journal::journal::Journal;
+use obzenflow_core::journal::journal_error::JournalError;
+use obzenflow_core::journal::journal_owner::JournalOwner;
+use obzenflow_core::journal::journal_reader::JournalReader;
+use std::collections::HashMap;
+use std::fs::File as StdFile;
+use std::io::SeekFrom;
+use std::io::{BufRead, BufReader};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::sync::OnceLock;
+use tokio::fs::File;
+use tokio::io::{AsyncBufReadExt, AsyncSeekExt, AsyncWriteExt};
+use tokio::sync::RwLock;
+use ulid::Ulid;
+
+/// Global registry of per-path read/write locks so all DiskJournal instances
+/// that point at the same file coordinate access and prevent torn reads.
+static JOURNAL_LOCKS: OnceLock<
+    std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, Arc<RwLock<()>>>>,
+> = OnceLock::new();
+
+fn shared_lock_for_path(path: &PathBuf) -> Arc<RwLock<()>> {
+    let registry =
+        JOURNAL_LOCKS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    let mut guard = registry.lock().unwrap();
+    guard
+        .entry(path.clone())
+        .or_insert_with(|| Arc::new(RwLock::new(())))
+        .clone()
+}
 
 /// Single append-only log for a flow execution
 ///
@@ -41,8 +59,10 @@ pub struct DiskJournal<T: JournalEvent> {
     write_offset: Arc<AtomicU64>,
     /// In-memory index: event_id -> file offset
     index: Arc<RwLock<HashMap<Ulid, u64>>>,
-    /// Write mutex to ensure atomic writes
-    write_lock: Arc<Mutex<()>>,
+    /// Shared lock to coordinate readers/writers
+    ///
+    /// Writers take a write lock; readers take a read lock to avoid torn lines.
+    read_write_lock: Arc<RwLock<()>>,
     /// Track vector clocks for each writer
     writer_clocks: Arc<RwLock<HashMap<WriterId, VectorClock>>>,
     _phantom: std::marker::PhantomData<T>,
@@ -51,17 +71,14 @@ pub struct DiskJournal<T: JournalEvent> {
 impl<T: JournalEvent> DiskJournal<T> {
     /// Create a new flow event log
     pub fn new(base_path: PathBuf, flow_id: &str) -> Result<Self, JournalError> {
-        std::fs::create_dir_all(&base_path)
-            .map_err(|e| JournalError::Implementation {
-                message: "Failed to create directory".to_string(),
-                source: Box::new(e),
-            })?;
+        std::fs::create_dir_all(&base_path).map_err(|e| JournalError::Implementation {
+            message: "Failed to create directory".to_string(),
+            source: Box::new(e),
+        })?;
         let log_path = base_path.join(format!("{}.log", flow_id));
 
         // Get current file size if it exists
-        let write_offset = std::fs::metadata(&log_path)
-            .map(|m| m.len())
-            .unwrap_or(0);
+        let write_offset = std::fs::metadata(&log_path).map(|m| m.len()).unwrap_or(0);
 
         // Build index if file exists
         let mut index = HashMap::with_capacity(10000);
@@ -69,11 +86,10 @@ impl<T: JournalEvent> DiskJournal<T> {
 
         if log_path.exists() {
             // Read through file to rebuild index and writer clocks
-            let file = StdFile::open(&log_path)
-                .map_err(|e| JournalError::Implementation {
-                    message: "Failed to open log file".to_string(),
-                    source: Box::new(e),
-                })?;
+            let file = StdFile::open(&log_path).map_err(|e| JournalError::Implementation {
+                message: "Failed to open log file".to_string(),
+                source: Box::new(e),
+            })?;
             let reader = BufReader::new(file);
             let mut offset = 0u64;
 
@@ -83,11 +99,23 @@ impl<T: JournalEvent> DiskJournal<T> {
                     source: Box::new(e),
                 })?;
                 if !line.trim().is_empty() {
-                    if let Ok(record) = serde_json::from_str::<LogRecord<T>>(&line) {
-                        index.insert(record.event_id, offset);
+                    match parse_framed_record::<T>(&line) {
+                        ParseOutcome::Complete(record) => {
+                            index.insert(record.event_id, offset);
 
-                        // Update writer clocks
-                        writer_clocks.insert(record.writer_id, record.vector_clock);
+                            // Update writer clocks
+                            writer_clocks.insert(record.writer_id, record.vector_clock);
+                        }
+                        // Skip partial lines when rebuilding index; they'll be retried on read
+                        ParseOutcome::Partial => {}
+                        ParseOutcome::Corrupt(e) => {
+                            tracing::warn!(
+                                offset,
+                                path = %log_path.display(),
+                                parse_error = %e,
+                                "Skipping corrupt record while rebuilding index"
+                            );
+                        }
                     }
                     offset += line.len() as u64 + 1; // +1 for newline
                 }
@@ -97,10 +125,10 @@ impl<T: JournalEvent> DiskJournal<T> {
         Ok(Self {
             owner: None,
             journal_id: JournalId::new(),
-            path: log_path,
+            path: log_path.clone(),
             write_offset: Arc::new(AtomicU64::new(write_offset)),
             index: Arc::new(RwLock::new(index)),
-            write_lock: Arc::new(Mutex::new(())),
+            read_write_lock: shared_lock_for_path(&log_path),
             writer_clocks: Arc::new(RwLock::new(writer_clocks)),
             _phantom: std::marker::PhantomData,
         })
@@ -110,17 +138,14 @@ impl<T: JournalEvent> DiskJournal<T> {
     pub fn with_owner(log_path: PathBuf, owner: JournalOwner) -> Result<Self, JournalError> {
         // Create parent directory if needed
         if let Some(parent) = log_path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| JournalError::Implementation {
-                    message: "Failed to create directory".to_string(),
-                    source: Box::new(e),
-                })?;
+            std::fs::create_dir_all(parent).map_err(|e| JournalError::Implementation {
+                message: "Failed to create directory".to_string(),
+                source: Box::new(e),
+            })?;
         }
 
         // Get current file size if it exists
-        let write_offset = std::fs::metadata(&log_path)
-            .map(|m| m.len())
-            .unwrap_or(0);
+        let write_offset = std::fs::metadata(&log_path).map(|m| m.len()).unwrap_or(0);
 
         // Build index if file exists
         let mut index = HashMap::with_capacity(10000);
@@ -128,11 +153,10 @@ impl<T: JournalEvent> DiskJournal<T> {
 
         if log_path.exists() {
             // Read through file to rebuild index and writer clocks
-            let file = StdFile::open(&log_path)
-                .map_err(|e| JournalError::Implementation {
-                    message: "Failed to open log file".to_string(),
-                    source: Box::new(e),
-                })?;
+            let file = StdFile::open(&log_path).map_err(|e| JournalError::Implementation {
+                message: "Failed to open log file".to_string(),
+                source: Box::new(e),
+            })?;
             let reader = BufReader::new(file);
             let mut offset = 0u64;
 
@@ -156,10 +180,10 @@ impl<T: JournalEvent> DiskJournal<T> {
         Ok(Self {
             owner: Some(owner),
             journal_id: JournalId::new(),
-            path: log_path,
+            path: log_path.clone(),
             write_offset: Arc::new(AtomicU64::new(write_offset)),
             index: Arc::new(RwLock::new(index)),
-            write_lock: Arc::new(Mutex::new(())),
+            read_write_lock: shared_lock_for_path(&log_path),
             writer_clocks: Arc::new(RwLock::new(writer_clocks)),
             _phantom: std::marker::PhantomData,
         })
@@ -173,7 +197,8 @@ impl<T: JournalEvent> DiskJournal<T> {
             return Ok(events);
         }
 
-        let file = File::open(&self.path).await
+        let file = File::open(&self.path)
+            .await
             .map_err(|e| JournalError::Implementation {
                 message: "Failed to open file".to_string(),
                 source: Box::new(e),
@@ -181,28 +206,95 @@ impl<T: JournalEvent> DiskJournal<T> {
         let reader = tokio::io::BufReader::new(file);
         let mut lines = reader.lines();
 
-        while let Some(line) = lines.next_line().await
-            .map_err(|e| JournalError::Implementation {
-                message: "Failed to read line".to_string(),
-                source: Box::new(e),
-            })? {
-            if !line.trim().is_empty() {
-                let record: LogRecord<T> = serde_json::from_str(&line)
-                    .map_err(|e| JournalError::Implementation {
-                        message: "Failed to parse record".to_string(),
-                        source: Box::new(e),
-                    })?;
-
-                events.push(EventEnvelope {
-                    journal_writer_id: JournalWriterId::from(self.journal_id),
-                    vector_clock: record.vector_clock,
-                    timestamp: record.timestamp,
-                    event: record.event,
-                });
+        while let Some(line) =
+            lines
+                .next_line()
+                .await
+                .map_err(|e| JournalError::Implementation {
+                    message: "Failed to read line".to_string(),
+                    source: Box::new(e),
+                })?
+        {
+            if line.trim().is_empty() {
+                continue;
+            }
+            match parse_framed_record::<T>(&line) {
+                ParseOutcome::Complete(record) => {
+                    events.push(EventEnvelope {
+                        journal_writer_id: JournalWriterId::from(self.journal_id),
+                        vector_clock: record.vector_clock,
+                        timestamp: record.timestamp,
+                        event: record.event,
+                    });
+                }
+                // For read_all, treat partial as transient and skip
+                ParseOutcome::Partial => continue,
+                ParseOutcome::Corrupt(e) => {
+                    return Err(JournalError::Implementation {
+                        message: format!("Failed to parse record: {}", e),
+                        source: Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, e)),
+                    });
+                }
             }
         }
 
         Ok(events)
+    }
+}
+
+/// Outcome of attempting to parse a framed log line
+pub(super) enum ParseOutcome<R: JournalEvent> {
+    Complete(LogRecord<R>),
+    Partial,
+    Corrupt(String),
+}
+
+pub(super) fn parse_framed_record<R: JournalEvent>(line: &str) -> ParseOutcome<R> {
+    let trimmed = line.trim_end_matches('\n');
+
+    // Attempt framed format: <len>:<crc>:<json>
+    let mut parts = trimmed.splitn(3, ':');
+    if let (Some(len_str), Some(crc_str), Some(payload)) =
+        (parts.next(), parts.next(), parts.next())
+    {
+        if let (Ok(expected_len), Ok(expected_crc)) =
+            (len_str.parse::<usize>(), crc_str.parse::<u32>())
+        {
+            // Check length first
+            let payload_bytes = payload.as_bytes();
+            if payload_bytes.len() < expected_len {
+                return ParseOutcome::Partial;
+            }
+
+            let body = &payload_bytes[..expected_len];
+            let mut hasher = Hasher::new();
+            hasher.update(body);
+            let actual_crc = hasher.finalize();
+            if actual_crc != expected_crc {
+                return ParseOutcome::Partial;
+            }
+
+            match serde_json::from_slice::<LogRecord<R>>(body) {
+                Ok(rec) => return ParseOutcome::Complete(rec),
+                // CRC matched, so this is truly malformed JSON rather than a torn read
+                Err(e) => return ParseOutcome::Corrupt(format!("json parse error: {}", e)),
+            }
+        } else {
+            // Header present but not parseable - likely read mid-line
+            return ParseOutcome::Partial;
+        }
+    } else {
+        // No header delimiters, likely a torn prefix/suffix
+        // Fall through to legacy JSON parsing below
+    }
+
+    // Fallback to legacy pure-JSON line
+    match serde_json::from_str::<LogRecord<R>>(trimmed) {
+        Ok(rec) => ParseOutcome::Complete(rec),
+        Err(_) => {
+            // Legacy JSON parse failed: treat as partial to allow retry instead of hard-corrupt
+            ParseOutcome::Partial
+        }
     }
 }
 
@@ -214,7 +306,7 @@ impl<T: JournalEvent> Clone for DiskJournal<T> {
             path: self.path.clone(),
             write_offset: self.write_offset.clone(),
             index: self.index.clone(),
-            write_lock: self.write_lock.clone(),
+            read_write_lock: self.read_write_lock.clone(),
             writer_clocks: self.writer_clocks.clone(),
             _phantom: std::marker::PhantomData,
         }
@@ -234,18 +326,19 @@ impl<T: JournalEvent + 'static> Journal<T> for DiskJournal<T> {
     async fn append(
         &self,
         event: T,
-        parent: Option<&EventEnvelope<T>>
+        parent: Option<&EventEnvelope<T>>,
     ) -> Result<EventEnvelope<T>, JournalError> {
         // Safety check: Ensure journal has an owner before allowing writes
         if self.owner.is_none() {
             return Err(JournalError::Implementation {
-                message: "Cannot write to an unowned journal. Journal must have an owner.".to_string(),
+                message: "Cannot write to an unowned journal. Journal must have an owner."
+                    .to_string(),
                 source: "Unowned journal write attempt".into(),
             });
         }
         // Get writer_id from the event
         let writer_id = event.writer_id().clone();
-        
+
         // Get or create vector clock for this writer
         let mut vector_clock = {
             let writer_clocks = self.writer_clocks.read().await;
@@ -257,7 +350,10 @@ impl<T: JournalEvent + 'static> Journal<T> for DiskJournal<T> {
 
         // Update vector clock based on parent
         if let Some(parent_envelope) = parent {
-            CausalOrderingService::update_with_parent(&mut vector_clock, &parent_envelope.vector_clock);
+            CausalOrderingService::update_with_parent(
+                &mut vector_clock,
+                &parent_envelope.vector_clock,
+            );
         }
 
         // Increment for this writer
@@ -282,20 +378,28 @@ impl<T: JournalEvent + 'static> Journal<T> for DiskJournal<T> {
         };
 
         // Serialize with newline
-        let mut json_line = serde_json::to_string(&record)
-            .map_err(|e| JournalError::Implementation {
-                message: "Failed to serialize record".to_string(),
-                source: Box::new(e),
-            })?;
-        json_line.push('\n');
-        let bytes = json_line.into_bytes();
+        let json_body = serde_json::to_vec(&record).map_err(|e| JournalError::Implementation {
+            message: "Failed to serialize record".to_string(),
+            source: Box::new(e),
+        })?;
 
-        // Acquire write lock for atomic write
-        let _lock = self.write_lock.lock().await;
+        // Frame with length and checksum so readers can detect torn reads
+        let mut hasher = Hasher::new();
+        hasher.update(&json_body);
+        let crc = hasher.finalize();
+        let framed_line = format!("{}:{}:", json_body.len(), crc);
+
+        let mut bytes = framed_line.into_bytes();
+        bytes.extend_from_slice(&json_body);
+        bytes.push(b'\n');
+
+        // Acquire write lock for atomic write (blocks readers)
+        let _lock = self.read_write_lock.write().await;
 
         // Get current offset and reserve space
         let offset = self.write_offset.load(Ordering::SeqCst);
-        self.write_offset.fetch_add(bytes.len() as u64, Ordering::SeqCst);
+        self.write_offset
+            .fetch_add(bytes.len() as u64, Ordering::SeqCst);
 
         // Write to file
         let mut file = tokio::fs::OpenOptions::new()
@@ -308,22 +412,33 @@ impl<T: JournalEvent + 'static> Journal<T> for DiskJournal<T> {
                 source: Box::new(e),
             })?;
 
-        file.write_all(&bytes).await
+        file.write_all(&bytes)
+            .await
             .map_err(|e| JournalError::Implementation {
                 message: "Failed to write to file".to_string(),
                 source: Box::new(e),
             })?;
-        file.flush().await
+        file.flush()
+            .await
             .map_err(|e| JournalError::Implementation {
                 message: "Failed to flush file".to_string(),
                 source: Box::new(e),
             })?;
+        tracing::debug!(
+            path = %self.path.display(),
+            offset,
+            bytes = bytes.len(),
+            write_lock_ptr = ?Arc::as_ptr(&self.read_write_lock),
+            "DiskJournal appended framed record"
+        );
 
         // Update index
         self.index.write().await.insert(record.event_id, offset);
 
         // Update writer's clock
-        self.writer_clocks.write().await
+        self.writer_clocks
+            .write()
+            .await
             .insert(writer_id, vector_clock);
 
         Ok(envelope)
@@ -334,21 +449,26 @@ impl<T: JournalEvent + 'static> Journal<T> for DiskJournal<T> {
 
         // Sort by vector clock for causal ordering
         events.sort_by(|a, b| {
-            CausalOrderingService::causal_compare(&a.vector_clock, &b.vector_clock)
-                .unwrap_or_else(|| {
+            CausalOrderingService::causal_compare(&a.vector_clock, &b.vector_clock).unwrap_or_else(
+                || {
                     // For concurrent events, use timestamp as tiebreaker
                     a.timestamp.cmp(&b.timestamp)
-                })
+                },
+            )
         });
 
         Ok(events)
     }
 
-    async fn read_causally_after(&self, after_event_id: &EventId) -> Result<Vec<EventEnvelope<T>>, JournalError> {
+    async fn read_causally_after(
+        &self,
+        after_event_id: &EventId,
+    ) -> Result<Vec<EventEnvelope<T>>, JournalError> {
         let all_events = self.read_causally_ordered().await?;
 
         // Find the position of the reference event
-        let position = all_events.iter()
+        let position = all_events
+            .iter()
             .position(|e| e.event.id() == after_event_id);
 
         match position {
@@ -357,7 +477,10 @@ impl<T: JournalEvent + 'static> Journal<T> for DiskJournal<T> {
         }
     }
 
-    async fn read_event(&self, event_id: &EventId) -> Result<Option<EventEnvelope<T>>, JournalError> {
+    async fn read_event(
+        &self,
+        event_id: &EventId,
+    ) -> Result<Option<EventEnvelope<T>>, JournalError> {
         let ulid = event_id.as_ulid();
 
         // Check index
@@ -373,12 +496,14 @@ impl<T: JournalEvent + 'static> Journal<T> for DiskJournal<T> {
         }
 
         // Read from file at specific offset
-        let mut file = File::open(&self.path).await
+        let mut file = File::open(&self.path)
+            .await
             .map_err(|e| JournalError::Implementation {
                 message: "Failed to open file".to_string(),
                 source: Box::new(e),
             })?;
-        file.seek(SeekFrom::Start(offset)).await
+        file.seek(SeekFrom::Start(offset))
+            .await
             .map_err(|e| JournalError::Implementation {
                 message: "Failed to seek in file".to_string(),
                 source: Box::new(e),
@@ -387,49 +512,74 @@ impl<T: JournalEvent + 'static> Journal<T> for DiskJournal<T> {
         let reader = tokio::io::BufReader::new(file);
         let mut lines = reader.lines();
 
-        if let Some(line) = lines.next_line().await
+        if let Some(line) = lines
+            .next_line()
+            .await
             .map_err(|e| JournalError::Implementation {
                 message: "Failed to read line".to_string(),
                 source: Box::new(e),
-            })? {
-            let record: LogRecord<T> = serde_json::from_str(&line)
-                .map_err(|e| JournalError::Implementation {
-                    message: "Failed to parse record".to_string(),
-                    source: Box::new(e),
-                })?;
-
-            Ok(Some(EventEnvelope {
-                journal_writer_id: JournalWriterId::from(self.journal_id),
-                vector_clock: record.vector_clock,
-                timestamp: record.timestamp,
-                event: record.event,
-            }))
+            })?
+        {
+            match parse_framed_record::<T>(&line) {
+                ParseOutcome::Complete(record) => Ok(Some(EventEnvelope {
+                    journal_writer_id: JournalWriterId::from(self.journal_id),
+                    vector_clock: record.vector_clock,
+                    timestamp: record.timestamp,
+                    event: record.event,
+                })),
+                ParseOutcome::Partial => Ok(None),
+                ParseOutcome::Corrupt(e) => Err(JournalError::Implementation {
+                    message: format!("Failed to parse record: {}", e),
+                    source: Box::new(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        e,
+                    )),
+                }),
+            }
         } else {
             Ok(None)
         }
     }
-    
+
     async fn reader(&self) -> Result<Box<dyn JournalReader<T>>, JournalError> {
-        Ok(Box::new(DiskJournalReader::new(self.path.clone(), self.journal_id).await?))
+        Ok(Box::new(
+            DiskJournalReader::new(
+                self.path.clone(),
+                self.journal_id,
+                self.read_write_lock.clone(),
+            )
+            .await?,
+        ))
     }
-    
+
     async fn reader_from(&self, position: u64) -> Result<Box<dyn JournalReader<T>>, JournalError> {
-        Ok(Box::new(DiskJournalReader::from_position(self.path.clone(), self.journal_id, position).await?))
+        Ok(Box::new(
+            DiskJournalReader::from_position(
+                self.path.clone(),
+                self.journal_id,
+                position,
+                self.read_write_lock.clone(),
+            )
+            .await?,
+        ))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use uuid::Uuid;
     use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
     use obzenflow_core::id::{StageId, SystemId};
     use obzenflow_core::journal::journal_owner::JournalOwner;
+    use uuid::Uuid;
 
     #[tokio::test]
     async fn test_basic_append_and_read() {
         let test_id = Uuid::new_v4();
-        let test_dir = std::path::PathBuf::from(format!("target/test-logs/test_basic_append_and_read_{}", test_id));
+        let test_dir = std::path::PathBuf::from(format!(
+            "target/test-logs/test_basic_append_and_read_{}",
+            test_id
+        ));
         std::fs::create_dir_all(&test_dir).unwrap();
         // Create a test journal with a proper owner
         let test_stage_id = obzenflow_core::StageId::new();
@@ -441,7 +591,7 @@ mod tests {
         let event = ChainEventFactory::data_event(
             writer_id,
             "test.event",
-            serde_json::json!({"data": "test value"})
+            serde_json::json!({"data": "test value"}),
         );
 
         // Append event
@@ -457,7 +607,7 @@ mod tests {
         let event_by_id = log.read_event(&envelope.event.id).await.unwrap();
         assert!(event_by_id.is_some());
         assert_eq!(event_by_id.unwrap().event.id, envelope.event.id);
-        
+
         // Cleanup
         std::fs::remove_dir_all(&test_dir).ok();
     }
@@ -465,7 +615,8 @@ mod tests {
     #[tokio::test]
     async fn test_causal_ordering() {
         let test_id = Uuid::new_v4();
-        let test_dir = std::path::PathBuf::from(format!("target/test-logs/test_causal_ordering_{}", test_id));
+        let test_dir =
+            std::path::PathBuf::from(format!("target/test-logs/test_causal_ordering_{}", test_id));
         std::fs::create_dir_all(&test_dir).unwrap();
         // Create a test journal with a proper owner
         let test_system_id = obzenflow_core::SystemId::new();
@@ -477,19 +628,13 @@ mod tests {
         let writer2 = WriterId::from(StageId::new());
 
         // First event from writer1
-        let event1 = ChainEventFactory::data_event(
-            writer1,
-            "event.1",
-            serde_json::json!({"seq": 1})
-        );
+        let event1 =
+            ChainEventFactory::data_event(writer1, "event.1", serde_json::json!({"seq": 1}));
         let envelope1 = log.append(event1, None).await.unwrap();
 
         // Second event from writer2, causally dependent on event1
-        let event2 = ChainEventFactory::data_event(
-            writer2,
-            "event.2",
-            serde_json::json!({"seq": 2})
-        );
+        let event2 =
+            ChainEventFactory::data_event(writer2, "event.2", serde_json::json!({"seq": 2}));
         let envelope2 = log.append(event2, Some(&envelope1)).await.unwrap();
 
         // Verify vector clocks show causal relationship
@@ -505,7 +650,7 @@ mod tests {
         // Verify causal order
         assert_eq!(events[0].event.id, envelope1.event.id);
         assert_eq!(events[1].event.id, envelope2.event.id);
-        
+
         // Cleanup
         std::fs::remove_dir_all(&test_dir).ok();
     }
@@ -513,7 +658,10 @@ mod tests {
     #[tokio::test]
     async fn test_concurrent_writers() {
         let test_id = Uuid::new_v4();
-        let test_dir = std::path::PathBuf::from(format!("target/test-logs/test_concurrent_writers_{}", test_id));
+        let test_dir = std::path::PathBuf::from(format!(
+            "target/test-logs/test_concurrent_writers_{}",
+            test_id
+        ));
         std::fs::create_dir_all(&test_dir).unwrap();
         // Create a test journal with a proper owner
         let test_system_id = obzenflow_core::SystemId::new();
@@ -531,7 +679,7 @@ mod tests {
                 let event = ChainEventFactory::data_event(
                     writer_id,
                     "concurrent.event",
-                    serde_json::json!({"writer": i})
+                    serde_json::json!({"writer": i}),
                 );
                 log_clone.append(event, None).await
             });
@@ -548,10 +696,12 @@ mod tests {
         assert_eq!(events.len(), 5);
 
         // Verify each event has unique writer
-        let writer_ids: std::collections::HashSet<_> =
-            events.iter().map(|e| e.event.writer_id().as_ulid().to_string()).collect();
+        let writer_ids: std::collections::HashSet<_> = events
+            .iter()
+            .map(|e| e.event.writer_id().as_ulid().to_string())
+            .collect();
         assert_eq!(writer_ids.len(), 5);
-        
+
         // Cleanup
         std::fs::remove_dir_all(&test_dir).ok();
     }

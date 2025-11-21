@@ -43,10 +43,11 @@ pub struct GoldenSignals;
 impl GoldenSignals {
     /// Taxonomy name
     pub const NAME: &'static str = "GoldenSignals";
-    
+
     /// Human-readable description
-    pub const DESCRIPTION: &'static str = "Latency, Traffic, Errors, Saturation - Google SRE's four golden signals";
-    
+    pub const DESCRIPTION: &'static str =
+        "Latency, Traffic, Errors, Saturation - Google SRE's four golden signals";
+
     /// Get Prometheus queries for Golden Signals
     pub fn prometheus_queries(flow_name: &str, stage_name: &str) -> Vec<(&'static str, String)> {
         vec![
@@ -94,7 +95,7 @@ impl GoldenSignals {
             ),
         ]
     }
-    
+
     /// Get Grafana dashboard JSON for Golden Signals
     pub fn grafana_dashboard(flow_name: &str) -> serde_json::Value {
         serde_json::json!({

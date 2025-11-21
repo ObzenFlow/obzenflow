@@ -31,7 +31,7 @@ impl Percentile {
             Percentile::P999 => 0.999,
         }
     }
-    
+
     /// Get the string representation for this percentile
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -42,7 +42,7 @@ impl Percentile {
             Percentile::P999 => "p999",
         }
     }
-    
+
     /// All standard percentiles in order
     pub fn all() -> &'static [Percentile] {
         &[

@@ -3,17 +3,16 @@
 //! This module defines abstract interfaces for metrics collection
 //! and export, using the wide events approach from FLOWIP-056c.
 
-pub mod observer;
 pub mod exporter;
-pub mod snapshots;
-pub mod primitives;
+pub mod observer;
 pub mod percentile;
+pub mod primitives;
+pub mod snapshots;
 
 pub use exporter::{MetricsExporter, NoOpMetricsExporter};
-pub use snapshots::{
-    AppMetricsSnapshot, InfraMetricsSnapshot, HistogramSnapshot,
-    FlowMetricsSnapshot, JournalMetricsSnapshot, StageInfraMetrics,
-    StageMetadata
-};
-pub use primitives::{Counter, Gauge, Histogram};
 pub use percentile::{Percentile, PercentileExt};
+pub use primitives::{Counter, Gauge, Histogram};
+pub use snapshots::{
+    AppMetricsSnapshot, FlowMetricsSnapshot, HistogramSnapshot, InfraMetricsSnapshot,
+    JournalMetricsSnapshot, StageInfraMetrics, StageMetadata,
+};

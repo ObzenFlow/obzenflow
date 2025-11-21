@@ -4,24 +4,24 @@
 //! through the entire pipeline. This is different from per-event latency as
 //! it measures overall system performance for batch processing scenarios.
 
-use criterion::{criterion_group, criterion_main, Criterion, BenchmarkId};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use obzenflow_benchmarks::prelude::*;
-use obzenflow_dsl_infra::{flow, source, transform, sink};
-use obzenflow_runtime_services::stages::common::handlers::{
-    FiniteSourceHandler, TransformHandler, SinkHandler
-};
-use obzenflow_infra::journal::DiskJournal;
-use obzenflow_core::event::event_id::EventId;
 use obzenflow_core::event::chain_event::ChainEvent;
+use obzenflow_core::event::event_id::EventId;
 use obzenflow_core::journal::writer_id::WriterId;
+use obzenflow_dsl_infra::{flow, sink, source, transform};
+use obzenflow_infra::journal::DiskJournal;
+use obzenflow_runtime_services::stages::common::handlers::{
+    FiniteSourceHandler, SinkHandler, TransformHandler,
+};
 // Monitoring removed per FLOWIP-056-666
+use async_trait::async_trait;
+use serde_json::json;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use serde_json::json;
+use tempfile::{tempdir, TempDir};
 use tokio::runtime::Runtime;
-use tempfile::{TempDir, tempdir};
-use async_trait::async_trait;
 
 const TEST_EVENT_COUNT: u64 = 100;
 const WARMUP_EVENT_COUNT: u64 = 10;
@@ -60,7 +60,7 @@ impl FiniteSourceHandler for TimestampedSource {
                 json!({
                     "index": current,
                     "emit_time_nanos": emit_time_nanos,
-                })
+                }),
             ))
         } else {
             None
@@ -101,13 +101,18 @@ struct TimestampedSink {
 
 impl TimestampedSink {
     fn new(expected_count: u64) -> (Self, Arc<tokio::sync::Mutex<Vec<Duration>>>) {
-        let latencies = Arc::new(tokio::sync::Mutex::new(Vec::with_capacity(expected_count as usize)));
+        let latencies = Arc::new(tokio::sync::Mutex::new(Vec::with_capacity(
+            expected_count as usize,
+        )));
         let received = Arc::new(AtomicU64::new(0));
-        (Self {
-            expected_count,
-            received: received.clone(),
-            latencies: latencies.clone(),
-        }, latencies)
+        (
+            Self {
+                expected_count,
+                received: received.clone(),
+                latencies: latencies.clone(),
+            },
+            latencies,
+        )
     }
 }
 
@@ -115,8 +120,11 @@ impl TimestampedSink {
 impl SinkHandler for TimestampedSink {
     fn consume(&mut self, event: ChainEvent) -> obzenflow_core::Result<()> {
         if let (Some(emit_time_nanos), Some(index)) = (
-            event.payload.get("emit_time_nanos").and_then(|v| v.as_u64()),
-            event.payload.get("index").and_then(|v| v.as_u64())
+            event
+                .payload
+                .get("emit_time_nanos")
+                .and_then(|v| v.as_u64()),
+            event.payload.get("index").and_then(|v| v.as_u64()),
         ) {
             self.received.fetch_add(1, Ordering::Relaxed);
 
@@ -144,10 +152,14 @@ impl SinkHandler for TimestampedSink {
 /// Create a temporary journal for benchmarking
 async fn create_temp_journal(test_name: &str) -> anyhow::Result<(Arc<DiskJournal>, TempDir)> {
     let temp_dir = tempdir()?;
-    let journal_path = temp_dir.path().join(format!("bench_{}_{}", test_name, std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos()));
+    let journal_path = temp_dir.path().join(format!(
+        "bench_{}_{}",
+        test_name,
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
     std::fs::create_dir_all(&journal_path)?;
 
     let journal = Arc::new(DiskJournal::new(journal_path, test_name).await?);
@@ -160,112 +172,115 @@ async fn build_pipeline(
     stage_count: usize,
     source: TimestampedSource,
     sink: TimestampedSink,
-    journal: Arc<DiskJournal>
+    journal: Arc<DiskJournal>,
 ) -> anyhow::Result<FlowHandle> {
     let handle = match stage_count {
-        1 => {
-            flow! {
-                journal: journal,
-                middleware: [],
-                
-                stages: {
-                    src = source!("source" => source);
-                    snk = sink!("sink" => sink);
-                },
-                
-                topology: {
-                    src |> snk;
-                }
-            }.await.map_err(|e| anyhow::anyhow!("Failed to create 1-stage flow: {:?}", e))?
+        1 => flow! {
+            journal: journal,
+            middleware: [],
+
+            stages: {
+                src = source!("source" => source);
+                snk = sink!("sink" => sink);
+            },
+
+            topology: {
+                src |> snk;
+            }
         }
-        3 => {
-            flow! {
-                journal: journal,
-                middleware: [],
-                
-                stages: {
-                    src = source!("source" => source);
-                    s1 = transform!("stage1" => PassthroughStage::new("stage1"));
-                    s2 = transform!("stage2" => PassthroughStage::new("stage2"));
-                    snk = sink!("sink" => sink);
-                },
-                
-                topology: {
-                    src |> s1;
-                    s1 |> s2;
-                    s2 |> snk;
-                }
-            }.await.map_err(|e| anyhow::anyhow!("Failed to create 3-stage flow: {:?}", e))?
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to create 1-stage flow: {:?}", e))?,
+        3 => flow! {
+            journal: journal,
+            middleware: [],
+
+            stages: {
+                src = source!("source" => source);
+                s1 = transform!("stage1" => PassthroughStage::new("stage1"));
+                s2 = transform!("stage2" => PassthroughStage::new("stage2"));
+                snk = sink!("sink" => sink);
+            },
+
+            topology: {
+                src |> s1;
+                s1 |> s2;
+                s2 |> snk;
+            }
         }
-        5 => {
-            flow! {
-                journal: journal,
-                middleware: [],
-                
-                stages: {
-                    src = source!("source" => source);
-                    s1 = transform!("stage1" => PassthroughStage::new("stage1"));
-                    s2 = transform!("stage2" => PassthroughStage::new("stage2"));
-                    s3 = transform!("stage3" => PassthroughStage::new("stage3"));
-                    s4 = transform!("stage4" => PassthroughStage::new("stage4"));
-                    snk = sink!("sink" => sink);
-                },
-                
-                topology: {
-                    src |> s1;
-                    s1 |> s2;
-                    s2 |> s3;
-                    s3 |> s4;
-                    s4 |> snk;
-                }
-            }.await.map_err(|e| anyhow::anyhow!("Failed to create 5-stage flow: {:?}", e))?
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to create 3-stage flow: {:?}", e))?,
+        5 => flow! {
+            journal: journal,
+            middleware: [],
+
+            stages: {
+                src = source!("source" => source);
+                s1 = transform!("stage1" => PassthroughStage::new("stage1"));
+                s2 = transform!("stage2" => PassthroughStage::new("stage2"));
+                s3 = transform!("stage3" => PassthroughStage::new("stage3"));
+                s4 = transform!("stage4" => PassthroughStage::new("stage4"));
+                snk = sink!("sink" => sink);
+            },
+
+            topology: {
+                src |> s1;
+                s1 |> s2;
+                s2 |> s3;
+                s3 |> s4;
+                s4 |> snk;
+            }
         }
-        10 => {
-            flow! {
-                journal: journal,
-                middleware: [],
-                
-                stages: {
-                    src = source!("source" => source);
-                    s1 = transform!("stage1" => PassthroughStage::new("stage1"));
-                    s2 = transform!("stage2" => PassthroughStage::new("stage2"));
-                    s3 = transform!("stage3" => PassthroughStage::new("stage3"));
-                    s4 = transform!("stage4" => PassthroughStage::new("stage4"));
-                    s5 = transform!("stage5" => PassthroughStage::new("stage5"));
-                    s6 = transform!("stage6" => PassthroughStage::new("stage6"));
-                    s7 = transform!("stage7" => PassthroughStage::new("stage7"));
-                    s8 = transform!("stage8" => PassthroughStage::new("stage8"));
-                    s9 = transform!("stage9" => PassthroughStage::new("stage9"));
-                    snk = sink!("sink" => sink);
-                },
-                
-                topology: {
-                    src |> s1;
-                    s1 |> s2;
-                    s2 |> s3;
-                    s3 |> s4;
-                    s4 |> s5;
-                    s5 |> s6;
-                    s6 |> s7;
-                    s7 |> s8;
-                    s8 |> s9;
-                    s9 |> snk;
-                }
-            }.await.map_err(|e| anyhow::anyhow!("Failed to create 10-stage flow: {:?}", e))?
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to create 5-stage flow: {:?}", e))?,
+        10 => flow! {
+            journal: journal,
+            middleware: [],
+
+            stages: {
+                src = source!("source" => source);
+                s1 = transform!("stage1" => PassthroughStage::new("stage1"));
+                s2 = transform!("stage2" => PassthroughStage::new("stage2"));
+                s3 = transform!("stage3" => PassthroughStage::new("stage3"));
+                s4 = transform!("stage4" => PassthroughStage::new("stage4"));
+                s5 = transform!("stage5" => PassthroughStage::new("stage5"));
+                s6 = transform!("stage6" => PassthroughStage::new("stage6"));
+                s7 = transform!("stage7" => PassthroughStage::new("stage7"));
+                s8 = transform!("stage8" => PassthroughStage::new("stage8"));
+                s9 = transform!("stage9" => PassthroughStage::new("stage9"));
+                snk = sink!("sink" => sink);
+            },
+
+            topology: {
+                src |> s1;
+                s1 |> s2;
+                s2 |> s3;
+                s3 |> s4;
+                s4 |> s5;
+                s5 |> s6;
+                s6 |> s7;
+                s7 |> s8;
+                s8 |> s9;
+                s9 |> snk;
+            }
         }
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to create 10-stage flow: {:?}", e))?,
         _ => return Err(anyhow::anyhow!("Unsupported stage count: {}", stage_count)),
     };
 
     // Start the pipeline
-    handle.run().await
+    handle
+        .run()
+        .await
         .map_err(|e| anyhow::anyhow!("Failed to run pipeline: {:?}", e))?;
-    
+
     Ok(handle)
 }
 
 /// Run a complete pipeline execution and measure total time
 async fn run_execution_test(stage_count: usize) -> anyhow::Result<Duration> {
-    let (journal, _temp_dir) = create_temp_journal(&format!("execution_{}_stages", stage_count)).await?;
+    let (journal, _temp_dir) =
+        create_temp_journal(&format!("execution_{}_stages", stage_count)).await?;
 
     let source = TimestampedSource::new(WARMUP_EVENT_COUNT + TEST_EVENT_COUNT);
     let (sink, _latencies) = TimestampedSink::new(WARMUP_EVENT_COUNT + TEST_EVENT_COUNT);
@@ -283,7 +298,8 @@ async fn run_execution_test(stage_count: usize) -> anyhow::Result<Duration> {
 
     while sink_clone.received.load(Ordering::Relaxed) < WARMUP_EVENT_COUNT + TEST_EVENT_COUNT {
         if wait_start.elapsed() > timeout {
-            eprintln!("WARNING: Timeout waiting for events. Received {} of {}",
+            eprintln!(
+                "WARNING: Timeout waiting for events. Received {} of {}",
                 sink_clone.received.load(Ordering::Relaxed),
                 WARMUP_EVENT_COUNT + TEST_EVENT_COUNT
             );
@@ -305,7 +321,7 @@ fn bench_total_execution_time(c: &mut Criterion) {
     let mut group = c.benchmark_group("total_execution_time");
 
     // Configure for longer benchmarks since we're measuring actual pipeline execution
-    group.sample_size(20);  // Consistent sample size across benchmarks
+    group.sample_size(20); // Consistent sample size across benchmarks
     group.measurement_time(Duration::from_secs(20));
 
     for &stage_count in STAGE_COUNTS {
@@ -314,9 +330,8 @@ fn bench_total_execution_time(c: &mut Criterion) {
             &stage_count,
             |b, &stage_count| {
                 // Use iter() to let Criterion handle the timing
-                b.to_async(&rt).iter(|| async {
-                    run_execution_test(stage_count).await.unwrap()
-                });
+                b.to_async(&rt)
+                    .iter(|| async { run_execution_test(stage_count).await.unwrap() });
             },
         );
     }
@@ -330,7 +345,7 @@ fn bench_execution_time_per_event(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
     let mut group = c.benchmark_group("execution_time_per_event");
 
-    group.sample_size(20);  // Consistent sample size across benchmarks
+    group.sample_size(20); // Consistent sample size across benchmarks
 
     for &stage_count in STAGE_COUNTS {
         group.bench_with_input(

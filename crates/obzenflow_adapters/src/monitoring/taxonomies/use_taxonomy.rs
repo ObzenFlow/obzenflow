@@ -39,10 +39,11 @@ pub struct USE;
 impl USE {
     /// Taxonomy name
     pub const NAME: &'static str = "USE";
-    
+
     /// Human-readable description
-    pub const DESCRIPTION: &'static str = "Utilization, Saturation, Errors - ideal for resource monitoring";
-    
+    pub const DESCRIPTION: &'static str =
+        "Utilization, Saturation, Errors - ideal for resource monitoring";
+
     /// Get Prometheus queries for USE metrics
     pub fn prometheus_queries(flow_name: &str, stage_name: &str) -> Vec<(&'static str, String)> {
         vec![
@@ -51,32 +52,32 @@ impl USE {
                 format!(
                     "obzenflow_cpu_usage_ratio{{flow=\"{}\",stage=\"{}\"}} * 100",
                     flow_name, stage_name
-                )
+                ),
             ),
             (
                 "Memory Usage (MB)",
                 format!(
                     "obzenflow_memory_bytes{{flow=\"{}\",stage=\"{}\"}} / 1024 / 1024",
                     flow_name, stage_name
-                )
+                ),
             ),
             (
                 "Saturation (In-Flight Events)",
                 format!(
                     "obzenflow_in_flight_events{{flow=\"{}\",stage=\"{}\"}}",
                     flow_name, stage_name
-                )
+                ),
             ),
             (
                 "Error Rate",
                 format!(
                     "rate(obzenflow_errors_total{{flow=\"{}\",stage=\"{}\"}}[5m])",
                     flow_name, stage_name
-                )
+                ),
             ),
         ]
     }
-    
+
     /// Get Grafana dashboard JSON for USE metrics
     pub fn grafana_dashboard(flow_name: &str) -> serde_json::Value {
         serde_json::json!({

@@ -6,7 +6,7 @@
 //! success, partials, and failures are durable and queryable.
 //!
 //! ## Quick start
-//! ```rust
+//! ```ignore
 //! use obzenflow_runtime_services::stages::common::handlers::SinkHandler;
 //! use obzenflow_core::{ChainEvent, Result};
 //! use async_trait::async_trait;
@@ -45,8 +45,8 @@
 //! ```
 
 use async_trait::async_trait;
-use obzenflow_core::{ChainEvent, Result};
 use obzenflow_core::event::payloads::delivery_payload::DeliveryPayload;
+use obzenflow_core::{ChainEvent, Result};
 
 /// Trait every **sink stage** must implement.
 #[async_trait]

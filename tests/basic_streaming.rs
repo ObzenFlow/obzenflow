@@ -1,19 +1,19 @@
 // tests/basic_streaming.rs
-use obzenflow_dsl_infra::{flow, source, transform, sink};
-use obzenflow_runtime_services::stages::common::handlers::{
-    FiniteSourceHandler, TransformHandler, SinkHandler
-};
-use obzenflow_infra::journal::DiskJournal;
-use obzenflow_core::event::event_id::EventId;
 use obzenflow_core::event::chain_event::ChainEvent;
+use obzenflow_core::event::event_id::EventId;
 use obzenflow_core::journal::writer_id::WriterId;
+use obzenflow_dsl_infra::{flow, sink, source, transform};
+use obzenflow_infra::journal::DiskJournal;
+use obzenflow_runtime_services::stages::common::handlers::{
+    FiniteSourceHandler, SinkHandler, TransformHandler,
+};
 // FLOWIP-056-666: Monitoring middleware temporarily disabled pending redesign
+use anyhow::Result;
+use async_trait::async_trait;
 use serde_json::json;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tempfile::tempdir;
-use anyhow::Result;
-use async_trait::async_trait;
 
 /// Simple test sink that counts events
 #[derive(Clone)]
@@ -24,7 +24,12 @@ struct EventCounterSink {
 impl EventCounterSink {
     fn new() -> (Self, Arc<AtomicU64>) {
         let count = Arc::new(AtomicU64::new(0));
-        (Self { count: count.clone() }, count)
+        (
+            Self {
+                count: count.clone(),
+            },
+            count,
+        )
     }
 }
 
@@ -45,7 +50,7 @@ struct TestEventSource {
 
 impl TestEventSource {
     fn new(count: usize) -> Self {
-        Self { 
+        Self {
             count,
             emitted: 0,
             writer_id: WriterId::new(),
@@ -68,7 +73,7 @@ impl FiniteSourceHandler for TestEventSource {
             None
         }
     }
-    
+
     fn is_complete(&self) -> bool {
         self.emitted >= self.count
     }
@@ -78,33 +83,39 @@ impl FiniteSourceHandler for TestEventSource {
 async fn test_basic_flow() -> Result<()> {
     let temp_dir = tempdir()?;
     let journal_path = temp_dir.path().to_path_buf();
-    
+
     let (counter_sink, counter) = EventCounterSink::new();
     let journal = Arc::new(DiskJournal::new(journal_path, "test_basic").await?);
-    
+
     // Create a simple flow
     let handle = flow! {
         name: "basic_flow_test",
         journal: journal,
         middleware: [],
-        
+
         stages: {
             src = source!("source" => TestEventSource::new(10));
             snk = sink!("sink" => counter_sink);
         },
-        
+
         topology: {
             src |> snk;
         }
-    }.await.map_err(|e| anyhow::anyhow!("Failed to create flow: {:?}", e))?;
-    
+    }
+    .await
+    .map_err(|e| anyhow::anyhow!("Failed to create flow: {:?}", e))?;
+
     // Run the flow
     handle.run().await?;
-    
+
     // Check that events were processed
     let final_count = counter.load(Ordering::Relaxed);
-    assert_eq!(final_count, 10, "Expected exactly 10 events to be processed, but got {}", final_count);
-    
+    assert_eq!(
+        final_count, 10,
+        "Expected exactly 10 events to be processed, but got {}",
+        final_count
+    );
+
     // Cleanup handled by tempdir
     Ok(())
 }
@@ -129,34 +140,40 @@ impl TransformHandler for Doubler {
 async fn test_multi_stage_flow() -> Result<()> {
     let temp_dir = tempdir()?;
     let journal_path = temp_dir.path().to_path_buf();
-    
+
     let (counter_sink, counter) = EventCounterSink::new();
     let journal = Arc::new(DiskJournal::new(journal_path, "test_multi_stage").await?);
-    
+
     let handle = flow! {
         name: "multi_stage_flow_test",
         journal: journal,
         middleware: [],
-        
+
         stages: {
             src = source!("source" => TestEventSource::new(5));
             dbl = transform!("doubler" => Doubler::new());
             snk = sink!("sink" => counter_sink);
         },
-        
+
         topology: {
             src |> dbl;
             dbl |> snk;
         }
-    }.await.map_err(|e| anyhow::anyhow!("Failed to create flow: {:?}", e))?;
-    
+    }
+    .await
+    .map_err(|e| anyhow::anyhow!("Failed to create flow: {:?}", e))?;
+
     // Run the flow
     handle.run().await?;
-    
+
     // Would expect 10 events (5 * 2) after processing
     let final_count = counter.load(Ordering::Relaxed);
-    assert_eq!(final_count, 10, "Expected exactly 10 events (5 * 2), but got {}", final_count);
-    
+    assert_eq!(
+        final_count, 10,
+        "Expected exactly 10 events (5 * 2), but got {}",
+        final_count
+    );
+
     // Cleanup handled by tempdir
     Ok(())
 }
@@ -170,7 +187,7 @@ struct NumberSource {
 
 impl NumberSource {
     fn new(count: usize) -> Self {
-        Self { 
+        Self {
             count,
             emitted: 0,
             writer_id: WriterId::new(),
@@ -193,7 +210,7 @@ impl FiniteSourceHandler for NumberSource {
             None
         }
     }
-    
+
     fn is_complete(&self) -> bool {
         self.emitted >= self.count
     }
@@ -250,10 +267,10 @@ impl SinkHandler for SumSink {
 async fn test_pipeline_topology() -> Result<()> {
     let temp_dir = tempdir()?;
     let journal_path = temp_dir.path().to_path_buf();
-    
+
     let (sum_sink, sum) = SumSink::new();
     let journal = Arc::new(DiskJournal::new(journal_path, "test_topology").await?);
-    
+
     // Pipeline: Source(1,2,3) -> Doubler(2,4,6) -> Sum
     // If topology filtering works, Sum should be 12 (2+4+6)
     // If it doesn't work (broadcast), Sum would be 21 (1+2+3+2+4+6)
@@ -261,30 +278,36 @@ async fn test_pipeline_topology() -> Result<()> {
         name: "pipeline_topology_test",
         journal: journal,
         middleware: [],
-        
+
         stages: {
             src = source!("source" => NumberSource::new(3));
             dbl = transform!("doubler" => NumberDoubler::new());
             snk = sink!("sink" => sum_sink);
         },
-        
+
         topology: {
             src |> dbl;
             dbl |> snk;
         }
-    }.await.map_err(|e| anyhow::anyhow!("Failed to create flow: {:?}", e))?;
-    
+    }
+    .await
+    .map_err(|e| anyhow::anyhow!("Failed to create flow: {:?}", e))?;
+
     // Run the flow
     handle.run().await?;
-    
+
     // Check the sum
     let final_sum = sum.load(Ordering::Relaxed);
     println!("Final sum: {}", final_sum);
-    
+
     // With proper topology: 2 + 4 + 6 = 12
     // Without topology (broadcast): 1 + 2 + 3 + 2 + 4 + 6 = 18
-    assert_eq!(final_sum, 12, "Expected sum of doubled values (2+4+6=12), but got {}", final_sum);
-    
+    assert_eq!(
+        final_sum, 12,
+        "Expected sum of doubled values (2+4+6=12), but got {}",
+        final_sum
+    );
+
     // Cleanup handled by tempdir
     Ok(())
 }

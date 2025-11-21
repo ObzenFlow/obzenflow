@@ -8,7 +8,7 @@ use std::fmt;
 use ulid::Ulid;
 
 /// Event identifier using ULID
-/// 
+///
 /// ULIDs provide:
 /// - Lexicographic sortability
 /// - Timestamp extraction
@@ -21,22 +21,22 @@ impl EventId {
     pub fn new() -> Self {
         EventId(Ulid::new())
     }
-    
+
     /// Create an EventId from a string
     pub fn from_string(id: &str) -> Result<Self, ulid::DecodeError> {
         Ok(EventId(Ulid::from_string(id)?))
     }
-    
+
     /// Get the string representation
     pub fn as_str(&self) -> String {
         self.0.to_string()
     }
-    
+
     /// Extract the timestamp (milliseconds since Unix epoch)
     pub fn timestamp_ms(&self) -> u64 {
         self.0.timestamp_ms()
     }
-    
+
     /// Get the inner ULID
     pub fn as_ulid(&self) -> Ulid {
         self.0
@@ -63,7 +63,7 @@ impl From<Ulid> for EventId {
 
 impl TryFrom<String> for EventId {
     type Error = ulid::DecodeError;
-    
+
     fn try_from(s: String) -> Result<Self, Self::Error> {
         Self::from_string(&s)
     }
@@ -71,7 +71,7 @@ impl TryFrom<String> for EventId {
 
 impl TryFrom<&str> for EventId {
     type Error = ulid::DecodeError;
-    
+
     fn try_from(s: &str) -> Result<Self, Self::Error> {
         Self::from_string(s)
     }

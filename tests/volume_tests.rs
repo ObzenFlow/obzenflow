@@ -1,24 +1,24 @@
 // tests/volume_tests.rs
-use obzenflow_dsl_infra::{flow, source, transform, sink};
-use obzenflow_runtime_services::stages::common::handlers::{
-    FiniteSourceHandler, TransformHandler, SinkHandler
-};
-use obzenflow_infra::journal::DiskJournal;
-use obzenflow_core::event::event_id::EventId;
 use obzenflow_core::event::chain_event::ChainEvent;
+use obzenflow_core::event::event_id::EventId;
 use obzenflow_core::journal::writer_id::WriterId;
+use obzenflow_dsl_infra::{flow, sink, source, transform};
+use obzenflow_infra::journal::DiskJournal;
+use obzenflow_runtime_services::stages::common::handlers::{
+    FiniteSourceHandler, SinkHandler, TransformHandler,
+};
 // FLOWIP-056-666: Monitoring middleware temporarily disabled pending redesign
+use anyhow::Result;
+use async_trait::async_trait;
 use serde_json::json;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tempfile::tempdir;
-use anyhow::Result;
-use async_trait::async_trait;
 
 /// Test fixture that generates events at a controlled rate
 struct EventGenerator {
-    rate: u64, // events per second  
+    rate: u64, // events per second
     total: usize,
     event_type: String,
     generated: usize,
@@ -58,7 +58,7 @@ impl FiniteSourceHandler for EventGenerator {
             None
         }
     }
-    
+
     fn is_complete(&self) -> bool {
         self.generated >= self.total
     }
@@ -71,9 +71,7 @@ struct CpuIntensiveStage {
 
 impl CpuIntensiveStage {
     fn new(work_duration: Duration) -> Self {
-        Self {
-            work_duration,
-        }
+        Self { work_duration }
     }
 }
 
@@ -98,9 +96,7 @@ struct MemoryIntensiveStage {
 
 impl MemoryIntensiveStage {
     fn new(buffer_size: usize) -> Self {
-        Self {
-            buffer_size,
-        }
+        Self { buffer_size }
     }
 }
 
@@ -157,31 +153,33 @@ impl TransformHandler for PassthroughStage {
 async fn test_basic_throughput() -> Result<()> {
     let temp_dir = tempdir()?;
     let (counter_sink, counter) = CountingSink::new();
-    
+
     let journal_path = temp_dir.path().to_path_buf();
     let journal = Arc::new(DiskJournal::new(journal_path, "test_throughput").await?);
-    
+
     let start = Instant::now();
     let handle = flow! {
         name: "high_throughput_test",
         journal: journal,
         middleware: [],
-        
+
         stages: {
             src = source!("source" => EventGenerator::new(1000, 1000, "TestEvent".to_string()));
             pass = transform!("passthrough" => PassthroughStage::new());
             snk = sink!("sink" => counter_sink);
         },
-        
+
         topology: {
             src |> pass;
             pass |> snk;
         }
-    }.await.map_err(|e| anyhow::anyhow!("Failed to create flow: {:?}", e))?;
-    
+    }
+    .await
+    .map_err(|e| anyhow::anyhow!("Failed to create flow: {:?}", e))?;
+
     // Run the pipeline
     handle.run().await?;
-    
+
     let elapsed = start.elapsed();
     let count = counter.load(Ordering::Relaxed);
     let throughput = count as f64 / elapsed.as_secs_f64();
@@ -191,8 +189,12 @@ async fn test_basic_throughput() -> Result<()> {
     println!("  Duration: {:?}", elapsed);
     println!("  Throughput: {:.2} events/sec", throughput);
 
-    assert!(count >= 1000, "Expected 1000 events processed, got {}", count);
-    
+    assert!(
+        count >= 1000,
+        "Expected 1000 events processed, got {}",
+        count
+    );
+
     Ok(())
 }
 
@@ -200,7 +202,7 @@ async fn test_basic_throughput() -> Result<()> {
 async fn test_backpressure() -> Result<()> {
     let temp_dir = tempdir()?;
     let (counter_sink, counter) = CountingSink::new();
-    
+
     let journal_path = temp_dir.path().to_path_buf();
     let journal = Arc::new(DiskJournal::new(journal_path, "test_backpressure").await?);
 
@@ -210,19 +212,21 @@ async fn test_backpressure() -> Result<()> {
         name: "backpressure_test",
         journal: journal,
         middleware: [],
-        
+
         stages: {
             src = source!("source" => EventGenerator::new(1000, 100, "TestEvent".to_string()));
             cpu = transform!("cpu_intensive" => CpuIntensiveStage::new(Duration::from_micros(100)));
             snk = sink!("sink" => counter_sink);
         },
-        
+
         topology: {
             src |> cpu;
             cpu |> snk;
         }
-    }.await.map_err(|e| anyhow::anyhow!("Failed to create flow: {:?}", e))?;
-    
+    }
+    .await
+    .map_err(|e| anyhow::anyhow!("Failed to create flow: {:?}", e))?;
+
     // Run the pipeline
     handle.run().await?;
 
@@ -232,7 +236,10 @@ async fn test_backpressure() -> Result<()> {
     println!("Backpressure test:");
     println!("  Processed: {} events", count);
     println!("  Duration: {:?}", elapsed);
-    println!("  Throughput: {:.2} events/sec", count as f64 / elapsed.as_secs_f64());
+    println!(
+        "  Throughput: {:.2} events/sec",
+        count as f64 / elapsed.as_secs_f64()
+    );
 
     // Should process all events
     assert_eq!(count, 100, "Expected 100 events processed, got {}", count);
@@ -243,7 +250,7 @@ async fn test_backpressure() -> Result<()> {
 async fn test_memory_pressure() -> Result<()> {
     let temp_dir = tempdir()?;
     let (counter_sink, counter) = CountingSink::new();
-    
+
     let journal_path = temp_dir.path().to_path_buf();
     let journal = Arc::new(DiskJournal::new(journal_path, "test_memory").await?);
 
@@ -251,22 +258,24 @@ async fn test_memory_pressure() -> Result<()> {
         name: "disk_journal_memory_usage_test",
         journal: journal,
         middleware: [],
-        
+
         stages: {
             src = source!("source" => EventGenerator::new(100, 50, "TestEvent".to_string()));
             mem = transform!("memory_intensive" => MemoryIntensiveStage::new(1024 * 1024)); // 1MB per event
             snk = sink!("sink" => counter_sink);
         },
-        
+
         topology: {
             src |> mem;
             mem |> snk;
         }
-    }.await.map_err(|e| anyhow::anyhow!("Failed to create flow: {:?}", e))?;
-    
+    }
+    .await
+    .map_err(|e| anyhow::anyhow!("Failed to create flow: {:?}", e))?;
+
     // Run the pipeline
     handle.run().await?;
-    
+
     let count = counter.load(Ordering::Relaxed);
     assert_eq!(count, 50, "Expected 50 events processed, got {}", count);
     Ok(())

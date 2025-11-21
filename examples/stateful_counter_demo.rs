@@ -20,11 +20,11 @@ use anyhow::Result;
 use async_trait::async_trait;
 use obzenflow_core::{
     event::chain_event::{ChainEvent, ChainEventFactory},
-    event::payloads::delivery_payload::{DeliveryPayload, DeliveryMethod},
-    WriterId,
+    event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload},
     id::StageId,
+    WriterId,
 };
-use obzenflow_dsl_infra::{flow, sink, source, transform, stateful};
+use obzenflow_dsl_infra::{flow, sink, source, stateful, transform};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime_services::stages::common::handlers::{
     FiniteSourceHandler, SinkHandler, StatefulHandler,
@@ -65,7 +65,7 @@ impl FiniteSourceHandler for NumberSource {
             Some(ChainEventFactory::data_event(
                 self.writer_id.clone(),
                 "number",
-                json!({ "value": num })
+                json!({ "value": num }),
             ))
         } else {
             None
@@ -165,7 +165,7 @@ impl StatefulHandler for CounterHandler {
                     "count": state.count,
                     "sum": state.sum,
                     "average": avg,
-                })
+                }),
             );
 
             vec![result_event]

@@ -42,10 +42,10 @@ pub enum BackoffKind {
     /// Fixed delay between retries
     Fixed { delay: Duration },
     /// Exponential backoff with optional jitter
-    Exponential { 
-        base: Duration, 
-        factor: f64, 
-        max: Option<Duration> 
+    Exponential {
+        base: Duration,
+        factor: f64,
+        max: Option<Duration>,
     },
 }
 

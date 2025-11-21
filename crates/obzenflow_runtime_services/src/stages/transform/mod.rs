@@ -13,24 +13,23 @@ pub mod builder;
 pub mod config;
 pub mod fsm;
 pub mod handle;
+pub mod strategies;
 pub mod supervisor;
-pub mod helpers;
 
 // Public API - only expose builder, handle, and essential types
+pub use crate::stages::common::handlers::TransformHandler;
 pub use builder::TransformBuilder;
 pub use config::TransformConfig;
+pub use fsm::{TransformEvent, TransformState};
 pub use handle::{TransformHandle, TransformHandleExt};
-pub use fsm::{TransformState, TransformEvent};
-pub use crate::stages::common::handlers::TransformHandler;
 
-// Re-export helpers for ergonomic imports (FLOWIP-080h)
-pub use helpers::{Filter, FilterTyped, Map, MapTyped, TryMap, TryMapWith, TryMapWithTyped};
+// Re-export transform strategies for ergonomic imports (FLOWIP-080h)
+pub use strategies::{Filter, FilterTyped, Map, MapTyped, TryMap, TryMapWith, TryMapWithTyped};
 
 // Re-export control strategies for convenience
 pub use crate::stages::common::control_strategies::{
-    ControlEventStrategy, ControlEventAction,
-    JonestownStrategy, RetryStrategy, BackoffStrategy,
-    WindowingStrategy, CompositeStrategy,
+    BackoffStrategy, CompositeStrategy, ControlEventAction, ControlEventStrategy,
+    JonestownStrategy, RetryStrategy, WindowingStrategy,
 };
 
 // Note: TransformSupervisor is NOT exported! It's an implementation detail.

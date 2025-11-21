@@ -111,7 +111,7 @@ impl From<std::time::Duration> for TimeUnit {
     fn from(duration: std::time::Duration) -> Self {
         // Choose the most appropriate representation based on duration magnitude
         let nanos = duration.as_nanos();
-        
+
         if nanos == 0 {
             TimeUnit::Nanoseconds(0)
         } else if nanos < 1_000_000 {
@@ -159,7 +159,7 @@ mod tests {
         assert_eq!(ns.as_micros(), 1_500_000);
         assert_eq!(ns.as_nanos(), 1_500_000_000);
 
-        // Test microseconds  
+        // Test microseconds
         let us = TimeUnit::Microseconds(2_500_000); // 2.5 seconds
         assert_eq!(us.as_seconds(), 2.5);
         assert_eq!(us.as_millis(), 2500.0);
@@ -205,13 +205,13 @@ mod tests {
     #[test]
     fn test_duration_to_time_unit_conversion() {
         // Test automatic unit selection based on magnitude
-        
+
         // Very short duration -> nanoseconds
         let short_duration = Duration::from_nanos(500_000); // 500μs
         let time_unit: TimeUnit = short_duration.into();
         assert_eq!(time_unit, TimeUnit::Nanoseconds(500_000));
 
-        // Medium duration -> microseconds  
+        // Medium duration -> microseconds
         let medium_duration = Duration::from_millis(50); // 50ms
         let time_unit: TimeUnit = medium_duration.into();
         assert_eq!(time_unit, TimeUnit::Microseconds(50_000));
@@ -233,9 +233,12 @@ mod tests {
         let original_duration = Duration::from_millis(1500);
         let time_unit: TimeUnit = original_duration.into();
         let converted_duration: Duration = time_unit.into();
-        
+
         // Should be very close (within nanosecond precision)
-        assert!((original_duration.as_nanos() as i64 - converted_duration.as_nanos() as i64).abs() < 1000);
+        assert!(
+            (original_duration.as_nanos() as i64 - converted_duration.as_nanos() as i64).abs()
+                < 1000
+        );
     }
 
     #[test]
@@ -243,14 +246,17 @@ mod tests {
         // Test that we don't lose precision in common use cases
         let precise_duration = Duration::from_nanos(1_234_567_890); // ~1.23 seconds
         let time_unit: TimeUnit = precise_duration.into();
-        
+
         // This duration is > 1 second, so it should be represented as milliseconds
         match time_unit {
             TimeUnit::Milliseconds(ms) => {
                 // Should preserve millisecond precision
                 assert_eq!(ms, 1_234);
             }
-            _ => panic!("Expected milliseconds for this duration, got {:?}", time_unit),
+            _ => panic!(
+                "Expected milliseconds for this duration, got {:?}",
+                time_unit
+            ),
         }
     }
 
@@ -264,7 +270,7 @@ mod tests {
         // Maximum values (within reason)
         let max_nanos = TimeUnit::Nanoseconds(u64::MAX);
         assert!(max_nanos.as_seconds() > 0.0);
-        
+
         let max_micros = TimeUnit::Microseconds(u64::MAX);
         assert!(max_micros.as_seconds() > 0.0);
     }

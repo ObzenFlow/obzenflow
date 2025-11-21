@@ -3,19 +3,14 @@
 //! Tracks events at flow entry (source) and exit (sink) points to provide
 //! true end-to-end latency and throughput metrics.
 
+use crate::middleware::{ErrorAction, Middleware, MiddlewareAction, MiddlewareContext};
+use crate::monitoring::metrics::core::{Metric, MetricSnapshot, MetricType, MetricValue};
 use obzenflow_core::event::chain_event::ChainEvent;
-use crate::middleware::{Middleware, MiddlewareAction, ErrorAction, MiddlewareContext};
-use crate::monitoring::metrics::core::{
-    Metric,
-    MetricType, 
-    MetricValue, 
-    MetricSnapshot
-};
+use obzenflow_core::event::context::StageType;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use std::collections::HashMap;
 use tokio::sync::RwLock;
-use obzenflow_core::event::context::StageType;
 
 /// Flow ID is just a string for now
 type FlowId = String;
@@ -80,8 +75,8 @@ impl FlowBoundaryTracker {
     /// Check if an event is entering the flow
     pub fn is_flow_entry(&self, event: &ChainEvent) -> bool {
         // Entry events are from source stages
-        (event.flow_context.stage_type == StageType::FiniteSource) |
-            (event.flow_context.stage_type == StageType::InfiniteSource)
+        (event.flow_context.stage_type == StageType::FiniteSource)
+            | (event.flow_context.stage_type == StageType::InfiniteSource)
     }
 
     /// Check if an event is exiting the flow
@@ -99,9 +94,9 @@ impl FlowBoundaryTracker {
     /// Record flow exit and calculate end-to-end metrics
     pub async fn record_exit(&self, event: &ChainEvent) {
         // Record exit metric - correlation-based latency calculation
-        self.metrics.on_event_complete(event, &[], Duration::default());
+        self.metrics
+            .on_event_complete(event, &[], Duration::default());
     }
-
 }
 
 /// Middleware that tracks flow boundaries
@@ -139,7 +134,12 @@ impl Middleware for BoundaryTrackingMiddleware {
         MiddlewareAction::Continue
     }
 
-    fn post_handle(&self, _event: &ChainEvent, results: &[ChainEvent], _ctx: &mut MiddlewareContext) {
+    fn post_handle(
+        &self,
+        _event: &ChainEvent,
+        results: &[ChainEvent],
+        _ctx: &mut MiddlewareContext,
+    ) {
         if self.boundary_type == BoundaryType::Exit {
             // For exit tracking, we track all results
             for result in results.iter() {
@@ -158,26 +158,22 @@ impl Middleware for BoundaryTrackingMiddleware {
     }
 }
 
-use crate::monitoring::metrics::{
-    rate::RateMetric,
-    errors::ErrorMetric,
-    duration::DurationMetric,
-};
+use crate::monitoring::metrics::{duration::DurationMetric, errors::ErrorMetric, rate::RateMetric};
 use obzenflow_core::event::CorrelationId;
 
 /// Flow-specific metrics that focus on end-to-end performance
 pub struct FlowMetrics {
     flow_name: String,
-    
+
     // Core metrics
     entry_counter: RateMetric,
     exit_counter: RateMetric,
     latency_metric: DurationMetric,
     error_counter: ErrorMetric,
-    
+
     // Track active correlations: CorrelationId → entry_time
     active_correlations: Arc<RwLock<HashMap<CorrelationId, Instant>>>,
-    
+
     // Timeout for cleaning up lost correlations
     correlation_timeout: Duration,
 }
@@ -199,7 +195,7 @@ impl FlowMetrics {
         // Only track events with correlation IDs (source events)
         if let Some(correlation_id) = &event.correlation_id {
             self.entry_counter.record_event();
-            
+
             // Track when this correlation started
             let correlations = self.active_correlations.clone();
             let timeout = self.correlation_timeout;
@@ -207,28 +203,32 @@ impl FlowMetrics {
             tokio::spawn(async move {
                 let mut correlations = correlations.write().await;
                 correlations.insert(correlation_id_copy, Instant::now());
-                
+
                 // Clean up old correlations if map is getting large
                 if correlations.len() > 10000 {
                     let now = Instant::now();
-                    correlations.retain(|_, &mut start_time| {
-                        now.duration_since(start_time) < timeout
-                    });
+                    correlations
+                        .retain(|_, &mut start_time| now.duration_since(start_time) < timeout);
                 }
             });
         }
     }
 
-    pub fn on_event_complete(&self, event: &ChainEvent, _results: &[ChainEvent], _stage_duration: Duration) {
+    pub fn on_event_complete(
+        &self,
+        event: &ChainEvent,
+        _results: &[ChainEvent],
+        _stage_duration: Duration,
+    ) {
         // Track events exiting at sinks
         if let Some(correlation_id) = &event.correlation_id {
             self.exit_counter.record_event();
-            
+
             // Calculate end-to-end latency using correlation payload
             if let Some(latency) = event.correlation_latency() {
                 self.latency_metric.record_duration(latency);
             }
-            
+
             // Clean up tracking
             let correlations = self.active_correlations.clone();
             let correlation_id_copy = *correlation_id;
@@ -237,48 +237,50 @@ impl FlowMetrics {
             });
         }
     }
-    
+
     pub fn on_event_error(&self, event: &ChainEvent) {
         if event.correlation_id.is_some() {
             self.error_counter.record_error();
         }
     }
-    
+
     /// Get count of correlations that haven't completed yet
     pub async fn active_correlation_count(&self) -> usize {
         self.active_correlations.read().await.len()
     }
-    
+
     /// Clean up timed-out correlations and return count of timeouts
     pub async fn cleanup_timeouts(&self) -> usize {
         let mut correlations = self.active_correlations.write().await;
         let timeout = self.correlation_timeout;
         let now = Instant::now();
         let initial_count = correlations.len();
-        
-        correlations.retain(|_, &mut start_time| {
-            now.duration_since(start_time) < timeout
-        });
-        
+
+        correlations.retain(|_, &mut start_time| now.duration_since(start_time) < timeout);
+
         initial_count - correlations.len()
     }
 
     pub fn export_metrics(&self) -> Vec<MetricSnapshot> {
         let mut snapshots = vec![];
-        
+
         // Add flow-level labels
         let mut add_flow_labels = |mut snapshot: MetricSnapshot| -> MetricSnapshot {
-            snapshot.labels.insert("level".to_string(), "flow".to_string());
-            snapshot.labels.insert("flow_name".to_string(), self.flow_name.clone());
+            snapshot
+                .labels
+                .insert("level".to_string(), "flow".to_string());
+            snapshot
+                .labels
+                .insert("flow_name".to_string(), self.flow_name.clone());
             snapshot
         };
-        
+
         // Export all metrics with flow labels
         snapshots.push(add_flow_labels(self.entry_counter.snapshot()));
         snapshots.push(add_flow_labels(self.exit_counter.snapshot()));
         snapshots.push(add_flow_labels(self.latency_metric.snapshot()));
         snapshots.push(add_flow_labels(self.error_counter.snapshot()));
-        
+
         // Add a gauge for active correlations
         // Note: We can't easily get async count in sync context, so we'll skip for now
         // In production, this would be handled by a background task that updates a cached value
@@ -294,7 +296,7 @@ impl FlowMetrics {
                 labels
             },
         });
-        
+
         snapshots
     }
 }

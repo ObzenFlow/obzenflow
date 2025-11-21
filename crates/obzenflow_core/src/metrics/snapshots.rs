@@ -3,85 +3,85 @@
 //! These DTOs define the contract between metrics collectors and exporters,
 //! implementing the dual collection pattern for application and infrastructure metrics.
 
-use std::collections::HashMap;
-use serde::{Serialize, Deserialize};
-use crate::time::MetricsDuration;
+use crate::event::context::StageType;
 use crate::id::StageId;
 use crate::metrics::Percentile;
-use crate::event::context::StageType;
+use crate::time::MetricsDuration;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 /// Snapshot of application-level metrics derived from the event stream
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppMetricsSnapshot {
     /// Timestamp when this snapshot was created
     pub timestamp: chrono::DateTime<chrono::Utc>,
-    
+
     /// Event counts by stage
     pub event_counts: HashMap<StageId, u64>,
-    
+
     /// Error counts by stage
     pub error_counts: HashMap<StageId, u64>,
-    
+
     /// Processing time histograms by stage (in seconds)
     pub processing_times: HashMap<StageId, HistogramSnapshot>,
-    
+
     /// In-flight events by stage
     pub in_flight: HashMap<StageId, f64>,
-    
+
     /// CPU usage ratio by stage (0.0-1.0)
     pub cpu_usage_ratio: HashMap<StageId, f64>,
-    
+
     /// Memory usage in bytes by stage
     pub memory_bytes: HashMap<StageId, f64>,
-    
+
     /// SAAFE metrics - anomalies total by stage
     pub anomalies_total: HashMap<StageId, u64>,
-    
+
     /// SAAFE metrics - amendments total by stage
     pub amendments_total: HashMap<StageId, u64>,
-    
+
     /// SAAFE metrics - saturation ratio by stage (0.0-1.0)
     pub saturation_ratio: HashMap<StageId, f64>,
-    
+
     /// SAAFE metrics - failures total by stage (critical failures)
     pub failures_total: HashMap<StageId, u64>,
-    
+
     /// USE metrics - event loops total by stage
     pub event_loops_total: HashMap<StageId, u64>,
-    
+
     /// USE metrics - event loops with work by stage
     pub event_loops_with_work_total: HashMap<StageId, u64>,
-    
+
     /// Flow-level latency histograms by flow name (in seconds)
     pub flow_latency_seconds: HashMap<StageId, HistogramSnapshot>,
-    
+
     /// Dropped events by flow name
     pub dropped_events: HashMap<StageId, f64>,
-    
+
     /// Circuit breaker state by stage (0=closed, 0.5=half_open, 1=open)
     pub circuit_breaker_state: HashMap<StageId, f64>,
-    
+
     /// Circuit breaker rejection rate by stage (0.0-1.0)
     pub circuit_breaker_rejection_rate: HashMap<StageId, f64>,
-    
+
     /// Circuit breaker consecutive failures by stage
     pub circuit_breaker_consecutive_failures: HashMap<StageId, f64>,
-    
+
     /// Rate limiter delay rate by stage (0.0-1.0)
     pub rate_limiter_delay_rate: HashMap<StageId, f64>,
-    
+
     /// Rate limiter utilization by stage (0.0-1.0)
     pub rate_limiter_utilization: HashMap<StageId, f64>,
-    
+
     /// Flow-level metrics (if journey events are implemented)
     pub flow_metrics: Option<FlowMetricsSnapshot>,
-    
+
     /// Stage metadata for display and categorization
     pub stage_metadata: HashMap<StageId, StageMetadata>,
-    
+
     /// First event time for each stage (for rate calculation)
     pub stage_first_event_time: HashMap<StageId, chrono::DateTime<chrono::Utc>>,
-    
+
     /// Last event time for each stage (for rate calculation)
     pub stage_last_event_time: HashMap<StageId, chrono::DateTime<chrono::Utc>>,
 
@@ -98,10 +98,10 @@ pub struct AppMetricsSnapshot {
 pub struct InfraMetricsSnapshot {
     /// Timestamp when this snapshot was created
     pub timestamp: chrono::DateTime<chrono::Utc>,
-    
+
     /// Journal write metrics
     pub journal_metrics: JournalMetricsSnapshot,
-    
+
     /// Stage-level infrastructure metrics
     pub stage_metrics: HashMap<StageId, StageInfraMetrics>,
 }
@@ -111,16 +111,16 @@ pub struct InfraMetricsSnapshot {
 pub struct HistogramSnapshot {
     /// Number of observations
     pub count: u64,
-    
+
     /// Sum of all observations
     pub sum: f64,
-    
+
     /// Minimum value observed
     pub min: f64,
-    
+
     /// Maximum value observed
     pub max: f64,
-    
+
     /// Percentiles (0.5, 0.9, 0.95, 0.99)
     pub percentiles: HashMap<Percentile, f64>,
 }
@@ -130,40 +130,40 @@ pub struct HistogramSnapshot {
 pub struct FlowMetricsSnapshot {
     /// Number of opened journeys
     pub journeys_opened: u64,
-    
+
     /// Number of sealed journeys
     pub journeys_sealed: u64,
-    
+
     /// Number of errored journeys
     pub journeys_errored: u64,
-    
+
     /// Number of abandoned journeys (timed out)
     pub journeys_abandoned: u64,
-    
+
     /// End-to-end latency histogram
     pub e2e_latency: HistogramSnapshot,
-    
+
     /// Total duration of the flow (wall clock time)
     pub flow_duration: MetricsDuration,
-    
+
     /// Total number of events processed across all stages
     pub total_events_processed: u64,
-    
+
     /// Events entering from sources only
     pub events_in: u64,
-    
+
     /// Events exiting through sinks only
     pub events_out: u64,
-    
+
     /// Total errors across all stages
     pub errors_total: u64,
-    
+
     /// Total event loops across all stages
     pub event_loops_total: u64,
-    
+
     /// Event loops with work across all stages
     pub event_loops_with_work_total: u64,
-    
+
     /// Active journeys count (saturation metric)
     pub saturation_journeys: u64,
 }
@@ -173,22 +173,20 @@ pub struct FlowMetricsSnapshot {
 pub struct JournalMetricsSnapshot {
     /// Total write operations
     pub writes_total: u64,
-    
+
     /// Write latency histogram (in microseconds)
     pub write_latency: HistogramSnapshot,
-    
+
     /// Current throughput (events per second)
     pub throughput: f64,
-    
+
     /// Total bytes written
     pub bytes_written: u64,
 }
 
-
 /// Stage-specific infrastructure metrics
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StageInfraMetrics {
-    
     /// Events currently being processed
     pub in_flight: u64,
 }
@@ -198,10 +196,10 @@ pub struct StageInfraMetrics {
 pub struct StageMetadata {
     /// Human-readable stage name (e.g., "event_source", "processor", "event_sink")
     pub name: String,
-    
+
     /// Stage type for categorization
     pub stage_type: StageType,
-    
+
     /// Flow name this stage belongs to
     pub flow_name: String,
 }
@@ -271,4 +269,3 @@ impl Default for JournalMetricsSnapshot {
         }
     }
 }
-

@@ -10,31 +10,28 @@ pub enum WebError {
         message: String,
         source: Option<Box<dyn std::error::Error + Send + Sync>>,
     },
-    
+
     /// Server failed to bind to address
     BindFailed {
         address: String,
         source: Option<Box<dyn std::error::Error + Send + Sync>>,
     },
-    
+
     /// Endpoint registration failed
-    EndpointRegistrationFailed {
-        path: String,
-        message: String,
-    },
-    
+    EndpointRegistrationFailed { path: String, message: String },
+
     /// Request handling failed
     RequestHandlingFailed {
         message: String,
         source: Option<Box<dyn std::error::Error + Send + Sync>>,
     },
-    
+
     /// Server shutdown failed
     ShutdownFailed {
         message: String,
         source: Option<Box<dyn std::error::Error + Send + Sync>>,
     },
-    
+
     /// Generic implementation error
     Implementation {
         message: String,
@@ -70,13 +67,13 @@ impl fmt::Display for WebError {
 impl std::error::Error for WebError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            WebError::StartupFailed { source, .. } |
-            WebError::BindFailed { source, .. } |
-            WebError::RequestHandlingFailed { source, .. } |
-            WebError::ShutdownFailed { source, .. } |
-            WebError::Implementation { source, .. } => {
-                source.as_ref().map(|s| s.as_ref() as &(dyn std::error::Error + 'static))
-            }
+            WebError::StartupFailed { source, .. }
+            | WebError::BindFailed { source, .. }
+            | WebError::RequestHandlingFailed { source, .. }
+            | WebError::ShutdownFailed { source, .. }
+            | WebError::Implementation { source, .. } => source
+                .as_ref()
+                .map(|s| s.as_ref() as &(dyn std::error::Error + 'static)),
             WebError::EndpointRegistrationFailed { .. } => None,
         }
     }

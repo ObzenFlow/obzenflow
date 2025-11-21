@@ -18,19 +18,18 @@ use anyhow::Result;
 use async_trait::async_trait;
 use obzenflow_core::{
     event::chain_event::{ChainEvent, ChainEventFactory},
-    event::payloads::delivery_payload::{DeliveryPayload, DeliveryMethod},
-    TypedPayload,
-    WriterId,
+    event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload},
     id::StageId,
+    TypedPayload, WriterId,
 };
 use obzenflow_dsl_infra::{flow, sink, source, stateful};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime_services::stages::common::handlers::{
-    FiniteSourceHandler, SinkHandler,
-};
+use obzenflow_runtime_services::stages::common::handlers::{FiniteSourceHandler, SinkHandler};
 // FLOWIP-080j: Typed stateful accumulators
-use obzenflow_runtime_services::stages::stateful::accumulators::{GroupByTyped, ReduceTyped};
+use obzenflow_runtime_services::stages::stateful::strategies::accumulators::{
+    GroupByTyped, ReduceTyped,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
@@ -279,7 +278,10 @@ impl UserEvent {
     fn update_metrics(&self, state: &mut MetricsState) {
         state.total_events += 1;
 
-        *state.events_by_type.entry(self.event_type.clone()).or_insert(0) += 1;
+        *state
+            .events_by_type
+            .entry(self.event_type.clone())
+            .or_insert(0) += 1;
 
         if let Some(ref page) = self.page {
             *state.pages_by_popularity.entry(page.clone()).or_insert(0) += 1;
@@ -316,46 +318,88 @@ impl SinkHandler for AnalyticsSink {
                 // Session snapshot from GroupByTyped
                 println!("\n📊 [{}] Session Update:", self.name);
                 println!("   User: {}", key.as_str().unwrap_or("unknown"));
-                println!("   - Events: {}", result["event_count"].as_u64().unwrap_or(0));
-                println!("   - Pages: {}", result["pages_viewed"].as_array().map(|v| v.len()).unwrap_or(0));
+                println!(
+                    "   - Events: {}",
+                    result["event_count"].as_u64().unwrap_or(0)
+                );
+                println!(
+                    "   - Pages: {}",
+                    result["pages_viewed"]
+                        .as_array()
+                        .map(|v| v.len())
+                        .unwrap_or(0)
+                );
                 println!("   - Clicks: {}", result["clicks"].as_u64().unwrap_or(0));
-                println!("   - Duration: {}ms", result["total_duration_ms"].as_u64().unwrap_or(0));
+                println!(
+                    "   - Duration: {}ms",
+                    result["total_duration_ms"].as_u64().unwrap_or(0)
+                );
             }
         }
         // ✨ FLOWIP-082a: ReduceTyped emits with state's EVENT_TYPE
-        else if event.event_type() == FunnelState::EVENT_TYPE || event.event_type() == MetricsState::EVENT_TYPE {
+        else if event.event_type() == FunnelState::EVENT_TYPE
+            || event.event_type() == MetricsState::EVENT_TYPE
+        {
             if let Some(result) = payload.get("result") {
                 // Check if it's funnel or metrics by looking at the fields
                 if result.get("funnel_stages").is_some() {
                     // Funnel update from ReduceTyped
                     println!("\n🎯 [{}] Funnel Progress:", self.name);
-                    println!("   Unique users: {}", result["total_users"].as_object().map(|m| m.len()).unwrap_or(0));
+                    println!(
+                        "   Unique users: {}",
+                        result["total_users"]
+                            .as_object()
+                            .map(|m| m.len())
+                            .unwrap_or(0)
+                    );
 
                     if let Some(stages) = result["funnel_stages"].as_object() {
                         let home = stages.get("/home").and_then(|v| v.as_u64()).unwrap_or(0);
-                        let products = stages.get("/products").and_then(|v| v.as_u64()).unwrap_or(0);
+                        let products = stages
+                            .get("/products")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0);
                         let cart = stages.get("/cart").and_then(|v| v.as_u64()).unwrap_or(0);
-                        let conversions = result["conversions"].as_array().map(|v| v.len()).unwrap_or(0);
-                        let total_revenue: f64 = result["conversions"].as_array()
+                        let conversions = result["conversions"]
+                            .as_array()
+                            .map(|v| v.len())
+                            .unwrap_or(0);
+                        let total_revenue: f64 = result["conversions"]
+                            .as_array()
                             .map(|arr| arr.iter().filter_map(|v| v.as_f64()).sum())
                             .unwrap_or(0.0);
 
                         if home > 0 {
-                            println!("   Home → Product: {:.1}%", (products as f64 / home as f64) * 100.0);
+                            println!(
+                                "   Home → Product: {:.1}%",
+                                (products as f64 / home as f64) * 100.0
+                            );
                         }
                         if products > 0 {
-                            println!("   Product → Cart: {:.1}%", (cart as f64 / products as f64) * 100.0);
+                            println!(
+                                "   Product → Cart: {:.1}%",
+                                (cart as f64 / products as f64) * 100.0
+                            );
                         }
                         if cart > 0 {
-                            println!("   Cart → Purchase: {:.1}%", (conversions as f64 / cart as f64) * 100.0);
+                            println!(
+                                "   Cart → Purchase: {:.1}%",
+                                (conversions as f64 / cart as f64) * 100.0
+                            );
                         }
                         println!("   Revenue: ${:.2}", total_revenue);
                     }
                 } else {
                     // Daily metrics from ReduceTyped
                     println!("\n📈 [{}] Daily Summary:", self.name);
-                    println!("   Total events: {}", result["total_events"].as_u64().unwrap_or(0));
-                    println!("   Total revenue: ${:.2}", result["total_revenue"].as_f64().unwrap_or(0.0));
+                    println!(
+                        "   Total events: {}",
+                        result["total_events"].as_u64().unwrap_or(0)
+                    );
+                    println!(
+                        "   Total revenue: ${:.2}",
+                        result["total_revenue"].as_f64().unwrap_or(0.0)
+                    );
                     if let Some(breakdown) = result["events_by_type"].as_object() {
                         println!("   Event types: {} unique", breakdown.len());
                     }

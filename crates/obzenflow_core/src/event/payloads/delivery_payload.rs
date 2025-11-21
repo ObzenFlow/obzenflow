@@ -3,12 +3,12 @@
 //! A `SinkHandler::consume()` must return one of these to let the runtime
 //! journal whether delivery fully succeeded, partially succeeded, or failed.
 
+use crate::time::MetricsDuration;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use crate::time::MetricsDuration;
 
 // ────────────────────────────────────────────────────────────────────────────
 // Core payload
@@ -39,13 +39,13 @@ pub struct DeliveryPayload {
 #[serde(rename_all = "snake_case")]
 pub enum DeliveryMethod {
     HttpPost { url: String },
-    HttpPut  { url: String },
+    HttpPut { url: String },
     S3Upload { bucket: String, key: String },
     DatabaseInsert { table: String },
-    QueuePublish   { queue_name: String },
-    FileWrite      { path: PathBuf },
-    Noop,                    // /dev/null sink
-    Custom(String),          // user‑defined
+    QueuePublish { queue_name: String },
+    FileWrite { path: PathBuf },
+    Noop,           // /dev/null sink
+    Custom(String), // user‑defined
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -56,24 +56,24 @@ pub enum DeliveryMethod {
 pub enum DeliveryResult {
     Success {
         #[serde(skip_serializing_if = "Option::is_none")]
-        confirmation:     Option<String>,
+        confirmation: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         response_headers: Option<HashMap<String, String>>,
     },
     Failed {
-        error_type:   String,
-        error_message:String,
+        error_type: String,
+        error_message: String,
         #[serde(skip_serializing_if = "Option::is_none")]
-        error_code:   Option<String>,
+        error_code: Option<String>,
         #[serde(default)]
         final_attempt: bool,
     },
     Partial {
         successful_count: u64,
-        failed_count:     u64,
-        error_summary:    String,
+        failed_count: u64,
+        error_summary: String,
         #[serde(skip_serializing_if = "Option::is_none")]
-        failed_items:     Option<Vec<String>>,
+        failed_items: Option<Vec<String>>,
     },
 }
 
@@ -94,7 +94,7 @@ impl DeliveryPayload {
             },
             destination: destination.into(),
             delivery_method: method,
-            processing_duration: MetricsDuration::ZERO,  // Will be set by middleware
+            processing_duration: MetricsDuration::ZERO, // Will be set by middleware
             bytes_processed,
             processed_at: Utc::now(),
             middleware_context: None,
@@ -106,7 +106,7 @@ impl DeliveryPayload {
         destination: impl Into<String>,
         method: DeliveryMethod,
         error_type: impl Into<String>,
-        error_msg:  impl Into<String>,
+        error_msg: impl Into<String>,
         final_attempt: bool,
     ) -> Self {
         Self {
@@ -118,7 +118,7 @@ impl DeliveryPayload {
             },
             destination: destination.into(),
             delivery_method: method,
-            processing_duration: MetricsDuration::ZERO,  // Will be set by middleware
+            processing_duration: MetricsDuration::ZERO, // Will be set by middleware
             bytes_processed: None,
             processed_at: Utc::now(),
             middleware_context: None,
@@ -129,7 +129,7 @@ impl DeliveryPayload {
     pub fn partial(
         destination: impl Into<String>,
         method: DeliveryMethod,
-        ok:  u64,
+        ok: u64,
         bad: u64,
         summary: impl Into<String>,
         failed_items: Option<Vec<String>>,
@@ -143,7 +143,7 @@ impl DeliveryPayload {
             },
             destination: destination.into(),
             delivery_method: method,
-            processing_duration: MetricsDuration::ZERO,  // Will be set by middleware
+            processing_duration: MetricsDuration::ZERO, // Will be set by middleware
             bytes_processed: None,
             processed_at: Utc::now(),
             middleware_context: None,
@@ -161,7 +161,7 @@ impl DeliveryPayload {
         Self {
             destination: url.clone(),
             delivery_method: DeliveryMethod::HttpPost { url },
-            processing_duration: MetricsDuration::ZERO,  // Will be set by middleware
+            processing_duration: MetricsDuration::ZERO, // Will be set by middleware
             bytes_processed: bytes,
             result: DeliveryResult::Success {
                 confirmation,
@@ -180,13 +180,13 @@ impl DeliveryPayload {
         self.processing_duration = duration;
         self
     }
-    
+
     /// Update the middleware context (builder style)
     pub fn with_middleware_context(mut self, context: Value) -> Self {
         self.middleware_context = Some(context);
         self
     }
-    
+
     /// Update bytes processed (builder style)
     pub fn with_bytes_processed(mut self, bytes: u64) -> Self {
         self.bytes_processed = Some(bytes);

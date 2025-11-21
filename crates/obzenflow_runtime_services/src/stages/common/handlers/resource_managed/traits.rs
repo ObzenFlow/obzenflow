@@ -11,19 +11,19 @@ pub trait ResourceManaged: Send + Sync {
     async fn initialize(&mut self) -> Result<()> {
         Ok(()) // Default: no initialization needed
     }
-    
+
     /// Check health of managed resources
     /// Used for monitoring and circuit breaking
     async fn health_check(&self) -> HealthStatus {
         HealthStatus::Healthy // Default: always healthy
     }
-    
+
     /// Cleanup resources before shutdown
     /// Called during graceful shutdown
     async fn cleanup(&mut self) -> Result<()> {
         Ok(()) // Default: no cleanup needed
     }
-    
+
     /// List managed resources for monitoring
     fn resources(&self) -> Vec<ResourceInfo> {
         vec![] // Default: no resources

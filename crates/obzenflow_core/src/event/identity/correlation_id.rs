@@ -14,17 +14,17 @@ impl CorrelationId {
     pub fn new() -> Self {
         CorrelationId(Ulid::new())
     }
-    
+
     /// Create from an existing Ulid
     pub fn from_ulid(ulid: Ulid) -> Self {
         CorrelationId(ulid)
     }
-    
+
     /// Get the inner Ulid
     pub fn as_ulid(&self) -> &Ulid {
         &self.0
     }
-    
+
     /// Convert to Ulid
     pub fn into_ulid(self) -> Ulid {
         self.0

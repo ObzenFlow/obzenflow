@@ -20,27 +20,23 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
+use obzenflow_adapters::middleware::rate_limit;
 use obzenflow_core::{
     event::chain_event::{ChainEvent, ChainEventFactory},
-    WriterId,
     id::StageId,
-    TypedPayload,
+    TypedPayload, WriterId,
 };
-use obzenflow_dsl_infra::{flow, sink, source, transform, stateful};
+use obzenflow_dsl_infra::{flow, sink, source, stateful, transform};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_adapters::middleware::rate_limit;
-use obzenflow_runtime_services::stages::common::handlers::{
-    FiniteSourceHandler, SinkHandler,
-};
+use obzenflow_runtime_services::stages::common::handlers::{FiniteSourceHandler, SinkHandler};
 // ✨ FLOWIP-080h: Import Map helper
 use obzenflow_runtime_services::stages::transform::Map;
 // ✨ FLOWIP-080j: Import ReduceTyped for type-safe accumulation
-use obzenflow_runtime_services::stages::stateful::accumulators::ReduceTyped;
-use obzenflow_core::event::payloads::delivery_payload::{DeliveryPayload, DeliveryMethod};
+use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
+use obzenflow_runtime_services::stages::stateful::strategies::accumulators::ReduceTyped;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::time::{Duration, Instant};
 
 /// Source that generates 100k events
 #[derive(Clone, Debug)]
@@ -82,7 +78,7 @@ impl FiniteSourceHandler for HighVolumeSource {
         // ✨ FLOWIP-082a: Emit typed event using EVENT_TYPE constant
         Some(ChainEventFactory::data_event(
             self.writer_id.clone(),
-            DataRequest::EVENT_TYPE,
+            &DataRequest::versioned_event_type(),
             json!({
                 "id": current_id,
                 "should_fail": should_fail,
@@ -164,7 +160,7 @@ fn error_prone_transform() -> Map<impl Fn(ChainEvent) -> ChainEvent + Send + Syn
             ChainEventFactory::derived_data_event(
                 event.writer_id.clone(),
                 &event,
-                ErrorEvent::EVENT_TYPE,
+                &ErrorEvent::versioned_event_type(),
                 error_payload,
             )
         } else {
@@ -176,7 +172,7 @@ fn error_prone_transform() -> Map<impl Fn(ChainEvent) -> ChainEvent + Send + Syn
             ChainEventFactory::derived_data_event(
                 event.writer_id.clone(),
                 &event,
-                ProcessedEvent::EVENT_TYPE,
+                &ProcessedEvent::versioned_event_type(),
                 result_payload,
             )
         }
@@ -195,9 +191,7 @@ struct EventCountState {
 
 impl Default for EventCountState {
     fn default() -> Self {
-        Self {
-            event_count: 0,
-        }
+        Self { event_count: 0 }
     }
 }
 
@@ -242,7 +236,7 @@ impl SummarySink {
 impl SinkHandler for SummarySink {
     async fn consume(&mut self, event: ChainEvent) -> obzenflow_core::Result<DeliveryPayload> {
         // ✨ FLOWIP-082a: ReduceTyped emits with state's EVENT_TYPE
-        if event.event_type() == EventCountState::EVENT_TYPE {
+        if EventCountState::event_type_matches(&event.event_type()) {
             let payload = event.payload();
             let result = &payload["result"];
             let count = result["event_count"].as_u64().unwrap_or(0);
@@ -251,7 +245,11 @@ impl SinkHandler for SummarySink {
             println!("=====================================");
             println!("📊 Business-Level Event Count (FLOWIP-080j):");
             println!("   Successfully processed: {} events", count);
-            println!("   Note: 100000 generated - {} = {} errors (routed to error journal)", count, 100000 - count as u32);
+            println!(
+                "   Note: 100000 generated - {} = {} errors (routed to error journal)",
+                count,
+                100000 - count as u32
+            );
             println!("=====================================");
             println!("");
             println!("💡 Key Improvement:");
@@ -273,13 +271,12 @@ impl SinkHandler for SummarySink {
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     // Set environment to use prometheus exporter
     std::env::set_var("OBZENFLOW_METRICS_EXPORTER", "prometheus");
 
     println!("🚀 Prometheus 100k Demo with FlowApplication Framework");
-    println!("=====================================================");
+    println!("========================================================");
     println!("📊 Processing 100,000 events demonstrating:");
     println!("   • Flow-level rate limiting middleware");
     println!("   • Fan-out topology (processor → counter + sink)");
@@ -287,13 +284,18 @@ async fn main() -> Result<()> {
     println!("   • Framework Prometheus metrics");
     println!("");
     println!("Usage:");
-    println!("  Run with server:    cargo run -p obzenflow --example prometheus_100k_demo --features obzenflow_infra/warp-server -- --server");
-    println!("  Custom port:        cargo run -p obzenflow --example prometheus_100k_demo --features obzenflow_infra/warp-server -- --server --server-port 8080");
-    println!("  Without server:     cargo run -p obzenflow --example prometheus_100k_demo");
+    println!("  Basic:              cargo run --package obzenflow --example prometheus_100k_demo");
+    println!("  With metrics:       cargo run --package obzenflow --example prometheus_100k_demo --features obzenflow_infra/warp-server -- --server");
+    println!("  With console:       cargo run --package obzenflow --example prometheus_100k_demo --features console,obzenflow_infra/warp-server -- --server");
+    println!("  Custom port:        cargo run --package obzenflow --example prometheus_100k_demo --features obzenflow_infra/warp-server -- --server --server-port 8080");
     println!("");
 
-    // Use FlowApplication to handle everything
-    FlowApplication::run(async {
+    // Use FlowApplication builder - handles runtime, observability, and features automatically
+    // No #[cfg] needed! with_console_subscriber() is a no-op if 'console' feature is disabled
+    FlowApplication::builder()
+        .with_console_subscriber()  // Enables tokio-console if --features console is used
+        .with_log_level(obzenflow_infra::application::LogLevel::Info)
+        .run_blocking(async {
         flow! {
             name: "prometheus_100k_demo",
             journals: disk_journals(std::path::PathBuf::from("target/prometheus_100k_demo_journal")),
@@ -347,7 +349,6 @@ async fn main() -> Result<()> {
         .await
         .map_err(|e| anyhow::anyhow!("Failed to create flow: {}", e))
     })
-    .await
     .map_err(|e| anyhow::anyhow!("Application failed: {}", e))?;
 
     Ok(())

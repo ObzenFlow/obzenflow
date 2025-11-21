@@ -3,12 +3,14 @@
 //! This module provides middleware capabilities for SinkHandler implementations,
 //! with special focus on error handling and retry logic.
 
-use obzenflow_core::{ChainEvent, Result};
-use obzenflow_core::event::payloads::delivery_payload::{DeliveryPayload, DeliveryResult, DeliveryMethod};
-use obzenflow_core::time::MetricsDuration;
-use obzenflow_runtime_services::stages::common::handlers::SinkHandler;
-use super::{Middleware, MiddlewareAction, ErrorAction, MiddlewareContext};
+use super::{ErrorAction, Middleware, MiddlewareAction, MiddlewareContext};
 use async_trait::async_trait;
+use obzenflow_core::event::payloads::delivery_payload::{
+    DeliveryMethod, DeliveryPayload, DeliveryResult,
+};
+use obzenflow_core::time::MetricsDuration;
+use obzenflow_core::{ChainEvent, Result};
+use obzenflow_runtime_services::stages::common::handlers::SinkHandler;
 
 /// A SinkHandler wrapper that applies middleware
 pub struct MiddlewareSink<H: SinkHandler> {
@@ -43,13 +45,13 @@ impl<H: SinkHandler> MiddlewareSink<H> {
             middleware_chain: Vec::new(),
         }
     }
-    
+
     /// Add middleware to the chain
     pub fn with_middleware(mut self, middleware: Box<dyn Middleware>) -> Self {
         self.middleware_chain.push(middleware);
         self
     }
-    
+
     /// Apply middleware with error handling
     async fn apply_middleware_with_error_handling(
         &mut self,
@@ -57,7 +59,7 @@ impl<H: SinkHandler> MiddlewareSink<H> {
     ) -> Result<DeliveryPayload> {
         // Create ephemeral context for this processing
         let mut ctx = MiddlewareContext::new();
-        
+
         // Pre-processing phase
         for middleware in &self.middleware_chain {
             match middleware.pre_handle(&event, &mut ctx) {
@@ -69,7 +71,7 @@ impl<H: SinkHandler> MiddlewareSink<H> {
                         DeliveryMethod::Noop,
                         None, // bytes_processed
                     ));
-                },
+                }
                 MiddlewareAction::Abort => {
                     // Abort is also treated as success but with a different message
                     return Ok(DeliveryPayload::success(
@@ -80,7 +82,7 @@ impl<H: SinkHandler> MiddlewareSink<H> {
                 }
             }
         }
-        
+
         // Consume with inner handler
         match self.inner.consume(event.clone()).await {
             Ok(payload) => {
@@ -89,9 +91,11 @@ impl<H: SinkHandler> MiddlewareSink<H> {
                 for middleware in &self.middleware_chain {
                     middleware.post_handle(&event, &empty, &mut ctx);
                 }
-                
+
                 // Extract timing from context if available (set by TimingMiddleware)
-                let enhanced_payload = if let Some(start_value) = ctx.get_baggage("processing_start_nanos") {
+                let enhanced_payload = if let Some(start_value) =
+                    ctx.get_baggage("processing_start_nanos")
+                {
                     if let Some(start_nanos) = start_value.as_u64() {
                         let now_nanos = std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)
@@ -99,12 +103,12 @@ impl<H: SinkHandler> MiddlewareSink<H> {
                             .as_nanos() as u64;
                         let duration_nanos = now_nanos - start_nanos;
                         let duration = MetricsDuration::from_nanos(duration_nanos);
-                        
+
                         tracing::debug!(
                             "SinkMiddleware: Enriching delivery payload with processing_duration={}",
                             duration
                         );
-                        
+
                         payload.with_processing_duration(duration)
                     } else {
                         payload
@@ -112,7 +116,7 @@ impl<H: SinkHandler> MiddlewareSink<H> {
                 } else {
                     payload
                 };
-                
+
                 Ok(enhanced_payload)
             }
             Err(e) => {
@@ -127,14 +131,14 @@ impl<H: SinkHandler> MiddlewareSink<H> {
                                 DeliveryMethod::Noop,
                                 None, // bytes_processed
                             ));
-                        },
+                        }
                         ErrorAction::Retry => {
                             // Simple retry once - in production, might want exponential backoff
                             return self.inner.consume(event).await;
                         }
                     }
                 }
-                
+
                 // If no middleware handled it, propagate the error
                 Err(e)
             }
@@ -147,12 +151,12 @@ impl<H: SinkHandler> SinkHandler for MiddlewareSink<H> {
     async fn consume(&mut self, event: ChainEvent) -> Result<DeliveryPayload> {
         self.apply_middleware_with_error_handling(event).await
     }
-    
+
     async fn flush(&mut self) -> Result<Option<DeliveryPayload>> {
         // Flush is not intercepted by middleware - it's an infrastructure concern
         self.inner.flush().await
     }
-    
+
     async fn drain(&mut self) -> Result<Option<DeliveryPayload>> {
         // Drain is not intercepted by middleware - it's an infrastructure concern
         self.inner.drain().await
@@ -189,13 +193,13 @@ impl<H: SinkHandler> SinkMiddlewareBuilder<H> {
             handler: MiddlewareSink::new(inner),
         }
     }
-    
+
     /// Add a middleware to the chain
     pub fn with<M: Middleware + 'static>(mut self, middleware: M) -> Self {
         self.handler = self.handler.with_middleware(Box::new(middleware));
         self
     }
-    
+
     /// Build the final middleware-wrapped handler
     pub fn build(self) -> MiddlewareSink<H> {
         self.handler
@@ -205,17 +209,17 @@ impl<H: SinkHandler> SinkMiddlewareBuilder<H> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
-    use std::sync::{Arc, Mutex};
     use async_trait::async_trait;
     use obzenflow_core::event::payloads::delivery_payload::DeliveryPayload;
     use obzenflow_core::event::ChainEventFactory;
-    
+    use serde_json::json;
+    use std::sync::{Arc, Mutex};
+
     struct TestSink {
         consumed: Arc<Mutex<Vec<ChainEvent>>>,
         fail_count: Arc<Mutex<usize>>,
     }
-    
+
     #[async_trait]
     impl SinkHandler for TestSink {
         async fn consume(&mut self, event: ChainEvent) -> Result<DeliveryPayload> {
@@ -224,31 +228,31 @@ mod tests {
                 *fail_count -= 1;
                 return Err(anyhow::anyhow!("Simulated failure").into());
             }
-            
+
             self.consumed.lock().unwrap().push(event);
             Ok(DeliveryPayload::success(
                 "test_sink",
                 DeliveryMethod::Noop,
-                None
+                None,
             ))
         }
     }
-    
+
     struct RetryMiddleware {
         max_retries: usize,
     }
-    
+
     impl Middleware for RetryMiddleware {
         fn on_error(&self, _event: &ChainEvent, _ctx: &mut MiddlewareContext) -> ErrorAction {
             ErrorAction::Retry
         }
     }
-    
+
     #[tokio::test]
     async fn test_sink_retry_middleware() {
         let consumed = Arc::new(Mutex::new(Vec::new()));
         let fail_count = Arc::new(Mutex::new(1)); // Fail once
-        
+
         let mut handler = TestSink {
             consumed: consumed.clone(),
             fail_count: fail_count.clone(),
@@ -256,13 +260,13 @@ mod tests {
         .middleware()
         .with(RetryMiddleware { max_retries: 2 })
         .build();
-        
+
         let event = ChainEventFactory::data_event(
             obzenflow_core::WriterId::from(obzenflow_core::StageId::new()),
             "test",
-            json!({"data": "test"})
+            json!({"data": "test"}),
         );
-        
+
         // Should succeed after retry
         handler.consume(event.clone()).await.unwrap();
         assert_eq!(consumed.lock().unwrap().len(), 1);

@@ -3,16 +3,16 @@
 //! The supervisor owns the FSM directly and runs autonomously.
 //! Once started, all communication happens through journal events only.
 
+use crate::supervised_base::base::Supervisor;
+use crate::supervised_base::{EventLoopDirective, SelfSupervised};
+use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
+use obzenflow_core::event::SystemEvent;
+use obzenflow_core::event::{ChainEventFactory, JournalEvent, WriterId};
+use obzenflow_core::journal::journal::Journal;
 use obzenflow_core::ChainEvent;
-use obzenflow_core::event::{WriterId, ChainEventFactory};
 use obzenflow_fsm::FsmBuilder;
 use serde_json::json;
 use std::sync::Arc;
-use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
-use crate::supervised_base::{EventLoopDirective, SelfSupervised};
-use crate::supervised_base::base::Supervisor;
-use obzenflow_core::journal::journal::Journal;
-use obzenflow_core::event::SystemEvent;
 
 use super::fsm::{
     MetricsAggregatorAction, MetricsAggregatorContext, MetricsAggregatorEvent,
@@ -45,165 +45,229 @@ impl Supervisor for MetricsAggregatorSupervisor {
         builder
             // Initializing -> Running
             .when("Initializing")
-                .on("StartRunning", |_state, _event: &MetricsAggregatorEvent, _ctx| async move {
+            .on(
+                "StartRunning",
+                |_state, _event: &MetricsAggregatorEvent, _ctx| async move {
                     Ok(obzenflow_fsm::Transition {
                         next_state: MetricsAggregatorState::Running,
                         actions: vec![MetricsAggregatorAction::Initialize],
                     })
-                })
-                .done()
-            
+                },
+            )
+            .done()
             // Running state transitions
             .when("Running")
-                .on("ProcessSystemEvent", |_state, event: &MetricsAggregatorEvent, _ctx| {
+            .on(
+                "ProcessSystemEvent",
+                |_state, event: &MetricsAggregatorEvent, _ctx| {
                     let event = event.clone();
                     async move {
                         if let MetricsAggregatorEvent::ProcessSystemEvent { envelope } = event {
                             // Create action to process the system event
                             Ok(obzenflow_fsm::Transition {
                                 next_state: MetricsAggregatorState::Running,
-                                actions: vec![MetricsAggregatorAction::ProcessSystemEvent { envelope }],
+                                actions: vec![MetricsAggregatorAction::ProcessSystemEvent {
+                                    envelope,
+                                }],
                             })
                         } else {
                             Err("Invalid event for ProcessSystemEvent".to_string())
                         }
                     }
-                })
-                .on("ProcessBatch", |_state, event: &MetricsAggregatorEvent, _ctx| {
+                },
+            )
+            .on(
+                "ProcessBatch",
+                |_state, event: &MetricsAggregatorEvent, _ctx| {
                     let event = event.clone();
                     async move {
                         if let MetricsAggregatorEvent::ProcessBatch { events } = event {
-                        // Create update actions for each event
-                        let actions: Vec<_> = events.into_iter()
-                            .map(|envelope| MetricsAggregatorAction::UpdateMetrics {
-                                envelope,
+                            // Create update actions for each event
+                            let actions: Vec<_> = events
+                                .into_iter()
+                                .map(|envelope| MetricsAggregatorAction::UpdateMetrics { envelope })
+                                .collect();
+
+                            Ok(obzenflow_fsm::Transition {
+                                next_state: MetricsAggregatorState::Running,
+                                actions,
                             })
-                            .collect();
-                        
-                        Ok(obzenflow_fsm::Transition {
-                            next_state: MetricsAggregatorState::Running,
-                            actions,
-                        })
-                    } else {
-                        Err("Invalid event".to_string())
+                        } else {
+                            Err("Invalid event".to_string())
+                        }
                     }
-                }
-                })
-                .on("ExportMetrics", |_state, _event: &MetricsAggregatorEvent, _ctx| async move {
+                },
+            )
+            .on(
+                "ExportMetrics",
+                |_state, _event: &MetricsAggregatorEvent, _ctx| async move {
                     Ok(obzenflow_fsm::Transition {
                         next_state: MetricsAggregatorState::Running,
                         actions: vec![MetricsAggregatorAction::ExportMetrics],
                     })
-                })
-                .on("StartDraining", |_state, _event: &MetricsAggregatorEvent, _ctx| async move {
+                },
+            )
+            .on(
+                "StartDraining",
+                |_state, _event: &MetricsAggregatorEvent, _ctx| async move {
                     Ok(obzenflow_fsm::Transition {
                         next_state: MetricsAggregatorState::Draining {
                             consecutive_empty_batches: 0,
                         },
                         actions: vec![],
                     })
-                })
-                .done()
-            
-            // Draining state transitions  
+                },
+            )
+            .on("Error", |_state, event: &MetricsAggregatorEvent, _ctx| {
+                let event = event.clone();
+                async move {
+                    if let MetricsAggregatorEvent::Error(error) = event {
+                        tracing::error!(
+                            error = %error,
+                            "Metrics aggregator received Error event in Running"
+                        );
+                        Ok(obzenflow_fsm::Transition {
+                            next_state: MetricsAggregatorState::Failed { error },
+                            actions: vec![],
+                        })
+                    } else {
+                        Err("Invalid event for Error in Running".to_string())
+                    }
+                }
+            })
+            .done()
+            // Draining state transitions
             .when("Draining")
-                .on("ProcessBatch", |_state, event: &MetricsAggregatorEvent, _ctx| {
+            .on(
+                "ProcessBatch",
+                |_state, event: &MetricsAggregatorEvent, _ctx| {
                     let event = event.clone();
                     async move {
                         if let MetricsAggregatorEvent::ProcessBatch { events } = event {
-                        // Process events during drain
-                        let actions: Vec<_> = events.into_iter()
-                            .map(|envelope| MetricsAggregatorAction::UpdateMetrics {
-                                envelope,
+                            // Process events during drain
+                            let actions: Vec<_> = events
+                                .into_iter()
+                                .map(|envelope| MetricsAggregatorAction::UpdateMetrics { envelope })
+                                .collect();
+
+                            Ok(obzenflow_fsm::Transition {
+                                next_state: MetricsAggregatorState::Draining {
+                                    consecutive_empty_batches: 0,
+                                },
+                                actions,
                             })
-                            .collect();
-                        
-                        Ok(obzenflow_fsm::Transition {
-                            next_state: MetricsAggregatorState::Draining {
-                                consecutive_empty_batches: 0,
-                            },
-                            actions,
-                        })
-                    } else {
-                        Err("Invalid event".to_string())
+                        } else {
+                            Err("Invalid event".to_string())
+                        }
                     }
-                }
-                })
-                .on("ProcessBatch", |state, event: &MetricsAggregatorEvent, _ctx| {
+                },
+            )
+            .on(
+                "ProcessBatch",
+                |state, event: &MetricsAggregatorEvent, _ctx| {
                     let state = state.clone();
                     let event = event.clone();
                     async move {
-                        if let (MetricsAggregatorState::Draining { .. }, 
-                                MetricsAggregatorEvent::ProcessBatch { events }) = (state, event) {
-                        // Process events during drain
-                        let actions: Vec<_> = events.into_iter()
-                            .map(|envelope| MetricsAggregatorAction::UpdateMetrics {
-                                envelope,
-                            })
-                            .collect();
-                        
-                        // Reset counter since we got events
-                        Ok(obzenflow_fsm::Transition {
-                            next_state: MetricsAggregatorState::Draining {
-                                consecutive_empty_batches: 0,
-                            },
-                            actions,
-                        })
-                    } else {
-                        Err("Invalid event".to_string())
-                    }
-                }
-                })
-                .on("DrainEmptyBatch", |state, _event: &MetricsAggregatorEvent, _ctx| {
-                    let state = state.clone();
-                    async move {
-                        if let MetricsAggregatorState::Draining { consecutive_empty_batches } = state {
-                        let new_count = consecutive_empty_batches + 1;
-                        
-                        if new_count >= 2 {
-                            // We've had enough empty batches, transition to complete
-                            // This will trigger the DrainComplete event from dispatch_state
+                        if let (
+                            MetricsAggregatorState::Draining { .. },
+                            MetricsAggregatorEvent::ProcessBatch { events },
+                        ) = (state, event)
+                        {
+                            // Process events during drain
+                            let actions: Vec<_> = events
+                                .into_iter()
+                                .map(|envelope| MetricsAggregatorAction::UpdateMetrics { envelope })
+                                .collect();
+
+                            // Reset counter since we got events
                             Ok(obzenflow_fsm::Transition {
                                 next_state: MetricsAggregatorState::Draining {
-                                    consecutive_empty_batches: new_count,
+                                    consecutive_empty_batches: 0,
                                 },
-                                actions: vec![],
+                                actions,
                             })
                         } else {
-                            // Increment counter and continue draining
-                            Ok(obzenflow_fsm::Transition {
-                                next_state: MetricsAggregatorState::Draining {
-                                    consecutive_empty_batches: new_count,
-                                },
-                                actions: vec![],
-                            })
+                            Err("Invalid event".to_string())
                         }
+                    }
+                },
+            )
+            .on(
+                "DrainEmptyBatch",
+                |state, _event: &MetricsAggregatorEvent, _ctx| {
+                    let state = state.clone();
+                    async move {
+                        if let MetricsAggregatorState::Draining {
+                            consecutive_empty_batches,
+                        } = state
+                        {
+                            let new_count = consecutive_empty_batches + 1;
+
+                            if new_count >= 2 {
+                                // We've had enough empty batches, transition to complete
+                                // This will trigger the DrainComplete event from dispatch_state
+                                Ok(obzenflow_fsm::Transition {
+                                    next_state: MetricsAggregatorState::Draining {
+                                        consecutive_empty_batches: new_count,
+                                    },
+                                    actions: vec![],
+                                })
+                            } else {
+                                // Increment counter and continue draining
+                                Ok(obzenflow_fsm::Transition {
+                                    next_state: MetricsAggregatorState::Draining {
+                                        consecutive_empty_batches: new_count,
+                                    },
+                                    actions: vec![],
+                                })
+                            }
+                        } else {
+                            Err("Invalid state for DrainEmptyBatch".to_string())
+                        }
+                    }
+                },
+            )
+            .on("Error", |_state, event: &MetricsAggregatorEvent, _ctx| {
+                let event = event.clone();
+                async move {
+                    if let MetricsAggregatorEvent::Error(error) = event {
+                        tracing::error!(
+                            error = %error,
+                            "Metrics aggregator received Error event in Draining"
+                        );
+                        Ok(obzenflow_fsm::Transition {
+                            next_state: MetricsAggregatorState::Failed { error },
+                            actions: vec![],
+                        })
                     } else {
-                        Err("Invalid state for DrainEmptyBatch".to_string())
+                        Err("Invalid event for Error in Draining".to_string())
                     }
                 }
-                })
-                .on("DrainComplete", |_state, event: &MetricsAggregatorEvent, _ctx| {
+            })
+            .on(
+                "DrainComplete",
+                |_state, event: &MetricsAggregatorEvent, _ctx| {
                     let event = event.clone();
                     async move {
                         if let MetricsAggregatorEvent::DrainComplete { last_event_id } = event {
-                        Ok(obzenflow_fsm::Transition {
-                            next_state: MetricsAggregatorState::Drained {
-                                last_event_id: last_event_id.clone(),
-                            },
-                            actions: vec![
-                                MetricsAggregatorAction::ExportMetrics, // Export final metrics
-                                MetricsAggregatorAction::PublishDrainComplete {
+                            Ok(obzenflow_fsm::Transition {
+                                next_state: MetricsAggregatorState::Drained {
                                     last_event_id: last_event_id.clone(),
                                 },
-                            ],
-                        })
-                    } else {
-                        Err("Invalid event".to_string())
+                                actions: vec![
+                                    MetricsAggregatorAction::ExportMetrics, // Export final metrics
+                                    MetricsAggregatorAction::PublishDrainComplete {
+                                        last_event_id: last_event_id.clone(),
+                                    },
+                                ],
+                            })
+                        } else {
+                            Err("Invalid event".to_string())
+                        }
                     }
-                }
-                })
-                .done()
+                },
+            )
+            .done()
     }
 
     fn name(&self) -> &str {
@@ -217,22 +281,22 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
     fn writer_id(&self) -> WriterId {
         WriterId::from(self.context.system_id)
     }
-    
+
     async fn write_completion_event(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let event = obzenflow_core::event::SystemEvent::new(
             self.writer_id(),
             obzenflow_core::event::SystemEventType::MetricsCoordination(
-                obzenflow_core::event::MetricsCoordinationEvent::Shutdown
-            )
+                obzenflow_core::event::MetricsCoordinationEvent::Shutdown,
+            ),
         );
-        
+
         self.system_journal
             .append(event, None)
             .await
             .map(|_| ())
             .map_err(|e| format!("Failed to write metrics shutdown event: {}", e).into())
     }
-    
+
     async fn dispatch_state(
         &mut self,
         state: &Self::State,
@@ -246,10 +310,10 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                 let event = obzenflow_core::event::SystemEvent::new(
                     WriterId::from(self.context.system_id),
                     obzenflow_core::event::SystemEventType::MetricsCoordination(
-                        obzenflow_core::event::MetricsCoordinationEvent::Ready
-                    )
+                        obzenflow_core::event::MetricsCoordinationEvent::Ready,
+                    ),
                 );
-                
+
                 self.system_journal
                     .append(event, None)
                     .await
@@ -265,15 +329,20 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
             }
 
             MetricsAggregatorState::Running => {
+                tracing::debug!("Metrics aggregator state=Running");
                 // Create timer on first entry to Running state
                 {
                     let mut timer_guard = self.context.export_timer.lock().await;
                     if timer_guard.is_none() {
-                        tracing::debug!("Creating export timer with interval {}s", self.context.export_interval_secs);
-                        let mut export_timer = tokio::time::interval(tokio::time::Duration::from_secs(
-                            self.context.export_interval_secs,
-                        ));
-                        export_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                        tracing::debug!(
+                            "Creating export timer with interval {}s",
+                            self.context.export_interval_secs
+                        );
+                        let mut export_timer = tokio::time::interval(
+                            tokio::time::Duration::from_secs(self.context.export_interval_secs),
+                        );
+                        export_timer
+                            .set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                         // First tick happens immediately, so consume it
                         export_timer.tick().await;
                         *timer_guard = Some(export_timer);
@@ -307,7 +376,7 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                 // Helper to check if either subscription has a drain event
                 let check_for_drain = |envelope: &obzenflow_core::EventEnvelope<ChainEvent>| {
                     matches!(
-                        &envelope.event.content, 
+                        &envelope.event.content,
                         obzenflow_core::event::ChainEventContent::FlowControl(
                             FlowControlPayload::Drain
                         )
@@ -329,8 +398,8 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                 let system_recv = async {
                     if let Some(system_sub) = system_subscription {
                         match system_sub.next().await {
-                            Ok(Some(envelope)) => Ok(envelope),
-                            Ok(None) => Err("No system event available".to_string()),
+                            Ok(Some(envelope)) => Ok(Some(envelope)),
+                            Ok(None) => Ok(None),
                             Err(e) => Err(format!("Error reading system events: {:?}", e)),
                         }
                     } else {
@@ -343,15 +412,34 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                     // FLOWIP-059b: Poll system events first (higher priority, lower volume)
                     result = system_recv => {
                         match result {
-                            Ok(envelope) => {
+                            Ok(Some(envelope)) => {
+                                tracing::info!(
+                                    event_id = %envelope.event.id(),
+                                    event_type = envelope.event.event_type_name(),
+                                    "Metrics aggregator received system event"
+                                );
                                 // Process system event through FSM event
                                 Ok(EventLoopDirective::Transition(
                                     MetricsAggregatorEvent::ProcessSystemEvent { envelope }
                                 ))
                             }
-                            Err(_) => {
-                                // No system events or error, continue
+                            Ok(None) => {
+                                tracing::debug!("Metrics aggregator system subscription returned None (likely stream end); continuing without failing");
                                 Ok(EventLoopDirective::Continue)
+                            }
+                            Err(e) => {
+                                tracing::error!(
+                                    error = %e,
+                                    "Metrics aggregator system subscription errored"
+                                );
+                                tracing::error!(
+                                    error = %e,
+                                    "Metrics aggregator emitting Error event from system subscription"
+                                );
+                                Ok(EventLoopDirective::Transition(MetricsAggregatorEvent::Error(format!(
+                                    "system subscription error: {}",
+                                    e
+                                ))))
                             }
                         }
                     }
@@ -359,82 +447,129 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                     result = data_recv => {
                         match result {
                             Ok(envelope) => {
+                                tracing::info!(
+                                    event_id = %envelope.event.id(),
+                                    event_type = envelope.event.event_type(),
+                                    "Metrics aggregator received data event"
+                                );
                                 // Check for drain event
                                 if check_for_drain(&envelope) {
-                                    tracing::info!("Metrics aggregator received drain event from data journal");
+                                    tracing::info!(
+                                        "Metrics aggregator received drain event from data journal \
+                                         event_id={} writer={:?}",
+                                        envelope.event.id,
+                                        envelope.event.writer_id
+                                    );
                                     // Clear the timer when transitioning away from Running
                                     *self.context.export_timer.lock().await = None;
                                     return Ok(EventLoopDirective::Transition(MetricsAggregatorEvent::StartDraining));
                                 }
-                                
+
                                 // Skip control and system events - they shouldn't be counted in metrics
                                 if envelope.event.is_control() || envelope.event.is_system() {
                                     return Ok(EventLoopDirective::Continue);
                                 }
-                                
+
                                 // Process single event through FSM
                                 Ok(EventLoopDirective::Transition(MetricsAggregatorEvent::ProcessBatch { events: vec![envelope] }))
                             }
                             Err(e) => {
-                                tracing::error!("Failed to receive event from data journal: {}", e);
-                                Ok(EventLoopDirective::Continue)
+                                let err_msg = format!("Data journal read error: {}", e);
+                                if err_msg.contains("Partial read retries exceeded") {
+                                    tracing::warn!(
+                                        error = %err_msg,
+                                        "Metrics aggregator dropping partial read after retries"
+                                    );
+                                    return Ok(EventLoopDirective::Continue);
+                                }
+                                tracing::error!(error = %err_msg, "Metrics aggregator emitting Error event");
+                                return Ok(EventLoopDirective::Transition(
+                                    MetricsAggregatorEvent::Error(err_msg)
+                                ));
                             }
                         }
                     }
-                    
+
                     // Process error journal events (FLOWIP-082g)
                     result = error_recv => {
                         match result {
                             Ok(envelope) => {
+                                tracing::info!(
+                                    event_id = %envelope.event.id(),
+                                    event_type = envelope.event.event_type(),
+                                    "Metrics aggregator received error event"
+                                );
                                 // Check for drain event
                                 if check_for_drain(&envelope) {
-                                    tracing::info!("Metrics aggregator received drain event from error journal");
+                                    tracing::info!(
+                                        "Metrics aggregator received drain event from error journal \
+                                         event_id={} writer={:?}",
+                                        envelope.event.id,
+                                        envelope.event.writer_id
+                                    );
                                     // Clear the timer when transitioning away from Running
                                     *self.context.export_timer.lock().await = None;
                                     return Ok(EventLoopDirective::Transition(MetricsAggregatorEvent::StartDraining));
                                 }
-                                
+
                                 // Skip control and system events
                                 if envelope.event.is_control() || envelope.event.is_system() {
                                     return Ok(EventLoopDirective::Continue);
                                 }
-                                
+
                                 // Process error event through FSM
                                 Ok(EventLoopDirective::Transition(MetricsAggregatorEvent::ProcessBatch { events: vec![envelope] }))
                             }
                             Err(e) => {
-                                tracing::error!("Failed to receive event from error journal: {}", e);
-                                Ok(EventLoopDirective::Continue)
+                                let err_msg = format!("Error journal read error: {}", e);
+                                if err_msg.contains("Partial read retries exceeded") {
+                                    tracing::warn!(
+                                        error = %err_msg,
+                                        "Metrics aggregator dropping partial error journal read after retries"
+                                    );
+                                    return Ok(EventLoopDirective::Continue);
+                                }
+                                tracing::error!(error = %err_msg, "Metrics aggregator emitting Error event");
+                                return Ok(EventLoopDirective::Transition(
+                                    MetricsAggregatorEvent::Error(err_msg)
+                                ));
                             }
                         }
                     }
 
                     // Export periodically
                     _ = timer_tick => {
+                        tracing::info!("Metrics aggregator export timer tick");
                         Ok(EventLoopDirective::Transition(MetricsAggregatorEvent::ExportMetrics))
                     }
                 }
             }
 
-            MetricsAggregatorState::Draining { consecutive_empty_batches } => {
+            MetricsAggregatorState::Draining {
+                consecutive_empty_batches,
+            } => {
+                tracing::debug!(
+                    empty_batches = *consecutive_empty_batches,
+                    "Metrics aggregator state=Draining"
+                );
                 // Check if we've had enough empty batches
                 if *consecutive_empty_batches >= 2 {
                     // Get last event ID and transition to complete
                     let store = self.context.metrics_store.read().await;
                     let last_event_id = store.last_event_id.clone();
                     drop(store);
-                    
+
                     return Ok(EventLoopDirective::Transition(
                         MetricsAggregatorEvent::DrainComplete { last_event_id },
                     ));
                 }
-                
+
                 // Process draining state - need to drain both data and error journals
                 let mut data_subscription_guard = self.context.data_subscription.write().await;
                 let data_subscription = data_subscription_guard
                     .as_mut()
                     .ok_or("No data subscription available")?;
-                    
+
                 let mut error_subscription_guard = self.context.error_subscription.write().await;
                 let error_subscription = error_subscription_guard.as_mut();
 
@@ -443,13 +578,14 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                     tokio::time::Duration::from_millis(25),
                     data_subscription.recv(),
                 );
-                
+
                 let error_recv = async {
                     if let Some(error_sub) = error_subscription {
                         tokio::time::timeout(
                             tokio::time::Duration::from_millis(25),
                             error_sub.recv(),
-                        ).await
+                        )
+                        .await
                     } else {
                         // If no error subscription, wait forever
                         std::future::pending().await
@@ -460,11 +596,28 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                     result = data_recv => {
                         match result {
                             Ok(Ok(envelope)) => {
+                                tracing::debug!(
+                                    event_id = %envelope.event.id(),
+                                    event_type = envelope.event.event_type(),
+                                    writer_id = ?envelope.event.writer_id,
+                                    "Metrics aggregator draining received data event"
+                                );
                                 // Skip control and system events even during draining
                                 if envelope.event.is_control() || envelope.event.is_system() {
+                                    tracing::debug!(
+                                        "Metrics aggregator draining: skipped control/system event \
+                                         id={} writer={:?}",
+                                        envelope.event.id,
+                                        envelope.event.writer_id
+                                    );
                                     return Ok(EventLoopDirective::Continue);
                                 }
                                 // Got event, process it
+                                tracing::debug!(
+                                    "Metrics aggregator draining: processed data event id={} writer={:?}",
+                                    envelope.event.id,
+                                    envelope.event.writer_id
+                                );
                                 Ok(EventLoopDirective::Transition(MetricsAggregatorEvent::ProcessBatch { events: vec![envelope] }))
                             }
                             _ => {
@@ -473,19 +626,39 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                             }
                         }
                     }
-                    
+
                     result = error_recv => {
                         match result {
                             Ok(Ok(envelope)) => {
+                                tracing::info!(
+                                    event_id = %envelope.event.id(),
+                                    event_type = envelope.event.event_type(),
+                                    "Metrics aggregator draining received error event"
+                                );
                                 // Skip control and system events even during draining
                                 if envelope.event.is_control() || envelope.event.is_system() {
+                                    tracing::debug!(
+                                        "Metrics aggregator draining: skipped control/system error event \
+                                         id={} writer={:?}",
+                                        envelope.event.id,
+                                        envelope.event.writer_id
+                                    );
                                     return Ok(EventLoopDirective::Continue);
                                 }
                                 // Got error event, process it
+                                tracing::debug!(
+                                    "Metrics aggregator draining: processed error event id={} writer={:?}",
+                                    envelope.event.id,
+                                    envelope.event.writer_id
+                                );
                                 Ok(EventLoopDirective::Transition(MetricsAggregatorEvent::ProcessBatch { events: vec![envelope] }))
                             }
                             _ => {
                                 // No events from either subscription - increment empty batch counter
+                                tracing::info!(
+                                    consecutive_empty_batches = consecutive_empty_batches + 1,
+                                    "Metrics aggregator draining: empty batch"
+                                );
                                 Ok(EventLoopDirective::Transition(MetricsAggregatorEvent::DrainEmptyBatch))
                             }
                         }
@@ -496,6 +669,12 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
             MetricsAggregatorState::Drained { .. } => {
                 // Terminal state
                 tracing::info!("Metrics aggregator drained, terminating");
+                Ok(EventLoopDirective::Terminate)
+            }
+
+            MetricsAggregatorState::Failed { error } => {
+                // Terminal state - error occurred
+                tracing::error!("Metrics aggregator failed: {}", error);
                 Ok(EventLoopDirective::Terminate)
             }
         }
@@ -510,4 +689,3 @@ impl Drop for MetricsAggregatorSupervisor {
         tracing::debug!("Metrics aggregator supervisor dropped");
     }
 }
-

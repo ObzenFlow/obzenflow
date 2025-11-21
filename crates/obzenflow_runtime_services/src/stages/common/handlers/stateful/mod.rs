@@ -1,7 +1,7 @@
 //! Stateful handler components
 
 pub mod traits;
-pub mod builder;
+pub mod wrapper;
 
 pub use traits::StatefulHandler;
-pub use builder::{StatefulHandlerWithEmission, StatefulHandlerExt};
+pub use wrapper::{StatefulHandlerExt, StatefulHandlerWithEmission};

@@ -3,7 +3,7 @@
 //! This is a simple data structure that holds component->sequence mappings.
 //! The causal ordering logic is implemented separately in domain services.
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// Vector clock data structure for causal ordering

@@ -5,14 +5,12 @@
 //! - Message bus for inter-FSM communication
 //! - Clean separation between supervision and business logic
 
-use super::{
-    fsm::{PipelineAction, PipelineContext, PipelineEvent, PipelineState},
-};
+use super::fsm::{PipelineAction, PipelineContext, PipelineEvent, PipelineState};
+use crate::id_conversions::StageIdExt;
 use crate::supervised_base::{EventLoopDirective, SelfSupervised};
 use obzenflow_core::event::{SystemEvent, WriterId};
 use obzenflow_core::journal::journal::Journal;
 use obzenflow_core::StageId;
-use crate::id_conversions::StageIdExt;
 use std::sync::Arc;
 
 /// Pipeline supervisor - manages the lifecycle of a pipeline
@@ -42,17 +40,29 @@ impl crate::supervised_base::base::Supervisor for PipelineSupervisor {
             .on(
                 "Materialize",
                 |_state, _event: &PipelineEvent, _ctx| async move {
+                    tracing::info!("🔄 FSM: Created -> Materializing (Materialize event)");
                     Ok(obzenflow_fsm::Transition {
                         next_state: PipelineState::Materializing,
                         actions: vec![PipelineAction::CreateStages],
                     })
                 },
             )
+            .on("Run", |_state, _event: &PipelineEvent, _ctx| async move {
+                tracing::error!("🚨 FATAL: Received Run event while in Created state!");
+                tracing::error!(
+                    "🚨 This means pipeline supervisor never processed Materialize event"
+                );
+                tracing::error!("🚨 Pipeline supervisor task likely never executed!");
+                panic!("Run event received in Created state - pipeline supervisor not running");
+            })
             .done()
             .when("Materializing")
             .on(
                 "MaterializationComplete",
                 |_state, _event: &PipelineEvent, _ctx| async move {
+                    tracing::info!(
+                        "🔄 FSM: Materializing -> Materialized (MaterializationComplete event)"
+                    );
                     Ok(obzenflow_fsm::Transition {
                         next_state: PipelineState::Materialized,
                         actions: vec![
@@ -63,6 +73,12 @@ impl crate::supervised_base::base::Supervisor for PipelineSupervisor {
                     })
                 },
             )
+            .on("Run", |_state, _event: &PipelineEvent, _ctx| async move {
+                tracing::error!("🚨 FATAL: Received Run event while in Materializing state!");
+                tracing::error!("🚨 Pipeline has not finished materializing yet");
+                tracing::error!("🚨 Check for race condition or missing MaterializationComplete");
+                panic!("Run event received in Materializing state - not ready yet");
+            })
             .on("Error", |_state, event, _ctx| {
                 let event = event.clone();
                 async move {
@@ -79,6 +95,7 @@ impl crate::supervised_base::base::Supervisor for PipelineSupervisor {
             .done()
             .when("Materialized")
             .on("Run", |_state, _event: &PipelineEvent, _ctx| async move {
+                tracing::info!("🔄 FSM: Materialized -> Running (Run event)");
                 Ok(obzenflow_fsm::Transition {
                     next_state: PipelineState::Running,
                     actions: vec![PipelineAction::NotifySourceStart],
@@ -122,16 +139,19 @@ impl crate::supervised_base::base::Supervisor for PipelineSupervisor {
                     }
                 }
             })
-            .on("AllStagesCompleted", |_state, _event: &PipelineEvent, _ctx| async move {
-                Ok(obzenflow_fsm::Transition {
-                    next_state: PipelineState::Drained,
-                    actions: vec![
-                        PipelineAction::DrainMetrics,
-                        PipelineAction::WritePipelineCompleted,
-                        PipelineAction::Cleanup
-                    ],
-                })
-            })
+            .on(
+                "AllStagesCompleted",
+                |_state, _event: &PipelineEvent, _ctx| async move {
+                    Ok(obzenflow_fsm::Transition {
+                        next_state: PipelineState::Drained,
+                        actions: vec![
+                            PipelineAction::DrainMetrics,
+                            PipelineAction::WritePipelineCompleted,
+                            PipelineAction::Cleanup,
+                        ],
+                    })
+                },
+            )
             .done()
             .when("SourceCompleted")
             .on(
@@ -186,13 +206,13 @@ impl SelfSupervised for PipelineSupervisor {
     fn writer_id(&self) -> WriterId {
         WriterId::from(self.pipeline_context.system_id)
     }
-    
+
     async fn write_completion_event(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let event = SystemEvent::new(
             self.writer_id(),
             obzenflow_core::event::SystemEventType::PipelineLifecycle(
-                obzenflow_core::event::PipelineLifecycleEvent::Completed
-            )
+                obzenflow_core::event::PipelineLifecycleEvent::Completed,
+            ),
         );
         self.system_journal
             .append(event, None)
@@ -200,7 +220,7 @@ impl SelfSupervised for PipelineSupervisor {
             .map(|_| ())
             .map_err(|e| format!("Failed to write completion event: {}", e).into())
     }
-    
+
     async fn dispatch_state(
         &mut self,
         state: &Self::State,
@@ -209,24 +229,52 @@ impl SelfSupervised for PipelineSupervisor {
             PipelineState::Created => {
                 // In Created state, we wait for external trigger to materialize
                 // This would typically come from the FlowHandle
+                tracing::info!("✅ Pipeline state in Created");
                 Ok(EventLoopDirective::Continue)
             }
 
             PipelineState::Materializing => {
                 // Check if all stages have been initialized
                 let supervisors = self.pipeline_context.stage_supervisors.read().await;
+                let source_supers = self.pipeline_context.source_supervisors.read().await;
                 let expected_count = self.pipeline_context.topology.stages().count();
-                let initialized_count = supervisors.len();
-                drop(supervisors);
-                
+                let initialized_count = supervisors.len() + source_supers.len();
+
                 if initialized_count == expected_count && expected_count > 0 {
                     // All stages created, transition to Materialized
+                    tracing::info!("✅ All stages initialized, transitioning to Materialized");
                     Ok(EventLoopDirective::Transition(
                         PipelineEvent::MaterializationComplete,
                     ))
                 } else {
-                    // Still waiting for stages to be created
-                    Ok(EventLoopDirective::Continue)
+                    // Still waiting for stages to be created. Log details once before failing hard.
+                    tracing::error!(
+                        initialized_count,
+                        expected_count,
+                        "⚠️ MISMATCH DETECTED: supervisors vs topology stages"
+                    );
+                    tracing::debug!(
+                        supervisors = ?supervisors
+                            .keys()
+                            .map(|id| format!("{:?}", id))
+                            .collect::<Vec<_>>(),
+                        sources = ?source_supers
+                            .keys()
+                            .map(|id| format!("{:?}", id))
+                            .collect::<Vec<_>>(),
+                        topology = ?self
+                            .pipeline_context
+                            .topology
+                            .stages()
+                            .map(|s| format!("{} ({:?})", s.name, s.id))
+                            .collect::<Vec<_>>(),
+                        "Materialization mismatch details"
+                    );
+
+                    panic!(
+                        "Stage count mismatch: {} supervisors vs {} topology stages",
+                        initialized_count, expected_count
+                    );
                 }
             }
 
@@ -234,51 +282,72 @@ impl SelfSupervised for PipelineSupervisor {
                 // First check if any stages are already running (they might have published before we subscribed)
                 let supervisors = self.pipeline_context.stage_supervisors.read().await;
                 for (stage_id, stage) in supervisors.iter() {
-                    if stage.is_ready() && !self.pipeline_context.topology.upstream_stages(stage_id.to_topology_id()).is_empty() {
+                    if stage.is_ready()
+                        && !self
+                            .pipeline_context
+                            .topology
+                            .upstream_stages(stage_id.to_topology_id())
+                            .is_empty()
+                    {
                         // This is a non-source stage that's already running
-                        self.pipeline_context.running_stages.write().await.insert(*stage_id);
+                        self.pipeline_context
+                            .running_stages
+                            .write()
+                            .await
+                            .insert(*stage_id);
                         tracing::info!("Stage '{}' was already running", stage.stage_name());
                     }
                 }
                 drop(supervisors);
-                
+
                 // Poll for stage running events to know when all non-source stages are ready
-                let mut reader_guard =
-                    self.pipeline_context.completion_reader.write().await;
-                let reader = reader_guard
-                    .as_mut()
-                    .ok_or("No reader available - should have been initialized during materialization")?;
+                let mut reader_guard = self.pipeline_context.completion_reader.write().await;
+                let reader = reader_guard.as_mut().ok_or(
+                    "No reader available - should have been initialized during materialization",
+                )?;
 
                 // Check for stage running events with timeout
-                match tokio::time::timeout(
-                    tokio::time::Duration::from_millis(100),
-                    reader.next(),
-                )
-                .await
+                match tokio::time::timeout(tokio::time::Duration::from_millis(100), reader.next())
+                    .await
                 {
                     Ok(Ok(Some(envelope))) => {
                         drop(reader_guard);
-                        
+
                         // Process stage running event
                         let event = &envelope.event;
-                        if let obzenflow_core::event::SystemEventType::StageLifecycle { 
-                            stage_id, 
-                            event: obzenflow_core::event::StageLifecycleEvent::Running 
-                        } = &event.event {
+                        if let obzenflow_core::event::SystemEventType::StageLifecycle {
+                            stage_id,
+                            event: obzenflow_core::event::StageLifecycleEvent::Running,
+                        } = &event.event
+                        {
                             // Track this stage as running
-                            self.pipeline_context.running_stages.write().await.insert(*stage_id);
-                            
+                            self.pipeline_context
+                                .running_stages
+                                .write()
+                                .await
+                                .insert(*stage_id);
+
                             // Get stage name from topology
-                            let stage_info = self.pipeline_context.topology
+                            let stage_info = self
+                                .pipeline_context
+                                .topology
                                 .stages()
                                 .find(|s| s.id == stage_id.to_topology_id());
                             let stage_name = stage_info
                                 .map(|s| s.name.clone())
                                 .unwrap_or_else(|| "unknown".to_string());
-                            
+
                             // Log based on stage type
-                            if self.pipeline_context.topology.upstream_stages(stage_id.to_topology_id()).is_empty() {
-                                tracing::debug!("Source stage '{}' is running (waiting for pipeline signal)", stage_name);
+                            if self
+                                .pipeline_context
+                                .topology
+                                .upstream_stages(stage_id.to_topology_id())
+                                .is_empty()
+                            {
+                                tracing::debug!(
+                                    "Source stage '{}' is running (waiting for pipeline signal)",
+                                    stage_name
+                                );
                             } else {
                                 tracing::info!("Stage '{}' is now running", stage_name);
                             }
@@ -288,33 +357,33 @@ impl SelfSupervised for PipelineSupervisor {
                         // No new events, but that's OK - stages might already be running
                     }
                 }
-                
+
                 // Check if all non-source stages are running
                 let running_stages = self.pipeline_context.running_stages.read().await;
                 let topology = &self.pipeline_context.topology;
-                
+
                 // Get all non-source stage IDs
                 let non_source_stages: std::collections::HashSet<_> = topology
                     .stages()
                     .filter(|stage_info| !topology.upstream_stages(stage_info.id).is_empty())
                     .map(|stage_info| StageId::from_topology_id(stage_info.id))
                     .collect();
-                
+
                 // Check if all non-source stages are in the running set
-                let all_ready = !non_source_stages.is_empty() && 
-                    non_source_stages.iter().all(|stage_id| running_stages.contains(stage_id));
-                
+                let all_ready = !non_source_stages.is_empty()
+                    && non_source_stages
+                        .iter()
+                        .all(|stage_id| running_stages.contains(stage_id));
+
                 if all_ready {
                     tracing::info!(
-                        "All {} non-source stages are running, starting pipeline", 
+                        "All {} non-source stages are running, starting pipeline",
                         non_source_stages.len()
                     );
                     Ok(EventLoopDirective::Transition(PipelineEvent::Run))
                 } else {
                     // Still waiting for stages to report running
-                    let waiting_for = non_source_stages
-                        .difference(&*running_stages)
-                        .count();
+                    let waiting_for = non_source_stages.difference(&*running_stages).count();
                     if waiting_for > 0 {
                         tracing::debug!(
                             "Waiting for {} more stage(s) to report running ({}/{} ready)",
@@ -329,22 +398,18 @@ impl SelfSupervised for PipelineSupervisor {
 
             PipelineState::Running => {
                 // Poll for completion events from stages
-                let mut reader_guard =
-                    self.pipeline_context.completion_reader.write().await;
-                let reader = reader_guard
-                    .as_mut()
-                    .ok_or("No reader available - should have been initialized during materialization")?;
+                let mut reader_guard = self.pipeline_context.completion_reader.write().await;
+                let reader = reader_guard.as_mut().ok_or(
+                    "No reader available - should have been initialized during materialization",
+                )?;
 
                 // Use timeout to allow periodic state checks while waiting for events
-                match tokio::time::timeout(
-                    tokio::time::Duration::from_millis(100),
-                    reader.next(),
-                )
-                .await
+                match tokio::time::timeout(tokio::time::Duration::from_millis(100), reader.next())
+                    .await
                 {
                     Ok(Ok(Some(envelope))) => {
                         drop(reader_guard);
-                        
+
                         let event = &envelope.event;
 
                         return match &event.event {
@@ -433,27 +498,21 @@ impl SelfSupervised for PipelineSupervisor {
 
             PipelineState::Draining => {
                 // Continue polling for completion events during drain
-                let mut reader_guard =
-                    self.pipeline_context.completion_reader.write().await;
-                let reader = reader_guard
-                    .as_mut()
-                    .ok_or("No reader available")?;
+                let mut reader_guard = self.pipeline_context.completion_reader.write().await;
+                let reader = reader_guard.as_mut().ok_or("No reader available")?;
 
-                match tokio::time::timeout(
-                    tokio::time::Duration::from_millis(100),
-                    reader.next(),
-                )
-                .await
+                match tokio::time::timeout(tokio::time::Duration::from_millis(100), reader.next())
+                    .await
                 {
                     Ok(Ok(Some(envelope))) => {
                         drop(reader_guard);
-                        
+
                         let event = &envelope.event;
 
                         return match &event.event {
-                            obzenflow_core::event::SystemEventType::StageLifecycle { 
-                                stage_id: _, 
-                                event: obzenflow_core::event::StageLifecycleEvent::Completed 
+                            obzenflow_core::event::SystemEventType::StageLifecycle {
+                                stage_id: _,
+                                event: obzenflow_core::event::StageLifecycleEvent::Completed,
                             } => {
                                 // Process stage completion immediately
                                 Ok(EventLoopDirective::Transition(
@@ -461,7 +520,7 @@ impl SelfSupervised for PipelineSupervisor {
                                 ))
                             }
                             obzenflow_core::event::SystemEventType::PipelineLifecycle(
-                                obzenflow_core::event::PipelineLifecycleEvent::AllStagesCompleted
+                                obzenflow_core::event::PipelineLifecycleEvent::AllStagesCompleted,
                             ) => {
                                 tracing::info!(
                                     "All stages have completed - transitioning to drained"
@@ -472,10 +531,7 @@ impl SelfSupervised for PipelineSupervisor {
                             }
                             _ => {
                                 // Log other events
-                                tracing::debug!(
-                                    "Received event during drain: {:?}",
-                                    event.event
-                                );
+                                tracing::debug!("Received event during drain: {:?}", event.event);
                                 Ok(EventLoopDirective::Continue)
                             }
                         };

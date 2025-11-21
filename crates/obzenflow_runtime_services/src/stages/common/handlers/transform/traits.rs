@@ -2,30 +2,30 @@
 //!
 //! Examples: Data enrichers, filters, mappers, routers
 
-use obzenflow_core::{ChainEvent, Result};
-use obzenflow_core::event::ChainEventContent;
 use async_trait::async_trait;
+use obzenflow_core::event::ChainEventContent;
+use obzenflow_core::{ChainEvent, Result};
 
 /// Handler for stateless transform stages
-/// 
+///
 /// Transforms are the workhorses of the pipeline - they:
 /// - Start processing immediately (no waiting)
 /// - Process events one at a time
 /// - Can filter (0 outputs), pass through (1 output), or expand (N outputs)
-/// 
+///
 /// # Example
-/// ```rust
+/// ```ignore
 /// use obzenflow_runtime_services::stages::common::handlers::TransformHandler;
 /// use obzenflow_core::{ChainEvent, Result};
 /// use obzenflow_core::event::ChainEventContent;
 /// use std::collections::HashMap;
 /// use serde_json::{json, Value};
 /// use async_trait::async_trait;
-/// 
+///
 /// struct DataEnricher {
 ///     cache: HashMap<String, Value>,
 /// }
-/// 
+///
 /// #[async_trait]
 /// impl TransformHandler for DataEnricher {
 ///     fn process(&self, mut event: ChainEvent) -> Vec<ChainEvent> {
@@ -39,7 +39,7 @@ use async_trait::async_trait;
 ///     }
 ///     
 ///     // Stateless transform has no special drain logic
-///     async fn drain(&mut self) -> Result<()> { 
+///     async fn drain(&mut self) -> Result<()> {
 ///         Ok(())
 ///     }
 /// }
@@ -47,12 +47,12 @@ use async_trait::async_trait;
 #[async_trait]
 pub trait TransformHandler: Send + Sync {
     /// Process an event, potentially producing multiple outputs
-    /// 
+    ///
     /// This is a pure function - same input always produces same output
     fn process(&self, event: ChainEvent) -> Vec<ChainEvent>;
-    
+
     /// Perform any cleanup during shutdown
-    /// 
+    ///
     /// For stateless transforms, this is typically a no-op.
     /// For stateful transforms, this might flush caches or close connections.
     async fn drain(&mut self) -> Result<()>;

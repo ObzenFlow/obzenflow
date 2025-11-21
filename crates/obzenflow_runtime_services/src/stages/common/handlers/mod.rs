@@ -1,16 +1,18 @@
 //! Handler-related components organized by type
 
-pub mod source;
-pub mod transform;
-pub mod sink;
+pub mod join;
 pub mod observer;
-pub mod stateful;
 pub mod resource_managed;
+pub mod sink;
+pub mod source;
+pub mod stateful;
+pub mod transform;
 
 // Re-export all handler traits for convenience
-pub use source::{FiniteSourceHandler, InfiniteSourceHandler};
-pub use transform::{TransformHandler};
-pub use sink::{SinkHandler};
+pub use join::JoinHandler;
 pub use observer::ObserverHandler;
-pub use stateful::{StatefulHandler, StatefulHandlerExt, StatefulHandlerWithEmission};
 pub use resource_managed::ResourceManaged;
+pub use sink::SinkHandler;
+pub use source::{FiniteSourceHandler, InfiniteSourceHandler};
+pub use stateful::{StatefulHandler, StatefulHandlerExt, StatefulHandlerWithEmission};
+pub use transform::TransformHandler;

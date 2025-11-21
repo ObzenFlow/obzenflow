@@ -31,7 +31,7 @@
 //! ```
 
 /// RED taxonomy definition
-/// 
+///
 /// RED focuses on Rate, Errors, and Duration - the three key metrics
 /// for understanding request/response systems.
 pub struct RED;
@@ -39,10 +39,11 @@ pub struct RED;
 impl RED {
     /// Taxonomy name
     pub const NAME: &'static str = "RED";
-    
+
     /// Human-readable description
-    pub const DESCRIPTION: &'static str = "Rate, Errors, Duration - ideal for request/response systems";
-    
+    pub const DESCRIPTION: &'static str =
+        "Rate, Errors, Duration - ideal for request/response systems";
+
     /// Get Prometheus queries for RED metrics
     pub fn prometheus_queries(flow_name: &str, stage_name: &str) -> Vec<(&'static str, String)> {
         vec![
@@ -76,7 +77,7 @@ impl RED {
             ),
         ]
     }
-    
+
     /// Get Grafana dashboard JSON for RED metrics
     pub fn grafana_dashboard(flow_name: &str) -> serde_json::Value {
         serde_json::json!({

@@ -7,6 +7,9 @@ mod dsl;
 pub mod stage_descriptor;
 mod stage_macros;
 
+#[cfg(test)]
+mod tests;
+
 // Re-export all public items
 #[allow(unused_imports)]
 pub use dsl::*;

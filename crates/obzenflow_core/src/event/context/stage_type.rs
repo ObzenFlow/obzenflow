@@ -11,18 +11,21 @@ use serde::{Deserialize, Serialize};
 pub enum StageType {
     /// Source that will eventually complete (e.g., file reader, bounded collection)
     FiniteSource,
-    
+
     /// Source that runs indefinitely (e.g., network listener, message queue consumer)
     InfiniteSource,
-    
+
     /// Transforms input events to output events
     Transform,
-    
+
     /// Terminal stage that consumes events (e.g., database writer, API caller)
     Sink,
-    
+
     /// Stage that maintains internal state across events
     Stateful,
+
+    /// Stage that joins events from two upstream sources
+    Join,
 }
 
 impl StageType {
@@ -30,32 +33,32 @@ impl StageType {
     pub fn is_source(&self) -> bool {
         matches!(self, StageType::FiniteSource | StageType::InfiniteSource)
     }
-    
+
     /// Check if this is a finite source
     pub fn is_finite_source(&self) -> bool {
         matches!(self, StageType::FiniteSource)
     }
-    
+
     /// Check if this is an infinite source
     pub fn is_infinite_source(&self) -> bool {
         matches!(self, StageType::InfiniteSource)
     }
-    
+
     /// Check if this stage generates events
     pub fn generates_events(&self) -> bool {
         self.is_source()
     }
-    
+
     /// Check if this stage consumes events
     pub fn consumes_events(&self) -> bool {
         !self.is_source()
     }
-    
+
     /// Check if this is a terminal stage
     pub fn is_terminal(&self) -> bool {
         matches!(self, StageType::Sink)
     }
-    
+
     /// Get a human-readable name for the stage type
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -64,6 +67,7 @@ impl StageType {
             StageType::Transform => "transform",
             StageType::Sink => "sink",
             StageType::Stateful => "stateful",
+            StageType::Join => "join",
         }
     }
 }
@@ -87,7 +91,9 @@ impl StageType {
     pub fn simple(&self) -> SimpleStageType {
         match self {
             StageType::FiniteSource | StageType::InfiniteSource => SimpleStageType::Source,
-            StageType::Transform | StageType::Stateful => SimpleStageType::Transform,
+            StageType::Transform | StageType::Stateful | StageType::Join => {
+                SimpleStageType::Transform
+            }
             StageType::Sink => SimpleStageType::Sink,
         }
     }

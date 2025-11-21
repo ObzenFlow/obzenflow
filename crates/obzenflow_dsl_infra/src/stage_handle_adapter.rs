@@ -1,9 +1,11 @@
-use std::sync::Arc;
 use async_trait::async_trait;
-use obzenflow_runtime_services::stages::common::stage_handle::{StageHandle, StageEvent, StageError};
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::StageId;
+use obzenflow_runtime_services::stages::common::stage_handle::{
+    StageError, StageEvent, StageHandle,
+};
 use obzenflow_runtime_services::supervised_base::SupervisorHandle;
+use std::sync::Arc;
 
 /// Adapter that bridges generic StandardHandle to the StageHandle trait
 pub struct StageHandleAdapter<H, E, S> {
@@ -26,8 +28,8 @@ pub enum StageStatus {
     Failed,
 }
 
-impl<H, E, S> StageHandleAdapter<H, E, S> 
-where 
+impl<H, E, S> StageHandleAdapter<H, E, S>
+where
     H: SupervisorHandle<Event = E, State = S> + Send + Sync + 'static,
     E: Send + Sync + 'static,
     S: Send + Sync + 'static,
@@ -54,7 +56,7 @@ where
 
 #[async_trait]
 impl<H, E, S> StageHandle for StageHandleAdapter<H, E, S>
-where 
+where
     H: SupervisorHandle<Event = E, State = S> + Send + Sync + 'static,
     E: Send + Sync + 'static,
     S: Send + Sync + 'static,
@@ -74,29 +76,42 @@ where
     async fn initialize(&self) -> Result<(), StageError> {
         let event = (self.event_translator)(StageEvent::Initialize)
             .map_err(|e| StageError::InitializationFailed(e))?;
-        self.inner.send_event(event).await
-            .map_err(|e| StageError::InitializationFailed(format!("Failed to send initialize event: {:?}", e)))
+        self.inner.send_event(event).await.map_err(|e| {
+            StageError::InitializationFailed(format!("Failed to send initialize event: {:?}", e))
+        })
+    }
+
+    async fn ready(&self) -> Result<(), StageError> {
+        let event = (self.event_translator)(StageEvent::Ready)
+            .map_err(|e| StageError::EventSendFailed(e))?;
+        self.inner.send_event(event).await.map_err(|e| {
+            StageError::EventSendFailed(format!("Failed to send ready event: {:?}", e))
+        })
     }
 
     async fn start(&self) -> Result<(), StageError> {
         let event = (self.event_translator)(StageEvent::Start)
             .map_err(|e| StageError::EventSendFailed(e))?;
-        self.inner.send_event(event).await
-            .map_err(|e| StageError::EventSendFailed(format!("Failed to send start event: {:?}", e)))
+        self.inner.send_event(event).await.map_err(|e| {
+            StageError::EventSendFailed(format!("Failed to send start event: {:?}", e))
+        })
     }
 
     async fn send_event(&self, event: StageEvent) -> Result<(), StageError> {
-        let translated = (self.event_translator)(event)
-            .map_err(|e| StageError::EventSendFailed(e))?;
-        self.inner.send_event(translated).await
+        let translated =
+            (self.event_translator)(event).map_err(|e| StageError::EventSendFailed(e))?;
+        self.inner
+            .send_event(translated)
+            .await
             .map_err(|e| StageError::EventSendFailed(format!("Failed to send event: {:?}", e)))
     }
 
     async fn begin_drain(&self) -> Result<(), StageError> {
         let event = (self.event_translator)(StageEvent::BeginDrain)
             .map_err(|e| StageError::EventSendFailed(e))?;
-        self.inner.send_event(event).await
-            .map_err(|e| StageError::EventSendFailed(format!("Failed to send drain event: {:?}", e)))
+        self.inner.send_event(event).await.map_err(|e| {
+            StageError::EventSendFailed(format!("Failed to send drain event: {:?}", e))
+        })
     }
 
     fn is_ready(&self) -> bool {
@@ -116,7 +131,9 @@ where
     async fn force_shutdown(&self) -> Result<(), StageError> {
         let event = (self.event_translator)(StageEvent::ForceShutdown)
             .map_err(|e| StageError::EventSendFailed(e))?;
-        self.inner.send_event(event).await
+        self.inner
+            .send_event(event)
+            .await
             .map_err(|e| StageError::EventSendFailed(format!("Failed to force shutdown: {:?}", e)))
     }
 }

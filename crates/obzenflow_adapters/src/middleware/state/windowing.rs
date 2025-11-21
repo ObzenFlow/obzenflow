@@ -4,20 +4,19 @@
 //! time windows complete before accepting EOF.
 
 use crate::middleware::{
-    Middleware, MiddlewareFactory, MiddlewareAction, MiddlewareContext,
-    ErrorAction,
+    ErrorAction, Middleware, MiddlewareAction, MiddlewareContext, MiddlewareFactory,
 };
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
-use obzenflow_core::EventId;
-use obzenflow_core::{WriterId, StageId};
-use obzenflow_runtime_services::pipeline::config::StageConfig;
 use obzenflow_core::event::context::StageType;
+use obzenflow_core::EventId;
+use obzenflow_core::{StageId, WriterId};
+use obzenflow_runtime_services::pipeline::config::StageConfig;
 use obzenflow_runtime_services::stages::common::control_strategies::{
     ControlEventStrategy, WindowingStrategy,
 };
+use serde_json::json;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
-use serde_json::json;
 
 /// Windowing middleware that aggregates events over time windows
 ///
@@ -43,7 +42,7 @@ impl WindowingMiddleware {
             aggregation_fn,
         }
     }
-    
+
     /// Check if the current window is complete
     fn is_window_complete(&self) -> bool {
         match *self.window_start.read().unwrap() {
@@ -51,28 +50,32 @@ impl WindowingMiddleware {
             Some(start) => start.elapsed() >= self.window_duration,
         }
     }
-    
+
     /// Emit the current window's aggregated result
     fn emit_window(&self, ctx: &mut MiddlewareContext) -> Option<ChainEvent> {
         let mut buffer = self.buffer.write().unwrap();
         if buffer.is_empty() {
             return None;
         }
-        
+
         // Create aggregated event
         let events = buffer.drain(..).collect::<Vec<_>>();
         let count = events.len();
         let aggregated = (self.aggregation_fn)(events);
-        
+
         // Reset window start
         *self.window_start.write().unwrap() = Some(Instant::now());
-        
+
         // Emit metrics
-        ctx.emit_event("windowing", "window_emitted", json!({
-            "event_count": count,
-            "window_duration_ms": self.window_duration.as_millis(),
-        }));
-        
+        ctx.emit_event(
+            "windowing",
+            "window_emitted",
+            json!({
+                "event_count": count,
+                "window_duration_ms": self.window_duration.as_millis(),
+            }),
+        );
+
         Some(aggregated)
     }
 }
@@ -90,12 +93,12 @@ impl Middleware for WindowingMiddleware {
             }
             return MiddlewareAction::Continue;
         }
-        
+
         // Start window on first event
         if self.window_start.read().unwrap().is_none() {
             *self.window_start.write().unwrap() = Some(Instant::now());
         }
-        
+
         // Check if window is complete
         if self.is_window_complete() {
             // Emit current window and start new one
@@ -103,10 +106,10 @@ impl Middleware for WindowingMiddleware {
             if let Some(aggregated) = self.emit_window(ctx) {
                 results.push(aggregated);
             }
-            
+
             // Buffer this event for the new window
             self.buffer.write().unwrap().push(event.clone());
-            
+
             // Skip original event, return aggregated result
             MiddlewareAction::Skip(results)
         } else {
@@ -115,7 +118,7 @@ impl Middleware for WindowingMiddleware {
             MiddlewareAction::Skip(vec![])
         }
     }
-    
+
     fn on_error(&self, _event: &ChainEvent, _ctx: &mut MiddlewareContext) -> ErrorAction {
         // Continue buffering on errors - let aggregation handle them
         ErrorAction::Propagate
@@ -148,7 +151,7 @@ impl WindowingMiddlewareFactory {
             aggregation_type: AggregationType::Count,
         }
     }
-    
+
     /// Create a tumbling window that sums a numeric field
     pub fn tumbling_sum(window_duration: Duration, field: String) -> Self {
         Self {
@@ -156,7 +159,7 @@ impl WindowingMiddlewareFactory {
             aggregation_type: AggregationType::Sum(field),
         }
     }
-    
+
     /// Create a tumbling window with custom aggregation
     pub fn tumbling_custom(
         window_duration: Duration,
@@ -167,35 +170,34 @@ impl WindowingMiddlewareFactory {
             aggregation_type: AggregationType::Custom(aggregation_fn),
         }
     }
-    
+
     fn create_aggregation_fn(&self) -> Arc<dyn Fn(Vec<ChainEvent>) -> ChainEvent + Send + Sync> {
         match &self.aggregation_type {
-            AggregationType::Count => {
-                Arc::new(|events: Vec<ChainEvent>| {
-                    let count = events.len();
-                    let result = ChainEventFactory::windowing_count_event(
-                        WriterId::from(StageId::new()),
-                        count,
-                        std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap()
-                            .as_millis(),
-                    );
-                    result
-                })
-            }
+            AggregationType::Count => Arc::new(|events: Vec<ChainEvent>| {
+                let count = events.len();
+                let result = ChainEventFactory::windowing_count_event(
+                    WriterId::from(StageId::new()),
+                    count,
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_millis(),
+                );
+                result
+            }),
             AggregationType::Sum(field) => {
                 let field = field.clone();
                 Arc::new(move |events: Vec<ChainEvent>| {
-                    let values: Vec<f64> = events.iter()
+                    let values: Vec<f64> = events
+                        .iter()
                         .filter_map(|e| {
                             let payload = e.payload();
                             payload.get(&field).and_then(|v| v.as_f64())
                         })
                         .collect();
-                    
+
                     let sum: f64 = values.iter().sum();
-                    
+
                     let result = ChainEventFactory::windowing_sum_event(
                         WriterId::from(StageId::new()),
                         sum,
@@ -213,19 +215,20 @@ impl WindowingMiddlewareFactory {
             AggregationType::Average(field) => {
                 let field = field.clone();
                 Arc::new(move |events: Vec<ChainEvent>| {
-                    let values: Vec<f64> = events.iter()
+                    let values: Vec<f64> = events
+                        .iter()
                         .filter_map(|e| {
                             let payload = e.payload();
                             payload.get(&field).and_then(|v| v.as_f64())
                         })
                         .collect();
-                    
+
                     let avg = if values.is_empty() {
                         0.0
                     } else {
                         values.iter().sum::<f64>() / values.len() as f64
                     };
-                    
+
                     let result = ChainEventFactory::windowing_average_event(
                         WriterId::from(StageId::new()),
                         avg,
@@ -252,7 +255,7 @@ impl MiddlewareFactory for WindowingMiddlewareFactory {
             self.create_aggregation_fn(),
         ))
     }
-    
+
     fn name(&self) -> &str {
         match &self.aggregation_type {
             AggregationType::Count => "windowing_count",
@@ -261,12 +264,12 @@ impl MiddlewareFactory for WindowingMiddlewareFactory {
             AggregationType::Custom(_) => "windowing_custom",
         }
     }
-    
+
     fn create_control_strategy(&self) -> Option<Box<dyn ControlEventStrategy>> {
         // Need windowing strategy to delay EOF until window completes
         Some(Box::new(WindowingStrategy::new(self.window_duration)))
     }
-    
+
     fn supported_stage_types(&self) -> &[StageType] {
         // Windowing makes sense for transforms
         // Could work for sinks that aggregate before writing
@@ -277,16 +280,16 @@ impl MiddlewareFactory for WindowingMiddlewareFactory {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_windowing_factory_creates_middleware() {
         let factory = WindowingMiddlewareFactory::tumbling_count(Duration::from_secs(60));
         assert_eq!(factory.name(), "windowing_count");
-        
+
         let strategy = factory.create_control_strategy();
         assert!(strategy.is_some(), "Expected windowing strategy");
     }
-    
+
     #[test]
     fn test_windowing_skips_data_events_until_window_complete() {
         let factory = WindowingMiddlewareFactory::tumbling_count(Duration::from_millis(100));
@@ -295,21 +298,21 @@ mod tests {
             Duration::from_millis(100),
             factory.create_aggregation_fn(),
         ));
-        
+
         let mut ctx = MiddlewareContext::new();
         let mut event = ChainEventFactory::data_event(
             WriterId::from(StageId::new()),
             "test.event",
             json!({"value": 42}),
         );
-        
+
         // First event starts window and is buffered
         let action = middleware.pre_handle(&event, &mut ctx);
         match action {
             MiddlewareAction::Skip(events) => assert!(events.is_empty()),
             _ => panic!("Expected Skip with no events"),
         }
-        
+
         // Second event is also buffered
         let action = middleware.pre_handle(&event, &mut ctx);
         match action {
@@ -317,7 +320,7 @@ mod tests {
             _ => panic!("Expected Skip with no events"),
         }
     }
-    
+
     #[test]
     fn test_windowing_forwards_control_events() {
         let factory = WindowingMiddlewareFactory::tumbling_count(Duration::from_secs(60));
@@ -326,13 +329,10 @@ mod tests {
             Duration::from_secs(60),
             factory.create_aggregation_fn(),
         ));
-        
+
         let mut ctx = MiddlewareContext::new();
-        let eof = ChainEventFactory::eof_event(
-            WriterId::from(StageId::new()),
-            true
-        );
-        
+        let eof = ChainEventFactory::eof_event(WriterId::from(StageId::new()), true);
+
         let action = middleware.pre_handle(&eof, &mut ctx);
         assert!(matches!(action, MiddlewareAction::Continue));
     }

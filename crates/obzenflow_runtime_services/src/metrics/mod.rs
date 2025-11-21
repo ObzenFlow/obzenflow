@@ -1,25 +1,21 @@
 //! Metrics aggregator implementation
 
-pub mod fsm;
-pub mod supervisor;
-pub mod config;
 pub mod builder;
-pub mod handle;
+pub mod config;
 pub mod constants;
-pub mod instrumentation;
+pub mod fsm;
+pub mod handle;
 pub mod inputs;
+pub mod instrumentation;
+pub mod supervisor;
 
 // Re-export commonly used types
 // Note: MetricsAggregatorSupervisor is intentionally NOT exported - use MetricsAggregatorBuilder
-pub use fsm::{
-    MetricsAggregatorState, 
-    MetricsAggregatorEvent, 
-    MetricsAggregatorAction,
-    MetricsAggregatorContext,
-    MetricsStore,
-    StageMetrics,
-};
-pub use config::DefaultMetricsConfig;
 pub use builder::MetricsAggregatorBuilder;
+pub use config::DefaultMetricsConfig;
+pub use fsm::{
+    MetricsAggregatorAction, MetricsAggregatorContext, MetricsAggregatorEvent,
+    MetricsAggregatorState, MetricsStore, StageMetrics,
+};
 pub use handle::{MetricsHandle, MetricsHandleExt};
 pub use inputs::MetricsInputs;

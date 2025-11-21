@@ -1,23 +1,20 @@
 // Simple stateless pipeline to test FSM warnings
 // This example uses only sources, transforms, and sinks - no stateful stages
 
-use obzenflow_dsl_infra::{flow, source, transform, sink};
-use obzenflow_runtime_services::stages::common::handlers::{
-    FiniteSourceHandler, SinkHandler
-};
-use obzenflow_runtime_services::stages::transform::Map;
-use obzenflow_infra::application::FlowApplication;
-use obzenflow_infra::journal::disk_journals;
-use obzenflow_core::{
-    event::chain_event::{ChainEvent, ChainEventFactory},
-    event::payloads::delivery_payload::{DeliveryPayload, DeliveryMethod},
-    WriterId,
-    id::StageId,
-    Result as CoreResult,
-};
-use serde_json::json;
 use anyhow::Result;
 use async_trait::async_trait;
+use obzenflow_core::{
+    event::chain_event::{ChainEvent, ChainEventFactory},
+    event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload},
+    id::StageId,
+    Result as CoreResult, WriterId,
+};
+use obzenflow_dsl_infra::{flow, sink, source, transform};
+use obzenflow_infra::application::FlowApplication;
+use obzenflow_infra::journal::disk_journals;
+use obzenflow_runtime_services::stages::common::handlers::{FiniteSourceHandler, SinkHandler};
+use obzenflow_runtime_services::stages::transform::Map;
+use serde_json::json;
 
 // Simple source that generates a few events
 #[derive(Clone, Debug)]
@@ -72,17 +69,18 @@ struct Printer {
 
 impl Printer {
     fn new(name: impl Into<String>) -> Self {
-        Self {
-            name: name.into(),
-        }
+        Self { name: name.into() }
     }
 }
 
 #[async_trait]
 impl SinkHandler for Printer {
     async fn consume(&mut self, event: ChainEvent) -> CoreResult<DeliveryPayload> {
-        println!("[{}] Received: {}", self.name,
-            serde_json::to_string(&event.payload()).unwrap_or_default());
+        println!(
+            "[{}] Received: {}",
+            self.name,
+            serde_json::to_string(&event.payload()).unwrap_or_default()
+        );
 
         Ok(DeliveryPayload::success(
             self.name.clone(),

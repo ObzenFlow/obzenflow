@@ -2,40 +2,42 @@
 
 use std::sync::Arc;
 
+use crate::message_bus::FsmMessageBus;
+use crate::metrics::instrumentation::StageInstrumentation;
+use crate::stages::common::handlers::InfiniteSourceHandler;
+use crate::stages::resources_builder::StageResources;
+use crate::supervised_base::base::Supervisor;
+use crate::supervised_base::{
+    BuilderError, ChannelBuilder, EventLoopDirective, EventReceiver, HandleBuilder,
+    HandlerSupervised, HandlerSupervisedExt, StateWatcher, SupervisorBuilder,
+    SupervisorTaskBuilder,
+};
+use obzenflow_core::event::SystemEvent;
 use obzenflow_core::journal::journal::Journal;
 use obzenflow_core::{ChainEvent, StageId};
-use obzenflow_core::event::SystemEvent;
-use crate::message_bus::FsmMessageBus;
-use crate::stages::resources_builder::StageResources;
-use crate::stages::common::handlers::InfiniteSourceHandler;
-use crate::metrics::instrumentation::StageInstrumentation;
-use crate::supervised_base::{
-    SupervisorBuilder, BuilderError, ChannelBuilder, SupervisorTaskBuilder,
-    HandlerSupervisedExt, HandleBuilder, EventReceiver, StateWatcher,
-    EventLoopDirective, HandlerSupervised,
-};
-use crate::supervised_base::base::Supervisor;
 
 use super::config::InfiniteSourceConfig;
+use super::fsm::{
+    InfiniteSourceAction, InfiniteSourceContext, InfiniteSourceEvent, InfiniteSourceState,
+};
 use super::handle::InfiniteSourceHandle;
 use super::supervisor::InfiniteSourceSupervisor;
-use super::fsm::{InfiniteSourceState, InfiniteSourceContext, InfiniteSourceEvent, InfiniteSourceAction};
 
 /// Builder for creating infinite source stages
-pub struct InfiniteSourceBuilder<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> {
+pub struct InfiniteSourceBuilder<
+    H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
+> {
     handler: H,
     config: InfiniteSourceConfig,
     resources: StageResources,
     instrumentation: Option<Arc<StageInstrumentation>>,
 }
 
-impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> InfiniteSourceBuilder<H> {
+impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
+    InfiniteSourceBuilder<H>
+{
     /// Create a new infinite source builder
-    pub fn new(
-        handler: H,
-        config: InfiniteSourceConfig,
-        resources: StageResources,
-    ) -> Self {
+    pub fn new(handler: H, config: InfiniteSourceConfig, resources: StageResources) -> Self {
         Self {
             handler,
             config,
@@ -43,7 +45,7 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
             instrumentation: None,
         }
     }
-    
+
     /// Set the instrumentation for this source
     pub fn with_instrumentation(mut self, instrumentation: Arc<StageInstrumentation>) -> Self {
         self.instrumentation = Some(instrumentation);
@@ -52,19 +54,22 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
 }
 
 #[async_trait::async_trait]
-impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> SupervisorBuilder for InfiniteSourceBuilder<H> {
+impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> SupervisorBuilder
+    for InfiniteSourceBuilder<H>
+{
     type Handle = InfiniteSourceHandle<H>;
     type Error = BuilderError;
-    
+
     async fn build(self) -> Result<Self::Handle, Self::Error> {
         // Create channels for supervisor communication
-        let (event_sender, event_receiver, state_watcher) = 
+        let (event_sender, event_receiver, state_watcher) =
             ChannelBuilder::new().build(InfiniteSourceState::<H>::Created);
-        
+
         // Create instrumentation if not provided
-        let instrumentation = self.instrumentation
+        let instrumentation = self
+            .instrumentation
             .unwrap_or_else(|| Arc::new(StageInstrumentation::new()));
-        
+
         // Create context
         let context = InfiniteSourceContext::new(
             self.handler,
@@ -78,7 +83,7 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
             self.resources.message_bus.clone(),
             instrumentation,
         );
-        
+
         // Create supervisor (private - not exposed)
         let supervisor = InfiniteSourceSupervisor {
             name: format!("infinite_source_{}", self.config.stage_name),
@@ -87,10 +92,10 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
             system_journal: self.resources.system_journal.clone(),
             stage_id: self.config.stage_id,
         };
-        
+
         // Clone what we need for the task
         let state_watcher_for_task = state_watcher.clone();
-        
+
         // Spawn the supervisor task
         let supervisor_name = format!("infinite_source_{}", self.config.stage_name);
         let task = SupervisorTaskBuilder::<InfiniteSourceSupervisor<H>>::new(&supervisor_name)
@@ -101,15 +106,16 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
                     external_events: event_receiver,
                     state_watcher: state_watcher_for_task,
                 };
-                
+
                 // Run with the wrapper
                 HandlerSupervisedExt::run(
                     supervisor_with_events,
                     InfiniteSourceState::<H>::Created,
                     context,
-                ).await
+                )
+                .await
             });
-        
+
         // Build and return handle
         HandleBuilder::new()
             .with_event_sender(event_sender)
@@ -121,14 +127,18 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
 }
 
 /// Internal wrapper that bridges external events with the handler-supervised supervisor
-struct HandlerSupervisedWithExternalEvents<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> {
+struct HandlerSupervisedWithExternalEvents<
+    H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
+> {
     supervisor: InfiniteSourceSupervisor<H>,
     external_events: EventReceiver<InfiniteSourceEvent<H>>,
     state_watcher: StateWatcher<InfiniteSourceState<H>>,
 }
 
 // Delegate trait implementations to the inner supervisor
-impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Supervisor for HandlerSupervisedWithExternalEvents<H> {
+impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Supervisor
+    for HandlerSupervisedWithExternalEvents<H>
+{
     type State = InfiniteSourceState<H>;
     type Event = InfiniteSourceEvent<H>;
     type Context = InfiniteSourceContext<H>;
@@ -147,31 +157,36 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
 }
 
 // Implement Sealed for the wrapper
-impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> crate::supervised_base::base::private::Sealed for HandlerSupervisedWithExternalEvents<H> {}
+impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
+    crate::supervised_base::base::private::Sealed for HandlerSupervisedWithExternalEvents<H>
+{
+}
 
 #[async_trait::async_trait]
-impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSupervised for HandlerSupervisedWithExternalEvents<H> {
+impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSupervised
+    for HandlerSupervisedWithExternalEvents<H>
+{
     type Handler = H;
-    
+
     fn writer_id(&self) -> obzenflow_core::WriterId {
         self.supervisor.writer_id()
     }
-    
+
     fn stage_id(&self) -> StageId {
         self.supervisor.stage_id()
     }
-    
+
     async fn write_completion_event(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         self.supervisor.write_completion_event().await
     }
-    
+
     async fn dispatch_state(
         &mut self,
         state: &Self::State,
     ) -> Result<EventLoopDirective<Self::Event>, Box<dyn std::error::Error + Send + Sync>> {
         // Update state for external observers
         let _ = self.state_watcher.update(state.clone());
-        
+
         // Check for external events first
         match self.external_events.try_recv() {
             Ok(event) => {
@@ -184,13 +199,14 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
             Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
                 // Channel closed, initiate shutdown only if not already failed
                 if !matches!(state, InfiniteSourceState::Failed(_)) {
-                    return Ok(EventLoopDirective::Transition(
-                        InfiniteSourceEvent::Error("External control channel closed".to_string()),
-                    ));
+                    return Ok(EventLoopDirective::Transition(InfiniteSourceEvent::Error(
+                        "External control channel closed".to_string(),
+                    )));
                 }
             }
         }
-        
+
+        // Delegate to the actual supervisor
         // Delegate to the actual supervisor
         self.supervisor.dispatch_state(state).await
     }

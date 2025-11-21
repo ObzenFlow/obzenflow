@@ -5,13 +5,10 @@
 
 // Core types and traits
 mod core;
-pub use core::{ControlEventStrategy, ControlEventAction, ProcessingContext};
+pub use core::{ControlEventAction, ControlEventStrategy, ProcessingContext};
 
 // Concrete strategy implementations
 mod strategies;
 pub use strategies::{
-    JonestownStrategy,
-    RetryStrategy, BackoffStrategy,
-    WindowingStrategy,
-    CompositeStrategy,
+    BackoffStrategy, CompositeStrategy, JonestownStrategy, RetryStrategy, WindowingStrategy,
 };

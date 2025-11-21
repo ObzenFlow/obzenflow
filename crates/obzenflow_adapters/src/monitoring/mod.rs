@@ -1,5 +1,5 @@
 //! Monitoring Taxonomies for ObzenFlow
-//! 
+//!
 //! With FLOWIP-056-666, monitoring taxonomies are now documentation and view definitions.
 //! Metrics are automatically collected by the MetricsAggregator from the event journal.
 //!
@@ -17,13 +17,13 @@
 //! 3. MetricsEndpoint exposes metrics in Prometheus format
 //! 4. Taxonomies provide Prometheus queries and Grafana dashboards
 
+pub mod aggregator;
+pub mod exporters;
 pub mod metrics;
 pub mod taxonomies;
-pub mod exporters;
-pub mod aggregator;
 
-pub use taxonomies::{RED, USE, GoldenSignals, SAAFE};
 pub use exporters::PrometheusExporter;
+pub use taxonomies::{GoldenSignals, RED, SAAFE, USE};
 
 /// Initialize the monitoring subsystem
 pub fn init() -> Result<(), Box<dyn std::error::Error>> {

@@ -1,53 +1,59 @@
 //! Transform supervisor implementation using HandlerSupervised pattern
 
-use std::sync::Arc;
-use obzenflow_core::{EventEnvelope};
-use obzenflow_core::journal::journal::Journal;
-use obzenflow_core::{ChainEvent, StageId};
-use obzenflow_core::event::SystemEvent;
+use crate::metrics::instrumentation::process_with_instrumentation;
+use crate::stages::common::control_strategies::{ControlEventAction, ProcessingContext};
+use crate::stages::common::handlers::TransformHandler;
+use crate::supervised_base::base::Supervisor;
+use crate::supervised_base::{EventLoopDirective, HandlerSupervised};
 use obzenflow_core::event::context::FlowContext;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
-use obzenflow_fsm::{FsmBuilder, Transition};
-use crate::stages::common::handlers::TransformHandler;
-use crate::stages::common::control_strategies::{ControlEventAction, ProcessingContext};
-use crate::supervised_base::{EventLoopDirective, HandlerSupervised};
-use crate::supervised_base::base::Supervisor;
-use crate::metrics::instrumentation::process_with_instrumentation;
+use obzenflow_core::event::SystemEvent;
+use obzenflow_core::journal::journal::Journal;
+use obzenflow_core::EventEnvelope;
+use obzenflow_core::{ChainEvent, StageId};
+use obzenflow_fsm::{EventVariant, FsmBuilder, StateVariant, Transition};
+use std::sync::Arc;
 
-use super::fsm::{
-    TransformState, TransformEvent, TransformAction,
-    TransformContext,
-};
+use super::fsm::{TransformAction, TransformContext, TransformEvent, TransformState};
 
 /// Supervisor for transform stages
-pub(crate) struct TransformSupervisor<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> {
+pub(crate) struct TransformSupervisor<
+    H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
+> {
     /// Supervisor name (for logging)
     pub(crate) name: String,
-    
+
     /// The FSM context containing all mutable state
     pub(crate) context: Arc<TransformContext<H>>,
-    
+
     /// Data journal for chain events
     pub(crate) data_journal: Arc<dyn Journal<ChainEvent>>,
-    
+
     /// System journal for lifecycle events
     pub(crate) system_journal: Arc<dyn Journal<SystemEvent>>,
-    
+
     /// Stage ID
     pub(crate) stage_id: StageId,
 }
 
 // Implement Sealed directly for TransformSupervisor to satisfy Supervisor trait bound
-impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> crate::supervised_base::base::private::Sealed for TransformSupervisor<H> {}
+impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
+    crate::supervised_base::base::private::Sealed for TransformSupervisor<H>
+{
+}
 
-impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Supervisor for TransformSupervisor<H> {
+impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Supervisor
+    for TransformSupervisor<H>
+{
     type State = TransformState<H>;
     type Event = TransformEvent<H>;
     type Context = TransformContext<H>;
     type Action = TransformAction<H>;
-    
-    fn configure_fsm(&self, builder: FsmBuilder<Self::State, Self::Event, Self::Context, Self::Action>) 
-        -> FsmBuilder<Self::State, Self::Event, Self::Context, Self::Action> {
+
+    fn configure_fsm(
+        &self,
+        builder: FsmBuilder<Self::State, Self::Event, Self::Context, Self::Action>,
+    ) -> FsmBuilder<Self::State, Self::Event, Self::Context, Self::Action> {
         builder
             // Created -> Initialized
             .when("Created")
@@ -77,6 +83,13 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Supe
             
             // Running -> Draining (on EOF)
             .when("Running")
+                // Ready can be delivered again (e.g. from wide subscriptions); ignore if already running
+                .on("Ready", |_state, _event, _ctx| async move {
+                    Ok(Transition {
+                        next_state: TransformState::Running,
+                        actions: vec![],
+                    })
+                })
                 .on("ReceivedEOF", |_state, _event, ctx| async move {
                     // Track state transition in instrumentation
                     ctx.instrumentation.transition_to_state("Draining");
@@ -164,25 +177,43 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Supe
                     }
                 })
                 .done()
+
+            // Catch all unhandled events
+            .when_unhandled(|state, event, _ctx| {
+                let state_name = state.variant_name().to_string();
+                let event_name = event.variant_name().to_string();
+                async move {
+                    tracing::error!(
+                        supervisor = "TransformSupervisor",
+                        state = %state_name,
+                        event = %event_name,
+                        "Unhandled event in FSM - this indicates a state machine configuration error"
+                    );
+                    // Return Err to propagate the error
+                    Err(format!("Unhandled event '{}' in state '{}' for TransformSupervisor", event_name, state_name))
+                }
+            })
     }
-    
+
     fn name(&self) -> &str {
         &self.name
     }
 }
 
 #[async_trait::async_trait]
-impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSupervised for TransformSupervisor<H> {
+impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSupervised
+    for TransformSupervisor<H>
+{
     type Handler = H;
-    
+
     fn writer_id(&self) -> obzenflow_core::WriterId {
         obzenflow_core::WriterId::from(self.stage_id)
     }
-    
+
     fn stage_id(&self) -> StageId {
         self.stage_id
     }
-    
+
     async fn write_completion_event(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let event = SystemEvent::stage_completed(self.stage_id);
         self.system_journal
@@ -191,7 +222,7 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Hand
             .map(|_| ())
             .map_err(|e| format!("Failed to write completion event: {}", e).into())
     }
-    
+
     async fn dispatch_state(
         &mut self,
         state: &Self::State,
@@ -199,37 +230,45 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Hand
         // Track every event loop iteration
         match state {
             TransformState::Created => {
-                // Send initialize event
-                Ok(EventLoopDirective::Transition(TransformEvent::Initialize))
+                // Wait for explicit initialization from pipeline
+                Ok(EventLoopDirective::Continue)
             }
-            
+
             TransformState::Initialized => {
                 // Auto-transition to ready (transforms start immediately)
                 Ok(EventLoopDirective::Transition(TransformEvent::Ready))
             }
-            
+
             TransformState::Running => {
-                self.context.instrumentation.event_loops_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.context
+                    .instrumentation
+                    .event_loops_total
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
                 // Process events from subscription
                 let mut subscription_guard = self.context.subscription.write().await;
                 if let Some(subscription) = subscription_guard.as_mut() {
                     match subscription.recv().await {
                         Ok(envelope) => {
+                            self.context.instrumentation.record_consumed(&envelope);
+
                             // We have work - increment loops with work
-                            self.context.instrumentation.event_loops_with_work_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            
+                            self.context
+                                .instrumentation
+                                .event_loops_with_work_total
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
                             tracing::debug!(
                                 stage_name = %self.context.stage_name,
                                 "Transform processing event"
                             );
-                            
+
                             // Match on event content to determine how to process
                             match &envelope.event.content {
                                 obzenflow_core::event::ChainEventContent::FlowControl(signal) => {
                                     // Processing context for control events
                                     let mut processing_ctx = ProcessingContext::new();
-                                    
+
                                     // Get the action from the control strategy
                                     let action = match signal {
                                         FlowControlPayload::Eof { .. } => {
@@ -237,19 +276,24 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Hand
                                                 stage_name = %self.context.stage_name,
                                                 "Transform received EOF from upstream"
                                             );
-                                            self.context.control_strategy.handle_eof(&envelope, &mut processing_ctx)
+                                            self.context
+                                                .control_strategy
+                                                .handle_eof(&envelope, &mut processing_ctx)
                                         }
-                                        FlowControlPayload::Watermark { .. } => {
-                                            self.context.control_strategy.handle_watermark(&envelope, &mut processing_ctx)
-                                        }
-                                        FlowControlPayload::Checkpoint { .. } => {
-                                            self.context.control_strategy.handle_checkpoint(&envelope, &mut processing_ctx)
-                                        }
-                                        FlowControlPayload::Drain => {
-                                            self.context.control_strategy.handle_drain(&envelope, &mut processing_ctx)
-                                        }
+                                        FlowControlPayload::Watermark { .. } => self
+                                            .context
+                                            .control_strategy
+                                            .handle_watermark(&envelope, &mut processing_ctx),
+                                        FlowControlPayload::Checkpoint { .. } => self
+                                            .context
+                                            .control_strategy
+                                            .handle_checkpoint(&envelope, &mut processing_ctx),
+                                        FlowControlPayload::Drain => self
+                                            .context
+                                            .control_strategy
+                                            .handle_drain(&envelope, &mut processing_ctx),
                                     };
-                                    
+
                                     // Execute the action
                                     match action {
                                         ControlEventAction::Forward => {
@@ -258,9 +302,12 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Hand
                                                 self.forward_control_event(&envelope).await?;
                                             } else {
                                                 // Buffer EOF for draining state
-                                                *self.context.buffered_eof.write().await = Some(envelope.event.clone());
+                                                *self.context.buffered_eof.write().await =
+                                                    Some(envelope.event.clone());
                                                 drop(subscription_guard);
-                                                return Ok(EventLoopDirective::Transition(TransformEvent::ReceivedEOF));
+                                                return Ok(EventLoopDirective::Transition(
+                                                    TransformEvent::ReceivedEOF,
+                                                ));
                                             }
                                         }
                                         ControlEventAction::Delay(duration) => {
@@ -281,7 +328,8 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Hand
                                                 "Retry requested, buffering event"
                                             );
                                             if envelope.event.is_eof() {
-                                                processing_ctx.buffered_eof = Some(envelope.clone());
+                                                processing_ctx.buffered_eof =
+                                                    Some(envelope.clone());
                                             }
                                         }
                                         ControlEventAction::Skip => {
@@ -298,7 +346,7 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Hand
                                     // Process data event with instrumentation
                                     let handler = self.context.handler.clone();
                                     let event_to_process = envelope.event.clone();
-                                    
+
                                     // Use run_if_not_error to handle error events
                                     if matches!(event_to_process.processing_info.status, obzenflow_core::event::status::processing_status::ProcessingStatus::Error(_)) {
                                         tracing::info!(
@@ -308,18 +356,16 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Hand
                                             event_to_process.processing_info.status
                                         );
                                     }
-                                    let events_to_process = self.run_if_not_error(event_to_process, |e| {
-                                        handler.process(e)
-                                    });
-                                    
+                                    let events_to_process = self
+                                        .run_if_not_error(event_to_process, |e| handler.process(e));
+
                                     // Process with instrumentation
                                     let result = process_with_instrumentation(
                                         &self.context.instrumentation,
-                                        || async move {
-                                            Ok(events_to_process)
-                                        }
-                                    ).await;
-                                    
+                                        || async move { Ok(events_to_process) },
+                                    )
+                                    .await;
+
                                     match result {
                                         Ok(transformed_events) => {
                                             // Write transformed events
@@ -331,6 +377,9 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Hand
                                                         event_id = %event.id,
                                                         "Writing error event to error journal (FLOWIP-082e)"
                                                     );
+                                                    self.context
+                                                        .instrumentation
+                                                        .record_emitted(&event);
                                                     self.context.error_journal
                                                         .append(event, Some(&envelope))
                                                         .await
@@ -348,7 +397,16 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Hand
                                                     let enriched_event = event
                                                         .with_flow_context(flow_context)
                                                         .with_runtime_context(self.context.instrumentation.snapshot());
-                                                    
+
+                                                    tracing::debug!(
+                                                        "Transform {} writing event to data_journal ptr: {:p}",
+                                                        self.context.stage_name,
+                                                        self.context.data_journal.as_ref() as *const _
+                                                    );
+
+                                                    self.context
+                                                        .instrumentation
+                                                        .record_emitted(&enriched_event);
                                                     self.context.data_journal
                                                         .append(enriched_event, Some(&envelope))
                                                         .await
@@ -379,19 +437,19 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Hand
                                 "Subscription error"
                             );
                             drop(subscription_guard);
-                            return Ok(EventLoopDirective::Transition(
-                                TransformEvent::Error(format!("Subscription error: {}", e))
-                            ));
+                            return Ok(EventLoopDirective::Transition(TransformEvent::Error(
+                                format!("Subscription error: {}", e),
+                            )));
                         }
                     }
                 } else {
                     // No subscription yet, wait
                     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
                 }
-                
+
                 Ok(EventLoopDirective::Continue)
             }
-            
+
             TransformState::Draining => {
                 // Continue processing remaining events with short timeout
                 let mut subscription_guard = self.context.subscription.write().await;
@@ -399,30 +457,34 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Hand
                     // Use shorter timeout to detect empty queue
                     match tokio::time::timeout(
                         tokio::time::Duration::from_millis(50),
-                        subscription.recv()
-                    ).await {
+                        subscription.recv(),
+                    )
+                    .await
+                    {
                         Ok(Ok(envelope)) => {
                             tracing::debug!(
                                 stage_name = %self.context.stage_name,
                                 "Transform draining events"
                             );
-                            
+
+                            self.context.instrumentation.record_consumed(&envelope);
+
                             // Process remaining event with instrumentation
                             if !envelope.event.is_control() {
                                 let envelope_event = envelope.event.clone();
-                                
+
                                 // Use run_if_not_error to handle error events
-                                let events_to_process = self.run_if_not_error(envelope_event, |e| {
-                                    self.context.handler.process(e)
-                                });
-                                
+                                let events_to_process = self
+                                    .run_if_not_error(envelope_event, |e| {
+                                        self.context.handler.process(e)
+                                    });
+
                                 let transformed_events = process_with_instrumentation(
                                     &self.context.instrumentation,
-                                    || async move {
-                                        Ok(events_to_process)
-                                    }
-                                ).await?;
-                                
+                                    || async move { Ok(events_to_process) },
+                                )
+                                .await?;
+
                                 // Write transformed events using new journal.write() API
                                 for event in transformed_events {
                                     // Check if this is an error event that was passed through
@@ -432,6 +494,9 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Hand
                                             event_id = %event.id,
                                             "Writing error event to error journal during drain (FLOWIP-082e)"
                                         );
+                                        self.context
+                                            .instrumentation
+                                            .record_emitted(&event);
                                         self.context.error_journal
                                             .append(event, Some(&envelope))
                                             .await
@@ -448,7 +513,10 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Hand
                                         let enriched_event = event
                                             .with_flow_context(flow_context)
                                             .with_runtime_context(self.context.instrumentation.snapshot());
-                                        
+
+                                        self.context
+                                            .instrumentation
+                                            .record_emitted(&enriched_event);
                                         self.context.data_journal
                                             .append(enriched_event, Some(&envelope))
                                             .await
@@ -465,25 +533,29 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Hand
                                 "Transform queue drained"
                             );
                             drop(subscription_guard);
-                            Ok(EventLoopDirective::Transition(TransformEvent::DrainComplete))
+                            Ok(EventLoopDirective::Transition(
+                                TransformEvent::DrainComplete,
+                            ))
                         }
                     }
                 } else {
                     // No subscription, complete immediately
-                    Ok(EventLoopDirective::Transition(TransformEvent::DrainComplete))
+                    Ok(EventLoopDirective::Transition(
+                        TransformEvent::DrainComplete,
+                    ))
                 }
             }
-            
+
             TransformState::Drained => {
                 // Terminal state
                 Ok(EventLoopDirective::Terminate)
             }
-            
+
             TransformState::Failed(_) => {
                 // Terminal state
                 Ok(EventLoopDirective::Terminate)
             }
-            
+
             TransformState::_Phantom(_) => {
                 unreachable!("PhantomData variant should never be instantiated")
             }
@@ -493,9 +565,13 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Hand
 
 impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> TransformSupervisor<H> {
     /// Helper to forward control events
-    async fn forward_control_event(&self, envelope: &EventEnvelope<ChainEvent>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    async fn forward_control_event(
+        &self,
+        envelope: &EventEnvelope<ChainEvent>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let forward_event = envelope.event.clone();
-        self.context.data_journal
+        self.context
+            .data_journal
             .append(forward_event, Some(envelope))
             .await
             .map_err(|e| format!("Failed to forward control event: {}", e))?;

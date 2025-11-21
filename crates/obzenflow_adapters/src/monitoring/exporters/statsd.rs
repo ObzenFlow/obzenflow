@@ -1,8 +1,8 @@
 // StatsD exporter implementation
 // This module is only compiled when the "metrics-statsd" feature is enabled
 
+use super::{ExportError, MetricExporter};
 use crate::monitoring::metrics::core::{Metric, MetricType, MetricValue};
-use super::{MetricExporter, ExportError};
 use std::net::UdpSocket;
 
 /// StatsD exporter that converts core metrics to StatsD wire format
@@ -18,9 +18,9 @@ impl StatsDExporter {
     pub fn new(target: impl Into<String>) -> Result<Self, ExportError> {
         let target = target.into();
         let socket = UdpSocket::bind("0.0.0.0:0").map_err(|e| ExportError::NetworkError {
-            message: format!("Failed to bind UDP socket: {}", e)
+            message: format!("Failed to bind UDP socket: {}", e),
         })?;
-        
+
         Ok(Self {
             socket,
             target,
@@ -28,23 +28,24 @@ impl StatsDExporter {
             sample_rate: 1.0,
         })
     }
-    
+
     /// Set metric name prefix (default: "flowstate.")
     pub fn with_prefix(mut self, prefix: impl Into<String>) -> Self {
         self.prefix = prefix.into();
         self
     }
-    
+
     /// Set sample rate (default: 1.0 = 100%)
     pub fn with_sample_rate(mut self, rate: f64) -> Self {
         self.sample_rate = rate.clamp(0.0, 1.0);
         self
     }
-    
+
     fn send_metric(&self, wire_format: &str) -> Result<(), ExportError> {
-        self.socket.send_to(wire_format.as_bytes(), &self.target)
+        self.socket
+            .send_to(wire_format.as_bytes(), &self.target)
             .map_err(|e| ExportError::NetworkError {
-                message: format!("Failed to send to {}: {}", self.target, e)
+                message: format!("Failed to send to {}: {}", self.target, e),
             })?;
         Ok(())
     }
@@ -54,7 +55,7 @@ impl MetricExporter<String> for StatsDExporter {
     fn export(&self, metric: &dyn Metric) -> Result<String, ExportError> {
         let snapshot = metric.snapshot();
         let metric_name = format!("{}{}", self.prefix, snapshot.name);
-        
+
         let wire_format = match snapshot.metric_type {
             MetricType::Counter => {
                 if let Some(value) = snapshot.value.as_counter() {
@@ -65,7 +66,7 @@ impl MetricExporter<String> for StatsDExporter {
                     }
                 } else {
                     return Err(ExportError::FormatError {
-                        message: "Counter metric has non-counter value".to_string()
+                        message: "Counter metric has non-counter value".to_string(),
                     });
                 }
             }
@@ -74,7 +75,7 @@ impl MetricExporter<String> for StatsDExporter {
                     format!("{}:{:.3}|g", metric_name, value)
                 } else {
                     return Err(ExportError::FormatError {
-                        message: "Gauge metric has non-gauge value".to_string()
+                        message: "Gauge metric has non-gauge value".to_string(),
                     });
                 }
             }
@@ -88,7 +89,7 @@ impl MetricExporter<String> for StatsDExporter {
                     }
                 } else {
                     return Err(ExportError::FormatError {
-                        message: "Histogram metric has non-histogram value".to_string()
+                        message: "Histogram metric has non-histogram value".to_string(),
                     });
                 }
             }
@@ -103,15 +104,15 @@ impl MetricExporter<String> for StatsDExporter {
                     }
                 } else {
                     return Err(ExportError::FormatError {
-                        message: "Summary metric has non-summary value".to_string()
+                        message: "Summary metric has non-summary value".to_string(),
                     });
                 }
             }
         };
-        
+
         // Send the metric
         self.send_metric(&wire_format)?;
-        
+
         Ok(wire_format)
     }
 }
@@ -162,16 +163,16 @@ mod tests {
             prefix: "test.".to_string(),
             sample_rate: 1.0,
         };
-        
+
         let metric = MockGauge {
             name: "cpu_usage".to_string(),
             value: 75.5,
         };
-        
+
         // We can't easily test the network send in unit tests, but we can test the format
         let snapshot = metric.snapshot();
         let expected = "test.cpu_usage:75.500|g";
-        
+
         // Test the format logic
         if let Some(value) = snapshot.value.as_gauge() {
             let format = format!("{}{}:{:.3}|g", exporter.prefix, snapshot.name, value);
@@ -183,11 +184,9 @@ mod tests {
     fn test_statsd_exporter_creation() {
         let result = StatsDExporter::new("127.0.0.1:8125");
         assert!(result.is_ok());
-        
-        let exporter = result.unwrap()
-            .with_prefix("custom.")
-            .with_sample_rate(0.5);
-        
+
+        let exporter = result.unwrap().with_prefix("custom.").with_sample_rate(0.5);
+
         assert_eq!(exporter.prefix, "custom.");
         assert_eq!(exporter.sample_rate, 0.5);
     }

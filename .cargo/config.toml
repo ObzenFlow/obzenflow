@@ -1,0 +1,5 @@
+[alias]
+console-run = "run --package obzenflow --features console"
+
+[build]
+rustflags = ["--cfg", "tokio_unstable"]

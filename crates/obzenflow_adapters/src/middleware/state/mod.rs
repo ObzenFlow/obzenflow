@@ -5,4 +5,4 @@
 
 pub mod windowing;
 
-pub use windowing::{WindowingMiddleware, WindowingMiddlewareFactory, AggregationType};
+pub use windowing::{AggregationType, WindowingMiddleware, WindowingMiddlewareFactory};

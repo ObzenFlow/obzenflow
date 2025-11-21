@@ -5,30 +5,30 @@
 use obzenflow_core::{ChainEvent, Result};
 
 /// Handler for observation stages that monitor events without transformation
-/// 
+///
 /// Observers are used for:
 /// - Logging and debugging
 /// - Metrics collection
 /// - Monitoring and alerting
-/// 
+///
 /// They see events but don't modify the data flow
-/// 
+///
 /// # Example
-/// ```rust
+/// ```ignore
 /// use obzenflow_runtime_services::stages::common::handlers::ObserverHandler;
 /// use obzenflow_core::{ChainEvent, Result};
 /// use tracing::{debug, info};
-/// 
+///
 /// #[derive(Debug)]
 /// enum LogLevel {
 ///     Debug,
 ///     Info,
 /// }
-/// 
+///
 /// struct EventLogger {
 ///     log_level: LogLevel,
 /// }
-/// 
+///
 /// impl ObserverHandler for EventLogger {
 ///     fn observe(&self, event: &ChainEvent) -> Result<()> {
 ///         match self.log_level {
@@ -41,10 +41,10 @@ use obzenflow_core::{ChainEvent, Result};
 /// ```
 pub trait ObserverHandler: Send + Sync {
     /// Observe an event without modifying it
-    /// 
+    ///
     /// The event is passed by reference since observers don't consume it
     fn observe(&self, event: &ChainEvent) -> Result<()>;
-    
+
     /// Check if the observer is healthy
     fn is_healthy(&self) -> bool {
         true

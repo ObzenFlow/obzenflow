@@ -1,7 +1,7 @@
 //! Configuration for stateful stages
 
-use obzenflow_core::StageId;
 use crate::stages::common::control_strategies::ControlEventStrategy;
+use obzenflow_core::StageId;
 use std::sync::Arc;
 
 /// Configuration for a stateful stage

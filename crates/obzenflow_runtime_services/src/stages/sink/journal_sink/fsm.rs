@@ -4,19 +4,20 @@
 //! They have a unique "Flushing" state that ensures all buffered
 //! data is written before shutdown.
 
-use obzenflow_fsm::{StateVariant, EventVariant, FsmContext, FsmAction};
-use obzenflow_core::{ChainEvent, EventId, WriterId, StageId, FlowId};
+use crate::messaging::UpstreamSubscription;
+use crate::metrics::instrumentation::StageInstrumentation;
+use crate::stages::common::control_strategies::ControlEventStrategy;
+use crate::stages::common::handlers::SinkHandler;
+use futures::TryFutureExt;
+use obzenflow_core::event::context::{FlowContext, StageType};
 use obzenflow_core::event::{ChainEventFactory, SystemEvent};
 use obzenflow_core::journal::journal::Journal;
+use obzenflow_core::{ChainEvent, EventId, FlowId, StageId, WriterId};
+use obzenflow_fsm::{EventVariant, FsmAction, FsmContext, StateVariant};
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 use std::marker::PhantomData;
-use futures::TryFutureExt;
+use std::sync::Arc;
 use tokio::sync::RwLock;
-use obzenflow_core::event::context::{FlowContext, StageType};
-use crate::stages::common::handlers::SinkHandler;
-use crate::metrics::instrumentation::StageInstrumentation;
-use crate::messaging::UpstreamSubscription;
 
 // ============================================================================
 // FSM States
@@ -27,26 +28,26 @@ use crate::messaging::UpstreamSubscription;
 pub enum JournalSinkState<H> {
     /// Initial state - sink has been created but not initialized
     Created,
-    
+
     /// Resources allocated (DB connections, file handles, etc.)
     Initialized,
-    
+
     /// Actively consuming events and writing to destination
     Running,
-    
+
     /// UNIQUE TO SINKS: Flushing any buffered data before drain
     /// This ensures no data loss during shutdown
     Flushing,
-    
+
     /// Flushing complete, waiting for remaining events
     Draining,
-    
+
     /// All events consumed, resources cleaned up
     Drained,
-    
+
     /// Unrecoverable error occurred
     Failed(String),
-    
+
     #[serde(skip)]
     _Phantom(PhantomData<H>),
 }
@@ -103,7 +104,7 @@ impl<H: Send + Sync + 'static> StateVariant for JournalSinkState<H> {
             JournalSinkState::Created => "Created",
             JournalSinkState::Initialized => "Initialized",
             JournalSinkState::Running => "Running",
-            JournalSinkState::Flushing => "Flushing",  // Unique to sinks!
+            JournalSinkState::Flushing => "Flushing", // Unique to sinks!
             JournalSinkState::Draining => "Draining",
             JournalSinkState::Drained => "Drained",
             JournalSinkState::Failed(_) => "Failed",
@@ -120,26 +121,26 @@ impl<H: Send + Sync + 'static> StateVariant for JournalSinkState<H> {
 pub enum JournalSinkEvent<H> {
     /// Initialize the sink - open connections, create output files, etc.
     Initialize,
-    
+
     /// Ready to consume events
     Ready,
-    
+
     /// Received EOF from all upstream stages
     ReceivedEOF,
-    
+
     /// Begin flush operation - write any buffered data
     /// UNIQUE TO SINKS: Ensures no data loss
     BeginFlush,
-    
+
     /// Flush operation completed successfully
     FlushComplete,
-    
+
     /// Begin graceful shutdown (after flush)
     BeginDrain,
-    
+
     /// Unrecoverable error occurred
     Error(String),
-    
+
     #[doc(hidden)]
     _Phantom(PhantomData<H>),
 }
@@ -181,7 +182,7 @@ impl<H: Send + Sync + 'static> EventVariant for JournalSinkEvent<H> {
             JournalSinkEvent::Initialize => "Initialize",
             JournalSinkEvent::Ready => "Ready",
             JournalSinkEvent::ReceivedEOF => "ReceivedEOF",
-            JournalSinkEvent::BeginFlush => "BeginFlush",      // Sink-specific!
+            JournalSinkEvent::BeginFlush => "BeginFlush", // Sink-specific!
             JournalSinkEvent::FlushComplete => "FlushComplete", // Sink-specific!
             JournalSinkEvent::BeginDrain => "BeginDrain",
             JournalSinkEvent::Error(_) => "Error",
@@ -200,19 +201,19 @@ pub enum JournalSinkAction<H> {
     /// - Register writer ID with journal
     /// - Create subscription to upstream stages
     AllocateResources,
-    
+
     /// Publish running event to journal
     PublishRunning,
-    
+
     /// Send completion event to journal
     SendCompletion,
-    
+
     /// Flush any buffered data to ensure durability
     FlushBuffers,
-    
+
     /// Clean up all resources
     Cleanup,
-    
+
     #[doc(hidden)]
     _Phantom(PhantomData<H>),
 }
@@ -253,51 +254,54 @@ impl<H> std::fmt::Debug for JournalSinkAction<H> {
 pub struct JournalSinkContext<H: SinkHandler> {
     /// The handler instance that implements sink logic
     pub handler: Arc<RwLock<H>>,
-    
+
     /// This sink's stage ID
     pub stage_id: obzenflow_core::StageId,
-    
+
     /// Human-readable stage name for logging
     pub stage_name: String,
-    
+
     /// Flow name for flow context
     pub flow_name: String,
-    
+
     /// Flow ID from pipeline
     pub flow_id: FlowId,
-    
+
     /// Data journal for writing delivery events
     pub data_journal: Arc<dyn Journal<ChainEvent>>,
-    
+
     /// Error journal for writing error events (FLOWIP-082e)
     pub error_journal: Arc<dyn Journal<ChainEvent>>,
-    
+
     /// System journal for writing lifecycle events
     pub system_journal: Arc<dyn Journal<SystemEvent>>,
-    
+
     /// Upstream journals for reading events
     pub upstream_journals: Vec<(StageId, Arc<dyn Journal<ChainEvent>>)>,
-    
+
     /// Message bus for pipeline communication
     pub bus: Arc<crate::message_bus::FsmMessageBus>,
-    
+
     /// Writer ID for this sink (initialized during setup)
     pub writer_id: Arc<RwLock<Option<WriterId>>>,
-    
+
     /// Subscription to upstream events
     pub subscription: Arc<RwLock<Option<UpstreamSubscription<ChainEvent>>>>,
-    
+
     /// Processing task handle (moved from supervisor to follow FSM patterns)
     pub processing_task: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
-    
+
     /// Upstream stage IDs
     pub upstream_stages: Vec<obzenflow_core::StageId>,
-    
+
     /// Track if we're currently flushing
     pub is_flushing: Arc<RwLock<bool>>,
-    
+
     /// Stage instrumentation for metrics tracking
     pub instrumentation: Arc<StageInstrumentation>,
+
+    /// Control strategy for FlowControl events
+    pub control_strategy: Arc<dyn ControlEventStrategy>,
 }
 
 impl<H: SinkHandler> JournalSinkContext<H> {
@@ -313,6 +317,7 @@ impl<H: SinkHandler> JournalSinkContext<H> {
         upstream_journals: Vec<(StageId, Arc<dyn Journal<ChainEvent>>)>,
         bus: Arc<crate::message_bus::FsmMessageBus>,
         upstream_stages: Vec<StageId>,
+        control_strategy: Arc<dyn ControlEventStrategy>,
         instrumentation: Arc<StageInstrumentation>,
     ) -> Self {
         Self {
@@ -331,6 +336,7 @@ impl<H: SinkHandler> JournalSinkContext<H> {
             processing_task: Arc::new(RwLock::new(None)),
             upstream_stages,
             is_flushing: Arc::new(RwLock::new(false)),
+            control_strategy,
             instrumentation,
         }
     }
@@ -345,51 +351,59 @@ impl<H: SinkHandler + 'static> FsmContext for JournalSinkContext<H> {}
 #[async_trait::async_trait]
 impl<H: SinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAction<H> {
     type Context = JournalSinkContext<H>;
-    
+
     async fn execute(&self, ctx: &Self::Context) -> Result<(), String> {
         match self {
             JournalSinkAction::AllocateResources => {
                 // Create WriterId from our StageId
                 let writer_id = WriterId::from(ctx.stage_id.clone());
                 *ctx.writer_id.write().await = Some(writer_id);
-                
+
+                tracing::info!(
+                    stage_name = %ctx.stage_name,
+                    upstream_count = ctx.upstream_journals.len(),
+                    upstream_stages = ?ctx.upstream_journals.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+                    "Sink creating upstream subscription"
+                );
+
                 // Create subscription from upstream journals
-                let subscription = UpstreamSubscription::new(&ctx.upstream_journals).await
+                let subscription = UpstreamSubscription::new(&ctx.upstream_journals)
+                    .await
                     .map_err(|e| format!("Failed to create subscription: {:?}", e))?;
-                
+
                 *ctx.subscription.write().await = Some(subscription);
-                
+
                 tracing::info!(
                     stage_name = %ctx.stage_name,
                     "Sink allocated resources and created subscription"
                 );
                 Ok(())
             }
-            
+
             JournalSinkAction::PublishRunning => {
                 let running_event = SystemEvent::stage_running(ctx.stage_id);
-                
+
                 ctx.system_journal
                     .append(running_event, None)
                     .await
                     .map_err(|e| format!("Failed to publish running event: {}", e))?;
-                
+
                 tracing::info!(
                     stage_name = %ctx.stage_name,
                     "Sink published running event"
                 );
                 Ok(())
             }
-            
+
             JournalSinkAction::SendCompletion => {
                 // Write completion event to system journal
                 let completion_event = SystemEvent::stage_completed(ctx.stage_id);
-                
+
                 ctx.system_journal
                     .append(completion_event, None)
                     .await
                     .map_err(|e| format!("Failed to write completion event: {}", e))?;
-                
+
                 tracing::info!(
                     stage_name = %ctx.stage_name,
                     "Sink sent completion event"
@@ -413,23 +427,22 @@ impl<H: SinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAction<H> 
                             .expect("writer_id not initialised")
                             .clone();
 
-
                         let flow_ctx = FlowContext {
-                            flow_name:  ctx.flow_name.clone(),
-                            flow_id:    ctx.flow_id.to_string(),
+                            flow_name: ctx.flow_name.clone(),
+                            flow_id: ctx.flow_id.to_string(),
                             stage_name: ctx.stage_name.clone(),
                             stage_id: ctx.stage_id.clone(),
-                            stage_type: StageType::Sink,   // or whatever enum case
+                            stage_type: StageType::Sink, // or whatever enum case
                         };
 
                         let evt = ChainEventFactory::delivery_event(writer_id, payload)
                             .with_flow_context(flow_ctx)
                             .with_runtime_context(ctx.instrumentation.snapshot());
 
-                        ctx.data_journal.append(evt, None)
+                        ctx.data_journal
+                            .append(evt, None)
                             .await
                             .map_err(|e| format!("Failed to write delivery receipt: {e}"))?;
-
                     }
                     Ok(None) => { /* flush succeeded, nothing to record */ }
                     Err(e) => return Err(format!("Failed to flush: {e:?}").into()),
@@ -440,26 +453,28 @@ impl<H: SinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAction<H> 
                 tracing::info!(stage_name=%ctx.stage_name, "Sink flushed buffers");
                 Ok(())
             }
-            
+
             JournalSinkAction::Cleanup => {
                 // Call handler drain before stopping tasks
                 let mut handler = ctx.handler.write().await;
-                handler.drain().await
+                handler
+                    .drain()
+                    .await
                     .map_err(|e| format!("Failed to drain handler: {:?}", e))?;
                 drop(handler);
-                
+
                 // Stop the processing task
                 if let Some(task) = ctx.processing_task.write().await.take() {
                     task.abort();
                 }
-                
+
                 tracing::info!(
                     stage_name = %ctx.stage_name,
                     "Sink cleaned up resources"
                 );
                 Ok(())
             }
-            
+
             JournalSinkAction::_Phantom(_) => unreachable!("PhantomData variant"),
         }
     }

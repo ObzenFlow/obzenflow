@@ -1,7 +1,7 @@
 //! Handle for stateful stages
 
-use crate::supervised_base::{StandardHandle, HandleError, SupervisorHandle};
 use crate::stages::common::handlers::StatefulHandler;
+use crate::supervised_base::{HandleError, StandardHandle, SupervisorHandle};
 
 use super::fsm::{StatefulEvent, StatefulState};
 

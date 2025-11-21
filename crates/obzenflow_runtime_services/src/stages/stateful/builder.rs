@@ -2,24 +2,24 @@
 
 use std::sync::Arc;
 
+use crate::message_bus::FsmMessageBus;
+use crate::metrics::instrumentation::StageInstrumentation;
+use crate::stages::common::control_strategies::{ControlEventStrategy, JonestownStrategy};
+use crate::stages::common::handlers::StatefulHandler;
+use crate::supervised_base::base::Supervisor;
+use crate::supervised_base::{
+    BuilderError, ChannelBuilder, EventLoopDirective, EventReceiver, HandleBuilder,
+    HandlerSupervised, HandlerSupervisedExt, StateWatcher, SupervisorBuilder,
+    SupervisorTaskBuilder,
+};
+use obzenflow_core::event::SystemEvent;
 use obzenflow_core::journal::journal::Journal;
 use obzenflow_core::{ChainEvent, StageId};
-use obzenflow_core::event::SystemEvent;
-use crate::message_bus::FsmMessageBus;
-use crate::stages::common::handlers::StatefulHandler;
-use crate::stages::common::control_strategies::{ControlEventStrategy, JonestownStrategy};
-use crate::metrics::instrumentation::StageInstrumentation;
-use crate::supervised_base::{
-    SupervisorBuilder, BuilderError, ChannelBuilder, SupervisorTaskBuilder,
-    HandlerSupervisedExt, HandleBuilder, EventReceiver, StateWatcher,
-    EventLoopDirective, HandlerSupervised,
-};
-use crate::supervised_base::base::Supervisor;
 
 use super::config::StatefulConfig;
+use super::fsm::{StatefulAction, StatefulContext, StatefulEvent, StatefulState};
 use super::handle::StatefulHandle;
 use super::supervisor::StatefulSupervisor;
-use super::fsm::{StatefulState, StatefulContext, StatefulEvent, StatefulAction};
 
 /// Builder for creating stateful stages
 pub struct StatefulBuilder<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> {
@@ -73,7 +73,9 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> State
 }
 
 #[async_trait::async_trait]
-impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> SupervisorBuilder for StatefulBuilder<H> {
+impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> SupervisorBuilder
+    for StatefulBuilder<H>
+{
     type Handle = StatefulHandle<H>;
     type Error = BuilderError;
 
@@ -83,11 +85,14 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Super
             ChannelBuilder::new().build(StatefulState::<H>::Created);
 
         // Use provided strategy or default to JonestownStrategy
-        let control_strategy = self.config.control_strategy
+        let control_strategy = self
+            .config
+            .control_strategy
             .unwrap_or_else(|| Arc::new(JonestownStrategy));
 
         // Create instrumentation if not provided
-        let instrumentation = self.instrumentation
+        let instrumentation = self
+            .instrumentation
             .unwrap_or_else(|| Arc::new(StageInstrumentation::new()));
 
         // Create context
@@ -121,8 +126,8 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Super
 
         // Spawn the supervisor task
         let supervisor_name = format!("stateful_{}", self.config.stage_name);
-        let task = SupervisorTaskBuilder::<StatefulSupervisor<H>>::new(&supervisor_name)
-            .spawn(move || async move {
+        let task = SupervisorTaskBuilder::<StatefulSupervisor<H>>::new(&supervisor_name).spawn(
+            move || async move {
                 // Create a wrapper that handles external events
                 let supervisor_with_events = HandlerSupervisedWithExternalEvents {
                     supervisor,
@@ -135,8 +140,10 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Super
                     supervisor_with_events,
                     StatefulState::<H>::Created,
                     context,
-                ).await
-            });
+                )
+                .await
+            },
+        );
 
         // Build and return handle
         HandleBuilder::new()
@@ -149,14 +156,18 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Super
 }
 
 /// Internal wrapper that bridges external events with the handler-supervised supervisor
-struct HandlerSupervisedWithExternalEvents<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> {
+struct HandlerSupervisedWithExternalEvents<
+    H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
+> {
     supervisor: StatefulSupervisor<H>,
     external_events: EventReceiver<StatefulEvent<H>>,
     state_watcher: StateWatcher<StatefulState<H>>,
 }
 
 // Delegate trait implementations to the inner supervisor
-impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Supervisor for HandlerSupervisedWithExternalEvents<H> {
+impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Supervisor
+    for HandlerSupervisedWithExternalEvents<H>
+{
     type State = StatefulState<H>;
     type Event = StatefulEvent<H>;
     type Context = StatefulContext<H>;
@@ -175,10 +186,15 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Super
 }
 
 // Implement Sealed for the wrapper
-impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> crate::supervised_base::base::private::Sealed for HandlerSupervisedWithExternalEvents<H> {}
+impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
+    crate::supervised_base::base::private::Sealed for HandlerSupervisedWithExternalEvents<H>
+{
+}
 
 #[async_trait::async_trait]
-impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSupervised for HandlerSupervisedWithExternalEvents<H> {
+impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSupervised
+    for HandlerSupervisedWithExternalEvents<H>
+{
     type Handler = H;
 
     fn writer_id(&self) -> obzenflow_core::WriterId {
@@ -212,9 +228,9 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
             Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
                 // Channel closed, initiate shutdown only if not already failed
                 if !matches!(state, StatefulState::Failed(_)) {
-                    return Ok(EventLoopDirective::Transition(
-                        StatefulEvent::Error("External control channel closed".to_string()),
-                    ));
+                    return Ok(EventLoopDirective::Transition(StatefulEvent::Error(
+                        "External control channel closed".to_string(),
+                    )));
                 }
             }
         }

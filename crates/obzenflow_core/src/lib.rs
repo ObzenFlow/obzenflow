@@ -14,20 +14,20 @@ pub mod web;
 
 // Re-export key types for convenience
 pub use error::Result;
-pub use event::EventId;
-pub use event::{WriterId, JournalWriterId};
 pub use event::chain_event::ChainEvent;
+pub use event::context::runtime_context;
 pub use event::event_envelope::EventEnvelope;
+pub use event::EventId;
+pub use event::{JournalWriterId, WriterId};
 pub use journal::journal::Journal;
 pub use journal::journal_error::JournalError;
 pub use journal::journal_owner::JournalOwner;
-pub use event::context::runtime_context;
 
 // Re-export schema types (FLOWIP-082a)
 pub use event::schema::TypedPayload;
 
 // Re-export typed IDs
-pub use id::{StageId, FlowId, JournalId, SystemId};
+pub use id::{FlowId, JournalId, StageId, SystemId};
 
 // Re-export Ulid for convenience since it's used in many IDs
 pub use ulid::Ulid;

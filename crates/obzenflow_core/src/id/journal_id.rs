@@ -13,17 +13,17 @@ impl JournalId {
     pub fn new() -> Self {
         JournalId(Ulid::new())
     }
-    
+
     /// Create from an existing Ulid
     pub fn from_ulid(ulid: Ulid) -> Self {
         JournalId(ulid)
     }
-    
+
     /// Get the inner ULID
     pub fn as_ulid(&self) -> &Ulid {
         &self.0
     }
-    
+
     /// Convert to Ulid
     pub fn into_ulid(self) -> Ulid {
         self.0

@@ -6,23 +6,23 @@
 
 use criterion::{criterion_group, criterion_main, Criterion};
 use obzenflow_benchmarks::prelude::*;
-use obzenflow_dsl_infra::{flow, source, transform, sink};
-use obzenflow_runtime_services::stages::common::handlers::{
-    FiniteSourceHandler, TransformHandler, SinkHandler
-};
-use obzenflow_infra::journal::DiskJournal;
-use obzenflow_core::event::event_id::EventId;
 use obzenflow_core::event::chain_event::ChainEvent;
+use obzenflow_core::event::event_id::EventId;
 use obzenflow_core::journal::writer_id::WriterId;
+use obzenflow_dsl_infra::{flow, sink, source, transform};
+use obzenflow_infra::journal::DiskJournal;
+use obzenflow_runtime_services::stages::common::handlers::{
+    FiniteSourceHandler, SinkHandler, TransformHandler,
+};
 // Monitoring removed per FLOWIP-056-666
+use async_trait::async_trait;
+use serde_json::json;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use serde_json::json;
+use sysinfo::{Pid, ProcessExt, System, SystemExt};
+use tempfile::{tempdir, TempDir};
 use tokio::runtime::Runtime;
-use sysinfo::{System, SystemExt, ProcessExt, Pid};
-use tempfile::{TempDir, tempdir};
-use async_trait::async_trait;
 
 /// Idle source that doesn't emit any events
 struct IdleSource {
@@ -59,13 +59,18 @@ struct TimestampedSink {
 
 impl TimestampedSink {
     fn new(expected_count: u64) -> (Self, Arc<tokio::sync::Mutex<Vec<Duration>>>) {
-        let latencies = Arc::new(tokio::sync::Mutex::new(Vec::with_capacity(expected_count as usize)));
+        let latencies = Arc::new(tokio::sync::Mutex::new(Vec::with_capacity(
+            expected_count as usize,
+        )));
         let received = Arc::new(AtomicU64::new(0));
-        (Self {
-            expected_count,
-            received: received.clone(),
-            latencies: latencies.clone(),
-        }, latencies)
+        (
+            Self {
+                expected_count,
+                received: received.clone(),
+                latencies: latencies.clone(),
+            },
+            latencies,
+        )
     }
 }
 
@@ -73,13 +78,17 @@ impl TimestampedSink {
 impl SinkHandler for TimestampedSink {
     fn consume(&mut self, event: ChainEvent) -> obzenflow_core::Result<()> {
         if let (Some(emit_time_nanos), Some(index)) = (
-            event.payload.get("emit_time_nanos").and_then(|v| v.as_u64()),
-            event.payload.get("index").and_then(|v| v.as_u64())
+            event
+                .payload
+                .get("emit_time_nanos")
+                .and_then(|v| v.as_u64()),
+            event.payload.get("index").and_then(|v| v.as_u64()),
         ) {
             self.received.fetch_add(1, Ordering::Relaxed);
 
             // Skip warmup events for latency calculation
-            if index >= 10 {  // WARMUP_EVENT_COUNT
+            if index >= 10 {
+                // WARMUP_EVENT_COUNT
                 // Calculate latency from embedded timestamp
                 let receive_time_nanos = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -134,116 +143,116 @@ async fn build_pipeline(
     stage_count: usize,
     source: IdleSource,
     sink: TimestampedSink,
-    journal: Arc<DiskJournal>
+    journal: Arc<DiskJournal>,
 ) -> anyhow::Result<FlowHandle> {
     let handle = match stage_count {
-        1 => {
-            flow! {
-                journal: journal,
-                middleware: [],
-                
-                stages: {
-                    src = source!("source" => source);
-                    snk = sink!("sink" => sink);
-                },
-                
-                topology: {
-                    src |> snk;
-                }
-            }.await.map_err(|e| anyhow::anyhow!("Failed to create flow: {:?}", e))?
+        1 => flow! {
+            journal: journal,
+            middleware: [],
+
+            stages: {
+                src = source!("source" => source);
+                snk = sink!("sink" => sink);
+            },
+
+            topology: {
+                src |> snk;
+            }
         }
-        10 => {
-            flow! {
-                journal: journal,
-                middleware: [],
-                
-                stages: {
-                    src = source!("source" => source);
-                    s1 = transform!("stage1" => PassthroughStage::new("stage1"));
-                    s2 = transform!("stage2" => PassthroughStage::new("stage2"));
-                    s3 = transform!("stage3" => PassthroughStage::new("stage3"));
-                    s4 = transform!("stage4" => PassthroughStage::new("stage4"));
-                    s5 = transform!("stage5" => PassthroughStage::new("stage5"));
-                    s6 = transform!("stage6" => PassthroughStage::new("stage6"));
-                    s7 = transform!("stage7" => PassthroughStage::new("stage7"));
-                    s8 = transform!("stage8" => PassthroughStage::new("stage8"));
-                    s9 = transform!("stage9" => PassthroughStage::new("stage9"));
-                    snk = sink!("sink" => sink);
-                },
-                
-                topology: {
-                    src |> s1;
-                    s1 |> s2;
-                    s2 |> s3;
-                    s3 |> s4;
-                    s4 |> s5;
-                    s5 |> s6;
-                    s6 |> s7;
-                    s7 |> s8;
-                    s8 |> s9;
-                    s9 |> snk;
-                }
-            }.await.map_err(|e| anyhow::anyhow!("Failed to create flow: {:?}", e))?
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to create flow: {:?}", e))?,
+        10 => flow! {
+            journal: journal,
+            middleware: [],
+
+            stages: {
+                src = source!("source" => source);
+                s1 = transform!("stage1" => PassthroughStage::new("stage1"));
+                s2 = transform!("stage2" => PassthroughStage::new("stage2"));
+                s3 = transform!("stage3" => PassthroughStage::new("stage3"));
+                s4 = transform!("stage4" => PassthroughStage::new("stage4"));
+                s5 = transform!("stage5" => PassthroughStage::new("stage5"));
+                s6 = transform!("stage6" => PassthroughStage::new("stage6"));
+                s7 = transform!("stage7" => PassthroughStage::new("stage7"));
+                s8 = transform!("stage8" => PassthroughStage::new("stage8"));
+                s9 = transform!("stage9" => PassthroughStage::new("stage9"));
+                snk = sink!("sink" => sink);
+            },
+
+            topology: {
+                src |> s1;
+                s1 |> s2;
+                s2 |> s3;
+                s3 |> s4;
+                s4 |> s5;
+                s5 |> s6;
+                s6 |> s7;
+                s7 |> s8;
+                s8 |> s9;
+                s9 |> snk;
+            }
         }
-        20 => {
-            flow! {
-                journal: journal,
-                middleware: [],
-                
-                stages: {
-                    src = source!("source" => source);
-                    s1 = transform!("stage1" => PassthroughStage::new("stage1"));
-                    s2 = transform!("stage2" => PassthroughStage::new("stage2"));
-                    s3 = transform!("stage3" => PassthroughStage::new("stage3"));
-                    s4 = transform!("stage4" => PassthroughStage::new("stage4"));
-                    s5 = transform!("stage5" => PassthroughStage::new("stage5"));
-                    s6 = transform!("stage6" => PassthroughStage::new("stage6"));
-                    s7 = transform!("stage7" => PassthroughStage::new("stage7"));
-                    s8 = transform!("stage8" => PassthroughStage::new("stage8"));
-                    s9 = transform!("stage9" => PassthroughStage::new("stage9"));
-                    s10 = transform!("stage10" => PassthroughStage::new("stage10"));
-                    s11 = transform!("stage11" => PassthroughStage::new("stage11"));
-                    s12 = transform!("stage12" => PassthroughStage::new("stage12"));
-                    s13 = transform!("stage13" => PassthroughStage::new("stage13"));
-                    s14 = transform!("stage14" => PassthroughStage::new("stage14"));
-                    s15 = transform!("stage15" => PassthroughStage::new("stage15"));
-                    s16 = transform!("stage16" => PassthroughStage::new("stage16"));
-                    s17 = transform!("stage17" => PassthroughStage::new("stage17"));
-                    s18 = transform!("stage18" => PassthroughStage::new("stage18"));
-                    s19 = transform!("stage19" => PassthroughStage::new("stage19"));
-                    snk = sink!("sink" => sink);
-                },
-                
-                topology: {
-                    src |> s1;
-                    s1 |> s2;
-                    s2 |> s3;
-                    s3 |> s4;
-                    s4 |> s5;
-                    s5 |> s6;
-                    s6 |> s7;
-                    s7 |> s8;
-                    s8 |> s9;
-                    s9 |> s10;
-                    s10 |> s11;
-                    s11 |> s12;
-                    s12 |> s13;
-                    s13 |> s14;
-                    s14 |> s15;
-                    s15 |> s16;
-                    s16 |> s17;
-                    s17 |> s18;
-                    s18 |> s19;
-                    s19 |> snk;
-                }
-            }.await.map_err(|e| anyhow::anyhow!("Failed to create flow: {:?}", e))?
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to create flow: {:?}", e))?,
+        20 => flow! {
+            journal: journal,
+            middleware: [],
+
+            stages: {
+                src = source!("source" => source);
+                s1 = transform!("stage1" => PassthroughStage::new("stage1"));
+                s2 = transform!("stage2" => PassthroughStage::new("stage2"));
+                s3 = transform!("stage3" => PassthroughStage::new("stage3"));
+                s4 = transform!("stage4" => PassthroughStage::new("stage4"));
+                s5 = transform!("stage5" => PassthroughStage::new("stage5"));
+                s6 = transform!("stage6" => PassthroughStage::new("stage6"));
+                s7 = transform!("stage7" => PassthroughStage::new("stage7"));
+                s8 = transform!("stage8" => PassthroughStage::new("stage8"));
+                s9 = transform!("stage9" => PassthroughStage::new("stage9"));
+                s10 = transform!("stage10" => PassthroughStage::new("stage10"));
+                s11 = transform!("stage11" => PassthroughStage::new("stage11"));
+                s12 = transform!("stage12" => PassthroughStage::new("stage12"));
+                s13 = transform!("stage13" => PassthroughStage::new("stage13"));
+                s14 = transform!("stage14" => PassthroughStage::new("stage14"));
+                s15 = transform!("stage15" => PassthroughStage::new("stage15"));
+                s16 = transform!("stage16" => PassthroughStage::new("stage16"));
+                s17 = transform!("stage17" => PassthroughStage::new("stage17"));
+                s18 = transform!("stage18" => PassthroughStage::new("stage18"));
+                s19 = transform!("stage19" => PassthroughStage::new("stage19"));
+                snk = sink!("sink" => sink);
+            },
+
+            topology: {
+                src |> s1;
+                s1 |> s2;
+                s2 |> s3;
+                s3 |> s4;
+                s4 |> s5;
+                s5 |> s6;
+                s6 |> s7;
+                s7 |> s8;
+                s8 |> s9;
+                s9 |> s10;
+                s10 |> s11;
+                s11 |> s12;
+                s12 |> s13;
+                s13 |> s14;
+                s14 |> s15;
+                s15 |> s16;
+                s16 |> s17;
+                s17 |> s18;
+                s18 |> s19;
+                s19 |> snk;
+            }
         }
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to create flow: {:?}", e))?,
         100 => {
             // For 100 stages, simplify to 10 stages for maintainability
             flow! {
                 journal: journal,
                 middleware: [],
-                
+
                 stages: {
                     src = source!("source" => source);
                     s1 = transform!("stage1" => PassthroughStage::new("stage1"));
@@ -257,7 +266,7 @@ async fn build_pipeline(
                     s9 = transform!("stage9" => PassthroughStage::new("stage9"));
                     snk = sink!("sink" => sink);
                 },
-                
+
                 topology: {
                     src |> s1;
                     s1 |> s2;
@@ -270,7 +279,9 @@ async fn build_pipeline(
                     s8 |> s9;
                     s9 |> snk;
                 }
-            }.await.map_err(|e| anyhow::anyhow!("Failed to create flow: {:?}", e))?
+            }
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to create flow: {:?}", e))?
         }
         _ => return Err(anyhow::anyhow!("Unsupported stage count: {}", stage_count)),
     };
@@ -289,19 +300,23 @@ async fn measure_idle_cpu() -> anyhow::Result<f64> {
     let handle = flow! {
         journal: journal,
         middleware: [GoldenSignals::monitoring()],
-        
+
         stages: {
             src = source!("source" => idle_source);
             snk = sink!("sink" => sink, [RED::monitoring()]);
         },
-        
+
         topology: {
             src |> snk;
         }
-    }.await.map_err(|e| anyhow::anyhow!("Failed to create flow: {:?}", e))?;
+    }
+    .await
+    .map_err(|e| anyhow::anyhow!("Failed to create flow: {:?}", e))?;
 
     // Start the pipeline
-    handle.run().await
+    handle
+        .run()
+        .await
         .map_err(|e| anyhow::anyhow!("Failed to run pipeline: {:?}", e))?;
 
     // Let pipeline stabilize
@@ -342,8 +357,8 @@ fn bench_idle_cpu_usage(c: &mut Criterion) {
     let mut group = c.benchmark_group("idle_cpu_usage");
 
     // Configure for CPU measurement
-    group.sample_size(10);  // Minimum required by Criterion
-    group.measurement_time(Duration::from_secs(45));  // Increased for CPU measurement stability
+    group.sample_size(10); // Minimum required by Criterion
+    group.measurement_time(Duration::from_secs(45)); // Increased for CPU measurement stability
 
     group.bench_function("cpu_percentage", |b| {
         b.to_async(&rt).iter(|| async {
@@ -362,8 +377,8 @@ fn bench_idle_cpu_by_depth(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
     let mut group = c.benchmark_group("idle_cpu_by_depth");
 
-    group.sample_size(10);  // Minimum required by Criterion
-    group.measurement_time(Duration::from_secs(45));  // Increased for CPU measurement stability
+    group.sample_size(10); // Minimum required by Criterion
+    group.measurement_time(Duration::from_secs(45)); // Increased for CPU measurement stability
 
     let stage_counts = vec![1, 10, 20, 100];
 
@@ -382,7 +397,8 @@ fn bench_idle_cpu_by_depth(c: &mut Criterion) {
 
 /// Measure idle CPU with a specific number of stages
 async fn measure_idle_cpu_with_stages(stage_count: usize) -> anyhow::Result<f64> {
-    let (journal, _temp_dir) = create_temp_journal(&format!("idle_cpu_{}_stages", stage_count)).await?;
+    let (journal, _temp_dir) =
+        create_temp_journal(&format!("idle_cpu_{}_stages", stage_count)).await?;
 
     let idle_source = IdleSource::new();
     let (sink, _) = TimestampedSink::new(0);
@@ -391,7 +407,9 @@ async fn measure_idle_cpu_with_stages(stage_count: usize) -> anyhow::Result<f64>
     let handle = build_pipeline(stage_count, idle_source, sink, journal).await?;
 
     // Start the pipeline
-    handle.run().await
+    handle
+        .run()
+        .await
         .map_err(|e| anyhow::anyhow!("Failed to run pipeline: {:?}", e))?;
 
     // Let stabilize
@@ -404,7 +422,8 @@ async fn measure_idle_cpu_with_stages(stage_count: usize) -> anyhow::Result<f64>
     system.refresh_process(pid);
     let mut cpu_samples = Vec::new();
 
-    for _ in 0..20 { // 2 seconds of sampling
+    for _ in 0..20 {
+        // 2 seconds of sampling
         tokio::time::sleep(Duration::from_millis(100)).await;
         system.refresh_process(pid);
 
@@ -424,9 +443,5 @@ async fn measure_idle_cpu_with_stages(stage_count: usize) -> anyhow::Result<f64>
     Ok(avg_cpu as f64)
 }
 
-criterion_group!(
-    benches,
-    bench_idle_cpu_usage,
-    bench_idle_cpu_by_depth
-);
+criterion_group!(benches, bench_idle_cpu_usage, bench_idle_cpu_by_depth);
 criterion_main!(benches);

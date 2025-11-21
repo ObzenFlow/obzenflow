@@ -3,19 +3,19 @@
 pub enum JournalError {
     #[error("Journal is full")]
     Full,
-    
+
     #[error("Event not found: {0}")]
     EventNotFound(String),
-    
+
     #[error("Writer not authorized")]
     Unauthorized,
-    
+
     #[error("Causal ordering violation")]
     CausalityViolation,
-    
+
     #[error("Subscription closed")]
     SubscriptionClosed,
-    
+
     /// Generic implementation error with source
     #[error("Implementation error: {message}")]
     Implementation {

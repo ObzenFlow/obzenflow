@@ -5,24 +5,21 @@
 //!
 //! Run with: cargo run --package obzenflow --example top_n_leaderboard
 
-use obzenflow_dsl_infra::{flow, source, stateful, sink};
-use obzenflow_runtime_services::stages::common::handlers::{
-    FiniteSourceHandler, SinkHandler
-};
-use obzenflow_runtime_services::stages::stateful::accumulators::TopNTyped;
-use obzenflow_infra::application::FlowApplication;
-use obzenflow_infra::journal::disk_journals;
-use obzenflow_core::{
-    event::chain_event::{ChainEvent, ChainEventFactory},
-    event::payloads::delivery_payload::{DeliveryPayload, DeliveryMethod},
-    TypedPayload,
-    WriterId,
-    id::StageId,
-};
-use serde::{Deserialize, Serialize};
-use serde_json::json;
 use anyhow::Result;
 use async_trait::async_trait;
+use obzenflow_core::{
+    event::chain_event::{ChainEvent, ChainEventFactory},
+    event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload},
+    id::StageId,
+    TypedPayload, WriterId,
+};
+use obzenflow_dsl_infra::{flow, sink, source, stateful};
+use obzenflow_infra::application::FlowApplication;
+use obzenflow_infra::journal::disk_journals;
+use obzenflow_runtime_services::stages::common::handlers::{FiniteSourceHandler, SinkHandler};
+use obzenflow_runtime_services::stages::stateful::strategies::accumulators::TopNTyped;
+use serde::{Deserialize, Serialize};
+use serde_json::json;
 
 /// Domain type for game score events (FLOWIP-082a)
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -80,8 +77,10 @@ impl FiniteSourceHandler for GameScoreSource {
             let (player, score, game_mode) = &self.events[self.current_index];
             self.current_index += 1;
 
-            println!("📊 Score Update: {} scored {:.0} points in {} mode",
-                player, score, game_mode);
+            println!(
+                "📊 Score Update: {} scored {:.0} points in {} mode",
+                player, score, game_mode
+            );
 
             // ✨ FLOWIP-082a: Emit typed event using EVENT_TYPE constant
             Some(ChainEventFactory::data_event(
@@ -92,7 +91,7 @@ impl FiniteSourceHandler for GameScoreSource {
                     "score": score,
                     "game_mode": game_mode,
                     "timestamp": self.current_index, // Simulated timestamp
-                })
+                }),
             ))
         } else {
             None
@@ -140,8 +139,14 @@ impl SinkHandler for LeaderboardDisplay {
                     _ => "  ",
                 };
 
-                println!("{} #{}: {} - {:.0} points ({})",
-                    medal, rank + 1, player, score, game_mode);
+                println!(
+                    "{} #{}: {} - {:.0} points ({})",
+                    medal,
+                    rank + 1,
+                    player,
+                    score,
+                    game_mode
+                );
             }
             println!("========================\n");
         }

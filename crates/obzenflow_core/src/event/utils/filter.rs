@@ -1,8 +1,7 @@
-
-use crate::event::JournalWriterId;
 use crate::event::event_envelope::EventEnvelope;
 use crate::event::types::EventId;
 use crate::event::ChainEvent;
+use crate::event::JournalWriterId;
 
 /// Filter for creating subscriptions - pure data filtering
 #[derive(Clone, Debug)]
@@ -57,7 +56,10 @@ impl EventFilter {
 
         // Check writer IDs
         if !self.journal_writer_ids.is_empty() {
-            if !self.journal_writer_ids.contains(&envelope.journal_writer_id) {
+            if !self
+                .journal_writer_ids
+                .contains(&envelope.journal_writer_id)
+            {
                 return false;
             }
         }

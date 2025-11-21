@@ -19,21 +19,18 @@ use anyhow::Result;
 use async_trait::async_trait;
 use obzenflow_core::{
     event::chain_event::{ChainEvent, ChainEventFactory},
-    event::payloads::delivery_payload::{DeliveryPayload, DeliveryMethod},
-    TypedPayload,
-    WriterId,
+    event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload},
     id::StageId,
+    TypedPayload, WriterId,
 };
-use obzenflow_dsl_infra::{flow, sink, source, transform, stateful};
-use obzenflow_infra::application::FlowApplication;
+use obzenflow_dsl_infra::{flow, sink, source, stateful, transform};
+use obzenflow_infra::application::{FlowApplication, LogLevel};
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime_services::stages::common::handlers::{
-    FiniteSourceHandler, SinkHandler,
-};
+use obzenflow_runtime_services::stages::common::handlers::{FiniteSourceHandler, SinkHandler};
 // FLOWIP-080h: Typed transform helpers
 use obzenflow_runtime_services::stages::transform::MapTyped;
 // FLOWIP-080j: Typed stateful accumulators
-use obzenflow_runtime_services::stages::stateful::accumulators::ReduceTyped;
+use obzenflow_runtime_services::stages::stateful::strategies::accumulators::ReduceTyped;
 use serde::{Deserialize, Serialize};
 
 /// Source that emits individual characters from sample sentences
@@ -147,7 +144,7 @@ struct TextAccumulator {
     transformed_text: String,
     sentence_count: usize,
     total_chars: usize,
-    last_was_punctuation: bool,  // Track consecutive punctuation to avoid double-counting
+    last_was_punctuation: bool, // Track consecutive punctuation to avoid double-counting
 }
 
 impl Default for TextAccumulator {
@@ -182,7 +179,8 @@ fn transform_char(ch: char) -> String {
             '8' => "eight",
             '9' => "nine",
             _ => "",
-        }.to_string()
+        }
+        .to_string()
     } else if ch.is_ascii_lowercase() {
         // Capitalize letters
         ch.to_uppercase().to_string()
@@ -217,7 +215,10 @@ impl SinkHandler for OutputSink {
                         result["sentence_count"].as_u64(),
                         result["total_chars"].as_u64(),
                     ) {
-                        println!("\n📊 Stats: {} sentences, {} characters total", sentences, chars);
+                        println!(
+                            "\n📊 Stats: {} sentences, {} characters total",
+                            sentences, chars
+                        );
                     }
                 }
             }
@@ -248,71 +249,74 @@ async fn main() -> Result<()> {
     println!("  3. \"rust 1 python 0.\"\n");
 
     // Use FlowApplication to handle everything
-    FlowApplication::run(async {
-        flow! {
-            name: "char_transform",
-            journals: disk_journals(std::path::PathBuf::from("target/char-transform-logs")),
-            middleware: [],
+    FlowApplication::builder()
+        .with_console_subscriber()
+        .with_log_level(LogLevel::Info)
+        .run_async(async {
+            flow! {
+                name: "char_transform",
+                journals: disk_journals(std::path::PathBuf::from("target/char-transform-logs")),
+                middleware: [],
 
-            stages: {
-                src = source!("source" => TextCharSource::new());
+                stages: {
+                    src = source!("source" => TextCharSource::new());
 
-                // FLOWIP-080h: MapTyped for type-safe character transformation
-                mapper = transform!("char_mapper" =>
-                    MapTyped::new(|char_event: CharEvent| {
-                        let ch = char_event.value.chars().next().unwrap_or(' ');
-                        TransformedChar {
-                            value: transform_char(ch),
-                            is_newline: ch == '\n',
-                        }
-                    })
-                );
-
-                // FLOWIP-080j: ReduceTyped for type-safe accumulation
-                reducer = stateful!("text_accumulator" =>
-                    ReduceTyped::new(
-                        TextAccumulator {
-                            transformed_text: String::new(),
-                            total_chars: 0,
-                            sentence_count: 0,
-                            last_was_punctuation: false,  // Track consecutive punctuation
-                        },
-                        |acc: &mut TextAccumulator, transformed: &TransformedChar| {  // CORRECTED: state first
-                            acc.transformed_text.push_str(&transformed.value);
-                            acc.total_chars += transformed.value.len();
-
-                            // Count sentences: only increment on first punctuation mark after content
-                            let is_sentence_end = transformed.value == "." || transformed.value == "!" || transformed.value == "?";
-                            let is_content = transformed.value.chars().any(|c| c.is_alphanumeric());
-
-                            if is_sentence_end && !acc.last_was_punctuation {
-                                acc.sentence_count += 1;
+                    // FLOWIP-080h: MapTyped for type-safe character transformation
+                    mapper = transform!("char_mapper" =>
+                        MapTyped::new(|char_event: CharEvent| {
+                            let ch = char_event.value.chars().next().unwrap_or(' ');
+                            TransformedChar {
+                                value: transform_char(ch),
+                                is_newline: ch == '\n',
                             }
+                        })
+                    );
 
-                            // Only reset punctuation flag when we see actual content (not whitespace)
-                            if is_content {
-                                acc.last_was_punctuation = false;
-                            } else if is_sentence_end {
-                                acc.last_was_punctuation = true;
+                    // FLOWIP-080j: ReduceTyped for type-safe accumulation
+                    reducer = stateful!("text_accumulator" =>
+                        ReduceTyped::new(
+                            TextAccumulator {
+                                transformed_text: String::new(),
+                                total_chars: 0,
+                                sentence_count: 0,
+                                last_was_punctuation: false,  // Track consecutive punctuation
+                            },
+                            |acc: &mut TextAccumulator, transformed: &TransformedChar| {  // CORRECTED: state first
+                                acc.transformed_text.push_str(&transformed.value);
+                                acc.total_chars += transformed.value.len();
+
+                                // Count sentences: only increment on first punctuation mark after content
+                                let is_sentence_end = transformed.value == "." || transformed.value == "!" || transformed.value == "?";
+                                let is_content = transformed.value.chars().any(|c| c.is_alphanumeric());
+
+                                if is_sentence_end && !acc.last_was_punctuation {
+                                    acc.sentence_count += 1;
+                                }
+
+                                // Only reset punctuation flag when we see actual content (not whitespace)
+                                if is_content {
+                                    acc.last_was_punctuation = false;
+                                } else if is_sentence_end {
+                                    acc.last_was_punctuation = true;
+                                }
                             }
-                        }
-                    ).emit_on_eof()  // Only emit when pipeline completes
-                );
+                        ).emit_on_eof()  // Only emit when pipeline completes
+                    );
 
-                output = sink!("output" => OutputSink::new());
-            },
+                    output = sink!("output" => OutputSink::new());
+                },
 
-            topology: {
-                src |> mapper;
-                mapper |> reducer;
-                reducer |> output;
+                topology: {
+                    src |> mapper;
+                    mapper |> reducer;
+                    reducer |> output;
+                }
             }
-        }
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to create flow: {:?}", e))
+        })
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to create flow: {:?}", e))
-    })
-    .await
-    .map_err(|e| anyhow::anyhow!("Application failed: {:?}", e))?;
+        .map_err(|e| anyhow::anyhow!("Application failed: {:?}", e))?;
 
     println!("\n✅ Pipeline completed!");
     println!("\n💡 Key Improvements (FLOWIP-080h, 080j & 082a):");

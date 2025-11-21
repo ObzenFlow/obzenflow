@@ -3,7 +3,7 @@ use std::time::Instant;
 use tokio::sync::broadcast;
 
 /// Core metric interface - format agnostic, always available
-/// 
+///
 /// This trait separates metric collection from export formats, enabling:
 /// - Clean feature flag support (metrics work without exporters)
 /// - Easy testing (no external dependencies required)
@@ -12,13 +12,13 @@ use tokio::sync::broadcast;
 pub trait Metric: Send + Sync {
     /// Unique identifier for this metric
     fn name(&self) -> &str;
-    
+
     /// Current snapshot of metric value
     fn snapshot(&self) -> MetricSnapshot;
-    
+
     /// Update metric with new value
     fn update(&self, value: MetricValue);
-    
+
     /// Get realtime update stream for TUI/debugging
     fn subscribe(&self) -> broadcast::Receiver<MetricUpdate>;
 }
@@ -54,14 +54,14 @@ pub enum MetricValue {
     /// Current gauge reading
     Gauge(f64),
     /// Histogram with bucket counts, sum, and total count
-    Histogram { 
-        buckets: Vec<(f64, u64)>,  // (upper_bound, count)
+    Histogram {
+        buckets: Vec<(f64, u64)>, // (upper_bound, count)
         sum: f64,
         count: u64,
     },
     /// Summary with quantile values, sum, and total count
-    Summary { 
-        quantiles: Vec<(f64, f64)>,  // (quantile, value)
+    Summary {
+        quantiles: Vec<(f64, f64)>, // (quantile, value)
         sum: f64,
         count: u64,
     },
@@ -80,10 +80,10 @@ pub struct MetricUpdate {
 pub enum MetricError {
     #[error("Invalid metric value type: expected {expected}, got {actual}")]
     InvalidValueType { expected: String, actual: String },
-    
+
     #[error("Metric update failed: {reason}")]
     UpdateFailed { reason: String },
-    
+
     #[error("Metric subscription failed: {reason}")]
     SubscriptionFailed { reason: String },
 }
@@ -98,7 +98,7 @@ impl MetricValue {
             MetricValue::Summary { .. } => MetricType::Summary,
         }
     }
-    
+
     /// Extract counter value if this is a counter
     pub fn as_counter(&self) -> Option<u64> {
         match self {
@@ -106,7 +106,7 @@ impl MetricValue {
             _ => None,
         }
     }
-    
+
     /// Extract gauge value if this is a gauge
     pub fn as_gauge(&self) -> Option<f64> {
         match self {
@@ -143,7 +143,7 @@ impl std::fmt::Display for MetricValue {
 }
 
 /// Marker trait for metrics that can be updated by external observation
-/// 
+///
 /// EventfulMetrics are updated by monitoring wrappers that observe events
 /// flowing through stages (requests, responses, processing times, etc.).
 /// The stage itself doesn't need to participate in metric collection.
@@ -152,7 +152,7 @@ pub trait EventfulMetric: Metric {
 }
 
 /// Marker trait for metrics that require internal state reporting
-/// 
+///
 /// StatefulMetrics require the stage to actively report internal state
 /// (queue depths, capacity utilization, resource saturation, etc.) that
 /// only the stage can know about.
@@ -161,7 +161,7 @@ pub trait StatefulMetric: Metric {
 }
 
 /// General support trait for stages that can provide metrics
-/// 
+///
 /// This trait can be used when you need a general bound over any metric support.
 /// Specific metrics define their own support traits (RateSupport, ErrorSupport, etc.)
 /// but this provides a common interface for generic programming.
@@ -191,7 +191,7 @@ mod tests {
     fn test_metric_value_display() {
         assert_eq!(MetricValue::Counter(100).to_string(), "100");
         assert_eq!(MetricValue::Gauge(3.14159).to_string(), "3.14");
-        
+
         let histogram = MetricValue::Histogram {
             buckets: vec![(1.0, 10), (5.0, 25)],
             sum: 75.5,
@@ -207,6 +207,4 @@ mod tests {
         assert_eq!(MetricType::Histogram.to_string(), "histogram");
         assert_eq!(MetricType::Summary.to_string(), "summary");
     }
-
-
 }

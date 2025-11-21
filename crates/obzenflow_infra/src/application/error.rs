@@ -6,19 +6,22 @@ use std::fmt;
 pub enum ApplicationError {
     /// Flow failed to build
     FlowBuildFailed(String),
-    
+
     /// Flow execution failed
     FlowExecutionFailed(String),
-    
+
     /// Server failed to start
     ServerStartFailed(String),
-    
+
+    /// Runtime creation failed
+    RuntimeCreationFailed(String),
+
     /// Feature not enabled
     FeatureNotEnabled(String),
-    
+
     /// IO error
     IoError(std::io::Error),
-    
+
     /// Other error
     Other(Box<dyn Error + Send + Sync>),
 }
@@ -29,6 +32,7 @@ impl fmt::Display for ApplicationError {
             Self::FlowBuildFailed(msg) => write!(f, "Flow build failed: {}", msg),
             Self::FlowExecutionFailed(msg) => write!(f, "Flow execution failed: {}", msg),
             Self::ServerStartFailed(msg) => write!(f, "Server start failed: {}", msg),
+            Self::RuntimeCreationFailed(msg) => write!(f, "Runtime creation failed: {}", msg),
             Self::FeatureNotEnabled(feature) => write!(f, "Feature not enabled: {}", feature),
             Self::IoError(err) => write!(f, "IO error: {}", err),
             Self::Other(err) => write!(f, "Application error: {}", err),

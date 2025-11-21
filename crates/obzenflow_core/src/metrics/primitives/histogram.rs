@@ -1,5 +1,5 @@
-use std::sync::atomic::{AtomicU64, Ordering};
 use super::TimeUnit;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Histogram for tracking distributions
 ///
@@ -9,13 +9,13 @@ use super::TimeUnit;
 pub struct Histogram {
     buckets: Vec<AtomicU64>,
     bucket_boundaries: Vec<f64>,
-    sum: AtomicU64,   // Store sum as fixed-point * 1000
+    sum: AtomicU64, // Store sum as fixed-point * 1000
     count: AtomicU64,
 }
 
 impl Histogram {
     /// Create a new histogram with OpenTelemetry-style default buckets
-    /// 
+    ///
     /// Based on industry research from Prometheus, OpenTelemetry, and Micrometer:
     /// - OpenTelemetry defaults: [0, 5, 10, 25, 50, 75, 100, 250, 500, 750, 1000, 2500, 5000, 7500, 10000, +Inf]
     /// - Designed for measuring duration in milliseconds (despite OTel recommending seconds)
@@ -28,7 +28,7 @@ impl Histogram {
             10.0,    // 10ms - very good
             25.0,    // 25ms - good
             50.0,    // 50ms - acceptable
-            75.0,    // 75ms 
+            75.0,    // 75ms
             100.0,   // 100ms - getting slow
             250.0,   // 250ms - slow
             500.0,   // 500ms - very slow
@@ -41,7 +41,7 @@ impl Histogram {
             f64::INFINITY,
         ];
         let buckets = (0..boundaries.len()).map(|_| AtomicU64::new(0)).collect();
-        
+
         Self {
             buckets,
             bucket_boundaries: boundaries,
@@ -51,14 +51,14 @@ impl Histogram {
     }
 
     /// Create a histogram for measuring durations in seconds (Prometheus-style)
-    /// 
+    ///
     /// Buckets: [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, +Inf]
     /// Use this when measuring Duration::as_secs_f64() or similar
     pub fn for_seconds() -> Self {
         let boundaries = vec![
             0.005, // 5ms
             0.01,  // 10ms
-            0.025, // 25ms  
+            0.025, // 25ms
             0.05,  // 50ms
             0.1,   // 100ms
             0.25,  // 250ms
@@ -70,7 +70,7 @@ impl Histogram {
             f64::INFINITY,
         ];
         let buckets = (0..boundaries.len()).map(|_| AtomicU64::new(0)).collect();
-        
+
         Self {
             buckets,
             bucket_boundaries: boundaries,
@@ -82,7 +82,7 @@ impl Histogram {
     /// Create a histogram with custom bucket boundaries
     pub fn with_buckets(boundaries: Vec<f64>) -> Self {
         let buckets = (0..boundaries.len()).map(|_| AtomicU64::new(0)).collect();
-        
+
         Self {
             buckets,
             bucket_boundaries: boundaries,
@@ -118,7 +118,10 @@ impl Histogram {
 
     /// Get all bucket counts
     pub fn bucket_counts(&self) -> Vec<u64> {
-        self.buckets.iter().map(|b| b.load(Ordering::Relaxed)).collect()
+        self.buckets
+            .iter()
+            .map(|b| b.load(Ordering::Relaxed))
+            .collect()
     }
 
     /// Get bucket boundaries
@@ -161,21 +164,21 @@ impl Histogram {
     pub fn sum_time(&self) -> TimeUnit {
         TimeUnit::from_millis(self.sum() as u64)
     }
-    
+
     /// Create a snapshot of the histogram for export
     pub fn snapshot(&self) -> crate::metrics::HistogramSnapshot {
         use crate::metrics::{HistogramSnapshot, Percentile};
         use std::collections::HashMap;
-        
+
         let count = self.count();
         let sum = self.sum();
-        
+
         // Calculate percentiles based on bucket counts
         let mut percentiles = HashMap::new();
-        
+
         if count > 0 {
             let bucket_counts = self.bucket_counts();
-            
+
             // Helper to find value at percentile
             let find_percentile = |target_count: u64| -> f64 {
                 let mut cumulative = 0u64;
@@ -188,19 +191,35 @@ impl Histogram {
                 }
                 self.bucket_boundaries.last().copied().unwrap_or(0.0)
             };
-            
+
             // Calculate standard percentiles
-            percentiles.insert(Percentile::P50, find_percentile((count as f64 * 0.5) as u64));
-            percentiles.insert(Percentile::P90, find_percentile((count as f64 * 0.9) as u64));
-            percentiles.insert(Percentile::P95, find_percentile((count as f64 * 0.95) as u64));
-            percentiles.insert(Percentile::P99, find_percentile((count as f64 * 0.99) as u64));
+            percentiles.insert(
+                Percentile::P50,
+                find_percentile((count as f64 * 0.5) as u64),
+            );
+            percentiles.insert(
+                Percentile::P90,
+                find_percentile((count as f64 * 0.9) as u64),
+            );
+            percentiles.insert(
+                Percentile::P95,
+                find_percentile((count as f64 * 0.95) as u64),
+            );
+            percentiles.insert(
+                Percentile::P99,
+                find_percentile((count as f64 * 0.99) as u64),
+            );
         }
-        
+
         HistogramSnapshot {
             count,
             sum,
             min: if count > 0 { 0.0 } else { f64::INFINITY }, // We don't track min
-            max: if count > 0 { f64::INFINITY } else { f64::NEG_INFINITY }, // We don't track max
+            max: if count > 0 {
+                f64::INFINITY
+            } else {
+                f64::NEG_INFINITY
+            }, // We don't track max
             percentiles,
         }
     }
@@ -238,45 +257,45 @@ mod tests {
     #[test]
     fn test_histogram_otel_style_buckets() {
         let histogram = Histogram::new();
-        
-        histogram.observe(3.0);    // Should go in 5ms bucket (index 1)
-        histogram.observe(15.0);   // Should go in 25ms bucket (index 3)  
-        histogram.observe(80.0);   // Should go in 100ms bucket (index 6)
+
+        histogram.observe(3.0); // Should go in 5ms bucket (index 1)
+        histogram.observe(15.0); // Should go in 25ms bucket (index 3)
+        histogram.observe(80.0); // Should go in 100ms bucket (index 6)
         histogram.observe(1500.0); // Should go in 2500ms bucket (index 11)
-        
+
         let counts = histogram.bucket_counts();
-        assert_eq!(counts[1], 1);  // 3ms in 5ms bucket
-        assert_eq!(counts[3], 1);  // 15ms in 25ms bucket
-        assert_eq!(counts[6], 1);  // 80ms in 100ms bucket  
+        assert_eq!(counts[1], 1); // 3ms in 5ms bucket
+        assert_eq!(counts[3], 1); // 15ms in 25ms bucket
+        assert_eq!(counts[6], 1); // 80ms in 100ms bucket
         assert_eq!(counts[11], 1); // 1500ms in 2500ms bucket
     }
 
     #[test]
     fn test_histogram_seconds_style_buckets() {
         let histogram = Histogram::for_seconds();
-        
-        histogram.observe(0.008);  // 8ms - should go in 0.01s bucket (index 1)
-        histogram.observe(0.03);   // 30ms - should go in 0.05s bucket (index 3)
-        histogram.observe(0.15);   // 150ms - should go in 0.25s bucket (index 5)
-        histogram.observe(3.0);    // 3s - should go in 5s bucket (index 9)
-        
+
+        histogram.observe(0.008); // 8ms - should go in 0.01s bucket (index 1)
+        histogram.observe(0.03); // 30ms - should go in 0.05s bucket (index 3)
+        histogram.observe(0.15); // 150ms - should go in 0.25s bucket (index 5)
+        histogram.observe(3.0); // 3s - should go in 5s bucket (index 9)
+
         let counts = histogram.bucket_counts();
-        assert_eq!(counts[1], 1);  // 8ms in 10ms bucket
-        assert_eq!(counts[3], 1);  // 30ms in 50ms bucket
-        assert_eq!(counts[5], 1);  // 150ms in 250ms bucket
-        assert_eq!(counts[9], 1);  // 3s in 5s bucket
+        assert_eq!(counts[1], 1); // 8ms in 10ms bucket
+        assert_eq!(counts[3], 1); // 30ms in 50ms bucket
+        assert_eq!(counts[5], 1); // 150ms in 250ms bucket
+        assert_eq!(counts[9], 1); // 3s in 5s bucket
     }
 
     #[test]
     fn test_histogram_custom_buckets() {
         let boundaries = vec![10.0, 50.0, 100.0, f64::INFINITY];
         let histogram = Histogram::with_buckets(boundaries);
-        
-        histogram.observe(5.0);   // Should go in 10ms bucket (index 0)
-        histogram.observe(30.0);  // Should go in 50ms bucket (index 1)
-        histogram.observe(75.0);  // Should go in 100ms bucket (index 2)
+
+        histogram.observe(5.0); // Should go in 10ms bucket (index 0)
+        histogram.observe(30.0); // Should go in 50ms bucket (index 1)
+        histogram.observe(75.0); // Should go in 100ms bucket (index 2)
         histogram.observe(500.0); // Should go in +Inf bucket (index 3)
-        
+
         let counts = histogram.bucket_counts();
         assert_eq!(counts[0], 1);
         assert_eq!(counts[1], 1);

@@ -4,10 +4,10 @@
 pub mod histogram {
     /// Minimum value for processing time histograms (1ms)
     pub const HISTOGRAM_MIN_MS: u64 = 1;
-    
+
     /// Maximum value for processing time histograms (60 seconds)
     pub const HISTOGRAM_MAX_MS: u64 = 60_000;
-    
+
     /// Significant figures for histogram precision
     pub const HISTOGRAM_SIGFIGS: u8 = 3;
 }

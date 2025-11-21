@@ -23,6 +23,9 @@ use super::memory::memory_journal::MemoryJournal;
 pub struct DiskJournalFactory {
     base_path: PathBuf,
     flow_id: FlowId,
+    // Cache journals so all consumers share the same instance (and shared locks)
+    chain_journals: HashMap<JournalName, Arc<dyn Journal<ChainEvent>>>,
+    system_journals: HashMap<JournalName, Arc<dyn Journal<SystemEvent>>>,
 }
 
 impl DiskJournalFactory {
@@ -32,13 +35,42 @@ impl DiskJournalFactory {
         std::fs::create_dir_all(&flow_path)
             .map_err(|e| JournalError::Implementation {
                 message: format!("Failed to create flow directory: {}", flow_path.display()),
+            source: Box::new(e),
+        })?;
+        
+        Ok(Self { 
+            base_path, 
+            flow_id, 
+            chain_journals: HashMap::new(),
+            system_journals: HashMap::new(),
+        })
+    }
+    
+    pub fn create_chain_journal(&mut self, name: JournalName, owner: JournalOwner) -> Result<Arc<dyn Journal<ChainEvent>>, JournalError> {
+        if let Some(journal) = self.chain_journals.get(&name) {
+            return Ok(journal.clone());
+        }
+        let flow_path = self.base_path.join("flows").join(self.flow_id.to_string());
+        let journal_path = flow_path.join(name.to_filename());
+        
+        // Create the file NOW if it doesn't exist
+        if !journal_path.exists() {
+            std::fs::File::create(&journal_path)
+                .map_err(|e| JournalError::Implementation {
+                message: format!("Failed to create journal file: {}", journal_path.display()),
                 source: Box::new(e),
             })?;
+        }
         
-        Ok(Self { base_path, flow_id })
+        let journal = Arc::new(DiskJournal::<ChainEvent>::with_owner(journal_path, owner)?);
+        self.chain_journals.insert(name, journal.clone());
+        Ok(journal)
     }
     
-    pub fn create_chain_journal(&self, name: JournalName, owner: JournalOwner) -> Result<Arc<dyn Journal<ChainEvent>>, JournalError> {
+    pub fn create_system_journal(&mut self, name: JournalName, owner: JournalOwner) -> Result<Arc<dyn Journal<SystemEvent>>, JournalError> {
+        if let Some(journal) = self.system_journals.get(&name) {
+            return Ok(journal.clone());
+        }
         let flow_path = self.base_path.join("flows").join(self.flow_id.to_string());
         let journal_path = flow_path.join(name.to_filename());
         
@@ -46,28 +78,14 @@ impl DiskJournalFactory {
         if !journal_path.exists() {
             std::fs::File::create(&journal_path)
                 .map_err(|e| JournalError::Implementation {
-                    message: format!("Failed to create journal file: {}", journal_path.display()),
-                    source: Box::new(e),
-                })?;
+                message: format!("Failed to create journal file: {}", journal_path.display()),
+                source: Box::new(e),
+            })?;
         }
         
-        Ok(Arc::new(DiskJournal::<ChainEvent>::with_owner(journal_path, owner)?))
-    }
-    
-    pub fn create_system_journal(&self, name: JournalName, owner: JournalOwner) -> Result<Arc<dyn Journal<SystemEvent>>, JournalError> {
-        let flow_path = self.base_path.join("flows").join(self.flow_id.to_string());
-        let journal_path = flow_path.join(name.to_filename());
-        
-        // Create the file NOW if it doesn't exist
-        if !journal_path.exists() {
-            std::fs::File::create(&journal_path)
-                .map_err(|e| JournalError::Implementation {
-                    message: format!("Failed to create journal file: {}", journal_path.display()),
-                    source: Box::new(e),
-                })?;
-        }
-        
-        Ok(Arc::new(DiskJournal::<SystemEvent>::with_owner(journal_path, owner)?))
+        let journal = Arc::new(DiskJournal::<SystemEvent>::with_owner(journal_path, owner)?);
+        self.system_journals.insert(name, journal.clone());
+        Ok(journal)
     }
 }
 

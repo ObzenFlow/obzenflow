@@ -1,14 +1,14 @@
 //! Pipeline-level coordination and management
 
-pub mod supervisor;
-pub mod fsm;
-pub mod config;
-pub mod handle;
 pub mod builder;
+pub mod config;
+pub mod fsm;
+pub mod handle;
+pub mod supervisor;
 
 // Re-export commonly used types
 // Note: PipelineSupervisor is intentionally NOT exported - use PipelineBuilder
-pub use handle::FlowHandle;
 pub use builder::PipelineBuilder;
-pub use fsm::{PipelineState, PipelineEvent, PipelineAction};
-pub use config::{StageConfig as PipelineStageConfig, ObserverConfig, StageHandlerType};
+pub use config::{ObserverConfig, StageConfig as PipelineStageConfig, StageHandlerType};
+pub use fsm::{PipelineAction, PipelineEvent, PipelineState};
+pub use handle::FlowHandle;

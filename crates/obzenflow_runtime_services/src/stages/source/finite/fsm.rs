@@ -4,17 +4,17 @@
 //! They have a unique "WaitingForGun" state that ensures they don't
 //! start emitting events until the pipeline is ready.
 
-use obzenflow_fsm::{StateVariant, EventVariant, FsmContext, FsmAction};
-use obzenflow_core::{ChainEvent, EventId, WriterId, StageId, FlowId};
 use obzenflow_core::event::{ChainEventFactory, SystemEvent};
 use obzenflow_core::journal::journal::Journal;
+use obzenflow_core::{ChainEvent, EventId, FlowId, StageId, WriterId};
+use obzenflow_fsm::{EventVariant, FsmAction, FsmContext, StateVariant};
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 use std::marker::PhantomData;
+use std::sync::Arc;
 use tokio::sync::RwLock;
 
-use crate::stages::common::handlers::FiniteSourceHandler;
 use crate::metrics::instrumentation::StageInstrumentation;
+use crate::stages::common::handlers::FiniteSourceHandler;
 
 // ============================================================================
 // FSM States
@@ -25,26 +25,26 @@ use crate::metrics::instrumentation::StageInstrumentation;
 pub enum FiniteSourceState<H> {
     /// Initial state - source has been created but not initialized
     Created,
-    
+
     /// Resources allocated, subscriptions created, ready to wait for start signal
     Initialized,
-    
+
     /// UNIQUE TO SOURCES: Waiting for explicit start command from pipeline
     /// This prevents sources from emitting events before the pipeline is ready
     WaitingForGun,
-    
+
     /// Actively producing events - the source is now allowed to emit
     Running,
-    
+
     /// Shutting down gracefully, finishing any pending work
     Draining,
-    
+
     /// All work complete, EOF sent downstream
     Drained,
-    
+
     /// Unrecoverable error occurred
     Failed(String),
-    
+
     #[serde(skip)]
     _Phantom(PhantomData<H>),
 }
@@ -118,24 +118,24 @@ impl<H: Send + Sync + 'static> StateVariant for FiniteSourceState<H> {
 pub enum FiniteSourceEvent<H> {
     /// Initialize the source - allocate resources, create writer ID
     Initialize,
-    
+
     /// Source is ready - transition to WaitingForGun state
     Ready,
-    
+
     /// Start event production - the "gun" has been fired!
     /// Only sources receive this event
     Start,
-    
+
     /// Begin graceful shutdown - stop producing new events
     BeginDrain,
-    
+
     /// Source completed naturally (finite sources only)
     /// This is triggered when is_complete() returns true
     Completed,
-    
+
     /// Unrecoverable error occurred
     Error(String),
-    
+
     #[doc(hidden)]
     _Phantom(PhantomData<H>),
 }
@@ -193,7 +193,7 @@ pub enum FiniteSourceAction<H> {
     /// - Register writer ID with journal
     /// - Open file handles, network connections, etc.
     AllocateResources,
-    
+
     /// Send EOF event downstream to signal completion
     SendEOF,
 
@@ -205,10 +205,10 @@ pub enum FiniteSourceAction<H> {
 
     /// Write stage completed event
     WriteStageCompleted,
-    
+
     /// Clean up all resources
     Cleanup,
-    
+
     #[doc(hidden)]
     _Phantom(PhantomData<H>),
 }
@@ -222,34 +222,34 @@ pub enum FiniteSourceAction<H> {
 pub struct FiniteSourceContext<H: FiniteSourceHandler> {
     /// The handler instance that implements source logic
     pub handler: Arc<RwLock<H>>,
-    
+
     /// This source's stage ID
     pub stage_id: obzenflow_core::StageId,
-    
+
     /// Human-readable stage name for logging
     pub stage_name: String,
-    
+
     /// Flow name for flow context
     pub flow_name: String,
-    
+
     /// Flow ID from pipeline
     pub flow_id: FlowId,
-    
+
     /// Data journal for writing generated events
     pub data_journal: Arc<dyn Journal<ChainEvent>>,
-    
+
     /// Error journal for writing error events (FLOWIP-082e)
     pub error_journal: Arc<dyn Journal<ChainEvent>>,
-    
+
     /// System journal for writing lifecycle events
     pub system_journal: Arc<dyn Journal<SystemEvent>>,
-    
+
     /// Message bus for pipeline communication
     pub bus: Arc<crate::message_bus::FsmMessageBus>,
-    
+
     /// Writer ID for this source (initialized during setup)
     pub writer_id: Arc<RwLock<Option<WriterId>>>,
-    
+
     /// Stage instrumentation for metrics tracking
     pub instrumentation: Arc<StageInstrumentation>,
 }
@@ -295,7 +295,9 @@ impl<H> Clone for FiniteSourceAction<H> {
         match self {
             Self::AllocateResources => Self::AllocateResources,
             Self::SendEOF => Self::SendEOF,
-            Self::SendError { message } => Self::SendError { message: message.clone() },
+            Self::SendError { message } => Self::SendError {
+                message: message.clone(),
+            },
             Self::PublishRunning => Self::PublishRunning,
             Self::WriteStageCompleted => Self::WriteStageCompleted,
             Self::Cleanup => Self::Cleanup,
@@ -321,14 +323,14 @@ impl<H> std::fmt::Debug for FiniteSourceAction<H> {
 #[async_trait::async_trait]
 impl<H: FiniteSourceHandler + Send + Sync + 'static> FsmAction for FiniteSourceAction<H> {
     type Context = FiniteSourceContext<H>;
-    
+
     async fn execute(&self, ctx: &Self::Context) -> Result<(), String> {
         match self {
             FiniteSourceAction::AllocateResources => {
                 // Create WriterId from our StageId
                 let writer_id = WriterId::from(ctx.stage_id.clone());
                 *ctx.writer_id.write().await = Some(writer_id.clone());
-                
+
                 tracing::info!(
                     stage_name = %ctx.stage_name,
                     writer_id = %writer_id,
@@ -336,48 +338,48 @@ impl<H: FiniteSourceHandler + Send + Sync + 'static> FsmAction for FiniteSourceA
                 );
                 Ok(())
             }
-            
+
             FiniteSourceAction::SendEOF => {
                 let writer_id_guard = ctx.writer_id.read().await;
                 let writer_id = writer_id_guard
                     .as_ref()
                     .ok_or_else(|| "No writer ID available to send EOF".to_string())?;
-                
+
                 let eof_event = ChainEventFactory::eof_event(
                     writer_id.clone(),
                     true, // natural EOF for finite sources
                 );
-                
+
                 ctx.data_journal
                     .append(eof_event, None)
                     .await
                     .map_err(|e| format!("Failed to send EOF: {}", e))?;
-                
+
                 tracing::info!(
                     stage_name = %ctx.stage_name,
                     "Finite source sent EOF event"
                 );
                 Ok(())
             }
-            
+
             FiniteSourceAction::SendError { message } => {
                 let writer_id_guard = ctx.writer_id.read().await;
                 let writer_id_guard = ctx.writer_id.read().await;
                 let _writer_id = writer_id_guard
                     .as_ref()
                     .ok_or_else(|| "No writer ID available to send error".to_string())?;
-                
+
                 let error_event = SystemEvent::stage_failed(
                     ctx.stage_id,
                     message.clone(),
-                    false // not recoverable
+                    false, // not recoverable
                 );
-                
+
                 ctx.system_journal
                     .append(error_event, None)
                     .await
                     .map_err(|e| format!("Failed to send error event: {}", e))?;
-                
+
                 tracing::error!(
                     stage_name = %ctx.stage_name,
                     error = %message,
@@ -413,24 +415,22 @@ impl<H: FiniteSourceHandler + Send + Sync + 'static> FsmAction for FiniteSourceA
                 let _writer_id = writer_id_guard
                     .as_ref()
                     .ok_or_else(|| "No writer ID available to send completion event".to_string())?;
-                
+
                 // Write completion event to system journal
-                let completion_event = SystemEvent::stage_completed(
-                    ctx.stage_id
-                );
-                
+                let completion_event = SystemEvent::stage_completed(ctx.stage_id);
+
                 ctx.system_journal
                     .append(completion_event, None)
                     .await
                     .map_err(|e| format!("Failed to send completion event: {}", e))?;
-                
+
                 tracing::info!(
                     stage_name = %ctx.stage_name,
                     "Finite source sent completion event"
                 );
                 Ok(())
             }
-            
+
             FiniteSourceAction::Cleanup => {
                 // Handler-specific cleanup would go here
                 tracing::info!(
@@ -439,9 +439,8 @@ impl<H: FiniteSourceHandler + Send + Sync + 'static> FsmAction for FiniteSourceA
                 );
                 Ok(())
             }
-            
+
             FiniteSourceAction::_Phantom(_) => unreachable!("PhantomData variant"),
         }
     }
 }
-

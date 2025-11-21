@@ -10,26 +10,25 @@
 // PATTERN=conflate cargo run --example stateful_primitives_demo   # Conflate + TimeWindow
 // PATTERN=realtime cargo run --example stateful_primitives_demo   # GroupBy + EmitAlways
 
-use obzenflow_dsl_infra::{flow, source, transform, stateful, sink};
-use obzenflow_runtime_services::stages::common::handlers::{
-    FiniteSourceHandler, SinkHandler
-};
-use obzenflow_infra::application::FlowApplication;
-use obzenflow_infra::journal::disk_journals;
+use anyhow::Result;
+use async_trait::async_trait;
 use obzenflow_core::{
     event::chain_event::{ChainEvent, ChainEventFactory},
-    event::payloads::delivery_payload::{DeliveryPayload, DeliveryMethod},
-    WriterId,
+    event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload},
     id::StageId,
-    Result as CoreResult,
+    Result as CoreResult, WriterId,
 };
-use obzenflow_runtime_services::stages::stateful::{GroupBy, Reduce, Conflate, OnEOF, EveryN, TimeWindow, EmitAlways};
+use obzenflow_dsl_infra::{flow, sink, source, stateful, transform};
+use obzenflow_infra::application::FlowApplication;
+use obzenflow_infra::journal::disk_journals;
+use obzenflow_runtime_services::stages::common::handlers::{FiniteSourceHandler, SinkHandler};
+use obzenflow_runtime_services::stages::stateful::{
+    Conflate, EmitAlways, EveryN, GroupBy, OnEOF, Reduce, TimeWindow,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use anyhow::Result;
-use async_trait::async_trait;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct ProductStats {
@@ -119,8 +118,11 @@ impl ResultCollector {
 #[async_trait::async_trait]
 impl SinkHandler for ResultCollector {
     async fn consume(&mut self, event: ChainEvent) -> CoreResult<DeliveryPayload> {
-        println!("📊 [{}] Received result: {}", self.name,
-            serde_json::to_string_pretty(&event.payload()).unwrap_or_default());
+        println!(
+            "📊 [{}] Received result: {}",
+            self.name,
+            serde_json::to_string_pretty(&event.payload()).unwrap_or_default()
+        );
 
         self.results.lock().unwrap().push(event.clone());
 

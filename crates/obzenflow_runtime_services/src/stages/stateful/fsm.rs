@@ -3,21 +3,21 @@
 //! Stateful stages maintain state across events, enabling aggregations,
 //! windowing operations, and session tracking.
 
-use obzenflow_fsm::{StateVariant, EventVariant, FsmContext, FsmAction};
-use obzenflow_core::{ChainEvent, EventId, WriterId, FlowId};
+use obzenflow_core::event::JournalEvent;
 use obzenflow_core::event::{ChainEventFactory, SystemEvent};
 use obzenflow_core::journal::journal::Journal;
-use obzenflow_core::event::JournalEvent;
 use obzenflow_core::StageId;
+use obzenflow_core::{ChainEvent, EventId, FlowId, WriterId};
+use obzenflow_fsm::{EventVariant, FsmAction, FsmContext, StateVariant};
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 use std::marker::PhantomData;
+use std::sync::Arc;
 use tokio::sync::RwLock;
 
-use crate::stages::common::handlers::StatefulHandler;
-use crate::stages::common::control_strategies::ControlEventStrategy;
-use crate::metrics::instrumentation::StageInstrumentation;
 use crate::messaging::UpstreamSubscription;
+use crate::metrics::instrumentation::StageInstrumentation;
+use crate::stages::common::control_strategies::ControlEventStrategy;
+use crate::stages::common::handlers::StatefulHandler;
 
 // ============================================================================
 // FSM States
@@ -388,8 +388,16 @@ impl<H: StatefulHandler + Send + Sync + 'static> FsmAction for StatefulAction<H>
                 let writer_id = WriterId::from(ctx.stage_id.clone());
                 *ctx.writer_id.write().await = Some(writer_id);
 
+                tracing::info!(
+                    stage_name = %ctx.stage_name,
+                    upstream_count = ctx.upstream_journals.len(),
+                    upstream_stages = ?ctx.upstream_journals.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+                    "Stateful creating upstream subscription"
+                );
+
                 // Create subscription to upstream journals
-                let subscription = UpstreamSubscription::new(&ctx.upstream_journals).await
+                let subscription = UpstreamSubscription::new(&ctx.upstream_journals)
+                    .await
                     .map_err(|e| format!("Failed to create subscription: {:?}", e))?;
 
                 *ctx.subscription.write().await = Some(subscription);
@@ -418,9 +426,7 @@ impl<H: StatefulHandler + Send + Sync + 'static> FsmAction for StatefulAction<H>
                     .ok_or_else(|| "No writer ID available to publish running event".to_string())?;
 
                 // Write lifecycle event to system journal
-                let running_event = SystemEvent::stage_running(
-                    ctx.stage_id
-                );
+                let running_event = SystemEvent::stage_running(ctx.stage_id);
 
                 ctx.system_journal
                     .append(running_event, None)
@@ -485,9 +491,7 @@ impl<H: StatefulHandler + Send + Sync + 'static> FsmAction for StatefulAction<H>
                     .ok_or_else(|| "No writer ID available to send completion".to_string())?;
 
                 // Write completion event to system journal
-                let completion_event = SystemEvent::stage_completed(
-                    ctx.stage_id
-                );
+                let completion_event = SystemEvent::stage_completed(ctx.stage_id);
 
                 ctx.system_journal
                     .append(completion_event, None)

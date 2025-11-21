@@ -5,7 +5,7 @@
 
 use crate::middleware::{MiddlewareFactory, MiddlewareSafety};
 use obzenflow_core::event::context::StageType;
-use tracing::{warn, error};
+use tracing::{error, warn};
 
 /// Validates middleware safety for a given stage type
 pub fn validate_middleware_safety(
@@ -70,9 +70,11 @@ fn check_dangerous_patterns(
     result: &mut ValidationResult,
 ) {
     let hints = factory.hints();
-    
+
     // Pattern 1: Skip control events on sinks
-    if hints.drops_control_events || (factory.name().contains("skip") && factory.name().contains("control")) {
+    if hints.drops_control_events
+        || (factory.name().contains("skip") && factory.name().contains("control"))
+    {
         if stage_type == StageType::Sink {
             let message = format!(
                 "❌ CRITICAL: Never skip control events on sink '{}'! \
@@ -171,6 +173,7 @@ fn format_stage_type(stage_type: StageType) -> &'static str {
         StageType::Transform => "transform",
         StageType::Sink => "sink",
         StageType::Stateful => "stateful",
+        StageType::Join => "join",
     }
 }
 
@@ -217,17 +220,21 @@ impl ValidationResult {
 mod tests {
     use super::*;
     use crate::middleware::{
-        Middleware, MiddlewareFactory, MiddlewareAction, MiddlewareContext,
-        MiddlewareHints, RetryHint, Attempts, BackoffKind
+        Attempts, BackoffKind, Middleware, MiddlewareAction, MiddlewareContext, MiddlewareFactory,
+        MiddlewareHints, RetryHint,
     };
-    use obzenflow_runtime_services::pipeline::config::StageConfig;
     use obzenflow_core::ChainEvent;
+    use obzenflow_runtime_services::pipeline::config::StageConfig;
     use std::time::Duration;
 
     // Mock middleware for testing dangerous patterns
     struct MockSkipControlMiddleware;
     impl Middleware for MockSkipControlMiddleware {
-        fn pre_handle(&self, _event: &ChainEvent, _ctx: &mut MiddlewareContext) -> MiddlewareAction {
+        fn pre_handle(
+            &self,
+            _event: &ChainEvent,
+            _ctx: &mut MiddlewareContext,
+        ) -> MiddlewareAction {
             MiddlewareAction::Continue
         }
     }
@@ -272,7 +279,9 @@ mod tests {
             MiddlewareHints {
                 retry: Some(RetryHint {
                     max_attempts: Attempts::Infinite,
-                    backoff: BackoffKind::Fixed { delay: Duration::from_millis(0) },
+                    backoff: BackoffKind::Fixed {
+                        delay: Duration::from_millis(0),
+                    },
                 }),
                 ..Default::default()
             }
@@ -282,11 +291,7 @@ mod tests {
     #[test]
     fn test_skip_control_on_sink_is_error() {
         let factory = MockSkipControlFactory;
-        let result = validate_middleware_safety(
-            &factory,
-            StageType::Sink,
-            "test_sink"
-        );
+        let result = validate_middleware_safety(&factory, StageType::Sink, "test_sink");
 
         assert!(!result.is_ok());
         assert!(result.errors.iter().any(|e| e.contains("CRITICAL")));
@@ -296,11 +301,7 @@ mod tests {
     #[test]
     fn test_skip_control_on_transform_is_warning() {
         let factory = MockSkipControlFactory;
-        let result = validate_middleware_safety(
-            &factory,
-            StageType::Transform,
-            "test_transform"
-        );
+        let result = validate_middleware_safety(&factory, StageType::Transform, "test_transform");
 
         assert!(result.is_ok()); // No errors
         assert!(result.has_warnings());
@@ -310,11 +311,7 @@ mod tests {
     #[test]
     fn test_infinite_retry_on_source_is_error() {
         let factory = MockInfiniteRetryFactory;
-        let result = validate_middleware_safety(
-            &factory,
-            StageType::FiniteSource,
-            "test_source"
-        );
+        let result = validate_middleware_safety(&factory, StageType::FiniteSource, "test_source");
 
         assert!(!result.is_ok());
         assert!(result.errors.iter().any(|e| e.contains("makes no sense")));
@@ -328,15 +325,13 @@ mod tests {
             fn create(&self, _: &StageConfig) -> Box<dyn Middleware> {
                 unimplemented!()
             }
-            fn name(&self) -> &str { "safe_middleware" }
+            fn name(&self) -> &str {
+                "safe_middleware"
+            }
         }
 
         let factory = SafeFactory;
-        let result = validate_middleware_safety(
-            &factory,
-            StageType::Transform,
-            "test_transform"
-        );
+        let result = validate_middleware_safety(&factory, StageType::Transform, "test_transform");
 
         assert!(result.is_ok());
         assert!(!result.has_warnings());

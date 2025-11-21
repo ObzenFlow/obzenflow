@@ -8,9 +8,9 @@
 //! • Top‑level enum uses `observability_type` (mirrors `content_type` in ChainEvent).
 //! • Sub‑enums use `stage_state`, `metrics_event`, `middleware_event`, and `action`.
 
+use crate::id::StageId;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use crate::id::StageId;
 
 // =============================================================================
 //  Top‑level wrapper: what kind of observability fact is this?
@@ -99,7 +99,11 @@ pub enum MetricsLifecycle {
 // =============================================================================
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "middleware_event", content = "details", rename_all = "snake_case")]
+#[serde(
+    tag = "middleware_event",
+    content = "details",
+    rename_all = "snake_case"
+)]
 pub enum MiddlewareLifecycle {
     CircuitBreaker(CircuitBreakerEvent),
     RateLimiter(RateLimiterEvent),

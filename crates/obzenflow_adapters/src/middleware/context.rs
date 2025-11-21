@@ -3,12 +3,12 @@
 //! This module provides a separate context that flows through middleware
 //! during event processing, preserving the immutability of ChainEvent.
 
+use obzenflow_core::event::ChainEventFactory;
+use obzenflow_core::ChainEvent;
+use obzenflow_core::WriterId;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
-use obzenflow_core::ChainEvent;
-use obzenflow_core::event::ChainEventFactory;
-use obzenflow_core::WriterId;
 
 /// Ephemeral event emitted by middleware during processing
 ///
@@ -70,25 +70,26 @@ impl MiddlewareContext {
 
     /// Emit an event that inner middleware can observe
     pub fn emit_event(&mut self, source: &str, event_type: &str, data: Value) {
-        self.events.push(MiddlewareEvent::new(source, event_type, data));
+        self.events
+            .push(MiddlewareEvent::new(source, event_type, data));
     }
 
     /// Check if any middleware event matches the given source and type
     pub fn has_event(&self, source: &str, event_type: &str) -> bool {
-        self.events.iter()
+        self.events
+            .iter()
             .any(|e| e.source == source && e.event_type == event_type)
     }
 
     /// Get all events from a specific source
     pub fn events_from(&self, source: &str) -> Vec<&MiddlewareEvent> {
-        self.events.iter()
-            .filter(|e| e.source == source)
-            .collect()
+        self.events.iter().filter(|e| e.source == source).collect()
     }
 
     /// Find the first event matching source and type
     pub fn find_event(&self, source: &str, event_type: &str) -> Option<&MiddlewareEvent> {
-        self.events.iter()
+        self.events
+            .iter()
             .find(|e| e.source == source && e.event_type == event_type)
     }
 
@@ -138,7 +139,7 @@ mod tests {
             json!({
                 "consecutive_failures": 10,
                 "threshold": 10
-            })
+            }),
         );
 
         assert_eq!(event.source, "circuit_breaker");
@@ -159,14 +160,22 @@ mod tests {
     fn test_context_event_emission() {
         let mut ctx = MiddlewareContext::new();
 
-        ctx.emit_event("circuit_breaker", "rejected", json!({
-            "reason": "circuit_open"
-        }));
+        ctx.emit_event(
+            "circuit_breaker",
+            "rejected",
+            json!({
+                "reason": "circuit_open"
+            }),
+        );
 
-        ctx.emit_event("retry", "attempt_started", json!({
-            "attempt": 1,
-            "max_attempts": 3
-        }));
+        ctx.emit_event(
+            "retry",
+            "attempt_started",
+            json!({
+                "attempt": 1,
+                "max_attempts": 3
+            }),
+        );
 
         assert_eq!(ctx.events.len(), 2);
         assert!(ctx.has_event("circuit_breaker", "rejected"));
@@ -223,7 +232,7 @@ mod tests {
             json!({
                 "queue_depth": 42,
                 "in_flight": 7
-            })
+            }),
         ));
 
         assert_eq!(ctx.control_events.len(), 2);

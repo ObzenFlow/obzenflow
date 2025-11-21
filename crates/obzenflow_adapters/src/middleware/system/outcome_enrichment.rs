@@ -1,10 +1,12 @@
 //! Outcome enrichment middleware for setting ProcessingOutcome based on event characteristics.
 
+use crate::middleware::{
+    ErrorAction, Middleware, MiddlewareAction, MiddlewareContext, MiddlewareFactory,
+};
 use obzenflow_core::event::chain_event::ChainEvent;
+use obzenflow_core::event::status::processing_status::ProcessingStatus;
 use obzenflow_runtime_services::pipeline::config::StageConfig;
 use serde_json::Value;
-use obzenflow_core::event::status::processing_status::ProcessingStatus;
-use crate::middleware::{ErrorAction, Middleware, MiddlewareAction, MiddlewareContext, MiddlewareFactory};
 
 /// Middleware that detects error conditions and sets ProcessingOutcome.
 ///
@@ -22,7 +24,9 @@ pub struct OutcomeEnrichmentMiddleware {
 
 impl OutcomeEnrichmentMiddleware {
     pub fn new(stage_name: impl Into<String>) -> Self {
-        Self { stage_name: stage_name.into() }
+        Self {
+            stage_name: stage_name.into(),
+        }
     }
 
     fn detect_outcome(&self, event: &ChainEvent, ctx: &MiddlewareContext) -> ProcessingStatus {
@@ -38,11 +42,19 @@ impl OutcomeEnrichmentMiddleware {
             {
                 return ProcessingStatus::Error(msg.to_string());
             }
-            return ProcessingStatus::Error(format!("Error in {}: {}", self.stage_name, event.event_type()));
+            return ProcessingStatus::Error(format!(
+                "Error in {}: {}",
+                self.stage_name,
+                event.event_type()
+            ));
         }
 
         // 2) payload _error flag
-        if payload.get("_error").and_then(|v| v.as_bool()).unwrap_or(false) {
+        if payload
+            .get("_error")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
             let msg = payload
                 .get("_error_message")
                 .and_then(|v| v.as_str())
@@ -63,7 +75,9 @@ impl OutcomeEnrichmentMiddleware {
         // 4) retry baggage
         if let Some(retry_info) = ctx.get_baggage("retry_attempt") {
             if let Some(attempt) = retry_info.as_u64() {
-                return ProcessingStatus::Retry { attempt: attempt as u32 };
+                return ProcessingStatus::Retry {
+                    attempt: attempt as u32,
+                };
             }
         }
 
@@ -81,7 +95,13 @@ impl Middleware for OutcomeEnrichmentMiddleware {
         MiddlewareAction::Continue
     }
 
-    fn post_handle(&self, _event: &ChainEvent, _results: &[ChainEvent], _ctx: &mut MiddlewareContext) {}
+    fn post_handle(
+        &self,
+        _event: &ChainEvent,
+        _results: &[ChainEvent],
+        _ctx: &mut MiddlewareContext,
+    ) {
+    }
 
     fn on_error(&self, event: &ChainEvent, ctx: &mut MiddlewareContext) -> ErrorAction {
         ctx.set_baggage("processing_failed", serde_json::json!(true));
@@ -142,8 +162,8 @@ pub fn outcome_enrichment() -> Box<dyn MiddlewareFactory> {
 mod tests {
     use super::*;
     use obzenflow_core::event::ChainEventFactory;
-    use obzenflow_core::{WriterId};
     use obzenflow_core::id::StageId;
+    use obzenflow_core::WriterId;
     use serde_json::json;
 
     fn writer() -> WriterId {
@@ -155,7 +175,8 @@ mod tests {
         let mw = OutcomeEnrichmentMiddleware::new("test_stage");
         let ctx = MiddlewareContext::new();
 
-        let mut event = ChainEventFactory::data_event(writer(), "validation.error", json!({"data": "invalid"}));
+        let mut event =
+            ChainEventFactory::data_event(writer(), "validation.error", json!({"data": "invalid"}));
         mw.pre_write(&mut event, &ctx);
 
         match &event.processing_info.status {
@@ -175,7 +196,7 @@ mod tests {
         let mut event = ChainEventFactory::data_event(
             writer(),
             "order.processed",
-            json!({"order_id":"12345","_error":true,"_error_message":"Insufficient funds"})
+            json!({"order_id":"12345","_error":true,"_error_message":"Insufficient funds"}),
         );
 
         mw.pre_write(&mut event, &ctx);
@@ -194,7 +215,7 @@ mod tests {
         let mut event = ChainEventFactory::data_event(
             writer(),
             "payment.processed",
-            json!({"payment_id":"pay_123","error":"Card declined"})
+            json!({"payment_id":"pay_123","error":"Card declined"}),
         );
 
         mw.pre_write(&mut event, &ctx);
@@ -214,7 +235,7 @@ mod tests {
         let mut event = ChainEventFactory::data_event(
             writer(),
             "order.processing",
-            json!({"order_id": "12345"})
+            json!({"order_id": "12345"}),
         );
 
         mw.pre_write(&mut event, &ctx);
@@ -234,7 +255,10 @@ mod tests {
 
         mw.pre_write(&mut event, &ctx);
 
-        assert!(matches!(event.processing_info.status, ProcessingStatus::Filtered));
+        assert!(matches!(
+            event.processing_info.status,
+            ProcessingStatus::Filtered
+        ));
     }
 
     #[test]
@@ -242,11 +266,8 @@ mod tests {
         let mw = OutcomeEnrichmentMiddleware::new("test_stage");
         let ctx = MiddlewareContext::new();
 
-        let mut event = ChainEventFactory::data_event(
-            writer(),
-            "error.validation",
-            json!({"data": "invalid"})
-        );
+        let mut event =
+            ChainEventFactory::data_event(writer(), "error.validation", json!({"data": "invalid"}));
 
         // Pre-set an outcome
         event.processing_info.status = ProcessingStatus::Retry { attempt: 2 };
@@ -267,11 +288,14 @@ mod tests {
         let mut event = ChainEventFactory::data_event(
             writer(),
             "order.created",
-            json!({"order_id": "12345", "amount": 99.99})
+            json!({"order_id": "12345", "amount": 99.99}),
         );
 
         mw.pre_write(&mut event, &ctx);
 
-        assert!(matches!(event.processing_info.status, ProcessingStatus::Success));
+        assert!(matches!(
+            event.processing_info.status,
+            ProcessingStatus::Success
+        ));
     }
 }

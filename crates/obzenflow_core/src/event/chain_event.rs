@@ -1,13 +1,13 @@
 //! ChainEvent - the enhanced event structure for FlowState RS
 //! This is the application-level event that lives inside EventEnvelope.data
 
+use crate::event::context::causality_context::CausalityContext;
+use crate::event::context::observability_context::ObservabilityContext;
 use crate::event::context::{FlowContext, IntentContext, ProcessingContext, RuntimeContext};
 use crate::event::types::{CorrelationId, EventId, WriterId};
 use crate::id::StageId;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use crate::event::context::causality_context::CausalityContext;
-use crate::event::context::observability_context::ObservabilityContext;
 
 /// The definitive event structure for FlowState RS
 /// Lives inside EventEnvelope.data as serialized bytes
@@ -157,7 +157,7 @@ impl ChainEvent {
         self.flow_context = ctx;
         self
     }
-    
+
     /// Set causality information for this event
     pub fn with_causality(mut self, causality: CausalityContext) -> Self {
         self.causality = causality;
@@ -193,17 +193,16 @@ impl ChainEvent {
         matches!(self.content, ChainEventContent::Observability(_))
     }
 
-
     /// Return a concise “category.kind” string for logging & metrics.
     pub fn event_type(&self) -> String {
         match &self.content {
             ChainEventContent::Data { event_type, .. } => event_type.clone(),
 
             ChainEventContent::FlowControl(signal) => match signal {
-                FlowControlPayload::Eof { .. }        => "control.eof".into(),
-                FlowControlPayload::Watermark { .. }   => "control.watermark".into(),
-                FlowControlPayload::Checkpoint { .. }  => "control.checkpoint".into(),
-                FlowControlPayload::Drain              => "control.drain".into(),
+                FlowControlPayload::Eof { .. } => "control.eof".into(),
+                FlowControlPayload::Watermark { .. } => "control.watermark".into(),
+                FlowControlPayload::Checkpoint { .. } => "control.checkpoint".into(),
+                FlowControlPayload::Drain => "control.drain".into(),
             },
 
             ChainEventContent::Delivery(_) => "sink.delivery".into(),
@@ -211,33 +210,36 @@ impl ChainEvent {
             ChainEventContent::Observability(obs) => match obs {
                 // Stage lifecycle
                 ObservabilityPayload::Stage(stage) => match stage {
-                    StageLifecycle::Running   { .. } => "lifecycle.stage.running".into(),
-                    StageLifecycle::Draining  { .. } => "lifecycle.stage.draining".into(),
-                    StageLifecycle::Drained   { .. } => "lifecycle.stage.drained".into(),
+                    StageLifecycle::Running { .. } => "lifecycle.stage.running".into(),
+                    StageLifecycle::Draining { .. } => "lifecycle.stage.draining".into(),
+                    StageLifecycle::Drained { .. } => "lifecycle.stage.drained".into(),
                     StageLifecycle::Completed { .. } => "lifecycle.stage.completed".into(),
-                    StageLifecycle::Failed    { .. } => "lifecycle.stage.failed".into(),
+                    StageLifecycle::Failed { .. } => "lifecycle.stage.failed".into(),
                 },
 
                 ObservabilityPayload::Metrics(metrics) => match metrics {
-                    MetricsLifecycle::Ready            { .. } => "lifecycle.metrics.ready".into(),
-                    MetricsLifecycle::StateSnapshot    { .. } => "lifecycle.metrics.state".into(),
-                    MetricsLifecycle::ResourceUsage    { .. } => "lifecycle.metrics.resource".into(),
-                    MetricsLifecycle::Custom           { .. } => "lifecycle.metrics.custom".into(),
-                    MetricsLifecycle::DrainRequested          => "lifecycle.metrics.drain".into(),
-                    MetricsLifecycle::Drained          { .. } => "lifecycle.metrics.drained".into(),
+                    MetricsLifecycle::Ready { .. } => "lifecycle.metrics.ready".into(),
+                    MetricsLifecycle::StateSnapshot { .. } => "lifecycle.metrics.state".into(),
+                    MetricsLifecycle::ResourceUsage { .. } => "lifecycle.metrics.resource".into(),
+                    MetricsLifecycle::Custom { .. } => "lifecycle.metrics.custom".into(),
+                    MetricsLifecycle::DrainRequested => "lifecycle.metrics.drain".into(),
+                    MetricsLifecycle::Drained { .. } => "lifecycle.metrics.drained".into(),
                 },
 
                 // Middleware lifecycle
                 ObservabilityPayload::Middleware(mw) => match mw {
-                    MiddlewareLifecycle::CircuitBreaker(_) => "lifecycle.middleware.circuit_breaker".into(),
-                    MiddlewareLifecycle::RateLimiter(_)    => "lifecycle.middleware.rate_limiter".into(),
-                    MiddlewareLifecycle::Retry(_)          => "lifecycle.middleware.retry".into(),
-                    MiddlewareLifecycle::Sli(_)            => "lifecycle.middleware.sli".into(),
+                    MiddlewareLifecycle::CircuitBreaker(_) => {
+                        "lifecycle.middleware.circuit_breaker".into()
+                    }
+                    MiddlewareLifecycle::RateLimiter(_) => {
+                        "lifecycle.middleware.rate_limiter".into()
+                    }
+                    MiddlewareLifecycle::Retry(_) => "lifecycle.middleware.retry".into(),
+                    MiddlewareLifecycle::Sli(_) => "lifecycle.middleware.sli".into(),
                 },
             },
         }
     }
-
 
     /// Get payload as JSON value
     pub fn payload(&self) -> Value {
@@ -298,7 +300,10 @@ use crate::event::journal_event::{JournalEvent, Sealed};
 use crate::event::payloads::correlation_payload::CorrelationPayload;
 use crate::event::payloads::delivery_payload::DeliveryPayload;
 use crate::event::payloads::flow_control_payload::FlowControlPayload;
-use crate::event::payloads::observability_payload::{CircuitBreakerEvent, MetricsLifecycle, MiddlewareLifecycle, ObservabilityPayload, RetryEvent, StageLifecycle};
+use crate::event::payloads::observability_payload::{
+    CircuitBreakerEvent, MetricsLifecycle, MiddlewareLifecycle, ObservabilityPayload, RetryEvent,
+    StageLifecycle,
+};
 
 // Implement the sealed trait first
 impl Sealed for ChainEvent {}
@@ -307,7 +312,7 @@ impl JournalEvent for ChainEvent {
     fn id(&self) -> &EventId {
         &self.id
     }
-    
+
     fn writer_id(&self) -> &WriterId {
         &self.writer_id
     }
@@ -316,25 +321,24 @@ impl JournalEvent for ChainEvent {
     /// Falls back to generic labels when the name is dynamic (e.g. custom metrics).
     fn event_type_name(&self) -> &'static str {
         match &self.content {
-            ChainEventContent::Data { .. }                 => "data",
+            ChainEventContent::Data { .. } => "data",
             ChainEventContent::FlowControl(sig) => match sig {
-                FlowControlPayload::Eof { .. }              => "control.eof",
-                FlowControlPayload::Watermark { .. }        => "control.watermark",
-                FlowControlPayload::Checkpoint { .. }       => "control.checkpoint",
-                FlowControlPayload::Drain                   => "control.drain",
+                FlowControlPayload::Eof { .. } => "control.eof",
+                FlowControlPayload::Watermark { .. } => "control.watermark",
+                FlowControlPayload::Checkpoint { .. } => "control.checkpoint",
+                FlowControlPayload::Drain => "control.drain",
             },
-            ChainEventContent::Delivery(_)                 => "sink.delivery",
+            ChainEventContent::Delivery(_) => "sink.delivery",
             ChainEventContent::Observability(obs) => match obs {
-                ObservabilityPayload::Stage(_)             => "lifecycle.stage",
+                ObservabilityPayload::Stage(_) => "lifecycle.stage",
                 ObservabilityPayload::Metrics(m) => match m {
-                    MetricsLifecycle::Custom { .. }        => "lifecycle.metrics.custom",
-                    _                                      => "lifecycle.metrics",
+                    MetricsLifecycle::Custom { .. } => "lifecycle.metrics.custom",
+                    _ => "lifecycle.metrics",
                 },
-                ObservabilityPayload::Middleware(_)        => "lifecycle.middleware",
+                ObservabilityPayload::Middleware(_) => "lifecycle.middleware",
             },
         }
     }
-
 }
 
 /// Stateless factory for creating ChainEvents with consistent patterns
@@ -552,7 +556,7 @@ impl ChainEventFactory {
             )),
         )
     }
-    
+
     /// Create a circuit breaker summary event
     pub fn circuit_breaker_summary(
         writer_id: WriterId,
@@ -594,9 +598,9 @@ impl ChainEventFactory {
             })),
         )
     }
-    
+
     // Windowing metrics events
-    
+
     /// Create a windowing count metrics event
     pub fn windowing_count_event(
         writer_id: WriterId,
@@ -615,7 +619,7 @@ impl ChainEventFactory {
             }),
         )
     }
-    
+
     /// Create a windowing sum metrics event
     pub fn windowing_sum_event(
         writer_id: WriterId,
@@ -640,7 +644,7 @@ impl ChainEventFactory {
             }),
         )
     }
-    
+
     /// Create a windowing average metrics event
     pub fn windowing_average_event(
         writer_id: WriterId,
@@ -680,25 +684,27 @@ impl ChainEventFactory {
 
         // FIX (FLOWIP-082): Propagate full lineage with depth limit
         const DEFAULT_MAX_LINEAGE_DEPTH: usize = 100;
-        
+
         // Add immediate parent
         event.causality = CausalityContext::with_parent(parent.id);
-        
+
         // Get max depth from environment or use default
         let max_depth = std::env::var("OBZENFLOW_MAX_LINEAGE_DEPTH")
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(DEFAULT_MAX_LINEAGE_DEPTH);
-        
+
         // Propagate ancestors up to depth limit
-        let ancestors_to_add = parent.causality.parent_ids
+        let ancestors_to_add = parent
+            .causality
+            .parent_ids
             .iter()
             .take(max_depth.saturating_sub(1));
-        
+
         for ancestor in ancestors_to_add {
             event.causality = event.causality.add_parent(*ancestor);
         }
-        
+
         // TODO: Log warning if we're truncating (requires tracing dependency)
         // Currently we silently truncate at max_depth
         #[allow(unused_variables)]
@@ -857,4 +863,3 @@ mod tests {
         assert_eq!(drain.event_type(), "control.drain");
     }
 }
-

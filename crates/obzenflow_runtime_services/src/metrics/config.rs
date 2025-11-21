@@ -3,9 +3,9 @@
 //! This module provides the default configuration for metrics collection,
 //! reading from environment variables to allow runtime configuration.
 
+use obzenflow_core::metrics::MetricsExporter;
 use std::env;
 use std::sync::Arc;
-use obzenflow_core::metrics::MetricsExporter;
 
 /// Default metrics configuration that reads from environment variables
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -66,18 +66,18 @@ mod tests {
     #[test]
     fn test_default_config() {
         let _guard = ENV_MUTEX.lock().unwrap();
-        
+
         // Save current env var if exists
         let saved = env::var("OBZENFLOW_METRICS_ENABLED").ok();
-        
+
         // Remove the env var to test default behavior
         env::remove_var("OBZENFLOW_METRICS_ENABLED");
-        
+
         let config = DefaultMetricsConfig::default();
         assert_eq!(config.enabled, true);
         assert_eq!(config.stage_taxonomy, "RED");
         assert_eq!(config.flow_taxonomy, "GoldenSignals");
-        
+
         // Restore original value if it existed
         if let Some(val) = saved {
             env::set_var("OBZENFLOW_METRICS_ENABLED", val);
@@ -95,25 +95,25 @@ mod tests {
     #[test]
     fn test_env_var_override() {
         let _guard = ENV_MUTEX.lock().unwrap();
-        
+
         // Save current env var if exists
         let saved = env::var("OBZENFLOW_METRICS_ENABLED").ok();
-        
+
         // Test with enabled=false
         env::set_var("OBZENFLOW_METRICS_ENABLED", "false");
         let config = DefaultMetricsConfig::default();
         assert_eq!(config.enabled, false);
-        
+
         // Test with enabled=true
         env::set_var("OBZENFLOW_METRICS_ENABLED", "true");
         let config = DefaultMetricsConfig::default();
         assert_eq!(config.enabled, true);
-        
+
         // Test with invalid value (should default to true)
         env::set_var("OBZENFLOW_METRICS_ENABLED", "invalid");
         let config = DefaultMetricsConfig::default();
         assert_eq!(config.enabled, true);
-        
+
         // Restore original value or remove
         match saved {
             Some(val) => env::set_var("OBZENFLOW_METRICS_ENABLED", val),

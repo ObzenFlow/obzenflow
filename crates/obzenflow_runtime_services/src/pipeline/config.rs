@@ -1,9 +1,9 @@
 //! Pipeline and stage configuration types
 
-use obzenflow_core::StageId;
 use crate::stages::common::handlers::{
-    FiniteSourceHandler, InfiniteSourceHandler, TransformHandler, SinkHandler
+    FiniteSourceHandler, InfiniteSourceHandler, SinkHandler, TransformHandler,
 };
+use obzenflow_core::StageId;
 
 /// Stage handler type that can be converted to BoxedStageHandle
 pub enum StageHandlerType {

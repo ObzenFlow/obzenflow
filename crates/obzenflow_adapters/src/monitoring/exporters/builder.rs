@@ -3,9 +3,9 @@
 //! This module provides a clean builder pattern for creating metrics exporters
 //! based on configuration, avoiding the "block cosplaying as a factory" anti-pattern.
 
-use std::sync::Arc;
+use super::{ConsoleSummaryExporter, PrometheusExporter};
 use obzenflow_core::metrics::MetricsExporter;
-use super::{PrometheusExporter, ConsoleSummaryExporter};
+use std::sync::Arc;
 
 /// Builder for creating metrics exporters
 pub struct MetricsExporterBuilder {
@@ -32,19 +32,19 @@ impl MetricsExporterBuilder {
     /// Create a builder configured from environment variables
     pub fn from_env() -> Self {
         use std::env;
-        
+
         // Check if metrics are enabled first
         let enabled = env::var("OBZENFLOW_METRICS_ENABLED")
             .ok()
             .and_then(|v| v.parse::<bool>().ok())
             .unwrap_or(true);
-            
+
         if !enabled {
             return Self {
                 exporter_type: ExporterType::Noop,
             };
         }
-        
+
         // Determine exporter type from env var
         let exporter_type = match env::var("OBZENFLOW_METRICS_EXPORTER").as_deref() {
             Ok("prometheus") | Err(_) => ExporterType::Prometheus, // Default
@@ -52,7 +52,8 @@ impl MetricsExporterBuilder {
             Ok("noop") => ExporterType::Noop,
             #[cfg(feature = "metrics-statsd")]
             Ok("statsd") => {
-                let host = env::var("OBZENFLOW_STATSD_HOST").unwrap_or_else(|_| "localhost".to_string());
+                let host =
+                    env::var("OBZENFLOW_STATSD_HOST").unwrap_or_else(|_| "localhost".to_string());
                 let port = env::var("OBZENFLOW_STATSD_PORT")
                     .ok()
                     .and_then(|p| p.parse().ok())
@@ -70,37 +71,37 @@ impl MetricsExporterBuilder {
                 ExporterType::Prometheus
             }
         };
-        
+
         Self { exporter_type }
     }
-    
+
     /// Create a builder with Prometheus exporter
     pub fn prometheus() -> Self {
         Self {
             exporter_type: ExporterType::Prometheus,
         }
     }
-    
+
     /// Create a builder with console summary exporter
     pub fn console() -> Self {
         Self {
             exporter_type: ExporterType::Console,
         }
     }
-    
+
     /// Create a builder with no-op exporter
     pub fn noop() -> Self {
         Self {
             exporter_type: ExporterType::Noop,
         }
     }
-    
+
     /// Set the exporter type
     pub fn with_type(mut self, exporter_type: ExporterType) -> Self {
         self.exporter_type = exporter_type;
         self
     }
-    
+
     /// Build the metrics exporter
     pub fn build(self) -> Arc<dyn MetricsExporter> {
         match self.exporter_type {
@@ -134,30 +135,35 @@ impl MetricsExporterBuilder {
 struct NoopExporter;
 
 impl MetricsExporter for NoopExporter {
-    fn update_app_metrics(&self, _snapshot: obzenflow_core::metrics::AppMetricsSnapshot) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    fn update_app_metrics(
+        &self,
+        _snapshot: obzenflow_core::metrics::AppMetricsSnapshot,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Ok(())
     }
-    
-    fn update_infra_metrics(&self, _snapshot: obzenflow_core::metrics::InfraMetricsSnapshot) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+
+    fn update_infra_metrics(
+        &self,
+        _snapshot: obzenflow_core::metrics::InfraMetricsSnapshot,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Ok(())
     }
-    
+
     fn render_metrics(&self) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         Ok(String::new())
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_builder_defaults() {
         let exporter = MetricsExporterBuilder::prometheus().build();
         assert!(exporter.render_metrics().is_ok());
     }
-    
+
     #[test]
     fn test_noop_exporter() {
         let exporter = MetricsExporterBuilder::noop().build();
