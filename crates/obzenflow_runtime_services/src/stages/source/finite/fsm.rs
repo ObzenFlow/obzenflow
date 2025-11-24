@@ -4,7 +4,9 @@
 //! They have a unique "WaitingForGun" state that ensures they don't
 //! start emitting events until the pipeline is ready.
 
-use obzenflow_core::event::{ChainEventFactory, SystemEvent};
+use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
+use obzenflow_core::event::types::{Count, JournalIndex, JournalPath, SeqNo};
+use obzenflow_core::event::{ChainEventContent, ChainEventFactory, SystemEvent};
 use obzenflow_core::journal::journal::Journal;
 use obzenflow_core::{ChainEvent, EventId, FlowId, StageId, WriterId};
 use obzenflow_fsm::{EventVariant, FsmAction, FsmContext, StateVariant};
@@ -345,9 +347,39 @@ impl<H: FiniteSourceHandler + Send + Sync + 'static> FsmAction for FiniteSourceA
                     .as_ref()
                     .ok_or_else(|| "No writer ID available to send EOF".to_string())?;
 
-                let eof_event = ChainEventFactory::eof_event(
+                // Snapshot how many events this source emitted
+                let emitted = ctx
+                    .instrumentation
+                    .events_processed_total
+                    .load(std::sync::atomic::Ordering::Relaxed);
+
+                // Emit EOF with writer positions populated
+                let mut eof_event = ChainEventFactory::eof_event(
                     writer_id.clone(),
                     true, // natural EOF for finite sources
+                );
+                if let ChainEventContent::FlowControl(FlowControlPayload::Eof {
+                    writer_id: writer_id_field,
+                    writer_seq,
+                    ..
+                }) = &mut eof_event.content
+                {
+                    *writer_id_field = Some(writer_id.clone());
+                    *writer_seq = Some(SeqNo(emitted));
+                }
+
+                // Emit consumption_final for the source itself (writer-side contract)
+                let final_event = ChainEventFactory::consumption_final_event(
+                    writer_id.clone(),
+                    true, // pass because sources are authoritative on what they wrote
+                    Count(emitted),
+                    None, // expected_count unknown until config plumbing (010)
+                    true, // eof_seen
+                    None, // last_event_id unknown here
+                    SeqNo(emitted),
+                    Some(SeqNo(emitted)), // advertised writer seq = what we wrote
+                    None,                 // vector clock unavailable here
+                    None,                 // no failure reason
                 );
 
                 ctx.data_journal
@@ -355,9 +387,15 @@ impl<H: FiniteSourceHandler + Send + Sync + 'static> FsmAction for FiniteSourceA
                     .await
                     .map_err(|e| format!("Failed to send EOF: {}", e))?;
 
+                ctx.data_journal
+                    .append(final_event, None)
+                    .await
+                    .map_err(|e| format!("Failed to send source consumption_final: {}", e))?;
+
                 tracing::info!(
                     stage_name = %ctx.stage_name,
-                    "Finite source sent EOF event"
+                    emitted,
+                    "Finite source sent EOF and consumption_final"
                 );
                 Ok(())
             }
@@ -390,7 +428,7 @@ impl<H: FiniteSourceHandler + Send + Sync + 'static> FsmAction for FiniteSourceA
 
             FiniteSourceAction::PublishRunning => {
                 let writer_id_guard = ctx.writer_id.read().await;
-                let _writer_id = writer_id_guard
+                let writer_id = writer_id_guard
                     .as_ref()
                     .ok_or_else(|| "No writer ID available to publish running event".to_string())?;
 
@@ -402,9 +440,26 @@ impl<H: FiniteSourceHandler + Send + Sync + 'static> FsmAction for FiniteSourceA
                     .await
                     .map_err(|e| format!("Failed to publish running event: {}", e))?;
 
+                // Emit writer-side source contract with runtime defaults (expected_count unknown)
+                let contract = ChainEventFactory::source_contract_event(
+                    writer_id.clone(),
+                    None, // expected_count unknown until 010 config plumbing
+                    ctx.stage_id,
+                    None, // route not available here
+                    JournalPath(ctx.stage_id.to_string()),
+                    JournalIndex(0),
+                    None, // writer_seq unknown at start
+                    None, // vector clock not captured at start
+                );
+
+                ctx.data_journal
+                    .append(contract, None)
+                    .await
+                    .map_err(|e| format!("Failed to append source_contract: {}", e))?;
+
                 tracing::info!(
                     stage_name = %ctx.stage_name,
-                    "Finite source published running event"
+                    "Finite source published running event and source_contract"
                 );
                 Ok(())
             }

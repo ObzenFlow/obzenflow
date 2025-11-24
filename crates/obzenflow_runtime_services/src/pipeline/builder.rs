@@ -9,6 +9,7 @@ use super::{
     supervisor::PipelineSupervisor,
 };
 use crate::{
+    id_conversions::StageIdExt,
     message_bus::FsmMessageBus,
     stages::common::stage_handle::BoxedStageHandle,
     supervised_base::{
@@ -23,7 +24,10 @@ use obzenflow_core::journal::journal::Journal;
 use obzenflow_core::metrics::MetricsExporter;
 use obzenflow_core::StageId;
 use obzenflow_topology::Topology;
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 use tokio::sync::RwLock;
 
 /// Builder for creating a pipeline with proper FSM lifecycle
@@ -146,6 +150,27 @@ impl SupervisorBuilder for PipelineBuilder {
         }
         tracing::info!("=== END TOPOLOGY DEBUG ===");
 
+        // Identify source stages (no upstreams)
+        let expected_sources: Vec<StageId> = self
+            .topology
+            .stages()
+            .filter(|stage| self.topology.upstream_stages(stage.id.clone()).is_empty())
+            .map(|stage| StageId::from_topology_id(stage.id))
+            .collect();
+
+        // Track every topology edge so we can require ContractStatus evidence for each upstream->reader pair
+        let expected_contract_pairs: HashSet<(StageId, StageId)> = self
+            .topology
+            .edges()
+            .iter()
+            .map(|edge| {
+                (
+                    StageId::from_topology_id(edge.from),
+                    StageId::from_topology_id(edge.to),
+                )
+            })
+            .collect();
+
         let pipeline_context = Arc::new(PipelineContext {
             system_id,
             bus: message_bus.clone(),
@@ -163,8 +188,12 @@ impl SupervisorBuilder for PipelineBuilder {
                 self.error_journals
                     .unwrap_or_else(|| Vec::<(StageId, Arc<dyn Journal<ChainEvent>>)>::new()),
             )),
-            completion_reader: Arc::new(RwLock::new(None)),
+            completion_subscription: Arc::new(RwLock::new(None)),
             metrics_exporter: self.metrics_exporter.clone(),
+            contract_status: Arc::new(RwLock::new(HashMap::new())),
+            contract_pairs: Arc::new(RwLock::new(HashMap::new())),
+            expected_contract_pairs: Arc::new(expected_contract_pairs),
+            expected_sources: Arc::new(expected_sources),
         });
 
         // Create channels using the common infrastructure
@@ -178,6 +207,8 @@ impl SupervisorBuilder for PipelineBuilder {
             name: "pipeline_supervisor".to_string(),
             pipeline_context: pipeline_context.clone(),
             system_journal: self.system_journal.clone(),
+            last_barrier_log: None,
+            drain_idle_iters: 0,
         };
 
         // Clone what we need for the task

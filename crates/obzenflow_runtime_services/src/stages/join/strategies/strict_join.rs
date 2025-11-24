@@ -346,7 +346,10 @@ mod tests {
         assert_eq!(out.len(), 1);
         match &out[0].content {
             ChainEventContent::FlowControl(FlowControlPayload::Eof { natural, .. }) => {
-                assert!(!natural, "strict join emits unnatural EOF on integrity violations");
+                assert!(
+                    !natural,
+                    "strict join emits unnatural EOF on integrity violations"
+                );
             }
             other => panic!("expected poison EOF, got {:?}", other),
         }

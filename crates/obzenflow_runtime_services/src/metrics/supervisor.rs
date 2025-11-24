@@ -3,6 +3,7 @@
 //! The supervisor owns the FSM directly and runs autonomously.
 //! Once started, all communication happens through journal events only.
 
+use crate::messaging::{PollResult, SubscriptionPoller};
 use crate::supervised_base::base::Supervisor;
 use crate::supervised_base::{EventLoopDirective, SelfSupervised};
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
@@ -11,6 +12,7 @@ use obzenflow_core::event::{ChainEventFactory, JournalEvent, WriterId};
 use obzenflow_core::journal::journal::Journal;
 use obzenflow_core::ChainEvent;
 use obzenflow_fsm::FsmBuilder;
+use obzenflow_fsm::StateVariant;
 use serde_json::json;
 use std::sync::Arc;
 
@@ -18,6 +20,8 @@ use super::fsm::{
     MetricsAggregatorAction, MetricsAggregatorContext, MetricsAggregatorEvent,
     MetricsAggregatorState,
 };
+
+const IDLE_BACKOFF_MS: u64 = 10;
 
 /// The supervisor that manages the metrics aggregator
 pub(crate) struct MetricsAggregatorSupervisor {
@@ -384,10 +388,14 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                 };
 
                 // Build futures for subscriptions
-                let data_recv = data_subscription.recv();
+                let data_recv = data_subscription.poll_next_with_state(state.variant_name());
                 let error_recv = async {
                     if let Some(error_sub) = error_subscription {
-                        error_sub.recv().await
+                        match error_sub.poll_next_with_state(state.variant_name()).await {
+                            PollResult::Event(envelope) => Ok(Some(envelope)),
+                            PollResult::NoEvents => Ok(None),
+                            PollResult::Error(e) => Err(format!("Error: {}", e)),
+                        }
                     } else {
                         // If no error subscription, wait forever
                         std::future::pending().await
@@ -397,10 +405,12 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                 // FLOWIP-059b: Build future for system events
                 let system_recv = async {
                     if let Some(system_sub) = system_subscription {
-                        match system_sub.next().await {
-                            Ok(Some(envelope)) => Ok(Some(envelope)),
-                            Ok(None) => Ok(None),
-                            Err(e) => Err(format!("Error reading system events: {:?}", e)),
+                        match system_sub.poll_next().await {
+                            PollResult::Event(envelope) => Ok(Some(envelope)),
+                            PollResult::NoEvents => Ok(None),
+                            PollResult::Error(e) => {
+                                Err(format!("Error reading system events: {}", e))
+                            }
                         }
                     } else {
                         // If no system subscription, wait forever
@@ -424,7 +434,8 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                                 ))
                             }
                             Ok(None) => {
-                                tracing::debug!("Metrics aggregator system subscription returned None (likely stream end); continuing without failing");
+                                // No events available - sleep to avoid busy loop
+                                idle_backoff().await;
                                 Ok(EventLoopDirective::Continue)
                             }
                             Err(e) => {
@@ -446,7 +457,7 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                     // Process data journal events
                     result = data_recv => {
                         match result {
-                            Ok(envelope) => {
+                            PollResult::Event(envelope) => {
                                 tracing::info!(
                                     event_id = %envelope.event.id(),
                                     event_type = envelope.event.event_type(),
@@ -473,7 +484,12 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                                 // Process single event through FSM
                                 Ok(EventLoopDirective::Transition(MetricsAggregatorEvent::ProcessBatch { events: vec![envelope] }))
                             }
-                            Err(e) => {
+                            PollResult::NoEvents => {
+                                // No events available, continue
+                                tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+                                Ok(EventLoopDirective::Continue)
+                            }
+                            PollResult::Error(e) => {
                                 let err_msg = format!("Data journal read error: {}", e);
                                 if err_msg.contains("Partial read retries exceeded") {
                                     tracing::warn!(
@@ -493,7 +509,7 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                     // Process error journal events (FLOWIP-082g)
                     result = error_recv => {
                         match result {
-                            Ok(envelope) => {
+                            Ok(Some(envelope)) => {
                                 tracing::info!(
                                     event_id = %envelope.event.id(),
                                     event_type = envelope.event.event_type(),
@@ -519,6 +535,12 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
 
                                 // Process error event through FSM
                                 Ok(EventLoopDirective::Transition(MetricsAggregatorEvent::ProcessBatch { events: vec![envelope] }))
+                            }
+                            Ok(None) => {
+                                // No error events available - should not happen often since
+                                // error_recv waits forever if no subscription, but sleep if it does
+                                idle_backoff().await;
+                                Ok(EventLoopDirective::Continue)
                             }
                             Err(e) => {
                                 let err_msg = format!("Error journal read error: {}", e);
@@ -573,19 +595,16 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                 let mut error_subscription_guard = self.context.error_subscription.write().await;
                 let error_subscription = error_subscription_guard.as_mut();
 
-                // Try both subscriptions with timeout
-                let data_recv = tokio::time::timeout(
-                    tokio::time::Duration::from_millis(25),
-                    data_subscription.recv(),
-                );
+                // Try both subscriptions without timeout - poll_next handles this
+                let data_recv = data_subscription.poll_next_with_state(state.variant_name());
 
                 let error_recv = async {
                     if let Some(error_sub) = error_subscription {
-                        tokio::time::timeout(
-                            tokio::time::Duration::from_millis(25),
-                            error_sub.recv(),
-                        )
-                        .await
+                        match error_sub.poll_next_with_state(state.variant_name()).await {
+                            PollResult::Event(envelope) => Ok(Some(envelope)),
+                            PollResult::NoEvents => Ok(None),
+                            PollResult::Error(e) => Err(format!("Error: {}", e)),
+                        }
                     } else {
                         // If no error subscription, wait forever
                         std::future::pending().await
@@ -595,7 +614,7 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                 tokio::select! {
                     result = data_recv => {
                         match result {
-                            Ok(Ok(envelope)) => {
+                            PollResult::Event(envelope) => {
                                 tracing::debug!(
                                     event_id = %envelope.event.id(),
                                     event_type = envelope.event.event_type(),
@@ -620,16 +639,23 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                                 );
                                 Ok(EventLoopDirective::Transition(MetricsAggregatorEvent::ProcessBatch { events: vec![envelope] }))
                             }
-                            _ => {
-                                // Try error journal next
-                                Ok(EventLoopDirective::Continue)
+                            PollResult::NoEvents | PollResult::Error(_) => {
+                                // Treat NoEvents/Error as an empty batch for draining
+                                let new_count = consecutive_empty_batches + 1;
+                                tracing::info!(
+                                    consecutive_empty_batches = new_count,
+                                    "Metrics aggregator draining: empty batch (data)"
+                                );
+                                Ok(EventLoopDirective::Transition(
+                                    MetricsAggregatorEvent::DrainEmptyBatch,
+                                ))
                             }
                         }
                     }
 
                     result = error_recv => {
                         match result {
-                            Ok(Ok(envelope)) => {
+                            Ok(Some(envelope)) => {
                                 tracing::info!(
                                     event_id = %envelope.event.id(),
                                     event_type = envelope.event.event_type(),
@@ -653,13 +679,16 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                                 );
                                 Ok(EventLoopDirective::Transition(MetricsAggregatorEvent::ProcessBatch { events: vec![envelope] }))
                             }
-                            _ => {
+                            Ok(None) | Err(_) => {
                                 // No events from either subscription - increment empty batch counter
+                                let new_count = consecutive_empty_batches + 1;
                                 tracing::info!(
-                                    consecutive_empty_batches = consecutive_empty_batches + 1,
+                                    consecutive_empty_batches = new_count,
                                     "Metrics aggregator draining: empty batch"
                                 );
-                                Ok(EventLoopDirective::Transition(MetricsAggregatorEvent::DrainEmptyBatch))
+                                Ok(EventLoopDirective::Transition(
+                                    MetricsAggregatorEvent::DrainEmptyBatch,
+                                ))
                             }
                         }
                     }
@@ -681,6 +710,10 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
     }
 }
 
+#[inline]
+async fn idle_backoff() {
+    tokio::time::sleep(std::time::Duration::from_millis(IDLE_BACKOFF_MS)).await;
+}
 // All business logic has been moved to FSM actions - no free functions needed!
 
 impl Drop for MetricsAggregatorSupervisor {

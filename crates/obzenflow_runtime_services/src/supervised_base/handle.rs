@@ -195,6 +195,14 @@ where
         let wrapped_future = async move {
             tracing::trace!("🎯 WRAPPER: Task {} started executing!", name_clone3);
             let result = future.await;
+            match &result {
+                Ok(_) => {
+                    tracing::debug!("✅ Supervisor task {} completed successfully", name_clone3);
+                }
+                Err(e) => {
+                    tracing::error!("❌ Supervisor task {} failed: {}", name_clone3, e);
+                }
+            }
             tracing::trace!("🎯 WRAPPER: Task {} completed!", name_clone3);
             result
         };

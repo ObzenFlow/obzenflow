@@ -5,8 +5,8 @@ use obzenflow_core::event::event_envelope::EventEnvelope;
 use obzenflow_core::event::identity::journal_writer_id::JournalWriterId;
 use obzenflow_core::event::vector_clock::VectorClock;
 use obzenflow_core::event::JournalEvent;
-use obzenflow_core::WriterId;
 use obzenflow_core::EventId;
+use obzenflow_core::WriterId;
 use serde::{Deserialize, Serialize}; // <‑‑ canonical path
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::RwLock;

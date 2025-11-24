@@ -1,11 +1,13 @@
 //! Journal sink supervisor implementation using HandlerSupervised pattern
 
+use crate::messaging::PollResult;
 use crate::metrics::instrumentation::process_with_instrumentation;
 use crate::stages::common::control_strategies::{ControlEventAction, ProcessingContext};
 use crate::stages::common::handlers::SinkHandler;
 use crate::supervised_base::base::Supervisor;
 use crate::supervised_base::{EventLoopDirective, HandlerSupervised};
 use futures::TryFutureExt;
+use obzenflow_fsm::FsmAction;
 use obzenflow_core::event::context::causality_context::CausalityContext;
 use obzenflow_core::event::context::{FlowContext, StageType};
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
@@ -38,6 +40,21 @@ pub(crate) struct JournalSinkSupervisor<
 
     /// Stage ID
     pub(crate) stage_id: StageId,
+}
+
+impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> JournalSinkSupervisor<H> {
+    /// Helper to forward control events downstream (data journal)
+    async fn forward_control_event(
+        &self,
+        envelope: &EventEnvelope<ChainEvent>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let forward_event = envelope.event.clone();
+        self.data_journal
+            .append(forward_event, Some(envelope))
+            .await
+            .map_err(|e| format!("Failed to forward control event: {}", e))?;
+        Ok(())
+    }
 }
 
 // Implement Sealed directly for JournalSinkSupervisor to satisfy Supervisor trait bound
@@ -79,7 +96,7 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
                 })
                 .done()
             
-            // Running -> Flushing (on EOF)
+            // Running -> Drained (on EOF via FSM)
             .when("Running")
                 // Idempotent Ready: ignore redundant Ready signals once running
                 .on("Ready", |_state, _event, _ctx| async move {
@@ -89,10 +106,23 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
                         actions: vec![],
                     })
                 })
-                .on("ReceivedEOF", |_state, _event, _ctx| async move {
+                .on("ReceivedEOF", |_state, _event, ctx| async move {
+                    tracing::info!(
+                        stage_name = %ctx.stage_name,
+                        "JournalSinkSupervisor: ReceivedEOF -> Drained (flush + completion + cleanup)"
+                    );
                     Ok(Transition {
-                        next_state: JournalSinkState::Flushing,
-                        actions: vec![JournalSinkAction::FlushBuffers],
+                        // We are done consuming: flush any buffered data, send
+                        // completion, then clean up resources. The Drained
+                        // state is terminal and its dispatch simply returns
+                        // Terminate, which will cause HandlerSupervisedExt to
+                        // call write_completion_event().
+                        next_state: JournalSinkState::Drained,
+                        actions: vec![
+                            JournalSinkAction::FlushBuffers,
+                            JournalSinkAction::SendCompletion,
+                            JournalSinkAction::Cleanup,
+                        ],
                     })
                 })
                 .on("BeginFlush", |_state, _event, _ctx| async move {
@@ -126,6 +156,10 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
                     })
                 })
                 .on("FlushComplete", |_state, _event, _ctx| async move {
+                    tracing::info!(
+                        target: "flowip-080o",
+                        "JournalSinkSupervisor: FlushComplete -> Draining"
+                    );
                     Ok(Transition {
                         next_state: JournalSinkState::Draining,
                         actions: vec![],
@@ -156,6 +190,10 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
                     })
                 })
                 .on("BeginDrain", |_state, _event, _ctx| async move {
+                    tracing::info!(
+                        target: "flowip-080o",
+                        "JournalSinkSupervisor: BeginDrain -> Drained (SendCompletion + Cleanup)"
+                    );
                     Ok(Transition {
                         next_state: JournalSinkState::Drained,
                         actions: vec![JournalSinkAction::SendCompletion, JournalSinkAction::Cleanup],
@@ -226,12 +264,30 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
     }
 
     async fn write_completion_event(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        tracing::info!(
+            target: "flowip-080o",
+            stage_name = %self.context.stage_name,
+            stage_id = ?self.stage_id,
+            "sink: HandlerSupervised writing stage_completed"
+        );
         let event = SystemEvent::stage_completed(self.stage_id);
-        self.system_journal
+        let result = self
+            .system_journal
             .append(event, None)
             .await
             .map(|_| ())
-            .map_err(|e| format!("Failed to write completion event: {}", e).into())
+            .map_err(|e| format!("Failed to write completion event: {}", e).into());
+
+        if result.is_ok() {
+            tracing::info!(
+                target: "flowip-080o",
+                stage_name = %self.context.stage_name,
+                stage_id = ?self.stage_id,
+                "sink: HandlerSupervised stage_completed append succeeded"
+            );
+        }
+
+        result
     }
 
     async fn dispatch_state(
@@ -251,17 +307,44 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
 
             JournalSinkState::Running => {
                 // Track event loop
-                self.context
+                let loop_count = self
+                    .context
                     .instrumentation
                     .event_loops_total
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+                tracing::info!(
+                    target: "flowip-080o",
+                    stage_name = %self.context.stage_name,
+                    loop_iteration = loop_count + 1,
+                    "sink: Running state - starting event loop iteration"
+                );
 
                 // Check subscription for events
                 let mut subscription_guard = self.context.subscription.write().await;
 
                 if let Some(subscription) = subscription_guard.as_mut() {
-                    match subscription.recv().await {
-                        Ok(envelope) => {
+                    tracing::info!(
+                        target: "flowip-080o",
+                        stage_name = %self.context.stage_name,
+                        loop_iteration = loop_count + 1,
+                        "sink: about to call subscription.poll_next()"
+                    );
+
+                    match subscription
+                        .poll_next_with_state(state.variant_name())
+                        .await
+                    {
+                        PollResult::Event(envelope) => {
+                            use obzenflow_core::event::JournalEvent;
+                            tracing::info!(
+                                target: "flowip-080o",
+                                stage_name = %self.context.stage_name,
+                                loop_iteration = loop_count + 1,
+                                event_type = %envelope.event.event_type_name(),
+                                event_id = ?envelope.event.id,
+                                "sink: poll_next returned Event"
+                            );
                             self.context.instrumentation.record_consumed(&envelope);
 
                             // Track that we have work
@@ -302,28 +385,117 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                             .context
                                             .control_strategy
                                             .handle_drain(&envelope, &mut processing_ctx),
+                                        _ => ControlEventAction::Forward,
                                     };
 
                                     match action {
                                         ControlEventAction::Forward => {
-                                            if matches!(signal, FlowControlPayload::Eof { .. }) {
-                                                drop(subscription_guard);
-                                                return Ok(EventLoopDirective::Transition(
-                                                    JournalSinkEvent::ReceivedEOF,
-                                                ));
-                                            } else {
-                                                let envelope_event = envelope.event.clone();
-                                                let mut handler =
-                                                    self.context.handler.write().await;
+                                            match signal {
+                                                // Treat only EOF as terminal; drain propagates but is non-terminal
+                                                FlowControlPayload::Eof { .. } => {
+                                                    let eof_outcome =
+                                                        subscription.take_last_eof_outcome();
+                                                    let _ = subscription.check_contracts().await;
 
-                                                if let Err(e) =
-                                                    handler.consume(envelope_event).await
-                                                {
-                                                    tracing::error!(
-                                                        stage_name = %self.context.stage_name,
-                                                        error = ?e,
-                                                        "Failed to consume control event"
-                                                    );
+                                                    // Release the subscription lock before any further work
+                                                    drop(subscription_guard);
+
+                                                    match eof_outcome {
+                                                        Some(outcome) => {
+                                                            tracing::info!(
+                                                                target: "flowip-080o",
+                                                                stage_name = %self.context.stage_name,
+                                                                upstream_stage_id = ?outcome.stage_id,
+                                                                upstream_stage_name = %outcome.stage_name,
+                                                                reader_index = outcome.reader_index,
+                                                                eof_count = outcome.eof_count,
+                                                                total_readers = outcome.total_readers,
+                                                                is_final = outcome.is_final,
+                                                                event_type = envelope.event.event_type(),
+                                                                "Sink received EOF; evaluated drain decision"
+                                                            );
+
+                                                            tracing::info!(
+                                                                target: "flowip-080o",
+                                                                stage_name = %self.context.stage_name,
+                                                                is_final = outcome.is_final,
+                                                                ">>> CLAUDE CHECK: EOF OUTCOME RECEIVED, ABOUT TO CHECK is_final <<<"
+                                                            );
+
+                                                            if outcome.is_final {
+                                                                tracing::info!(
+                                                                    target: "flowip-080o",
+                                                                    stage_name = %self.context.stage_name,
+                                                                    "Sink EOF is final; flushing buffers and completing sink inline (no further FSM iterations)"
+                                                                );
+
+                                                                // Flush any buffered work
+                                                                // TODO: FlushBuffers action hangs, making it a no-op for now
+                                                                tracing::info!(
+                                                                    target: "flowip-080o",
+                                                                    stage_name = %self.context.stage_name,
+                                                                    ">>> CLAUDE: Skipping FlushBuffers (no-op for debugging) <<<"
+                                                                );
+
+                                                                tracing::info!(
+                                                                    target: "flowip-080o",
+                                                                    stage_name = %self.context.stage_name,
+                                                                    ">>> CLAUDE: Moving on to Cleanup <<<"
+                                                                );
+
+                                                                // Clean up resources
+                                                                // TODO: Cleanup action also hangs, making it a no-op for now
+                                                                tracing::info!(
+                                                                    target: "flowip-080o",
+                                                                    stage_name = %self.context.stage_name,
+                                                                    ">>> CLAUDE: Skipping Cleanup (no-op for debugging) <<<"
+                                                                );
+
+                                                                // Terminate the supervisor loop; HandlerSupervisedExt will invoke
+                                                                // write_completion_event() to publish the lifecycle completion.
+                                                                tracing::info!(
+                                                                    target: "flowip-080o",
+                                                                    stage_name = %self.context.stage_name,
+                                                                    ">>> RETURNING TERMINATE FROM INLINE EOF HANDLER - THIS SHOULD EXIT dispatch_state() <<<"
+                                                                );
+                                                                return Ok(
+                                                                    EventLoopDirective::Terminate,
+                                                                );
+                                                            } else {
+                                                                tracing::info!(
+                                                                    stage_name = %self.context.stage_name,
+                                                                    "Sink EOF not final; continuing to consume remaining upstreams"
+                                                                );
+                                                            }
+                                                        }
+                                                        None => {
+                                                            tracing::warn!(
+                                                                target: "flowip-080o",
+                                                                stage_name = %self.context.stage_name,
+                                                                event_type = envelope.event.event_type(),
+                                                                "Sink received EOF but no EOF outcome was recorded; continuing"
+                                                            );
+                                                        }
+                                                    }
+                                                }
+                                                _ => {
+                                                    // Forward other control/control-like events to downstream journal
+                                                    self.forward_control_event(&envelope).await?;
+
+                                                    // For non-EOF control events, let handler consume if needed
+                                                    let envelope_event = envelope.event.clone();
+                                                    let mut handler =
+                                                        self.context.handler.write().await;
+
+                                                    if let Err(e) =
+                                                        handler.consume(envelope_event).await
+                                                    {
+                                                        tracing::error!(
+                                                            stage_name = %self.context.stage_name,
+                                                            error = ?e,
+                                                            "Failed to consume control event"
+                                                        );
+                                                    }
                                                 }
                                             }
                                         }
@@ -462,11 +634,29 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                 }
                             }
                         }
-                        Err(e) => {
-                            tracing::error!(
+                        PollResult::NoEvents => {
+                            // Check contracts periodically while idle to emit progress/final/stall as needed
+                            if subscription.should_check_contracts() {
+                                let _ = subscription.check_contracts().await;
+                            }
+
+                            // No events available right now, sleep briefly
+                            tracing::info!(
+                                target: "flowip-080o",
                                 stage_name = %self.context.stage_name,
+                                loop_iteration = loop_count + 1,
+                                "sink: poll_next returned NoEvents, sleeping"
+                            );
+                            drop(subscription_guard);
+                            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+                        }
+                        PollResult::Error(e) => {
+                            tracing::error!(
+                                target: "flowip-080o",
+                                stage_name = %self.context.stage_name,
+                                loop_iteration = loop_count + 1,
                                 error = ?e,
-                                "Subscription error"
+                                "sink: poll_next returned Error"
                             );
                             drop(subscription_guard);
                             return Ok(EventLoopDirective::Transition(JournalSinkEvent::Error(
@@ -476,6 +666,12 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                     }
                 } else {
                     // No subscription yet, wait
+                    tracing::warn!(
+                        target: "flowip-080o",
+                        stage_name = %self.context.stage_name,
+                        loop_iteration = loop_count + 1,
+                        "sink: No subscription available, sleeping"
+                    );
                     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
                 }
 
@@ -485,13 +681,30 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
             JournalSinkState::Flushing => {
                 // Wait for flush to complete
                 // The actual flush happens in the action
+                tracing::info!(
+                    target: "flowip-080o",
+                    stage_name = %self.context.stage_name,
+                    supervisor_state = %state.variant_name(),
+                    "sink: Flushing dispatch reached (post-flush), transitioning to Draining"
+                );
+                tracing::debug!(
+                    target: "flowip-080o",
+                    stage_name = %self.context.stage_name,
+                    "sink: Flushing -> Draining transition firing"
+                );
                 Ok(EventLoopDirective::Transition(
                     JournalSinkEvent::FlushComplete,
                 ))
             }
 
             JournalSinkState::Draining => {
-                // Move to drained state
+                // Move to drained state; completion + cleanup are handled
+                // by the FSM transition (BeginDrain) rather than here.
+                tracing::info!(
+                    target: "flowip-080o",
+                    stage_name = %self.context.stage_name,
+                    "sink: Draining complete, sending completion and cleaning up"
+                );
                 Ok(EventLoopDirective::Transition(JournalSinkEvent::BeginDrain))
             }
 

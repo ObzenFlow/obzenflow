@@ -1,5 +1,6 @@
 //! Transform supervisor implementation using HandlerSupervised pattern
 
+use crate::messaging::PollResult;
 use crate::metrics::instrumentation::process_with_instrumentation;
 use crate::stages::common::control_strategies::{ControlEventAction, ProcessingContext};
 use crate::stages::common::handlers::TransformHandler;
@@ -240,16 +241,42 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Hand
             }
 
             TransformState::Running => {
-                self.context
+                let loop_count = self
+                    .context
                     .instrumentation
                     .event_loops_total
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
+                tracing::info!(
+                    target: "flowip-080o",
+                    stage_name = %self.context.stage_name,
+                    loop_iteration = loop_count + 1,
+                    "transform: Running state - starting event loop iteration"
+                );
+
                 // Process events from subscription
                 let mut subscription_guard = self.context.subscription.write().await;
                 if let Some(subscription) = subscription_guard.as_mut() {
-                    match subscription.recv().await {
-                        Ok(envelope) => {
+                    tracing::info!(
+                        target: "flowip-080o",
+                        stage_name = %self.context.stage_name,
+                        loop_iteration = loop_count + 1,
+                        "transform: about to call subscription.poll_next()"
+                    );
+
+                    match subscription
+                        .poll_next_with_state(state.variant_name())
+                        .await
+                    {
+                        PollResult::Event(envelope) => {
+                            use obzenflow_core::event::JournalEvent;
+                            tracing::info!(
+                                target: "flowip-080o",
+                                stage_name = %self.context.stage_name,
+                                loop_iteration = loop_count + 1,
+                                event_type = %envelope.event.event_type_name(),
+                                "transform: poll_next returned Event"
+                            );
                             self.context.instrumentation.record_consumed(&envelope);
 
                             // We have work - increment loops with work
@@ -257,6 +284,14 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Hand
                                 .instrumentation
                                 .event_loops_with_work_total
                                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+                            tracing::info!(
+                                target: "flowip-080o",
+                                stage_name = %self.context.stage_name,
+                                event_type = %envelope.event.event_type(),
+                                is_eof = envelope.event.is_eof(),
+                                "transform: received event from subscription"
+                            );
 
                             tracing::debug!(
                                 stage_name = %self.context.stage_name,
@@ -292,19 +327,29 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Hand
                                             .context
                                             .control_strategy
                                             .handle_drain(&envelope, &mut processing_ctx),
+                                        _ => ControlEventAction::Forward,
                                     };
 
                                     // Execute the action
                                     match action {
                                         ControlEventAction::Forward => {
                                             // Forward control events immediately
-                                            if !envelope.event.is_eof() {
-                                                self.forward_control_event(&envelope).await?;
-                                            } else {
-                                                // Buffer EOF for draining state
+                                            // Always forward control events downstream
+                                            self.forward_control_event(&envelope).await?;
+
+                                            // EOF or Drain triggers local drain after forwarding
+                                            // Drain events from pipeline BeginDrain should initiate stage draining
+                                            if envelope.event.is_eof()
+                                                || matches!(signal, FlowControlPayload::Drain)
+                                            {
                                                 *self.context.buffered_eof.write().await =
                                                     Some(envelope.event.clone());
                                                 drop(subscription_guard);
+                                                tracing::info!(
+                                                    stage_name = %self.context.stage_name,
+                                                    event_type = envelope.event.event_type(),
+                                                    "Transform stage received drain signal, transitioning to draining"
+                                                );
                                                 return Ok(EventLoopDirective::Transition(
                                                     TransformEvent::ReceivedEOF,
                                                 ));
@@ -384,6 +429,9 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Hand
                                                         .append(event, Some(&envelope))
                                                         .await
                                                         .map_err(|e| format!("Failed to write error event: {}", e))?;
+
+                                                    // Track output for contract verification
+                                                    subscription.track_output_event();
                                                 } else {
                                                     // Enrich with runtime context
                                                     let flow_context = FlowContext {
@@ -411,6 +459,9 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Hand
                                                         .append(enriched_event, Some(&envelope))
                                                         .await
                                                         .map_err(|e| format!("Failed to write transformed event: {}", e))?;
+
+                                                    // Track output for contract verification
+                                                    subscription.track_output_event();
                                                 }
                                             }
                                         }
@@ -430,7 +481,52 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Hand
                                 }
                             }
                         }
-                        Err(e) => {
+                        PollResult::NoEvents => {
+                            // No events available right now
+                            // Check contracts if appropriate (FSM decides when)
+                            if subscription.should_check_contracts() {
+                                match subscription.check_contracts().await {
+                                    Ok(crate::messaging::upstream_subscription::ContractStatus::Stalled(upstream)) => {
+                                        tracing::warn!(
+                                            stage_name = %self.context.stage_name,
+                                            upstream = ?upstream,
+                                            "Upstream stalled detected during active processing"
+                                        );
+                                    }
+                                    Ok(crate::messaging::upstream_subscription::ContractStatus::Violated { upstream, cause }) => {
+                                        tracing::error!(
+                                            stage_name = %self.context.stage_name,
+                                            upstream = ?upstream,
+                                            cause = ?cause,
+                                            "Contract violation detected during active processing"
+                                        );
+                                    }
+                                    Ok(_) => {
+                                        // Healthy or ProgressEmitted - no action needed
+                                    }
+                                    Err(e) => {
+                                        tracing::error!(
+                                            stage_name = %self.context.stage_name,
+                                            error = %e,
+                                            "Failed to check contracts"
+                                        );
+                                    }
+                                }
+                            }
+
+                            tracing::trace!(
+                                stage_name = %self.context.stage_name,
+                                "No events available, sleeping"
+                            );
+                            tracing::info!(
+                                target: "flowip-080o",
+                                stage_name = %self.context.stage_name,
+                                "transform: poll_next returned NoEvents; sleeping briefly"
+                            );
+                            drop(subscription_guard);
+                            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+                        }
+                        PollResult::Error(e) => {
                             tracing::error!(
                                 stage_name = %self.context.stage_name,
                                 error = ?e,
@@ -451,26 +547,41 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Hand
             }
 
             TransformState::Draining => {
-                // Continue processing remaining events with short timeout
+                // Continue processing remaining events
                 let mut subscription_guard = self.context.subscription.write().await;
                 if let Some(subscription) = subscription_guard.as_mut() {
-                    // Use shorter timeout to detect empty queue
-                    match tokio::time::timeout(
-                        tokio::time::Duration::from_millis(50),
-                        subscription.recv(),
-                    )
-                    .await
+                    // Poll for remaining events without timeout hacks
+                    match subscription
+                        .poll_next_with_state(state.variant_name())
+                        .await
                     {
-                        Ok(Ok(envelope)) => {
+                        PollResult::Event(envelope) => {
+                            tracing::info!(
+                                target: "flowip-080o",
+                                stage_name = %self.context.stage_name,
+                                event_type = %envelope.event.event_type(),
+                                is_eof = envelope.event.is_eof(),
+                                "transform: draining received event from subscription"
+                            );
+
                             tracing::debug!(
                                 stage_name = %self.context.stage_name,
                                 "Transform draining events"
                             );
 
+                            tracing::info!(
+                                target: "flowip-080o",
+                                stage_name = %self.context.stage_name,
+                                event_type = %envelope.event.event_type(),
+                                is_eof = envelope.event.is_eof(),
+                                "transform: draining received event"
+                            );
+
                             self.context.instrumentation.record_consumed(&envelope);
 
-                            // Process remaining event with instrumentation
+                            // Process remaining event based on type
                             if !envelope.event.is_control() {
+                                // Process data events
                                 let envelope_event = envelope.event.clone();
 
                                 // Use run_if_not_error to handle error events
@@ -501,6 +612,9 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Hand
                                             .append(event, Some(&envelope))
                                             .await
                                             .map_err(|e| format!("Failed to write error event during drain: {}", e))?;
+
+                                        // Track output for contract verification
+                                        subscription.track_output_event();
                                     } else {
                                         let flow_context = FlowContext {
                                             flow_name: self.context.flow_name.clone(),
@@ -521,13 +635,33 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Hand
                                             .append(enriched_event, Some(&envelope))
                                             .await
                                             .map_err(|e| format!("Failed to write transformed event: {}", e))?;
+
+                                        // Track output for contract verification
+                                        subscription.track_output_event();
                                     }
+                                }
+                            } else {
+                                // Forward control events during draining (CRITICAL FIX for FLOWIP-080o)
+                                // This ensures contract events (consumption_final, consumption_progress, etc.)
+                                // are not lost during the draining phase
+                                tracing::debug!(
+                                    stage_name = %self.context.stage_name,
+                                    event_type = envelope.event.event_type(),
+                                    "Forwarding control event during draining"
+                                );
+
+                                // Don't forward EOF again during draining - it will be sent after drain completes
+                                if !envelope.event.is_eof() {
+                                    self.forward_control_event(&envelope).await?;
                                 }
                             }
                             Ok(EventLoopDirective::Continue)
                         }
-                        _ => {
-                            // Timeout or empty - queue is drained
+                        PollResult::NoEvents => {
+                            // Queue is truly drained - no more events available
+                            // Do a final contract check before transitioning
+                            let _ = subscription.check_contracts().await;
+
                             tracing::info!(
                                 stage_name = %self.context.stage_name,
                                 "Transform queue drained"
@@ -536,6 +670,17 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Hand
                             Ok(EventLoopDirective::Transition(
                                 TransformEvent::DrainComplete,
                             ))
+                        }
+                        PollResult::Error(e) => {
+                            tracing::error!(
+                                stage_name = %self.context.stage_name,
+                                error = ?e,
+                                "Error during draining"
+                            );
+                            drop(subscription_guard);
+                            Ok(EventLoopDirective::Transition(TransformEvent::Error(
+                                format!("Drain error: {}", e),
+                            )))
                         }
                     }
                 } else {

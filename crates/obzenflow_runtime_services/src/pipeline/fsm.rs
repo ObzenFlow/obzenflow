@@ -4,6 +4,8 @@
 
 use crate::id_conversions::StageIdExt;
 use crate::message_bus::FsmMessageBus;
+use crate::messaging::system_subscription::SystemSubscription;
+use crate::messaging::upstream_subscription::UpstreamSubscription;
 use crate::supervised_base::SupervisorHandle;
 use obzenflow_core::event::payloads::observability_payload::{
     MetricsLifecycle, ObservabilityPayload,
@@ -18,7 +20,7 @@ use obzenflow_core::StageId;
 use obzenflow_fsm::{
     EventVariant, FsmAction, FsmBuilder, FsmContext, StateMachine, StateVariant, Transition,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -30,9 +32,15 @@ pub enum PipelineState {
     Materialized,
     Running,
     SourceCompleted, // Source has finished, initiating Jonestown protocol
+    AbortRequested {
+        reason: obzenflow_core::event::types::ViolationCause,
+        upstream: Option<StageId>,
+    },
     Draining,
     Drained,
-    Failed { reason: String },
+    Failed {
+        reason: String,
+    },
 }
 
 impl StateVariant for PipelineState {
@@ -43,6 +51,7 @@ impl StateVariant for PipelineState {
             PipelineState::Materialized => "Materialized",
             PipelineState::Running => "Running",
             PipelineState::SourceCompleted => "SourceCompleted",
+            PipelineState::AbortRequested { .. } => "AbortRequested",
             PipelineState::Draining => "Draining",
             PipelineState::Drained => "Drained",
             PipelineState::Failed { .. } => "Failed",
@@ -58,6 +67,10 @@ pub enum PipelineEvent {
     Run,
     Shutdown,   // Source has completed
     BeginDrain, // Start draining all stages
+    Abort {
+        reason: obzenflow_core::event::types::ViolationCause,
+        upstream: Option<StageId>,
+    },
     StageCompleted {
         envelope: obzenflow_core::EventEnvelope<SystemEvent>,
     },
@@ -75,6 +88,7 @@ impl EventVariant for PipelineEvent {
             PipelineEvent::Run => "Run",
             PipelineEvent::Shutdown => "Shutdown",
             PipelineEvent::BeginDrain => "BeginDrain",
+            PipelineEvent::Abort { .. } => "Abort",
             PipelineEvent::StageCompleted { .. } => "StageCompleted",
             PipelineEvent::AllStagesCompleted => "AllStagesCompleted",
             PipelineEvent::Error { .. } => "Error",
@@ -94,6 +108,14 @@ pub enum PipelineAction {
     Cleanup,
     StartMetricsAggregator,
     DrainMetrics,
+    WritePipelineAbort {
+        reason: obzenflow_core::event::types::ViolationCause,
+        upstream: Option<StageId>,
+    },
+    AbortTeardown {
+        reason: obzenflow_core::event::types::ViolationCause,
+        upstream: Option<StageId>,
+    },
     StartCompletionSubscription,
     ProcessCompletionEvents,
     HandleStageCompleted {
@@ -130,12 +152,8 @@ pub struct PipelineContext {
     /// Running stages tracking (for startup coordination)
     pub running_stages: Arc<RwLock<std::collections::HashSet<StageId>>>,
 
-    /// Reader for stage completion events from system journal
-    pub completion_reader: Arc<
-        RwLock<
-            Option<Box<dyn obzenflow_core::journal::journal_reader::JournalReader<SystemEvent>>>,
-        >,
-    >,
+    /// System subscription for stage completion events from system journal
+    pub completion_subscription: Arc<RwLock<Option<SystemSubscription<SystemEvent>>>>,
 
     /// Metrics exporter for accessing aggregated metrics
     pub metrics_exporter: Option<Arc<dyn obzenflow_core::metrics::MetricsExporter>>,
@@ -145,6 +163,19 @@ pub struct PipelineContext {
 
     /// Stage error journals (for error sink) (FLOWIP-082e)
     pub stage_error_journals: Arc<RwLock<Vec<(StageId, Arc<dyn Journal<ChainEvent>>)>>>,
+
+    /// Per-source contract status (pass/fail) keyed by source StageId
+    pub contract_status: Arc<RwLock<HashMap<StageId, bool>>>,
+
+    /// Per-edge contract status (upstream, reader) keyed by topology edge
+    pub contract_pairs:
+        Arc<RwLock<HashMap<(StageId, StageId), crate::pipeline::supervisor::ContractEdgeStatus>>>,
+
+    /// Expected contract edges derived from the topology (upstream -> reader)
+    pub expected_contract_pairs: Arc<HashSet<(StageId, StageId)>>,
+
+    /// Expected source stages (used to decide when to drain on success)
+    pub expected_sources: Arc<Vec<StageId>>,
     // TODO: Add metrics handle once MetricsAggregatorBuilder is implemented
     // pub metrics_handle: Option<MetricsHandle>,
 }
@@ -293,28 +324,36 @@ impl FsmAction for PipelineAction {
             }
 
             PipelineAction::BeginDrain => {
-                // Publish drain event to journal for stages to pick up
+                // Publish drain signal to system journal (lifecycle) and propagate FlowControl::Drain to all stage data journals
                 let writer_id = WriterId::from(context.system_id);
 
-                let drain_event = ChainEventFactory::system_data_event(
-                    writer_id,
-                    constants::system::pipeline::DRAIN,
-                    serde_json::json!({
-                        "timestamp": chrono::Utc::now().to_rfc3339(),
-                    }),
-                );
-
-                // Create SystemEventFactory locally to create consistent pipeline lifecycle event
+                // System lifecycle event
                 let system_event_factory = SystemEventFactory::new(context.system_id);
                 let drain_system_event = system_event_factory.pipeline_draining();
-
                 context
                     .system_journal
                     .append(drain_system_event, None)
                     .await
-                    .map_err(|e| format!("Failed to publish drain event: {}", e))?;
+                    .map_err(|e| format!("Failed to publish system drain event: {}", e))?;
 
-                tracing::info!("Published drain event to journal");
+                // Flow-control drain into every stage data journal so downstream stages see it
+                let drain_event = ChainEventFactory::drain_event(writer_id);
+                let stage_journals = context.stage_data_journals.read().await.clone();
+                for (stage_id, journal) in stage_journals {
+                    journal
+                        .append(drain_event.clone(), None)
+                        .await
+                        .map_err(|e| {
+                            format!(
+                                "Failed to publish drain event to stage {:?}: {}",
+                                stage_id, e
+                            )
+                        })?;
+                }
+
+                tracing::info!(
+                    "Published drain event to system journal and all stage data journals"
+                );
             }
 
             PipelineAction::WritePipelineCompleted => {
@@ -552,6 +591,34 @@ impl FsmAction for PipelineAction {
                 }
             }
 
+            PipelineAction::WritePipelineAbort { reason, upstream } => {
+                let writer_id = WriterId::from(context.system_id);
+                let abort_event =
+                    ChainEventFactory::pipeline_abort_event(writer_id, reason.clone(), *upstream);
+                // Publish abort to all stage data journals for visibility
+                let stage_journals = context.stage_data_journals.read().await.clone();
+                for (stage_id, journal) in stage_journals {
+                    journal
+                        .append(abort_event.clone(), None)
+                        .await
+                        .map_err(|e| {
+                            format!(
+                                "Failed to write pipeline abort event to {:?}: {}",
+                                stage_id, e
+                            )
+                        })?;
+                }
+
+                tracing::error!(?reason, ?upstream, "Pipeline abort event written");
+            }
+
+            PipelineAction::AbortTeardown { reason, upstream } => {
+                // Drop subscriptions/readers to stop further polling
+                *context.completion_subscription.write().await = None;
+                let _ = reason;
+                let _ = upstream;
+            }
+
             PipelineAction::StartCompletionSubscription => {
                 // Create reader for system journal - will receive system events
                 let reader = context
@@ -560,9 +627,13 @@ impl FsmAction for PipelineAction {
                     .await
                     .map_err(|e| format!("Failed to create system journal reader: {:?}", e))?;
 
-                *context.completion_reader.write().await = Some(reader);
+                // Wrap in SystemSubscription for consistent PollResult handling
+                let subscription =
+                    SystemSubscription::new(reader, "pipeline_supervisor".to_string());
 
-                tracing::info!("Started reader for system journal events");
+                *context.completion_subscription.write().await = Some(subscription);
+
+                tracing::info!("Started system subscription for journal events");
             }
 
             PipelineAction::ProcessCompletionEvents => {
@@ -704,6 +775,42 @@ pub fn build_pipeline_fsm() -> PipelineFsm {
         })
         .done()
         .when("Running")
+        .on("Abort", |_state, event, _ctx| {
+            let event = event.clone();
+            async move {
+                if let PipelineEvent::Abort { reason, upstream } = event {
+                    let reason_clone = reason.clone();
+                    Ok(Transition {
+                        next_state: PipelineState::AbortRequested {
+                            reason: reason.clone(),
+                            upstream,
+                        },
+                        actions: vec![
+                            PipelineAction::WritePipelineAbort { reason, upstream },
+                            PipelineAction::AbortTeardown {
+                                reason: reason_clone,
+                                upstream,
+                            },
+                        ],
+                    })
+                } else {
+                    Err("Invalid event".to_string())
+                }
+            }
+        })
+        .on("StageCompleted", |_state, event, _ctx| {
+            let event = event.clone();
+            async move {
+                if let PipelineEvent::StageCompleted { envelope } = event {
+                    Ok(Transition {
+                        next_state: PipelineState::Running,
+                        actions: vec![PipelineAction::HandleStageCompleted { envelope }],
+                    })
+                } else {
+                    Err("Invalid event".to_string())
+                }
+            }
+        })
         .on(
             "Shutdown",
             |_state, _event: &PipelineEvent, _ctx| async move {
@@ -740,6 +847,51 @@ pub fn build_pipeline_fsm() -> PipelineFsm {
         .done()
         .when("Draining")
         .on(
+            "Shutdown",
+            |_state, _event: &PipelineEvent, _ctx| async move {
+                Ok(Transition {
+                    next_state: PipelineState::Draining,
+                    actions: vec![PipelineAction::BeginDrain],
+                })
+            },
+        )
+        .on("Abort", |_state, event, _ctx| {
+            let event = event.clone();
+            async move {
+                if let PipelineEvent::Abort { reason, upstream } = event {
+                    let reason_clone = reason.clone();
+                    Ok(Transition {
+                        next_state: PipelineState::AbortRequested {
+                            reason: reason.clone(),
+                            upstream,
+                        },
+                        actions: vec![
+                            PipelineAction::WritePipelineAbort { reason, upstream },
+                            PipelineAction::AbortTeardown {
+                                reason: reason_clone,
+                                upstream,
+                            },
+                        ],
+                    })
+                } else {
+                    Err("Invalid event".to_string())
+                }
+            }
+        })
+        .on("StageCompleted", |_state, event, _ctx| {
+            let event = event.clone();
+            async move {
+                if let PipelineEvent::StageCompleted { envelope } = event {
+                    Ok(Transition {
+                        next_state: PipelineState::Draining,
+                        actions: vec![PipelineAction::HandleStageCompleted { envelope }],
+                    })
+                } else {
+                    Err("Invalid event".to_string())
+                }
+            }
+        })
+        .on(
             "AllStagesCompleted",
             |_state, _event: &PipelineEvent, _ctx| async move {
                 Ok(Transition {
@@ -749,6 +901,48 @@ pub fn build_pipeline_fsm() -> PipelineFsm {
                         PipelineAction::WritePipelineCompleted,
                         PipelineAction::Cleanup,
                     ],
+                })
+            },
+        )
+        .on("Error", |_state, event, _ctx| {
+            let event = event.clone();
+            async move {
+                if let PipelineEvent::Error { message } = event {
+                    Ok(Transition {
+                        next_state: PipelineState::Failed { reason: message },
+                        actions: vec![PipelineAction::Cleanup],
+                    })
+                } else {
+                    Err("Invalid event".to_string())
+                }
+            }
+        })
+        .done()
+        .when("AbortRequested")
+        .on("Error", |_state, event, _ctx| {
+            let event = event.clone();
+            async move {
+                if let PipelineEvent::Error { message } = event {
+                    Ok(Transition {
+                        next_state: PipelineState::Failed { reason: message },
+                        actions: vec![PipelineAction::Cleanup],
+                    })
+                } else {
+                    Err("Invalid event".to_string())
+                }
+            }
+        })
+        .on(
+            "Shutdown",
+            |_state, _event: &PipelineEvent, _ctx| async move {
+                Ok(Transition {
+                    next_state: PipelineState::AbortRequested {
+                        reason: obzenflow_core::event::types::ViolationCause::Other(
+                            "shutdown_requested".into(),
+                        ),
+                        upstream: None,
+                    },
+                    actions: vec![PipelineAction::Cleanup],
                 })
             },
         )

@@ -16,6 +16,7 @@ use crate::supervised_base::{
 use obzenflow_core::event::SystemEvent;
 use obzenflow_core::journal::journal::Journal;
 use obzenflow_core::{ChainEvent, StageId};
+use obzenflow_fsm::{EventVariant, StateVariant};
 
 use super::config::JournalSinkConfig;
 use super::fsm::{JournalSinkAction, JournalSinkContext, JournalSinkEvent, JournalSinkState};
@@ -80,11 +81,10 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
             self.resources.data_journal.clone(),
             self.resources.error_journal.clone(),
             self.resources.system_journal.clone(),
-            self.resources.upstream_journals.clone(),
             self.resources.message_bus.clone(),
-            self.resources.upstream_stages.clone(),
-            control_strategy.clone(),
+            control_strategy,
             instrumentation,
+            self.resources.upstream_subscription_factory,
         );
 
         // Create supervisor (private - not exposed)
@@ -188,12 +188,26 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
         &mut self,
         state: &Self::State,
     ) -> Result<EventLoopDirective<Self::Event>, Box<dyn std::error::Error + Send + Sync>> {
+        // Lightweight instrumentation to understand sink FSM behaviour.
+        tracing::info!(
+            target: "flowip-080o",
+            stage_name = %self.supervisor.context.stage_name,
+            fsm_state = %state.variant_name(),
+            "sink_fsm: dispatch_state entry"
+        );
+
         // Update state for external observers
         let _ = self.state_watcher.update(state.clone());
 
         // Check for external events first
         match self.external_events.try_recv() {
             Ok(event) => {
+                tracing::info!(
+                    target: "flowip-080o",
+                    stage_name = %self.supervisor.context.stage_name,
+                    event = %event.variant_name(),
+                    "sink_fsm: received external event"
+                );
                 // Got an external event, transition to handle it
                 return Ok(EventLoopDirective::Transition(event));
             }

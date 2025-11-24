@@ -40,6 +40,20 @@ pub enum SystemEventType {
     /// Metrics subsystem coordination
     #[serde(rename = "metrics_coordination")]
     MetricsCoordination(MetricsCoordinationEvent),
+
+    /// Contract status reported by a reader/subscriber (per upstream)
+    #[serde(rename = "contract_status")]
+    ContractStatus {
+        upstream: StageId,
+        reader: StageId,
+        pass: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reader_seq: Option<crate::event::types::SeqNo>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        advertised_writer_seq: Option<crate::event::types::SeqNo>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reason: Option<crate::event::types::ViolationCause>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -201,6 +215,29 @@ impl SystemEventFactory {
         )
     }
 
+    /// Contract status summary emitted by readers/subscribers (per upstream)
+    pub fn contract_status(
+        &self,
+        upstream: StageId,
+        reader: StageId,
+        pass: bool,
+        reader_seq: Option<crate::event::types::SeqNo>,
+        advertised_writer_seq: Option<crate::event::types::SeqNo>,
+        reason: Option<crate::event::types::ViolationCause>,
+    ) -> SystemEvent {
+        SystemEvent::new(
+            self.writer_id,
+            SystemEventType::ContractStatus {
+                upstream,
+                reader,
+                pass,
+                reader_seq,
+                advertised_writer_seq,
+                reason,
+            },
+        )
+    }
+
     // === Pipeline Lifecycle Events ===
 
     pub fn pipeline_starting(&self) -> SystemEvent {
@@ -324,6 +361,13 @@ impl JournalEvent for SystemEvent {
                 MetricsCoordinationEvent::Drained => "system.metrics.drained",
                 MetricsCoordinationEvent::Shutdown => "system.metrics.shutdown",
             },
+            SystemEventType::ContractStatus { pass, .. } => {
+                if *pass {
+                    "system.contract.pass"
+                } else {
+                    "system.contract.fail"
+                }
+            }
         }
     }
 }

@@ -146,6 +146,10 @@ fn test_direct_chain_event_construction() {
         content: ChainEventContent::FlowControl(FlowControlPayload::Eof {
             natural: true,
             timestamp: 12345,
+            writer_id: Some(WriterId::from(StageId::new())),
+            writer_seq: None,
+            vector_clock: None,
+            last_event_id: None,
         }),
         causality: Default::default(),
         flow_context: Default::default(),

@@ -5,15 +5,152 @@
 
 use crate::id_conversions::StageIdExt;
 use crate::message_bus::FsmMessageBus;
+use crate::messaging::upstream_subscription::{ContractConfig, UpstreamSubscription};
 use obzenflow_core::event::SystemEvent;
 use obzenflow_core::journal::journal::Journal;
-use obzenflow_core::{ChainEvent, FlowId, StageId, SystemId};
+use obzenflow_core::{ChainEvent, FlowId, StageId, SystemId, WriterId};
 use obzenflow_topology::Topology;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-/// Resources provided to stage creation
+/// Factory for creating subscriptions with pre-computed metadata
+/// This allows deferred subscription creation with the correct journal subsets
 #[derive(Clone)]
+pub struct SubscriptionFactory {
+    /// Pre-computed stage names for all potential upstreams
+    stage_names: HashMap<StageId, String>,
+}
+
+/// A subscription factory that is already bound to a specific set of journals
+/// and resolved stage names. Stages can build subscriptions without re-plumbing
+/// upstream details.
+#[derive(Clone)]
+pub struct BoundSubscriptionFactory {
+    /// Owner label for logging/attribution
+    pub owner_label: String,
+    journals_with_names: Vec<(StageId, String, Arc<dyn Journal<ChainEvent>>)>,
+}
+
+impl SubscriptionFactory {
+    /// Create a new factory with pre-computed metadata
+    pub fn new(stage_names: HashMap<StageId, String>) -> Self {
+        Self { stage_names }
+    }
+
+    /// Create a subscription for the given journals with pre-computed names
+    pub async fn create_subscription(
+        &self,
+        journals: &[(StageId, Arc<dyn Journal<ChainEvent>>)],
+    ) -> Result<UpstreamSubscription<ChainEvent>, String> {
+        // Build the tuples with names
+        let journals_with_names: Vec<(StageId, String, Arc<dyn Journal<ChainEvent>>)> = journals
+            .iter()
+            .map(|(id, journal)| {
+                let name = self
+                    .stage_names
+                    .get(id)
+                    .cloned()
+                    .unwrap_or_else(|| format!("{:?}", id));
+                (*id, name, journal.clone())
+            })
+            .collect();
+
+        UpstreamSubscription::new_with_names("unknown_owner", &journals_with_names)
+            .await
+            .map_err(|e| format!("Failed to create subscription: {:?}", e))
+    }
+
+    /// Bind this factory to a concrete set of journals (capturing stage IDs/names)
+    pub fn bind(
+        &self,
+        journals: &[(StageId, Arc<dyn Journal<ChainEvent>>)],
+    ) -> BoundSubscriptionFactory {
+        let journals_with_names: Vec<(StageId, String, Arc<dyn Journal<ChainEvent>>)> = journals
+            .iter()
+            .map(|(id, journal)| {
+                let name = self
+                    .stage_names
+                    .get(id)
+                    .cloned()
+                    .unwrap_or_else(|| format!("{:?}", id));
+                (*id, name, journal.clone())
+            })
+            .collect();
+
+        BoundSubscriptionFactory {
+            owner_label: "unknown_owner".to_string(),
+            journals_with_names,
+        }
+    }
+
+    /// Create a subscription with contracts configured
+    pub async fn create_subscription_with_contracts(
+        &self,
+        journals: &[(StageId, Arc<dyn Journal<ChainEvent>>)],
+        writer_id: WriterId,
+        data_journal: Arc<dyn Journal<ChainEvent>>,
+        contract_config: ContractConfig,
+        system_journal: Option<Arc<dyn Journal<SystemEvent>>>,
+        reader_stage: Option<StageId>,
+    ) -> Result<UpstreamSubscription<ChainEvent>, String> {
+        let subscription = self.create_subscription(journals).await?;
+        Ok(subscription.with_contracts(
+            writer_id,
+            data_journal,
+            contract_config,
+            system_journal,
+            reader_stage,
+        ))
+    }
+}
+
+impl BoundSubscriptionFactory {
+    /// Build a subscription from the bound journals
+    pub async fn build(&self) -> Result<UpstreamSubscription<ChainEvent>, String> {
+        UpstreamSubscription::new_with_names(&self.owner_label, &self.journals_with_names)
+            .await
+            .map_err(|e| format!("Failed to create subscription: {:?}", e))
+    }
+
+    /// Build a subscription with contracts configured from the bound journals
+    pub async fn build_with_contracts(
+        &self,
+        writer_id: WriterId,
+        data_journal: Arc<dyn Journal<ChainEvent>>,
+        contract_config: ContractConfig,
+        system_journal: Option<Arc<dyn Journal<SystemEvent>>>,
+        reader_stage: Option<StageId>,
+    ) -> Result<UpstreamSubscription<ChainEvent>, String> {
+        let subscription =
+            UpstreamSubscription::new_with_names(&self.owner_label, &self.journals_with_names)
+                .await
+                .map_err(|e| format!("Failed to create subscription: {:?}", e))?
+                .with_contracts(
+                    writer_id,
+                    data_journal,
+                    contract_config,
+                    system_journal,
+                    reader_stage,
+                );
+
+        Ok(subscription)
+    }
+
+    /// Whether there are any upstream journals bound
+    pub fn is_empty(&self) -> bool {
+        self.journals_with_names.is_empty()
+    }
+
+    /// Convenience for logging
+    pub fn upstream_stage_ids(&self) -> Vec<StageId> {
+        self.journals_with_names
+            .iter()
+            .map(|(id, _, _)| *id)
+            .collect()
+    }
+}
+
+/// Resources provided to stage creation
 pub struct StageResources {
     /// Flow execution ID (from pipeline)
     pub flow_id: FlowId,
@@ -29,6 +166,16 @@ pub struct StageResources {
 
     /// Upstream journals for reading events
     pub upstream_journals: Vec<(StageId, Arc<dyn Journal<ChainEvent>>)>,
+
+    /// Friendly upstream stage names keyed by StageId (for diagnostics/instrumentation)
+    pub upstream_stage_names: std::collections::HashMap<StageId, String>,
+
+    /// Factory for creating subscriptions with pre-computed metadata
+    /// All stages must use this factory to create their subscriptions
+    pub subscription_factory: SubscriptionFactory,
+
+    /// Stage-scoped factory already bound to this stage's upstream journals
+    pub upstream_subscription_factory: BoundSubscriptionFactory,
 
     /// Message bus for FSM communication
     pub message_bus: Arc<FsmMessageBus>,
@@ -71,7 +218,21 @@ impl StageResourcesBuilder {
     }
 
     /// Build all resources for all stages
-    pub fn build(self) -> Result<StageResourcesSet, String> {
+    pub async fn build(self) -> Result<StageResourcesSet, String> {
+        // Debug: Log all stage_journals keys
+        tracing::info!(
+            target: "flowip-080o",
+            stage_journals_count = self.stage_journals.len(),
+            "StageResourcesBuilder::build() - stage_journals HashMap keys:"
+        );
+        for (stage_id, _) in &self.stage_journals {
+            tracing::info!(
+                target: "flowip-080o",
+                stage_id = ?stage_id,
+                "stage_journals key"
+            );
+        }
+
         // Create shared message bus
         let message_bus = Arc::new(FsmMessageBus::new());
 
@@ -110,15 +271,85 @@ impl StageResourcesBuilder {
 
             // Get upstream journals
             let upstream_ulids = self.topology.upstream_stages(stage_ulid);
+            let upstream_names: Vec<String> = upstream_ulids
+                .iter()
+                .map(|upstream| {
+                    self.topology
+                        .stage_name(*upstream)
+                        .unwrap_or("unknown")
+                        .to_string()
+                })
+                .collect();
+
+            tracing::info!(
+                target: "flowip-080o",
+                stage_name = %stage_info.name,
+                stage_id = ?stage_id,
+                upstream_ulids = ?upstream_ulids,
+                upstream_names = ?upstream_names,
+                "Building upstream_journals for stage"
+            );
+
             let upstream_journals: Vec<(StageId, Arc<dyn Journal<ChainEvent>>)> = upstream_ulids
                 .iter()
                 .filter_map(|upstream_ulid| {
                     let upstream_id = StageId::from_topology_id(*upstream_ulid);
-                    self.stage_journals
-                        .get(&upstream_id)
-                        .map(|journal| (upstream_id, journal.clone()))
+                    let journal_opt = self.stage_journals.get(&upstream_id);
+
+                    if let Some(journal) = journal_opt {
+                        tracing::info!(
+                            target: "flowip-080o",
+                            stage_name = %stage_info.name,
+                            upstream_id = ?upstream_id,
+                            upstream_stage_name = %self
+                                .topology
+                                .stage_name(upstream_id.to_topology_id())
+                                .unwrap_or("unknown"),
+                            upstream_journal_id = ?journal.id(),
+                            "Found upstream journal"
+                        );
+                        Some((upstream_id, journal.clone()))
+                    } else {
+                        tracing::warn!(
+                            target: "flowip-080o",
+                            stage_name = %stage_info.name,
+                            upstream_id = ?upstream_id,
+                            upstream_stage_name = %self
+                                .topology
+                                .stage_name(upstream_id.to_topology_id())
+                                .unwrap_or("unknown"),
+                            "Missing upstream journal in stage_journals map!"
+                        );
+                        None
+                    }
                 })
                 .collect();
+
+            let upstream_stage_names: std::collections::HashMap<StageId, String> = upstream_ulids
+                .iter()
+                .map(|upstream_ulid| {
+                    let upstream_id = StageId::from_topology_id(*upstream_ulid);
+                    let name = self
+                        .topology
+                        .stage_name(*upstream_ulid)
+                        .unwrap_or("unknown")
+                        .to_string();
+                    (upstream_id, name)
+                })
+                .collect();
+
+            // No longer pre-build subscriptions - all stages use factory
+
+            if upstream_journals.len() != upstream_ulids.len() {
+                tracing::error!(
+                    target: "flowip-080o",
+                    stage_name = %stage_info.name,
+                    stage_id = ?stage_id,
+                    expected_upstreams = upstream_ulids.len(),
+                    wired_upstreams = upstream_journals.len(),
+                    "Mismatch between topology upstreams and wired upstream journals"
+                );
+            }
 
             // Check if this is the ErrorSink stage (FLOWIP-082g)
             let error_journals_for_stage = if stage_info.name == "__error_sink" {
@@ -127,12 +358,33 @@ impl StageResourcesBuilder {
                 Vec::new()
             };
 
+            // Create subscription factory with ALL stage names (not just upstreams)
+            // This allows join stages to create subscriptions after DSL adds reference
+            let mut all_stage_names = upstream_stage_names.clone();
+
+            // Add ALL stages to the factory's stage names map
+            for stage_info in self.topology.stages() {
+                let stage_id = StageId::from_topology_id(stage_info.id);
+                all_stage_names
+                    .entry(stage_id)
+                    .or_insert_with(|| stage_info.name.clone());
+            }
+
+            // Keep a copy for logging before moving into the factory
+            let all_stage_names_for_log = all_stage_names.clone();
+            let subscription_factory = SubscriptionFactory::new(all_stage_names);
+            let mut upstream_subscription_factory = subscription_factory.bind(&upstream_journals);
+            upstream_subscription_factory.owner_label = stage_info.name.clone();
+
             let resources = StageResources {
                 flow_id: self.flow_id.clone(),
                 data_journal,
                 error_journal,
                 system_journal: self.system_journal.clone(),
-                upstream_journals,
+                upstream_journals: upstream_journals.clone(),
+                upstream_stage_names,
+                subscription_factory,
+                upstream_subscription_factory,
                 message_bus: message_bus.clone(),
                 upstream_stages: upstream_ulids
                     .into_iter()
@@ -140,6 +392,18 @@ impl StageResourcesBuilder {
                     .collect(),
                 error_journals: error_journals_for_stage,
             };
+
+            tracing::info!(
+                target: "flowip-080o",
+                stage_name = %stage_info.name,
+                stage_id = ?stage_id,
+                upstream_journals_count = upstream_journals.len(),
+                upstream_stage_ids = ?upstream_journals.iter().map(|(id, _)| id).collect::<Vec<_>>(),
+                upstream_stage_names = ?upstream_journals.iter().map(|(id, _)| {
+                    (id, all_stage_names_for_log.get(id).cloned().unwrap_or_else(|| "<unknown>".to_string()))
+                }).collect::<Vec<_>>(),
+                "Inserting StageResources for stage"
+            );
 
             stage_resources.insert(stage_id, resources);
         }

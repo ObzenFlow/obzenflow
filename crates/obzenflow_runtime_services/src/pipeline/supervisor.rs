@@ -7,11 +7,17 @@
 
 use super::fsm::{PipelineAction, PipelineContext, PipelineEvent, PipelineState};
 use crate::id_conversions::StageIdExt;
+use crate::messaging::SubscriptionPoller;
 use crate::supervised_base::{EventLoopDirective, SelfSupervised};
+use obzenflow_core::event::types::{SeqNo, ViolationCause};
 use obzenflow_core::event::{SystemEvent, WriterId};
 use obzenflow_core::journal::journal::Journal;
 use obzenflow_core::StageId;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+const IDLE_BACKOFF_MS: u64 = 10;
+const DRAIN_LIVENESS_MAX_IDLE: u64 = 100;
 
 /// Pipeline supervisor - manages the lifecycle of a pipeline
 pub(crate) struct PipelineSupervisor {
@@ -23,6 +29,12 @@ pub(crate) struct PipelineSupervisor {
 
     /// System journal for pipeline orchestration events
     pub(crate) system_journal: Arc<dyn Journal<SystemEvent>>,
+
+    /// Throttled logging for barrier snapshots during drain
+    pub(crate) last_barrier_log: Option<Instant>,
+
+    /// Idle iterations observed during draining (for liveness guard)
+    pub(crate) drain_idle_iters: u64,
 }
 
 impl crate::supervised_base::base::Supervisor for PipelineSupervisor {
@@ -103,6 +115,29 @@ impl crate::supervised_base::base::Supervisor for PipelineSupervisor {
             })
             .done()
             .when("Running")
+            .on("Abort", |_state, event, _ctx| {
+                let event = event.clone();
+                async move {
+                    if let PipelineEvent::Abort { reason, upstream } = event {
+                        let reason_clone = reason.clone();
+                        Ok(obzenflow_fsm::Transition {
+                            next_state: PipelineState::AbortRequested {
+                                reason: reason.clone(),
+                                upstream,
+                            },
+                            actions: vec![
+                                PipelineAction::WritePipelineAbort { reason, upstream },
+                                PipelineAction::AbortTeardown {
+                                    reason: reason_clone,
+                                    upstream,
+                                },
+                            ],
+                        })
+                    } else {
+                        Err("Invalid event".to_string())
+                    }
+                }
+            })
             .on(
                 "Shutdown",
                 |_state, _event: &PipelineEvent, _ctx| async move {
@@ -152,6 +187,19 @@ impl crate::supervised_base::base::Supervisor for PipelineSupervisor {
                     })
                 },
             )
+            .on("Error", |_state, event, _ctx| {
+                let event = event.clone();
+                async move {
+                    if let PipelineEvent::Error { message } = event {
+                        Ok(obzenflow_fsm::Transition {
+                            next_state: PipelineState::Failed { reason: message },
+                            actions: vec![PipelineAction::Cleanup],
+                        })
+                    } else {
+                        Err("Invalid event".to_string())
+                    }
+                }
+            })
             .done()
             .when("SourceCompleted")
             .on(
@@ -165,6 +213,29 @@ impl crate::supervised_base::base::Supervisor for PipelineSupervisor {
             )
             .done()
             .when("Draining")
+            .on("Abort", |_state, event, _ctx| {
+                let event = event.clone();
+                async move {
+                    if let PipelineEvent::Abort { reason, upstream } = event {
+                        let reason_clone = reason.clone();
+                        Ok(obzenflow_fsm::Transition {
+                            next_state: PipelineState::AbortRequested {
+                                reason: reason.clone(),
+                                upstream,
+                            },
+                            actions: vec![
+                                PipelineAction::WritePipelineAbort { reason, upstream },
+                                PipelineAction::AbortTeardown {
+                                    reason: reason_clone,
+                                    upstream,
+                                },
+                            ],
+                        })
+                    } else {
+                        Err("Invalid event".to_string())
+                    }
+                }
+            })
             .on("StageCompleted", |_state, event, _ctx| {
                 let event = event.clone();
                 async move {
@@ -192,6 +263,34 @@ impl crate::supervised_base::base::Supervisor for PipelineSupervisor {
                     })
                 },
             )
+            .on("Error", |_state, event, _ctx| {
+                let event = event.clone();
+                async move {
+                    if let PipelineEvent::Error { message } = event {
+                        Ok(obzenflow_fsm::Transition {
+                            next_state: PipelineState::Failed { reason: message },
+                            actions: vec![PipelineAction::Cleanup],
+                        })
+                    } else {
+                        Err("Invalid event".to_string())
+                    }
+                }
+            })
+            .done()
+            .when("AbortRequested")
+            .on("Error", |_state, event, _ctx| {
+                let event = event.clone();
+                async move {
+                    if let PipelineEvent::Error { message } = event {
+                        Ok(obzenflow_fsm::Transition {
+                            next_state: PipelineState::Failed { reason: message },
+                            actions: vec![PipelineAction::Cleanup],
+                        })
+                    } else {
+                        Err("Invalid event".to_string())
+                    }
+                }
+            })
             .done()
     }
 
@@ -301,17 +400,16 @@ impl SelfSupervised for PipelineSupervisor {
                 drop(supervisors);
 
                 // Poll for stage running events to know when all non-source stages are ready
-                let mut reader_guard = self.pipeline_context.completion_reader.write().await;
-                let reader = reader_guard.as_mut().ok_or(
-                    "No reader available - should have been initialized during materialization",
+                let mut sub_guard = self.pipeline_context.completion_subscription.write().await;
+                let subscription = sub_guard.as_mut().ok_or(
+                    "No subscription available - should have been initialized during materialization",
                 )?;
 
-                // Check for stage running events with timeout
-                match tokio::time::timeout(tokio::time::Duration::from_millis(100), reader.next())
-                    .await
-                {
-                    Ok(Ok(Some(envelope))) => {
-                        drop(reader_guard);
+                // Check for stage running events
+                use crate::messaging::PollResult;
+                match subscription.poll_next().await {
+                    PollResult::Event(envelope) => {
+                        drop(sub_guard);
 
                         // Process stage running event
                         let event = &envelope.event;
@@ -325,7 +423,7 @@ impl SelfSupervised for PipelineSupervisor {
                                 .running_stages
                                 .write()
                                 .await
-                                .insert(*stage_id);
+                                .insert(stage_id.clone());
 
                             // Get stage name from topology
                             let stage_info = self
@@ -353,8 +451,16 @@ impl SelfSupervised for PipelineSupervisor {
                             }
                         }
                     }
-                    _ => {
+                    PollResult::NoEvents => {
                         // No new events, but that's OK - stages might already be running
+                        // Add a brief sleep to avoid busy loop
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
+                    PollResult::Error(e) => {
+                        tracing::error!("Error polling system journal in Awaiting: {}", e);
+                        return Ok(EventLoopDirective::Transition(PipelineEvent::Error {
+                            message: format!("System journal error: {}", e),
+                        }));
                     }
                 }
 
@@ -397,18 +503,17 @@ impl SelfSupervised for PipelineSupervisor {
             }
 
             PipelineState::Running => {
-                // Poll for completion events from stages
-                let mut reader_guard = self.pipeline_context.completion_reader.write().await;
-                let reader = reader_guard.as_mut().ok_or(
-                    "No reader available - should have been initialized during materialization",
+                // Poll for completion events from stages (system journal)
+                let mut sub_guard = self.pipeline_context.completion_subscription.write().await;
+                let subscription = sub_guard.as_mut().ok_or(
+                    "No subscription available - should have been initialized during materialization",
                 )?;
 
-                // Use timeout to allow periodic state checks while waiting for events
-                match tokio::time::timeout(tokio::time::Duration::from_millis(100), reader.next())
-                    .await
-                {
-                    Ok(Ok(Some(envelope))) => {
-                        drop(reader_guard);
+                // Use poll_next for non-blocking event polling
+                use crate::messaging::PollResult;
+                match subscription.poll_next().await {
+                    PollResult::Event(envelope) => {
+                        drop(sub_guard);
 
                         let event = &envelope.event;
 
@@ -470,6 +575,12 @@ impl SelfSupervised for PipelineSupervisor {
                                 match event {
                                     obzenflow_core::event::PipelineLifecycleEvent::AllStagesCompleted => {
                                         tracing::info!("Received AllStagesCompleted event!");
+                                        if let Some(abort_directive) = self
+                                            .missing_contract_abort()
+                                            .await
+                                        {
+                                            return Ok(abort_directive);
+                                        }
                                         Ok(EventLoopDirective::Transition(
                                             PipelineEvent::AllStagesCompleted,
                                         ))
@@ -477,15 +588,63 @@ impl SelfSupervised for PipelineSupervisor {
                                     _ => Ok(EventLoopDirective::Continue)
                                 }
                             }
+                            obzenflow_core::event::SystemEventType::ContractStatus { upstream, reader, pass, reader_seq, advertised_writer_seq, reason } => {
+                                {
+                                    let mut pair_status = self.pipeline_context.contract_pairs.write().await;
+                                    if *pass {
+                                        pair_status.insert(
+                                            (*upstream, *reader),
+                                            ContractEdgeStatus::passed(*reader_seq, *advertised_writer_seq),
+                                        );
+                                    } else {
+                                        pair_status.insert(
+                                            (*upstream, *reader),
+                                            ContractEdgeStatus::failed(
+                                                reason.clone(),
+                                                *reader_seq,
+                                                *advertised_writer_seq,
+                                            ),
+                                        );
+                                    }
+                                }
+
+                                if !pass {
+                                    tracing::error!(?upstream, ?reader, ?reason, "Contract status failure");
+                                    return Ok(EventLoopDirective::Transition(PipelineEvent::Abort {
+                                        reason: reason.clone().unwrap_or_else(|| obzenflow_core::event::types::ViolationCause::Other("contract_failed".into())),
+                                        upstream: Some(*upstream),
+                                    }));
+                                }
+
+                                let mut status = self.pipeline_context.contract_status.write().await;
+                                status.insert(*upstream, true);
+                                let expected = self.pipeline_context.expected_sources.as_ref();
+                                let all_pass = !expected.is_empty()
+                                    && expected
+                                        .iter()
+                                        .all(|src| status.get(src).copied().unwrap_or(false));
+                                if all_pass {
+                                    tracing::info!("All source contracts passed; initiating drain");
+                                    Ok(EventLoopDirective::Transition(PipelineEvent::Shutdown))
+                                } else {
+                                    Ok(EventLoopDirective::Continue)
+                                }
+                            }
                             _ => Ok(EventLoopDirective::Continue)
                         };
                     }
-                    _ => {
-                        // No events or timeout - continue running
+                    PollResult::NoEvents => {
+                        // No events available right now - sleep briefly to avoid busy loop
+                        idle_backoff().await;
+                        Ok(EventLoopDirective::Continue)
+                    }
+                    PollResult::Error(e) => {
+                        tracing::error!("Error polling system journal: {}", e);
+                        Ok(EventLoopDirective::Transition(PipelineEvent::Error {
+                            message: format!("System journal error: {}", e),
+                        }))
                     }
                 }
-
-                Ok(EventLoopDirective::Continue)
             }
 
             PipelineState::SourceCompleted => {
@@ -498,14 +657,13 @@ impl SelfSupervised for PipelineSupervisor {
 
             PipelineState::Draining => {
                 // Continue polling for completion events during drain
-                let mut reader_guard = self.pipeline_context.completion_reader.write().await;
-                let reader = reader_guard.as_mut().ok_or("No reader available")?;
+                let mut sub_guard = self.pipeline_context.completion_subscription.write().await;
+                let subscription = sub_guard.as_mut().ok_or("No subscription available")?;
 
-                match tokio::time::timeout(tokio::time::Duration::from_millis(100), reader.next())
-                    .await
-                {
-                    Ok(Ok(Some(envelope))) => {
-                        drop(reader_guard);
+                use crate::messaging::PollResult;
+                match subscription.poll_next().await {
+                    PollResult::Event(envelope) => {
+                        drop(sub_guard);
 
                         let event = &envelope.event;
 
@@ -519,12 +677,70 @@ impl SelfSupervised for PipelineSupervisor {
                                     PipelineEvent::StageCompleted { envelope },
                                 ))
                             }
+                            obzenflow_core::event::SystemEventType::ContractStatus {
+                                upstream,
+                                reader,
+                                pass,
+                                reader_seq,
+                                advertised_writer_seq,
+                                reason,
+                            } => {
+                                {
+                                    let mut pair_status =
+                                        self.pipeline_context.contract_pairs.write().await;
+                                    if *pass {
+                                        pair_status.insert(
+                                            (*upstream, *reader),
+                                            ContractEdgeStatus::passed(
+                                                *reader_seq,
+                                                *advertised_writer_seq,
+                                            ),
+                                        );
+                                    } else {
+                                        pair_status.insert(
+                                            (*upstream, *reader),
+                                            ContractEdgeStatus::failed(
+                                                reason.clone(),
+                                                *reader_seq,
+                                                *advertised_writer_seq,
+                                            ),
+                                        );
+                                    }
+                                }
+
+                                if !pass {
+                                    tracing::error!(
+                                        ?upstream,
+                                        ?reader,
+                                        ?reason,
+                                        "Contract status failure during drain"
+                                    );
+                                    return Ok(EventLoopDirective::Transition(
+                                        PipelineEvent::Abort {
+                                            reason: reason.clone().unwrap_or_else(|| {
+                                                obzenflow_core::event::types::ViolationCause::Other(
+                                                    "contract_failed".into(),
+                                                )
+                                            }),
+                                            upstream: Some(upstream.clone()),
+                                        },
+                                    ));
+                                } else {
+                                    let mut status =
+                                        self.pipeline_context.contract_status.write().await;
+                                    status.insert(upstream.clone(), true);
+                                }
+                                Ok(EventLoopDirective::Continue)
+                            }
                             obzenflow_core::event::SystemEventType::PipelineLifecycle(
                                 obzenflow_core::event::PipelineLifecycleEvent::AllStagesCompleted,
                             ) => {
                                 tracing::info!(
                                     "All stages have completed - transitioning to drained"
                                 );
+                                if let Some(abort_directive) = self.missing_contract_abort().await {
+                                    return Ok(abort_directive);
+                                }
                                 Ok(EventLoopDirective::Transition(
                                     PipelineEvent::AllStagesCompleted,
                                 ))
@@ -536,12 +752,47 @@ impl SelfSupervised for PipelineSupervisor {
                             }
                         };
                     }
-                    _ => {
-                        // No events - continue draining
+                    PollResult::NoEvents => {
+                        // No events available right now - sleep briefly to avoid busy loop
+                        idle_backoff().await;
+                        drop(sub_guard);
+                        if self.should_log_barrier() {
+                            let snapshot = self.barrier_snapshot().await;
+                            tracing::info!(
+                                pending_stages = ?snapshot.pending_stages,
+                                missing_contracts = ?snapshot.missing_contracts,
+                                completed_stages = snapshot.completed,
+                                total_stages = snapshot.total,
+                                satisfied_contracts = snapshot.satisfied_contracts,
+                                total_contracts = snapshot.total_contracts,
+                                "Drain barrier snapshot (no events)"
+                            );
+                        }
+                        if self.all_stages_and_contracts_complete().await {
+                            // Synthesize AllStagesCompleted when everything is done
+                            if let Err(e) = self.write_all_stages_completed().await {
+                                tracing::error!(error = %e, "Failed to write synthetic AllStagesCompleted");
+                            }
+                            Ok(EventLoopDirective::Transition(
+                                PipelineEvent::AllStagesCompleted,
+                            ))
+                        } else {
+                            self.drain_idle_iters = self.drain_idle_iters.saturating_add(1);
+                            if self.drain_idle_iters > DRAIN_LIVENESS_MAX_IDLE {
+                                if let Some(abort_directive) = self.pending_stage_abort().await {
+                                    return Ok(abort_directive);
+                                }
+                            }
+                            Ok(EventLoopDirective::Continue)
+                        }
+                    }
+                    PollResult::Error(e) => {
+                        tracing::error!("Error polling system journal during drain: {}", e);
+                        Ok(EventLoopDirective::Transition(PipelineEvent::Error {
+                            message: format!("System journal error during drain: {}", e),
+                        }))
                     }
                 }
-
-                Ok(EventLoopDirective::Continue)
             }
 
             PipelineState::Drained => {
@@ -555,6 +806,243 @@ impl SelfSupervised for PipelineSupervisor {
                 tracing::error!("Pipeline failed: {}", reason);
                 Ok(EventLoopDirective::Terminate)
             }
+
+            PipelineState::AbortRequested { reason, upstream } => {
+                let msg = format!(
+                    "Pipeline abort requested: {:?} (upstream={:?})",
+                    reason, upstream
+                );
+                Ok(EventLoopDirective::Transition(PipelineEvent::Error {
+                    message: msg,
+                }))
+            }
         }
     }
+}
+
+impl PipelineSupervisor {
+    /// Abort if stages are still pending after drain liveness threshold
+    async fn pending_stage_abort(&self) -> Option<EventLoopDirective<PipelineEvent>> {
+        let completed = self.pipeline_context.completed_stages.read().await;
+        let pending: Vec<StageId> = self
+            .pipeline_context
+            .topology
+            .stages()
+            .map(|info| StageId::from_topology_id(info.id))
+            .filter(|id| !completed.contains(id))
+            .collect();
+
+        if pending.is_empty() {
+            return None;
+        }
+
+        let names: Vec<String> = pending
+            .iter()
+            .map(|id| {
+                self.pipeline_context
+                    .topology
+                    .stage_name(id.to_topology_id())
+                    .unwrap_or("unknown")
+                    .to_string()
+            })
+            .collect();
+
+        let reason = ViolationCause::Other(format!(
+            "pending_stage_completion stages={:?} names={:?}",
+            pending, names
+        ));
+
+        tracing::error!(
+            ?pending,
+            names = ?names,
+            "Drain liveness exceeded with pending stage completions; aborting pipeline"
+        );
+
+        Some(EventLoopDirective::Transition(PipelineEvent::Abort {
+            reason,
+            upstream: pending.first().copied(),
+        }))
+    }
+    /// If any expected contract edge is missing, return an abort directive
+    async fn missing_contract_abort(&self) -> Option<EventLoopDirective<PipelineEvent>> {
+        let expected = self.pipeline_context.expected_contract_pairs.clone();
+        let seen = self.pipeline_context.contract_pairs.read().await;
+
+        let missing: Vec<(StageId, StageId)> = expected
+            .iter()
+            .filter(|pair| !matches!(seen.get(pair), Some(status) if status.is_passed()))
+            .copied()
+            .collect();
+
+        if let Some((upstream, reader)) = missing.first().copied() {
+            let upstream_name = self
+                .pipeline_context
+                .topology
+                .stage_name(upstream.to_topology_id())
+                .unwrap_or("unknown")
+                .to_string();
+            let reader_name = self
+                .pipeline_context
+                .topology
+                .stage_name(reader.to_topology_id())
+                .unwrap_or("unknown")
+                .to_string();
+
+            let reason = ViolationCause::Other(format!(
+                "missing_contract_status upstream={:?}({}) -> reader={:?}({})",
+                upstream, upstream_name, reader, reader_name
+            ));
+
+            tracing::error!(
+                ?upstream,
+                ?reader,
+                upstream_name,
+                reader_name,
+                missing_pairs = ?missing,
+                "Missing contract status evidence for topology edges; aborting pipeline"
+            );
+
+            Some(EventLoopDirective::Transition(PipelineEvent::Abort {
+                reason,
+                upstream: Some(upstream),
+            }))
+        } else {
+            None
+        }
+    }
+
+    /// Check if all stages have completed and all contract pairs are satisfied
+    async fn all_stages_and_contracts_complete(&self) -> bool {
+        let completed = self.pipeline_context.completed_stages.read().await.len();
+        let total = self.pipeline_context.topology.num_stages();
+
+        if completed < total {
+            return false;
+        }
+
+        let expected = self.pipeline_context.expected_contract_pairs.clone();
+        let seen = self.pipeline_context.contract_pairs.read().await;
+        expected
+            .iter()
+            .all(|pair| matches!(seen.get(pair), Some(status) if status.is_passed()))
+    }
+
+    /// Synthesize and write AllStagesCompleted when we know we’re done
+    async fn write_all_stages_completed(&self) -> Result<(), String> {
+        let event = SystemEvent::new(
+            WriterId::from(self.pipeline_context.system_id),
+            obzenflow_core::event::SystemEventType::PipelineLifecycle(
+                obzenflow_core::event::PipelineLifecycleEvent::AllStagesCompleted,
+            ),
+        );
+        self.system_journal
+            .append(event, None)
+            .await
+            .map(|_| ())
+            .map_err(|e| format!("Failed to write AllStagesCompleted: {}", e))
+    }
+
+    /// Snapshot the current drain barrier state for logging/inspection
+    async fn barrier_snapshot(&self) -> BarrierSnapshot {
+        let completed: Vec<StageId> = self.pipeline_context.completed_stages.read().await.clone();
+        let expected_stages: Vec<StageId> = self
+            .pipeline_context
+            .topology
+            .stages()
+            .map(|s| StageId::from_topology_id(s.id))
+            .collect();
+        let pending_stages: Vec<StageId> = expected_stages
+            .iter()
+            .copied()
+            .filter(|id| !completed.contains(id))
+            .collect();
+
+        let expected_contracts = self.pipeline_context.expected_contract_pairs.clone();
+        let seen = self.pipeline_context.contract_pairs.read().await;
+        let missing_contracts: Vec<(StageId, StageId)> = expected_contracts
+            .iter()
+            .filter(|pair| !matches!(seen.get(pair), Some(status) if status.is_passed()))
+            .copied()
+            .collect();
+
+        let total_contracts = expected_contracts.len();
+        let satisfied_contracts = expected_contracts
+            .iter()
+            .filter(|pair| matches!(seen.get(pair), Some(status) if status.is_passed()))
+            .count();
+
+        BarrierSnapshot {
+            pending_stages,
+            missing_contracts,
+            completed: completed.len(),
+            total: expected_stages.len(),
+            satisfied_contracts,
+            total_contracts,
+        }
+    }
+
+    /// Throttle barrier logging to avoid spamming the drain loop
+    fn should_log_barrier(&mut self) -> bool {
+        let now = Instant::now();
+        match self.last_barrier_log {
+            Some(last) if now.duration_since(last) < Duration::from_secs(1) => false,
+            _ => {
+                self.last_barrier_log = Some(now);
+                true
+            }
+        }
+    }
+}
+
+/// Lightweight snapshot of drain barrier progress for diagnostics
+#[derive(Debug)]
+struct BarrierSnapshot {
+    pending_stages: Vec<StageId>,
+    missing_contracts: Vec<(StageId, StageId)>,
+    completed: usize,
+    total: usize,
+    satisfied_contracts: usize,
+    total_contracts: usize,
+}
+
+/// Status for a contract edge (upstream -> reader)
+#[derive(Clone, Debug, Default)]
+pub struct ContractEdgeStatus {
+    passed: bool,
+    reason: Option<ViolationCause>,
+    reader_seq: Option<SeqNo>,
+    advertised_writer_seq: Option<SeqNo>,
+}
+
+impl ContractEdgeStatus {
+    pub(crate) fn passed(reader_seq: Option<SeqNo>, advertised_writer_seq: Option<SeqNo>) -> Self {
+        Self {
+            passed: true,
+            reason: None,
+            reader_seq,
+            advertised_writer_seq,
+        }
+    }
+
+    pub(crate) fn failed(
+        reason: Option<ViolationCause>,
+        reader_seq: Option<SeqNo>,
+        advertised_writer_seq: Option<SeqNo>,
+    ) -> Self {
+        Self {
+            passed: false,
+            reason,
+            reader_seq,
+            advertised_writer_seq,
+        }
+    }
+
+    pub(crate) fn is_passed(&self) -> bool {
+        self.passed
+    }
+}
+
+#[inline]
+async fn idle_backoff() {
+    tokio::time::sleep(Duration::from_millis(IDLE_BACKOFF_MS)).await;
 }

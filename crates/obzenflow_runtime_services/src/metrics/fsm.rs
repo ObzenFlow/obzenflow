@@ -148,10 +148,8 @@ pub struct MetricsAggregatorContext {
     pub system_subscription: Arc<
         RwLock<
             Option<
-                Box<
-                    dyn obzenflow_core::journal::journal_reader::JournalReader<
-                        obzenflow_core::event::SystemEvent,
-                    >,
+                crate::messaging::system_subscription::SystemSubscription<
+                    obzenflow_core::event::SystemEvent,
                 >,
             >,
         >,
@@ -284,6 +282,20 @@ impl MetricsAggregatorContext {
         system_id: SystemId,
         stage_metadata: HashMap<StageId, StageMetadata>,
     ) -> Result<Self, String> {
+        // Helper to attach stage names to journals for better diagnostics
+        let with_names = |journals: &[(StageId, Arc<dyn Journal<ChainEvent>>)]| {
+            journals
+                .iter()
+                .map(|(id, journal)| {
+                    let name = stage_metadata
+                        .get(id)
+                        .map(|m| m.name.clone())
+                        .unwrap_or_else(|| format!("{:?}", id));
+                    (*id, name, journal.clone())
+                })
+                .collect::<Vec<_>>()
+        };
+
         tracing::info!(
             upstream_count = inputs.stage_data_journals.len(),
             upstream_stages = tracing::field::debug(
@@ -296,11 +308,13 @@ impl MetricsAggregatorContext {
             "MetricsAggregator creating data subscription"
         );
         // Create subscription for data journals
-        let data_subscription = crate::messaging::upstream_subscription::UpstreamSubscription::new(
-            &inputs.stage_data_journals,
-        )
-        .await
-        .map_err(|e| format!("Failed to create data subscription: {}", e))?;
+        let data_subscription =
+            crate::messaging::upstream_subscription::UpstreamSubscription::new_with_names(
+                "metrics_aggregator",
+                &with_names(&inputs.stage_data_journals),
+            )
+            .await
+            .map_err(|e| format!("Failed to create data subscription: {}", e))?;
 
         if !inputs.error_journals.is_empty() {
             tracing::info!(
@@ -319,8 +333,9 @@ impl MetricsAggregatorContext {
         // Create subscription for error journals (FLOWIP-082g)
         let error_subscription = if !inputs.error_journals.is_empty() {
             Some(
-                crate::messaging::upstream_subscription::UpstreamSubscription::new(
-                    &inputs.error_journals,
+                crate::messaging::upstream_subscription::UpstreamSubscription::new_with_names(
+                    "metrics_aggregator",
+                    &with_names(&inputs.error_journals),
                 )
                 .await
                 .map_err(|e| format!("Failed to create error subscription: {}", e))?,
@@ -335,11 +350,17 @@ impl MetricsAggregatorContext {
             .await
             .map_err(|e| format!("Failed to create system journal reader: {:?}", e))?;
 
+        // Wrap in SystemSubscription for consistent polling interface
+        let system_subscription = crate::messaging::system_subscription::SystemSubscription::new(
+            system_reader,
+            "metrics_aggregator".to_string(),
+        );
+
         Ok(Self {
             system_journal,
             data_subscription: Arc::new(RwLock::new(Some(data_subscription))),
             error_subscription: Arc::new(RwLock::new(error_subscription)),
-            system_subscription: Arc::new(RwLock::new(Some(system_reader))),
+            system_subscription: Arc::new(RwLock::new(Some(system_subscription))),
             include_error_journals: true, // Default to true per FLOWIP-082g
             exporter,
             metrics_store: Arc::new(RwLock::new(MetricsStore::default())),

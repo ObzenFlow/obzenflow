@@ -4,6 +4,9 @@
 //! Unlike transforms which have single upstream, joins track two distinct upstreams
 //! (reference and stream) with different behaviors.
 
+use obzenflow_core::event::context::{FlowContext, StageType};
+use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
+use obzenflow_core::event::types::SeqNo;
 use obzenflow_core::event::JournalEvent;
 use obzenflow_core::event::{ChainEventFactory, SystemEvent};
 use obzenflow_core::journal::journal::Journal;
@@ -15,9 +18,11 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+use crate::messaging::upstream_subscription::ContractConfig;
 use crate::messaging::UpstreamSubscription;
 use crate::metrics::instrumentation::StageInstrumentation;
 use crate::stages::common::handlers::JoinHandler;
+use crate::stages::resources_builder::BoundSubscriptionFactory;
 
 // ============================================================================
 // FSM States
@@ -265,10 +270,8 @@ pub struct JoinContext<H: JoinHandler> {
     pub flow_id: FlowId,
 
     /// Reference stage ID (set during construction via with_reference())
+    /// Join stages need to know this to differentiate reference from stream
     pub reference_stage_id: StageId,
-
-    /// Stream stage IDs (from topology upstreams)
-    pub stream_stages: Vec<StageId>,
 
     /// Data journal for writing joined events
     pub data_journal: Arc<dyn Journal<ChainEvent>>,
@@ -278,12 +281,6 @@ pub struct JoinContext<H: JoinHandler> {
 
     /// System journal for writing lifecycle events
     pub system_journal: Arc<dyn Journal<SystemEvent>>,
-
-    /// Reference journal (dimension/lookup data)
-    pub reference_journal: Arc<dyn Journal<ChainEvent>>,
-
-    /// Stream journals (fact data from topology upstreams) - NOT including reference
-    pub stream_journals: Vec<(StageId, Arc<dyn Journal<ChainEvent>>)>,
 
     /// Message bus for pipeline communication
     pub bus: Arc<crate::message_bus::FsmMessageBus>,
@@ -305,6 +302,10 @@ pub struct JoinContext<H: JoinHandler> {
 
     /// Control event handling strategy
     pub control_strategy: Arc<dyn crate::stages::common::control_strategies::ControlEventStrategy>,
+
+    /// Bound factories for reference and stream subscriptions
+    pub reference_subscription_factory: BoundSubscriptionFactory,
+    pub stream_subscription_factory: BoundSubscriptionFactory,
 }
 
 impl<H: JoinHandler> JoinContext<H> {
@@ -316,15 +317,14 @@ impl<H: JoinHandler> JoinContext<H> {
         flow_name: String,
         flow_id: FlowId,
         reference_stage_id: StageId,
-        stream_stages: Vec<StageId>,
         data_journal: Arc<dyn Journal<ChainEvent>>,
         error_journal: Arc<dyn Journal<ChainEvent>>,
         system_journal: Arc<dyn Journal<SystemEvent>>,
-        reference_journal: Arc<dyn Journal<ChainEvent>>,
-        stream_journals: Vec<(StageId, Arc<dyn Journal<ChainEvent>>)>,
         bus: Arc<crate::message_bus::FsmMessageBus>,
         control_strategy: Arc<dyn crate::stages::common::control_strategies::ControlEventStrategy>,
         instrumentation: Arc<StageInstrumentation>,
+        reference_subscription_factory: BoundSubscriptionFactory,
+        stream_subscription_factory: BoundSubscriptionFactory,
     ) -> Self {
         let handler_state = handler.initial_state();
         Self {
@@ -335,12 +335,9 @@ impl<H: JoinHandler> JoinContext<H> {
             flow_name,
             flow_id,
             reference_stage_id,
-            stream_stages,
             data_journal,
             error_journal,
             system_journal,
-            reference_journal,
-            stream_journals,
             bus,
             writer_id: Arc::new(RwLock::new(None)),
             reference_subscription: Arc::new(RwLock::new(None)),
@@ -348,6 +345,8 @@ impl<H: JoinHandler> JoinContext<H> {
             buffered_eof: Arc::new(RwLock::new(None)),
             control_strategy,
             instrumentation,
+            reference_subscription_factory,
+            stream_subscription_factory,
         }
     }
 }
@@ -367,22 +366,27 @@ impl<H: JoinHandler + Send + Sync + 'static> FsmAction for JoinAction<H> {
             JoinAction::AllocateResources => {
                 // Create WriterId from our StageId
                 let writer_id = WriterId::from(ctx.stage_id.clone());
-                *ctx.writer_id.write().await = Some(writer_id);
+                *ctx.writer_id.write().await = Some(writer_id.clone());
 
                 tracing::info!(
                     stage_name = %ctx.stage_name,
                     reference_stage_id = ?ctx.reference_stage_id,
-                    stream_stages = ?ctx.stream_stages,
+                    stream_journal_count = ctx.stream_subscription_factory.upstream_stage_ids().len(),
                     "Join: Creating subscriptions to upstream journals"
                 );
 
                 // 1) Subscribe to reference journal ONLY
-                let ref_subscription = UpstreamSubscription::new(&vec![(
-                    ctx.reference_stage_id,
-                    ctx.reference_journal.clone(),
-                )])
-                .await
-                .map_err(|e| format!("Failed to create reference subscription: {:?}", e))?;
+                let ref_subscription = ctx
+                    .reference_subscription_factory
+                    .build_with_contracts(
+                        writer_id.clone(),
+                        ctx.data_journal.clone(),
+                        ContractConfig::default(),
+                        Some(ctx.system_journal.clone()),
+                        Some(ctx.stage_id),
+                    )
+                    .await
+                    .map_err(|e| format!("Failed to create reference subscription: {}", e))?;
 
                 tracing::info!(
                     stage_name = %ctx.stage_name,
@@ -394,12 +398,21 @@ impl<H: JoinHandler + Send + Sync + 'static> FsmAction for JoinAction<H> {
                 // 2) Subscribe to stream journals ONLY (NOT reference)
                 tracing::info!(
                     stage_name = %ctx.stage_name,
-                    stream_journal_ids = ?ctx.stream_journals.iter().map(|(id, _)| id).collect::<Vec<_>>(),
+                    stream_journal_ids = ?ctx.stream_subscription_factory.upstream_stage_ids(),
                     "Join: Creating stream subscription"
                 );
-                let stream_subscription = UpstreamSubscription::new(&ctx.stream_journals)
+
+                let stream_subscription = ctx
+                    .stream_subscription_factory
+                    .build_with_contracts(
+                        writer_id,
+                        ctx.data_journal.clone(),
+                        ContractConfig::default(),
+                        Some(ctx.system_journal.clone()),
+                        Some(ctx.stage_id),
+                    )
                     .await
-                    .map_err(|e| format!("Failed to create stream subscription: {:?}", e))?;
+                    .map_err(|e| format!("Failed to create stream subscription: {}", e))?;
 
                 tracing::info!(
                     stage_name = %ctx.stage_name,
@@ -473,15 +486,65 @@ impl<H: JoinHandler + Send + Sync + 'static> FsmAction for JoinAction<H> {
                     .as_ref()
                     .ok_or_else(|| "No writer ID available to forward EOF".to_string())?;
 
-                // Get the buffered EOF event or create a new one
-                let eof_event = if let Some(buffered) = ctx.buffered_eof.write().await.take() {
-                    buffered
-                } else {
-                    ChainEventFactory::eof_event(
-                        writer_id.clone(),
-                        true, // natural EOF
-                    )
+                // Always emit an EOF authored by this stage, preserving upstream
+                // metadata when available.
+                let buffered = ctx.buffered_eof.write().await.take();
+                let mut natural = true;
+                let mut upstream_vector_clock = None;
+                let mut upstream_last_event = None;
+                let runtime_context = ctx.instrumentation.snapshot();
+
+                if let Some(buffered_event) = buffered {
+                    if let obzenflow_core::event::ChainEventContent::FlowControl(
+                        FlowControlPayload::Eof {
+                            natural: n,
+                            writer_seq,
+                            vector_clock,
+                            last_event_id,
+                            ..
+                        },
+                    ) = buffered_event.content.clone()
+                    {
+                        natural = n;
+                        upstream_vector_clock = vector_clock;
+                        upstream_last_event = last_event_id;
+                        // We intentionally ignore the upstream writer_seq and
+                        // advertise our own position below.
+                    }
+                }
+
+                let mut eof_event = ChainEventFactory::eof_event(writer_id.clone(), natural);
+
+                if let obzenflow_core::event::ChainEventContent::FlowControl(
+                    FlowControlPayload::Eof {
+                        writer_id: ref mut eof_writer,
+                        writer_seq,
+                        vector_clock,
+                        last_event_id,
+                        ..
+                    },
+                ) = &mut eof_event.content
+                {
+                    *eof_writer = Some(writer_id.clone());
+                    *writer_seq = Some(SeqNo(runtime_context.writer_seq));
+                    if let Some(vc) = upstream_vector_clock {
+                        *vector_clock = Some(vc);
+                    }
+                    *last_event_id = upstream_last_event
+                        .or_else(|| runtime_context.last_emitted_event_id.clone());
+                }
+
+                // Attach flow/runtime context for downstream contract tracking
+                eof_event.flow_context = FlowContext {
+                    flow_name: ctx.flow_name.clone(),
+                    flow_id: ctx.flow_id.to_string(),
+                    stage_name: ctx.stage_name.clone(),
+                    stage_id: ctx.stage_id,
+                    stage_type: StageType::Join,
                 };
+                eof_event.runtime_context = Some(runtime_context);
+
+                ctx.instrumentation.record_emitted(&eof_event);
 
                 ctx.data_journal
                     .append(eof_event, None)

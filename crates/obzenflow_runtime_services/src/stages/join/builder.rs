@@ -5,6 +5,7 @@ use std::sync::Arc;
 use crate::message_bus::FsmMessageBus;
 use crate::metrics::instrumentation::StageInstrumentation;
 use crate::stages::common::handlers::JoinHandler;
+use crate::stages::resources_builder::StageResources;
 use crate::supervised_base::base::Supervisor;
 use crate::supervised_base::{
     BuilderError, ChannelBuilder, EventLoopDirective, EventReceiver, HandleBuilder,
@@ -31,30 +32,21 @@ pub enum JoinBuilderError {
 pub struct JoinBuilder<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> {
     handler: H,
     config: JoinConfig,
-    flow_id: obzenflow_core::FlowId,
-    data_journal: Arc<dyn Journal<ChainEvent>>,
-    error_journal: Arc<dyn Journal<ChainEvent>>,
-    system_journal: Arc<dyn Journal<SystemEvent>>,
+    resources: StageResources,
     reference_journal: Arc<dyn Journal<ChainEvent>>,
     stream_journals: Vec<(StageId, Arc<dyn Journal<ChainEvent>>)>,
-    bus: Arc<FsmMessageBus>,
     control_strategy: Arc<dyn crate::stages::common::control_strategies::ControlEventStrategy>,
     instrumentation: Option<Arc<StageInstrumentation>>,
 }
 
 impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> JoinBuilder<H> {
-    /// Create a new join builder
-    #[allow(clippy::too_many_arguments)]
+    /// Create a new join builder with StageResources
     pub fn new(
         handler: H,
         config: JoinConfig,
-        flow_id: obzenflow_core::FlowId,
-        data_journal: Arc<dyn Journal<ChainEvent>>,
-        error_journal: Arc<dyn Journal<ChainEvent>>,
-        system_journal: Arc<dyn Journal<SystemEvent>>,
+        resources: StageResources,
         reference_journal: Arc<dyn Journal<ChainEvent>>,
         stream_journals: Vec<(StageId, Arc<dyn Journal<ChainEvent>>)>,
-        bus: Arc<FsmMessageBus>,
         control_strategy: Arc<dyn crate::stages::common::control_strategies::ControlEventStrategy>,
     ) -> Result<Self, JoinBuilderError> {
         tracing::info!(
@@ -66,13 +58,9 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> JoinBuild
         Ok(Self {
             handler,
             config,
-            flow_id,
-            data_journal,
-            error_journal,
-            system_journal,
+            resources,
             reference_journal,
             stream_journals,
-            bus,
             control_strategy,
             instrumentation: None,
         })
@@ -102,34 +90,41 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
             .instrumentation
             .unwrap_or_else(|| Arc::new(StageInstrumentation::new()));
 
-        // Extract stream_stages from stream_journals
-        let stream_stages: Vec<StageId> = self.stream_journals.iter().map(|(id, _)| *id).collect();
+        // Bind factories for reference and stream subscriptions (after DSL split)
+        let reference_subscription_factory = self.resources.subscription_factory.bind(&vec![(
+            self.config.reference_source_id,
+            self.reference_journal.clone(),
+        )]);
 
-        // Create context
+        let stream_subscription_factory = self
+            .resources
+            .subscription_factory
+            .bind(&self.stream_journals);
+
+        // Create context with subscription factory from resources
         let context = Arc::new(JoinContext::new(
             self.handler,
             self.config.stage_id,
             self.config.stage_name.clone(),
             self.config.flow_name.clone(),
-            self.flow_id.clone(),
+            self.resources.flow_id.clone(),
             self.config.reference_source_id,
-            stream_stages,
-            self.data_journal.clone(),
-            self.error_journal.clone(),
-            self.system_journal.clone(),
-            self.reference_journal.clone(),
-            self.stream_journals.clone(),
-            self.bus.clone(),
+            self.resources.data_journal.clone(),
+            self.resources.error_journal.clone(),
+            self.resources.system_journal.clone(),
+            self.resources.message_bus.clone(),
             self.control_strategy.clone(),
             instrumentation.clone(),
+            reference_subscription_factory,
+            stream_subscription_factory,
         ));
 
         // Create supervisor
         let supervisor = JoinSupervisor {
             name: format!("join_{}", self.config.stage_name),
             context: context.clone(),
-            data_journal: self.data_journal.clone(),
-            system_journal: self.system_journal.clone(),
+            data_journal: self.resources.data_journal.clone(),
+            system_journal: self.resources.system_journal.clone(),
             stage_id: self.config.stage_id,
         };
 

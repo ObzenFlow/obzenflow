@@ -8,6 +8,7 @@ use obzenflow_core::event::status::processing_status::ProcessingStatus;
 use obzenflow_core::event::WriterId;
 use obzenflow_core::{ChainEvent, StageId};
 use obzenflow_fsm::FsmAction;
+use obzenflow_fsm::StateVariant;
 use tokio::task::JoinHandle;
 
 /// Trait for handler-supervised components
@@ -69,13 +70,31 @@ pub trait HandlerSupervisedExt: HandlerSupervised {
 
         // Build the state machine
         let mut machine = configured_builder.build();
+        let mut loop_iteration: u64 = 0;
 
         loop {
+            loop_iteration += 1;
+
             // Get current state
             let current_state = machine.state().clone();
 
+            tracing::debug!(
+                target: "obzenflow_runtime_services::supervised_base::handler_supervised",
+                iteration = loop_iteration,
+                state = %current_state.variant_name(),
+                "HandlerSupervised::run loop iteration start"
+            );
+
             // Get directive from the supervisor's dispatch logic
             let directive = self.dispatch_state(&current_state).await?;
+
+            tracing::debug!(
+                target: "obzenflow_runtime_services::supervised_base::handler_supervised",
+                iteration = loop_iteration,
+                state = %current_state.variant_name(),
+                directive = ?directive,
+                "HandlerSupervised::run dispatch_state returned directive"
+            );
 
             match directive {
                 EventLoopDirective::Continue => {

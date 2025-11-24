@@ -6,6 +6,7 @@ use crate::message_bus::FsmMessageBus;
 use crate::metrics::instrumentation::StageInstrumentation;
 use crate::stages::common::control_strategies::{ControlEventStrategy, JonestownStrategy};
 use crate::stages::common::handlers::StatefulHandler;
+use crate::stages::resources_builder::StageResources;
 use crate::supervised_base::base::Supervisor;
 use crate::supervised_base::{
     BuilderError, ChannelBuilder, EventLoopDirective, EventReceiver, HandleBuilder,
@@ -25,36 +26,17 @@ use super::supervisor::StatefulSupervisor;
 pub struct StatefulBuilder<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> {
     handler: H,
     config: StatefulConfig,
-    flow_id: obzenflow_core::FlowId,
-    data_journal: Arc<dyn Journal<ChainEvent>>,
-    error_journal: Arc<dyn Journal<ChainEvent>>,
-    system_journal: Arc<dyn Journal<SystemEvent>>,
-    upstream_journals: Vec<(StageId, Arc<dyn Journal<ChainEvent>>)>,
-    bus: Arc<FsmMessageBus>,
+    resources: StageResources,
     instrumentation: Option<Arc<StageInstrumentation>>,
 }
 
 impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StatefulBuilder<H> {
-    /// Create a new stateful builder
-    pub fn new(
-        handler: H,
-        config: StatefulConfig,
-        flow_id: obzenflow_core::FlowId,
-        data_journal: Arc<dyn Journal<ChainEvent>>,
-        error_journal: Arc<dyn Journal<ChainEvent>>,
-        system_journal: Arc<dyn Journal<SystemEvent>>,
-        upstream_journals: Vec<(StageId, Arc<dyn Journal<ChainEvent>>)>,
-        bus: Arc<FsmMessageBus>,
-    ) -> Self {
+    /// Create a new stateful builder with StageResources
+    pub fn new(handler: H, config: StatefulConfig, resources: StageResources) -> Self {
         Self {
             handler,
             config,
-            flow_id,
-            data_journal,
-            error_journal,
-            system_journal,
-            upstream_journals,
-            bus,
+            resources,
             instrumentation: None,
         }
     }
@@ -95,29 +77,28 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Super
             .instrumentation
             .unwrap_or_else(|| Arc::new(StageInstrumentation::new()));
 
-        // Create context
+        // Create context with subscription factory from resources
         let context = StatefulContext::new(
             self.handler,
             self.config.stage_id,
             self.config.stage_name.clone(),
             self.config.flow_name.clone(),
-            self.flow_id.clone(),
-            self.data_journal.clone(),
-            self.error_journal.clone(),
-            self.system_journal.clone(),
-            self.upstream_journals.clone(),
-            self.bus.clone(),
-            self.config.upstream_stages.clone(),
+            self.resources.flow_id.clone(),
+            self.resources.data_journal.clone(),
+            self.resources.error_journal.clone(),
+            self.resources.system_journal.clone(),
+            self.resources.message_bus.clone(),
             control_strategy,
             instrumentation,
+            self.resources.upstream_subscription_factory,
         );
 
         // Create supervisor (private - not exposed)
         let supervisor = StatefulSupervisor {
             name: format!("stateful_{}", self.config.stage_name),
             context: Arc::new(context.clone()),
-            data_journal: self.data_journal.clone(),
-            system_journal: self.system_journal.clone(),
+            data_journal: self.resources.data_journal.clone(),
+            system_journal: self.resources.system_journal.clone(),
             stage_id: self.config.stage_id,
         };
 

@@ -331,7 +331,7 @@ macro_rules! build_typed_flow {
             error_journals,
         );
 
-        let stage_resources_set = resources_builder.build()
+        let stage_resources_set = resources_builder.build().await
             .map_err(|e| format!("Failed to build stage resources: {:?}", e))?;
 
         // Create metrics exporter using the builder pattern
@@ -358,8 +358,23 @@ macro_rules! build_typed_flow {
                 };
 
                 // Get the pre-built resources for this stage
+                tracing::info!(
+                    target: "flowip-080o",
+                    stage_name = %name,
+                    stage_id = ?id,
+                    "DSL: Removing resources for stage"
+                );
                 let mut resources = stage_resources.remove(id)
                     .ok_or_else(|| format!("No resources found for stage {:?}", id))?;
+
+                tracing::info!(
+                    target: "flowip-080o",
+                    stage_name = %name,
+                    stage_id = ?id,
+                    upstream_journals_count = resources.upstream_journals.len(),
+                    upstream_stage_ids = ?resources.upstream_journals.iter().map(|(id, _)| id).collect::<Vec<_>>(),
+                    "DSL: Got resources for stage"
+                );
 
                 // Special handling for join stages: add reference journal to upstream_journals
                 // Join descriptors store reference_stage_id from the builder

@@ -4,10 +4,12 @@
 //! They have a unique "Flushing" state that ensures all buffered
 //! data is written before shutdown.
 
+use crate::messaging::upstream_subscription::ContractConfig;
 use crate::messaging::UpstreamSubscription;
 use crate::metrics::instrumentation::StageInstrumentation;
 use crate::stages::common::control_strategies::ControlEventStrategy;
 use crate::stages::common::handlers::SinkHandler;
+use crate::stages::resources_builder::BoundSubscriptionFactory;
 use futures::TryFutureExt;
 use obzenflow_core::event::context::{FlowContext, StageType};
 use obzenflow_core::event::{ChainEventFactory, SystemEvent};
@@ -276,9 +278,6 @@ pub struct JournalSinkContext<H: SinkHandler> {
     /// System journal for writing lifecycle events
     pub system_journal: Arc<dyn Journal<SystemEvent>>,
 
-    /// Upstream journals for reading events
-    pub upstream_journals: Vec<(StageId, Arc<dyn Journal<ChainEvent>>)>,
-
     /// Message bus for pipeline communication
     pub bus: Arc<crate::message_bus::FsmMessageBus>,
 
@@ -291,14 +290,14 @@ pub struct JournalSinkContext<H: SinkHandler> {
     /// Processing task handle (moved from supervisor to follow FSM patterns)
     pub processing_task: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
 
-    /// Upstream stage IDs
-    pub upstream_stages: Vec<obzenflow_core::StageId>,
-
     /// Track if we're currently flushing
     pub is_flushing: Arc<RwLock<bool>>,
 
     /// Stage instrumentation for metrics tracking
     pub instrumentation: Arc<StageInstrumentation>,
+
+    /// Bound subscription factory for upstream journals
+    pub upstream_subscription_factory: BoundSubscriptionFactory,
 
     /// Control strategy for FlowControl events
     pub control_strategy: Arc<dyn ControlEventStrategy>,
@@ -314,11 +313,10 @@ impl<H: SinkHandler> JournalSinkContext<H> {
         data_journal: Arc<dyn Journal<ChainEvent>>,
         error_journal: Arc<dyn Journal<ChainEvent>>,
         system_journal: Arc<dyn Journal<SystemEvent>>,
-        upstream_journals: Vec<(StageId, Arc<dyn Journal<ChainEvent>>)>,
         bus: Arc<crate::message_bus::FsmMessageBus>,
-        upstream_stages: Vec<StageId>,
         control_strategy: Arc<dyn ControlEventStrategy>,
         instrumentation: Arc<StageInstrumentation>,
+        upstream_subscription_factory: BoundSubscriptionFactory,
     ) -> Self {
         Self {
             handler: Arc::new(RwLock::new(handler)),
@@ -329,13 +327,12 @@ impl<H: SinkHandler> JournalSinkContext<H> {
             data_journal,
             error_journal,
             system_journal,
-            upstream_journals,
             bus,
             writer_id: Arc::new(RwLock::new(None)),
             subscription: Arc::new(RwLock::new(None)),
             processing_task: Arc::new(RwLock::new(None)),
-            upstream_stages,
             is_flushing: Arc::new(RwLock::new(false)),
+            upstream_subscription_factory,
             control_strategy,
             instrumentation,
         }
@@ -357,24 +354,26 @@ impl<H: SinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAction<H> 
             JournalSinkAction::AllocateResources => {
                 // Create WriterId from our StageId
                 let writer_id = WriterId::from(ctx.stage_id.clone());
-                *ctx.writer_id.write().await = Some(writer_id);
+                *ctx.writer_id.write().await = Some(writer_id.clone());
 
-                tracing::info!(
-                    stage_name = %ctx.stage_name,
-                    upstream_count = ctx.upstream_journals.len(),
-                    upstream_stages = ?ctx.upstream_journals.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
-                    "Sink creating upstream subscription"
-                );
-
-                // Create subscription from upstream journals
-                let subscription = UpstreamSubscription::new(&ctx.upstream_journals)
+                // Build subscription using bound factory with contracts
+                let subscription = ctx
+                    .upstream_subscription_factory
+                    .build_with_contracts(
+                        writer_id,
+                        ctx.data_journal.clone(),
+                        ContractConfig::default(),
+                        Some(ctx.system_journal.clone()),
+                        Some(ctx.stage_id),
+                    )
                     .await
-                    .map_err(|e| format!("Failed to create subscription: {:?}", e))?;
+                    .map_err(|e| format!("Failed to create subscription: {}", e))?;
 
                 *ctx.subscription.write().await = Some(subscription);
 
                 tracing::info!(
                     stage_name = %ctx.stage_name,
+                    upstream_count = ctx.upstream_subscription_factory.upstream_stage_ids().len(),
                     "Sink allocated resources and created subscription"
                 );
                 Ok(())
@@ -399,10 +398,26 @@ impl<H: SinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAction<H> 
                 // Write completion event to system journal
                 let completion_event = SystemEvent::stage_completed(ctx.stage_id);
 
+                tracing::info!(
+                    target: "flowip-080o",
+                    stage_name = %ctx.stage_name,
+                    stage_id = ?ctx.stage_id,
+                    fsm_state = "Draining",
+                    "sink: writing stage_completed to system.log"
+                );
+
                 ctx.system_journal
                     .append(completion_event, None)
                     .await
                     .map_err(|e| format!("Failed to write completion event: {}", e))?;
+
+                tracing::info!(
+                    target: "flowip-080o",
+                    stage_name = %ctx.stage_name,
+                    stage_id = ?ctx.stage_id,
+                    fsm_state = "Draining",
+                    "sink: stage_completed append succeeded"
+                );
 
                 tracing::info!(
                     stage_name = %ctx.stage_name,
@@ -413,6 +428,12 @@ impl<H: SinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAction<H> 
 
             JournalSinkAction::FlushBuffers => {
                 *ctx.is_flushing.write().await = true;
+
+                tracing::info!(
+                    target: "flowip-080o",
+                    stage_name = %ctx.stage_name,
+                    "sink: FlushBuffers starting"
+                );
 
                 let mut handler = ctx.handler.write().await;
 
@@ -446,6 +467,17 @@ impl<H: SinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAction<H> 
                     }
                     Ok(None) => { /* flush succeeded, nothing to record */ }
                     Err(e) => return Err(format!("Failed to flush: {e:?}").into()),
+                }
+
+                // After flush, emit any pending contract events (final/progress/stall)
+                if let Some(mut subscription) = ctx.subscription.write().await.take() {
+                    tracing::info!(
+                        target: "flowip-080o",
+                        stage_name = %ctx.stage_name,
+                        "sink: FlushBuffers completed, emitting any pending contract events"
+                    );
+                    let _ = subscription.check_contracts().await;
+                    *ctx.subscription.write().await = Some(subscription);
                 }
 
                 *ctx.is_flushing.write().await = false;

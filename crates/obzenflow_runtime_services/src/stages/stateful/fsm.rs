@@ -3,6 +3,9 @@
 //! Stateful stages maintain state across events, enabling aggregations,
 //! windowing operations, and session tracking.
 
+use obzenflow_core::event::context::{FlowContext, StageType};
+use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
+use obzenflow_core::event::types::SeqNo;
 use obzenflow_core::event::JournalEvent;
 use obzenflow_core::event::{ChainEventFactory, SystemEvent};
 use obzenflow_core::journal::journal::Journal;
@@ -14,10 +17,12 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+use crate::messaging::upstream_subscription::ContractConfig;
 use crate::messaging::UpstreamSubscription;
 use crate::metrics::instrumentation::StageInstrumentation;
 use crate::stages::common::control_strategies::ControlEventStrategy;
 use crate::stages::common::handlers::StatefulHandler;
+use crate::stages::resources_builder::BoundSubscriptionFactory;
 
 // ============================================================================
 // FSM States
@@ -302,9 +307,6 @@ pub struct StatefulContext<H: StatefulHandler> {
     /// System journal for writing lifecycle events
     pub system_journal: Arc<dyn Journal<SystemEvent>>,
 
-    /// Upstream journals for reading events
-    pub upstream_journals: Vec<(StageId, Arc<dyn Journal<ChainEvent>>)>,
-
     /// Message bus for pipeline communication
     pub bus: Arc<crate::message_bus::FsmMessageBus>,
 
@@ -317,9 +319,6 @@ pub struct StatefulContext<H: StatefulHandler> {
     /// Processing task handle
     pub processing_task: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
 
-    /// Upstream stage IDs
-    pub upstream_stages: Vec<obzenflow_core::StageId>,
-
     /// Control event handling strategy
     pub control_strategy: Arc<dyn ControlEventStrategy>,
 
@@ -328,6 +327,9 @@ pub struct StatefulContext<H: StatefulHandler> {
 
     /// Stage instrumentation for metrics tracking
     pub instrumentation: Arc<StageInstrumentation>,
+
+    /// Bound subscription factory for this stage's upstream journals
+    pub upstream_subscription_factory: BoundSubscriptionFactory,
 }
 
 impl<H: StatefulHandler> StatefulContext<H> {
@@ -341,11 +343,10 @@ impl<H: StatefulHandler> StatefulContext<H> {
         data_journal: Arc<dyn Journal<ChainEvent>>,
         error_journal: Arc<dyn Journal<ChainEvent>>,
         system_journal: Arc<dyn Journal<SystemEvent>>,
-        upstream_journals: Vec<(StageId, Arc<dyn Journal<ChainEvent>>)>,
         bus: Arc<crate::message_bus::FsmMessageBus>,
-        upstream_stages: Vec<StageId>,
         control_strategy: Arc<dyn ControlEventStrategy>,
         instrumentation: Arc<StageInstrumentation>,
+        upstream_subscription_factory: BoundSubscriptionFactory,
     ) -> Self {
         let initial_state = handler.initial_state();
         Self {
@@ -358,15 +359,14 @@ impl<H: StatefulHandler> StatefulContext<H> {
             data_journal,
             error_journal,
             system_journal,
-            upstream_journals,
             bus,
             writer_id: Arc::new(RwLock::new(None)),
-            subscription: Arc::new(RwLock::new(None)),
+            subscription: Arc::new(RwLock::new(None)), // Created lazily using factory
             processing_task: Arc::new(RwLock::new(None)),
-            upstream_stages,
             control_strategy,
             buffered_eof: Arc::new(RwLock::new(None)),
             instrumentation,
+            upstream_subscription_factory,
         }
     }
 }
@@ -386,21 +386,35 @@ impl<H: StatefulHandler + Send + Sync + 'static> FsmAction for StatefulAction<H>
             StatefulAction::AllocateResources => {
                 // Create WriterId from our StageId
                 let writer_id = WriterId::from(ctx.stage_id.clone());
-                *ctx.writer_id.write().await = Some(writer_id);
+                *ctx.writer_id.write().await = Some(writer_id.clone());
 
-                tracing::info!(
-                    stage_name = %ctx.stage_name,
-                    upstream_count = ctx.upstream_journals.len(),
-                    upstream_stages = ?ctx.upstream_journals.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
-                    "Stateful creating upstream subscription"
-                );
+                // Create subscription using bound factory
+                if !ctx.upstream_subscription_factory.is_empty() {
+                    let subscription = ctx
+                        .upstream_subscription_factory
+                        .build_with_contracts(
+                            writer_id,
+                            ctx.data_journal.clone(),
+                            ContractConfig::default(),
+                            Some(ctx.system_journal.clone()),
+                            Some(ctx.stage_id),
+                        )
+                        .await
+                        .map_err(|e| format!("Failed to create subscription: {}", e))?;
 
-                // Create subscription to upstream journals
-                let subscription = UpstreamSubscription::new(&ctx.upstream_journals)
-                    .await
-                    .map_err(|e| format!("Failed to create subscription: {:?}", e))?;
+                    *ctx.subscription.write().await = Some(subscription);
 
-                *ctx.subscription.write().await = Some(subscription);
+                    tracing::info!(
+                        stage_name = %ctx.stage_name,
+                        upstream_count = ctx.upstream_subscription_factory.upstream_stage_ids().len(),
+                        "Created subscription using bound factory"
+                    );
+                } else {
+                    tracing::info!(
+                        stage_name = %ctx.stage_name,
+                        "No upstream journals - skipping subscription creation"
+                    );
+                }
 
                 tracing::info!(
                     stage_name = %ctx.stage_name,
@@ -462,15 +476,65 @@ impl<H: StatefulHandler + Send + Sync + 'static> FsmAction for StatefulAction<H>
                     .as_ref()
                     .ok_or_else(|| "No writer ID available to forward EOF".to_string())?;
 
-                // Get the buffered EOF event or create a new one
-                let eof_event = if let Some(buffered) = ctx.buffered_eof.write().await.take() {
-                    buffered
-                } else {
-                    ChainEventFactory::eof_event(
-                        writer_id.clone(),
-                        true, // natural EOF
-                    )
+                // Always emit an EOF authored by this stage, preserving upstream
+                // metadata (vector clock, last_event_id, writer_seq) when present.
+                let buffered = ctx.buffered_eof.write().await.take();
+                let mut natural = true;
+                let mut upstream_vector_clock = None;
+                let mut upstream_last_event = None;
+                let runtime_context = ctx.instrumentation.snapshot();
+
+                if let Some(buffered_event) = buffered {
+                    if let obzenflow_core::event::ChainEventContent::FlowControl(
+                        FlowControlPayload::Eof {
+                            natural: n,
+                            writer_seq,
+                            vector_clock,
+                            last_event_id,
+                            ..
+                        },
+                    ) = buffered_event.content.clone()
+                    {
+                        natural = n;
+                        upstream_vector_clock = vector_clock;
+                        upstream_last_event = last_event_id;
+                        // We intentionally ignore the upstream writer_seq and
+                        // advertise our own position below.
+                    }
+                }
+
+                let mut eof_event = ChainEventFactory::eof_event(writer_id.clone(), natural);
+
+                if let obzenflow_core::event::ChainEventContent::FlowControl(
+                    FlowControlPayload::Eof {
+                        writer_id: ref mut eof_writer,
+                        writer_seq,
+                        vector_clock,
+                        last_event_id,
+                        ..
+                    },
+                ) = &mut eof_event.content
+                {
+                    *eof_writer = Some(writer_id.clone());
+                    *writer_seq = Some(SeqNo(runtime_context.writer_seq));
+                    if let Some(vc) = upstream_vector_clock {
+                        *vector_clock = Some(vc);
+                    }
+                    *last_event_id = upstream_last_event
+                        .or_else(|| runtime_context.last_emitted_event_id.clone());
+                }
+
+                // Attach flow/runtime context for downstream contract tracking
+                eof_event.flow_context = FlowContext {
+                    flow_name: ctx.flow_name.clone(),
+                    flow_id: ctx.flow_id.to_string(),
+                    stage_name: ctx.stage_name.clone(),
+                    stage_id: ctx.stage_id,
+                    stage_type: StageType::Stateful,
                 };
+                eof_event.runtime_context = Some(runtime_context);
+
+                ctx.instrumentation.record_emitted(&eof_event);
 
                 ctx.data_journal
                     .append(eof_event, None)

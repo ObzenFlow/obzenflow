@@ -415,20 +415,11 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stag
         };
 
         // Use the builder to create the handle
-        let handle = TransformBuilder::new(
-            handler_with_middleware,
-            transform_config,
-            resources.flow_id,
-            resources.data_journal,
-            resources.error_journal,
-            resources.system_journal,
-            resources.upstream_journals,
-            resources.message_bus,
-        )
-        .with_instrumentation(instrumentation)
-        .build()
-        .await
-        .map_err(|e| format!("Failed to build transform: {:?}", e))?;
+        let handle = TransformBuilder::new(handler_with_middleware, transform_config, resources)
+            .with_instrumentation(instrumentation)
+            .build()
+            .await
+            .map_err(|e| format!("Failed to build transform: {:?}", e))?;
 
         // Create adapter to bridge to StageHandle
         let adapter = StageHandleAdapter::new(
@@ -755,20 +746,11 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stage
         };
 
         // Use the builder to create the handle
-        let handle = StatefulBuilder::new(
-            self.handler,
-            stateful_config,
-            resources.flow_id,
-            resources.data_journal,
-            resources.error_journal,
-            resources.system_journal,
-            resources.upstream_journals,
-            resources.message_bus,
-        )
-        .with_instrumentation(instrumentation)
-        .build()
-        .await
-        .map_err(|e| format!("Failed to build stateful stage: {:?}", e))?;
+        let handle = StatefulBuilder::new(self.handler, stateful_config, resources)
+            .with_instrumentation(instrumentation)
+            .build()
+            .await
+            .map_err(|e| format!("Failed to build stateful stage: {:?}", e))?;
 
         // Create adapter to bridge to StageHandle
         let adapter = StageHandleAdapter::new(
@@ -931,16 +913,14 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
             };
 
         // Use the builder to create the handle
+        // NOTE: For join stages, the pre-built subscription in resources is stale
+        // because DSL mutates upstream_journals AFTER subscription was built
         let handle = JoinBuilder::new(
             self.handler,
             join_config,
-            resources.flow_id,
-            resources.data_journal,
-            resources.error_journal,
-            resources.system_journal,
+            resources,
             reference_journal,
             stream_journals,
-            resources.message_bus,
             control_strategy,
         )
         .map_err(|e| format!("Failed to create join builder: {}", e))?

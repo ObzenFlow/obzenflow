@@ -2,6 +2,7 @@ use super::fsm::{PipelineEvent, PipelineState};
 use crate::errors::FlowError;
 use crate::supervised_base::{HandleError, StandardHandle, SupervisorHandle};
 use obzenflow_topology::Topology;
+use std::io;
 use std::sync::Arc;
 
 /// Flow handle for external control - the public API returned by the DSL
@@ -56,13 +57,33 @@ impl FlowHandle {
         self.send_event(PipelineEvent::Run).await?;
         tracing::info!("FlowHandle::run() - Run event sent, waiting for completion");
 
+        // Capture state receiver before consuming self so we can inspect the terminal state
+        let mut state_rx = self.state_receiver();
+
         // Now wait for it to complete
         let result = self.wait_for_completion().await;
         tracing::info!(
             "FlowHandle::run() - wait_for_completion returned: {:?}",
             result
         );
-        result
+
+        // Surface aborts/failures instead of letting the example print success on error
+        if let Err(e) = result {
+            tracing::error!("FlowHandle::run() failed: {}", e);
+            return Err(e);
+        }
+
+        // Inspect final state to fail fast on pipeline aborts
+        let final_state = state_rx.borrow().clone();
+        match final_state {
+            PipelineState::Failed { reason } => Err(FlowError::ExecutionFailed(Box::new(
+                io::Error::new(io::ErrorKind::Other, reason),
+            ))),
+            PipelineState::AbortRequested { reason, .. } => Err(FlowError::ExecutionFailed(
+                Box::new(io::Error::new(io::ErrorKind::Other, format!("{reason:?}"))),
+            )),
+            _ => Ok(()),
+        }
     }
 
     /// Run the pipeline and wait for completion, returning the metrics exporter

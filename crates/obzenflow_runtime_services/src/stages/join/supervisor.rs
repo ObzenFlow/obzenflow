@@ -1,6 +1,7 @@
 //! Join supervisor implementation using HandlerSupervised pattern
 
-use crate::messaging::UpstreamSubscription;
+use crate::messaging::upstream_subscription::ContractConfig;
+use crate::messaging::{PollResult, UpstreamSubscription};
 use crate::stages::common::control_strategies::{ControlEventAction, ProcessingContext};
 use crate::stages::common::handlers::JoinHandler;
 use crate::supervised_base::base::Supervisor;
@@ -317,9 +318,12 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                         "Have reference subscription, attempting to receive"
                     );
 
-                    // Receive from subscription (no timeout - blocks until event arrives, just like transform)
-                    match subscription.recv().await {
-                        Ok(envelope) => {
+                    // Receive from subscription
+                    match subscription
+                        .poll_next_with_state(state.variant_name())
+                        .await
+                    {
+                        PollResult::Event(envelope) => {
                             tracing::debug!(
                                 stage_name = %self.context.stage_name,
                                 event_type = envelope.event.event_type(),
@@ -354,21 +358,22 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                             .context
                                             .control_strategy
                                             .handle_drain(&envelope, &mut processing_ctx),
+                                        _ => ControlEventAction::Forward,
                                     };
 
                                     match action {
                                         ControlEventAction::Forward => {
+                                            // Always forward control events downstream
+                                            self.data_journal
+                                                .append(envelope.event.clone(), None)
+                                                .await?;
+
                                             if matches!(signal, FlowControlPayload::Eof { .. }) {
-                                                // Reference EOF -> transition to Enriching
+                                                // Reference EOF -> transition to Enriching after forwarding
                                                 drop(ref_subscription_guard);
                                                 return Ok(EventLoopDirective::Transition(
                                                     JoinEvent::ReceivedEOF,
                                                 ));
-                                            } else {
-                                                // Forward non-EOF control events downstream
-                                                self.data_journal
-                                                    .append(envelope.event.clone(), None)
-                                                    .await?;
                                             }
                                         }
                                         ControlEventAction::Delay(duration) => {
@@ -434,7 +439,45 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                 }
                             }
                         }
-                        Err(e) => {
+                        PollResult::NoEvents => {
+                            // Check contracts if appropriate
+                            if subscription.should_check_contracts() {
+                                match subscription.check_contracts().await {
+                                    Ok(crate::messaging::upstream_subscription::ContractStatus::Stalled(upstream)) => {
+                                        tracing::warn!(
+                                            stage_name = %self.context.stage_name,
+                                            upstream = ?upstream,
+                                            "Reference upstream stalled during join loading"
+                                        );
+                                    }
+                                    Ok(crate::messaging::upstream_subscription::ContractStatus::Violated { upstream, cause }) => {
+                                        tracing::error!(
+                                            stage_name = %self.context.stage_name,
+                                            upstream = ?upstream,
+                                            cause = ?cause,
+                                            "Reference contract violation during join loading"
+                                        );
+                                    }
+                                    Ok(_) => {}
+                                    Err(e) => {
+                                        tracing::error!(
+                                            stage_name = %self.context.stage_name,
+                                            error = %e,
+                                            "Failed to check reference contracts"
+                                        );
+                                    }
+                                }
+                            }
+
+                            // No events available right now, sleep briefly and continue
+                            tracing::trace!(
+                                stage_name = %self.context.stage_name,
+                                "No reference events available, sleeping"
+                            );
+                            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+                            return Ok(EventLoopDirective::Continue);
+                        }
+                        PollResult::Error(e) => {
                             tracing::error!("Reference subscription error: {}", e);
                             return Ok(EventLoopDirective::Transition(JoinEvent::Error(format!(
                                 "Reference subscription error: {}",
@@ -458,8 +501,11 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
 
                 let mut stream_subscription_guard = self.context.stream_subscription.write().await;
                 if let Some(ref mut subscription) = *stream_subscription_guard {
-                    match subscription.recv().await {
-                        Ok(envelope) => {
+                    match subscription
+                        .poll_next_with_state(state.variant_name())
+                        .await
+                    {
+                        PollResult::Event(envelope) => {
                             // Match on event content type like Transform does
                             match &envelope.event.content {
                                 obzenflow_core::event::ChainEventContent::FlowControl(signal) => {
@@ -492,21 +538,22 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                             .context
                                             .control_strategy
                                             .handle_drain(&envelope, &mut processing_ctx),
+                                        _ => ControlEventAction::Forward,
                                     };
 
                                     match action {
                                         ControlEventAction::Forward => {
-                                            // If EOF was buffered above, transition to draining
+                                            // Always forward control events downstream
+                                            self.data_journal
+                                                .append(envelope.event.clone(), None)
+                                                .await?;
+
+                                            // If EOF was buffered above, transition to draining after forwarding
                                             if matches!(signal, FlowControlPayload::Eof { .. }) {
                                                 drop(stream_subscription_guard);
                                                 return Ok(EventLoopDirective::Transition(
                                                     JoinEvent::ReceivedEOF,
                                                 ));
-                                            } else {
-                                                // Non-EOF control events are forwarded immediately
-                                                self.data_journal
-                                                    .append(envelope.event.clone(), None)
-                                                    .await?;
                                             }
                                         }
                                         ControlEventAction::Delay(duration) => {
@@ -556,7 +603,13 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
 
                                     // Write output events
                                     for event in events {
+                                        // Record emission for contract tracking/instrumentation
+                                        use obzenflow_core::event::JournalEvent;
+                                        self.context.instrumentation.record_emitted(&event);
+
                                         self.data_journal.append(event, None).await?;
+                                        // Track output for contract verification
+                                        subscription.track_output_event();
                                     }
 
                                     return Ok(EventLoopDirective::Continue);
@@ -571,7 +624,45 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                 }
                             }
                         }
-                        Err(e) => {
+                        PollResult::NoEvents => {
+                            // Check contracts if appropriate
+                            if subscription.should_check_contracts() {
+                                match subscription.check_contracts().await {
+                                    Ok(crate::messaging::upstream_subscription::ContractStatus::Stalled(upstream)) => {
+                                        tracing::warn!(
+                                            stage_name = %self.context.stage_name,
+                                            upstream = ?upstream,
+                                            "Stream upstream stalled during join enriching"
+                                        );
+                                    }
+                                    Ok(crate::messaging::upstream_subscription::ContractStatus::Violated { upstream, cause }) => {
+                                        tracing::error!(
+                                            stage_name = %self.context.stage_name,
+                                            upstream = ?upstream,
+                                            cause = ?cause,
+                                            "Stream contract violation during join enriching"
+                                        );
+                                    }
+                                    Ok(_) => {}
+                                    Err(e) => {
+                                        tracing::error!(
+                                            stage_name = %self.context.stage_name,
+                                            error = %e,
+                                            "Failed to check stream contracts"
+                                        );
+                                    }
+                                }
+                            }
+
+                            // No events available right now, sleep briefly and continue
+                            tracing::trace!(
+                                stage_name = %self.context.stage_name,
+                                "No stream events available, sleeping"
+                            );
+                            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+                            return Ok(EventLoopDirective::Continue);
+                        }
+                        PollResult::Error(e) => {
                             tracing::error!("Stream subscription error: {}", e);
                             return Ok(EventLoopDirective::Transition(JoinEvent::Error(format!(
                                 "Stream subscription error: {}",
@@ -588,23 +679,208 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
             }
 
             JoinState::Draining => {
-                // Call handler drain
+                // First, drain any remaining events from both subscriptions
+                // This is critical for contract events (FLOWIP-080o fix)
+
+                // Drain reference subscription
+                let mut ref_subscription_guard = self.context.reference_subscription.write().await;
+                if let Some(subscription) = ref_subscription_guard.as_mut() {
+                    match subscription
+                        .poll_next_with_state(state.variant_name())
+                        .await
+                    {
+                        PollResult::Event(envelope) => {
+                            tracing::debug!(
+                                stage_name = %self.context.stage_name,
+                                event_type = envelope.event.event_type(),
+                                "Join draining reference subscription event"
+                            );
+
+                            // Process based on event type
+                            if !envelope.event.is_control() {
+                                // Process data event through join handler
+                                let handler = (*self.context.handler).clone();
+                                let mut state = self.context.handler_state.write().await;
+
+                                // Get writer ID for the handler
+                                let writer_id_guard = self.context.writer_id.read().await;
+                                let writer_id = writer_id_guard
+                                    .as_ref()
+                                    .ok_or_else(|| "No writer ID available")?;
+
+                                let results = handler.process_event(
+                                    &mut *state,
+                                    envelope.event.clone(),
+                                    self.context.reference_stage_id,
+                                    writer_id.clone(),
+                                );
+
+                                for event in results {
+                                    use obzenflow_core::event::JournalEvent;
+                                    self.context.instrumentation.record_emitted(&event);
+
+                                    self.data_journal.append(event, None).await?;
+                                    // Track output for contract verification
+                                    if let Some(ref mut sub) =
+                                        *self.context.reference_subscription.write().await
+                                    {
+                                        sub.track_output_event();
+                                    }
+                                }
+                            } else if !envelope.event.is_eof() {
+                                // Forward non-EOF control events (CRITICAL FIX for FLOWIP-080o)
+                                tracing::debug!(
+                                    stage_name = %self.context.stage_name,
+                                    event_type = envelope.event.event_type(),
+                                    "Forwarding reference control event during join draining"
+                                );
+                                self.data_journal
+                                    .append(envelope.event.clone(), None)
+                                    .await?;
+                            }
+
+                            // Continue draining
+                            return Ok(EventLoopDirective::Continue);
+                        }
+                        PollResult::NoEvents => {
+                            // Do a final contract check before marking as drained
+                            let _ = subscription.check_contracts().await;
+
+                            // Reference queue empty
+                            tracing::debug!(
+                                stage_name = %self.context.stage_name,
+                                "Join reference subscription queue drained"
+                            );
+                        }
+                        PollResult::Error(e) => {
+                            tracing::error!(
+                                stage_name = %self.context.stage_name,
+                                error = ?e,
+                                "Error draining reference subscription"
+                            );
+                            return Ok(EventLoopDirective::Transition(JoinEvent::Error(format!(
+                                "Reference drain error: {}",
+                                e
+                            ))));
+                        }
+                    }
+                }
+                drop(ref_subscription_guard);
+
+                // Drain stream subscription
+                let mut stream_subscription_guard = self.context.stream_subscription.write().await;
+                if let Some(subscription) = stream_subscription_guard.as_mut() {
+                    match subscription
+                        .poll_next_with_state(state.variant_name())
+                        .await
+                    {
+                        PollResult::Event(envelope) => {
+                            tracing::debug!(
+                                stage_name = %self.context.stage_name,
+                                event_type = envelope.event.event_type(),
+                                "Join draining stream subscription event"
+                            );
+
+                            // Process based on event type
+                            if !envelope.event.is_control() {
+                                // Process data event through join handler
+                                let handler = (*self.context.handler).clone();
+                                let mut state = self.context.handler_state.write().await;
+
+                                // Get writer ID for the handler
+                                let writer_id_guard = self.context.writer_id.read().await;
+                                let writer_id = writer_id_guard
+                                    .as_ref()
+                                    .ok_or_else(|| "No writer ID available")?;
+
+                                // Use the bound factory metadata to identify the first stream upstream
+                                let source_stage_id = self
+                                    .context
+                                    .stream_subscription_factory
+                                    .upstream_stage_ids()
+                                    .first()
+                                    .copied()
+                                    .unwrap_or(self.context.reference_stage_id);
+
+                                let results = handler.process_event(
+                                    &mut *state,
+                                    envelope.event.clone(),
+                                    source_stage_id,
+                                    writer_id.clone(),
+                                );
+
+                                for event in results {
+                                    use obzenflow_core::event::JournalEvent;
+                                    self.context.instrumentation.record_emitted(&event);
+
+                                    self.data_journal.append(event, None).await?;
+                                    // Track output for contract verification
+                                    subscription.track_output_event();
+                                }
+                            } else if !envelope.event.is_eof() {
+                                // Forward non-EOF control events (CRITICAL FIX for FLOWIP-080o)
+                                tracing::debug!(
+                                    stage_name = %self.context.stage_name,
+                                    event_type = envelope.event.event_type(),
+                                    "Forwarding stream control event during join draining"
+                                );
+                                self.data_journal
+                                    .append(envelope.event.clone(), None)
+                                    .await?;
+                            }
+
+                            // Continue draining
+                            return Ok(EventLoopDirective::Continue);
+                        }
+                        PollResult::NoEvents => {
+                            // Do a final contract check before marking as drained
+                            let _ = subscription.check_contracts().await;
+
+                            // Stream queue empty
+                            tracing::debug!(
+                                stage_name = %self.context.stage_name,
+                                "Join stream subscription queue drained"
+                            );
+                        }
+                        PollResult::Error(e) => {
+                            tracing::error!(
+                                stage_name = %self.context.stage_name,
+                                error = ?e,
+                                "Error draining stream subscription"
+                            );
+                            return Ok(EventLoopDirective::Transition(JoinEvent::Error(format!(
+                                "Stream drain error: {}",
+                                e
+                            ))));
+                        }
+                    }
+                }
+                drop(stream_subscription_guard);
+
+                // Now call handler.drain() to emit any final joined state
+                tracing::info!(
+                    stage_name = %self.context.stage_name,
+                    "Join subscriptions drained, calling handler.drain()"
+                );
+
                 let handler = (*self.context.handler).clone();
                 let state = self.context.handler_state.read().await;
                 let events = handler.drain(&*state).await?;
 
                 // Write any final events
                 for event in events {
-                    self.data_journal.append(event, None).await?;
-                }
+                    use obzenflow_core::event::JournalEvent;
+                    self.context.instrumentation.record_emitted(&event);
 
-                // Forward any buffered EOF if not already sent
-                if let Some(buffered) = self.context.buffered_eof.write().await.take() {
-                    self.data_journal.append(buffered, None).await?;
-                    tracing::info!(
-                        stage_name = %self.context.stage_name,
-                        "Join forwarded buffered EOF during draining"
-                    );
+                    self.data_journal.append(event, None).await?;
+                    // Track output for contract verification - need to check which subscription
+                    // Since this is during drain, we need to track on both subscriptions
+                    if let Some(ref mut sub) = *self.context.reference_subscription.write().await {
+                        sub.track_output_event();
+                    }
+                    if let Some(ref mut sub) = *self.context.stream_subscription.write().await {
+                        sub.track_output_event();
+                    }
                 }
 
                 Ok(EventLoopDirective::Transition(JoinEvent::DrainComplete))

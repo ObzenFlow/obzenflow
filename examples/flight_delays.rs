@@ -440,11 +440,11 @@ impl StatefulHandler for CarrierAggregator {
     }
 
     fn create_events(&self, state: &Self::State) -> Vec<ChainEvent> {
-                // ✨ FLOWIP-082a: Emit typed CarrierStatistics events
-                state
-                    .stats
-                    .iter()
-                    .map(|(carrier, (total_delay, flight_count))| {
+        // ✨ FLOWIP-082a: Emit typed CarrierStatistics events
+        state
+            .stats
+            .iter()
+            .map(|(carrier, (total_delay, flight_count))| {
                 let avg_delay = if *flight_count > 0 {
                     *total_delay as f64 / *flight_count as f64
                 } else {
@@ -458,14 +458,14 @@ impl StatefulHandler for CarrierAggregator {
                     average_delay: avg_delay,
                 };
 
-                        // Use TypedPayload's EVENT_TYPE
-                        ChainEventFactory::data_event(
-                            self.writer_id.clone(),
-                            &CarrierStatistics::versioned_event_type(),
-                            serde_json::to_value(&stats).unwrap(),
-                        )
-                    })
-                    .collect()
+                // Use TypedPayload's EVENT_TYPE
+                ChainEventFactory::data_event(
+                    self.writer_id.clone(),
+                    &CarrierStatistics::versioned_event_type(),
+                    serde_json::to_value(&stats).unwrap(),
+                )
+            })
+            .collect()
     }
 }
 
