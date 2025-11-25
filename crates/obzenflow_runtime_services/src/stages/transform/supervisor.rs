@@ -422,6 +422,8 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Hand
                                                         event_id = %event.id,
                                                         "Writing error event to error journal (FLOWIP-082e)"
                                                     );
+                                                    // Only count data events for transport contracts (FLOWIP-080o-part-2)
+                                                    // Error events are still data, so count them
                                                     self.context
                                                         .instrumentation
                                                         .record_emitted(&event);
@@ -452,16 +454,21 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Hand
                                                         self.context.data_journal.as_ref() as *const _
                                                     );
 
-                                                    self.context
-                                                        .instrumentation
-                                                        .record_emitted(&enriched_event);
+                                                    // FLOWIP-080o-part-2: Only count data events for writer_seq.
+                                                    // Lifecycle events (middleware metrics, etc.) are observability
+                                                    // overhead and should not participate in transport contracts.
+                                                    if enriched_event.is_data() {
+                                                        self.context
+                                                            .instrumentation
+                                                            .record_emitted(&enriched_event);
+                                                        // Track output for contract verification
+                                                        subscription.track_output_event();
+                                                    }
+
                                                     self.context.data_journal
                                                         .append(enriched_event, Some(&envelope))
                                                         .await
                                                         .map_err(|e| format!("Failed to write transformed event: {}", e))?;
-
-                                                    // Track output for contract verification
-                                                    subscription.track_output_event();
                                                 }
                                             }
                                         }
@@ -605,6 +612,8 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Hand
                                             event_id = %event.id,
                                             "Writing error event to error journal during drain (FLOWIP-082e)"
                                         );
+                                        // Only count data events for transport contracts (FLOWIP-080o-part-2)
+                                        // Error events are still data, so count them
                                         self.context
                                             .instrumentation
                                             .record_emitted(&event);
@@ -628,16 +637,21 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Hand
                                             .with_flow_context(flow_context)
                                             .with_runtime_context(self.context.instrumentation.snapshot());
 
-                                        self.context
-                                            .instrumentation
-                                            .record_emitted(&enriched_event);
+                                        // FLOWIP-080o-part-2: Only count data events for writer_seq.
+                                        // Lifecycle events (middleware metrics, etc.) are observability
+                                        // overhead and should not participate in transport contracts.
+                                        if enriched_event.is_data() {
+                                            self.context
+                                                .instrumentation
+                                                .record_emitted(&enriched_event);
+                                            // Track output for contract verification
+                                            subscription.track_output_event();
+                                        }
+
                                         self.context.data_journal
                                             .append(enriched_event, Some(&envelope))
                                             .await
                                             .map_err(|e| format!("Failed to write transformed event: {}", e))?;
-
-                                        // Track output for contract verification
-                                        subscription.track_output_event();
                                     }
                                 }
                             } else {

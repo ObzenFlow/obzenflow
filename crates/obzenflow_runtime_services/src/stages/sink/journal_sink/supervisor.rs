@@ -426,40 +426,21 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                                                 tracing::info!(
                                                                     target: "flowip-080o",
                                                                     stage_name = %self.context.stage_name,
-                                                                    "Sink EOF is final; flushing buffers and completing sink inline (no further FSM iterations)"
+                                                                    "Sink EOF is final; triggering FSM transition to Drained"
                                                                 );
 
-                                                                // Flush any buffered work
-                                                                // TODO: FlushBuffers action hangs, making it a no-op for now
-                                                                tracing::info!(
-                                                                    target: "flowip-080o",
-                                                                    stage_name = %self.context.stage_name,
-                                                                    ">>> CLAUDE: Skipping FlushBuffers (no-op for debugging) <<<"
-                                                                );
-
-                                                                tracing::info!(
-                                                                    target: "flowip-080o",
-                                                                    stage_name = %self.context.stage_name,
-                                                                    ">>> CLAUDE: Moving on to Cleanup <<<"
-                                                                );
-
-                                                                // Clean up resources
-                                                                // TODO: Cleanup action also hangs, making it a no-op for now
-                                                                tracing::info!(
-                                                                    target: "flowip-080o",
-                                                                    stage_name = %self.context.stage_name,
-                                                                    ">>> CLAUDE: Skipping Cleanup (no-op for debugging) <<<"
-                                                                );
-
-                                                                // Terminate the supervisor loop; HandlerSupervisedExt will invoke
-                                                                // write_completion_event() to publish the lifecycle completion.
-                                                                tracing::info!(
-                                                                    target: "flowip-080o",
-                                                                    stage_name = %self.context.stage_name,
-                                                                    ">>> RETURNING TERMINATE FROM INLINE EOF HANDLER - THIS SHOULD EXIT dispatch_state() <<<"
-                                                                );
+                                                                // FLOWIP-080o-part-2: Use FSM properly.
+                                                                // Return Transition(ReceivedEOF) to let the FSM handle
+                                                                // the Running -> Drained transition and execute actions:
+                                                                // [FlushBuffers, SendCompletion, Cleanup]
+                                                                //
+                                                                // Previously this returned Terminate directly, bypassing
+                                                                // the FSM and skipping flush/cleanup (which caused hangs
+                                                                // when attempted inline due to lock contention).
                                                                 return Ok(
-                                                                    EventLoopDirective::Terminate,
+                                                                    EventLoopDirective::Transition(
+                                                                        JournalSinkEvent::ReceivedEOF,
+                                                                    ),
                                                                 );
                                                             } else {
                                                                 tracing::info!(
@@ -554,9 +535,15 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                             ))
                                             .with_correlation_from(&envelope.event);
 
-                                            self.context
-                                                .instrumentation
-                                                .record_emitted(&delivery_event);
+                                            // FLOWIP-080o-part-2: Only count data/delivery events for writer_seq.
+                                            // Lifecycle events (middleware metrics, etc.) are observability
+                                            // overhead and should not participate in transport contracts.
+                                            // Sink emits Delivery events (not Data), so check both.
+                                            if delivery_event.is_data() || delivery_event.is_delivery() {
+                                                self.context
+                                                    .instrumentation
+                                                    .record_emitted(&delivery_event);
+                                            }
                                             self.context
                                                 .data_journal
                                                 .append(delivery_event, Some(&envelope))
@@ -601,9 +588,13 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                             ))
                                             .with_correlation_from(&envelope.event);
 
-                                            self.context
-                                                .instrumentation
-                                                .record_emitted(&fail_event);
+                                            // FLOWIP-080o-part-2: Only count data/delivery events for writer_seq.
+                                            // Failure events are still delivery events, so count them.
+                                            if fail_event.is_data() || fail_event.is_delivery() {
+                                                self.context
+                                                    .instrumentation
+                                                    .record_emitted(&fail_event);
+                                            }
                                             self.context
                                                 .data_journal
                                                 .append(fail_event, Some(&envelope))

@@ -92,48 +92,54 @@ impl SinkHandler for DashboardSink {
             self.total_margin += order.final_margin;
 
             println!("{}", "=".repeat(60));
-        } else if event.is_eof() {
-            println!("\n\n{}", "=".repeat(60));
-            println!("🎯 FINAL ANALYTICS DASHBOARD");
-            println!("{}", "=".repeat(60));
-            println!("Total Orders Processed: {}", self.order_count);
-            println!(
-                "Orders with Promotions: {} ({:.0}%)",
-                self.promo_orders,
-                if self.order_count > 0 {
-                    (self.promo_orders as f64 / self.order_count as f64) * 100.0
-                } else {
-                    0.0
-                }
-            );
-            println!("\n💰 Revenue Summary:");
-            println!("   Total Revenue: ${:.2}", self.total_revenue);
-            println!("   Total Margin: ${:.2}", self.total_margin);
-            println!(
-                "   Avg Margin %: {:.1}%",
-                if self.total_revenue > 0.0 {
-                    (self.total_margin / self.total_revenue) * 100.0
-                } else {
-                    0.0
-                }
-            );
-            println!("{}", "=".repeat(60));
-
-            println!("\n💡 Join Strategy Summary:");
-            println!("   ✅ InnerJoin (SKU→Product→Category): All orders matched");
-            println!("   ✅ StrictJoin (Payment Validation): All payments valid");
-            println!(
-                "   ✨ LeftJoin (Promotions): {}/{} orders had promos",
-                self.promo_orders, self.order_count
-            );
-            println!("\n   Note: LeftJoin preserved all orders, even without promotions!");
-            println!("   Note: StrictJoin would have failed on invalid payment (try INJECT_BAD_PAYMENT=1)");
         }
+        // Note: EOF events are not passed to consume() - use drain() for final summary
 
         Ok(DeliveryPayload::success(
             "dashboard",
             DeliveryMethod::Custom("Display".to_string()),
             None,
         ))
+    }
+
+    /// Called during graceful shutdown - print final analytics summary
+    async fn drain(&mut self) -> obzenflow_core::Result<Option<DeliveryPayload>> {
+        println!("\n\n{}", "=".repeat(60));
+        println!("🎯 FINAL ANALYTICS DASHBOARD");
+        println!("{}", "=".repeat(60));
+        println!("Total Orders Processed: {}", self.order_count);
+        println!(
+            "Orders with Promotions: {} ({:.0}%)",
+            self.promo_orders,
+            if self.order_count > 0 {
+                (self.promo_orders as f64 / self.order_count as f64) * 100.0
+            } else {
+                0.0
+            }
+        );
+        println!("\n💰 Revenue Summary:");
+        println!("   Total Revenue: ${:.2}", self.total_revenue);
+        println!("   Total Margin: ${:.2}", self.total_margin);
+        println!(
+            "   Avg Margin %: {:.1}%",
+            if self.total_revenue > 0.0 {
+                (self.total_margin / self.total_revenue) * 100.0
+            } else {
+                0.0
+            }
+        );
+        println!("{}", "=".repeat(60));
+
+        println!("\n💡 Join Strategy Summary:");
+        println!("   ✅ InnerJoin (SKU→Product→Category): All orders matched");
+        println!("   ✅ StrictJoin (Payment Validation): All payments valid");
+        println!(
+            "   ✨ LeftJoin (Promotions): {}/{} orders had promos",
+            self.promo_orders, self.order_count
+        );
+        println!("\n   Note: LeftJoin preserved all orders, even without promotions!");
+        println!("   Note: StrictJoin would have failed on invalid payment (try INJECT_BAD_PAYMENT=1)");
+
+        Ok(None)
     }
 }

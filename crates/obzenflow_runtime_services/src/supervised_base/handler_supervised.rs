@@ -104,17 +104,47 @@ pub trait HandlerSupervisedExt: HandlerSupervised {
                 }
 
                 EventLoopDirective::Transition(event) => {
+                    tracing::info!(
+                        target: "flowip-080o",
+                        iteration = loop_iteration,
+                        event = ?event,
+                        "HandlerSupervised: handling FSM transition event"
+                    );
                     let actions = machine
                         .handle(event, context.clone())
                         .await
                         .map_err(|e| format!("FSM error: {}", e))?;
 
-                    for action in actions {
+                    tracing::info!(
+                        target: "flowip-080o",
+                        iteration = loop_iteration,
+                        action_count = actions.len(),
+                        "HandlerSupervised: FSM returned actions, executing sequentially"
+                    );
+                    for (i, action) in actions.iter().enumerate() {
+                        tracing::info!(
+                            target: "flowip-080o",
+                            iteration = loop_iteration,
+                            action_index = i,
+                            action = ?action,
+                            "HandlerSupervised: executing action"
+                        );
                         action
                             .execute(&context)
                             .await
                             .map_err(|e| format!("Action error: {}", e))?;
+                        tracing::info!(
+                            target: "flowip-080o",
+                            iteration = loop_iteration,
+                            action_index = i,
+                            "HandlerSupervised: action completed"
+                        );
                     }
+                    tracing::info!(
+                        target: "flowip-080o",
+                        iteration = loop_iteration,
+                        "HandlerSupervised: all actions completed"
+                    );
                 }
 
                 EventLoopDirective::Terminate => {

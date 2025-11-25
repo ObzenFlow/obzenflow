@@ -427,18 +427,32 @@ impl<H: SinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAction<H> 
             }
 
             JournalSinkAction::FlushBuffers => {
+                tracing::info!(
+                    target: "flowip-080o",
+                    stage_name = %ctx.stage_name,
+                    "sink: FlushBuffers action - acquiring is_flushing lock"
+                );
                 *ctx.is_flushing.write().await = true;
 
                 tracing::info!(
                     target: "flowip-080o",
                     stage_name = %ctx.stage_name,
-                    "sink: FlushBuffers starting"
+                    "sink: FlushBuffers action - acquiring handler lock"
                 );
-
                 let mut handler = ctx.handler.write().await;
 
+                tracing::info!(
+                    target: "flowip-080o",
+                    stage_name = %ctx.stage_name,
+                    "sink: FlushBuffers action - calling handler.flush()"
+                );
                 match handler.flush().await {
                     Ok(Some(payload)) => {
+                        tracing::info!(
+                            target: "flowip-080o",
+                            stage_name = %ctx.stage_name,
+                            "sink: FlushBuffers action - flush returned payload, writing delivery"
+                        );
                         // grab a copy of the WriterId or crash; this should never be None after init
                         let writer_id = ctx
                             .writer_id
@@ -465,44 +479,103 @@ impl<H: SinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAction<H> 
                             .await
                             .map_err(|e| format!("Failed to write delivery receipt: {e}"))?;
                     }
-                    Ok(None) => { /* flush succeeded, nothing to record */ }
+                    Ok(None) => {
+                        tracing::info!(
+                            target: "flowip-080o",
+                            stage_name = %ctx.stage_name,
+                            "sink: FlushBuffers action - flush returned None (no payload)"
+                        );
+                    }
                     Err(e) => return Err(format!("Failed to flush: {e:?}").into()),
                 }
+                // Release handler lock before acquiring subscription lock
+                drop(handler);
 
+                tracing::info!(
+                    target: "flowip-080o",
+                    stage_name = %ctx.stage_name,
+                    "sink: FlushBuffers action - acquiring subscription lock for contract check"
+                );
                 // After flush, emit any pending contract events (final/progress/stall)
-                if let Some(mut subscription) = ctx.subscription.write().await.take() {
+                let maybe_subscription = {
+                    let mut sub_guard = ctx.subscription.write().await;
+                    sub_guard.take()
+                };
+
+                if let Some(mut subscription) = maybe_subscription {
                     tracing::info!(
                         target: "flowip-080o",
                         stage_name = %ctx.stage_name,
-                        "sink: FlushBuffers completed, emitting any pending contract events"
+                        "sink: FlushBuffers action - calling check_contracts"
                     );
                     let _ = subscription.check_contracts().await;
-                    *ctx.subscription.write().await = Some(subscription);
+                    tracing::info!(
+                        target: "flowip-080o",
+                        stage_name = %ctx.stage_name,
+                        "sink: FlushBuffers action - putting subscription back"
+                    );
+                    let mut sub_guard = ctx.subscription.write().await;
+                    *sub_guard = Some(subscription);
                 }
 
+                tracing::info!(
+                    target: "flowip-080o",
+                    stage_name = %ctx.stage_name,
+                    "sink: FlushBuffers action - releasing is_flushing lock"
+                );
                 *ctx.is_flushing.write().await = false;
 
-                tracing::info!(stage_name=%ctx.stage_name, "Sink flushed buffers");
+                tracing::info!(
+                    target: "flowip-080o",
+                    stage_name = %ctx.stage_name,
+                    "sink: FlushBuffers action - COMPLETE"
+                );
                 Ok(())
             }
 
             JournalSinkAction::Cleanup => {
+                tracing::info!(
+                    target: "flowip-080o",
+                    stage_name = %ctx.stage_name,
+                    "sink: Cleanup action - acquiring handler lock"
+                );
                 // Call handler drain before stopping tasks
                 let mut handler = ctx.handler.write().await;
+                tracing::info!(
+                    target: "flowip-080o",
+                    stage_name = %ctx.stage_name,
+                    "sink: Cleanup action - calling handler.drain()"
+                );
                 handler
                     .drain()
                     .await
                     .map_err(|e| format!("Failed to drain handler: {:?}", e))?;
+                tracing::info!(
+                    target: "flowip-080o",
+                    stage_name = %ctx.stage_name,
+                    "sink: Cleanup action - handler.drain() complete, dropping handler lock"
+                );
                 drop(handler);
 
+                tracing::info!(
+                    target: "flowip-080o",
+                    stage_name = %ctx.stage_name,
+                    "sink: Cleanup action - acquiring processing_task lock"
+                );
                 // Stop the processing task
                 if let Some(task) = ctx.processing_task.write().await.take() {
+                    tracing::info!(
+                        target: "flowip-080o",
+                        stage_name = %ctx.stage_name,
+                        "sink: Cleanup action - aborting processing task"
+                    );
                     task.abort();
                 }
 
                 tracing::info!(
+                    target: "flowip-080o",
                     stage_name = %ctx.stage_name,
-                    "Sink cleaned up resources"
+                    "sink: Cleanup action - COMPLETE"
                 );
                 Ok(())
             }

@@ -129,8 +129,10 @@ mod middleware_safety;
 mod middleware_trait;
 
 // Handler-specific middleware adapters
+mod join_middleware;
 mod sink_middleware;
 mod source_middleware;
+mod stateful_middleware;
 mod transform_middleware;
 
 // Common middleware utilities
@@ -159,10 +161,14 @@ pub use middleware_safety::MiddlewareSafety;
 pub use middleware_trait::{ErrorAction, Middleware, MiddlewareAction};
 
 // Handler-specific exports
+pub use join_middleware::{JoinHandlerMiddlewareExt, JoinMiddlewareBuilder, MiddlewareJoin};
 pub use sink_middleware::{MiddlewareSink, SinkHandlerExt, SinkMiddlewareBuilder};
 pub use source_middleware::{
     FiniteSourceHandlerExt, FiniteSourceMiddlewareBuilder, InfiniteSourceHandlerExt,
     InfiniteSourceMiddlewareBuilder, MiddlewareFiniteSource, MiddlewareInfiniteSource,
+};
+pub use stateful_middleware::{
+    MiddlewareStateful, StatefulHandlerMiddlewareExt, StatefulMiddlewareBuilder,
 };
 pub use transform_middleware::{
     MiddlewareTransform, TransformHandlerExt, TransformMiddlewareBuilder,

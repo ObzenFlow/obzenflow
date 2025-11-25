@@ -6,9 +6,10 @@
 use crate::stage_handle_adapter::StageHandleAdapter;
 use async_trait::async_trait;
 use obzenflow_adapters::middleware::{
-    validate_middleware_safety, FiniteSourceHandlerExt, InfiniteSourceHandlerExt, Middleware,
-    MiddlewareFactory, OutcomeEnrichmentMiddleware, SinkHandlerExt, SystemEnrichmentMiddleware,
-    TimingMiddleware, TransformHandlerExt,
+    validate_middleware_safety, FiniteSourceHandlerExt, InfiniteSourceHandlerExt,
+    JoinHandlerMiddlewareExt, Middleware, MiddlewareFactory, OutcomeEnrichmentMiddleware,
+    SinkHandlerExt, StatefulHandlerMiddlewareExt, SystemEnrichmentMiddleware, TimingMiddleware,
+    TransformHandlerExt,
 };
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::journal::journal::Journal;
@@ -732,9 +733,23 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stage
             instrumentation_config,
         ));
 
-        // Note: Stateful handlers don't currently support middleware wrapping
-        // This is because they have an associated type (State) which makes trait objects difficult
-        // Future work: FLOWIP-080c could add middleware support via HKT or similar patterns
+        // Create system middleware with instrumentation (FLOWIP-080o-part-2)
+        let mut all_middleware = create_system_middleware(&config, StageType::Stateful);
+
+        // Add resolved user middleware
+        let user_middleware: Vec<Box<dyn Middleware>> = resolved
+            .middleware
+            .into_iter()
+            .map(|spec| spec.factory.create(&config))
+            .collect();
+        all_middleware.extend(user_middleware);
+
+        // Apply all middleware (FLOWIP-080o-part-2: MiddlewareStateful now exists)
+        let mut builder = self.handler.middleware();
+        for mw in all_middleware {
+            builder = builder.with(mw);
+        }
+        let handler_with_middleware = builder.build();
 
         // Create the stage configuration
         let stateful_config = StatefulConfig {
@@ -746,7 +761,7 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stage
         };
 
         // Use the builder to create the handle
-        let handle = StatefulBuilder::new(self.handler, stateful_config, resources)
+        let handle = StatefulBuilder::new(handler_with_middleware, stateful_config, resources)
             .with_instrumentation(instrumentation)
             .build()
             .await
@@ -870,9 +885,24 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
             instrumentation_config,
         ));
 
-        // Note: Join handlers don't currently support middleware wrapping
-        // This is because they have an associated type (State) which makes trait objects difficult
-        // Future work could add middleware support via HKT or similar patterns
+        // Create system middleware with instrumentation (FLOWIP-080o-part-2)
+        let mut all_middleware = create_system_middleware(&config, StageType::Join);
+
+        // Add resolved user middleware
+        let user_middleware: Vec<Box<dyn Middleware>> = resolved
+            .middleware
+            .into_iter()
+            .map(|spec| spec.factory.create(&config))
+            .collect();
+        all_middleware.extend(user_middleware);
+
+        // Apply all middleware (FLOWIP-080o-part-2: MiddlewareJoin now exists)
+        // Same middleware is applied to both reference and stream sides
+        let mut builder = self.handler.middleware();
+        for mw in all_middleware {
+            builder = builder.with(mw);
+        }
+        let handler_with_middleware = builder.build();
 
         // Create the stage configuration
         // reference_stage_id comes from the builder (stored in self)
@@ -916,7 +946,7 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
         // NOTE: For join stages, the pre-built subscription in resources is stale
         // because DSL mutates upstream_journals AFTER subscription was built
         let handle = JoinBuilder::new(
-            self.handler,
+            handler_with_middleware,
             join_config,
             resources,
             reference_journal,

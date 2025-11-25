@@ -778,10 +778,23 @@ impl SelfSupervised for PipelineSupervisor {
                             ))
                         } else {
                             self.drain_idle_iters = self.drain_idle_iters.saturating_add(1);
-                            if self.drain_idle_iters > DRAIN_LIVENESS_MAX_IDLE {
-                                if let Some(abort_directive) = self.pending_stage_abort().await {
-                                    return Ok(abort_directive);
-                                }
+                            // Soft warning when drain is taking unusually long.
+                            // This does NOT cause an abort - 080o-part-2 semantics require
+                            // explicit contract failures for aborts, not elapsed time.
+                            // Future work (090a) may introduce configurable, rate-aware
+                            // liveness bounds as a separate concern from transport contracts.
+                            if self.drain_idle_iters == DRAIN_LIVENESS_MAX_IDLE {
+                                let snapshot = self.barrier_snapshot().await;
+                                tracing::warn!(
+                                    pending_stages = ?snapshot.pending_stages,
+                                    missing_contracts = ?snapshot.missing_contracts,
+                                    completed_stages = snapshot.completed,
+                                    total_stages = snapshot.total,
+                                    idle_iterations = self.drain_idle_iters,
+                                    "Drain taking unusually long; waiting for stages to complete. \
+                                     No abort will occur - only explicit contract failures cause aborts. \
+                                     See FLOWIP-080o-part-2 and FLOWIP-090a for liveness semantics."
+                                );
                             }
                             Ok(EventLoopDirective::Continue)
                         }
@@ -821,60 +834,15 @@ impl SelfSupervised for PipelineSupervisor {
 }
 
 impl PipelineSupervisor {
-    /// Abort if stages are still pending after drain liveness threshold
-    async fn pending_stage_abort(&self) -> Option<EventLoopDirective<PipelineEvent>> {
-        let completed = self.pipeline_context.completed_stages.read().await;
-        let pending: Vec<StageId> = self
-            .pipeline_context
-            .topology
-            .stages()
-            .map(|info| StageId::from_topology_id(info.id))
-            .filter(|id| !completed.contains(id))
-            .collect();
-
-        if pending.is_empty() {
-            return None;
-        }
-
-        let names: Vec<String> = pending
-            .iter()
-            .map(|id| {
-                self.pipeline_context
-                    .topology
-                    .stage_name(id.to_topology_id())
-                    .unwrap_or("unknown")
-                    .to_string()
-            })
-            .collect();
-
-        let reason = ViolationCause::Other(format!(
-            "pending_stage_completion stages={:?} names={:?}",
-            pending, names
-        ));
-
-        tracing::error!(
-            ?pending,
-            names = ?names,
-            "Drain liveness exceeded with pending stage completions; aborting pipeline"
-        );
-
-        Some(EventLoopDirective::Transition(PipelineEvent::Abort {
-            reason,
-            upstream: pending.first().copied(),
-        }))
-    }
-    /// If any expected contract edge is missing, return an abort directive
+    /// If any contract edge has an explicit failure recorded, return an abort directive
     async fn missing_contract_abort(&self) -> Option<EventLoopDirective<PipelineEvent>> {
-        let expected = self.pipeline_context.expected_contract_pairs.clone();
         let seen = self.pipeline_context.contract_pairs.read().await;
 
-        let missing: Vec<(StageId, StageId)> = expected
+        // Find any edge with an explicit failure (contract violated)
+        if let Some(((upstream, reader), status)) = seen
             .iter()
-            .filter(|pair| !matches!(seen.get(pair), Some(status) if status.is_passed()))
-            .copied()
-            .collect();
-
-        if let Some((upstream, reader)) = missing.first().copied() {
+            .find(|(_pair, status)| !status.is_passed())
+        {
             let upstream_name = self
                 .pipeline_context
                 .topology
@@ -888,23 +856,23 @@ impl PipelineSupervisor {
                 .unwrap_or("unknown")
                 .to_string();
 
-            let reason = ViolationCause::Other(format!(
-                "missing_contract_status upstream={:?}({}) -> reader={:?}({})",
-                upstream, upstream_name, reader, reader_name
-            ));
+            // Prefer the recorded violation cause, fall back to a generic label
+            let reason = status
+                .reason
+                .clone()
+                .unwrap_or_else(|| ViolationCause::Other("contract_failed".into()));
 
             tracing::error!(
                 ?upstream,
                 ?reader,
                 upstream_name,
                 reader_name,
-                missing_pairs = ?missing,
-                "Missing contract status evidence for topology edges; aborting pipeline"
+                "Contract edge recorded as failed; aborting pipeline based on explicit contract violation"
             );
 
             Some(EventLoopDirective::Transition(PipelineEvent::Abort {
                 reason,
-                upstream: Some(upstream),
+                upstream: Some(*upstream),
             }))
         } else {
             None
@@ -920,11 +888,12 @@ impl PipelineSupervisor {
             return false;
         }
 
-        let expected = self.pipeline_context.expected_contract_pairs.clone();
         let seen = self.pipeline_context.contract_pairs.read().await;
-        expected
-            .iter()
-            .all(|pair| matches!(seen.get(pair), Some(status) if status.is_passed()))
+
+        // Success requires that no contract edge has an explicit failure recorded.
+        // Missing contract evidence is tolerated here; it is surfaced via logs/metrics
+        // but does not block drain at the transport-contract layer.
+        !seen.values().any(|status| !status.is_passed())
     }
 
     /// Synthesize and write AllStagesCompleted when we know we’re done

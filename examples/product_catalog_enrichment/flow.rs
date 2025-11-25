@@ -201,7 +201,7 @@ pub fn run_example() -> Result<()> {
 
     FlowApplication::builder()
         .with_console_subscriber()
-        .with_log_level(obzenflow_infra::application::LogLevel::Error)
+        .with_log_level(obzenflow_infra::application::LogLevel::Info)
         .run_blocking(build_flow())
         .map_err(|e| anyhow::anyhow!("Application failed: {:?}", e))?;
 

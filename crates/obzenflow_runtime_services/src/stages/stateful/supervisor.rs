@@ -612,18 +612,22 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                                 .with_flow_context(flow_context)
                                 .with_runtime_context(self.context.instrumentation.snapshot());
 
-                            self.context.instrumentation.record_emitted(&enriched_event);
+                            // FLOWIP-080o-part-2: Only count data events for writer_seq.
+                            // Lifecycle events (middleware metrics, etc.) are observability
+                            // overhead and should not participate in transport contracts.
+                            if enriched_event.is_data() {
+                                self.context.instrumentation.record_emitted(&enriched_event);
+                                // Track output for contract verification
+                                if let Some(ref mut sub) = *self.context.subscription.write().await {
+                                    sub.track_output_event();
+                                }
+                            }
                             // Write the aggregated event
                             self.context
                                 .data_journal
                                 .append(enriched_event, None)
                                 .await
                                 .map_err(|e| format!("Failed to write aggregated event: {}", e))?;
-
-                            // Track output for contract verification
-                            if let Some(ref mut sub) = *self.context.subscription.write().await {
-                                sub.track_output_event();
-                            }
                         }
 
                         tracing::debug!(
@@ -777,7 +781,16 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                                 .with_flow_context(flow_context)
                                 .with_runtime_context(self.context.instrumentation.snapshot());
 
-                            self.context.instrumentation.record_emitted(&enriched_event);
+                            // FLOWIP-080o-part-2: Only count data events for writer_seq.
+                            // Lifecycle events (middleware metrics, etc.) are observability
+                            // overhead and should not participate in transport contracts.
+                            if enriched_event.is_data() {
+                                self.context.instrumentation.record_emitted(&enriched_event);
+                                // Track output for contract verification
+                                if let Some(ref mut sub) = *self.context.subscription.write().await {
+                                    sub.track_output_event();
+                                }
+                            }
                             self.context
                                 .data_journal
                                 .append(enriched_event, None)
@@ -785,11 +798,6 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                                 .map_err(|e| {
                                     format!("Failed to write final aggregated event: {}", e)
                                 })?;
-
-                            // Track output for contract verification
-                            if let Some(ref mut sub) = *self.context.subscription.write().await {
-                                sub.track_output_event();
-                            }
                         }
 
                         tracing::info!(

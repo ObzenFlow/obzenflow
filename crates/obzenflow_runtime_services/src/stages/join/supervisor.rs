@@ -603,13 +603,15 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
 
                                     // Write output events
                                     for event in events {
-                                        // Record emission for contract tracking/instrumentation
-                                        use obzenflow_core::event::JournalEvent;
-                                        self.context.instrumentation.record_emitted(&event);
-
+                                        // FLOWIP-080o-part-2: Only count data events for writer_seq.
+                                        // Lifecycle events (middleware metrics, etc.) are observability
+                                        // overhead and should not participate in transport contracts.
+                                        if event.is_data() {
+                                            self.context.instrumentation.record_emitted(&event);
+                                            // Track output for contract verification
+                                            subscription.track_output_event();
+                                        }
                                         self.data_journal.append(event, None).await?;
-                                        // Track output for contract verification
-                                        subscription.track_output_event();
                                     }
 
                                     return Ok(EventLoopDirective::Continue);
@@ -716,16 +718,19 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                 );
 
                                 for event in results {
-                                    use obzenflow_core::event::JournalEvent;
-                                    self.context.instrumentation.record_emitted(&event);
-
-                                    self.data_journal.append(event, None).await?;
-                                    // Track output for contract verification
-                                    if let Some(ref mut sub) =
-                                        *self.context.reference_subscription.write().await
-                                    {
-                                        sub.track_output_event();
+                                    // FLOWIP-080o-part-2: Only count data events for writer_seq.
+                                    // Lifecycle events (middleware metrics, etc.) are observability
+                                    // overhead and should not participate in transport contracts.
+                                    if event.is_data() {
+                                        self.context.instrumentation.record_emitted(&event);
+                                        // Track output for contract verification
+                                        if let Some(ref mut sub) =
+                                            *self.context.reference_subscription.write().await
+                                        {
+                                            sub.track_output_event();
+                                        }
                                     }
+                                    self.data_journal.append(event, None).await?;
                                 }
                             } else if !envelope.event.is_eof() {
                                 // Forward non-EOF control events (CRITICAL FIX for FLOWIP-080o)
@@ -810,12 +815,15 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                 );
 
                                 for event in results {
-                                    use obzenflow_core::event::JournalEvent;
-                                    self.context.instrumentation.record_emitted(&event);
-
+                                    // FLOWIP-080o-part-2: Only count data events for writer_seq.
+                                    // Lifecycle events (middleware metrics, etc.) are observability
+                                    // overhead and should not participate in transport contracts.
+                                    if event.is_data() {
+                                        self.context.instrumentation.record_emitted(&event);
+                                        // Track output for contract verification
+                                        subscription.track_output_event();
+                                    }
                                     self.data_journal.append(event, None).await?;
-                                    // Track output for contract verification
-                                    subscription.track_output_event();
                                 }
                             } else if !envelope.event.is_eof() {
                                 // Forward non-EOF control events (CRITICAL FIX for FLOWIP-080o)
@@ -869,18 +877,21 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
 
                 // Write any final events
                 for event in events {
-                    use obzenflow_core::event::JournalEvent;
-                    self.context.instrumentation.record_emitted(&event);
-
+                    // FLOWIP-080o-part-2: Only count data events for writer_seq.
+                    // Lifecycle events (middleware metrics, etc.) are observability
+                    // overhead and should not participate in transport contracts.
+                    if event.is_data() {
+                        self.context.instrumentation.record_emitted(&event);
+                        // Track output for contract verification - need to check which subscription
+                        // Since this is during drain, we need to track on both subscriptions
+                        if let Some(ref mut sub) = *self.context.reference_subscription.write().await {
+                            sub.track_output_event();
+                        }
+                        if let Some(ref mut sub) = *self.context.stream_subscription.write().await {
+                            sub.track_output_event();
+                        }
+                    }
                     self.data_journal.append(event, None).await?;
-                    // Track output for contract verification - need to check which subscription
-                    // Since this is during drain, we need to track on both subscriptions
-                    if let Some(ref mut sub) = *self.context.reference_subscription.write().await {
-                        sub.track_output_event();
-                    }
-                    if let Some(ref mut sub) = *self.context.stream_subscription.write().await {
-                        sub.track_output_event();
-                    }
                 }
 
                 Ok(EventLoopDirective::Transition(JoinEvent::DrainComplete))

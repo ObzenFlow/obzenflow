@@ -272,7 +272,12 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
                             &self.context.data_journal
                         };
 
-                        self.context.instrumentation.record_emitted(&event_to_write);
+                        // FLOWIP-080o-part-2: Only count data events for writer_seq.
+                        // Lifecycle events (middleware metrics, etc.) are observability
+                        // overhead and should not participate in transport contracts.
+                        if event_to_write.is_data() {
+                            self.context.instrumentation.record_emitted(&event_to_write);
+                        }
                         journal
                             .append(event_to_write, None)
                             .await
