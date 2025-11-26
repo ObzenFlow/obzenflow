@@ -54,38 +54,33 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
         builder
             // Created -> Initialized
             .when("Created")
-                .on("Initialize", |_state, _event, ctx| async move {
-                    // Track state transition in instrumentation
-                    ctx.instrumentation.transition_to_state("Initialized");
+                .on("Initialize", |_state, _event, ctx| {
+                    Box::pin(async move {
+                        // Track state transition in instrumentation
+                        ctx.instrumentation.transition_to_state("Initialized");
 
-                    Ok(Transition {
-                        next_state: JoinState::Initialized,
-                        actions: vec![JoinAction::AllocateResources],
+                        Ok(Transition {
+                            next_state: JoinState::Initialized,
+                            actions: vec![JoinAction::AllocateResources],
+                        })
                     })
                 })
                 .done()
 
             // Initialized -> Hydrating
             .when("Initialized")
-                .on("Ready", |_state, _event, ctx| async move {
-                    // Track state transition in instrumentation
-                    ctx.instrumentation.transition_to_state("Hydrating");
+                .on("Ready", |_state, _event, ctx| {
+                    Box::pin(async move {
+                        // Track state transition in instrumentation
+                        ctx.instrumentation.transition_to_state("Hydrating");
 
-                    Ok(Transition {
-                        next_state: JoinState::Hydrating,
-                        actions: vec![
-                            JoinAction::InitializeHandlerState,
-                            JoinAction::PublishRunning
-                        ],
-                    })
-                })
-                // Idempotent ready: if we get Ready again, stay in Hydrating
-                .on("Ready", |_state, _event, ctx| async move {
-                    tracing::info!("JoinSupervisor: received redundant Ready in Hydrating; treating as no-op");
-                    ctx.instrumentation.transition_to_state("Hydrating");
-                    Ok(Transition {
-                        next_state: JoinState::Hydrating,
-                        actions: vec![],
+                        Ok(Transition {
+                            next_state: JoinState::Hydrating,
+                            actions: vec![
+                                JoinAction::InitializeHandlerState,
+                                JoinAction::PublishRunning
+                            ],
+                        })
                     })
                 })
                 .done()
@@ -93,16 +88,18 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
             // Hydrating -> Enriching (only when reference completes)
             .when("Hydrating")
                 // Idempotent Ready in Hydrating: ignore redundant Ready signals
-                .on("Ready", |_state, _event, _ctx| async move {
-                    tracing::info!("JoinSupervisor: received Ready in Hydrating; treating as no-op");
-                    Ok(Transition {
-                        next_state: JoinState::Hydrating,
-                        actions: vec![],
+                .on("Ready", |_state, _event, _ctx| {
+                    Box::pin(async move {
+                        tracing::info!("JoinSupervisor: received Ready in Hydrating; treating as no-op");
+                        Ok(Transition {
+                            next_state: JoinState::Hydrating,
+                            actions: vec![],
+                        })
                     })
                 })
                 .on("ReceivedEOF", |_state, event, ctx| {
                     let event = event.clone();
-                    async move {
+                    Box::pin(async move {
                         if let JoinEvent::ReceivedEOF = event {
                             // In Hydrating, we only read from reference_subscription in dispatch_state
                             // So ReceivedEOF must be from reference
@@ -114,11 +111,11 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
                         } else {
                             unreachable!()
                         }
-                    }
+                    })
                 })
                 .on("Error", |_state, event, ctx| {
                     let event = event.clone();
-                    async move {
+                    Box::pin(async move {
                         if let JoinEvent::Error(msg) = event {
                             ctx.instrumentation.transition_to_state("Failed");
                             ctx.instrumentation.failures_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -130,40 +127,46 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
                         } else {
                             unreachable!()
                         }
-                    }
+                    })
                 })
                 .done()
 
             // Enriching -> Draining (on stream EOF)
             .when("Enriching")
                 // Idempotent Ready: ignore redundant Ready signals once hydrating/enriching
-                .on("Ready", |_state, _event, _ctx| async move {
-                    tracing::info!("JoinSupervisor: received Ready in Enriching; treating as no-op");
-                    Ok(Transition {
-                        next_state: JoinState::Enriching,
-                        actions: vec![],
+                .on("Ready", |_state, _event, _ctx| {
+                    Box::pin(async move {
+                        tracing::info!("JoinSupervisor: received Ready in Enriching; treating as no-op");
+                        Ok(Transition {
+                            next_state: JoinState::Enriching,
+                            actions: vec![],
+                        })
                     })
                 })
-                .on("ReceivedEOF", |_state, _event, ctx| async move {
-                    // If we received EOF in Enriching, it came from stream_subscription
-                    // (we only read from stream_subscription in Enriching state)
-                    // Don't check writer_id - subscription context tells us it's from stream
-                    ctx.instrumentation.transition_to_state("Draining");
-                    Ok(Transition {
-                        next_state: JoinState::Draining,
-                        actions: vec![], // No actions - dispatch_state handles draining
+                .on("ReceivedEOF", |_state, _event, ctx| {
+                    Box::pin(async move {
+                        // If we received EOF in Enriching, it came from stream_subscription
+                        // (we only read from stream_subscription in Enriching state)
+                        // Don't check writer_id - subscription context tells us it's from stream
+                        ctx.instrumentation.transition_to_state("Draining");
+                        Ok(Transition {
+                            next_state: JoinState::Draining,
+                            actions: vec![], // No actions - dispatch_state handles draining
+                        })
                     })
                 })
-                .on("BeginDrain", |_state, _event, ctx| async move {
-                    ctx.instrumentation.transition_to_state("Draining");
-                    Ok(Transition {
-                        next_state: JoinState::Draining,
-                        actions: vec![],
+                .on("BeginDrain", |_state, _event, ctx| {
+                    Box::pin(async move {
+                        ctx.instrumentation.transition_to_state("Draining");
+                        Ok(Transition {
+                            next_state: JoinState::Draining,
+                            actions: vec![],
+                        })
                     })
                 })
                 .on("Error", |_state, event, ctx| {
                     let event = event.clone();
-                    async move {
+                    Box::pin(async move {
                         if let JoinEvent::Error(msg) = event {
                             ctx.instrumentation.transition_to_state("Failed");
                             ctx.instrumentation.failures_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -175,27 +178,29 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
                         } else {
                             unreachable!()
                         }
-                    }
+                    })
                 })
                 .done()
 
             // Draining -> Drained
             .when("Draining")
-                .on("DrainComplete", |_state, _event, ctx| async move {
-                    ctx.instrumentation.transition_to_state("Drained");
+                .on("DrainComplete", |_state, _event, ctx| {
+                    Box::pin(async move {
+                        ctx.instrumentation.transition_to_state("Drained");
 
-                    Ok(Transition {
-                        next_state: JoinState::Drained,
-                        actions: vec![
-                            JoinAction::ForwardEOF,
-                            JoinAction::SendCompletion,
-                            JoinAction::Cleanup,
-                        ],
+                        Ok(Transition {
+                            next_state: JoinState::Drained,
+                            actions: vec![
+                                JoinAction::ForwardEOF,
+                                JoinAction::SendCompletion,
+                                JoinAction::Cleanup,
+                            ],
+                        })
                     })
                 })
                 .on("Error", |_state, event, ctx| {
                     let event = event.clone();
-                    async move {
+                    Box::pin(async move {
                         if let JoinEvent::Error(msg) = event {
                             ctx.instrumentation.transition_to_state("Failed");
                             ctx.instrumentation.failures_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -207,7 +212,7 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
                         } else {
                             unreachable!()
                         }
-                    }
+                    })
                 })
                 .done()
 
@@ -216,7 +221,7 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
                 .on("Error", |state, event, _ctx| {
                     let event = event.clone();
                     let state = state.clone();
-                    async move {
+                    Box::pin(async move {
                         if let JoinEvent::Error(msg) = event {
                             // If already failed, don't cleanup again
                             if matches!(state, JoinState::Failed(_)) {
@@ -233,7 +238,7 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
                         } else {
                             unreachable!()
                         }
-                    }
+                    })
                 })
                 .done()
 
@@ -241,16 +246,18 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
             .when_unhandled(|state, event, _ctx| {
                 let state_name = state.variant_name().to_string();
                 let event_name = event.variant_name().to_string();
-                async move {
+                Box::pin(async move {
                     tracing::error!(
                         supervisor = "JoinSupervisor",
                         state = %state_name,
                         event = %event_name,
                         "Unhandled event in FSM - this indicates a state machine configuration error"
                     );
-                    // Return Err to propagate the error
-                    Err(format!("Unhandled event '{}' in state '{}' for JoinSupervisor", event_name, state_name))
-                }
+                    Err(obzenflow_fsm::FsmError::UnhandledEvent {
+                        state: state_name,
+                        event: event_name,
+                    })
+                })
             })
     }
 
@@ -275,11 +282,14 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
 
     async fn write_completion_event(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let event = SystemEvent::stage_completed(self.stage_id);
-        self.system_journal
-            .append(event, None)
-            .await
-            .map(|_| ())
-            .map_err(|e| format!("Failed to write completion event: {}", e).into())
+        if let Err(e) = self.system_journal.append(event, None).await {
+            tracing::error!(
+                stage_name = %self.context.stage_name,
+                journal_error = %e,
+                "Failed to write completion event; continuing without system journal entry"
+            );
+        }
+        Ok(())
     }
 
     async fn dispatch_state(
@@ -312,6 +322,8 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                 );
 
                 let mut ref_subscription_guard = self.context.reference_subscription.write().await;
+                let mut ref_contract_state_guard =
+                    self.context.reference_contract_state.write().await;
                 if let Some(ref mut subscription) = *ref_subscription_guard {
                     tracing::trace!(
                         stage_name = %self.context.stage_name,
@@ -320,7 +332,10 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
 
                     // Receive from subscription
                     match subscription
-                        .poll_next_with_state(state.variant_name())
+                        .poll_next_with_state(
+                            state.variant_name(),
+                            Some(&mut ref_contract_state_guard[..]),
+                        )
                         .await
                     {
                         PollResult::Event(envelope) => {
@@ -369,11 +384,34 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                                 .await?;
 
                                             if matches!(signal, FlowControlPayload::Eof { .. }) {
-                                                // Reference EOF -> transition to Enriching after forwarding
-                                                drop(ref_subscription_guard);
-                                                return Ok(EventLoopDirective::Transition(
-                                                    JoinEvent::ReceivedEOF,
-                                                ));
+                                                // FLOWIP-080p: use EofOutcome to decide when the
+                                                // reference side is truly complete.
+                                                let eof_outcome =
+                                                    subscription.take_last_eof_outcome();
+                                                if let Some(outcome) = eof_outcome {
+                                                    tracing::info!(
+                                                        target: "flowip-080o",
+                                                        stage_name = %self.context.stage_name,
+                                                        upstream_stage_id = ?outcome.stage_id,
+                                                        upstream_stage_name = %outcome.stage_name,
+                                                        reader_index = outcome.reader_index,
+                                                        eof_count = outcome.eof_count,
+                                                        total_readers = outcome.total_readers,
+                                                        is_final = outcome.is_final,
+                                                        "Join (Hydrating) evaluated EOF outcome for reference side"
+                                                    );
+
+                                                    if outcome.is_final {
+                                                        // Reference EOF is final -> transition to Enriching
+                                                        drop(ref_subscription_guard);
+                                                        return Ok(EventLoopDirective::Transition(
+                                                            JoinEvent::ReceivedEOF,
+                                                        ));
+                                                    }
+                                                }
+
+                                                // Non-final EOF: continue hydrating.
+                                                return Ok(EventLoopDirective::Continue);
                                             }
                                         }
                                         ControlEventAction::Delay(duration) => {
@@ -441,8 +479,13 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                         }
                         PollResult::NoEvents => {
                             // Check contracts if appropriate
-                            if subscription.should_check_contracts() {
-                                match subscription.check_contracts().await {
+                            if subscription
+                                .should_check_contracts(&ref_contract_state_guard[..])
+                            {
+                                match subscription
+                                    .check_contracts(&mut ref_contract_state_guard[..])
+                                    .await
+                                {
                                     Ok(crate::messaging::upstream_subscription::ContractStatus::Stalled(upstream)) => {
                                         tracing::warn!(
                                             stage_name = %self.context.stage_name,
@@ -499,10 +542,16 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                 // Process stream events (reference is already complete)
                 // Following the robust pattern from Transform's Running state
 
-                let mut stream_subscription_guard = self.context.stream_subscription.write().await;
+                let mut stream_subscription_guard =
+                    self.context.stream_subscription.write().await;
+                let mut stream_contract_state_guard =
+                    self.context.stream_contract_state.write().await;
                 if let Some(ref mut subscription) = *stream_subscription_guard {
                     match subscription
-                        .poll_next_with_state(state.variant_name())
+                        .poll_next_with_state(
+                            state.variant_name(),
+                            Some(&mut stream_contract_state_guard[..]),
+                        )
                         .await
                     {
                         PollResult::Event(envelope) => {
@@ -548,12 +597,36 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                                 .append(envelope.event.clone(), None)
                                                 .await?;
 
-                                            // If EOF was buffered above, transition to draining after forwarding
+                                            // Use EofOutcome from the stream subscription to decide
+                                            // when the join can move to Draining.
                                             if matches!(signal, FlowControlPayload::Eof { .. }) {
-                                                drop(stream_subscription_guard);
-                                                return Ok(EventLoopDirective::Transition(
-                                                    JoinEvent::ReceivedEOF,
-                                                ));
+                                                let eof_outcome =
+                                                    subscription.take_last_eof_outcome();
+                                                if let Some(outcome) = eof_outcome {
+                                                    tracing::info!(
+                                                        target: "flowip-080o",
+                                                        stage_name = %self.context.stage_name,
+                                                        upstream_stage_id = ?outcome.stage_id,
+                                                        upstream_stage_name = %outcome.stage_name,
+                                                        reader_index = outcome.reader_index,
+                                                        eof_count = outcome.eof_count,
+                                                        total_readers = outcome.total_readers,
+                                                        is_final = outcome.is_final,
+                                                        "Join (Enriching) evaluated EOF outcome for stream side"
+                                                    );
+
+                                                    if outcome.is_final {
+                                                        drop(stream_subscription_guard);
+                                                        return Ok(
+                                                            EventLoopDirective::Transition(
+                                                                JoinEvent::ReceivedEOF,
+                                                            ),
+                                                        );
+                                                    }
+                                                }
+
+                                                // Non-final EOF: keep enriching.
+                                                return Ok(EventLoopDirective::Continue);
                                             }
                                         }
                                         ControlEventAction::Delay(duration) => {
@@ -628,8 +701,13 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                         }
                         PollResult::NoEvents => {
                             // Check contracts if appropriate
-                            if subscription.should_check_contracts() {
-                                match subscription.check_contracts().await {
+                            if subscription
+                                .should_check_contracts(&stream_contract_state_guard[..])
+                            {
+                                match subscription
+                                    .check_contracts(&mut stream_contract_state_guard[..])
+                                    .await
+                                {
                                     Ok(crate::messaging::upstream_subscription::ContractStatus::Stalled(upstream)) => {
                                         tracing::warn!(
                                             stage_name = %self.context.stage_name,
@@ -686,9 +764,14 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
 
                 // Drain reference subscription
                 let mut ref_subscription_guard = self.context.reference_subscription.write().await;
+                let mut ref_contract_state_guard =
+                    self.context.reference_contract_state.write().await;
                 if let Some(subscription) = ref_subscription_guard.as_mut() {
                     match subscription
-                        .poll_next_with_state(state.variant_name())
+                        .poll_next_with_state(
+                            state.variant_name(),
+                            Some(&mut ref_contract_state_guard[..]),
+                        )
                         .await
                     {
                         PollResult::Event(envelope) => {
@@ -749,7 +832,9 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                         }
                         PollResult::NoEvents => {
                             // Do a final contract check before marking as drained
-                            let _ = subscription.check_contracts().await;
+                            let _ = subscription
+                                .check_contracts(&mut ref_contract_state_guard[..])
+                                .await;
 
                             // Reference queue empty
                             tracing::debug!(
@@ -773,10 +858,16 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                 drop(ref_subscription_guard);
 
                 // Drain stream subscription
-                let mut stream_subscription_guard = self.context.stream_subscription.write().await;
+                let mut stream_subscription_guard =
+                    self.context.stream_subscription.write().await;
+                let mut stream_contract_state_guard =
+                    self.context.stream_contract_state.write().await;
                 if let Some(subscription) = stream_subscription_guard.as_mut() {
                     match subscription
-                        .poll_next_with_state(state.variant_name())
+                        .poll_next_with_state(
+                            state.variant_name(),
+                            Some(&mut stream_contract_state_guard[..]),
+                        )
                         .await
                     {
                         PollResult::Event(envelope) => {
@@ -842,7 +933,9 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                         }
                         PollResult::NoEvents => {
                             // Do a final contract check before marking as drained
-                            let _ = subscription.check_contracts().await;
+                            let _ = subscription
+                                .check_contracts(&mut stream_contract_state_guard[..])
+                                .await;
 
                             // Stream queue empty
                             tracing::debug!(
@@ -884,7 +977,9 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                         self.context.instrumentation.record_emitted(&event);
                         // Track output for contract verification - need to check which subscription
                         // Since this is during drain, we need to track on both subscriptions
-                        if let Some(ref mut sub) = *self.context.reference_subscription.write().await {
+                        if let Some(ref mut sub) =
+                            *self.context.reference_subscription.write().await
+                        {
                             sub.track_output_event();
                         }
                         if let Some(ref mut sub) = *self.context.stream_subscription.write().await {

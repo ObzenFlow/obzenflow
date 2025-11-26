@@ -17,6 +17,7 @@ use obzenflow_core::event::types::{
 use obzenflow_core::event::vector_clock::VectorClock;
 use obzenflow_core::event::{ChainEvent, ChainEventContent, ChainEventFactory, JournalEvent};
 use obzenflow_core::journal::journal::Journal;
+use obzenflow_core::journal::journal_error::JournalError;
 use obzenflow_core::journal::journal_reader::JournalReader;
 use obzenflow_core::EventEnvelope;
 use obzenflow_core::Result;
@@ -28,8 +29,48 @@ use std::io;
 use std::sync::Arc;
 use tokio::time::Instant;
 
+use async_trait::async_trait;
+
 // Import PollResult from the trait module
 pub use super::subscription_poller::{PollResult, SubscriptionPoller};
+
+/// Fallback reader used when a real journal reader cannot be created.
+///
+/// This reader behaves as an always-empty journal (EOF), allowing the
+/// subscription machinery to continue operating without failing the FSM.
+struct EmptyJournalReader<T: JournalEvent> {
+    _phantom: std::marker::PhantomData<T>,
+}
+
+impl<T: JournalEvent> EmptyJournalReader<T> {
+    fn new() -> Self {
+        Self {
+            _phantom: std::marker::PhantomData,
+        }
+    }
+}
+
+#[async_trait]
+impl<T> JournalReader<T> for EmptyJournalReader<T>
+where
+    T: JournalEvent + Send + Sync + 'static,
+{
+    async fn next(&mut self) -> std::result::Result<Option<EventEnvelope<T>>, JournalError> {
+        Ok(None)
+    }
+
+    async fn skip(&mut self, _n: u64) -> std::result::Result<u64, JournalError> {
+        Ok(0)
+    }
+
+    fn position(&self) -> u64 {
+        0
+    }
+
+    fn is_at_end(&self) -> bool {
+        true
+    }
+}
 
 /// Status of contract checking
 #[derive(Debug)]
@@ -112,7 +153,11 @@ pub struct EofOutcome {
     pub is_final: bool,
 }
 
-/// Progress tracking for a single upstream reader
+/// Progress tracking for a single upstream reader.
+///
+/// This struct is intentionally pure contract state (no I/O handles) so that it
+/// can be owned by FSM contexts and inspected/snapshotted independently of the
+/// subscription mechanics.
 #[derive(Debug)]
 pub struct ReaderProgress {
     pub stage_id: StageId,
@@ -137,7 +182,11 @@ pub struct ReaderProgress {
 }
 
 impl ReaderProgress {
-    fn new(stage_id: StageId) -> Self {
+    /// Create a new reader progress record for the given upstream stage.
+    ///
+    /// Kept `pub(crate)` so FSM contexts within this crate can construct
+    /// contract state without exposing construction details outside the crate.
+    pub(crate) fn new(stage_id: StageId) -> Self {
         Self {
             stage_id,
             reader_seq: SeqNo(0),
@@ -154,12 +203,12 @@ impl ReaderProgress {
     }
 }
 
-/// Contract tracking state - separated from subscription mechanics
-/// This tracks progress for at-least-once delivery guarantees
+/// Contract tracking state - separated from subscription mechanics.
+///
+/// This struct owns configuration and journal handles, but **does not** own
+/// per-reader contract state. Reader progress lives in FSM contexts and is
+/// passed in as `&mut [ReaderProgress]` when contracts are evaluated.
 pub struct ContractTracker {
-    /// Per-reader progress tracking
-    reader_progress: Vec<ReaderProgress>,
-
     /// Configuration for contract behavior
     config: ContractConfig,
 
@@ -255,10 +304,28 @@ where
                 journal_id = ?journal_id,
                 "Creating reader for upstream journal"
             );
-            let reader = journal
-                .reader()
-                .await
-                .map_err(|e| format!("Failed to create reader for stage {:?}: {}", stage_id, e))?;
+            let reader = match journal.reader().await {
+                Ok(reader) => reader,
+                Err(JournalError::Implementation { .. }) => {
+                    // Best-effort: log the failure and use an empty reader so the
+                    // FSM can continue operating (upstream treated as having no events).
+                    tracing::error!(
+                        target: "flowip-080o",
+                        stage_id = ?stage_id,
+                        stage_name = stage_name,
+                        journal_id = ?journal_id,
+                        "Failed to create reader for upstream journal; using EmptyJournalReader (no events)"
+                    );
+                    Box::new(EmptyJournalReader::<T>::new()) as Box<dyn JournalReader<T>>
+                }
+                Err(e) => {
+                    return Err(format!(
+                        "Failed to create reader for stage {:?}: {}",
+                        stage_id, e
+                    )
+                    .into());
+                }
+            };
             readers.push((*stage_id, stage_name.clone(), reader));
         }
 
@@ -296,14 +363,7 @@ where
         system_journal: Option<Arc<dyn Journal<SystemEvent>>>,
         reader_stage: Option<StageId>,
     ) -> Self {
-        let reader_progress = self
-            .readers
-            .iter()
-            .map(|(stage_id, _, _)| ReaderProgress::new(*stage_id))
-            .collect();
-
         self.contract_tracker = Some(ContractTracker {
-            reader_progress,
             config,
             writer_id,
             journal,
@@ -320,7 +380,11 @@ where
     /// This method tries once through all readers and returns immediately.
     /// The caller (FSM) decides whether to retry, sleep, or transition states.
     /// `fsm_state` is the caller's current FSM state (for diagnostics).
-    pub async fn poll_next_with_state(&mut self, fsm_state: &str) -> PollResult<T> {
+    pub async fn poll_next_with_state(
+        &mut self,
+        fsm_state: &str,
+        mut reader_progress: Option<&mut [ReaderProgress]>,
+    ) -> PollResult<T> {
         // Check for buffered events first (future enhancement)
         // For now, we don't buffer events
 
@@ -445,43 +509,56 @@ where
                         (false, false)
                     };
 
-                    // Update contract tracking if enabled
-                    if let Some(tracker) = &mut self.contract_tracker {
-                        if let Some(progress) = tracker.reader_progress.get_mut(current_index) {
-                            // Update progress for data events
-                            if let Some(chain_event) =
-                                (&envelope.event as &dyn Any).downcast_ref::<ChainEvent>()
-                            {
-                                if chain_event.is_data() {
-                                    progress.reader_seq.0 += 1;
-                                }
-
-                                // Capture advertised positions from EOF authored by this upstream
-                                if let ChainEventContent::FlowControl(FlowControlPayload::Eof {
-                                    writer_id,
-                                    writer_seq,
-                                    vector_clock,
-                                    ..
-                                }) = &chain_event.content
+                    // Update contract tracking state if enabled and contract
+                    // progress has been provided by the owning FSM context.
+                    //
+                    // Reader progress lives in FSM contexts; we only update it
+                    // here so that later contract checks can emit progress/final
+                    // events based on the same state during replay.
+                    if self.contract_tracker.is_some() {
+                        if let Some(progress_slice) = reader_progress.as_deref_mut() {
+                            if let Some(progress) = progress_slice.get_mut(current_index) {
+                                // Update progress for data events
+                                if let Some(chain_event) =
+                                    (&envelope.event as &dyn Any).downcast_ref::<ChainEvent>()
                                 {
-                                    let authored_by_upstream = match writer_id {
-                                        Some(WriterId::Stage(eof_stage)) => *eof_stage == stage_id,
-                                        Some(_) => false,
-                                        None => true,
-                                    };
+                                    if chain_event.is_data() {
+                                        progress.reader_seq.0 += 1;
+                                    }
 
-                                    if authored_by_upstream {
-                                        progress.advertised_writer_seq = writer_seq.clone();
-                                        progress.last_vector_clock = vector_clock.clone();
+                                    // Capture advertised positions from EOF authored by this upstream
+                                    if let ChainEventContent::FlowControl(
+                                        FlowControlPayload::Eof {
+                                            writer_id,
+                                            writer_seq,
+                                            vector_clock,
+                                            ..
+                                        },
+                                    ) = &chain_event.content
+                                    {
+                                        let authored_by_upstream = match writer_id {
+                                            Some(WriterId::Stage(eof_stage)) => {
+                                                *eof_stage == stage_id
+                                            }
+                                            Some(_) => false,
+                                            None => true,
+                                        };
+
+                                        if authored_by_upstream {
+                                            progress.advertised_writer_seq = writer_seq.clone();
+                                            progress.last_vector_clock = vector_clock.clone();
+                                        }
                                     }
                                 }
-                            }
 
-                            progress.last_event_id = Some(envelope.event.id().clone());
-                            if let Some(chain_event) =
-                                (&envelope.event as &dyn Any).downcast_ref::<ChainEvent>()
-                            {
-                                progress.last_vector_clock = Some(envelope.vector_clock.clone());
+                                progress.last_event_id = Some(envelope.event.id().clone());
+                                if (&envelope.event as &dyn Any)
+                                    .downcast_ref::<ChainEvent>()
+                                    .is_some()
+                                {
+                                    progress.last_vector_clock =
+                                        Some(envelope.vector_clock.clone());
+                                }
                             }
                         }
                     }
@@ -626,14 +703,20 @@ where
 
     /// Backwards-compatible wrapper when FSM state is not provided
     pub async fn poll_next(&mut self) -> PollResult<T> {
-        self.poll_next_with_state("unknown").await
+        self.poll_next_with_state("unknown", None).await
     }
 
-    /// Check contracts and emit progress/stall/final events as needed
+    /// Check contracts and emit progress/stall/final events as needed.
     ///
     /// This is a separate method that the FSM calls when it decides
     /// contract checking is appropriate (e.g., after idle cycles).
-    pub async fn check_contracts(&mut self) -> Result<ContractStatus> {
+    ///
+    /// Per-reader contract state is supplied by the caller so that it can live
+    /// inside FSM contexts rather than inside the subscription itself.
+    pub async fn check_contracts(
+        &mut self,
+        reader_progress: &mut [ReaderProgress],
+    ) -> Result<ContractStatus> {
         let tracker = match &mut self.contract_tracker {
             Some(t) => t,
             None => return Ok(ContractStatus::Healthy),
@@ -643,7 +726,7 @@ where
         let mut status = ContractStatus::Healthy;
 
         // Check each reader for progress/stalls
-        for (index, progress) in tracker.reader_progress.iter_mut().enumerate() {
+        for (index, progress) in reader_progress.iter_mut().enumerate() {
             if progress.final_emitted {
                 continue;
             }
@@ -722,12 +805,13 @@ where
                                     .append(gap_event, None)
                                     .await
                                     .map_err(|e| format!("Failed to append gap event: {}", e))?;
-
-                                status = ContractStatus::Violated {
-                                    upstream: progress.stage_id,
-                                    cause: failure_reason.clone().unwrap(),
-                                };
                             }
+
+                            // Any SeqDivergence (missing or over-consumption) is reported as a violation.
+                            status = ContractStatus::Violated {
+                                upstream: progress.stage_id,
+                                cause: failure_reason.clone().unwrap(),
+                            };
                         }
                     }
 
@@ -880,13 +964,16 @@ where
         !self.readers.is_empty()
     }
 
-    /// Hint to FSM about whether contract check might be useful
-    pub fn should_check_contracts(&self) -> bool {
+    /// Hint to FSM about whether contract check might be useful.
+    ///
+    /// Uses per-reader timestamps from FSM-owned contract state to decide if
+    /// enough time has passed since the last check.
+    pub fn should_check_contracts(&self, reader_progress: &[ReaderProgress]) -> bool {
         if let Some(tracker) = &self.contract_tracker {
             let now = Instant::now();
 
             // Check if enough time has passed since last check
-            for progress in &tracker.reader_progress {
+            for progress in reader_progress {
                 if let Some(last) = progress.last_progress_instant {
                     let elapsed = now.duration_since(last).as_millis() as u64;
                     if elapsed >= tracker.config.progress_max_interval.0 / 2 {

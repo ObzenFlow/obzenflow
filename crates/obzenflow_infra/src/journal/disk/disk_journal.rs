@@ -23,9 +23,10 @@ use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::OnceLock;
 use tokio::fs::File;
-use tokio::io::{AsyncBufReadExt, AsyncSeekExt, AsyncWriteExt};
+use tokio::io::{AsyncBufReadExt, AsyncSeekExt};
 use tokio::sync::RwLock;
 use ulid::Ulid;
 
@@ -55,6 +56,8 @@ pub struct DiskJournal<T: JournalEvent> {
     journal_id: JournalId,
     /// Path to the log file
     path: PathBuf,
+    /// Shared synchronous file handle for appends (opened once)
+    write_file: Arc<Mutex<StdFile>>,
     /// Atomic write offset for tracking file position
     write_offset: Arc<AtomicU64>,
     /// In-memory index: event_id -> file offset
@@ -122,10 +125,25 @@ impl<T: JournalEvent> DiskJournal<T> {
             }
         }
 
+        // Open a single shared file handle for appends
+        let std_file = StdFile::options()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+            .map_err(|e| JournalError::Implementation {
+                message: format!(
+                    "Failed to open log file for append: {}",
+                    log_path.display()
+                ),
+                source: Box::new(e),
+            })?;
+        let write_file = std_file;
+
         Ok(Self {
             owner: None,
             journal_id: JournalId::new(),
             path: log_path.clone(),
+            write_file: Arc::new(Mutex::new(write_file)),
             write_offset: Arc::new(AtomicU64::new(write_offset)),
             index: Arc::new(RwLock::new(index)),
             read_write_lock: shared_lock_for_path(&log_path),
@@ -177,10 +195,25 @@ impl<T: JournalEvent> DiskJournal<T> {
             }
         }
 
+        // Open a single shared file handle for appends
+        let std_file = StdFile::options()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+            .map_err(|e| JournalError::Implementation {
+                message: format!(
+                    "Failed to open log file for append: {}",
+                    log_path.display()
+                ),
+                source: Box::new(e),
+            })?;
+        let write_file = std_file;
+
         Ok(Self {
             owner: Some(owner),
             journal_id: JournalId::new(),
             path: log_path.clone(),
+            write_file: Arc::new(Mutex::new(write_file)),
             write_offset: Arc::new(AtomicU64::new(write_offset)),
             index: Arc::new(RwLock::new(index)),
             read_write_lock: shared_lock_for_path(&log_path),
@@ -304,6 +337,7 @@ impl<T: JournalEvent> Clone for DiskJournal<T> {
             owner: self.owner.clone(),
             journal_id: self.journal_id,
             path: self.path.clone(),
+            write_file: self.write_file.clone(),
             write_offset: self.write_offset.clone(),
             index: self.index.clone(),
             read_write_lock: self.read_write_lock.clone(),
@@ -401,29 +435,61 @@ impl<T: JournalEvent + 'static> Journal<T> for DiskJournal<T> {
         self.write_offset
             .fetch_add(bytes.len() as u64, Ordering::SeqCst);
 
-        // Write to file
-        let mut file = tokio::fs::OpenOptions::new()
-            .append(true)
-            .create(true)
-            .open(&self.path)
-            .await
-            .map_err(|e| JournalError::Implementation {
-                message: "Failed to open file for append".to_string(),
-                source: Box::new(e),
+        // Write to file using the shared StdFile handle on a blocking thread.
+        let path = self.path.clone();
+        let write_file = self.write_file.clone();
+        let write_bytes = bytes.clone();
+
+        tokio::task::spawn_blocking(move || -> Result<(), JournalError> {
+            use std::io::{Error, ErrorKind, Write};
+
+            let mut file = match write_file.lock() {
+                Ok(guard) => guard,
+                Err(e) => {
+                    return Err(JournalError::Implementation {
+                        message: format!("Failed to lock journal file: {}", path.display()),
+                        source: Box::new(Error::new(
+                            ErrorKind::Other,
+                            format!("Mutex poisoned: {}", e),
+                        )),
+                    });
+                }
+            };
+
+            file.write_all(&write_bytes).map_err(|e| {
+                tracing::error!(
+                    path = %path.display(),
+                    os_error = %e,
+                    "DiskJournal failed to write to file"
+                );
+                JournalError::Implementation {
+                    message: "Failed to write to file".to_string(),
+                    source: Box::new(e),
+                }
             })?;
 
-        file.write_all(&bytes)
-            .await
-            .map_err(|e| JournalError::Implementation {
-                message: "Failed to write to file".to_string(),
-                source: Box::new(e),
+            file.flush().map_err(|e| {
+                tracing::error!(
+                    path = %path.display(),
+                    os_error = %e,
+                    "DiskJournal failed to flush file"
+                );
+                JournalError::Implementation {
+                    message: "Failed to flush file".to_string(),
+                    source: Box::new(e),
+                }
             })?;
-        file.flush()
-            .await
-            .map_err(|e| JournalError::Implementation {
-                message: "Failed to flush file".to_string(),
-                source: Box::new(e),
-            })?;
+
+            Ok(())
+        })
+        .await
+        .map_err(|e| JournalError::Implementation {
+            message: format!(
+                "Background writer task panicked for journal {}",
+                self.path.display()
+            ),
+            source: Box::new(e),
+        })??;
         tracing::debug!(
             path = %self.path.display(),
             offset,

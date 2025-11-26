@@ -58,26 +58,30 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Super
         builder
             // Created -> Initialized
             .when("Created")
-                .on("Initialize", |_state, _event, ctx| async move {
-                    // Track state transition in instrumentation
-                    ctx.instrumentation.transition_to_state("Initialized");
+                .on("Initialize", |_state, _event, ctx| {
+                    Box::pin(async move {
+                        // Track state transition in instrumentation
+                        ctx.instrumentation.transition_to_state("Initialized");
 
-                    Ok(Transition {
-                        next_state: StatefulState::Initialized,
-                        actions: vec![StatefulAction::AllocateResources],
+                        Ok(Transition {
+                            next_state: StatefulState::Initialized,
+                            actions: vec![StatefulAction::AllocateResources],
+                        })
                     })
                 })
                 .done()
 
             // Initialized -> Accumulating (stateful stages start immediately)
             .when("Initialized")
-                .on("Ready", |_state, _event, ctx| async move {
-                    // Track state transition in instrumentation
-                    ctx.instrumentation.transition_to_state("Accumulating");
+                .on("Ready", |_state, _event, ctx| {
+                    Box::pin(async move {
+                        // Track state transition in instrumentation
+                        ctx.instrumentation.transition_to_state("Accumulating");
 
-                    Ok(Transition {
-                        next_state: StatefulState::Accumulating,
-                        actions: vec![StatefulAction::PublishRunning],
+                        Ok(Transition {
+                            next_state: StatefulState::Accumulating,
+                            actions: vec![StatefulAction::PublishRunning],
+                        })
                     })
                 })
                 .done()
@@ -86,33 +90,39 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Super
             // Accumulating -> Draining (on EOF)
             .when("Accumulating")
                 // Ready messages can reappear (ex: wide system subscriptions); ignore if already running
-                .on("Ready", |_state, _event, _ctx| async move {
-                    Ok(Transition {
-                        next_state: StatefulState::Accumulating,
-                        actions: vec![],
+                .on("Ready", |_state, _event, _ctx| {
+                    Box::pin(async move {
+                        Ok(Transition {
+                            next_state: StatefulState::Accumulating,
+                            actions: vec![],
+                        })
                     })
                 })
-                .on("ShouldEmit", |_state, _event, ctx| async move {
-                    // Track state transition in instrumentation
-                    ctx.instrumentation.transition_to_state("Emitting");
+                .on("ShouldEmit", |_state, _event, ctx| {
+                    Box::pin(async move {
+                        // Track state transition in instrumentation
+                        ctx.instrumentation.transition_to_state("Emitting");
 
-                    Ok(Transition {
-                        next_state: StatefulState::Emitting,
-                        actions: vec![], // Emission handled in dispatch_state
+                        Ok(Transition {
+                            next_state: StatefulState::Emitting,
+                            actions: vec![], // Emission handled in dispatch_state
+                        })
                     })
                 })
-                .on("ReceivedEOF", |_state, _event, ctx| async move {
-                    // Track state transition in instrumentation
-                    ctx.instrumentation.transition_to_state("Draining");
+                .on("ReceivedEOF", |_state, _event, ctx| {
+                    Box::pin(async move {
+                        // Track state transition in instrumentation
+                        ctx.instrumentation.transition_to_state("Draining");
 
-                    Ok(Transition {
-                        next_state: StatefulState::Draining,
-                        actions: vec![], // Draining handled in dispatch_state
+                        Ok(Transition {
+                            next_state: StatefulState::Draining,
+                            actions: vec![], // Draining handled in dispatch_state
+                        })
                     })
                 })
                 .on("Error", |_state, event, ctx| {
                     let event = event.clone();
-                    async move {
+                    Box::pin(async move {
                         if let StatefulEvent::Error(msg) = event {
                             // Track state transition and failure in instrumentation
                             ctx.instrumentation.transition_to_state("Failed");
@@ -125,48 +135,54 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Super
                         } else {
                             unreachable!()
                         }
-                    }
+                    })
                 })
                 .done()
 
             // Emitting -> Accumulating (future: emission strategies)
             .when("Emitting")
                 // Ready can show up from late subscriptions; treat as no-op while emitting
-                .on("Ready", |_state, _event, _ctx| async move {
-                    Ok(Transition {
-                        next_state: StatefulState::Emitting,
-                        actions: vec![],
+                .on("Ready", |_state, _event, _ctx| {
+                    Box::pin(async move {
+                        Ok(Transition {
+                            next_state: StatefulState::Emitting,
+                            actions: vec![],
+                        })
                     })
                 })
-                .on("EmitComplete", |_state, _event, ctx| async move {
-                    // Track state transition in instrumentation
-                    ctx.instrumentation.transition_to_state("Accumulating");
+                .on("EmitComplete", |_state, _event, ctx| {
+                    Box::pin(async move {
+                        // Track state transition in instrumentation
+                        ctx.instrumentation.transition_to_state("Accumulating");
 
-                    Ok(Transition {
-                        next_state: StatefulState::Accumulating,
-                        actions: vec![],
+                        Ok(Transition {
+                            next_state: StatefulState::Accumulating,
+                            actions: vec![],
+                        })
                     })
                 })
                 .done()
 
             // Draining -> Drained
             .when("Draining")
-                .on("DrainComplete", |_state, _event, ctx| async move {
-                    // Track state transition in instrumentation
-                    ctx.instrumentation.transition_to_state("Drained");
+                .on("DrainComplete", |_state, _event, ctx| {
+                    Box::pin(async move {
+                        // Track state transition in instrumentation
+                        ctx.instrumentation.transition_to_state("Drained");
 
-                    Ok(Transition {
-                        next_state: StatefulState::Drained,
-                        actions: vec![
-                            StatefulAction::ForwardEOF,
-                            StatefulAction::SendCompletion,
-                            StatefulAction::Cleanup,
-                        ],
+                        Ok(Transition {
+                            next_state: StatefulState::Drained,
+                            actions: vec![
+                                StatefulAction::ForwardEOF,
+                                StatefulAction::SendCompletion,
+                                StatefulAction::Cleanup,
+                            ],
+                        })
                     })
                 })
                 .on("Error", |_state, event, ctx| {
                     let event = event.clone();
-                    async move {
+                    Box::pin(async move {
                         if let StatefulEvent::Error(msg) = event {
                             // Track state transition and failure in instrumentation
                             ctx.instrumentation.transition_to_state("Failed");
@@ -179,7 +195,7 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Super
                         } else {
                             unreachable!()
                         }
-                    }
+                    })
                 })
                 .done()
 
@@ -188,7 +204,7 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Super
                 .on("Error", |state, event, _ctx| {
                     let event = event.clone();
                     let state = state.clone();
-                    async move {
+                    Box::pin(async move {
                         if let StatefulEvent::Error(msg) = event {
                             // If already failed, don't cleanup again
                             if matches!(state, StatefulState::Failed(_)) {
@@ -205,7 +221,7 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Super
                         } else {
                             unreachable!()
                         }
-                    }
+                    })
                 })
                 .done()
 
@@ -213,16 +229,18 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Super
             .when_unhandled(|state, event, _ctx| {
                 let state_name = state.variant_name().to_string();
                 let event_name = event.variant_name().to_string();
-                async move {
+                Box::pin(async move {
                     tracing::error!(
                         supervisor = "StatefulSupervisor",
                         state = %state_name,
                         event = %event_name,
                         "Unhandled event in FSM - this indicates a state machine configuration error"
                     );
-                    // Return Err to propagate the error
-                    Err(format!("Unhandled event '{}' in state '{}' for StatefulSupervisor", event_name, state_name))
-                }
+                    Err(obzenflow_fsm::FsmError::UnhandledEvent {
+                        state: state_name,
+                        event: event_name,
+                    })
+                })
             })
     }
 
@@ -247,11 +265,14 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
 
     async fn write_completion_event(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let event = SystemEvent::stage_completed(self.stage_id);
-        self.system_journal
-            .append(event, None)
-            .await
-            .map(|_| ())
-            .map_err(|e| format!("Failed to write completion event: {}", e).into())
+        if let Err(e) = self.system_journal.append(event, None).await {
+            tracing::error!(
+                stage_name = %self.context.stage_name,
+                journal_error = %e,
+                "Failed to write completion event; continuing without system journal entry"
+            );
+        }
+        Ok(())
     }
 
     async fn dispatch_state(
@@ -285,6 +306,7 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
 
                 // Process events from subscription
                 let mut subscription_guard = self.context.subscription.write().await;
+                let mut contract_state_guard = self.context.contract_state.write().await;
                 if let Some(subscription) = subscription_guard.as_mut() {
                     tracing::info!(
                         target: "flowip-080o",
@@ -294,7 +316,10 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                     );
 
                     match subscription
-                        .poll_next_with_state(state.variant_name())
+                        .poll_next_with_state(
+                            state.variant_name(),
+                            Some(&mut contract_state_guard[..]),
+                        )
                         .await
                     {
                         PollResult::Event(envelope) => {
@@ -355,62 +380,57 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                                     // Execute the action
                                     match action {
                                         ControlEventAction::Forward => {
-                                            // Decide whether this EOF should trigger draining.
-                                            //
-                                            // Critical subtlety (FLOWIP-080o):
-                                            // - Journals may contain EOFs authored by *other* upstream
-                                            //   stages that were merely forwarded (e.g., a join
-                                            //   forwarding source EOFs).
-                                            // - Stateful stages should only transition to draining
-                                            //   when they observe an EOF authored by one of their
-                                            //   direct upstream stages (or a pipeline Drain).
-                                            let is_stage_level_eof = if envelope.event.is_eof() {
-                                                use obzenflow_core::event::ChainEventContent;
-                                                if let ChainEventContent::FlowControl(
-                                                    obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload::Eof {
-                                                        writer_id,
-                                                        ..
-                                                    },
-                                                ) = &envelope.event.content
-                                                {
-                                                    // Get the set of direct upstream stage IDs
-                                                    let upstream_ids = self
-                                                        .context
-                                                        .upstream_subscription_factory
-                                                        .upstream_stage_ids();
-
-                                                    match writer_id {
-                                                        Some(obzenflow_core::WriterId::Stage(id)) => {
-                                                            upstream_ids.contains(id)
-                                                        }
-                                                        // If the EOF is not authored by a stage or has
-                                                        // no writer, treat it as stage-level for
-                                                        // backwards compatibility.
-                                                        _ => true,
-                                                    }
-                                                } else {
-                                                    false
-                                                }
-                                            } else {
-                                                false
-                                            };
-
-                                            if is_stage_level_eof {
-                                                // Do not forward upstream EOF; buffer and transition to drain
-                                                *self.context.buffered_eof.write().await =
-                                                    Some(envelope.event.clone());
+                                            // FLOWIP-080p: Use EofOutcome from UpstreamSubscription as
+                                            // the single authority for deciding when this stateful
+                                            // stage should begin draining.
+                                            if matches!(signal, FlowControlPayload::Eof { .. }) {
+                                                // Evaluate EOF outcome for this subscription
+                                                let eof_outcome =
+                                                    subscription.take_last_eof_outcome();
+                                                // Perform a contract check at EOF time for good measure
+                                                let _ = subscription
+                                                    .check_contracts(
+                                                        &mut contract_state_guard[..],
+                                                    )
+                                                    .await;
+                                                // Release subscription lock before further work
                                                 drop(subscription_guard);
-                                                tracing::info!(
-                                                    stage_name = %self.context.stage_name,
-                                                    event_type = envelope.event.event_type(),
-                                                    "Stateful stage received terminal EOF, transitioning to draining"
-                                                );
-                                                return Ok(EventLoopDirective::Transition(
-                                                    StatefulEvent::ReceivedEOF,
-                                                ));
+
+                                                if let Some(outcome) = eof_outcome {
+                                                    tracing::info!(
+                                                        target: "flowip-080o",
+                                                        stage_name = %self.context.stage_name,
+                                                        upstream_stage_id = ?outcome.stage_id,
+                                                        upstream_stage_name = %outcome.stage_name,
+                                                        reader_index = outcome.reader_index,
+                                                        eof_count = outcome.eof_count,
+                                                        total_readers = outcome.total_readers,
+                                                        is_final = outcome.is_final,
+                                                        "Stateful stage evaluated EOF outcome"
+                                                    );
+
+                                                    if outcome.is_final {
+                                                        // All upstream readers have reached EOF: begin draining.
+                                                        *self.context.buffered_eof.write().await =
+                                                            Some(envelope.event.clone());
+                                                        tracing::info!(
+                                                            stage_name = %self.context.stage_name,
+                                                            event_type = envelope
+                                                                .event
+                                                                .event_type(),
+                                                            "Stateful stage received final EOF for all upstreams, transitioning to draining"
+                                                        );
+                                                        return Ok(EventLoopDirective::Transition(
+                                                            StatefulEvent::ReceivedEOF,
+                                                        ));
+                                                    }
+                                                }
+
+                                                // Non-final EOF: do not forward, do not drain yet.
+                                                return Ok(EventLoopDirective::Continue);
                                             }
 
-                                            // Forward other control events downstream
+                                            // Forward non-EOF control events downstream
                                             self.forward_control_event(&envelope).await?;
 
                                             // Drain events from pipeline BeginDrain should initiate stage draining
@@ -490,8 +510,11 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                         PollResult::NoEvents => {
                             // No events available right now
                             // Check contracts if appropriate (FSM decides when)
-                            if subscription.should_check_contracts() {
-                                match subscription.check_contracts().await {
+                            if subscription.should_check_contracts(&contract_state_guard[..]) {
+                                match subscription
+                                    .check_contracts(&mut contract_state_guard[..])
+                                    .await
+                                {
                                     Ok(crate::messaging::upstream_subscription::ContractStatus::Stalled(upstream)) => {
                                         tracing::warn!(
                                             stage_name = %self.context.stage_name,
@@ -618,7 +641,8 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                             if enriched_event.is_data() {
                                 self.context.instrumentation.record_emitted(&enriched_event);
                                 // Track output for contract verification
-                                if let Some(ref mut sub) = *self.context.subscription.write().await {
+                                if let Some(ref mut sub) = *self.context.subscription.write().await
+                                {
                                     sub.track_output_event();
                                 }
                             }
@@ -659,10 +683,14 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                 // First, drain any remaining events from the subscription queue
                 // This is critical for contract events (FLOWIP-080o fix)
                 let mut subscription_guard = self.context.subscription.write().await;
+                let mut contract_state_guard = self.context.contract_state.write().await;
                 if let Some(subscription) = subscription_guard.as_mut() {
                     // Poll for remaining events without timeout hacks
                     match subscription
-                        .poll_next_with_state(state.variant_name())
+                        .poll_next_with_state(
+                            state.variant_name(),
+                            Some(&mut contract_state_guard[..]),
+                        )
                         .await
                     {
                         PollResult::Event(envelope) => {
@@ -712,7 +740,9 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                         PollResult::NoEvents => {
                             // Queue is truly drained - no more events available
                             // Do a final contract check before draining
-                            let _ = subscription.check_contracts().await;
+                            let _ = subscription
+                                .check_contracts(&mut contract_state_guard[..])
+                                .await;
 
                             tracing::info!(
                                 stage_name = %self.context.stage_name,
@@ -787,7 +817,8 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                             if enriched_event.is_data() {
                                 self.context.instrumentation.record_emitted(&enriched_event);
                                 // Track output for contract verification
-                                if let Some(ref mut sub) = *self.context.subscription.write().await {
+                                if let Some(ref mut sub) = *self.context.subscription.write().await
+                                {
                                     sub.track_output_event();
                                 }
                             }

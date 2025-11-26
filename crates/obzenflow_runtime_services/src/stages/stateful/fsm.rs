@@ -17,7 +17,7 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-use crate::messaging::upstream_subscription::ContractConfig;
+use crate::messaging::upstream_subscription::{ContractConfig, ReaderProgress};
 use crate::messaging::UpstreamSubscription;
 use crate::metrics::instrumentation::StageInstrumentation;
 use crate::stages::common::control_strategies::ControlEventStrategy;
@@ -316,6 +316,9 @@ pub struct StatefulContext<H: StatefulHandler> {
     /// Subscription to upstream events
     pub subscription: Arc<RwLock<Option<UpstreamSubscription<ChainEvent>>>>,
 
+    /// FSM-owned contract state for each upstream reader (aligned with subscription readers)
+    pub contract_state: Arc<RwLock<Vec<ReaderProgress>>>,
+
     /// Processing task handle
     pub processing_task: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
 
@@ -362,6 +365,7 @@ impl<H: StatefulHandler> StatefulContext<H> {
             bus,
             writer_id: Arc::new(RwLock::new(None)),
             subscription: Arc::new(RwLock::new(None)), // Created lazily using factory
+            contract_state: Arc::new(RwLock::new(Vec::new())),
             processing_task: Arc::new(RwLock::new(None)),
             control_strategy,
             buffered_eof: Arc::new(RwLock::new(None)),
@@ -381,14 +385,24 @@ impl<H: StatefulHandler + 'static> FsmContext for StatefulContext<H> {}
 impl<H: StatefulHandler + Send + Sync + 'static> FsmAction for StatefulAction<H> {
     type Context = StatefulContext<H>;
 
-    async fn execute(&self, ctx: &Self::Context) -> Result<(), String> {
+    async fn execute(&self, ctx: &mut Self::Context) -> Result<(), obzenflow_fsm::FsmError> {
         match self {
             StatefulAction::AllocateResources => {
                 // Create WriterId from our StageId
                 let writer_id = WriterId::from(ctx.stage_id.clone());
                 *ctx.writer_id.write().await = Some(writer_id.clone());
 
-                // Create subscription using bound factory
+                // Initialize FSM-owned contract state for each upstream reader
+                {
+                    let upstream_ids = ctx.upstream_subscription_factory.upstream_stage_ids();
+                    let mut contract_state = ctx.contract_state.write().await;
+                    *contract_state = upstream_ids
+                        .into_iter()
+                        .map(ReaderProgress::new)
+                        .collect();
+                }
+
+                // Create subscription using bound factory with contracts
                 if !ctx.upstream_subscription_factory.is_empty() {
                     let subscription = ctx
                         .upstream_subscription_factory
@@ -400,7 +414,11 @@ impl<H: StatefulHandler + Send + Sync + 'static> FsmAction for StatefulAction<H>
                             Some(ctx.stage_id),
                         )
                         .await
-                        .map_err(|e| format!("Failed to create subscription: {}", e))?;
+                        .map_err(|e| {
+                            obzenflow_fsm::FsmError::HandlerError(format!(
+                                "Failed to create subscription: {e}"
+                            ))
+                        })?;
 
                     *ctx.subscription.write().await = Some(subscription);
 
@@ -434,18 +452,16 @@ impl<H: StatefulHandler + Send + Sync + 'static> FsmAction for StatefulAction<H>
             }
 
             StatefulAction::PublishRunning => {
-                let writer_id_guard = ctx.writer_id.read().await;
-                let _writer_id = writer_id_guard
-                    .as_ref()
-                    .ok_or_else(|| "No writer ID available to publish running event".to_string())?;
-
                 // Write lifecycle event to system journal
                 let running_event = SystemEvent::stage_running(ctx.stage_id);
 
-                ctx.system_journal
-                    .append(running_event, None)
-                    .await
-                    .map_err(|e| format!("Failed to publish running event: {}", e))?;
+                if let Err(e) = ctx.system_journal.append(running_event, None).await {
+                    tracing::error!(
+                        stage_name = %ctx.stage_name,
+                        journal_error = %e,
+                        "Failed to publish running event; continuing without system journal entry"
+                    );
+                }
 
                 tracing::info!(
                     stage_name = %ctx.stage_name,
@@ -472,9 +488,11 @@ impl<H: StatefulHandler + Send + Sync + 'static> FsmAction for StatefulAction<H>
 
             StatefulAction::ForwardEOF => {
                 let writer_id_guard = ctx.writer_id.read().await;
-                let writer_id = writer_id_guard
-                    .as_ref()
-                    .ok_or_else(|| "No writer ID available to forward EOF".to_string())?;
+                let writer_id = writer_id_guard.as_ref().ok_or_else(|| {
+                    obzenflow_fsm::FsmError::HandlerError(
+                        "No writer ID available to forward EOF".to_string(),
+                    )
+                })?;
 
                 // Always emit an EOF authored by this stage, preserving upstream
                 // metadata (vector clock, last_event_id, writer_seq) when present.
@@ -539,7 +557,9 @@ impl<H: StatefulHandler + Send + Sync + 'static> FsmAction for StatefulAction<H>
                 ctx.data_journal
                     .append(eof_event, None)
                     .await
-                    .map_err(|e| format!("Failed to forward EOF: {}", e))?;
+                    .map_err(|e| {
+                        obzenflow_fsm::FsmError::HandlerError(format!("Failed to forward EOF: {e}"))
+                    })?;
 
                 tracing::info!(
                     stage_name = %ctx.stage_name,
@@ -549,18 +569,16 @@ impl<H: StatefulHandler + Send + Sync + 'static> FsmAction for StatefulAction<H>
             }
 
             StatefulAction::SendCompletion => {
-                let writer_id_guard = ctx.writer_id.read().await;
-                let _writer_id = writer_id_guard
-                    .as_ref()
-                    .ok_or_else(|| "No writer ID available to send completion".to_string())?;
-
                 // Write completion event to system journal
                 let completion_event = SystemEvent::stage_completed(ctx.stage_id);
 
-                ctx.system_journal
-                    .append(completion_event, None)
-                    .await
-                    .map_err(|e| format!("Failed to write completion event: {}", e))?;
+                if let Err(e) = ctx.system_journal.append(completion_event, None).await {
+                    tracing::error!(
+                        stage_name = %ctx.stage_name,
+                        journal_error = %e,
+                        "Failed to write completion event; continuing without system journal entry"
+                    );
+                }
 
                 tracing::info!(
                     stage_name = %ctx.stage_name,

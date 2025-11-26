@@ -53,69 +53,83 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> S
         builder
             // Created -> Initialized
             .when("Created")
-                .on("Initialize", |_state, _event, _ctx| async move {
-                    Ok(Transition {
-                        next_state: FiniteSourceState::Initialized,
-                        actions: vec![FiniteSourceAction::AllocateResources],
+                .on("Initialize", |_state, _event, _ctx| {
+                    Box::pin(async move {
+                        Ok(Transition {
+                            next_state: FiniteSourceState::Initialized,
+                            actions: vec![FiniteSourceAction::AllocateResources],
+                        })
                     })
                 })
                 .done()
             
             // Initialized -> WaitingForGun
             .when("Initialized")
-                .on("Ready", |_state, _event, _ctx| async move {
-                    Ok(Transition {
-                        next_state: FiniteSourceState::WaitingForGun,
-                        actions: vec![], // Sources wait quietly
+                .on("Ready", |_state, _event, _ctx| {
+                    Box::pin(async move {
+                        Ok(Transition {
+                            next_state: FiniteSourceState::WaitingForGun,
+                            actions: vec![], // Sources wait quietly
+                        })
                     })
                 })
                 .done()
             
             // WaitingForGun -> Running (THE KEY DIFFERENCE!)
             .when("WaitingForGun")
-                .on("Start", |_state, _event, _ctx| async move {
-                    Ok(Transition {
-                        next_state: FiniteSourceState::Running,
-                        actions: vec![FiniteSourceAction::PublishRunning],
+                .on("Start", |_state, _event, _ctx| {
+                    Box::pin(async move {
+                        Ok(Transition {
+                            next_state: FiniteSourceState::Running,
+                            actions: vec![FiniteSourceAction::PublishRunning],
+                        })
                     })
                 })
                 .done()
             
             // Running -> Draining (on completion or drain request)
             .when("Running")
-                .on("Completed", |_state, _event, _ctx| async move {
-                    Ok(Transition {
-                        next_state: FiniteSourceState::Draining,
-                        actions: vec![],
+                .on("Completed", |_state, _event, _ctx| {
+                    Box::pin(async move {
+                        Ok(Transition {
+                            next_state: FiniteSourceState::Draining,
+                            actions: vec![],
+                        })
                     })
                 })
-                .on("BeginDrain", |_state, _event, _ctx| async move {
-                    Ok(Transition {
-                        next_state: FiniteSourceState::Draining,
-                        actions: vec![],
+                .on("BeginDrain", |_state, _event, _ctx| {
+                    Box::pin(async move {
+                        Ok(Transition {
+                            next_state: FiniteSourceState::Draining,
+                            actions: vec![],
+                        })
                     })
                 })
                 .on("Error", |_state, event, _ctx| {
                     let event = event.clone();
-                    async move {
+                    Box::pin(async move {
                         if let FiniteSourceEvent::Error(msg) = event {
                             Ok(Transition {
                                 next_state: FiniteSourceState::Failed(msg),
                                 actions: vec![FiniteSourceAction::Cleanup],
                             })
                         } else {
-                            Err("Invalid event".to_string())
+                            Err(obzenflow_fsm::FsmError::HandlerError(
+                                "Invalid event".to_string(),
+                            ))
                         }
-                    }
+                    })
                 })
                 .done()
             
             // Draining -> Drained
             .when("Draining")
-                .on("Completed", |_state, _event, _ctx| async move {
-                    Ok(Transition {
-                        next_state: FiniteSourceState::Drained,
-                        actions: vec![FiniteSourceAction::SendEOF, FiniteSourceAction::WriteStageCompleted, FiniteSourceAction::Cleanup],
+                .on("Completed", |_state, _event, _ctx| {
+                    Box::pin(async move {
+                        Ok(Transition {
+                            next_state: FiniteSourceState::Drained,
+                            actions: vec![FiniteSourceAction::SendEOF, FiniteSourceAction::WriteStageCompleted, FiniteSourceAction::Cleanup],
+                        })
                     })
                 })
                 .done()
@@ -124,7 +138,7 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> S
             .from_any()
                 .on("Error", |_state, event, _ctx| {
                     let event = event.clone();
-                    async move {
+                    Box::pin(async move {
                         let error_msg = if let FiniteSourceEvent::Error(msg) = event {
                             msg
                         } else {
@@ -138,7 +152,7 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> S
                                 FiniteSourceAction::Cleanup,
                             ],
                         })
-                    }
+                    })
                 })
                 .done()
             
@@ -152,16 +166,18 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> S
             .when_unhandled(|state, event, _ctx| {
                 let state_name = state.variant_name().to_string();
                 let event_name = event.variant_name().to_string();
-                async move {
+                Box::pin(async move {
                     tracing::error!(
                         supervisor = "FiniteSourceSupervisor",
                         state = %state_name,
                         event = %event_name,
                         "Unhandled event in FSM - this indicates a state machine configuration error"
                     );
-                    // Return Err to propagate the error
-                    Err(format!("Unhandled event '{}' in state '{}' for FiniteSourceSupervisor", event_name, state_name))
-                }
+                    Err(obzenflow_fsm::FsmError::UnhandledEvent {
+                        state: state_name,
+                        event: event_name,
+                    })
+                })
             })
     }
 
@@ -186,11 +202,14 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> H
 
     async fn write_completion_event(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let event = SystemEvent::stage_completed(self.stage_id);
-        self.system_journal
-            .append(event, None)
-            .await
-            .map(|_| ())
-            .map_err(|e| format!("Failed to write completion event: {}", e).into())
+        if let Err(e) = self.system_journal.append(event, None).await {
+            tracing::error!(
+                stage_name = %self.name,
+                journal_error = %e,
+                "Failed to write completion event; continuing without system journal entry"
+            );
+        }
+        Ok(())
     }
 
     async fn dispatch_state(

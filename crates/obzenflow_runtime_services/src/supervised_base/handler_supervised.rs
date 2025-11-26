@@ -62,7 +62,7 @@ pub trait HandlerSupervisedExt: HandlerSupervised {
         Self::Context: 'static,
         Self::Action: 'static,
     {
-        let context = std::sync::Arc::new(context);
+        let mut context = context;
 
         // Create the builder and let the supervisor configure it
         let builder = obzenflow_fsm::FsmBuilder::new(initial_state);
@@ -111,9 +111,9 @@ pub trait HandlerSupervisedExt: HandlerSupervised {
                         "HandlerSupervised: handling FSM transition event"
                     );
                     let actions = machine
-                        .handle(event, context.clone())
+                        .handle(event, &mut context)
                         .await
-                        .map_err(|e| format!("FSM error: {}", e))?;
+                        .map_err(|e| format!("FSM error: {e}"))?;
 
                     tracing::info!(
                         target: "flowip-080o",
@@ -121,7 +121,7 @@ pub trait HandlerSupervisedExt: HandlerSupervised {
                         action_count = actions.len(),
                         "HandlerSupervised: FSM returned actions, executing sequentially"
                     );
-                    for (i, action) in actions.iter().enumerate() {
+                    for (i, action) in actions.into_iter().enumerate() {
                         tracing::info!(
                             target: "flowip-080o",
                             iteration = loop_iteration,
@@ -130,9 +130,9 @@ pub trait HandlerSupervisedExt: HandlerSupervised {
                             "HandlerSupervised: executing action"
                         );
                         action
-                            .execute(&context)
+                            .execute(&mut context)
                             .await
-                            .map_err(|e| format!("Action error: {}", e))?;
+                            .map_err(|e| format!("Action error: {e}"))?;
                         tracing::info!(
                             target: "flowip-080o",
                             iteration = loop_iteration,

@@ -138,7 +138,9 @@ impl SinkHandler for DashboardSink {
             self.promo_orders, self.order_count
         );
         println!("\n   Note: LeftJoin preserved all orders, even without promotions!");
-        println!("   Note: StrictJoin would have failed on invalid payment (try INJECT_BAD_PAYMENT=1)");
+        println!(
+            "   Note: StrictJoin would have failed on invalid payment (try INJECT_BAD_PAYMENT=1)"
+        );
 
         Ok(None)
     }

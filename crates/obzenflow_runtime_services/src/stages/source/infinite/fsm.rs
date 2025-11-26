@@ -331,7 +331,7 @@ impl<H> std::fmt::Debug for InfiniteSourceAction<H> {
 impl<H: InfiniteSourceHandler + Send + Sync + 'static> FsmAction for InfiniteSourceAction<H> {
     type Context = InfiniteSourceContext<H>;
 
-    async fn execute(&self, ctx: &Self::Context) -> Result<(), String> {
+    async fn execute(&self, ctx: &mut Self::Context) -> Result<(), obzenflow_fsm::FsmError> {
         match self {
             InfiniteSourceAction::AllocateResources => {
                 // Create WriterId from our StageId
@@ -348,9 +348,11 @@ impl<H: InfiniteSourceHandler + Send + Sync + 'static> FsmAction for InfiniteSou
 
             InfiniteSourceAction::SendEOF => {
                 let writer_id_guard = ctx.writer_id.read().await;
-                let writer_id = writer_id_guard
-                    .as_ref()
-                    .ok_or_else(|| "No writer ID available to send EOF".to_string())?;
+                let writer_id = writer_id_guard.as_ref().ok_or_else(|| {
+                    obzenflow_fsm::FsmError::HandlerError(
+                        "No writer ID available to send EOF".to_string(),
+                    )
+                })?;
 
                 let eof_event = ChainEventFactory::eof_event(
                     writer_id.clone(),
@@ -360,7 +362,9 @@ impl<H: InfiniteSourceHandler + Send + Sync + 'static> FsmAction for InfiniteSou
                 ctx.data_journal
                     .append(eof_event, None)
                     .await
-                    .map_err(|e| format!("Failed to send EOF: {}", e))?;
+                    .map_err(|e| {
+                        obzenflow_fsm::FsmError::HandlerError(format!("Failed to send EOF: {e}"))
+                    })?;
 
                 tracing::info!(
                     stage_name = %ctx.stage_name,
@@ -370,44 +374,43 @@ impl<H: InfiniteSourceHandler + Send + Sync + 'static> FsmAction for InfiniteSou
             }
 
             InfiniteSourceAction::SendError { message } => {
-                let writer_id_guard = ctx.writer_id.read().await;
-                let writer_id_guard = ctx.writer_id.read().await;
-                let _writer_id = writer_id_guard
-                    .as_ref()
-                    .ok_or_else(|| "No writer ID available to send error".to_string())?;
-
                 let error_event = obzenflow_core::event::SystemEvent::stage_failed(
                     ctx.stage_id,
                     message.clone(),
                     false, // not recoverable
                 );
 
-                ctx.system_journal
-                    .append(error_event, None)
-                    .await
-                    .map_err(|e| format!("Failed to send error event: {}", e))?;
-
-                tracing::error!(
-                    stage_name = %ctx.stage_name,
-                    error = %message,
-                    "Infinite source encountered error"
-                );
+                match ctx.system_journal.append(error_event, None).await {
+                    Ok(_) => {
+                        tracing::error!(
+                            stage_name = %ctx.stage_name,
+                            error = %message,
+                            "Infinite source encountered error"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            stage_name = %ctx.stage_name,
+                            error = %message,
+                            journal_error = %e,
+                            "Infinite source encountered error but failed to write error event"
+                        );
+                    }
+                }
                 Ok(())
             }
 
             InfiniteSourceAction::PublishRunning => {
-                let writer_id_guard = ctx.writer_id.read().await;
-                let _writer_id = writer_id_guard
-                    .as_ref()
-                    .ok_or_else(|| "No writer ID available to publish running event".to_string())?;
-
                 // Write running event to system journal
                 let running_event = SystemEvent::stage_running(ctx.stage_id);
 
-                ctx.system_journal
-                    .append(running_event, None)
-                    .await
-                    .map_err(|e| format!("Failed to publish running event: {}", e))?;
+                if let Err(e) = ctx.system_journal.append(running_event, None).await {
+                    tracing::error!(
+                        stage_name = %ctx.stage_name,
+                        journal_error = %e,
+                        "Failed to publish running event; continuing without system journal entry"
+                    );
+                }
 
                 tracing::info!(
                     stage_name = %ctx.stage_name,
@@ -417,19 +420,16 @@ impl<H: InfiniteSourceHandler + Send + Sync + 'static> FsmAction for InfiniteSou
             }
 
             InfiniteSourceAction::WriteStageCompleted => {
-                let writer_id_guard = ctx.writer_id.read().await;
-                let writer_id_guard = ctx.writer_id.read().await;
-                let _writer_id = writer_id_guard
-                    .as_ref()
-                    .ok_or_else(|| "No writer ID available to send completion event".to_string())?;
-
                 // Write completion event to system journal
                 let completion_event = SystemEvent::stage_completed(ctx.stage_id);
 
-                ctx.system_journal
-                    .append(completion_event, None)
-                    .await
-                    .map_err(|e| format!("Failed to send completion event: {}", e))?;
+                if let Err(e) = ctx.system_journal.append(completion_event, None).await {
+                    tracing::error!(
+                        stage_name = %ctx.stage_name,
+                        journal_error = %e,
+                        "Failed to write completion event; continuing without system journal entry"
+                    );
+                }
 
                 tracing::info!(
                     stage_name = %ctx.stage_name,

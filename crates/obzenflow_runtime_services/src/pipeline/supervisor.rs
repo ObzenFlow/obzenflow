@@ -49,75 +49,86 @@ impl crate::supervised_base::base::Supervisor for PipelineSupervisor {
     ) -> obzenflow_fsm::FsmBuilder<Self::State, Self::Event, Self::Context, Self::Action> {
         builder
             .when("Created")
-            .on(
-                "Materialize",
-                |_state, _event: &PipelineEvent, _ctx| async move {
+            .on("Materialize", |_state, _event: &PipelineEvent, _ctx| {
+                Box::pin(async move {
                     tracing::info!("🔄 FSM: Created -> Materializing (Materialize event)");
                     Ok(obzenflow_fsm::Transition {
                         next_state: PipelineState::Materializing,
                         actions: vec![PipelineAction::CreateStages],
                     })
-                },
-            )
-            .on("Run", |_state, _event: &PipelineEvent, _ctx| async move {
-                tracing::error!("🚨 FATAL: Received Run event while in Created state!");
-                tracing::error!(
-                    "🚨 This means pipeline supervisor never processed Materialize event"
-                );
-                tracing::error!("🚨 Pipeline supervisor task likely never executed!");
-                panic!("Run event received in Created state - pipeline supervisor not running");
+                })
+            })
+            .on("Run", |_state, _event: &PipelineEvent, _ctx| {
+                Box::pin(async move {
+                    tracing::error!("🚨 FATAL: Received Run event while in Created state!");
+                    tracing::error!(
+                        "🚨 This means pipeline supervisor never processed Materialize event"
+                    );
+                    tracing::error!("🚨 Pipeline supervisor task likely never executed!");
+                    panic!("Run event received in Created state - pipeline supervisor not running");
+                })
             })
             .done()
             .when("Materializing")
             .on(
                 "MaterializationComplete",
-                |_state, _event: &PipelineEvent, _ctx| async move {
-                    tracing::info!(
-                        "🔄 FSM: Materializing -> Materialized (MaterializationComplete event)"
-                    );
-                    Ok(obzenflow_fsm::Transition {
-                        next_state: PipelineState::Materialized,
-                        actions: vec![
-                            PipelineAction::StartCompletionSubscription,
-                            PipelineAction::StartMetricsAggregator,
-                            PipelineAction::NotifyStagesStart,
-                        ],
+                |_state, _event: &PipelineEvent, _ctx| {
+                    Box::pin(async move {
+                        tracing::info!(
+                            "🔄 FSM: Materializing -> Materialized (MaterializationComplete event)"
+                        );
+                        Ok(obzenflow_fsm::Transition {
+                            next_state: PipelineState::Materialized,
+                            actions: vec![
+                                PipelineAction::StartCompletionSubscription,
+                                PipelineAction::StartMetricsAggregator,
+                                PipelineAction::NotifyStagesStart,
+                            ],
+                        })
                     })
                 },
             )
-            .on("Run", |_state, _event: &PipelineEvent, _ctx| async move {
-                tracing::error!("🚨 FATAL: Received Run event while in Materializing state!");
-                tracing::error!("🚨 Pipeline has not finished materializing yet");
-                tracing::error!("🚨 Check for race condition or missing MaterializationComplete");
-                panic!("Run event received in Materializing state - not ready yet");
+            .on("Run", |_state, _event: &PipelineEvent, _ctx| {
+                Box::pin(async move {
+                    tracing::error!("🚨 FATAL: Received Run event while in Materializing state!");
+                    tracing::error!("🚨 Pipeline has not finished materializing yet");
+                    tracing::error!(
+                        "🚨 Check for race condition or missing MaterializationComplete"
+                    );
+                    panic!("Run event received in Materializing state - not ready yet");
+                })
             })
             .on("Error", |_state, event, _ctx| {
                 let event = event.clone();
-                async move {
+                Box::pin(async move {
                     if let PipelineEvent::Error { message } = event {
                         Ok(obzenflow_fsm::Transition {
                             next_state: PipelineState::Failed { reason: message },
                             actions: vec![PipelineAction::Cleanup],
                         })
                     } else {
-                        Err("Invalid event".to_string())
+                        Err(obzenflow_fsm::FsmError::HandlerError(
+                            "Invalid event".to_string(),
+                        ))
                     }
-                }
+                })
             })
             .done()
             .when("Materialized")
-            .on("Run", |_state, _event: &PipelineEvent, _ctx| async move {
-                tracing::info!("🔄 FSM: Materialized -> Running (Run event)");
-                Ok(obzenflow_fsm::Transition {
-                    next_state: PipelineState::Running,
-                    actions: vec![PipelineAction::NotifySourceStart],
+            .on("Run", |_state, _event: &PipelineEvent, _ctx| {
+                Box::pin(async move {
+                    tracing::info!("🔄 FSM: Materialized -> Running (Run event)");
+                    Ok(obzenflow_fsm::Transition {
+                        next_state: PipelineState::Running,
+                        actions: vec![PipelineAction::NotifySourceStart],
+                    })
                 })
             })
             .done()
             .when("Running")
             .on("Abort", |_state, event, _ctx| {
                 let event = event.clone();
-                async move {
+                Box::pin(async move {
                     if let PipelineEvent::Abort { reason, upstream } = event {
                         let reason_clone = reason.clone();
                         Ok(obzenflow_fsm::Transition {
@@ -134,22 +145,23 @@ impl crate::supervised_base::base::Supervisor for PipelineSupervisor {
                             ],
                         })
                     } else {
-                        Err("Invalid event".to_string())
+                        Err(obzenflow_fsm::FsmError::HandlerError(
+                            "Invalid event".to_string(),
+                        ))
                     }
-                }
+                })
             })
-            .on(
-                "Shutdown",
-                |_state, _event: &PipelineEvent, _ctx| async move {
+            .on("Shutdown", |_state, _event: &PipelineEvent, _ctx| {
+                Box::pin(async move {
                     Ok(obzenflow_fsm::Transition {
                         next_state: PipelineState::SourceCompleted,
                         actions: vec![], // No actions yet - just track state
                     })
-                },
-            )
+                })
+            })
             .on("StageCompleted", |_state, event, _ctx| {
                 let event = event.clone();
-                async move {
+                Box::pin(async move {
                     if let PipelineEvent::StageCompleted { envelope } = event {
                         // Just track the completion, stay in Running state
                         Ok(obzenflow_fsm::Transition {
@@ -157,65 +169,57 @@ impl crate::supervised_base::base::Supervisor for PipelineSupervisor {
                             actions: vec![PipelineAction::HandleStageCompleted { envelope }],
                         })
                     } else {
-                        Err("Invalid event".to_string())
+                        Err(obzenflow_fsm::FsmError::HandlerError(
+                            "Invalid event".to_string(),
+                        ))
                     }
-                }
+                })
             })
             .on("Error", |_state, event, _ctx| {
                 let event = event.clone();
-                async move {
+                Box::pin(async move {
                     if let PipelineEvent::Error { message } = event {
                         Ok(obzenflow_fsm::Transition {
                             next_state: PipelineState::Failed { reason: message },
                             actions: vec![PipelineAction::Cleanup],
                         })
                     } else {
-                        Err("Invalid event".to_string())
+                        Err(obzenflow_fsm::FsmError::HandlerError(
+                            "Invalid event".to_string(),
+                        ))
                     }
-                }
+                })
             })
             .on(
                 "AllStagesCompleted",
-                |_state, _event: &PipelineEvent, _ctx| async move {
-                    Ok(obzenflow_fsm::Transition {
-                        next_state: PipelineState::Drained,
-                        actions: vec![
-                            PipelineAction::DrainMetrics,
-                            PipelineAction::WritePipelineCompleted,
-                            PipelineAction::Cleanup,
-                        ],
+                |_state, _event: &PipelineEvent, _ctx| {
+                    Box::pin(async move {
+                        Ok(obzenflow_fsm::Transition {
+                            next_state: PipelineState::Drained,
+                            actions: vec![
+                                PipelineAction::DrainMetrics,
+                                PipelineAction::WritePipelineCompleted,
+                                PipelineAction::Cleanup,
+                            ],
+                        })
                     })
                 },
             )
-            .on("Error", |_state, event, _ctx| {
-                let event = event.clone();
-                async move {
-                    if let PipelineEvent::Error { message } = event {
-                        Ok(obzenflow_fsm::Transition {
-                            next_state: PipelineState::Failed { reason: message },
-                            actions: vec![PipelineAction::Cleanup],
-                        })
-                    } else {
-                        Err("Invalid event".to_string())
-                    }
-                }
-            })
             .done()
             .when("SourceCompleted")
-            .on(
-                "BeginDrain",
-                |_state, _event: &PipelineEvent, _ctx| async move {
+            .on("BeginDrain", |_state, _event: &PipelineEvent, _ctx| {
+                Box::pin(async move {
                     Ok(obzenflow_fsm::Transition {
                         next_state: PipelineState::Draining,
                         actions: vec![PipelineAction::BeginDrain],
                     })
-                },
-            )
+                })
+            })
             .done()
             .when("Draining")
             .on("Abort", |_state, event, _ctx| {
                 let event = event.clone();
-                async move {
+                Box::pin(async move {
                     if let PipelineEvent::Abort { reason, upstream } = event {
                         let reason_clone = reason.clone();
                         Ok(obzenflow_fsm::Transition {
@@ -232,13 +236,15 @@ impl crate::supervised_base::base::Supervisor for PipelineSupervisor {
                             ],
                         })
                     } else {
-                        Err("Invalid event".to_string())
+                        Err(obzenflow_fsm::FsmError::HandlerError(
+                            "Invalid event".to_string(),
+                        ))
                     }
-                }
+                })
             })
             .on("StageCompleted", |_state, event, _ctx| {
                 let event = event.clone();
-                async move {
+                Box::pin(async move {
                     if let PipelineEvent::StageCompleted { envelope } = event {
                         // Track completion and check if all stages are done
                         Ok(obzenflow_fsm::Transition {
@@ -246,50 +252,58 @@ impl crate::supervised_base::base::Supervisor for PipelineSupervisor {
                             actions: vec![PipelineAction::HandleStageCompleted { envelope }],
                         })
                     } else {
-                        Err("Invalid event".to_string())
+                        Err(obzenflow_fsm::FsmError::HandlerError(
+                            "Invalid event".to_string(),
+                        ))
                     }
-                }
+                })
             })
             .on(
                 "AllStagesCompleted",
-                |_state, _event: &PipelineEvent, _ctx| async move {
-                    Ok(obzenflow_fsm::Transition {
-                        next_state: PipelineState::Drained,
-                        actions: vec![
-                            PipelineAction::DrainMetrics,
-                            PipelineAction::WritePipelineCompleted,
-                            PipelineAction::Cleanup,
-                        ],
+                |_state, _event: &PipelineEvent, _ctx| {
+                    Box::pin(async move {
+                        Ok(obzenflow_fsm::Transition {
+                            next_state: PipelineState::Drained,
+                            actions: vec![
+                                PipelineAction::DrainMetrics,
+                                PipelineAction::WritePipelineCompleted,
+                                PipelineAction::Cleanup,
+                            ],
+                        })
                     })
                 },
             )
             .on("Error", |_state, event, _ctx| {
                 let event = event.clone();
-                async move {
+                Box::pin(async move {
                     if let PipelineEvent::Error { message } = event {
                         Ok(obzenflow_fsm::Transition {
                             next_state: PipelineState::Failed { reason: message },
                             actions: vec![PipelineAction::Cleanup],
                         })
                     } else {
-                        Err("Invalid event".to_string())
+                        Err(obzenflow_fsm::FsmError::HandlerError(
+                            "Invalid event".to_string(),
+                        ))
                     }
-                }
+                })
             })
             .done()
             .when("AbortRequested")
             .on("Error", |_state, event, _ctx| {
                 let event = event.clone();
-                async move {
+                Box::pin(async move {
                     if let PipelineEvent::Error { message } = event {
                         Ok(obzenflow_fsm::Transition {
                             next_state: PipelineState::Failed { reason: message },
                             actions: vec![PipelineAction::Cleanup],
                         })
                     } else {
-                        Err("Invalid event".to_string())
+                        Err(obzenflow_fsm::FsmError::HandlerError(
+                            "Invalid event".to_string(),
+                        ))
                     }
-                }
+                })
             })
             .done()
     }
@@ -313,11 +327,14 @@ impl SelfSupervised for PipelineSupervisor {
                 obzenflow_core::event::PipelineLifecycleEvent::Completed,
             ),
         );
-        self.system_journal
-            .append(event, None)
-            .await
-            .map(|_| ())
-            .map_err(|e| format!("Failed to write completion event: {}", e).into())
+        if let Err(e) = self.system_journal.append(event, None).await {
+            tracing::error!(
+                pipeline = %self.name,
+                journal_error = %e,
+                "Failed to write pipeline completion event; continuing without system journal entry"
+            );
+        }
+        Ok(())
     }
 
     async fn dispatch_state(
@@ -839,9 +856,8 @@ impl PipelineSupervisor {
         let seen = self.pipeline_context.contract_pairs.read().await;
 
         // Find any edge with an explicit failure (contract violated)
-        if let Some(((upstream, reader), status)) = seen
-            .iter()
-            .find(|(_pair, status)| !status.is_passed())
+        if let Some(((upstream, reader), status)) =
+            seen.iter().find(|(_pair, status)| !status.is_passed())
         {
             let upstream_name = self
                 .pipeline_context

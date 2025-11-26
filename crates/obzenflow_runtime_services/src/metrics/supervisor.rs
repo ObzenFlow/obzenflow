@@ -51,10 +51,12 @@ impl Supervisor for MetricsAggregatorSupervisor {
             .when("Initializing")
             .on(
                 "StartRunning",
-                |_state, _event: &MetricsAggregatorEvent, _ctx| async move {
-                    Ok(obzenflow_fsm::Transition {
-                        next_state: MetricsAggregatorState::Running,
-                        actions: vec![MetricsAggregatorAction::Initialize],
+                |_state, _event: &MetricsAggregatorEvent, _ctx| {
+                    Box::pin(async move {
+                        Ok(obzenflow_fsm::Transition {
+                            next_state: MetricsAggregatorState::Running,
+                            actions: vec![MetricsAggregatorAction::Initialize],
+                        })
                     })
                 },
             )
@@ -65,7 +67,7 @@ impl Supervisor for MetricsAggregatorSupervisor {
                 "ProcessSystemEvent",
                 |_state, event: &MetricsAggregatorEvent, _ctx| {
                     let event = event.clone();
-                    async move {
+                    Box::pin(async move {
                         if let MetricsAggregatorEvent::ProcessSystemEvent { envelope } = event {
                             // Create action to process the system event
                             Ok(obzenflow_fsm::Transition {
@@ -75,16 +77,18 @@ impl Supervisor for MetricsAggregatorSupervisor {
                                 }],
                             })
                         } else {
-                            Err("Invalid event for ProcessSystemEvent".to_string())
+                            Err(obzenflow_fsm::FsmError::HandlerError(
+                                "Invalid event for ProcessSystemEvent".to_string(),
+                            ))
                         }
-                    }
+                    })
                 },
             )
             .on(
                 "ProcessBatch",
                 |_state, event: &MetricsAggregatorEvent, _ctx| {
                     let event = event.clone();
-                    async move {
+                    Box::pin(async move {
                         if let MetricsAggregatorEvent::ProcessBatch { events } = event {
                             // Create update actions for each event
                             let actions: Vec<_> = events
@@ -97,34 +101,40 @@ impl Supervisor for MetricsAggregatorSupervisor {
                                 actions,
                             })
                         } else {
-                            Err("Invalid event".to_string())
+                            Err(obzenflow_fsm::FsmError::HandlerError(
+                                "Invalid event".to_string(),
+                            ))
                         }
-                    }
+                    })
                 },
             )
             .on(
                 "ExportMetrics",
-                |_state, _event: &MetricsAggregatorEvent, _ctx| async move {
-                    Ok(obzenflow_fsm::Transition {
-                        next_state: MetricsAggregatorState::Running,
-                        actions: vec![MetricsAggregatorAction::ExportMetrics],
+                |_state, _event: &MetricsAggregatorEvent, _ctx| {
+                    Box::pin(async move {
+                        Ok(obzenflow_fsm::Transition {
+                            next_state: MetricsAggregatorState::Running,
+                            actions: vec![MetricsAggregatorAction::ExportMetrics],
+                        })
                     })
                 },
             )
             .on(
                 "StartDraining",
-                |_state, _event: &MetricsAggregatorEvent, _ctx| async move {
-                    Ok(obzenflow_fsm::Transition {
-                        next_state: MetricsAggregatorState::Draining {
-                            consecutive_empty_batches: 0,
-                        },
-                        actions: vec![],
+                |_state, _event: &MetricsAggregatorEvent, _ctx| {
+                    Box::pin(async move {
+                        Ok(obzenflow_fsm::Transition {
+                            next_state: MetricsAggregatorState::Draining {
+                                consecutive_empty_batches: 0,
+                            },
+                            actions: vec![],
+                        })
                     })
                 },
             )
             .on("Error", |_state, event: &MetricsAggregatorEvent, _ctx| {
                 let event = event.clone();
-                async move {
+                Box::pin(async move {
                     if let MetricsAggregatorEvent::Error(error) = event {
                         tracing::error!(
                             error = %error,
@@ -135,9 +145,11 @@ impl Supervisor for MetricsAggregatorSupervisor {
                             actions: vec![],
                         })
                     } else {
-                        Err("Invalid event for Error in Running".to_string())
+                        Err(obzenflow_fsm::FsmError::HandlerError(
+                            "Invalid event for Error in Running".to_string(),
+                        ))
                     }
-                }
+                })
             })
             .done()
             // Draining state transitions
@@ -146,7 +158,7 @@ impl Supervisor for MetricsAggregatorSupervisor {
                 "ProcessBatch",
                 |_state, event: &MetricsAggregatorEvent, _ctx| {
                     let event = event.clone();
-                    async move {
+                    Box::pin(async move {
                         if let MetricsAggregatorEvent::ProcessBatch { events } = event {
                             // Process events during drain
                             let actions: Vec<_> = events
@@ -161,46 +173,18 @@ impl Supervisor for MetricsAggregatorSupervisor {
                                 actions,
                             })
                         } else {
-                            Err("Invalid event".to_string())
+                            Err(obzenflow_fsm::FsmError::HandlerError(
+                                "Invalid event".to_string(),
+                            ))
                         }
-                    }
-                },
-            )
-            .on(
-                "ProcessBatch",
-                |state, event: &MetricsAggregatorEvent, _ctx| {
-                    let state = state.clone();
-                    let event = event.clone();
-                    async move {
-                        if let (
-                            MetricsAggregatorState::Draining { .. },
-                            MetricsAggregatorEvent::ProcessBatch { events },
-                        ) = (state, event)
-                        {
-                            // Process events during drain
-                            let actions: Vec<_> = events
-                                .into_iter()
-                                .map(|envelope| MetricsAggregatorAction::UpdateMetrics { envelope })
-                                .collect();
-
-                            // Reset counter since we got events
-                            Ok(obzenflow_fsm::Transition {
-                                next_state: MetricsAggregatorState::Draining {
-                                    consecutive_empty_batches: 0,
-                                },
-                                actions,
-                            })
-                        } else {
-                            Err("Invalid event".to_string())
-                        }
-                    }
+                    })
                 },
             )
             .on(
                 "DrainEmptyBatch",
                 |state, _event: &MetricsAggregatorEvent, _ctx| {
                     let state = state.clone();
-                    async move {
+                    Box::pin(async move {
                         if let MetricsAggregatorState::Draining {
                             consecutive_empty_batches,
                         } = state
@@ -226,14 +210,16 @@ impl Supervisor for MetricsAggregatorSupervisor {
                                 })
                             }
                         } else {
-                            Err("Invalid state for DrainEmptyBatch".to_string())
+                            Err(obzenflow_fsm::FsmError::HandlerError(
+                                "Invalid state for DrainEmptyBatch".to_string(),
+                            ))
                         }
-                    }
+                    })
                 },
             )
             .on("Error", |_state, event: &MetricsAggregatorEvent, _ctx| {
                 let event = event.clone();
-                async move {
+                Box::pin(async move {
                     if let MetricsAggregatorEvent::Error(error) = event {
                         tracing::error!(
                             error = %error,
@@ -244,15 +230,17 @@ impl Supervisor for MetricsAggregatorSupervisor {
                             actions: vec![],
                         })
                     } else {
-                        Err("Invalid event for Error in Draining".to_string())
+                        Err(obzenflow_fsm::FsmError::HandlerError(
+                            "Invalid event for Error in Draining".to_string(),
+                        ))
                     }
-                }
+                })
             })
             .on(
                 "DrainComplete",
                 |_state, event: &MetricsAggregatorEvent, _ctx| {
                     let event = event.clone();
-                    async move {
+                    Box::pin(async move {
                         if let MetricsAggregatorEvent::DrainComplete { last_event_id } = event {
                             Ok(obzenflow_fsm::Transition {
                                 next_state: MetricsAggregatorState::Drained {
@@ -266,9 +254,11 @@ impl Supervisor for MetricsAggregatorSupervisor {
                                 ],
                             })
                         } else {
-                            Err("Invalid event".to_string())
+                            Err(obzenflow_fsm::FsmError::HandlerError(
+                                "Invalid event".to_string(),
+                            ))
                         }
-                    }
+                    })
                 },
             )
             .done()
@@ -294,11 +284,13 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
             ),
         );
 
-        self.system_journal
-            .append(event, None)
-            .await
-            .map(|_| ())
-            .map_err(|e| format!("Failed to write metrics shutdown event: {}", e).into())
+        if let Err(e) = self.system_journal.append(event, None).await {
+            tracing::error!(
+                journal_error = %e,
+                "Failed to write metrics shutdown event; continuing without system journal entry"
+            );
+        }
+        Ok(())
     }
 
     async fn dispatch_state(
@@ -388,10 +380,14 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                 };
 
                 // Build futures for subscriptions
-                let data_recv = data_subscription.poll_next_with_state(state.variant_name());
+                let data_recv =
+                    data_subscription.poll_next_with_state(state.variant_name(), None);
                 let error_recv = async {
                     if let Some(error_sub) = error_subscription {
-                        match error_sub.poll_next_with_state(state.variant_name()).await {
+                        match error_sub
+                            .poll_next_with_state(state.variant_name(), None)
+                            .await
+                        {
                             PollResult::Event(envelope) => Ok(Some(envelope)),
                             PollResult::NoEvents => Ok(None),
                             PollResult::Error(e) => Err(format!("Error: {}", e)),
@@ -596,11 +592,15 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                 let error_subscription = error_subscription_guard.as_mut();
 
                 // Try both subscriptions without timeout - poll_next handles this
-                let data_recv = data_subscription.poll_next_with_state(state.variant_name());
+                let data_recv =
+                    data_subscription.poll_next_with_state(state.variant_name(), None);
 
                 let error_recv = async {
                     if let Some(error_sub) = error_subscription {
-                        match error_sub.poll_next_with_state(state.variant_name()).await {
+                        match error_sub
+                            .poll_next_with_state(state.variant_name(), None)
+                            .await
+                        {
                             PollResult::Event(envelope) => Ok(Some(envelope)),
                             PollResult::NoEvents => Ok(None),
                             PollResult::Error(e) => Err(format!("Error: {}", e)),

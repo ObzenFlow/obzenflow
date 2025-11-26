@@ -77,4 +77,3 @@ async fn sink_wires_to_reducer_in_simple_chain() {
         "sink should subscribe to reducer journal only"
     );
 }
-

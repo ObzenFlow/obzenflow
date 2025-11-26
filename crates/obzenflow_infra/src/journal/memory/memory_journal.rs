@@ -27,6 +27,27 @@ pub struct MemoryJournal<T: JournalEvent> {
     _phantom: std::marker::PhantomData<T>,
 }
 
+/// Reader for MemoryJournal
+///
+/// This reader takes a snapshot of the journal's events in causal order
+/// at creation time and iterates over that immutable view. New events
+/// appended after the reader is created will not be visible through this
+/// reader, which is acceptable for test/dev usage.
+pub struct MemoryJournalReader<T: JournalEvent> {
+    events: Vec<EventEnvelope<T>>,
+    position: u64,
+}
+
+impl<T: JournalEvent> MemoryJournalReader<T> {
+    pub fn new(events: Vec<EventEnvelope<T>>, position: u64) -> Self {
+        let clamped = position.min(events.len() as u64);
+        Self {
+            events,
+            position: clamped,
+        }
+    }
+}
+
 impl<T: JournalEvent> MemoryJournal<T> {
     /// Create a new in-memory journal without an owner
     pub fn new() -> Self {
@@ -62,7 +83,7 @@ impl<T: JournalEvent> MemoryJournal<T> {
 }
 
 #[async_trait]
-impl<T: JournalEvent> Journal<T> for MemoryJournal<T> {
+impl<T: JournalEvent + 'static> Journal<T> for MemoryJournal<T> {
     fn id(&self) -> &JournalId {
         &self.journal_id
     }
@@ -159,19 +180,44 @@ impl<T: JournalEvent> Journal<T> for MemoryJournal<T> {
     }
     
     async fn reader(&self) -> Result<Box<dyn JournalReader<T>>, JournalError> {
-        // TODO: Implement MemoryJournalReader
-        Err(JournalError::Implementation {
-            message: "MemoryJournalReader not yet implemented".to_string(),
-            source: "Not implemented".into(),
-        })
+        // Snapshot events in causal order at reader creation time
+        let events = self.read_causally_ordered().await?;
+        Ok(Box::new(MemoryJournalReader::new(events, 0)))
     }
     
     async fn reader_from(&self, _position: u64) -> Result<Box<dyn JournalReader<T>>, JournalError> {
-        // TODO: Implement MemoryJournalReader
-        Err(JournalError::Implementation {
-            message: "MemoryJournalReader not yet implemented".to_string(),
-            source: "Not implemented".into(),
-        })
+        let events = self.read_causally_ordered().await?;
+        Ok(Box::new(MemoryJournalReader::new(events, _position)))
+    }
+}
+
+#[async_trait]
+impl<T: JournalEvent + 'static> JournalReader<T> for MemoryJournalReader<T> {
+    async fn next(&mut self) -> Result<Option<EventEnvelope<T>>, JournalError> {
+        if self.position as usize >= self.events.len() {
+            return Ok(None);
+        }
+        let env = self.events.get(self.position as usize).cloned();
+        if env.is_some() {
+            self.position += 1;
+        }
+        Ok(env)
+    }
+
+    async fn skip(&mut self, n: u64) -> Result<u64, JournalError> {
+        let len = self.events.len() as u64;
+        let start = self.position;
+        let target = (self.position + n).min(len);
+        self.position = target;
+        Ok(target - start)
+    }
+
+    fn position(&self) -> u64 {
+        self.position
+    }
+
+    fn is_at_end(&self) -> bool {
+        self.position as usize >= self.events.len()
     }
 }
 
@@ -278,5 +324,42 @@ mod tests {
         for (i, event) in ordered.iter().enumerate() {
             assert_eq!(event.event.payload()["seq"], i + 1);
         }
+    }
+
+    #[tokio::test]
+    async fn test_memory_journal_reader_sees_all_events_in_order() {
+        // Create a test journal with a proper owner
+        let test_stage_id = obzenflow_core::StageId::new();
+        let owner = obzenflow_core::JournalOwner::stage(test_stage_id);
+        let journal = MemoryJournal::with_owner(owner);
+        let writer = WriterId::from(StageId::new());
+
+        // Append a small sequence of events
+        let e1 = ChainEventFactory::data_event(
+            writer.clone(),
+            "reader.test.1",
+            json!({"seq": 1}),
+        );
+        let e2 = ChainEventFactory::data_event(
+            writer.clone(),
+            "reader.test.2",
+            json!({"seq": 2}),
+        );
+        journal.append(e1, None).await.unwrap();
+        journal.append(e2, None).await.unwrap();
+
+        // Read via reader() and compare with read_causally_ordered()
+        let all = journal.read_causally_ordered().await.unwrap();
+        assert_eq!(all.len(), 2);
+
+        let mut reader = journal.reader().await.unwrap();
+        let mut seen = Vec::new();
+        while let Some(env) = reader.next().await.unwrap() {
+            seen.push(env.event.id().clone());
+        }
+
+        let all_ids: Vec<_> = all.iter().map(|e| e.event.id().clone()).collect();
+        assert_eq!(seen, all_ids);
+        assert!(reader.is_at_end());
     }
 }

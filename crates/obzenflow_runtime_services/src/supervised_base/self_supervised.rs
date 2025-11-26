@@ -6,7 +6,6 @@
 use super::base::{EventLoopDirective, Supervisor};
 use obzenflow_core::event::WriterId;
 use obzenflow_fsm::FsmAction;
-use std::sync::Arc;
 
 /// Trait that self-supervised components MUST implement
 /// This ensures they provide all required functionality
@@ -55,15 +54,21 @@ pub trait SelfSupervisedExt: SelfSupervised {
             "SelfSupervised::run() starting with initial state: {:?}",
             initial_state
         );
-        let context = Arc::new(context);
+        let mut context = context;
 
         // Create the builder and let the supervisor configure it
-        tracing::debug!("Creating FSM builder");
+        tracing::debug!(
+            supervisor = %supervisor_name,
+            "Creating FSM builder"
+        );
         let builder = obzenflow_fsm::FsmBuilder::new(initial_state);
         let configured_builder = self.configure_fsm(builder);
 
         // Build the state machine
-        tracing::debug!("Building FSM");
+        tracing::debug!(
+            supervisor = %supervisor_name,
+            "Building FSM"
+        );
         let mut machine = configured_builder.build();
 
         let mut iteration = 0;
@@ -107,9 +112,9 @@ pub trait SelfSupervisedExt: SelfSupervised {
                         event
                     );
                     let actions = machine
-                        .handle(event, context.clone())
+                        .handle(event, &mut context)
                         .await
-                        .map_err(|e| format!("FSM error: {}", e))?;
+                        .map_err(|e| format!("FSM error: {e}"))?;
 
                     tracing::debug!(
                         supervisor = %supervisor_name,
@@ -129,9 +134,9 @@ pub trait SelfSupervisedExt: SelfSupervised {
                             action
                         );
                         action
-                            .execute(&context)
+                            .execute(&mut context)
                             .await
-                            .map_err(|e| format!("Action error: {}", e))?;
+                            .map_err(|e| format!("Action error: {e}"))?;
                         tracing::debug!(
                             supervisor = %supervisor_name,
                             writer_id = ?supervisor_writer,

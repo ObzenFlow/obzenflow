@@ -187,7 +187,7 @@ impl FsmContext for PipelineContext {}
 impl FsmAction for PipelineAction {
     type Context = PipelineContext;
 
-    async fn execute(&self, context: &Self::Context) -> Result<(), String> {
+    async fn execute(&self, context: &mut Self::Context) -> Result<(), obzenflow_fsm::FsmError> {
         match self {
             PipelineAction::CreateStages => {
                 tracing::info!("PipelineAction::CreateStages starting");
@@ -210,7 +210,10 @@ impl FsmAction for PipelineAction {
 
                         // Initialize the stage
                         stage.initialize().await.map_err(|e| {
-                            format!("Failed to initialize stage {}: {}", stage_name, e)
+                            obzenflow_fsm::FsmError::HandlerError(format!(
+                                "Failed to initialize stage {}: {}",
+                                stage_name, e
+                            ))
                         })?;
 
                         // Put it back
@@ -234,7 +237,10 @@ impl FsmAction for PipelineAction {
                         let stage_name = source.stage_name().to_string();
                         tracing::info!("Initializing source: {} (id: {:?})", stage_name, source_id);
                         source.initialize().await.map_err(|e| {
-                            format!("Failed to initialize source {}: {}", stage_name, e)
+                            obzenflow_fsm::FsmError::HandlerError(format!(
+                                "Failed to initialize source {}: {}",
+                                stage_name, e
+                            ))
                         })?;
                         source_supers.insert(source_id, source);
                         tracing::info!("Source {} initialized", stage_name);
@@ -272,7 +278,11 @@ impl FsmAction for PipelineAction {
                             stage_id
                         );
                         stage.start().await.map_err(|e| {
-                            format!("Failed to start stage {}: {}", stage.stage_name(), e)
+                            obzenflow_fsm::FsmError::HandlerError(format!(
+                                "Failed to start stage {}: {}",
+                                stage.stage_name(),
+                                e
+                            ))
                         })?;
                     }
                 }
@@ -289,7 +299,11 @@ impl FsmAction for PipelineAction {
                         source.stage_name()
                     );
                     source.ready().await.map_err(|e| {
-                        format!("Failed to ready source {}: {}", source.stage_name(), e)
+                        obzenflow_fsm::FsmError::HandlerError(format!(
+                            "Failed to ready source {}: {}",
+                            source.stage_name(),
+                            e
+                        ))
                     })?;
                 }
                 tracing::info!("All sources moved to WaitingForGun");
@@ -306,18 +320,18 @@ impl FsmAction for PipelineAction {
                     );
                     // Ensure source is in WaitingForGun before start
                     source.ready().await.map_err(|e| {
-                        format!(
+                        obzenflow_fsm::FsmError::HandlerError(format!(
                             "Failed to ready source stage {}: {}",
                             source.stage_name(),
                             e
-                        )
+                        ))
                     })?;
                     source.start().await.map_err(|e| {
-                        format!(
+                        obzenflow_fsm::FsmError::HandlerError(format!(
                             "Failed to start source stage {}: {}",
                             source.stage_name(),
                             e
-                        )
+                        ))
                     })?;
                 }
                 tracing::info!("All sources started");
@@ -334,7 +348,12 @@ impl FsmAction for PipelineAction {
                     .system_journal
                     .append(drain_system_event, None)
                     .await
-                    .map_err(|e| format!("Failed to publish system drain event: {}", e))?;
+                    .map_err(|e| {
+                        obzenflow_fsm::FsmError::HandlerError(format!(
+                            "Failed to publish system drain event: {}",
+                            e
+                        ))
+                    })?;
 
                 // Flow-control drain into every stage data journal so downstream stages see it
                 let drain_event = ChainEventFactory::drain_event(writer_id);
@@ -344,10 +363,10 @@ impl FsmAction for PipelineAction {
                         .append(drain_event.clone(), None)
                         .await
                         .map_err(|e| {
-                            format!(
+                            obzenflow_fsm::FsmError::HandlerError(format!(
                                 "Failed to publish drain event to stage {:?}: {}",
                                 stage_id, e
-                            )
+                            ))
                         })?;
                 }
 
@@ -368,7 +387,12 @@ impl FsmAction for PipelineAction {
                     .system_journal
                     .append(pipeline_completed, None)
                     .await
-                    .map_err(|e| format!("Failed to write pipeline completed event: {}", e))?;
+                    .map_err(|e| {
+                        obzenflow_fsm::FsmError::HandlerError(format!(
+                            "Failed to write pipeline completed event: {}",
+                            e
+                        ))
+                    })?;
 
                 tracing::info!("Pipeline completion event written");
             }
@@ -485,10 +509,12 @@ impl FsmAction for PipelineAction {
                     });
 
                     // Subscribe to system journal to wait for metrics ready event
-                    let mut ready_reader =
-                        context.system_journal.reader().await.map_err(|e| {
-                            format!("Failed to create system journal reader: {}", e)
-                        })?;
+                    let mut ready_reader = context.system_journal.reader().await.map_err(|e| {
+                        obzenflow_fsm::FsmError::HandlerError(format!(
+                            "Failed to create system journal reader: {}",
+                            e
+                        ))
+                    })?;
 
                     // Wait for metrics aggregator to be ready
                     let deadline =
@@ -510,14 +536,15 @@ impl FsmAction for PipelineAction {
                                 // No more events, continue waiting
                             }
                             Ok(Err(e)) => {
-                                return Err(
-                                    format!("Failed to read metrics ready event: {}", e).into()
-                                );
+                                return Err(obzenflow_fsm::FsmError::HandlerError(format!(
+                                    "Failed to read metrics ready event: {}",
+                                    e
+                                )));
                             }
                             Err(_) => {
-                                return Err(
-                                    "Timeout waiting for metrics aggregator to be ready".into()
-                                );
+                                return Err(obzenflow_fsm::FsmError::HandlerError(
+                                    "Timeout waiting for metrics aggregator to be ready".into(),
+                                ));
                             }
                         }
                     }
@@ -543,20 +570,22 @@ impl FsmAction for PipelineAction {
                         .append(drain_event.clone(), None)
                         .await
                         .map_err(|e| {
-                            format!(
+                            obzenflow_fsm::FsmError::HandlerError(format!(
                                 "Failed to publish drain event to stage {:?}: {}",
                                 stage_id, e
-                            )
+                            ))
                         })?;
                 }
                 drop(stage_journals);
 
                 // 3. Wait for drain completion event from system journal
                 // The metrics aggregator will publish MetricsCoordination::Drained event when done
-                let mut reader =
-                    context.system_journal.reader().await.map_err(|e| {
-                        format!("Failed to create reader for drain completion: {}", e)
-                    })?;
+                let mut reader = context.system_journal.reader().await.map_err(|e| {
+                    obzenflow_fsm::FsmError::HandlerError(format!(
+                        "Failed to create reader for drain completion: {}",
+                        e
+                    ))
+                })?;
 
                 // Wait for the specific drain completion event with a reasonable timeout
                 // Keep this short to avoid long post-completion hangs if the metrics aggregator is gone.
@@ -579,7 +608,10 @@ impl FsmAction for PipelineAction {
                             // No more events, continue waiting
                         }
                         Ok(Err(e)) => {
-                            return Err(format!("Failed to receive drain completion: {}", e).into())
+                            return Err(obzenflow_fsm::FsmError::HandlerError(format!(
+                                "Failed to receive drain completion: {}",
+                                e
+                            )))
                         }
                         Err(_) => {
                             tracing::warn!(
@@ -602,10 +634,10 @@ impl FsmAction for PipelineAction {
                         .append(abort_event.clone(), None)
                         .await
                         .map_err(|e| {
-                            format!(
+                            obzenflow_fsm::FsmError::HandlerError(format!(
                                 "Failed to write pipeline abort event to {:?}: {}",
                                 stage_id, e
-                            )
+                            ))
                         })?;
                 }
 
@@ -621,11 +653,12 @@ impl FsmAction for PipelineAction {
 
             PipelineAction::StartCompletionSubscription => {
                 // Create reader for system journal - will receive system events
-                let reader = context
-                    .system_journal
-                    .reader()
-                    .await
-                    .map_err(|e| format!("Failed to create system journal reader: {:?}", e))?;
+                let reader = context.system_journal.reader().await.map_err(|e| {
+                    obzenflow_fsm::FsmError::HandlerError(format!(
+                        "Failed to create system journal reader: {:?}",
+                        e
+                    ))
+                })?;
 
                 // Wrap in SystemSubscription for consistent PollResult handling
                 let subscription =
@@ -700,7 +733,10 @@ impl FsmAction for PipelineAction {
                             .append(all_stages_completed_event, None)
                             .await
                             .map_err(|e| {
-                                format!("Failed to write all stages completed event: {}", e)
+                                obzenflow_fsm::FsmError::HandlerError(format!(
+                                    "Failed to write all stages completed event: {}",
+                                    e
+                                ))
                             })?;
                     }
                 } else {
@@ -722,62 +758,67 @@ pub type PipelineFsm = StateMachine<PipelineState, PipelineEvent, PipelineContex
 pub fn build_pipeline_fsm() -> PipelineFsm {
     FsmBuilder::new(PipelineState::Created)
         .when("Created")
-        .on(
-            "Materialize",
-            |_state, _event: &PipelineEvent, _ctx| async move {
+        .on("Materialize", |_state, _event: &PipelineEvent, _ctx| {
+            Box::pin(async move {
                 tracing::info!("FSM: Transitioning from Created to Materializing");
                 Ok(Transition {
                     next_state: PipelineState::Materializing,
                     actions: vec![PipelineAction::CreateStages],
                 })
-            },
-        )
+            })
+        })
         .done()
         .when("Materializing")
         .on(
             "MaterializationComplete",
-            |_state, _event: &PipelineEvent, _ctx| async move {
-                tracing::info!("FSM: Transitioning from Materializing to Materialized");
-                Ok(Transition {
-                    next_state: PipelineState::Materialized,
-                    actions: vec![
-                        PipelineAction::StartCompletionSubscription,
-                        PipelineAction::StartMetricsAggregator,
-                        PipelineAction::NotifyStagesStart,
-                        PipelineAction::NotifySourceReady,
-                    ],
+            |_state, _event: &PipelineEvent, _ctx| {
+                Box::pin(async move {
+                    tracing::info!("FSM: Transitioning from Materializing to Materialized");
+                    Ok(Transition {
+                        next_state: PipelineState::Materialized,
+                        actions: vec![
+                            PipelineAction::StartCompletionSubscription,
+                            PipelineAction::StartMetricsAggregator,
+                            PipelineAction::NotifyStagesStart,
+                            PipelineAction::NotifySourceReady,
+                        ],
+                    })
                 })
             },
         )
         .on("Error", |_state, event, _ctx| {
             let event = event.clone();
-            async move {
+            Box::pin(async move {
                 if let PipelineEvent::Error { message } = event {
                     Ok(Transition {
                         next_state: PipelineState::Failed { reason: message },
                         actions: vec![PipelineAction::Cleanup],
                     })
                 } else {
-                    Err("Invalid event".to_string())
+                    Err(obzenflow_fsm::FsmError::HandlerError(
+                        "Invalid event".to_string(),
+                    ))
                 }
-            }
+            })
         })
         .done()
         .when("Materialized")
-        .on("Run", |_state, _event: &PipelineEvent, _ctx| async move {
-            tracing::info!(
-                "FSM: Transitioning from Materialized to Running (triggered by Run event)"
-            );
-            Ok(Transition {
-                next_state: PipelineState::Running,
-                actions: vec![PipelineAction::NotifySourceStart],
+        .on("Run", |_state, _event: &PipelineEvent, _ctx| {
+            Box::pin(async move {
+                tracing::info!(
+                    "FSM: Transitioning from Materialized to Running (triggered by Run event)"
+                );
+                Ok(Transition {
+                    next_state: PipelineState::Running,
+                    actions: vec![PipelineAction::NotifySourceStart],
+                })
             })
         })
         .done()
         .when("Running")
         .on("Abort", |_state, event, _ctx| {
             let event = event.clone();
-            async move {
+            Box::pin(async move {
                 if let PipelineEvent::Abort { reason, upstream } = event {
                     let reason_clone = reason.clone();
                     Ok(Transition {
@@ -794,70 +835,73 @@ pub fn build_pipeline_fsm() -> PipelineFsm {
                         ],
                     })
                 } else {
-                    Err("Invalid event".to_string())
+                    Err(obzenflow_fsm::FsmError::HandlerError(
+                        "Invalid event".to_string(),
+                    ))
                 }
-            }
+            })
         })
         .on("StageCompleted", |_state, event, _ctx| {
             let event = event.clone();
-            async move {
+            Box::pin(async move {
                 if let PipelineEvent::StageCompleted { envelope } = event {
                     Ok(Transition {
                         next_state: PipelineState::Running,
                         actions: vec![PipelineAction::HandleStageCompleted { envelope }],
                     })
                 } else {
-                    Err("Invalid event".to_string())
+                    Err(obzenflow_fsm::FsmError::HandlerError(
+                        "Invalid event".to_string(),
+                    ))
                 }
-            }
+            })
         })
-        .on(
-            "Shutdown",
-            |_state, _event: &PipelineEvent, _ctx| async move {
+        .on("Shutdown", |_state, _event: &PipelineEvent, _ctx| {
+            Box::pin(async move {
                 Ok(Transition {
                     next_state: PipelineState::SourceCompleted,
                     actions: vec![], // No actions yet - just track state
                 })
-            },
-        )
+            })
+        })
         .on("Error", |_state, event, _ctx| {
             let event = event.clone();
-            async move {
+            Box::pin(async move {
                 if let PipelineEvent::Error { message } = event {
                     Ok(Transition {
                         next_state: PipelineState::Failed { reason: message },
                         actions: vec![PipelineAction::Cleanup],
                     })
                 } else {
-                    Err("Invalid event".to_string())
+                    Err(obzenflow_fsm::FsmError::HandlerError(
+                        "Invalid event".to_string(),
+                    ))
                 }
-            }
+            })
         })
         .done()
         .when("SourceCompleted")
-        .on(
-            "BeginDrain",
-            |_state, _event: &PipelineEvent, _ctx| async move {
+        .on("BeginDrain", |_state, _event: &PipelineEvent, _ctx| {
+            Box::pin(async move {
                 Ok(Transition {
                     next_state: PipelineState::Draining,
                     actions: vec![PipelineAction::BeginDrain],
                 })
-            },
-        )
+            })
+        })
         .done()
         .when("Draining")
-        .on(
-            "Shutdown",
-            |_state, _event: &PipelineEvent, _ctx| async move {
+        .on("Shutdown", |_state, _event: &PipelineEvent, _ctx| {
+            Box::pin(async move {
                 Ok(Transition {
                     next_state: PipelineState::Draining,
                     actions: vec![PipelineAction::BeginDrain],
                 })
-            },
-        )
+            })
+        })
         .on("Abort", |_state, event, _ctx| {
             let event = event.clone();
-            async move {
+            Box::pin(async move {
                 if let PipelineEvent::Abort { reason, upstream } = event {
                     let reason_clone = reason.clone();
                     Ok(Transition {
@@ -874,67 +918,76 @@ pub fn build_pipeline_fsm() -> PipelineFsm {
                         ],
                     })
                 } else {
-                    Err("Invalid event".to_string())
+                    Err(obzenflow_fsm::FsmError::HandlerError(
+                        "Invalid event".to_string(),
+                    ))
                 }
-            }
+            })
         })
         .on("StageCompleted", |_state, event, _ctx| {
             let event = event.clone();
-            async move {
+            Box::pin(async move {
                 if let PipelineEvent::StageCompleted { envelope } = event {
                     Ok(Transition {
                         next_state: PipelineState::Draining,
                         actions: vec![PipelineAction::HandleStageCompleted { envelope }],
                     })
                 } else {
-                    Err("Invalid event".to_string())
+                    Err(obzenflow_fsm::FsmError::HandlerError(
+                        "Invalid event".to_string(),
+                    ))
                 }
-            }
+            })
         })
         .on(
             "AllStagesCompleted",
-            |_state, _event: &PipelineEvent, _ctx| async move {
-                Ok(Transition {
-                    next_state: PipelineState::Drained,
-                    actions: vec![
-                        PipelineAction::DrainMetrics, // Drain metrics AFTER all stages complete
-                        PipelineAction::WritePipelineCompleted,
-                        PipelineAction::Cleanup,
-                    ],
+            |_state, _event: &PipelineEvent, _ctx| {
+                Box::pin(async move {
+                    Ok(Transition {
+                        next_state: PipelineState::Drained,
+                        actions: vec![
+                            PipelineAction::DrainMetrics, // Drain metrics AFTER all stages complete
+                            PipelineAction::WritePipelineCompleted,
+                            PipelineAction::Cleanup,
+                        ],
+                    })
                 })
             },
         )
         .on("Error", |_state, event, _ctx| {
             let event = event.clone();
-            async move {
+            Box::pin(async move {
                 if let PipelineEvent::Error { message } = event {
                     Ok(Transition {
                         next_state: PipelineState::Failed { reason: message },
                         actions: vec![PipelineAction::Cleanup],
                     })
                 } else {
-                    Err("Invalid event".to_string())
+                    Err(obzenflow_fsm::FsmError::HandlerError(
+                        "Invalid event".to_string(),
+                    ))
                 }
-            }
+            })
         })
         .done()
         .when("AbortRequested")
         .on("Error", |_state, event, _ctx| {
             let event = event.clone();
-            async move {
+            Box::pin(async move {
                 if let PipelineEvent::Error { message } = event {
                     Ok(Transition {
                         next_state: PipelineState::Failed { reason: message },
                         actions: vec![PipelineAction::Cleanup],
                     })
                 } else {
-                    Err("Invalid event".to_string())
+                    Err(obzenflow_fsm::FsmError::HandlerError(
+                        "Invalid event".to_string(),
+                    ))
                 }
-            }
+            })
         })
-        .on(
-            "Shutdown",
-            |_state, _event: &PipelineEvent, _ctx| async move {
+        .on("Shutdown", |_state, _event: &PipelineEvent, _ctx| {
+            Box::pin(async move {
                 Ok(Transition {
                     next_state: PipelineState::AbortRequested {
                         reason: obzenflow_core::event::types::ViolationCause::Other(
@@ -944,8 +997,8 @@ pub fn build_pipeline_fsm() -> PipelineFsm {
                     },
                     actions: vec![PipelineAction::Cleanup],
                 })
-            },
-        )
+            })
+        })
         .done()
         .build()
 }

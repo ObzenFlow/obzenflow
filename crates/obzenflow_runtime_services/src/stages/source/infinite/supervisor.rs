@@ -55,63 +55,75 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
         builder
             // Created -> Initialized
             .when("Created")
-                .on("Initialize", |_state, _event, _ctx| async move {
-                    Ok(Transition {
-                        next_state: InfiniteSourceState::Initialized,
-                        actions: vec![InfiniteSourceAction::AllocateResources],
+                .on("Initialize", |_state, _event, _ctx| {
+                    Box::pin(async move {
+                        Ok(Transition {
+                            next_state: InfiniteSourceState::Initialized,
+                            actions: vec![InfiniteSourceAction::AllocateResources],
+                        })
                     })
                 })
                 .done()
             
             // Initialized -> WaitingForGun
             .when("Initialized")
-                .on("Ready", |_state, _event, _ctx| async move {
-                    Ok(Transition {
-                        next_state: InfiniteSourceState::WaitingForGun,
-                        actions: vec![], // Sources wait quietly
+                .on("Ready", |_state, _event, _ctx| {
+                    Box::pin(async move {
+                        Ok(Transition {
+                            next_state: InfiniteSourceState::WaitingForGun,
+                            actions: vec![], // Sources wait quietly
+                        })
                     })
                 })
                 .done()
             
             // WaitingForGun -> Running
             .when("WaitingForGun")
-                .on("Start", |_state, _event, _ctx| async move {
-                    Ok(Transition {
-                        next_state: InfiniteSourceState::Running,
-                        actions: vec![InfiniteSourceAction::PublishRunning],
+                .on("Start", |_state, _event, _ctx| {
+                    Box::pin(async move {
+                        Ok(Transition {
+                            next_state: InfiniteSourceState::Running,
+                            actions: vec![InfiniteSourceAction::PublishRunning],
+                        })
                     })
                 })
                 .done()
             
             // Running -> Draining (only on drain request, infinite sources don't complete naturally)
             .when("Running")
-                .on("BeginDrain", |_state, _event, _ctx| async move {
-                    Ok(Transition {
-                        next_state: InfiniteSourceState::Draining,
-                        actions: vec![],
+                .on("BeginDrain", |_state, _event, _ctx| {
+                    Box::pin(async move {
+                        Ok(Transition {
+                            next_state: InfiniteSourceState::Draining,
+                            actions: vec![],
+                        })
                     })
                 })
                 .on("Error", |_state, event, _ctx| {
                     let event = event.clone();
-                    async move {
+                    Box::pin(async move {
                         if let InfiniteSourceEvent::Error(msg) = event {
                             Ok(Transition {
                                 next_state: InfiniteSourceState::Failed(msg),
                                 actions: vec![InfiniteSourceAction::Cleanup],
                             })
                         } else {
-                            Err("Invalid event".to_string())
+                            Err(obzenflow_fsm::FsmError::HandlerError(
+                                "Invalid event".to_string(),
+                            ))
                         }
-                    }
+                    })
                 })
                 .done()
             
             // Draining -> Drained
             .when("Draining")
-                .on("Completed", |_state, _event, _ctx| async move {
-                    Ok(Transition {
-                        next_state: InfiniteSourceState::Drained,
-                        actions: vec![InfiniteSourceAction::SendEOF, InfiniteSourceAction::WriteStageCompleted, InfiniteSourceAction::Cleanup],
+                .on("Completed", |_state, _event, _ctx| {
+                    Box::pin(async move {
+                        Ok(Transition {
+                            next_state: InfiniteSourceState::Drained,
+                            actions: vec![InfiniteSourceAction::SendEOF, InfiniteSourceAction::WriteStageCompleted, InfiniteSourceAction::Cleanup],
+                        })
                     })
                 })
                 .done()
@@ -120,7 +132,7 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
             .from_any()
                 .on("Error", |_state, event, _ctx| {
                     let event = event.clone();
-                    async move {
+                    Box::pin(async move {
                         let error_msg = if let InfiniteSourceEvent::Error(msg) = event {
                             msg
                         } else {
@@ -134,7 +146,7 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
                                 InfiniteSourceAction::Cleanup,
                             ],
                         })
-                    }
+                    })
                 })
                 .done()
             
@@ -148,16 +160,18 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
             .when_unhandled(|state, event, _ctx| {
                 let state_name = state.variant_name().to_string();
                 let event_name = event.variant_name().to_string();
-                async move {
+                Box::pin(async move {
                     tracing::error!(
                         supervisor = "InfiniteSourceSupervisor",
                         state = %state_name,
                         event = %event_name,
                         "Unhandled event in FSM - this indicates a state machine configuration error"
                     );
-                    // Return Err to propagate the error
-                    Err(format!("Unhandled event '{}' in state '{}' for InfiniteSourceSupervisor", event_name, state_name))
-                }
+                    Err(obzenflow_fsm::FsmError::UnhandledEvent {
+                        state: state_name,
+                        event: event_name,
+                    })
+                })
             })
     }
 
@@ -182,11 +196,14 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
 
     async fn write_completion_event(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let event = SystemEvent::stage_completed(self.stage_id);
-        self.system_journal
-            .append(event, None)
-            .await
-            .map(|_| ())
-            .map_err(|e| format!("Failed to write completion event: {}", e).into())
+        if let Err(e) = self.system_journal.append(event, None).await {
+            tracing::error!(
+                stage_name = %self.context.stage_name,
+                journal_error = %e,
+                "Failed to write completion event; continuing without system journal entry"
+            );
+        }
+        Ok(())
     }
 
     async fn dispatch_state(

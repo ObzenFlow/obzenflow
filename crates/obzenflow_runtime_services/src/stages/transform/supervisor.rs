@@ -58,26 +58,30 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Supe
         builder
             // Created -> Initialized
             .when("Created")
-                .on("Initialize", |_state, _event, ctx| async move {
-                    // Track state transition in instrumentation
-                    ctx.instrumentation.transition_to_state("Initialized");
-                    
-                    Ok(Transition {
-                        next_state: TransformState::Initialized,
-                        actions: vec![TransformAction::AllocateResources],
+                .on("Initialize", |_state, _event, ctx| {
+                    Box::pin(async move {
+                        // Track state transition in instrumentation
+                        ctx.instrumentation.transition_to_state("Initialized");
+                        
+                        Ok(Transition {
+                            next_state: TransformState::Initialized,
+                            actions: vec![TransformAction::AllocateResources],
+                        })
                     })
                 })
                 .done()
             
             // Initialized -> Running (transforms start immediately)
             .when("Initialized")
-                .on("Ready", |_state, _event, ctx| async move {
-                    // Track state transition in instrumentation
-                    ctx.instrumentation.transition_to_state("Running");
-                    
-                    Ok(Transition {
-                        next_state: TransformState::Running,
-                        actions: vec![TransformAction::PublishRunning],
+                .on("Ready", |_state, _event, ctx| {
+                    Box::pin(async move {
+                        // Track state transition in instrumentation
+                        ctx.instrumentation.transition_to_state("Running");
+                        
+                        Ok(Transition {
+                            next_state: TransformState::Running,
+                            actions: vec![TransformAction::PublishRunning],
+                        })
                     })
                 })
                 .done()
@@ -85,24 +89,28 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Supe
             // Running -> Draining (on EOF)
             .when("Running")
                 // Ready can be delivered again (e.g. from wide subscriptions); ignore if already running
-                .on("Ready", |_state, _event, _ctx| async move {
-                    Ok(Transition {
-                        next_state: TransformState::Running,
-                        actions: vec![],
+                .on("Ready", |_state, _event, _ctx| {
+                    Box::pin(async move {
+                        Ok(Transition {
+                            next_state: TransformState::Running,
+                            actions: vec![],
+                        })
                     })
                 })
-                .on("ReceivedEOF", |_state, _event, ctx| async move {
-                    // Track state transition in instrumentation
-                    ctx.instrumentation.transition_to_state("Draining");
-                    
-                    Ok(Transition {
-                        next_state: TransformState::Draining,
-                        actions: vec![], // Continue draining in dispatch_state
+                .on("ReceivedEOF", |_state, _event, ctx| {
+                    Box::pin(async move {
+                        // Track state transition in instrumentation
+                        ctx.instrumentation.transition_to_state("Draining");
+                        
+                        Ok(Transition {
+                            next_state: TransformState::Draining,
+                            actions: vec![], // Continue draining in dispatch_state
+                        })
                     })
                 })
                 .on("Error", |_state, event, ctx| {
                     let event = event.clone();
-                    async move {
+                    Box::pin(async move {
                         if let TransformEvent::Error(msg) = event {
                             // Track state transition and failure in instrumentation
                             ctx.instrumentation.transition_to_state("Failed");
@@ -115,28 +123,30 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Supe
                         } else {
                             unreachable!()
                         }
-                    }
+                    })
                 })
                 .done()
             
             // Draining -> Drained
             .when("Draining")
-                .on("DrainComplete", |_state, _event, ctx| async move {
-                    // Track state transition in instrumentation
-                    ctx.instrumentation.transition_to_state("Drained");
-                    
-                    Ok(Transition {
-                        next_state: TransformState::Drained,
-                        actions: vec![
-                            TransformAction::ForwardEOF,
-                            TransformAction::SendCompletion,
-                            TransformAction::Cleanup,
-                        ],
+                .on("DrainComplete", |_state, _event, ctx| {
+                    Box::pin(async move {
+                        // Track state transition in instrumentation
+                        ctx.instrumentation.transition_to_state("Drained");
+                        
+                        Ok(Transition {
+                            next_state: TransformState::Drained,
+                            actions: vec![
+                                TransformAction::ForwardEOF,
+                                TransformAction::SendCompletion,
+                                TransformAction::Cleanup,
+                            ],
+                        })
                     })
                 })
                 .on("Error", |_state, event, ctx| {
                     let event = event.clone();
-                    async move {
+                    Box::pin(async move {
                         if let TransformEvent::Error(msg) = event {
                             // Track state transition and failure in instrumentation
                             ctx.instrumentation.transition_to_state("Failed");
@@ -149,7 +159,7 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Supe
                         } else {
                             unreachable!()
                         }
-                    }
+                    })
                 })
                 .done()
             
@@ -158,7 +168,7 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Supe
                 .on("Error", |state, event, _ctx| {
                     let event = event.clone();
                     let state = state.clone();
-                    async move {
+                    Box::pin(async move {
                         if let TransformEvent::Error(msg) = event {
                             // If already failed, don't cleanup again
                             if matches!(state, TransformState::Failed(_)) {
@@ -175,7 +185,7 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Supe
                         } else {
                             unreachable!()
                         }
-                    }
+                    })
                 })
                 .done()
 
@@ -183,16 +193,18 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Supe
             .when_unhandled(|state, event, _ctx| {
                 let state_name = state.variant_name().to_string();
                 let event_name = event.variant_name().to_string();
-                async move {
+                Box::pin(async move {
                     tracing::error!(
                         supervisor = "TransformSupervisor",
                         state = %state_name,
                         event = %event_name,
                         "Unhandled event in FSM - this indicates a state machine configuration error"
                     );
-                    // Return Err to propagate the error
-                    Err(format!("Unhandled event '{}' in state '{}' for TransformSupervisor", event_name, state_name))
-                }
+                    Err(obzenflow_fsm::FsmError::UnhandledEvent {
+                        state: state_name,
+                        event: event_name,
+                    })
+                })
             })
     }
 
@@ -217,11 +229,14 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Hand
 
     async fn write_completion_event(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let event = SystemEvent::stage_completed(self.stage_id);
-        self.system_journal
-            .append(event, None)
-            .await
-            .map(|_| ())
-            .map_err(|e| format!("Failed to write completion event: {}", e).into())
+        if let Err(e) = self.system_journal.append(event, None).await {
+            tracing::error!(
+                stage_name = %self.context.stage_name,
+                journal_error = %e,
+                "Failed to write completion event; continuing without system journal entry"
+            );
+        }
+        Ok(())
     }
 
     async fn dispatch_state(
@@ -256,6 +271,7 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Hand
 
                 // Process events from subscription
                 let mut subscription_guard = self.context.subscription.write().await;
+                let mut contract_state_guard = self.context.contract_state.write().await;
                 if let Some(subscription) = subscription_guard.as_mut() {
                     tracing::info!(
                         target: "flowip-080o",
@@ -265,7 +281,10 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Hand
                     );
 
                     match subscription
-                        .poll_next_with_state(state.variant_name())
+                        .poll_next_with_state(
+                            state.variant_name(),
+                            Some(&mut contract_state_guard[..]),
+                        )
                         .await
                     {
                         PollResult::Event(envelope) => {
@@ -491,8 +510,11 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Hand
                         PollResult::NoEvents => {
                             // No events available right now
                             // Check contracts if appropriate (FSM decides when)
-                            if subscription.should_check_contracts() {
-                                match subscription.check_contracts().await {
+                            if subscription.should_check_contracts(&contract_state_guard[..]) {
+                                match subscription
+                                    .check_contracts(&mut contract_state_guard[..])
+                                    .await
+                                {
                                     Ok(crate::messaging::upstream_subscription::ContractStatus::Stalled(upstream)) => {
                                         tracing::warn!(
                                             stage_name = %self.context.stage_name,
@@ -556,10 +578,14 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Hand
             TransformState::Draining => {
                 // Continue processing remaining events
                 let mut subscription_guard = self.context.subscription.write().await;
+                let mut contract_state_guard = self.context.contract_state.write().await;
                 if let Some(subscription) = subscription_guard.as_mut() {
                     // Poll for remaining events without timeout hacks
                     match subscription
-                        .poll_next_with_state(state.variant_name())
+                        .poll_next_with_state(
+                            state.variant_name(),
+                            Some(&mut contract_state_guard[..]),
+                        )
                         .await
                     {
                         PollResult::Event(envelope) => {
@@ -674,7 +700,8 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Hand
                         PollResult::NoEvents => {
                             // Queue is truly drained - no more events available
                             // Do a final contract check before transitioning
-                            let _ = subscription.check_contracts().await;
+                            let _ =
+                                subscription.check_contracts(&mut contract_state_guard[..]).await;
 
                             tracing::info!(
                                 stage_name = %self.context.stage_name,

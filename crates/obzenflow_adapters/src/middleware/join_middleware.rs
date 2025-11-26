@@ -149,7 +149,9 @@ where
         }
 
         // Process with inner handler
-        let mut results = self.inner.process_event(state, event.clone(), source_id, writer_id);
+        let mut results = self
+            .inner
+            .process_event(state, event.clone(), source_id, writer_id);
 
         // Apply post-middleware
         self.apply_post_middleware(&event, &mut results, &mut ctx);

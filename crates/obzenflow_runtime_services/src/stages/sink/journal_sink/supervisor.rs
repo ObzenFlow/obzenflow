@@ -7,7 +7,6 @@ use crate::stages::common::handlers::SinkHandler;
 use crate::supervised_base::base::Supervisor;
 use crate::supervised_base::{EventLoopDirective, HandlerSupervised};
 use futures::TryFutureExt;
-use obzenflow_fsm::FsmAction;
 use obzenflow_core::event::context::causality_context::CausalityContext;
 use obzenflow_core::event::context::{FlowContext, StageType};
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
@@ -17,6 +16,7 @@ use obzenflow_core::journal::journal::Journal;
 use obzenflow_core::time::MetricsDuration;
 use obzenflow_core::ChainEvent;
 use obzenflow_core::{StageId, WriterId};
+use obzenflow_fsm::FsmAction;
 use obzenflow_fsm::{EventVariant, FsmBuilder, StateVariant, Transition};
 use std::sync::Arc;
 
@@ -78,20 +78,24 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
         builder
             // Created -> Initialized
             .when("Created")
-                .on("Initialize", |_state, _event, _ctx| async move {
-                    Ok(Transition {
-                        next_state: JournalSinkState::Initialized,
-                        actions: vec![JournalSinkAction::AllocateResources],
+                .on("Initialize", |_state, _event, _ctx| {
+                    Box::pin(async move {
+                        Ok(Transition {
+                            next_state: JournalSinkState::Initialized,
+                            actions: vec![JournalSinkAction::AllocateResources],
+                        })
                     })
                 })
                 .done()
             
             // Initialized -> Running (sinks auto-start)
             .when("Initialized")
-                .on("Ready", |_state, _event, _ctx| async move {
-                    Ok(Transition {
-                        next_state: JournalSinkState::Running,
-                        actions: vec![JournalSinkAction::PublishRunning],
+                .on("Ready", |_state, _event, _ctx| {
+                    Box::pin(async move {
+                        Ok(Transition {
+                            next_state: JournalSinkState::Running,
+                            actions: vec![JournalSinkAction::PublishRunning],
+                        })
                     })
                 })
                 .done()
@@ -99,41 +103,47 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
             // Running -> Drained (on EOF via FSM)
             .when("Running")
                 // Idempotent Ready: ignore redundant Ready signals once running
-                .on("Ready", |_state, _event, _ctx| async move {
-                    tracing::info!("JournalSinkSupervisor: received Ready in Running; treating as no-op");
-                    Ok(Transition {
-                        next_state: JournalSinkState::Running,
-                        actions: vec![],
+                .on("Ready", |_state, _event, _ctx| {
+                    Box::pin(async move {
+                        tracing::info!("JournalSinkSupervisor: received Ready in Running; treating as no-op");
+                        Ok(Transition {
+                            next_state: JournalSinkState::Running,
+                            actions: vec![],
+                        })
                     })
                 })
-                .on("ReceivedEOF", |_state, _event, ctx| async move {
-                    tracing::info!(
-                        stage_name = %ctx.stage_name,
-                        "JournalSinkSupervisor: ReceivedEOF -> Drained (flush + completion + cleanup)"
-                    );
-                    Ok(Transition {
-                        // We are done consuming: flush any buffered data, send
-                        // completion, then clean up resources. The Drained
-                        // state is terminal and its dispatch simply returns
-                        // Terminate, which will cause HandlerSupervisedExt to
-                        // call write_completion_event().
-                        next_state: JournalSinkState::Drained,
-                        actions: vec![
-                            JournalSinkAction::FlushBuffers,
-                            JournalSinkAction::SendCompletion,
-                            JournalSinkAction::Cleanup,
-                        ],
+                .on("ReceivedEOF", |_state, _event, ctx| {
+                    Box::pin(async move {
+                        tracing::info!(
+                            stage_name = %ctx.stage_name,
+                            "JournalSinkSupervisor: ReceivedEOF -> Drained (flush + completion + cleanup)"
+                        );
+                        Ok(Transition {
+                            // We are done consuming: flush any buffered data, send
+                            // completion, then clean up resources. The Drained
+                            // state is terminal and its dispatch simply returns
+                            // Terminate, which will cause HandlerSupervisedExt to
+                            // call write_completion_event().
+                            next_state: JournalSinkState::Drained,
+                            actions: vec![
+                                JournalSinkAction::FlushBuffers,
+                                JournalSinkAction::SendCompletion,
+                                JournalSinkAction::Cleanup,
+                            ],
+                        })
                     })
                 })
-                .on("BeginFlush", |_state, _event, _ctx| async move {
-                    Ok(Transition {
-                        next_state: JournalSinkState::Flushing,
-                        actions: vec![JournalSinkAction::FlushBuffers],
+                .on("BeginFlush", |_state, _event, _ctx| {
+                    Box::pin(async move {
+                        Ok(Transition {
+                            next_state: JournalSinkState::Flushing,
+                            actions: vec![JournalSinkAction::FlushBuffers],
+                        })
                     })
                 })
                 .on("Error", |_state, event, _ctx| {
                     let event = event.clone();
-                    async move {
+                    Box::pin(async move {
                         if let JournalSinkEvent::Error(msg) = event {
                             Ok(Transition {
                                 next_state: JournalSinkState::Failed(msg),
@@ -142,32 +152,36 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
                         } else {
                             unreachable!()
                         }
-                    }
+                    })
                 })
                 .done()
             
             // Flushing -> Draining
             .when("Flushing")
-                .on("Ready", |_state, _event, _ctx| async move {
-                    tracing::info!("JournalSinkSupervisor: received Ready in Flushing; treating as no-op");
-                    Ok(Transition {
-                        next_state: JournalSinkState::Flushing,
-                        actions: vec![],
+                .on("Ready", |_state, _event, _ctx| {
+                    Box::pin(async move {
+                        tracing::info!("JournalSinkSupervisor: received Ready in Flushing; treating as no-op");
+                        Ok(Transition {
+                            next_state: JournalSinkState::Flushing,
+                            actions: vec![],
+                        })
                     })
                 })
-                .on("FlushComplete", |_state, _event, _ctx| async move {
-                    tracing::info!(
-                        target: "flowip-080o",
-                        "JournalSinkSupervisor: FlushComplete -> Draining"
-                    );
-                    Ok(Transition {
-                        next_state: JournalSinkState::Draining,
-                        actions: vec![],
+                .on("FlushComplete", |_state, _event, _ctx| {
+                    Box::pin(async move {
+                        tracing::info!(
+                            target: "flowip-080o",
+                            "JournalSinkSupervisor: FlushComplete -> Draining"
+                        );
+                        Ok(Transition {
+                            next_state: JournalSinkState::Draining,
+                            actions: vec![],
+                        })
                     })
                 })
                 .on("Error", |_state, event, _ctx| {
                     let event = event.clone();
-                    async move {
+                    Box::pin(async move {
                         if let JournalSinkEvent::Error(msg) = event {
                             Ok(Transition {
                                 next_state: JournalSinkState::Failed(msg),
@@ -176,27 +190,31 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
                         } else {
                             unreachable!()
                         }
-                    }
+                    })
                 })
                 .done()
             
             // Draining -> Drained
             .when("Draining")
-                .on("Ready", |_state, _event, _ctx| async move {
-                    tracing::info!("JournalSinkSupervisor: received Ready in Draining; treating as no-op");
-                    Ok(Transition {
-                        next_state: JournalSinkState::Draining,
-                        actions: vec![],
+                .on("Ready", |_state, _event, _ctx| {
+                    Box::pin(async move {
+                        tracing::info!("JournalSinkSupervisor: received Ready in Draining; treating as no-op");
+                        Ok(Transition {
+                            next_state: JournalSinkState::Draining,
+                            actions: vec![],
+                        })
                     })
                 })
-                .on("BeginDrain", |_state, _event, _ctx| async move {
-                    tracing::info!(
-                        target: "flowip-080o",
-                        "JournalSinkSupervisor: BeginDrain -> Drained (SendCompletion + Cleanup)"
-                    );
-                    Ok(Transition {
-                        next_state: JournalSinkState::Drained,
-                        actions: vec![JournalSinkAction::SendCompletion, JournalSinkAction::Cleanup],
+                .on("BeginDrain", |_state, _event, _ctx| {
+                    Box::pin(async move {
+                        tracing::info!(
+                            target: "flowip-080o",
+                            "JournalSinkSupervisor: BeginDrain -> Drained (SendCompletion + Cleanup)"
+                        );
+                        Ok(Transition {
+                            next_state: JournalSinkState::Drained,
+                            actions: vec![JournalSinkAction::SendCompletion, JournalSinkAction::Cleanup],
+                        })
                     })
                 })
                 .done()
@@ -206,7 +224,7 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
                 .on("Error", |state, event, _ctx| {
                     let event = event.clone();
                     let state = state.clone();
-                    async move {
+                    Box::pin(async move {
                         if let JournalSinkEvent::Error(msg) = event {
                             // If already failed, don't cleanup again
                             if matches!(state, JournalSinkState::Failed(_)) {
@@ -223,7 +241,7 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
                         } else {
                             unreachable!()
                         }
-                    }
+                    })
                 })
                 .done()
 
@@ -231,16 +249,18 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
             .when_unhandled(|state, event, _ctx| {
                 let state_name = state.variant_name().to_string();
                 let event_name = event.variant_name().to_string();
-                async move {
+                Box::pin(async move {
                     tracing::error!(
                         supervisor = "JournalSinkSupervisor",
                         state = %state_name,
                         event = %event_name,
                         "Unhandled event in FSM - this indicates a state machine configuration error"
                     );
-                    // Return Err to propagate the error
-                    Err(format!("Unhandled event '{}' in state '{}' for JournalSinkSupervisor", event_name, state_name))
-                }
+                    Err(obzenflow_fsm::FsmError::UnhandledEvent {
+                        state: state_name,
+                        event: event_name,
+                    })
+                })
             })
     }
 
@@ -264,21 +284,23 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
     }
 
     async fn write_completion_event(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let event = SystemEvent::stage_completed(self.stage_id);
         tracing::info!(
             target: "flowip-080o",
             stage_name = %self.context.stage_name,
             stage_id = ?self.stage_id,
             "sink: HandlerSupervised writing stage_completed"
         );
-        let event = SystemEvent::stage_completed(self.stage_id);
-        let result = self
-            .system_journal
-            .append(event, None)
-            .await
-            .map(|_| ())
-            .map_err(|e| format!("Failed to write completion event: {}", e).into());
 
-        if result.is_ok() {
+        if let Err(e) = self.system_journal.append(event, None).await {
+            tracing::error!(
+                target: "flowip-080o",
+                stage_name = %self.context.stage_name,
+                stage_id = ?self.stage_id,
+                journal_error = %e,
+                "sink: HandlerSupervised failed to append stage_completed; continuing without system journal entry"
+            );
+        } else {
             tracing::info!(
                 target: "flowip-080o",
                 stage_name = %self.context.stage_name,
@@ -287,7 +309,7 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
             );
         }
 
-        result
+        Ok(())
     }
 
     async fn dispatch_state(
@@ -322,6 +344,7 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
 
                 // Check subscription for events
                 let mut subscription_guard = self.context.subscription.write().await;
+                let mut contract_state_guard = self.context.contract_state.write().await;
 
                 if let Some(subscription) = subscription_guard.as_mut() {
                     tracing::info!(
@@ -332,7 +355,10 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                     );
 
                     match subscription
-                        .poll_next_with_state(state.variant_name())
+                        .poll_next_with_state(
+                            state.variant_name(),
+                            Some(&mut contract_state_guard[..]),
+                        )
                         .await
                     {
                         PollResult::Event(envelope) => {
@@ -395,7 +421,16 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                                 FlowControlPayload::Eof { .. } => {
                                                     let eof_outcome =
                                                         subscription.take_last_eof_outcome();
-                                                    let _ = subscription.check_contracts().await;
+                                                    let _ = subscription
+                                                        .check_contracts(
+                                                            &mut contract_state_guard[..],
+                                                        )
+                                                        .await;
+
+                                                    // Capture upstream reader count for logging before
+                                                    // releasing the subscription lock.
+                                                    let upstream_readers =
+                                                        subscription.upstream_count();
 
                                                     // Release the subscription lock before any further work
                                                     drop(subscription_guard);
@@ -450,11 +485,13 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                                             }
                                                         }
                                                         None => {
-                                                            tracing::warn!(
+                                                            tracing::info!(
                                                                 target: "flowip-080o",
                                                                 stage_name = %self.context.stage_name,
                                                                 event_type = envelope.event.event_type(),
-                                                                "Sink received EOF but no EOF outcome was recorded; continuing"
+                                                                writer_id = ?envelope.event.writer_id,
+                                                                upstream_readers = upstream_readers,
+                                                                "Sink received EOF authored by a non-upstream writer; ignoring for EOF authority and continuing to consume"
                                                             );
                                                         }
                                                     }
@@ -539,7 +576,9 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                             // Lifecycle events (middleware metrics, etc.) are observability
                                             // overhead and should not participate in transport contracts.
                                             // Sink emits Delivery events (not Data), so check both.
-                                            if delivery_event.is_data() || delivery_event.is_delivery() {
+                                            if delivery_event.is_data()
+                                                || delivery_event.is_delivery()
+                                            {
                                                 self.context
                                                     .instrumentation
                                                     .record_emitted(&delivery_event);
@@ -627,8 +666,10 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                         }
                         PollResult::NoEvents => {
                             // Check contracts periodically while idle to emit progress/final/stall as needed
-                            if subscription.should_check_contracts() {
-                                let _ = subscription.check_contracts().await;
+                            if subscription.should_check_contracts(&contract_state_guard[..]) {
+                                let _ = subscription
+                                    .check_contracts(&mut contract_state_guard[..])
+                                    .await;
                             }
 
                             // No events available right now, sleep briefly

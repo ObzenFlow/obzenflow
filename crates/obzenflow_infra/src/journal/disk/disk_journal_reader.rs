@@ -9,6 +9,7 @@ use obzenflow_core::event::JournalEvent;
 use obzenflow_core::id::JournalId;
 use obzenflow_core::journal::journal_error::JournalError;
 use obzenflow_core::journal::journal_reader::JournalReader;
+use std::fs::File as StdFile;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::fs::File;
@@ -45,13 +46,19 @@ impl<T: JournalEvent> DiskJournalReader<T> {
     ) -> Result<Self, JournalError> {
         // If file doesn't exist, create an empty reader at EOF
         if !path.exists() {
-            // Create empty file
-            let file = File::create(&path)
-                .await
-                .map_err(|e| JournalError::Implementation {
+            // Create empty file using blocking std I/O, then wrap in async File
+            let std_file = StdFile::create(&path).map_err(|e| {
+                tracing::error!(
+                    path = %path.display(),
+                    os_error = %e,
+                    "DiskJournalReader failed to create journal file"
+                );
+                JournalError::Implementation {
                     message: format!("Failed to create journal file: {}", path.display()),
                     source: Box::new(e),
-                })?;
+                }
+            })?;
+            let file = File::from_std(std_file);
 
             return Ok(Self {
                 reader: BufReader::new(file),
@@ -66,12 +73,20 @@ impl<T: JournalEvent> DiskJournalReader<T> {
             });
         }
 
-        let file = File::open(&path)
-            .await
-            .map_err(|e| JournalError::Implementation {
+        // Open using blocking std I/O, then wrap in async File to avoid Tokio's
+        // per-open background task failures under high concurrency.
+        let std_file = StdFile::open(&path).map_err(|e| {
+            tracing::error!(
+                path = %path.display(),
+                os_error = %e,
+                "DiskJournalReader failed to open journal file"
+            );
+            JournalError::Implementation {
                 message: format!("Failed to open journal file: {}", path.display()),
                 source: Box::new(e),
-            })?;
+            }
+        })?;
+        let file = File::from_std(std_file);
 
         Ok(Self {
             reader: BufReader::new(file),
@@ -93,12 +108,18 @@ impl<T: JournalEvent> DiskJournalReader<T> {
         start_position: u64,
         read_write_lock: Arc<RwLock<()>>,
     ) -> Result<Self, JournalError> {
-        let file = File::open(&path)
-            .await
-            .map_err(|e| JournalError::Implementation {
+        let std_file = StdFile::open(&path).map_err(|e| {
+            tracing::error!(
+                path = %path.display(),
+                os_error = %e,
+                "DiskJournalReader failed to open journal file from_position"
+            );
+            JournalError::Implementation {
                 message: format!("Failed to open journal file: {}", path.display()),
                 source: Box::new(e),
-            })?;
+            }
+        })?;
+        let file = File::from_std(std_file);
 
         let mut reader = BufReader::new(file);
         let mut position = 0;

@@ -326,7 +326,7 @@ impl<H> std::fmt::Debug for FiniteSourceAction<H> {
 impl<H: FiniteSourceHandler + Send + Sync + 'static> FsmAction for FiniteSourceAction<H> {
     type Context = FiniteSourceContext<H>;
 
-    async fn execute(&self, ctx: &Self::Context) -> Result<(), String> {
+    async fn execute(&self, ctx: &mut Self::Context) -> Result<(), obzenflow_fsm::FsmError> {
         match self {
             FiniteSourceAction::AllocateResources => {
                 // Create WriterId from our StageId
@@ -343,9 +343,11 @@ impl<H: FiniteSourceHandler + Send + Sync + 'static> FsmAction for FiniteSourceA
 
             FiniteSourceAction::SendEOF => {
                 let writer_id_guard = ctx.writer_id.read().await;
-                let writer_id = writer_id_guard
-                    .as_ref()
-                    .ok_or_else(|| "No writer ID available to send EOF".to_string())?;
+                let writer_id = writer_id_guard.as_ref().ok_or_else(|| {
+                    obzenflow_fsm::FsmError::HandlerError(
+                        "No writer ID available to send EOF".to_string(),
+                    )
+                })?;
 
                 // Snapshot how many events this source emitted
                 let emitted = ctx
@@ -385,12 +387,18 @@ impl<H: FiniteSourceHandler + Send + Sync + 'static> FsmAction for FiniteSourceA
                 ctx.data_journal
                     .append(eof_event, None)
                     .await
-                    .map_err(|e| format!("Failed to send EOF: {}", e))?;
+                    .map_err(|e| {
+                        obzenflow_fsm::FsmError::HandlerError(format!("Failed to send EOF: {e}"))
+                    })?;
 
                 ctx.data_journal
                     .append(final_event, None)
                     .await
-                    .map_err(|e| format!("Failed to send source consumption_final: {}", e))?;
+                    .map_err(|e| {
+                        obzenflow_fsm::FsmError::HandlerError(format!(
+                            "Failed to send source consumption_final: {e}"
+                        ))
+                    })?;
 
                 tracing::info!(
                     stage_name = %ctx.stage_name,
@@ -401,44 +409,56 @@ impl<H: FiniteSourceHandler + Send + Sync + 'static> FsmAction for FiniteSourceA
             }
 
             FiniteSourceAction::SendError { message } => {
-                let writer_id_guard = ctx.writer_id.read().await;
-                let writer_id_guard = ctx.writer_id.read().await;
-                let _writer_id = writer_id_guard
-                    .as_ref()
-                    .ok_or_else(|| "No writer ID available to send error".to_string())?;
-
                 let error_event = SystemEvent::stage_failed(
                     ctx.stage_id,
                     message.clone(),
                     false, // not recoverable
                 );
 
-                ctx.system_journal
-                    .append(error_event, None)
-                    .await
-                    .map_err(|e| format!("Failed to send error event: {}", e))?;
-
-                tracing::error!(
-                    stage_name = %ctx.stage_name,
-                    error = %message,
-                    "Finite source encountered error"
-                );
+                // Best-effort: log journal failures but don't fail the FSM
+                match ctx.system_journal.append(error_event, None).await {
+                    Ok(_) => {
+                        tracing::error!(
+                            stage_name = %ctx.stage_name,
+                            error = %message,
+                            "Finite source encountered error"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            stage_name = %ctx.stage_name,
+                            error = %message,
+                            journal_error = %e,
+                            "Finite source encountered error but failed to write error event"
+                        );
+                    }
+                }
                 Ok(())
             }
 
             FiniteSourceAction::PublishRunning => {
                 let writer_id_guard = ctx.writer_id.read().await;
-                let writer_id = writer_id_guard
-                    .as_ref()
-                    .ok_or_else(|| "No writer ID available to publish running event".to_string())?;
+                let writer_id = match writer_id_guard.as_ref() {
+                    Some(id) => id.clone(),
+                    None => {
+                        tracing::warn!(
+                            stage_name = %ctx.stage_name,
+                            "No writer ID available to publish running event; skipping running event and source_contract"
+                        );
+                        return Ok(());
+                    }
+                };
 
                 // Write running event to system journal
                 let running_event = SystemEvent::stage_running(ctx.stage_id);
 
-                ctx.system_journal
-                    .append(running_event, None)
-                    .await
-                    .map_err(|e| format!("Failed to publish running event: {}", e))?;
+                if let Err(e) = ctx.system_journal.append(running_event, None).await {
+                    tracing::error!(
+                        stage_name = %ctx.stage_name,
+                        journal_error = %e,
+                        "Failed to publish running event; continuing without system journal entry"
+                    );
+                }
 
                 // Emit writer-side source contract with runtime defaults (expected_count unknown)
                 let contract = ChainEventFactory::source_contract_event(
@@ -452,10 +472,11 @@ impl<H: FiniteSourceHandler + Send + Sync + 'static> FsmAction for FiniteSourceA
                     None, // vector clock not captured at start
                 );
 
-                ctx.data_journal
-                    .append(contract, None)
-                    .await
-                    .map_err(|e| format!("Failed to append source_contract: {}", e))?;
+                ctx.data_journal.append(contract, None).await.map_err(|e| {
+                    obzenflow_fsm::FsmError::HandlerError(format!(
+                        "Failed to append source_contract: {e}"
+                    ))
+                })?;
 
                 tracing::info!(
                     stage_name = %ctx.stage_name,
@@ -465,19 +486,16 @@ impl<H: FiniteSourceHandler + Send + Sync + 'static> FsmAction for FiniteSourceA
             }
 
             FiniteSourceAction::WriteStageCompleted => {
-                let writer_id_guard = ctx.writer_id.read().await;
-                let writer_id_guard = ctx.writer_id.read().await;
-                let _writer_id = writer_id_guard
-                    .as_ref()
-                    .ok_or_else(|| "No writer ID available to send completion event".to_string())?;
-
                 // Write completion event to system journal
                 let completion_event = SystemEvent::stage_completed(ctx.stage_id);
 
-                ctx.system_journal
-                    .append(completion_event, None)
-                    .await
-                    .map_err(|e| format!("Failed to send completion event: {}", e))?;
+                if let Err(e) = ctx.system_journal.append(completion_event, None).await {
+                    tracing::error!(
+                        stage_name = %ctx.stage_name,
+                        journal_error = %e,
+                        "Failed to write completion event; continuing without system journal entry"
+                    );
+                }
 
                 tracing::info!(
                     stage_name = %ctx.stage_name,
