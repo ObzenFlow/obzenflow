@@ -56,20 +56,12 @@ pub trait SelfSupervisedExt: SelfSupervised {
         );
         let mut context = context;
 
-        // Create the builder and let the supervisor configure it
+        // Build the state machine via the Supervisor API
         tracing::debug!(
             supervisor = %supervisor_name,
-            "Creating FSM builder"
+            "Building FSM via Supervisor::build_state_machine"
         );
-        let builder = obzenflow_fsm::FsmBuilder::new(initial_state);
-        let configured_builder = self.configure_fsm(builder);
-
-        // Build the state machine
-        tracing::debug!(
-            supervisor = %supervisor_name,
-            "Building FSM"
-        );
-        let mut machine = configured_builder.build();
+        let mut machine = self.build_state_machine(initial_state);
 
         let mut iteration = 0;
         loop {

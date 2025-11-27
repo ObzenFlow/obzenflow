@@ -1,13 +1,10 @@
-// Simple stateless pipeline to test FSM warnings
-// This example uses only sources, transforms, and sinks - no stateful stages
-
-use anyhow::Result;
 use async_trait::async_trait;
 use obzenflow_core::{
     event::chain_event::{ChainEvent, ChainEventFactory},
     event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload},
     id::StageId,
-    Result as CoreResult, WriterId,
+    Result as CoreResult,
+    WriterId,
 };
 use obzenflow_dsl_infra::{flow, sink, source, transform};
 use obzenflow_infra::application::FlowApplication;
@@ -16,7 +13,6 @@ use obzenflow_runtime_services::stages::common::handlers::{FiniteSourceHandler, 
 use obzenflow_runtime_services::stages::transform::Map;
 use serde_json::json;
 
-// Simple source that generates a few events
 #[derive(Clone, Debug)]
 struct SimpleSource {
     count: usize,
@@ -44,10 +40,6 @@ impl FiniteSourceHandler for SimpleSource {
             "number",
             json!({
                 "value": self.count + 1,
-                "timestamp": std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_millis(),
             }),
         ))
     }
@@ -57,64 +49,30 @@ impl FiniteSourceHandler for SimpleSource {
     }
 }
 
-// Simple transform that doubles values - using Map helper (FLOWIP-080h)
-// Before: 24 lines of struct + impl TransformHandler
-// After: Just use Map::new() directly in the pipeline!
-
-// Simple sink that prints results
 #[derive(Clone, Debug)]
-struct Printer {
-    name: String,
-}
-
-impl Printer {
-    fn new(name: impl Into<String>) -> Self {
-        Self { name: name.into() }
-    }
-}
+struct Printer;
 
 #[async_trait]
 impl SinkHandler for Printer {
-    async fn consume(&mut self, event: ChainEvent) -> CoreResult<DeliveryPayload> {
-        println!(
-            "[{}] Received: {}",
-            self.name,
-            serde_json::to_string(&event.payload()).unwrap_or_default()
-        );
-
+    async fn consume(&mut self, _event: ChainEvent) -> CoreResult<DeliveryPayload> {
         Ok(DeliveryPayload::success(
-            self.name.clone(),
+            "printer",
             DeliveryMethod::Custom("Print".to_string()),
             None,
         ))
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    // Set environment variable for metrics
-    std::env::set_var("OBZENFLOW_METRICS_EXPORTER", "console");
-
-    println!("==========================================");
-    println!("     Simple Stateless Pipeline Test");
-    println!("==========================================");
-    println!();
-    println!("Testing FSM warnings with only:");
-    println!("  • Source (generates 5 events)");
-    println!("  • Transform (doubles values)");
-    println!("  • Sink (prints results)");
-    println!("  • NO stateful stages");
-    println!();
-
+#[tokio::test]
+async fn stateless_pipeline_runs_to_completion() {
     FlowApplication::run(async {
         flow! {
-            name: "stateless_simple",
-            journals: disk_journals(std::path::PathBuf::from("target/stateless-simple-logs")),
+            name: "stateless_simple_test",
+            journals: disk_journals(std::path::PathBuf::from("target/stateless_simple_test_logs")),
             middleware: [],
 
             stages: {
                 numbers = source!("numbers" => SimpleSource::new(5));
-                // Using Map helper instead of custom Doubler struct (FLOWIP-080h)
                 doubler = transform!("doubler" => Map::new(|event| {
                     if let Some(value) = event.payload()["value"].as_u64() {
                         ChainEventFactory::data_event(
@@ -129,7 +87,7 @@ async fn main() -> Result<()> {
                         event
                     }
                 }));
-                printer = sink!("printer" => Printer::new("output"));
+                printer = sink!("printer" => Printer);
             },
 
             topology: {
@@ -141,13 +99,6 @@ async fn main() -> Result<()> {
         .map_err(|e| anyhow::anyhow!("Failed to create flow: {:?}", e))
     })
     .await
-    .map_err(|e| anyhow::anyhow!("Application failed: {:?}", e))?;
-
-    println!("\n✅ Pipeline completed successfully!");
-    println!("\n📊 Analysis:");
-    println!("  Check the logs above for FSM warnings.");
-    println!("  If warnings appear, they're from core infrastructure.");
-    println!("  If no warnings, the issue is specific to stateful stages.");
-
-    Ok(())
+    .expect("flow should complete without stateful stages");
 }
+

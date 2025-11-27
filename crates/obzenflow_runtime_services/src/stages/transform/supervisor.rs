@@ -12,7 +12,7 @@ use obzenflow_core::event::SystemEvent;
 use obzenflow_core::journal::journal::Journal;
 use obzenflow_core::EventEnvelope;
 use obzenflow_core::{ChainEvent, StageId};
-use obzenflow_fsm::{EventVariant, FsmBuilder, StateVariant, Transition};
+use obzenflow_fsm::{fsm, EventVariant, StateVariant, Transition};
 use std::sync::Arc;
 
 use super::fsm::{TransformAction, TransformContext, TransformEvent, TransformState};
@@ -51,126 +51,33 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Supe
     type Context = TransformContext<H>;
     type Action = TransformAction<H>;
 
-    fn configure_fsm(
+    fn build_state_machine(
         &self,
-        builder: FsmBuilder<Self::State, Self::Event, Self::Context, Self::Action>,
-    ) -> FsmBuilder<Self::State, Self::Event, Self::Context, Self::Action> {
-        builder
-            // Created -> Initialized
-            .when("Created")
-                .on("Initialize", |_state, _event, ctx| {
+        initial_state: Self::State,
+    ) -> obzenflow_fsm::StateMachine<Self::State, Self::Event, Self::Context, Self::Action> {
+        fsm! {
+            state:   TransformState<H>;
+            event:   TransformEvent<H>;
+            context: TransformContext<H>;
+            action:  TransformAction<H>;
+            initial: initial_state;
+
+            state TransformState::Created {
+                on TransformEvent::Initialize => |_state: &TransformState<H>, _event: &TransformEvent<H>, ctx: &mut TransformContext<H>| {
                     Box::pin(async move {
-                        // Track state transition in instrumentation
                         ctx.instrumentation.transition_to_state("Initialized");
-                        
                         Ok(Transition {
                             next_state: TransformState::Initialized,
                             actions: vec![TransformAction::AllocateResources],
                         })
                     })
-                })
-                .done()
-            
-            // Initialized -> Running (transforms start immediately)
-            .when("Initialized")
-                .on("Ready", |_state, _event, ctx| {
-                    Box::pin(async move {
-                        // Track state transition in instrumentation
-                        ctx.instrumentation.transition_to_state("Running");
-                        
-                        Ok(Transition {
-                            next_state: TransformState::Running,
-                            actions: vec![TransformAction::PublishRunning],
-                        })
-                    })
-                })
-                .done()
-            
-            // Running -> Draining (on EOF)
-            .when("Running")
-                // Ready can be delivered again (e.g. from wide subscriptions); ignore if already running
-                .on("Ready", |_state, _event, _ctx| {
-                    Box::pin(async move {
-                        Ok(Transition {
-                            next_state: TransformState::Running,
-                            actions: vec![],
-                        })
-                    })
-                })
-                .on("ReceivedEOF", |_state, _event, ctx| {
-                    Box::pin(async move {
-                        // Track state transition in instrumentation
-                        ctx.instrumentation.transition_to_state("Draining");
-                        
-                        Ok(Transition {
-                            next_state: TransformState::Draining,
-                            actions: vec![], // Continue draining in dispatch_state
-                        })
-                    })
-                })
-                .on("Error", |_state, event, ctx| {
-                    let event = event.clone();
-                    Box::pin(async move {
-                        if let TransformEvent::Error(msg) = event {
-                            // Track state transition and failure in instrumentation
-                            ctx.instrumentation.transition_to_state("Failed");
-                            ctx.instrumentation.failures_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            
-                            Ok(Transition {
-                                next_state: TransformState::Failed(msg),
-                                actions: vec![TransformAction::Cleanup],
-                            })
-                        } else {
-                            unreachable!()
-                        }
-                    })
-                })
-                .done()
-            
-            // Draining -> Drained
-            .when("Draining")
-                .on("DrainComplete", |_state, _event, ctx| {
-                    Box::pin(async move {
-                        // Track state transition in instrumentation
-                        ctx.instrumentation.transition_to_state("Drained");
-                        
-                        Ok(Transition {
-                            next_state: TransformState::Drained,
-                            actions: vec![
-                                TransformAction::ForwardEOF,
-                                TransformAction::SendCompletion,
-                                TransformAction::Cleanup,
-                            ],
-                        })
-                    })
-                })
-                .on("Error", |_state, event, ctx| {
-                    let event = event.clone();
-                    Box::pin(async move {
-                        if let TransformEvent::Error(msg) = event {
-                            // Track state transition and failure in instrumentation
-                            ctx.instrumentation.transition_to_state("Failed");
-                            ctx.instrumentation.failures_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            
-                            Ok(Transition {
-                                next_state: TransformState::Failed(msg),
-                                actions: vec![TransformAction::Cleanup],
-                            })
-                        } else {
-                            unreachable!()
-                        }
-                    })
-                })
-                .done()
-            
-            // Error transitions from any state
-            .from_any()
-                .on("Error", |state, event, _ctx| {
+                };
+
+                on TransformEvent::Error => |state: &TransformState<H>, event: &TransformEvent<H>, _ctx: &mut TransformContext<H>| {
                     let event = event.clone();
                     let state = state.clone();
                     Box::pin(async move {
                         if let TransformEvent::Error(msg) = event {
-                            // If already failed, don't cleanup again
                             if matches!(state, TransformState::Failed(_)) {
                                 Ok(Transition {
                                     next_state: state.clone(),
@@ -186,11 +93,166 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Supe
                             unreachable!()
                         }
                     })
-                })
-                .done()
+                };
+            }
 
-            // Catch all unhandled events
-            .when_unhandled(|state, event, _ctx| {
+            state TransformState::Initialized {
+                on TransformEvent::Ready => |_state: &TransformState<H>, _event: &TransformEvent<H>, ctx: &mut TransformContext<H>| {
+                    Box::pin(async move {
+                        ctx.instrumentation.transition_to_state("Running");
+                        Ok(Transition {
+                            next_state: TransformState::Running,
+                            actions: vec![TransformAction::PublishRunning],
+                        })
+                    })
+                };
+
+                on TransformEvent::Error => |state: &TransformState<H>, event: &TransformEvent<H>, _ctx: &mut TransformContext<H>| {
+                    let event = event.clone();
+                    let state = state.clone();
+                    Box::pin(async move {
+                        if let TransformEvent::Error(msg) = event {
+                            if matches!(state, TransformState::Failed(_)) {
+                                Ok(Transition {
+                                    next_state: state.clone(),
+                                    actions: vec![],
+                                })
+                            } else {
+                                Ok(Transition {
+                                    next_state: TransformState::Failed(msg),
+                                    actions: vec![TransformAction::Cleanup],
+                                })
+                            }
+                        } else {
+                            unreachable!()
+                        }
+                    })
+                };
+            }
+
+            state TransformState::Running {
+                // Ready can be delivered again (e.g. from wide subscriptions); ignore if already running
+                on TransformEvent::Ready => |_state: &TransformState<H>, _event: &TransformEvent<H>, _ctx: &mut TransformContext<H>| {
+                    Box::pin(async move {
+                        Ok(Transition {
+                            next_state: TransformState::Running,
+                            actions: vec![],
+                        })
+                    })
+                };
+
+                on TransformEvent::ReceivedEOF => |_state: &TransformState<H>, _event: &TransformEvent<H>, ctx: &mut TransformContext<H>| {
+                    Box::pin(async move {
+                        ctx.instrumentation.transition_to_state("Draining");
+                        Ok(Transition {
+                            next_state: TransformState::Draining,
+                            actions: vec![], // Continue draining in dispatch_state
+                        })
+                    })
+                };
+
+                on TransformEvent::Error => |_state: &TransformState<H>, event: &TransformEvent<H>, ctx: &mut TransformContext<H>| {
+                    let event = event.clone();
+                    Box::pin(async move {
+                        if let TransformEvent::Error(msg) = event {
+                            ctx.instrumentation.transition_to_state("Failed");
+                            ctx.instrumentation
+                                .failures_total
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            Ok(Transition {
+                                next_state: TransformState::Failed(msg),
+                                actions: vec![TransformAction::Cleanup],
+                            })
+                        } else {
+                            unreachable!()
+                        }
+                    })
+                };
+            }
+
+            state TransformState::Draining {
+                on TransformEvent::DrainComplete => |_state: &TransformState<H>, _event: &TransformEvent<H>, ctx: &mut TransformContext<H>| {
+                    Box::pin(async move {
+                        ctx.instrumentation.transition_to_state("Drained");
+                        Ok(Transition {
+                            next_state: TransformState::Drained,
+                            actions: vec![
+                                TransformAction::ForwardEOF,
+                                TransformAction::SendCompletion,
+                                TransformAction::Cleanup,
+                            ],
+                        })
+                    })
+                };
+
+                on TransformEvent::Error => |_state: &TransformState<H>, event: &TransformEvent<H>, ctx: &mut TransformContext<H>| {
+                    let event = event.clone();
+                    Box::pin(async move {
+                        if let TransformEvent::Error(msg) = event {
+                            ctx.instrumentation.transition_to_state("Failed");
+                            ctx.instrumentation
+                                .failures_total
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            Ok(Transition {
+                                next_state: TransformState::Failed(msg),
+                                actions: vec![TransformAction::Cleanup],
+                            })
+                        } else {
+                            unreachable!()
+                        }
+                    })
+                };
+            }
+
+            state TransformState::Drained {
+                on TransformEvent::Error => |state: &TransformState<H>, event: &TransformEvent<H>, _ctx: &mut TransformContext<H>| {
+                    let event = event.clone();
+                    let state = state.clone();
+                    Box::pin(async move {
+                        if let TransformEvent::Error(msg) = event {
+                            if matches!(state, TransformState::Failed(_)) {
+                                Ok(Transition {
+                                    next_state: state.clone(),
+                                    actions: vec![],
+                                })
+                            } else {
+                                Ok(Transition {
+                                    next_state: TransformState::Failed(msg),
+                                    actions: vec![TransformAction::Cleanup],
+                                })
+                            }
+                        } else {
+                            unreachable!()
+                        }
+                    })
+                };
+            }
+
+            state TransformState::Failed {
+                on TransformEvent::Error => |state: &TransformState<H>, event: &TransformEvent<H>, _ctx: &mut TransformContext<H>| {
+                    let event = event.clone();
+                    let state = state.clone();
+                    Box::pin(async move {
+                        if let TransformEvent::Error(msg) = event {
+                            if matches!(state, TransformState::Failed(_)) {
+                                Ok(Transition {
+                                    next_state: state.clone(),
+                                    actions: vec![],
+                                })
+                            } else {
+                                Ok(Transition {
+                                    next_state: TransformState::Failed(msg),
+                                    actions: vec![TransformAction::Cleanup],
+                                })
+                            }
+                        } else {
+                            unreachable!()
+                        }
+                    })
+                };
+            }
+
+            unhandled => |state: &TransformState<H>, event: &TransformEvent<H>, _ctx: &mut TransformContext<H>| {
                 let state_name = state.variant_name().to_string();
                 let event_name = event.variant_name().to_string();
                 Box::pin(async move {
@@ -205,7 +267,8 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Supe
                         event: event_name,
                     })
                 })
-            })
+            };
+        }
     }
 
     fn name(&self) -> &str {

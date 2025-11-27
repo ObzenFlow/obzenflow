@@ -7,7 +7,7 @@ use obzenflow_core::event::context::FlowContext;
 use obzenflow_core::event::SystemEvent;
 use obzenflow_core::journal::journal::Journal;
 use obzenflow_core::{ChainEvent, StageId, WriterId};
-use obzenflow_fsm::{EventVariant, FsmBuilder, StateVariant, Transition};
+use obzenflow_fsm::{fsm, EventVariant, StateVariant, Transition};
 use std::sync::Arc;
 
 use super::fsm::{
@@ -48,58 +48,118 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
     type Context = InfiniteSourceContext<H>;
     type Action = InfiniteSourceAction<H>;
 
-    fn configure_fsm(
+    fn build_state_machine(
         &self,
-        builder: FsmBuilder<Self::State, Self::Event, Self::Context, Self::Action>,
-    ) -> FsmBuilder<Self::State, Self::Event, Self::Context, Self::Action> {
-        builder
-            // Created -> Initialized
-            .when("Created")
-                .on("Initialize", |_state, _event, _ctx| {
+        initial_state: Self::State,
+    ) -> obzenflow_fsm::StateMachine<Self::State, Self::Event, Self::Context, Self::Action> {
+        fsm! {
+            state:   InfiniteSourceState<H>;
+            event:   InfiniteSourceEvent<H>;
+            context: InfiniteSourceContext<H>;
+            action:  InfiniteSourceAction<H>;
+            initial: initial_state;
+
+            state InfiniteSourceState::Created {
+                on InfiniteSourceEvent::Initialize => |_state: &InfiniteSourceState<H>, _event: &InfiniteSourceEvent<H>, _ctx: &mut InfiniteSourceContext<H>| {
                     Box::pin(async move {
                         Ok(Transition {
                             next_state: InfiniteSourceState::Initialized,
                             actions: vec![InfiniteSourceAction::AllocateResources],
                         })
                     })
-                })
-                .done()
-            
-            // Initialized -> WaitingForGun
-            .when("Initialized")
-                .on("Ready", |_state, _event, _ctx| {
+                };
+
+                on InfiniteSourceEvent::Error => |_state: &InfiniteSourceState<H>, event: &InfiniteSourceEvent<H>, _ctx: &mut InfiniteSourceContext<H>| {
+                    let event = event.clone();
+                    Box::pin(async move {
+                        let error_msg = if let InfiniteSourceEvent::Error(msg) = event {
+                            msg
+                        } else {
+                            "Unknown error".to_string()
+                        };
+
+                        Ok(Transition {
+                            next_state: InfiniteSourceState::Failed(error_msg.clone()),
+                            actions: vec![
+                                InfiniteSourceAction::SendError { message: error_msg },
+                                InfiniteSourceAction::Cleanup,
+                            ],
+                        })
+                    })
+                };
+            }
+
+            state InfiniteSourceState::Initialized {
+                on InfiniteSourceEvent::Ready => |_state: &InfiniteSourceState<H>, _event: &InfiniteSourceEvent<H>, _ctx: &mut InfiniteSourceContext<H>| {
                     Box::pin(async move {
                         Ok(Transition {
                             next_state: InfiniteSourceState::WaitingForGun,
-                            actions: vec![], // Sources wait quietly
+                            actions: vec![],
                         })
                     })
-                })
-                .done()
-            
-            // WaitingForGun -> Running
-            .when("WaitingForGun")
-                .on("Start", |_state, _event, _ctx| {
+                };
+
+                on InfiniteSourceEvent::Error => |_state: &InfiniteSourceState<H>, event: &InfiniteSourceEvent<H>, _ctx: &mut InfiniteSourceContext<H>| {
+                    let event = event.clone();
+                    Box::pin(async move {
+                        let error_msg = if let InfiniteSourceEvent::Error(msg) = event {
+                            msg
+                        } else {
+                            "Unknown error".to_string()
+                        };
+
+                        Ok(Transition {
+                            next_state: InfiniteSourceState::Failed(error_msg.clone()),
+                            actions: vec![
+                                InfiniteSourceAction::SendError { message: error_msg },
+                                InfiniteSourceAction::Cleanup,
+                            ],
+                        })
+                    })
+                };
+            }
+
+            state InfiniteSourceState::WaitingForGun {
+                on InfiniteSourceEvent::Start => |_state: &InfiniteSourceState<H>, _event: &InfiniteSourceEvent<H>, _ctx: &mut InfiniteSourceContext<H>| {
                     Box::pin(async move {
                         Ok(Transition {
                             next_state: InfiniteSourceState::Running,
                             actions: vec![InfiniteSourceAction::PublishRunning],
                         })
                     })
-                })
-                .done()
-            
-            // Running -> Draining (only on drain request, infinite sources don't complete naturally)
-            .when("Running")
-                .on("BeginDrain", |_state, _event, _ctx| {
+                };
+
+                on InfiniteSourceEvent::Error => |_state: &InfiniteSourceState<H>, event: &InfiniteSourceEvent<H>, _ctx: &mut InfiniteSourceContext<H>| {
+                    let event = event.clone();
+                    Box::pin(async move {
+                        let error_msg = if let InfiniteSourceEvent::Error(msg) = event {
+                            msg
+                        } else {
+                            "Unknown error".to_string()
+                        };
+
+                        Ok(Transition {
+                            next_state: InfiniteSourceState::Failed(error_msg.clone()),
+                            actions: vec![
+                                InfiniteSourceAction::SendError { message: error_msg },
+                                InfiniteSourceAction::Cleanup,
+                            ],
+                        })
+                    })
+                };
+            }
+
+            state InfiniteSourceState::Running {
+                on InfiniteSourceEvent::BeginDrain => |_state: &InfiniteSourceState<H>, _event: &InfiniteSourceEvent<H>, _ctx: &mut InfiniteSourceContext<H>| {
                     Box::pin(async move {
                         Ok(Transition {
                             next_state: InfiniteSourceState::Draining,
                             actions: vec![],
                         })
                     })
-                })
-                .on("Error", |_state, event, _ctx| {
+                };
+
+                on InfiniteSourceEvent::Error => |_state: &InfiniteSourceState<H>, event: &InfiniteSourceEvent<H>, _ctx: &mut InfiniteSourceContext<H>| {
                     let event = event.clone();
                     Box::pin(async move {
                         if let InfiniteSourceEvent::Error(msg) = event {
@@ -113,24 +173,24 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
                             ))
                         }
                     })
-                })
-                .done()
-            
-            // Draining -> Drained
-            .when("Draining")
-                .on("Completed", |_state, _event, _ctx| {
+                };
+            }
+
+            state InfiniteSourceState::Draining {
+                on InfiniteSourceEvent::Completed => |_state: &InfiniteSourceState<H>, _event: &InfiniteSourceEvent<H>, _ctx: &mut InfiniteSourceContext<H>| {
                     Box::pin(async move {
                         Ok(Transition {
                             next_state: InfiniteSourceState::Drained,
-                            actions: vec![InfiniteSourceAction::SendEOF, InfiniteSourceAction::WriteStageCompleted, InfiniteSourceAction::Cleanup],
+                            actions: vec![
+                                InfiniteSourceAction::SendEOF,
+                                InfiniteSourceAction::WriteStageCompleted,
+                                InfiniteSourceAction::Cleanup,
+                            ],
                         })
                     })
-                })
-                .done()
-            
-            // Error handling from any state
-            .from_any()
-                .on("Error", |_state, event, _ctx| {
+                };
+
+                on InfiniteSourceEvent::Error => |_state: &InfiniteSourceState<H>, event: &InfiniteSourceEvent<H>, _ctx: &mut InfiniteSourceContext<H>| {
                     let event = event.clone();
                     Box::pin(async move {
                         let error_msg = if let InfiniteSourceEvent::Error(msg) = event {
@@ -138,7 +198,7 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
                         } else {
                             "Unknown error".to_string()
                         };
-                        
+
                         Ok(Transition {
                             next_state: InfiniteSourceState::Failed(error_msg.clone()),
                             actions: vec![
@@ -147,17 +207,50 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
                             ],
                         })
                     })
-                })
-                .done()
-            
-            // Terminal states
-            .when("Drained")
-                .done()
-            .when("Failed")
-                .done()
+                };
+            }
 
-            // Catch all unhandled events
-            .when_unhandled(|state, event, _ctx| {
+            state InfiniteSourceState::Drained {
+                on InfiniteSourceEvent::Error => |_state: &InfiniteSourceState<H>, event: &InfiniteSourceEvent<H>, _ctx: &mut InfiniteSourceContext<H>| {
+                    let event = event.clone();
+                    Box::pin(async move {
+                        let error_msg = if let InfiniteSourceEvent::Error(msg) = event {
+                            msg
+                        } else {
+                            "Unknown error".to_string()
+                        };
+
+                        Ok(Transition {
+                            next_state: InfiniteSourceState::Failed(error_msg.clone()),
+                            actions: vec![
+                                InfiniteSourceAction::SendError { message: error_msg },
+                                InfiniteSourceAction::Cleanup,
+                            ],
+                        })
+                    })
+                };
+            }
+
+            state InfiniteSourceState::Failed {
+                on InfiniteSourceEvent::Error => |state: &InfiniteSourceState<H>, event: &InfiniteSourceEvent<H>, _ctx: &mut InfiniteSourceContext<H>| {
+                    let state = state.clone();
+                    let event = event.clone();
+                    Box::pin(async move {
+                        if let InfiniteSourceEvent::Error(_msg) = event {
+                            Ok(Transition {
+                                next_state: state,
+                                actions: vec![],
+                            })
+                        } else {
+                            Err(obzenflow_fsm::FsmError::HandlerError(
+                                "Invalid event".to_string(),
+                            ))
+                        }
+                    })
+                };
+            }
+
+            unhandled => |state: &InfiniteSourceState<H>, event: &InfiniteSourceEvent<H>, _ctx: &mut InfiniteSourceContext<H>| {
                 let state_name = state.variant_name().to_string();
                 let event_name = event.variant_name().to_string();
                 Box::pin(async move {
@@ -172,7 +265,8 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
                         event: event_name,
                     })
                 })
-            })
+            };
+        }
     }
 
     fn name(&self) -> &str {

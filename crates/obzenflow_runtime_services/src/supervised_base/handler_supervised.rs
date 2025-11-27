@@ -64,12 +64,8 @@ pub trait HandlerSupervisedExt: HandlerSupervised {
     {
         let mut context = context;
 
-        // Create the builder and let the supervisor configure it
-        let builder = obzenflow_fsm::FsmBuilder::new(initial_state);
-        let configured_builder = self.configure_fsm(builder);
-
-        // Build the state machine
-        let mut machine = configured_builder.build();
+        // Build the state machine via the Supervisor API
+        let mut machine = self.build_state_machine(initial_state);
         let mut loop_iteration: u64 = 0;
 
         loop {

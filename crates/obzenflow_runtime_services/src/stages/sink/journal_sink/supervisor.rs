@@ -17,7 +17,7 @@ use obzenflow_core::time::MetricsDuration;
 use obzenflow_core::ChainEvent;
 use obzenflow_core::{StageId, WriterId};
 use obzenflow_fsm::FsmAction;
-use obzenflow_fsm::{EventVariant, FsmBuilder, StateVariant, Transition};
+use obzenflow_fsm::{fsm, EventVariant, StateVariant, Transition};
 use std::sync::Arc;
 
 use super::fsm::{JournalSinkAction, JournalSinkContext, JournalSinkEvent, JournalSinkState};
@@ -71,77 +71,28 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
     type Context = JournalSinkContext<H>;
     type Action = JournalSinkAction<H>;
 
-    fn configure_fsm(
+    fn build_state_machine(
         &self,
-        builder: FsmBuilder<Self::State, Self::Event, Self::Context, Self::Action>,
-    ) -> FsmBuilder<Self::State, Self::Event, Self::Context, Self::Action> {
-        builder
-            // Created -> Initialized
-            .when("Created")
-                .on("Initialize", |_state, _event, _ctx| {
+        initial_state: Self::State,
+    ) -> obzenflow_fsm::StateMachine<Self::State, Self::Event, Self::Context, Self::Action> {
+        fsm! {
+            state:   JournalSinkState<H>;
+            event:   JournalSinkEvent<H>;
+            context: JournalSinkContext<H>;
+            action:  JournalSinkAction<H>;
+            initial: initial_state;
+
+            state JournalSinkState::Created {
+                on JournalSinkEvent::Initialize => |_state: &JournalSinkState<H>, _event: &JournalSinkEvent<H>, _ctx: &mut JournalSinkContext<H>| {
                     Box::pin(async move {
                         Ok(Transition {
                             next_state: JournalSinkState::Initialized,
                             actions: vec![JournalSinkAction::AllocateResources],
                         })
                     })
-                })
-                .done()
-            
-            // Initialized -> Running (sinks auto-start)
-            .when("Initialized")
-                .on("Ready", |_state, _event, _ctx| {
-                    Box::pin(async move {
-                        Ok(Transition {
-                            next_state: JournalSinkState::Running,
-                            actions: vec![JournalSinkAction::PublishRunning],
-                        })
-                    })
-                })
-                .done()
-            
-            // Running -> Drained (on EOF via FSM)
-            .when("Running")
-                // Idempotent Ready: ignore redundant Ready signals once running
-                .on("Ready", |_state, _event, _ctx| {
-                    Box::pin(async move {
-                        tracing::info!("JournalSinkSupervisor: received Ready in Running; treating as no-op");
-                        Ok(Transition {
-                            next_state: JournalSinkState::Running,
-                            actions: vec![],
-                        })
-                    })
-                })
-                .on("ReceivedEOF", |_state, _event, ctx| {
-                    Box::pin(async move {
-                        tracing::info!(
-                            stage_name = %ctx.stage_name,
-                            "JournalSinkSupervisor: ReceivedEOF -> Drained (flush + completion + cleanup)"
-                        );
-                        Ok(Transition {
-                            // We are done consuming: flush any buffered data, send
-                            // completion, then clean up resources. The Drained
-                            // state is terminal and its dispatch simply returns
-                            // Terminate, which will cause HandlerSupervisedExt to
-                            // call write_completion_event().
-                            next_state: JournalSinkState::Drained,
-                            actions: vec![
-                                JournalSinkAction::FlushBuffers,
-                                JournalSinkAction::SendCompletion,
-                                JournalSinkAction::Cleanup,
-                            ],
-                        })
-                    })
-                })
-                .on("BeginFlush", |_state, _event, _ctx| {
-                    Box::pin(async move {
-                        Ok(Transition {
-                            next_state: JournalSinkState::Flushing,
-                            actions: vec![JournalSinkAction::FlushBuffers],
-                        })
-                    })
-                })
-                .on("Error", |_state, event, _ctx| {
+                };
+
+                on JournalSinkEvent::Error => |_state: &JournalSinkState<H>, event: &JournalSinkEvent<H>, _ctx: &mut JournalSinkContext<H>| {
                     let event = event.clone();
                     Box::pin(async move {
                         if let JournalSinkEvent::Error(msg) = event {
@@ -153,12 +104,88 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
                             unreachable!()
                         }
                     })
-                })
-                .done()
-            
-            // Flushing -> Draining
-            .when("Flushing")
-                .on("Ready", |_state, _event, _ctx| {
+                };
+            }
+
+            state JournalSinkState::Initialized {
+                on JournalSinkEvent::Ready => |_state: &JournalSinkState<H>, _event: &JournalSinkEvent<H>, _ctx: &mut JournalSinkContext<H>| {
+                    Box::pin(async move {
+                        Ok(Transition {
+                            next_state: JournalSinkState::Running,
+                            actions: vec![JournalSinkAction::PublishRunning],
+                        })
+                    })
+                };
+
+                on JournalSinkEvent::Error => |_state: &JournalSinkState<H>, event: &JournalSinkEvent<H>, _ctx: &mut JournalSinkContext<H>| {
+                    let event = event.clone();
+                    Box::pin(async move {
+                        if let JournalSinkEvent::Error(msg) = event {
+                            Ok(Transition {
+                                next_state: JournalSinkState::Failed(msg),
+                                actions: vec![JournalSinkAction::Cleanup],
+                            })
+                        } else {
+                            unreachable!()
+                        }
+                    })
+                };
+            }
+
+            state JournalSinkState::Running {
+                on JournalSinkEvent::Ready => |_state: &JournalSinkState<H>, _event: &JournalSinkEvent<H>, _ctx: &mut JournalSinkContext<H>| {
+                    Box::pin(async move {
+                        tracing::info!("JournalSinkSupervisor: received Ready in Running; treating as no-op");
+                        Ok(Transition {
+                            next_state: JournalSinkState::Running,
+                            actions: vec![],
+                        })
+                    })
+                };
+
+                on JournalSinkEvent::ReceivedEOF => |_state: &JournalSinkState<H>, _event: &JournalSinkEvent<H>, ctx: &mut JournalSinkContext<H>| {
+                    Box::pin(async move {
+                        tracing::info!(
+                            stage_name = %ctx.stage_name,
+                            "JournalSinkSupervisor: ReceivedEOF -> Drained (flush + completion + cleanup)"
+                        );
+                        Ok(Transition {
+                            next_state: JournalSinkState::Drained,
+                            actions: vec![
+                                JournalSinkAction::FlushBuffers,
+                                JournalSinkAction::SendCompletion,
+                                JournalSinkAction::Cleanup,
+                            ],
+                        })
+                    })
+                };
+
+                on JournalSinkEvent::BeginFlush => |_state: &JournalSinkState<H>, _event: &JournalSinkEvent<H>, _ctx: &mut JournalSinkContext<H>| {
+                    Box::pin(async move {
+                        Ok(Transition {
+                            next_state: JournalSinkState::Flushing,
+                            actions: vec![JournalSinkAction::FlushBuffers],
+                        })
+                    })
+                };
+
+                on JournalSinkEvent::Error => |_state: &JournalSinkState<H>, event: &JournalSinkEvent<H>, _ctx: &mut JournalSinkContext<H>| {
+                    let event = event.clone();
+                    Box::pin(async move {
+                        if let JournalSinkEvent::Error(msg) = event {
+                            Ok(Transition {
+                                next_state: JournalSinkState::Failed(msg),
+                                actions: vec![JournalSinkAction::Cleanup],
+                            })
+                        } else {
+                            unreachable!()
+                        }
+                    })
+                };
+            }
+
+            state JournalSinkState::Flushing {
+                on JournalSinkEvent::Ready => |_state: &JournalSinkState<H>, _event: &JournalSinkEvent<H>, _ctx: &mut JournalSinkContext<H>| {
                     Box::pin(async move {
                         tracing::info!("JournalSinkSupervisor: received Ready in Flushing; treating as no-op");
                         Ok(Transition {
@@ -166,8 +193,9 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
                             actions: vec![],
                         })
                     })
-                })
-                .on("FlushComplete", |_state, _event, _ctx| {
+                };
+
+                on JournalSinkEvent::FlushComplete => |_state: &JournalSinkState<H>, _event: &JournalSinkEvent<H>, _ctx: &mut JournalSinkContext<H>| {
                     Box::pin(async move {
                         tracing::info!(
                             target: "flowip-080o",
@@ -178,8 +206,9 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
                             actions: vec![],
                         })
                     })
-                })
-                .on("Error", |_state, event, _ctx| {
+                };
+
+                on JournalSinkEvent::Error => |_state: &JournalSinkState<H>, event: &JournalSinkEvent<H>, _ctx: &mut JournalSinkContext<H>| {
                     let event = event.clone();
                     Box::pin(async move {
                         if let JournalSinkEvent::Error(msg) = event {
@@ -191,12 +220,11 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
                             unreachable!()
                         }
                     })
-                })
-                .done()
-            
-            // Draining -> Drained
-            .when("Draining")
-                .on("Ready", |_state, _event, _ctx| {
+                };
+            }
+
+            state JournalSinkState::Draining {
+                on JournalSinkEvent::Ready => |_state: &JournalSinkState<H>, _event: &JournalSinkEvent<H>, _ctx: &mut JournalSinkContext<H>| {
                     Box::pin(async move {
                         tracing::info!("JournalSinkSupervisor: received Ready in Draining; treating as no-op");
                         Ok(Transition {
@@ -204,8 +232,9 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
                             actions: vec![],
                         })
                     })
-                })
-                .on("BeginDrain", |_state, _event, _ctx| {
+                };
+
+                on JournalSinkEvent::BeginDrain => |_state: &JournalSinkState<H>, _event: &JournalSinkEvent<H>, _ctx: &mut JournalSinkContext<H>| {
                     Box::pin(async move {
                         tracing::info!(
                             target: "flowip-080o",
@@ -216,37 +245,57 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
                             actions: vec![JournalSinkAction::SendCompletion, JournalSinkAction::Cleanup],
                         })
                     })
-                })
-                .done()
-            
-            // Error transitions from any state
-            .from_any()
-                .on("Error", |state, event, _ctx| {
+                };
+
+                on JournalSinkEvent::Error => |_state: &JournalSinkState<H>, event: &JournalSinkEvent<H>, _ctx: &mut JournalSinkContext<H>| {
                     let event = event.clone();
-                    let state = state.clone();
                     Box::pin(async move {
                         if let JournalSinkEvent::Error(msg) = event {
-                            // If already failed, don't cleanup again
-                            if matches!(state, JournalSinkState::Failed(_)) {
-                                Ok(Transition {
-                                    next_state: state.clone(),
-                                    actions: vec![],
-                                })
-                            } else {
-                                Ok(Transition {
-                                    next_state: JournalSinkState::Failed(msg),
-                                    actions: vec![JournalSinkAction::Cleanup],
-                                })
-                            }
+                            Ok(Transition {
+                                next_state: JournalSinkState::Failed(msg),
+                                actions: vec![JournalSinkAction::Cleanup],
+                            })
                         } else {
                             unreachable!()
                         }
                     })
-                })
-                .done()
+                };
+            }
 
-            // Catch all unhandled events
-            .when_unhandled(|state, event, _ctx| {
+            state JournalSinkState::Drained {
+                on JournalSinkEvent::Error => |_state: &JournalSinkState<H>, event: &JournalSinkEvent<H>, _ctx: &mut JournalSinkContext<H>| {
+                    let event = event.clone();
+                    Box::pin(async move {
+                        if let JournalSinkEvent::Error(msg) = event {
+                            Ok(Transition {
+                                next_state: JournalSinkState::Failed(msg),
+                                actions: vec![JournalSinkAction::Cleanup],
+                            })
+                        } else {
+                            unreachable!()
+                        }
+                    })
+                };
+            }
+
+            state JournalSinkState::Failed {
+                on JournalSinkEvent::Error => |state: &JournalSinkState<H>, event: &JournalSinkEvent<H>, _ctx: &mut JournalSinkContext<H>| {
+                    let state = state.clone();
+                    let event = event.clone();
+                    Box::pin(async move {
+                        if let JournalSinkEvent::Error(_msg) = event {
+                            Ok(Transition {
+                                next_state: state,
+                                actions: vec![],
+                            })
+                        } else {
+                            unreachable!()
+                        }
+                    })
+                };
+            }
+
+            unhandled => |state: &JournalSinkState<H>, event: &JournalSinkEvent<H>, _ctx: &mut JournalSinkContext<H>| {
                 let state_name = state.variant_name().to_string();
                 let event_name = event.variant_name().to_string();
                 Box::pin(async move {
@@ -261,7 +310,8 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
                         event: event_name,
                     })
                 })
-            })
+            };
+        }
     }
 
     fn name(&self) -> &str {

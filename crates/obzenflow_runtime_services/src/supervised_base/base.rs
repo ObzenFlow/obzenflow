@@ -3,7 +3,7 @@
 //! This module provides shared types and traits used by both self-supervised
 //! and handler-supervised state machine implementations.
 
-use obzenflow_fsm::{EventVariant, FsmAction, FsmContext, StateVariant};
+use obzenflow_fsm::{EventVariant, FsmAction, FsmContext, StateMachine, StateVariant};
 
 /// Directives that control a state's event loop
 #[derive(Debug, Clone)]
@@ -35,13 +35,15 @@ pub trait Supervisor: private::Sealed {
     type Context: FsmContext;
     type Action: FsmAction<Context = Self::Context>;
 
-    /// Configure the FSM builder with state transitions
-    /// Each supervisor must implement this to define its state transitions
-    /// The actual .build() will be called by the framework
-    fn configure_fsm(
+    /// Build the fully configured FSM for this supervisor.
+    ///
+    /// Implementors are expected to use the typed `fsm!` DSL (or an
+    /// equivalent strongly-typed constructor) to define their state
+    /// machines. The legacy FsmBuilder-based path has been removed.
+    fn build_state_machine(
         &self,
-        builder: obzenflow_fsm::FsmBuilder<Self::State, Self::Event, Self::Context, Self::Action>,
-    ) -> obzenflow_fsm::FsmBuilder<Self::State, Self::Event, Self::Context, Self::Action>;
+        initial_state: Self::State,
+    ) -> StateMachine<Self::State, Self::Event, Self::Context, Self::Action>;
 
     /// Get the name of this supervised component
     fn name(&self) -> &str;

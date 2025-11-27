@@ -115,22 +115,33 @@ impl Supervisor for MySupervisor {
     type Context = MyContext;
     type Action = MyAction;
     
-    fn configure_fsm(&self, builder: FsmBuilder<...>) -> FsmBuilder<...> {
-        builder
-            .when("Created")
-            .on("Start", |_state, _event, _ctx| async move {
-                Ok(Transition {
-                    next_state: MyState::Running,
-                    actions: vec![MyAction::Initialize],
-                })
-            })
-            .done()
-        // ... more transitions
+    fn build_state_machine(
+        &self,
+        initial_state: Self::State,
+    ) -> StateMachine<Self::State, Self::Event, Self::Context, Self::Action> {
+        fsm! {
+            state:   MyState;
+            event:   MyEvent;
+            context: MyContext;
+            action:  MyAction;
+            initial: initial_state;
+
+            state MyState::Created {
+                on MyEvent::Start => |_state: &MyState, _event: &MyEvent, _ctx: &mut MyContext| {
+                    Box::pin(async move {
+                        Ok(Transition {
+                            next_state: MyState::Running,
+                            actions: vec![MyAction::Initialize],
+                        })
+                    })
+                };
+            }
+
+            // ... more states and transitions
+        }
     }
     
     // Required trait methods
-    fn journal(&self) -> &Arc<ReactiveJournal> { &self.journal }
-    fn writer_id(&self) -> &WriterId { &self.writer_id }
     fn name(&self) -> &str { &self.name }
 }
 

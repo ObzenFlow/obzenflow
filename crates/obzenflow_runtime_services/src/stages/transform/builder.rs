@@ -154,11 +154,14 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Supe
     type Context = TransformContext<H>;
     type Action = TransformAction<H>;
 
-    fn configure_fsm(
+    fn build_state_machine(
         &self,
-        builder: obzenflow_fsm::FsmBuilder<Self::State, Self::Event, Self::Context, Self::Action>,
-    ) -> obzenflow_fsm::FsmBuilder<Self::State, Self::Event, Self::Context, Self::Action> {
-        self.supervisor.configure_fsm(builder)
+        initial_state: Self::State,
+    ) -> obzenflow_fsm::StateMachine<Self::State, Self::Event, Self::Context, Self::Action> {
+        // Delegate to the inner supervisor so we use its FSM definition
+        // (currently implemented via the typed `fsm!` DSL) rather than
+        // attempting to reconfigure a fresh FsmBuilder here.
+        self.supervisor.build_state_machine(initial_state)
     }
 
     fn name(&self) -> &str {

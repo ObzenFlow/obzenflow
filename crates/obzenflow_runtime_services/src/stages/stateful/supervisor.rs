@@ -12,7 +12,7 @@ use obzenflow_core::event::SystemEvent;
 use obzenflow_core::journal::journal::Journal;
 use obzenflow_core::EventEnvelope;
 use obzenflow_core::{ChainEvent, StageId};
-use obzenflow_fsm::{EventVariant, FsmBuilder, StateVariant, Transition};
+use obzenflow_fsm::{fsm, EventVariant, StateVariant, Transition};
 use std::sync::Arc;
 
 use super::fsm::{StatefulAction, StatefulContext, StatefulEvent, StatefulState};
@@ -51,83 +51,33 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Super
     type Context = StatefulContext<H>;
     type Action = StatefulAction<H>;
 
-    fn configure_fsm(
+    fn build_state_machine(
         &self,
-        builder: FsmBuilder<Self::State, Self::Event, Self::Context, Self::Action>,
-    ) -> FsmBuilder<Self::State, Self::Event, Self::Context, Self::Action> {
-        builder
-            // Created -> Initialized
-            .when("Created")
-                .on("Initialize", |_state, _event, ctx| {
-                    Box::pin(async move {
-                        // Track state transition in instrumentation
-                        ctx.instrumentation.transition_to_state("Initialized");
+        initial_state: Self::State,
+    ) -> obzenflow_fsm::StateMachine<Self::State, Self::Event, Self::Context, Self::Action> {
+        fsm! {
+            state:   StatefulState<H>;
+            event:   StatefulEvent<H>;
+            context: StatefulContext<H>;
+            action:  StatefulAction<H>;
+            initial: initial_state;
 
+            state StatefulState::Created {
+                on StatefulEvent::Initialize => |_state: &StatefulState<H>, _event: &StatefulEvent<H>, ctx: &mut StatefulContext<H>| {
+                    Box::pin(async move {
+                        ctx.instrumentation.transition_to_state("Initialized");
                         Ok(Transition {
                             next_state: StatefulState::Initialized,
                             actions: vec![StatefulAction::AllocateResources],
                         })
                     })
-                })
-                .done()
+                };
 
-            // Initialized -> Accumulating (stateful stages start immediately)
-            .when("Initialized")
-                .on("Ready", |_state, _event, ctx| {
-                    Box::pin(async move {
-                        // Track state transition in instrumentation
-                        ctx.instrumentation.transition_to_state("Accumulating");
-
-                        Ok(Transition {
-                            next_state: StatefulState::Accumulating,
-                            actions: vec![StatefulAction::PublishRunning],
-                        })
-                    })
-                })
-                .done()
-
-            // Accumulating -> Emitting (when should_emit returns true)
-            // Accumulating -> Draining (on EOF)
-            .when("Accumulating")
-                // Ready messages can reappear (ex: wide system subscriptions); ignore if already running
-                .on("Ready", |_state, _event, _ctx| {
-                    Box::pin(async move {
-                        Ok(Transition {
-                            next_state: StatefulState::Accumulating,
-                            actions: vec![],
-                        })
-                    })
-                })
-                .on("ShouldEmit", |_state, _event, ctx| {
-                    Box::pin(async move {
-                        // Track state transition in instrumentation
-                        ctx.instrumentation.transition_to_state("Emitting");
-
-                        Ok(Transition {
-                            next_state: StatefulState::Emitting,
-                            actions: vec![], // Emission handled in dispatch_state
-                        })
-                    })
-                })
-                .on("ReceivedEOF", |_state, _event, ctx| {
-                    Box::pin(async move {
-                        // Track state transition in instrumentation
-                        ctx.instrumentation.transition_to_state("Draining");
-
-                        Ok(Transition {
-                            next_state: StatefulState::Draining,
-                            actions: vec![], // Draining handled in dispatch_state
-                        })
-                    })
-                })
-                .on("Error", |_state, event, ctx| {
+                // Fallback error handling for Created (matches original from_any behavior)
+                on StatefulEvent::Error => |_state: &StatefulState<H>, event: &StatefulEvent<H>, _ctx: &mut StatefulContext<H>| {
                     let event = event.clone();
                     Box::pin(async move {
                         if let StatefulEvent::Error(msg) = event {
-                            // Track state transition and failure in instrumentation
-                            ctx.instrumentation.transition_to_state("Failed");
-                            ctx.instrumentation.failures_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
                             Ok(Transition {
                                 next_state: StatefulState::Failed(msg),
                                 actions: vec![StatefulAction::Cleanup],
@@ -136,40 +86,125 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Super
                             unreachable!()
                         }
                     })
-                })
-                .done()
+                };
+            }
 
-            // Emitting -> Accumulating (future: emission strategies)
-            .when("Emitting")
-                // Ready can show up from late subscriptions; treat as no-op while emitting
-                .on("Ready", |_state, _event, _ctx| {
+            state StatefulState::Initialized {
+                on StatefulEvent::Ready => |_state: &StatefulState<H>, _event: &StatefulEvent<H>, ctx: &mut StatefulContext<H>| {
+                    Box::pin(async move {
+                        ctx.instrumentation.transition_to_state("Accumulating");
+                        Ok(Transition {
+                            next_state: StatefulState::Accumulating,
+                            actions: vec![StatefulAction::PublishRunning],
+                        })
+                    })
+                };
+
+                // Fallback error handling for Initialized (matches original from_any behavior)
+                on StatefulEvent::Error => |_state: &StatefulState<H>, event: &StatefulEvent<H>, _ctx: &mut StatefulContext<H>| {
+                    let event = event.clone();
+                    Box::pin(async move {
+                        if let StatefulEvent::Error(msg) = event {
+                            Ok(Transition {
+                                next_state: StatefulState::Failed(msg),
+                                actions: vec![StatefulAction::Cleanup],
+                            })
+                        } else {
+                            unreachable!()
+                        }
+                    })
+                };
+            }
+
+            state StatefulState::Accumulating {
+                on StatefulEvent::Ready => |_state: &StatefulState<H>, _event: &StatefulEvent<H>, _ctx: &mut StatefulContext<H>| {
+                    Box::pin(async move {
+                        Ok(Transition {
+                            next_state: StatefulState::Accumulating,
+                            actions: vec![],
+                        })
+                    })
+                };
+
+                on StatefulEvent::ShouldEmit => |_state: &StatefulState<H>, _event: &StatefulEvent<H>, ctx: &mut StatefulContext<H>| {
+                    Box::pin(async move {
+                        ctx.instrumentation.transition_to_state("Emitting");
+                        Ok(Transition {
+                            next_state: StatefulState::Emitting,
+                            actions: vec![],
+                        })
+                    })
+                };
+
+                on StatefulEvent::ReceivedEOF => |_state: &StatefulState<H>, _event: &StatefulEvent<H>, ctx: &mut StatefulContext<H>| {
+                    Box::pin(async move {
+                        ctx.instrumentation.transition_to_state("Draining");
+                        Ok(Transition {
+                            next_state: StatefulState::Draining,
+                            actions: vec![],
+                        })
+                    })
+                };
+
+                on StatefulEvent::Error => |_state: &StatefulState<H>, event: &StatefulEvent<H>, ctx: &mut StatefulContext<H>| {
+                    let event = event.clone();
+                    Box::pin(async move {
+                        if let StatefulEvent::Error(msg) = event {
+                            ctx.instrumentation.transition_to_state("Failed");
+                            ctx.instrumentation
+                                .failures_total
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            Ok(Transition {
+                                next_state: StatefulState::Failed(msg),
+                                actions: vec![StatefulAction::Cleanup],
+                            })
+                        } else {
+                            unreachable!()
+                        }
+                    })
+                };
+            }
+
+            state StatefulState::Emitting {
+                on StatefulEvent::Ready => |_state: &StatefulState<H>, _event: &StatefulEvent<H>, _ctx: &mut StatefulContext<H>| {
                     Box::pin(async move {
                         Ok(Transition {
                             next_state: StatefulState::Emitting,
                             actions: vec![],
                         })
                     })
-                })
-                .on("EmitComplete", |_state, _event, ctx| {
-                    Box::pin(async move {
-                        // Track state transition in instrumentation
-                        ctx.instrumentation.transition_to_state("Accumulating");
+                };
 
+                on StatefulEvent::EmitComplete => |_state: &StatefulState<H>, _event: &StatefulEvent<H>, ctx: &mut StatefulContext<H>| {
+                    Box::pin(async move {
+                        ctx.instrumentation.transition_to_state("Accumulating");
                         Ok(Transition {
                             next_state: StatefulState::Accumulating,
                             actions: vec![],
                         })
                     })
-                })
-                .done()
+                };
 
-            // Draining -> Drained
-            .when("Draining")
-                .on("DrainComplete", |_state, _event, ctx| {
+                // Fallback error handling for Emitting (matches original from_any behavior)
+                on StatefulEvent::Error => |_state: &StatefulState<H>, event: &StatefulEvent<H>, _ctx: &mut StatefulContext<H>| {
+                    let event = event.clone();
                     Box::pin(async move {
-                        // Track state transition in instrumentation
-                        ctx.instrumentation.transition_to_state("Drained");
+                        if let StatefulEvent::Error(msg) = event {
+                            Ok(Transition {
+                                next_state: StatefulState::Failed(msg),
+                                actions: vec![StatefulAction::Cleanup],
+                            })
+                        } else {
+                            unreachable!()
+                        }
+                    })
+                };
+            }
 
+            state StatefulState::Draining {
+                on StatefulEvent::DrainComplete => |_state: &StatefulState<H>, _event: &StatefulEvent<H>, ctx: &mut StatefulContext<H>| {
+                    Box::pin(async move {
+                        ctx.instrumentation.transition_to_state("Drained");
                         Ok(Transition {
                             next_state: StatefulState::Drained,
                             actions: vec![
@@ -179,15 +214,16 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Super
                             ],
                         })
                     })
-                })
-                .on("Error", |_state, event, ctx| {
+                };
+
+                on StatefulEvent::Error => |_state: &StatefulState<H>, event: &StatefulEvent<H>, ctx: &mut StatefulContext<H>| {
                     let event = event.clone();
                     Box::pin(async move {
                         if let StatefulEvent::Error(msg) = event {
-                            // Track state transition and failure in instrumentation
                             ctx.instrumentation.transition_to_state("Failed");
-                            ctx.instrumentation.failures_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
+                            ctx.instrumentation
+                                .failures_total
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             Ok(Transition {
                                 next_state: StatefulState::Failed(msg),
                                 actions: vec![StatefulAction::Cleanup],
@@ -196,39 +232,48 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Super
                             unreachable!()
                         }
                     })
-                })
-                .done()
-
-            // Error transitions from any state
-            .from_any()
-                .on("Error", |state, event, _ctx| {
+                };
+            }
+            
+            // Drained: terminal on success; still handle Error like from_any
+            state StatefulState::Drained {
+                on StatefulEvent::Error => |_state: &StatefulState<H>, event: &StatefulEvent<H>, _ctx: &mut StatefulContext<H>| {
                     let event = event.clone();
-                    let state = state.clone();
                     Box::pin(async move {
                         if let StatefulEvent::Error(msg) = event {
-                            // If already failed, don't cleanup again
-                            if matches!(state, StatefulState::Failed(_)) {
-                                Ok(Transition {
-                                    next_state: state.clone(),
-                                    actions: vec![],
-                                })
-                            } else {
-                                Ok(Transition {
-                                    next_state: StatefulState::Failed(msg),
-                                    actions: vec![StatefulAction::Cleanup],
-                                })
-                            }
+                            Ok(Transition {
+                                next_state: StatefulState::Failed(msg),
+                                actions: vec![StatefulAction::Cleanup],
+                            })
                         } else {
                             unreachable!()
                         }
                     })
-                })
-                .done()
+                };
+            }
 
-            // Catch all unhandled events
-            .when_unhandled(|state, event, _ctx| {
+            // Failed: receiving Error again should be idempotent (no extra cleanup)
+            state StatefulState::Failed {
+                on StatefulEvent::Error => |state: &StatefulState<H>, event: &StatefulEvent<H>, _ctx: &mut StatefulContext<H>| {
+                    let state = state.clone();
+                    let event = event.clone();
+                    Box::pin(async move {
+                        if let StatefulEvent::Error(_msg) = event {
+                            Ok(Transition {
+                                next_state: state,
+                                actions: vec![],
+                            })
+                        } else {
+                            unreachable!()
+                        }
+                    })
+                };
+            }
+
+            unhandled => |state: &StatefulState<H>, event: &StatefulEvent<H>, _ctx: &mut StatefulContext<H>| {
                 let state_name = state.variant_name().to_string();
                 let event_name = event.variant_name().to_string();
+
                 Box::pin(async move {
                     tracing::error!(
                         supervisor = "StatefulSupervisor",
@@ -241,7 +286,8 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Super
                         event: event_name,
                     })
                 })
-            })
+            };
+        }
     }
 
     fn name(&self) -> &str {

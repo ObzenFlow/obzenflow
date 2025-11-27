@@ -10,7 +10,7 @@ use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::SystemEvent;
 use obzenflow_core::journal::journal::Journal;
 use obzenflow_core::{ChainEvent, StageId};
-use obzenflow_fsm::{EventVariant, FsmBuilder, StateVariant, Transition};
+use obzenflow_fsm::{fsm, EventVariant, StateVariant, Transition};
 use std::sync::Arc;
 
 use super::fsm::{JoinAction, JoinContext, JoinEvent, JoinState};
@@ -47,48 +47,78 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
     type Context = JoinContext<H>;
     type Action = JoinAction<H>;
 
-    fn configure_fsm(
+    fn build_state_machine(
         &self,
-        builder: FsmBuilder<Self::State, Self::Event, Self::Context, Self::Action>,
-    ) -> FsmBuilder<Self::State, Self::Event, Self::Context, Self::Action> {
-        builder
-            // Created -> Initialized
-            .when("Created")
-                .on("Initialize", |_state, _event, ctx| {
-                    Box::pin(async move {
-                        // Track state transition in instrumentation
-                        ctx.instrumentation.transition_to_state("Initialized");
+        initial_state: Self::State,
+    ) -> obzenflow_fsm::StateMachine<Self::State, Self::Event, Self::Context, Self::Action> {
+        fsm! {
+            state:   JoinState<H>;
+            event:   JoinEvent<H>;
+            context: JoinContext<H>;
+            action:  JoinAction<H>;
+            initial: initial_state;
 
+            state JoinState::Created {
+                on JoinEvent::Initialize => |_state: &JoinState<H>, _event: &JoinEvent<H>, ctx: &mut JoinContext<H>| {
+                    Box::pin(async move {
+                        ctx.instrumentation.transition_to_state("Initialized");
                         Ok(Transition {
                             next_state: JoinState::Initialized,
                             actions: vec![JoinAction::AllocateResources],
                         })
                     })
-                })
-                .done()
+                };
 
-            // Initialized -> Hydrating
-            .when("Initialized")
-                .on("Ready", |_state, _event, ctx| {
+                on JoinEvent::Error => |_state: &JoinState<H>, event: &JoinEvent<H>, ctx: &mut JoinContext<H>| {
+                    let event = event.clone();
                     Box::pin(async move {
-                        // Track state transition in instrumentation
-                        ctx.instrumentation.transition_to_state("Hydrating");
+                        if let JoinEvent::Error(msg) = event {
+                            ctx.instrumentation.transition_to_state("Failed");
+                            ctx.instrumentation.failures_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            Ok(Transition {
+                                next_state: JoinState::Failed(msg),
+                                actions: vec![JoinAction::Cleanup],
+                            })
+                        } else {
+                            unreachable!()
+                        }
+                    })
+                };
+            }
 
+            state JoinState::Initialized {
+                on JoinEvent::Ready => |_state: &JoinState<H>, _event: &JoinEvent<H>, ctx: &mut JoinContext<H>| {
+                    Box::pin(async move {
+                        ctx.instrumentation.transition_to_state("Hydrating");
                         Ok(Transition {
                             next_state: JoinState::Hydrating,
                             actions: vec![
                                 JoinAction::InitializeHandlerState,
-                                JoinAction::PublishRunning
+                                JoinAction::PublishRunning,
                             ],
                         })
                     })
-                })
-                .done()
+                };
 
-            // Hydrating -> Enriching (only when reference completes)
-            .when("Hydrating")
-                // Idempotent Ready in Hydrating: ignore redundant Ready signals
-                .on("Ready", |_state, _event, _ctx| {
+                on JoinEvent::Error => |_state: &JoinState<H>, event: &JoinEvent<H>, ctx: &mut JoinContext<H>| {
+                    let event = event.clone();
+                    Box::pin(async move {
+                        if let JoinEvent::Error(msg) = event {
+                            ctx.instrumentation.transition_to_state("Failed");
+                            ctx.instrumentation.failures_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            Ok(Transition {
+                                next_state: JoinState::Failed(msg),
+                                actions: vec![JoinAction::Cleanup],
+                            })
+                        } else {
+                            unreachable!()
+                        }
+                    })
+                };
+            }
+
+            state JoinState::Hydrating {
+                on JoinEvent::Ready => |_state: &JoinState<H>, _event: &JoinEvent<H>, _ctx: &mut JoinContext<H>| {
                     Box::pin(async move {
                         tracing::info!("JoinSupervisor: received Ready in Hydrating; treating as no-op");
                         Ok(Transition {
@@ -96,30 +126,29 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
                             actions: vec![],
                         })
                     })
-                })
-                .on("ReceivedEOF", |_state, event, ctx| {
+                };
+
+                on JoinEvent::ReceivedEOF => |_state: &JoinState<H>, event: &JoinEvent<H>, ctx: &mut JoinContext<H>| {
                     let event = event.clone();
                     Box::pin(async move {
                         if let JoinEvent::ReceivedEOF = event {
-                            // In Hydrating, we only read from reference_subscription in dispatch_state
-                            // So ReceivedEOF must be from reference
                             ctx.instrumentation.transition_to_state("Enriching");
                             Ok(Transition {
                                 next_state: JoinState::Enriching,
-                                actions: vec![], // No actions - dispatch_state handles it
+                                actions: vec![],
                             })
                         } else {
                             unreachable!()
                         }
                     })
-                })
-                .on("Error", |_state, event, ctx| {
+                };
+
+                on JoinEvent::Error => |_state: &JoinState<H>, event: &JoinEvent<H>, ctx: &mut JoinContext<H>| {
                     let event = event.clone();
                     Box::pin(async move {
                         if let JoinEvent::Error(msg) = event {
                             ctx.instrumentation.transition_to_state("Failed");
                             ctx.instrumentation.failures_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
                             Ok(Transition {
                                 next_state: JoinState::Failed(msg),
                                 actions: vec![JoinAction::Cleanup],
@@ -128,13 +157,11 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
                             unreachable!()
                         }
                     })
-                })
-                .done()
+                };
+            }
 
-            // Enriching -> Draining (on stream EOF)
-            .when("Enriching")
-                // Idempotent Ready: ignore redundant Ready signals once hydrating/enriching
-                .on("Ready", |_state, _event, _ctx| {
+            state JoinState::Enriching {
+                on JoinEvent::Ready => |_state: &JoinState<H>, _event: &JoinEvent<H>, _ctx: &mut JoinContext<H>| {
                     Box::pin(async move {
                         tracing::info!("JoinSupervisor: received Ready in Enriching; treating as no-op");
                         Ok(Transition {
@@ -142,20 +169,9 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
                             actions: vec![],
                         })
                     })
-                })
-                .on("ReceivedEOF", |_state, _event, ctx| {
-                    Box::pin(async move {
-                        // If we received EOF in Enriching, it came from stream_subscription
-                        // (we only read from stream_subscription in Enriching state)
-                        // Don't check writer_id - subscription context tells us it's from stream
-                        ctx.instrumentation.transition_to_state("Draining");
-                        Ok(Transition {
-                            next_state: JoinState::Draining,
-                            actions: vec![], // No actions - dispatch_state handles draining
-                        })
-                    })
-                })
-                .on("BeginDrain", |_state, _event, ctx| {
+                };
+
+                on JoinEvent::ReceivedEOF => |_state: &JoinState<H>, _event: &JoinEvent<H>, ctx: &mut JoinContext<H>| {
                     Box::pin(async move {
                         ctx.instrumentation.transition_to_state("Draining");
                         Ok(Transition {
@@ -163,14 +179,24 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
                             actions: vec![],
                         })
                     })
-                })
-                .on("Error", |_state, event, ctx| {
+                };
+
+                on JoinEvent::BeginDrain => |_state: &JoinState<H>, _event: &JoinEvent<H>, ctx: &mut JoinContext<H>| {
+                    Box::pin(async move {
+                        ctx.instrumentation.transition_to_state("Draining");
+                        Ok(Transition {
+                            next_state: JoinState::Draining,
+                            actions: vec![],
+                        })
+                    })
+                };
+
+                on JoinEvent::Error => |_state: &JoinState<H>, event: &JoinEvent<H>, ctx: &mut JoinContext<H>| {
                     let event = event.clone();
                     Box::pin(async move {
                         if let JoinEvent::Error(msg) = event {
                             ctx.instrumentation.transition_to_state("Failed");
                             ctx.instrumentation.failures_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
                             Ok(Transition {
                                 next_state: JoinState::Failed(msg),
                                 actions: vec![JoinAction::Cleanup],
@@ -179,15 +205,13 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
                             unreachable!()
                         }
                     })
-                })
-                .done()
+                };
+            }
 
-            // Draining -> Drained
-            .when("Draining")
-                .on("DrainComplete", |_state, _event, ctx| {
+            state JoinState::Draining {
+                on JoinEvent::DrainComplete => |_state: &JoinState<H>, _event: &JoinEvent<H>, ctx: &mut JoinContext<H>| {
                     Box::pin(async move {
                         ctx.instrumentation.transition_to_state("Drained");
-
                         Ok(Transition {
                             next_state: JoinState::Drained,
                             actions: vec![
@@ -197,14 +221,14 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
                             ],
                         })
                     })
-                })
-                .on("Error", |_state, event, ctx| {
+                };
+
+                on JoinEvent::Error => |_state: &JoinState<H>, event: &JoinEvent<H>, ctx: &mut JoinContext<H>| {
                     let event = event.clone();
                     Box::pin(async move {
                         if let JoinEvent::Error(msg) = event {
                             ctx.instrumentation.transition_to_state("Failed");
                             ctx.instrumentation.failures_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
                             Ok(Transition {
                                 next_state: JoinState::Failed(msg),
                                 actions: vec![JoinAction::Cleanup],
@@ -213,37 +237,46 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
                             unreachable!()
                         }
                     })
-                })
-                .done()
+                };
+            }
 
-            // Error transitions from any state
-            .from_any()
-                .on("Error", |state, event, _ctx| {
+            state JoinState::Drained {
+                on JoinEvent::Error => |_state: &JoinState<H>, event: &JoinEvent<H>, ctx: &mut JoinContext<H>| {
                     let event = event.clone();
-                    let state = state.clone();
                     Box::pin(async move {
                         if let JoinEvent::Error(msg) = event {
-                            // If already failed, don't cleanup again
-                            if matches!(state, JoinState::Failed(_)) {
-                                Ok(Transition {
-                                    next_state: state.clone(),
-                                    actions: vec![],
-                                })
-                            } else {
-                                Ok(Transition {
-                                    next_state: JoinState::Failed(msg),
-                                    actions: vec![JoinAction::Cleanup],
-                                })
-                            }
+                            ctx.instrumentation.transition_to_state("Failed");
+                            ctx.instrumentation.failures_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            Ok(Transition {
+                                next_state: JoinState::Failed(msg),
+                                actions: vec![JoinAction::Cleanup],
+                            })
                         } else {
                             unreachable!()
                         }
                     })
-                })
-                .done()
+                };
+            }
 
-            // Catch all unhandled events
-            .when_unhandled(|state, event, _ctx| {
+            state JoinState::Failed {
+                on JoinEvent::Error => |state: &JoinState<H>, event: &JoinEvent<H>, ctx: &mut JoinContext<H>| {
+                    let state = state.clone();
+                    let event = event.clone();
+                    Box::pin(async move {
+                        if let JoinEvent::Error(_msg) = event {
+                            ctx.instrumentation.transition_to_state("Failed");
+                            Ok(Transition {
+                                next_state: state,
+                                actions: vec![],
+                            })
+                        } else {
+                            unreachable!()
+                        }
+                    })
+                };
+            }
+
+            unhandled => |state: &JoinState<H>, event: &JoinEvent<H>, _ctx: &mut JoinContext<H>| {
                 let state_name = state.variant_name().to_string();
                 let event_name = event.variant_name().to_string();
                 Box::pin(async move {
@@ -258,7 +291,8 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
                         event: event_name,
                     })
                 })
-            })
+            };
+        }
     }
 
     fn name(&self) -> &str {

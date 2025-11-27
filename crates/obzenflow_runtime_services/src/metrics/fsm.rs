@@ -12,7 +12,7 @@ use obzenflow_core::metrics::{Percentile, StageMetadata};
 use obzenflow_core::time::MetricsDuration;
 use obzenflow_core::{ChainEvent, EventId, Journal};
 use obzenflow_fsm::{
-    EventVariant, FsmAction, FsmBuilder, FsmContext, StateMachine, StateVariant, Transition,
+    fsm, EventVariant, FsmAction, FsmContext, StateMachine, StateVariant, Transition,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -971,209 +971,210 @@ pub type MetricsAggregatorFsm = StateMachine<
 
 /// Build the metrics aggregator FSM with lifecycle transitions only
 pub fn build_metrics_aggregator_fsm() -> MetricsAggregatorFsm {
-    FsmBuilder::new(MetricsAggregatorState::Initializing)
-        // Initializing state transitions
-        .when("Initializing")
-        .on(
-            "StartRunning",
-            |_state, _event: &MetricsAggregatorEvent, _ctx| {
+    fsm! {
+        state:   MetricsAggregatorState;
+        event:   MetricsAggregatorEvent;
+        context: MetricsAggregatorContext;
+        action:  MetricsAggregatorAction;
+        initial: MetricsAggregatorState::Initializing;
+
+        state MetricsAggregatorState::Initializing {
+            on MetricsAggregatorEvent::StartRunning => |_state: &MetricsAggregatorState, _event: &MetricsAggregatorEvent, _ctx: &mut MetricsAggregatorContext| {
                 Box::pin(async move {
                     Ok(Transition {
                         next_state: MetricsAggregatorState::Running,
                         actions: vec![MetricsAggregatorAction::Initialize],
                     })
                 })
-            },
-        )
-        .on("Error", |_state, event, _ctx| {
-            let event = event.clone();
-            Box::pin(async move {
-                let error = match event {
-                    MetricsAggregatorEvent::Error(err) => err.clone(),
-                    _ => {
-                        return Err(obzenflow_fsm::FsmError::HandlerError(
-                            "Invalid event for Error handler".to_string(),
-                        ));
-                    }
-                };
-                tracing::error!(error = %error, "Metrics aggregator encountered error");
-                Ok(Transition {
-                    next_state: MetricsAggregatorState::Failed { error },
-                    actions: vec![],
+            };
+
+            on MetricsAggregatorEvent::Error => |_state: &MetricsAggregatorState, event: &MetricsAggregatorEvent, _ctx: &mut MetricsAggregatorContext| {
+                let event = event.clone();
+                Box::pin(async move {
+                    let error = match event {
+                        MetricsAggregatorEvent::Error(err) => err.clone(),
+                        _ => {
+                            return Err(obzenflow_fsm::FsmError::HandlerError(
+                                "Invalid event for Error handler".to_string(),
+                            ));
+                        }
+                    };
+                    tracing::error!(error = %error, "Metrics aggregator encountered error");
+                    Ok(Transition {
+                        next_state: MetricsAggregatorState::Failed { error },
+                        actions: vec![],
+                    })
                 })
-            })
-        })
-        .done()
-        // Running state transitions
-        .when("Running")
-        .on("StartDraining", |_state, _event, _ctx| {
-            Box::pin(async move {
-                Ok(Transition {
-                    next_state: MetricsAggregatorState::Draining {
-                        consecutive_empty_batches: 0,
-                    },
-                    actions: vec![],
+            };
+        }
+
+        state MetricsAggregatorState::Running {
+            on MetricsAggregatorEvent::StartDraining => |_state: &MetricsAggregatorState, _event: &MetricsAggregatorEvent, _ctx: &mut MetricsAggregatorContext| {
+                Box::pin(async move {
+                    Ok(Transition {
+                        next_state: MetricsAggregatorState::Draining {
+                            consecutive_empty_batches: 0,
+                        },
+                        actions: vec![],
+                    })
                 })
-            })
-        })
-        .on("ProcessSystemEvent", |_state, event, _ctx| {
-            let event = event.clone();
-            Box::pin(async move {
-                match event {
-                    MetricsAggregatorEvent::ProcessSystemEvent { envelope } => Ok(Transition {
-                        next_state: MetricsAggregatorState::Running,
-                        actions: vec![MetricsAggregatorAction::ProcessSystemEvent {
-                            envelope: envelope.clone(),
-                        }],
-                    }),
-                    _ => Err(obzenflow_fsm::FsmError::HandlerError(
-                        "Invalid event for ProcessSystemEvent handler".to_string(),
-                    )),
-                }
-            })
-        })
-        .on("ProcessBatch", |_state, event, _ctx| {
-            let event = event.clone();
-            Box::pin(async move {
-                match event {
-                    MetricsAggregatorEvent::ProcessBatch { events } => {
-                        let actions = events
-                            .iter()
-                            .cloned()
-                            .map(|envelope| MetricsAggregatorAction::UpdateMetrics { envelope })
-                            .collect::<Vec<_>>();
-                        Ok(Transition {
+            };
+
+            on MetricsAggregatorEvent::ProcessSystemEvent => |_state: &MetricsAggregatorState, event: &MetricsAggregatorEvent, _ctx: &mut MetricsAggregatorContext| {
+                let event = event.clone();
+                Box::pin(async move {
+                    match event {
+                        MetricsAggregatorEvent::ProcessSystemEvent { envelope } => Ok(Transition {
                             next_state: MetricsAggregatorState::Running,
-                            actions,
-                        })
-                    }
-                    _ => Err(obzenflow_fsm::FsmError::HandlerError(
-                        "Invalid event for ProcessBatch handler".to_string(),
-                    )),
-                }
-            })
-        })
-        .on("ExportMetrics", |_state, _event, _ctx| {
-            Box::pin(async move {
-                Ok(Transition {
-                    next_state: MetricsAggregatorState::Running,
-                    actions: vec![MetricsAggregatorAction::ExportMetrics],
-                })
-            })
-        })
-        .on("Error", |_state, event, _ctx| {
-            let event = event.clone();
-            Box::pin(async move {
-                match event {
-                    MetricsAggregatorEvent::Error(error) => Ok(Transition {
-                        next_state: MetricsAggregatorState::Failed {
-                            error: error.clone(),
-                        },
-                        actions: vec![],
-                    }),
-                    _ => Err(obzenflow_fsm::FsmError::HandlerError(
-                        "Invalid event for Error handler".to_string(),
-                    )),
-                }
-            })
-        })
-        .done()
-        // Draining state transitions
-        .when("Draining")
-        .on("DrainComplete", |_state, event, _ctx| {
-            let event = event.clone();
-            Box::pin(async move {
-                match event {
-                    MetricsAggregatorEvent::DrainComplete { last_event_id } => {
-                        let last_event_id = last_event_id.clone();
-                        Ok(Transition {
-                            next_state: MetricsAggregatorState::Drained {
-                                last_event_id: last_event_id.clone(),
-                            },
-                            actions: vec![MetricsAggregatorAction::PublishDrainComplete {
-                                last_event_id,
+                            actions: vec![MetricsAggregatorAction::ProcessSystemEvent {
+                                envelope: envelope.clone(),
                             }],
-                        })
+                        }),
+                        _ => Err(obzenflow_fsm::FsmError::HandlerError(
+                            "Invalid event for ProcessSystemEvent handler".to_string(),
+                        )),
                     }
-                    _ => Err(obzenflow_fsm::FsmError::HandlerError(
-                        "Invalid event for DrainComplete handler".to_string(),
-                    )),
-                }
-            })
-        })
-        .on("ProcessBatch", |_state, event, _ctx| {
-            let event = event.clone();
-            Box::pin(async move {
-                match event {
-                    MetricsAggregatorEvent::ProcessBatch { events } => {
-                        let actions = events
-                            .iter()
-                            .cloned()
-                            .map(|envelope| MetricsAggregatorAction::UpdateMetrics { envelope })
-                            .collect::<Vec<_>>();
-                        Ok(Transition {
-                            next_state: MetricsAggregatorState::Draining {
-                                consecutive_empty_batches: 0,
-                            },
-                            actions,
-                        })
-                    }
-                    _ => Err(obzenflow_fsm::FsmError::HandlerError(
-                        "Invalid event for ProcessBatch handler in Draining".to_string(),
-                    )),
-                }
-            })
-        })
-        .on("DrainEmptyBatch", |state, _event, _ctx| {
-            let state = state.clone();
-            Box::pin(async move {
-                let next_count = match state {
-                    MetricsAggregatorState::Draining {
-                        consecutive_empty_batches,
-                    } => consecutive_empty_batches + 1,
-                    _ => 0,
-                };
-                Ok(Transition {
-                    next_state: MetricsAggregatorState::Draining {
-                        consecutive_empty_batches: next_count,
-                    },
-                    actions: vec![],
                 })
-            })
-        })
-        .on("Error", |_state, event, _ctx| {
-            let event = event.clone();
-            Box::pin(async move {
-                match event {
-                    MetricsAggregatorEvent::Error(error) => Ok(Transition {
-                        next_state: MetricsAggregatorState::Failed {
-                            error: error.clone(),
+            };
+
+            on MetricsAggregatorEvent::ProcessBatch => |_state: &MetricsAggregatorState, event: &MetricsAggregatorEvent, _ctx: &mut MetricsAggregatorContext| {
+                let event = event.clone();
+                Box::pin(async move {
+                    match event {
+                        MetricsAggregatorEvent::ProcessBatch { events } => {
+                            let actions = events
+                                .iter()
+                                .cloned()
+                                .map(|envelope| MetricsAggregatorAction::UpdateMetrics { envelope })
+                                .collect::<Vec<_>>();
+                            Ok(Transition {
+                                next_state: MetricsAggregatorState::Running,
+                                actions,
+                            })
+                        }
+                        _ => Err(obzenflow_fsm::FsmError::HandlerError(
+                            "Invalid event for ProcessBatch handler".to_string(),
+                        )),
+                    }
+                })
+            };
+
+            on MetricsAggregatorEvent::ExportMetrics => |_state: &MetricsAggregatorState, _event: &MetricsAggregatorEvent, _ctx: &mut MetricsAggregatorContext| {
+                Box::pin(async move {
+                    Ok(Transition {
+                        next_state: MetricsAggregatorState::Running,
+                        actions: vec![MetricsAggregatorAction::ExportMetrics],
+                    })
+                })
+            };
+
+            on MetricsAggregatorEvent::Error => |_state: &MetricsAggregatorState, event: &MetricsAggregatorEvent, _ctx: &mut MetricsAggregatorContext| {
+                let event = event.clone();
+                Box::pin(async move {
+                    match event {
+                        MetricsAggregatorEvent::Error(error) => Ok(Transition {
+                            next_state: MetricsAggregatorState::Failed {
+                                error: error.clone(),
+                            },
+                            actions: vec![],
+                        }),
+                        _ => Err(obzenflow_fsm::FsmError::HandlerError(
+                            "Invalid event for Error handler".to_string(),
+                        )),
+                    }
+                })
+            };
+        }
+
+        state MetricsAggregatorState::Draining {
+            on MetricsAggregatorEvent::DrainComplete => |_state: &MetricsAggregatorState, event: &MetricsAggregatorEvent, _ctx: &mut MetricsAggregatorContext| {
+                let event = event.clone();
+                Box::pin(async move {
+                    match event {
+                        MetricsAggregatorEvent::DrainComplete { last_event_id } => {
+                            let last_event_id = last_event_id.clone();
+                            Ok(Transition {
+                                next_state: MetricsAggregatorState::Drained {
+                                    last_event_id: last_event_id.clone(),
+                                },
+                                actions: vec![MetricsAggregatorAction::PublishDrainComplete {
+                                    last_event_id,
+                                }],
+                            })
+                        }
+                        _ => Err(obzenflow_fsm::FsmError::HandlerError(
+                            "Invalid event for DrainComplete handler".to_string(),
+                        )),
+                    }
+                })
+            };
+
+            on MetricsAggregatorEvent::ProcessBatch => |_state: &MetricsAggregatorState, event: &MetricsAggregatorEvent, _ctx: &mut MetricsAggregatorContext| {
+                let event = event.clone();
+                Box::pin(async move {
+                    match event {
+                        MetricsAggregatorEvent::ProcessBatch { events } => {
+                            let actions = events
+                                .iter()
+                                .cloned()
+                                .map(|envelope| MetricsAggregatorAction::UpdateMetrics { envelope })
+                                .collect::<Vec<_>>();
+                            Ok(Transition {
+                                next_state: MetricsAggregatorState::Draining {
+                                    consecutive_empty_batches: 0,
+                                },
+                                actions,
+                            })
+                        }
+                        _ => Err(obzenflow_fsm::FsmError::HandlerError(
+                            "Invalid event for ProcessBatch handler in Draining".to_string(),
+                        )),
+                    }
+                })
+            };
+
+            on MetricsAggregatorEvent::DrainEmptyBatch => |state: &MetricsAggregatorState, _event: &MetricsAggregatorEvent, _ctx: &mut MetricsAggregatorContext| {
+                let state = state.clone();
+                Box::pin(async move {
+                    let next_count = match state {
+                        MetricsAggregatorState::Draining {
+                            consecutive_empty_batches,
+                        } => consecutive_empty_batches + 1,
+                        _ => 0,
+                    };
+                    Ok(Transition {
+                        next_state: MetricsAggregatorState::Draining {
+                            consecutive_empty_batches: next_count,
                         },
                         actions: vec![],
-                    }),
-                    _ => Err(obzenflow_fsm::FsmError::HandlerError(
-                        "Invalid event for Error handler".to_string(),
-                    )),
-                }
-            })
-        })
-        .done()
+                    })
+                })
+            };
+
+            on MetricsAggregatorEvent::Error => |_state: &MetricsAggregatorState, event: &MetricsAggregatorEvent, _ctx: &mut MetricsAggregatorContext| {
+                let event = event.clone();
+                Box::pin(async move {
+                    match event {
+                        MetricsAggregatorEvent::Error(error) => Ok(Transition {
+                            next_state: MetricsAggregatorState::Failed {
+                                error: error.clone(),
+                            },
+                            actions: vec![],
+                        }),
+                        _ => Err(obzenflow_fsm::FsmError::HandlerError(
+                            "Invalid event for Error handler".to_string(),
+                        )),
+                    }
+                })
+            };
+        }
+
         // Drained state (terminal) - no transitions
-        .when("Drained")
-        .done()
+        state MetricsAggregatorState::Drained { }
+
         // Failed state (terminal) - no transitions
-        .when("Failed")
-        .done()
-        // Handle unhandled events
-        .when_unhandled(|state, event, _ctx| {
-            let state_name = state.variant_name().to_string();
-            let event_name = event.variant_name().to_string();
-            Box::pin(async move {
-                tracing::warn!("Unhandled event {} in state {}", event_name, state_name);
-                Ok(())
-            })
-        })
-        .build()
+        state MetricsAggregatorState::Failed { }
+    }
 }
 
 #[cfg(test)]
