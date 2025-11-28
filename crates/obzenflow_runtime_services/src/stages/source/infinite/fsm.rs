@@ -14,6 +14,7 @@ use std::sync::Arc;
 
 use crate::metrics::instrumentation::StageInstrumentation;
 use crate::stages::common::handlers::InfiniteSourceHandler;
+use crate::stages::source::strategies::{SourceControlContext, SourceControlStrategy};
 
 // ============================================================================
 // FSM States
@@ -254,6 +255,12 @@ pub struct InfiniteSourceContext<H> {
     /// Stage instrumentation for metrics tracking
     pub instrumentation: Arc<StageInstrumentation>,
 
+    /// Source control strategy for this stage
+    pub control_strategy: Arc<dyn SourceControlStrategy>,
+
+    /// Mutable context for the source control strategy
+    pub control_context: SourceControlContext,
+
     /// Phantom to keep the handler type in the context's type parameters
     _marker: PhantomData<H>,
 }
@@ -269,6 +276,7 @@ impl<H> InfiniteSourceContext<H> {
         system_journal: Arc<dyn Journal<SystemEvent>>,
         bus: Arc<crate::message_bus::FsmMessageBus>,
         instrumentation: Arc<StageInstrumentation>,
+        control_strategy: Arc<dyn SourceControlStrategy>,
     ) -> Self {
         Self {
             stage_id,
@@ -283,6 +291,8 @@ impl<H> InfiniteSourceContext<H> {
             can_emit: false,
             shutdown_requested: false,
             instrumentation,
+            control_strategy,
+            control_context: SourceControlContext::new(),
             _marker: PhantomData,
         }
     }
@@ -345,6 +355,14 @@ impl<H: InfiniteSourceHandler + Send + Sync + 'static> FsmAction for InfiniteSou
             }
 
             InfiniteSourceAction::SendEOF => {
+                // Consult the source control strategy (FLOWIP-081a). For now
+                // we preserve existing behaviour for all decisions; strategy
+                // hooks become meaningful in later FLOWIPs (e.g. 051b).
+                let decision = ctx
+                    .control_strategy
+                    .on_begin_drain(&mut ctx.control_context);
+                let _ = decision;
+
                 let writer_id = ctx.writer_id.as_ref().ok_or_else(|| {
                     obzenflow_fsm::FsmError::HandlerError(
                         "No writer ID available to send EOF".to_string(),

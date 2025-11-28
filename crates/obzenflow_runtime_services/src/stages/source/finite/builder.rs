@@ -6,6 +6,7 @@ use crate::message_bus::FsmMessageBus;
 use crate::metrics::instrumentation::StageInstrumentation;
 use crate::stages::common::handlers::FiniteSourceHandler;
 use crate::stages::resources_builder::StageResources;
+use crate::stages::source::strategies::{JonestownSourceStrategy, SourceControlStrategy};
 use crate::supervised_base::base::Supervisor;
 use crate::supervised_base::{
     BuilderError, ChannelBuilder, EventLoopDirective, EventReceiver, HandleBuilder,
@@ -49,6 +50,12 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
         self.instrumentation = Some(instrumentation);
         self
     }
+
+    /// Set a custom source control strategy (defaults to JonestownSourceStrategy)
+    pub fn with_control_strategy(mut self, strategy: Arc<dyn SourceControlStrategy>) -> Self {
+        self.config.control_strategy = Some(strategy);
+        self
+    }
 }
 
 #[async_trait::async_trait]
@@ -62,6 +69,12 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> S
         // Create channels for supervisor communication
         let (event_sender, event_receiver, state_watcher) =
             ChannelBuilder::new().build(FiniteSourceState::<H>::Created);
+
+        // Use provided strategy or default to JonestownSourceStrategy
+        let control_strategy = self
+            .config
+            .control_strategy
+            .unwrap_or_else(|| Arc::new(JonestownSourceStrategy));
 
         // Create instrumentation if not provided
         let instrumentation = self
@@ -79,6 +92,7 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> S
             self.resources.system_journal.clone(),
             self.resources.message_bus.clone(),
             instrumentation,
+            control_strategy,
         );
 
         // Create supervisor (private - not exposed)

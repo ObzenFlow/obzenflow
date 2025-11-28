@@ -6,3 +6,4 @@
 
 pub mod finite;
 pub mod infinite;
+pub mod strategies;
