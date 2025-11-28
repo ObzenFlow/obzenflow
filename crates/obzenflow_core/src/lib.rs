@@ -9,6 +9,7 @@ pub mod event;
 pub mod id;
 pub mod journal;
 pub mod metrics;
+pub mod contracts;
 pub mod time;
 pub mod web;
 
@@ -31,3 +32,10 @@ pub use id::{FlowId, JournalId, StageId, SystemId};
 
 // Re-export Ulid for convenience since it's used in many IDs
 pub use ulid::Ulid;
+
+// Re-export core contract types (FLOWIP-090c)
+pub use contracts::{
+    Contract, ContractContext, ContractEvidence, ContractReadContext, ContractResult,
+    ContractState, ContractViolation, ContractWriteContext, HashMismatch, TransportContract,
+    ViolationCause,
+};

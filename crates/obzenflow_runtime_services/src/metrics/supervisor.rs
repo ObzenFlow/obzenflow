@@ -251,10 +251,18 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                     result = data_recv => {
                         match result {
                             PollResult::Event(envelope) => {
+                                let kind = if envelope.event.is_control() {
+                                    "control"
+                                } else if envelope.event.is_system() {
+                                    "system"
+                                } else {
+                                    "data"
+                                };
                                 tracing::info!(
                                     event_id = %envelope.event.id(),
                                     event_type = envelope.event.event_type(),
-                                    "Metrics aggregator received data event"
+                                    event_kind = kind,
+                                    "Metrics aggregator received journal event"
                                 );
                                 // Check for drain event
                                 if check_for_drain(&envelope) {
@@ -404,11 +412,19 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                         .await
                     {
                         PollResult::Event(envelope) => {
+                            let kind = if envelope.event.is_control() {
+                                "control"
+                            } else if envelope.event.is_system() {
+                                "system"
+                            } else {
+                                "data"
+                            };
                             tracing::debug!(
                                 event_id = %envelope.event.id(),
                                 event_type = envelope.event.event_type(),
+                                event_kind = kind,
                                 writer_id = ?envelope.event.writer_id,
-                                "Metrics aggregator draining received data event"
+                                "Metrics aggregator draining received journal event"
                             );
                             // Skip control and system events even during draining
                             if envelope.event.is_control() || envelope.event.is_system() {

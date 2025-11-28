@@ -8,6 +8,7 @@ pub mod errors;
 pub mod id_conversions;
 pub mod message_bus;
 pub mod supervised_base;
+pub mod contracts;
 
 // Major subsystems
 pub mod messaging;

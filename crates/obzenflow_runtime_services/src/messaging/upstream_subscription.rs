@@ -12,16 +12,19 @@
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::system_event::{SystemEvent, SystemEventType};
 use obzenflow_core::event::types::{
-    Count, DurationMs, JournalIndex, JournalPath, SeqNo, ViolationCause,
+    Count, DurationMs, JournalIndex, JournalPath, SeqNo, ViolationCause as EventViolationCause,
 };
 use obzenflow_core::event::vector_clock::VectorClock;
 use obzenflow_core::event::{ChainEvent, ChainEventContent, ChainEventFactory, JournalEvent};
 use obzenflow_core::journal::journal::Journal;
 use obzenflow_core::journal::journal_error::JournalError;
 use obzenflow_core::journal::journal_reader::JournalReader;
+use obzenflow_core::ContractResult;
 use obzenflow_core::EventEnvelope;
 use obzenflow_core::Result;
 use obzenflow_core::StageId;
+use obzenflow_core::TransportContract;
+use obzenflow_core::ViolationCause;
 use obzenflow_core::WriterId;
 use std::any::Any;
 use std::collections::VecDeque;
@@ -30,6 +33,7 @@ use std::sync::Arc;
 use tokio::time::Instant;
 
 use async_trait::async_trait;
+use crate::contracts::ContractChain;
 
 // Import PollResult from the trait module
 pub use super::subscription_poller::{PollResult, SubscriptionPoller};
@@ -79,10 +83,10 @@ pub enum ContractStatus {
     Healthy,
     /// An upstream is stalled
     Stalled(StageId),
-    /// Contract violation detected
+    /// Contract violation detected (event-level cause for system events)
     Violated {
         upstream: StageId,
-        cause: ViolationCause,
+        cause: EventViolationCause,
     },
     /// Progress emitted
     ProgressEmitted,
@@ -264,6 +268,12 @@ where
     /// Optional contract tracker (guarantees)
     contract_tracker: Option<ContractTracker>,
 
+    /// Optional contract chains for each upstream reader (edge-scoped contracts).
+    ///
+    /// When `with_contracts` is used, this vector is sized to match `readers`
+    /// and each entry holds the contract chain for the corresponding edge.
+    contract_chains: Vec<Option<ContractChain>>,
+
     /// Last EOF accounting outcome (set when an EOF is observed)
     last_eof_outcome: Option<EofOutcome>,
 }
@@ -336,6 +346,7 @@ where
             readers,
             state,
             contract_tracker: None,
+            contract_chains: Vec::new(),
             last_eof_outcome: None,
         })
     }
@@ -371,6 +382,19 @@ where
             reader_stage,
             output_events_written: SeqNo(0),
         });
+
+        // Initialize per-reader contract chains using the new Contract framework.
+        // For 090c v1, we attach a TransportContract to each upstream edge.
+        if !self.readers.is_empty() {
+            self.contract_chains = self
+                .readers
+                .iter()
+                .map(|_| {
+                    let chain = ContractChain::new().with_contract(TransportContract::new());
+                    Some(chain)
+                })
+                .collect();
+        }
 
         self
     }
@@ -509,12 +533,13 @@ where
                         (false, false)
                     };
 
-                    // Update contract tracking state if enabled and contract
-                    // progress has been provided by the owning FSM context.
-                    //
-                    // Reader progress lives in FSM contexts; we only update it
-                    // here so that later contract checks can emit progress/final
-                    // events based on the same state during replay.
+                    // Update legacy contract tracking state if enabled and
+                    // contract progress has been provided by the owning FSM
+                    // context. Reader progress lives in FSM contexts; we only
+                    // update it here so that later contract checks can emit
+                    // progress/final events based on the same state during
+                    // replay.
+                    let mut reader_seq_for_contracts: Option<SeqNo> = None;
                     if self.contract_tracker.is_some() {
                         if let Some(progress_slice) = reader_progress.as_deref_mut() {
                             if let Some(progress) = progress_slice.get_mut(current_index) {
@@ -559,6 +584,34 @@ where
                                     progress.last_vector_clock =
                                         Some(envelope.vector_clock.clone());
                                 }
+
+                                // Capture the updated reader_seq for contract chains.
+                                reader_seq_for_contracts = Some(progress.reader_seq);
+                            }
+                        }
+                    }
+
+                    // Feed the event into the ContractChain for this edge, if configured.
+                    if let (Some(chain_event), Some(reader_stage)) = (
+                        (&envelope.event as &dyn Any).downcast_ref::<ChainEvent>(),
+                        self.contract_tracker
+                            .as_ref()
+                            .and_then(|t| t.reader_stage),
+                    ) {
+                        if let Some(chain_slot) = self.contract_chains.get_mut(current_index) {
+                            if let Some(chain) = chain_slot.as_mut() {
+                                let reader_seq = reader_seq_for_contracts.unwrap_or(SeqNo(0));
+                                // From the contract framework's perspective, the
+                                // upstream writer is `stage_id` and the
+                                // downstream reader is `reader_stage`.
+                                chain.on_read(chain_event, reader_stage, reader_seq, stage_id);
+
+                                // Also feed the event into the writer side of
+                                // the transport contract via `on_write`. For
+                                // transport, the writer-side count is derived
+                                // from EOF writer_seq; `TransportContract`
+                                // ignores non-EOF events on the write side.
+                                chain.on_write(chain_event, stage_id, SeqNo(0));
                             }
                         }
                     }
@@ -784,13 +837,108 @@ where
                     let mut pass = true;
                     let mut failure_reason = None;
 
-                    if let Some(advertised) = progress.advertised_writer_seq {
+                    // Prefer the new contract framework (TransportContract via
+                    // ContractChain) when available. This ensures that the
+                    // same verification logic is used for both runtime gating
+                    // and contract evidence.
+                    if let (Some(reader_stage), Some(chain_slot)) = (
+                        tracker.reader_stage,
+                        self.contract_chains.get(index).and_then(|c| c.as_ref()),
+                    ) {
+                        for result in chain_slot.verify_all(progress.stage_id, reader_stage) {
+                            match result {
+                                ContractResult::Passed(_) => {
+                                    // Leave `pass = true`
+                                }
+                                ContractResult::Failed(violation) => {
+                                    pass = false;
+                                    // Map contract-level cause into event-level cause
+                                    let event_cause = match &violation.cause {
+                                        ViolationCause::SeqDivergence { advertised, reader } => {
+                                            EventViolationCause::SeqDivergence {
+                                                advertised: *advertised,
+                                                reader: *reader,
+                                            }
+                                        }
+                                        ViolationCause::ContentMismatch { .. } => {
+                                            EventViolationCause::Other("content_mismatch".into())
+                                        }
+                                        ViolationCause::DeliveryMismatch { .. } => {
+                                            EventViolationCause::Other("delivery_mismatch".into())
+                                        }
+                                        ViolationCause::AccountingMismatch { .. } => {
+                                            EventViolationCause::Other(
+                                                "accounting_mismatch".into(),
+                                            )
+                                        }
+                                        ViolationCause::Other(msg) => {
+                                            EventViolationCause::Other(msg.clone())
+                                        }
+                                    };
+                                    failure_reason = Some(event_cause.clone());
+
+                                    // Any explicit contract failure is surfaced
+                                    // as a violation for this upstream.
+                                    status = ContractStatus::Violated {
+                                        upstream: progress.stage_id,
+                                        cause: event_cause.clone(),
+                                    };
+
+                                    // For transport SeqDivergence, emit a gap
+                                    // event when we are missing events.
+                                    if let ViolationCause::SeqDivergence { advertised, reader } =
+                                        &violation.cause
+                                    {
+                                        if let Some(advertised) = advertised {
+                                            if advertised.0 > reader.0 {
+                                                let gap_event =
+                                                    ChainEventFactory::consumption_gap_event(
+                                                        tracker.writer_id.clone(),
+                                                        SeqNo(reader.0 + 1),
+                                                        *advertised,
+                                                        progress.stage_id,
+                                                    );
+                                                tracker
+                                                    .journal
+                                                    .append(gap_event, None)
+                                                    .await
+                                                    .map_err(|e| {
+                                                        format!(
+                                                            "Failed to append gap event: {}",
+                                                            e
+                                                        )
+                                                    })?;
+                                            }
+                                        }
+                                    }
+
+                                    break;
+                                }
+                                ContractResult::Pending => {
+                                    // At EOF we expect a definitive result; treat
+                                    // Pending as a violation with a generic cause.
+                                    pass = false;
+                                    let cause = EventViolationCause::Other(
+                                        "contract_pending_at_eof".into(),
+                                    );
+                                    failure_reason = Some(cause.clone());
+                                    status = ContractStatus::Violated {
+                                        upstream: progress.stage_id,
+                                        cause,
+                                    };
+                                    break;
+                                }
+                            }
+                        }
+                    } else if let Some(advertised) = progress.advertised_writer_seq {
+                        // Legacy fallback: compare advertised vs reader seq.
                         if advertised.0 != progress.reader_seq.0 {
                             pass = false;
-                            failure_reason = Some(ViolationCause::SeqDivergence {
+                            let cause = EventViolationCause::SeqDivergence {
                                 advertised: Some(advertised),
                                 reader: progress.reader_seq,
-                            });
+                            };
+                            failure_reason = Some(cause.clone());
 
                             if advertised.0 > progress.reader_seq.0 {
                                 // Missing events
@@ -804,13 +952,14 @@ where
                                     .journal
                                     .append(gap_event, None)
                                     .await
-                                    .map_err(|e| format!("Failed to append gap event: {}", e))?;
+                                    .map_err(|e| {
+                                        format!("Failed to append gap event: {}", e)
+                                    })?;
                             }
 
-                            // Any SeqDivergence (missing or over-consumption) is reported as a violation.
                             status = ContractStatus::Violated {
                                 upstream: progress.stage_id,
-                                cause: failure_reason.clone().unwrap(),
+                                cause,
                             };
                         }
                     }
@@ -910,7 +1059,7 @@ where
                                         pass: false,
                                         reader_seq: Some(progress.reader_seq),
                                         advertised_writer_seq: progress.advertised_writer_seq,
-                                        reason: Some(ViolationCause::Other(
+                                        reason: Some(EventViolationCause::Other(
                                             "reader_stalled".into(),
                                         )),
                                     },

@@ -394,7 +394,9 @@ async fn contract_seq_divergence_overconsumption_sets_violation_without_gap() {
 
     let upstream_writer = WriterId::from(upstream_stage);
 
-    // Normal upstream: 2 data events + EOF advertising 2.
+    // Upstream writes 2 data events but EOF only advertises 1.
+    // This simulates an over-consumption divergence where the reader
+    // has observed more data events than the upstream claims via EOF.
     upstream_journal
         .append(make_data_event(upstream_writer.clone(), 1), None)
         .await
@@ -404,7 +406,7 @@ async fn contract_seq_divergence_overconsumption_sets_violation_without_gap() {
         .await
         .expect("append data 2");
     upstream_journal
-        .append(make_eof_event(upstream_writer.clone(), 2), None)
+        .append(make_eof_event(upstream_writer.clone(), 1), None)
         .await
         .expect("append eof");
 
@@ -421,10 +423,7 @@ async fn contract_seq_divergence_overconsumption_sets_violation_without_gap() {
     }
 
     assert_eq!(progress[0].reader_seq, SeqNo(2));
-    assert_eq!(progress[0].advertised_writer_seq, Some(SeqNo(2)));
-
-    // Simulate an over-consumption divergence by lowering advertised seq.
-    progress[0].advertised_writer_seq = Some(SeqNo(1));
+    assert_eq!(progress[0].advertised_writer_seq, Some(SeqNo(1)));
 
     let status = subscription
         .check_contracts(&mut progress[..])
