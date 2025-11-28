@@ -11,7 +11,6 @@ use obzenflow_fsm::{EventVariant, FsmAction, FsmContext, StateMachine, StateVari
 use serde::{Deserialize, Serialize};
 use std::marker::PhantomData;
 use std::sync::Arc;
-use tokio::sync::RwLock;
 
 use crate::metrics::instrumentation::StageInstrumentation;
 use crate::stages::common::handlers::InfiniteSourceHandler;
@@ -218,10 +217,7 @@ pub enum InfiniteSourceAction<H> {
 
 /// Context for infinite source handlers - contains everything actions need
 #[derive(Clone)]
-pub struct InfiniteSourceContext<H: InfiniteSourceHandler> {
-    /// The handler instance that implements source logic
-    pub handler: Arc<RwLock<H>>,
-
+pub struct InfiniteSourceContext<H> {
     /// This source's stage ID
     pub stage_id: obzenflow_core::StageId,
 
@@ -247,21 +243,23 @@ pub struct InfiniteSourceContext<H: InfiniteSourceHandler> {
     pub bus: Arc<crate::message_bus::FsmMessageBus>,
 
     /// Writer ID for this source (initialized during setup)
-    pub writer_id: Arc<RwLock<Option<WriterId>>>,
+    pub writer_id: Option<WriterId>,
 
     /// Flag indicating if source can emit (set to true after Start event)
-    pub can_emit: Arc<RwLock<bool>>,
+    pub can_emit: bool,
 
     /// Flag to track if shutdown was requested
-    pub shutdown_requested: Arc<RwLock<bool>>,
+    pub shutdown_requested: bool,
 
     /// Stage instrumentation for metrics tracking
     pub instrumentation: Arc<StageInstrumentation>,
+
+    /// Phantom to keep the handler type in the context's type parameters
+    _marker: PhantomData<H>,
 }
 
-impl<H: InfiniteSourceHandler> InfiniteSourceContext<H> {
+impl<H> InfiniteSourceContext<H> {
     pub fn new(
-        handler: H,
         stage_id: obzenflow_core::StageId,
         stage_name: String,
         flow_name: String,
@@ -273,7 +271,6 @@ impl<H: InfiniteSourceHandler> InfiniteSourceContext<H> {
         instrumentation: Arc<StageInstrumentation>,
     ) -> Self {
         Self {
-            handler: Arc::new(RwLock::new(handler)),
             stage_id,
             stage_name,
             flow_name,
@@ -282,10 +279,11 @@ impl<H: InfiniteSourceHandler> InfiniteSourceContext<H> {
             error_journal,
             system_journal,
             bus,
-            writer_id: Arc::new(RwLock::new(None)),
-            can_emit: Arc::new(RwLock::new(false)),
-            shutdown_requested: Arc::new(RwLock::new(false)),
+            writer_id: None,
+            can_emit: false,
+            shutdown_requested: false,
             instrumentation,
+            _marker: PhantomData,
         }
     }
 }
@@ -336,7 +334,7 @@ impl<H: InfiniteSourceHandler + Send + Sync + 'static> FsmAction for InfiniteSou
             InfiniteSourceAction::AllocateResources => {
                 // Create WriterId from our StageId
                 let writer_id = WriterId::from(ctx.stage_id.clone());
-                *ctx.writer_id.write().await = Some(writer_id.clone());
+                ctx.writer_id = Some(writer_id.clone());
 
                 tracing::info!(
                     stage_name = %ctx.stage_name,
@@ -347,8 +345,7 @@ impl<H: InfiniteSourceHandler + Send + Sync + 'static> FsmAction for InfiniteSou
             }
 
             InfiniteSourceAction::SendEOF => {
-                let writer_id_guard = ctx.writer_id.read().await;
-                let writer_id = writer_id_guard.as_ref().ok_or_else(|| {
+                let writer_id = ctx.writer_id.as_ref().ok_or_else(|| {
                     obzenflow_fsm::FsmError::HandlerError(
                         "No writer ID available to send EOF".to_string(),
                     )

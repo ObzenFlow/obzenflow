@@ -28,7 +28,6 @@ use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
 };
-use tokio::sync::RwLock;
 
 /// Builder for creating a pipeline with proper FSM lifecycle
 pub struct PipelineBuilder {
@@ -171,30 +170,28 @@ impl SupervisorBuilder for PipelineBuilder {
             })
             .collect();
 
-        let pipeline_context = Arc::new(PipelineContext {
+        let pipeline_context = PipelineContext {
             system_id,
             bus: message_bus.clone(),
             topology: self.topology.clone(),
             system_journal: self.system_journal.clone(),
-            completed_stages: Arc::new(RwLock::new(Vec::new())),
-            running_stages: Arc::new(RwLock::new(std::collections::HashSet::new())),
-            stage_supervisors: Arc::new(RwLock::new(stage_map)),
-            source_supervisors: Arc::new(RwLock::new(source_map)),
-            stage_data_journals: Arc::new(RwLock::new(
-                self.stage_journals
-                    .unwrap_or_else(|| Vec::<(StageId, Arc<dyn Journal<ChainEvent>>)>::new()),
-            )),
-            stage_error_journals: Arc::new(RwLock::new(
-                self.error_journals
-                    .unwrap_or_else(|| Vec::<(StageId, Arc<dyn Journal<ChainEvent>>)>::new()),
-            )),
-            completion_subscription: Arc::new(RwLock::new(None)),
+            completed_stages: Vec::new(),
+            running_stages: std::collections::HashSet::new(),
+            stage_supervisors: stage_map,
+            source_supervisors: source_map,
+            stage_data_journals: self
+                .stage_journals
+                .unwrap_or_else(|| Vec::<(StageId, Arc<dyn Journal<ChainEvent>>)>::new()),
+            stage_error_journals: self
+                .error_journals
+                .unwrap_or_else(|| Vec::<(StageId, Arc<dyn Journal<ChainEvent>>)>::new()),
+            completion_subscription: None,
             metrics_exporter: self.metrics_exporter.clone(),
-            contract_status: Arc::new(RwLock::new(HashMap::new())),
-            contract_pairs: Arc::new(RwLock::new(HashMap::new())),
-            expected_contract_pairs: Arc::new(expected_contract_pairs),
-            expected_sources: Arc::new(expected_sources),
-        });
+            contract_status: HashMap::new(),
+            contract_pairs: HashMap::new(),
+            expected_contract_pairs,
+            expected_sources,
+        };
 
         // Create channels using the common infrastructure
         let (event_sender, event_receiver, state_watcher) =
@@ -205,14 +202,13 @@ impl SupervisorBuilder for PipelineBuilder {
         // Create supervisor (note: no public new() method)
         let supervisor = PipelineSupervisor {
             name: "pipeline_supervisor".to_string(),
-            pipeline_context: pipeline_context.clone(),
+            system_id,
             system_journal: self.system_journal.clone(),
             last_barrier_log: None,
             drain_idle_iters: 0,
         };
 
         // Clone what we need for the task
-        let context_for_task = pipeline_context.clone();
         let state_watcher_for_task = state_watcher.clone();
         let metrics_exporter = self.metrics_exporter.clone();
 
@@ -236,7 +232,7 @@ impl SupervisorBuilder for PipelineBuilder {
             let result = SelfSupervisedExt::run(
                 supervisor_with_events,
                 PipelineState::Created,
-                context_for_task.as_ref().clone(),
+                pipeline_context,
             )
             .await;
 
@@ -321,6 +317,7 @@ impl crate::supervised_base::SelfSupervised for SupervisorWithExternalEvents {
     async fn dispatch_state(
         &mut self,
         state: &Self::State,
+        context: &mut PipelineContext,
     ) -> Result<
         crate::supervised_base::EventLoopDirective<Self::Event>,
         Box<dyn std::error::Error + Send + Sync>,
@@ -356,6 +353,6 @@ impl crate::supervised_base::SelfSupervised for SupervisorWithExternalEvents {
         }
 
         // Delegate to the actual supervisor
-        self.supervisor.dispatch_state(state).await
+        self.supervisor.dispatch_state(state, context).await
     }
 }

@@ -427,7 +427,7 @@ where
 
             // Skip EOF'd readers
             if self.state.is_reader_eof(current_index) {
-                tracing::info!(
+                tracing::trace!(
                     target: "flowip-080o",
                     owner = %self.owner_label,
                     current_index = current_index,
@@ -437,7 +437,7 @@ where
 
                 // Have we checked all readers?
                 if self.state.current_reader_index == starting_index {
-                    tracing::info!(
+                    tracing::debug!(
                         target: "flowip-080o",
                         owner = %self.owner_label,
                         "subscription: back to starting_index after skipping EOF'd readers, breaking"

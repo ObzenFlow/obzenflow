@@ -16,7 +16,6 @@ use obzenflow_fsm::{EventVariant, FsmAction, FsmContext, StateVariant};
 use serde::{Deserialize, Serialize};
 use std::marker::PhantomData;
 use std::sync::Arc;
-use tokio::sync::RwLock;
 
 use crate::messaging::upstream_subscription::{ContractConfig, ReaderProgress};
 use crate::messaging::UpstreamSubscription;
@@ -249,13 +248,12 @@ impl<H> std::fmt::Debug for JoinAction<H> {
 // ============================================================================
 
 /// Context for join handlers - contains everything actions need
-#[derive(Clone)]
 pub struct JoinContext<H: JoinHandler> {
     /// The handler instance (immutable, wrapped in Arc like StatefulContext)
     pub handler: Arc<H>,
 
     /// Handler state (catalogs, buffers)
-    pub handler_state: Arc<RwLock<H::State>>,
+    pub handler_state: H::State,
 
     /// This join's stage ID
     pub stage_id: StageId,
@@ -286,22 +284,22 @@ pub struct JoinContext<H: JoinHandler> {
     pub bus: Arc<crate::message_bus::FsmMessageBus>,
 
     /// Writer ID for this join (initialized during setup)
-    pub writer_id: Arc<RwLock<Option<WriterId>>>,
+    pub writer_id: Option<WriterId>,
 
     /// Subscription to reference journal ONLY (used during Hydrating)
-    pub reference_subscription: Arc<RwLock<Option<UpstreamSubscription<ChainEvent>>>>,
+    pub reference_subscription: Option<UpstreamSubscription<ChainEvent>>,
 
     /// Subscription to stream journals ONLY (used during Enriching)
-    pub stream_subscription: Arc<RwLock<Option<UpstreamSubscription<ChainEvent>>>>,
+    pub stream_subscription: Option<UpstreamSubscription<ChainEvent>>,
 
     /// FSM-owned contract state for reference side (aligned with reference_subscription readers)
-    pub reference_contract_state: Arc<RwLock<Vec<ReaderProgress>>>,
+    pub reference_contract_state: Vec<ReaderProgress>,
 
     /// FSM-owned contract state for stream side (aligned with stream_subscription readers)
-    pub stream_contract_state: Arc<RwLock<Vec<ReaderProgress>>>,
+    pub stream_contract_state: Vec<ReaderProgress>,
 
     /// Buffered EOF event to forward when draining completes
-    pub buffered_eof: Arc<RwLock<Option<ChainEvent>>>,
+    pub buffered_eof: Option<ChainEvent>,
 
     /// Stage instrumentation for metrics tracking
     pub instrumentation: Arc<StageInstrumentation>,
@@ -335,7 +333,7 @@ impl<H: JoinHandler> JoinContext<H> {
         let handler_state = handler.initial_state();
         Self {
             handler: Arc::new(handler),
-            handler_state: Arc::new(RwLock::new(handler_state)),
+            handler_state,
             stage_id,
             stage_name,
             flow_name,
@@ -345,12 +343,12 @@ impl<H: JoinHandler> JoinContext<H> {
             error_journal,
             system_journal,
             bus,
-            writer_id: Arc::new(RwLock::new(None)),
-            reference_subscription: Arc::new(RwLock::new(None)),
-            stream_subscription: Arc::new(RwLock::new(None)),
-            reference_contract_state: Arc::new(RwLock::new(Vec::new())),
-            stream_contract_state: Arc::new(RwLock::new(Vec::new())),
-            buffered_eof: Arc::new(RwLock::new(None)),
+            writer_id: None,
+            reference_subscription: None,
+            stream_subscription: None,
+            reference_contract_state: Vec::new(),
+            stream_contract_state: Vec::new(),
+            buffered_eof: None,
             control_strategy,
             instrumentation,
             reference_subscription_factory,
@@ -374,7 +372,7 @@ impl<H: JoinHandler + Send + Sync + 'static> FsmAction for JoinAction<H> {
             JoinAction::AllocateResources => {
                 // Create WriterId from our StageId
                 let writer_id = WriterId::from(ctx.stage_id.clone());
-                *ctx.writer_id.write().await = Some(writer_id.clone());
+                ctx.writer_id = Some(writer_id.clone());
 
                 tracing::info!(
                     stage_name = %ctx.stage_name,
@@ -384,16 +382,12 @@ impl<H: JoinHandler + Send + Sync + 'static> FsmAction for JoinAction<H> {
                 );
 
                 // Initialize FSM-owned contract state for reference and stream sides
-                {
-                    let ref_ids = ctx.reference_subscription_factory.upstream_stage_ids();
-                    let mut ref_state = ctx.reference_contract_state.write().await;
-                    *ref_state = ref_ids.into_iter().map(ReaderProgress::new).collect();
-                }
-                {
-                    let stream_ids = ctx.stream_subscription_factory.upstream_stage_ids();
-                    let mut stream_state = ctx.stream_contract_state.write().await;
-                    *stream_state = stream_ids.into_iter().map(ReaderProgress::new).collect();
-                }
+                let ref_ids = ctx.reference_subscription_factory.upstream_stage_ids();
+                ctx.reference_contract_state = ref_ids.into_iter().map(ReaderProgress::new).collect();
+
+                let stream_ids = ctx.stream_subscription_factory.upstream_stage_ids();
+                ctx.stream_contract_state =
+                    stream_ids.into_iter().map(ReaderProgress::new).collect();
 
                 // 1) Subscribe to reference journal ONLY
                 let ref_subscription = ctx
@@ -417,7 +411,7 @@ impl<H: JoinHandler + Send + Sync + 'static> FsmAction for JoinAction<H> {
                     "Join: Created reference subscription successfully"
                 );
 
-                *ctx.reference_subscription.write().await = Some(ref_subscription);
+                ctx.reference_subscription = Some(ref_subscription);
 
                 // 2) Subscribe to stream journals ONLY (NOT reference)
                 tracing::info!(
@@ -447,7 +441,7 @@ impl<H: JoinHandler + Send + Sync + 'static> FsmAction for JoinAction<H> {
                     "Join: Created stream subscription successfully"
                 );
 
-                *ctx.stream_subscription.write().await = Some(stream_subscription);
+                ctx.stream_subscription = Some(stream_subscription);
 
                 tracing::info!(
                     stage_name = %ctx.stage_name,
@@ -507,8 +501,7 @@ impl<H: JoinHandler + Send + Sync + 'static> FsmAction for JoinAction<H> {
             }
 
             JoinAction::ForwardEOF => {
-                let writer_id_guard = ctx.writer_id.read().await;
-                let writer_id = writer_id_guard.as_ref().ok_or_else(|| {
+                let writer_id = ctx.writer_id.as_ref().ok_or_else(|| {
                     obzenflow_fsm::FsmError::HandlerError(
                         "No writer ID available to forward EOF".to_string(),
                     )
@@ -516,7 +509,7 @@ impl<H: JoinHandler + Send + Sync + 'static> FsmAction for JoinAction<H> {
 
                 // Always emit an EOF authored by this stage, preserving upstream
                 // metadata when available.
-                let buffered = ctx.buffered_eof.write().await.take();
+                let buffered = ctx.buffered_eof.take();
                 let mut natural = true;
                 let mut upstream_vector_clock = None;
                 let mut upstream_last_event = None;
@@ -610,8 +603,8 @@ impl<H: JoinHandler + Send + Sync + 'static> FsmAction for JoinAction<H> {
             JoinAction::Cleanup => {
                 // Cleanup is now minimal since we don't use background tasks
                 // Just clear subscriptions
-                *ctx.reference_subscription.write().await = None;
-                *ctx.stream_subscription.write().await = None;
+                ctx.reference_subscription = None;
+                ctx.stream_subscription = None;
 
                 tracing::info!(
                     stage_name = %ctx.stage_name,

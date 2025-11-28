@@ -29,9 +29,6 @@ pub(crate) struct JournalSinkSupervisor<
     /// Supervisor name (for logging)
     pub(crate) name: String,
 
-    /// The FSM context containing all mutable state
-    pub(crate) context: Arc<JournalSinkContext<H>>,
-
     /// Data journal for chain events
     pub(crate) data_journal: Arc<dyn Journal<ChainEvent>>,
 
@@ -40,6 +37,12 @@ pub(crate) struct JournalSinkSupervisor<
 
     /// Stage ID
     pub(crate) stage_id: StageId,
+
+    /// Human-readable stage name (for logging in methods that don't see Context)
+    pub(crate) stage_name: String,
+
+    /// Phantom marker to keep H in the type while no fields reference it directly
+    pub(crate) _marker: std::marker::PhantomData<H>,
 }
 
 impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> JournalSinkSupervisor<H> {
@@ -337,7 +340,7 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
         let event = SystemEvent::stage_completed(self.stage_id);
         tracing::info!(
             target: "flowip-080o",
-            stage_name = %self.context.stage_name,
+            stage_name = %self.stage_name,
             stage_id = ?self.stage_id,
             "sink: HandlerSupervised writing stage_completed"
         );
@@ -345,7 +348,7 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
         if let Err(e) = self.system_journal.append(event, None).await {
             tracing::error!(
                 target: "flowip-080o",
-                stage_name = %self.context.stage_name,
+                stage_name = %self.stage_name,
                 stage_id = ?self.stage_id,
                 journal_error = %e,
                 "sink: HandlerSupervised failed to append stage_completed; continuing without system journal entry"
@@ -353,7 +356,7 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
         } else {
             tracing::info!(
                 target: "flowip-080o",
-                stage_name = %self.context.stage_name,
+                stage_name = %self.stage_name,
                 stage_id = ?self.stage_id,
                 "sink: HandlerSupervised stage_completed append succeeded"
             );
@@ -365,6 +368,7 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
     async fn dispatch_state(
         &mut self,
         state: &Self::State,
+        ctx: &mut Self::Context,
     ) -> Result<EventLoopDirective<Self::Event>, Box<dyn std::error::Error + Send + Sync>> {
         match state {
             JournalSinkState::Created => {
@@ -379,58 +383,64 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
 
             JournalSinkState::Running => {
                 // Track event loop
-                let loop_count = self
-                    .context
+                let loop_count = ctx
                     .instrumentation
                     .event_loops_total
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
                 tracing::info!(
                     target: "flowip-080o",
-                    stage_name = %self.context.stage_name,
+                    stage_name = %ctx.stage_name,
                     loop_iteration = loop_count + 1,
                     "sink: Running state - starting event loop iteration"
                 );
 
-                // Check subscription for events
-                let mut subscription_guard = self.context.subscription.write().await;
-                let mut contract_state_guard = self.context.contract_state.write().await;
+                // Take ownership of subscription and contract state so we never hold
+                // a borrow of ctx across await while operating on them.
+                let mut maybe_subscription = ctx.subscription.take();
+                let mut contract_state = std::mem::take(&mut ctx.contract_state);
 
-                if let Some(subscription) = subscription_guard.as_mut() {
+                // Default directive is to continue; branches below may override it.
+                let mut directive: Result<
+                    EventLoopDirective<Self::Event>,
+                    Box<dyn std::error::Error + Send + Sync>,
+                > = Ok(EventLoopDirective::Continue);
+
+                if let Some(mut subscription) = maybe_subscription {
                     tracing::info!(
                         target: "flowip-080o",
-                        stage_name = %self.context.stage_name,
+                        stage_name = %ctx.stage_name,
                         loop_iteration = loop_count + 1,
                         "sink: about to call subscription.poll_next()"
                     );
 
-                    match subscription
+                    let poll_result = subscription
                         .poll_next_with_state(
                             state.variant_name(),
-                            Some(&mut contract_state_guard[..]),
+                            Some(&mut contract_state[..]),
                         )
-                        .await
-                    {
+                        .await;
+
+                    match poll_result {
                         PollResult::Event(envelope) => {
                             use obzenflow_core::event::JournalEvent;
                             tracing::info!(
                                 target: "flowip-080o",
-                                stage_name = %self.context.stage_name,
+                                stage_name = %ctx.stage_name,
                                 loop_iteration = loop_count + 1,
                                 event_type = %envelope.event.event_type_name(),
                                 event_id = ?envelope.event.id,
                                 "sink: poll_next returned Event"
                             );
-                            self.context.instrumentation.record_consumed(&envelope);
+                            ctx.instrumentation.record_consumed(&envelope);
 
                             // Track that we have work
-                            self.context
-                                .instrumentation
+                            ctx.instrumentation
                                 .event_loops_with_work_total
                                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
                             tracing::trace!(
-                                stage_name = %self.context.stage_name,
+                                stage_name = %ctx.stage_name,
                                 "Sink processing event"
                             );
 
@@ -440,31 +450,27 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                     let action = match signal {
                                         FlowControlPayload::Eof { natural, .. } => {
                                             tracing::info!(
-                                                stage_name = %self.context.stage_name,
+                                                stage_name = %ctx.stage_name,
                                                 natural = natural,
                                                 writer_id = ?envelope.event.writer_id,
                                                 "Sink received EOF via upstream subscription"
                                             );
-                                            self.context
-                                                .control_strategy
+                                            ctx.control_strategy
                                                 .handle_eof(&envelope, &mut processing_ctx)
                                         }
-                                        FlowControlPayload::Watermark { .. } => self
-                                            .context
+                                        FlowControlPayload::Watermark { .. } => ctx
                                             .control_strategy
                                             .handle_watermark(&envelope, &mut processing_ctx),
-                                        FlowControlPayload::Checkpoint { .. } => self
-                                            .context
+                                        FlowControlPayload::Checkpoint { .. } => ctx
                                             .control_strategy
                                             .handle_checkpoint(&envelope, &mut processing_ctx),
-                                        FlowControlPayload::Drain => self
-                                            .context
+                                        FlowControlPayload::Drain => ctx
                                             .control_strategy
                                             .handle_drain(&envelope, &mut processing_ctx),
                                         _ => ControlEventAction::Forward,
                                     };
 
-                                    match action {
+                                            match action {
                                         ControlEventAction::Forward => {
                                             match signal {
                                                 // Treat only EOF as terminal; drain propagates but is non-terminal
@@ -473,7 +479,7 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                                         subscription.take_last_eof_outcome();
                                                     let _ = subscription
                                                         .check_contracts(
-                                                            &mut contract_state_guard[..],
+                                                            &mut contract_state[..],
                                                         )
                                                         .await;
 
@@ -482,14 +488,11 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                                     let upstream_readers =
                                                         subscription.upstream_count();
 
-                                                    // Release the subscription lock before any further work
-                                                    drop(subscription_guard);
-
                                                     match eof_outcome {
                                                         Some(outcome) => {
                                                             tracing::info!(
                                                                 target: "flowip-080o",
-                                                                stage_name = %self.context.stage_name,
+                                                                stage_name = %ctx.stage_name,
                                                                 upstream_stage_id = ?outcome.stage_id,
                                                                 upstream_stage_name = %outcome.stage_name,
                                                                 reader_index = outcome.reader_index,
@@ -502,7 +505,7 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
 
                                                             tracing::info!(
                                                                 target: "flowip-080o",
-                                                                stage_name = %self.context.stage_name,
+                                                                stage_name = %ctx.stage_name,
                                                                 is_final = outcome.is_final,
                                                                 ">>> CLAUDE CHECK: EOF OUTCOME RECEIVED, ABOUT TO CHECK is_final <<<"
                                                             );
@@ -510,7 +513,7 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                                             if outcome.is_final {
                                                                 tracing::info!(
                                                                     target: "flowip-080o",
-                                                                    stage_name = %self.context.stage_name,
+                                                                    stage_name = %ctx.stage_name,
                                                                     "Sink EOF is final; triggering FSM transition to Drained"
                                                                 );
 
@@ -529,15 +532,15 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                                                 );
                                                             } else {
                                                                 tracing::info!(
-                                                                    stage_name = %self.context.stage_name,
-                                                                    "Sink EOF not final; continuing to consume remaining upstreams"
+                                                                    stage_name = %ctx.stage_name,
+                                                                "Sink EOF not final; continuing to consume remaining upstreams"
                                                                 );
                                                             }
                                                         }
                                                         None => {
                                                             tracing::info!(
                                                                 target: "flowip-080o",
-                                                                stage_name = %self.context.stage_name,
+                                                                stage_name = %ctx.stage_name,
                                                                 event_type = envelope.event.event_type(),
                                                                 writer_id = ?envelope.event.writer_id,
                                                                 upstream_readers = upstream_readers,
@@ -550,16 +553,14 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                                     // Forward other control/control-like events to downstream journal
                                                     self.forward_control_event(&envelope).await?;
 
-                                                    // For non-EOF control events, let handler consume if needed
-                                                    let envelope_event = envelope.event.clone();
-                                                    let mut handler =
-                                                        self.context.handler.write().await;
+                                                // For non-EOF control events, let handler consume if needed
+                                                let envelope_event = envelope.event.clone();
+                                                let handler = &mut ctx.handler;
 
-                                                    if let Err(e) =
-                                                        handler.consume(envelope_event).await
+                                                if let Err(e) = handler.consume(envelope_event).await
                                                     {
                                                         tracing::error!(
-                                                            stage_name = %self.context.stage_name,
+                                                            stage_name = %ctx.stage_name,
                                                             error = ?e,
                                                             "Failed to consume control event"
                                                         );
@@ -569,7 +570,7 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                         }
                                         ControlEventAction::Delay(duration) => {
                                             tracing::info!(
-                                                stage_name = %self.context.stage_name,
+                                                stage_name = %ctx.stage_name,
                                                 event_type = envelope.event.event_type(),
                                                 duration = ?duration,
                                                 "Sink delaying control event"
@@ -578,7 +579,7 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                         }
                                         ControlEventAction::Retry | ControlEventAction::Skip => {
                                             tracing::info!(
-                                                stage_name = %self.context.stage_name,
+                                                stage_name = %ctx.stage_name,
                                                 event_type = envelope.event.event_type(),
                                                 "Sink ignoring control event (Retry/Skip not implemented)"
                                             );
@@ -589,9 +590,9 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                     let envelope_event = envelope.event.clone();
 
                                     let ack_result = process_with_instrumentation(
-                                        &self.context.instrumentation,
+                                        &ctx.instrumentation,
                                         || async {
-                                            let mut handler = self.context.handler.write().await;
+                                            let handler = &mut ctx.handler;
                                             handler.consume(envelope_event).await
                                             // ← returns Result<DeliveryPayload, Box<…>>
                                         },
@@ -601,9 +602,9 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                     match ack_result {
                                         Ok(payload) => {
                                             let flow_context = FlowContext {
-                                                flow_name: self.context.flow_name.clone(),
-                                                flow_id: self.context.flow_id.to_string(),
-                                                stage_name: self.context.stage_name.clone(),
+                                                flow_name: ctx.flow_name.clone(),
+                                                flow_id: ctx.flow_id.to_string(),
+                                                stage_name: ctx.stage_name.clone(),
                                                 stage_id: self.stage_id.clone(),
                                                 stage_type:
                                                     obzenflow_core::event::context::StageType::Sink,
@@ -615,7 +616,7 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                             )
                                             .with_flow_context(flow_context)
                                             .with_runtime_context(
-                                                self.context.instrumentation.snapshot(),
+                                                ctx.instrumentation.snapshot(),
                                             )
                                             .with_causality(CausalityContext::with_parent(
                                                 envelope.event.id,
@@ -629,37 +630,27 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                             if delivery_event.is_data()
                                                 || delivery_event.is_delivery()
                                             {
-                                                self.context
-                                                    .instrumentation
-                                                    .record_emitted(&delivery_event);
+                                                ctx.instrumentation.record_emitted(&delivery_event);
                                             }
-                                            self.context
-                                                .data_journal
+                                            ctx.data_journal
                                                 .append(delivery_event, Some(&envelope))
                                                 .await?;
                                         }
                                         Err(e) => {
                                             let fail_payload = DeliveryPayload::failed(
-                                                self.context.stage_name.clone(), // destination
+                                                ctx.stage_name.clone(), // destination
                                                 DeliveryMethod::Noop, // or HttpPost { url: … } etc.
                                                 "sink_error",
                                                 e.to_string(),
                                                 /* final_attempt */ false,
                                             );
 
-                                            let writer_id = self
-                                                .context
-                                                .writer_id
-                                                .read()
-                                                .await
-                                                .as_ref()
-                                                .expect("writer_id not initialised")
-                                                .clone();
+                                            let writer_id = self.writer_id();
 
                                             let flow_ctx = FlowContext {
-                                                flow_name: self.context.flow_name.clone(),
-                                                flow_id: self.context.flow_id.to_string(),
-                                                stage_name: self.context.stage_name.clone(),
+                                                flow_name: ctx.flow_name.clone(),
+                                                flow_id: ctx.flow_id.to_string(),
+                                                stage_name: ctx.stage_name.clone(),
                                                 stage_id: self.stage_id.clone(),
                                                 stage_type: StageType::Sink,
                                             };
@@ -670,7 +661,7 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                             )
                                             .with_flow_context(flow_ctx)
                                             .with_runtime_context(
-                                                self.context.instrumentation.snapshot(),
+                                                ctx.instrumentation.snapshot(),
                                             )
                                             .with_causality(CausalityContext::with_parent(
                                                 envelope.event.id,
@@ -680,12 +671,9 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                             // FLOWIP-080o-part-2: Only count data/delivery events for writer_seq.
                                             // Failure events are still delivery events, so count them.
                                             if fail_event.is_data() || fail_event.is_delivery() {
-                                                self.context
-                                                    .instrumentation
-                                                    .record_emitted(&fail_event);
+                                                ctx.instrumentation.record_emitted(&fail_event);
                                             }
-                                            self.context
-                                                .data_journal
+                                            ctx.data_journal
                                                 .append(fail_event, Some(&envelope))
                                                 .await
                                                 .map_err(|je| {
@@ -694,19 +682,21 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
 
                                             // propagate the original error up the FSM so the stage can decide
                                             // whether to retry or transition to an error state
-                                            return Err(format!("Sink consume failed: {e}").into());
+                                            directive = Err(
+                                                format!("Sink consume failed: {e}").into(),
+                                            );
                                         }
                                     }
                                 }
                                 _ => {
                                     // For other content types, just consume without instrumentation
                                     let envelope_event = envelope.event.clone();
-                                    let mut handler = self.context.handler.write().await;
+                                    let handler = &mut ctx.handler;
 
                                     if let Err(e) = handler.consume(envelope_event).await {
                                         // ← add .await
                                         tracing::error!(
-                                            stage_name = %self.context.stage_name,
+                                            stage_name = %ctx.stage_name,
                                             error = ?e,
                                             "Failed to consume control/system event"
                                         );
@@ -716,48 +706,52 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                         }
                         PollResult::NoEvents => {
                             // Check contracts periodically while idle to emit progress/final/stall as needed
-                            if subscription.should_check_contracts(&contract_state_guard[..]) {
+                            if subscription.should_check_contracts(&contract_state[..]) {
                                 let _ = subscription
-                                    .check_contracts(&mut contract_state_guard[..])
+                                    .check_contracts(&mut contract_state[..])
                                     .await;
                             }
 
                             // No events available right now, sleep briefly
                             tracing::info!(
                                 target: "flowip-080o",
-                                stage_name = %self.context.stage_name,
+                                stage_name = %ctx.stage_name,
                                 loop_iteration = loop_count + 1,
                                 "sink: poll_next returned NoEvents, sleeping"
                             );
-                            drop(subscription_guard);
                             tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
                         }
                         PollResult::Error(e) => {
                             tracing::error!(
                                 target: "flowip-080o",
-                                stage_name = %self.context.stage_name,
+                                stage_name = %ctx.stage_name,
                                 loop_iteration = loop_count + 1,
                                 error = ?e,
                                 "sink: poll_next returned Error"
                             );
-                            drop(subscription_guard);
-                            return Ok(EventLoopDirective::Transition(JournalSinkEvent::Error(
-                                format!("Subscription error: {}", e),
-                            )));
+                            directive = Ok(EventLoopDirective::Transition(
+                                JournalSinkEvent::Error(format!("Subscription error: {}", e)),
+                            ));
                         }
                     }
+
+                    // Put subscription back into context so subsequent iterations can continue
+                    ctx.subscription = Some(subscription);
                 } else {
                     // No subscription yet, wait
                     tracing::warn!(
                         target: "flowip-080o",
-                        stage_name = %self.context.stage_name,
+                        stage_name = %ctx.stage_name,
                         loop_iteration = loop_count + 1,
                         "sink: No subscription available, sleeping"
                     );
                     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
                 }
 
-                Ok(EventLoopDirective::Continue)
+                // Always restore contract state before returning, even on error.
+                ctx.contract_state = contract_state;
+
+                directive
             }
 
             JournalSinkState::Flushing => {
@@ -765,13 +759,13 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                 // The actual flush happens in the action
                 tracing::info!(
                     target: "flowip-080o",
-                    stage_name = %self.context.stage_name,
+                    stage_name = %ctx.stage_name,
                     supervisor_state = %state.variant_name(),
                     "sink: Flushing dispatch reached (post-flush), transitioning to Draining"
                 );
                 tracing::debug!(
                     target: "flowip-080o",
-                    stage_name = %self.context.stage_name,
+                    stage_name = %ctx.stage_name,
                     "sink: Flushing -> Draining transition firing"
                 );
                 Ok(EventLoopDirective::Transition(
@@ -784,7 +778,7 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                 // by the FSM transition (BeginDrain) rather than here.
                 tracing::info!(
                     target: "flowip-080o",
-                    stage_name = %self.context.stage_name,
+                    stage_name = %ctx.stage_name,
                     "sink: Draining complete, sending completion and cleaning up"
                 );
                 Ok(EventLoopDirective::Transition(JournalSinkEvent::BeginDrain))

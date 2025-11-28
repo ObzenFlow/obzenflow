@@ -22,7 +22,6 @@ use obzenflow_fsm::{
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use tokio::sync::RwLock;
 
 /// Pipeline states
 #[derive(Clone, Debug, PartialEq)]
@@ -124,7 +123,6 @@ pub enum PipelineAction {
 }
 
 /// Pipeline context - holds all mutable state
-#[derive(Clone)]
 pub struct PipelineContext {
     /// System ID for this pipeline component
     pub system_id: SystemId,
@@ -140,42 +138,42 @@ pub struct PipelineContext {
 
     /// Stage supervisors by ID (non-sources only)
     pub stage_supervisors:
-        Arc<RwLock<HashMap<StageId, crate::stages::common::stage_handle::BoxedStageHandle>>>,
+        HashMap<StageId, crate::stages::common::stage_handle::BoxedStageHandle>,
 
     /// Source supervisors by ID (sources only)
     pub source_supervisors:
-        Arc<RwLock<HashMap<StageId, crate::stages::common::stage_handle::BoxedStageHandle>>>,
+        HashMap<StageId, crate::stages::common::stage_handle::BoxedStageHandle>,
 
     /// Completed stages tracking
-    pub completed_stages: Arc<RwLock<Vec<StageId>>>,
+    pub completed_stages: Vec<StageId>,
 
     /// Running stages tracking (for startup coordination)
-    pub running_stages: Arc<RwLock<std::collections::HashSet<StageId>>>,
+    pub running_stages: std::collections::HashSet<StageId>,
 
     /// System subscription for stage completion events from system journal
-    pub completion_subscription: Arc<RwLock<Option<SystemSubscription<SystemEvent>>>>,
+    pub completion_subscription: Option<SystemSubscription<SystemEvent>>,
 
     /// Metrics exporter for accessing aggregated metrics
     pub metrics_exporter: Option<Arc<dyn obzenflow_core::metrics::MetricsExporter>>,
 
     /// Stage data journals (for metrics aggregator)
-    pub stage_data_journals: Arc<RwLock<Vec<(StageId, Arc<dyn Journal<ChainEvent>>)>>>,
+    pub stage_data_journals: Vec<(StageId, Arc<dyn Journal<ChainEvent>>)>,
 
     /// Stage error journals (for error sink) (FLOWIP-082e)
-    pub stage_error_journals: Arc<RwLock<Vec<(StageId, Arc<dyn Journal<ChainEvent>>)>>>,
+    pub stage_error_journals: Vec<(StageId, Arc<dyn Journal<ChainEvent>>)>,
 
     /// Per-source contract status (pass/fail) keyed by source StageId
-    pub contract_status: Arc<RwLock<HashMap<StageId, bool>>>,
+    pub contract_status: HashMap<StageId, bool>,
 
     /// Per-edge contract status (upstream, reader) keyed by topology edge
     pub contract_pairs:
-        Arc<RwLock<HashMap<(StageId, StageId), crate::pipeline::supervisor::ContractEdgeStatus>>>,
+        HashMap<(StageId, StageId), crate::pipeline::supervisor::ContractEdgeStatus>,
 
     /// Expected contract edges derived from the topology (upstream -> reader)
-    pub expected_contract_pairs: Arc<HashSet<(StageId, StageId)>>,
+    pub expected_contract_pairs: HashSet<(StageId, StageId)>,
 
     /// Expected source stages (used to decide when to drain on success)
-    pub expected_sources: Arc<Vec<StageId>>,
+    pub expected_sources: Vec<StageId>,
     // TODO: Add metrics handle once MetricsAggregatorBuilder is implemented
     // pub metrics_handle: Option<MetricsHandle>,
 }
@@ -193,11 +191,11 @@ impl FsmAction for PipelineAction {
                 tracing::info!("PipelineAction::CreateStages starting");
                 // Stages are already in the stage_supervisors map from the builder
                 // We just need to initialize them
-                let mut supervisors = context.stage_supervisors.write().await;
+                let supervisors = &mut context.stage_supervisors;
 
                 tracing::info!("Supervisors count: {}", supervisors.len());
 
-                // Collect stage IDs to avoid holding the lock while initializing
+                // Collect stage IDs to avoid borrow issues while initializing
                 let stage_ids: Vec<_> = supervisors.keys().cloned().collect();
 
                 tracing::info!("Stage IDs count: {}", stage_ids.len());
@@ -229,7 +227,7 @@ impl FsmAction for PipelineAction {
                 );
 
                 // Initialize all source supervisors (finite and infinite)
-                let mut source_supers = context.source_supervisors.write().await;
+                let source_supers = &mut context.source_supervisors;
                 tracing::info!("Source supervisors count: {}", source_supers.len());
                 let source_ids: Vec<_> = source_supers.keys().cloned().collect();
                 for source_id in source_ids {
@@ -254,7 +252,7 @@ impl FsmAction for PipelineAction {
 
             PipelineAction::NotifyStagesStart => {
                 // Start all non-source stages (transforms and sinks)
-                let supervisors = context.stage_supervisors.read().await;
+                let supervisors = &context.stage_supervisors;
                 let non_source_stages: Vec<_> = supervisors
                     .iter()
                     .filter(|(stage_id, stage)| {
@@ -266,10 +264,8 @@ impl FsmAction for PipelineAction {
                     })
                     .map(|(stage_id, _)| *stage_id)
                     .collect();
-                drop(supervisors);
-
                 // Start each non-source stage
-                let mut supervisors = context.stage_supervisors.write().await;
+                let supervisors = &mut context.stage_supervisors;
                 for stage_id in non_source_stages {
                     if let Some(stage) = supervisors.get_mut(&stage_id) {
                         tracing::info!(
@@ -291,7 +287,7 @@ impl FsmAction for PipelineAction {
             }
 
             PipelineAction::NotifySourceReady => {
-                let mut supervisors = context.source_supervisors.write().await;
+                let supervisors = &mut context.source_supervisors;
                 for (source_id, source) in supervisors.iter_mut() {
                     tracing::info!(
                         "Marking source ready (WaitingForGun): {:?} ({})",
@@ -310,7 +306,7 @@ impl FsmAction for PipelineAction {
             }
 
             PipelineAction::NotifySourceStart => {
-                let mut supervisors = context.source_supervisors.write().await;
+                let supervisors = &mut context.source_supervisors;
                 tracing::info!("Starting {} source stages", supervisors.len());
                 for (source_id, source) in supervisors.iter_mut() {
                     tracing::info!(
@@ -357,7 +353,7 @@ impl FsmAction for PipelineAction {
 
                 // Flow-control drain into every stage data journal so downstream stages see it
                 let drain_event = ChainEventFactory::drain_event(writer_id);
-                let stage_journals = context.stage_data_journals.read().await.clone();
+                let stage_journals = context.stage_data_journals.clone();
                 for (stage_id, journal) in stage_journals {
                     journal
                         .append(drain_event.clone(), None)
@@ -409,7 +405,7 @@ impl FsmAction for PipelineAction {
                     tracing::info!("Found metrics exporter, starting metrics aggregator");
 
                     // Get stage journals from context
-                    let stage_journals = context.stage_data_journals.read().await.clone();
+                    let stage_journals = context.stage_data_journals.clone();
 
                     if stage_journals.is_empty() {
                         tracing::warn!("No stage journals available for metrics aggregator");
@@ -424,10 +420,9 @@ impl FsmAction for PipelineAction {
                     let system_journal = context.system_journal.clone();
 
                     // Build stage metadata from topology and stage supervisors
-                    let supervisors = context.stage_supervisors.read().await;
                     let mut stage_metadata = std::collections::HashMap::new();
 
-                    for (stage_id, stage_handle) in supervisors.iter() {
+                    for (stage_id, stage_handle) in context.stage_supervisors.iter() {
                         if let Some(stage_info) = context
                             .topology
                             .stages()
@@ -441,11 +436,8 @@ impl FsmAction for PipelineAction {
                             stage_metadata.insert(*stage_id, metadata);
                         }
                     }
-                    drop(supervisors);
-
                     // Include sources in metadata
-                    let sources = context.source_supervisors.read().await;
-                    for (stage_id, stage_handle) in sources.iter() {
+                    for (stage_id, stage_handle) in context.source_supervisors.iter() {
                         if let Some(stage_info) = context
                             .topology
                             .stages()
@@ -459,10 +451,8 @@ impl FsmAction for PipelineAction {
                             stage_metadata.insert(*stage_id, metadata);
                         }
                     }
-                    drop(sources);
-
                     // Get error journals for metrics (FLOWIP-082g)
-                    let error_journals = context.stage_error_journals.read().await.clone();
+                    let error_journals = context.stage_error_journals.clone();
                     if !error_journals.is_empty() {
                         tracing::info!(
                             error_journal_ids = ?error_journals.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
@@ -564,7 +554,7 @@ impl FsmAction for PipelineAction {
 
                 // 2. Publish drain request to ALL stage data journals
                 // (metrics aggregator reads from these journals)
-                let stage_journals = context.stage_data_journals.read().await;
+                let stage_journals = &context.stage_data_journals;
                 for (stage_id, journal) in stage_journals.iter() {
                     journal
                         .append(drain_event.clone(), None)
@@ -628,7 +618,7 @@ impl FsmAction for PipelineAction {
                 let abort_event =
                     ChainEventFactory::pipeline_abort_event(writer_id, reason.clone(), *upstream);
                 // Publish abort to all stage data journals for visibility
-                let stage_journals = context.stage_data_journals.read().await.clone();
+                let stage_journals = context.stage_data_journals.clone();
                 for (stage_id, journal) in stage_journals {
                     journal
                         .append(abort_event.clone(), None)
@@ -646,7 +636,7 @@ impl FsmAction for PipelineAction {
 
             PipelineAction::AbortTeardown { reason, upstream } => {
                 // Drop subscriptions/readers to stop further polling
-                *context.completion_subscription.write().await = None;
+                context.completion_subscription = None;
                 let _ = reason;
                 let _ = upstream;
             }
@@ -664,7 +654,7 @@ impl FsmAction for PipelineAction {
                 let subscription =
                     SystemSubscription::new(reader, "pipeline_supervisor".to_string());
 
-                *context.completion_subscription.write().await = Some(subscription);
+                context.completion_subscription = Some(subscription);
 
                 tracing::info!("Started system subscription for journal events");
             }
@@ -701,9 +691,8 @@ impl FsmAction for PipelineAction {
                     tracing::info!("Stage completed: {} ({})", stage_name, stage_id);
 
                     // Add to completed stages
-                    let mut completed = context.completed_stages.write().await;
-                    if !completed.contains(&stage_id) {
-                        completed.push(stage_id);
+                    if !context.completed_stages.contains(&stage_id) {
+                        context.completed_stages.push(stage_id);
                     }
 
                     // Check if all expected stages have completed
@@ -716,11 +705,11 @@ impl FsmAction for PipelineAction {
 
                     tracing::debug!(
                         "Stage completion: {} of {} stages completed",
-                        completed.len(),
+                        context.completed_stages.len(),
                         total_stages
                     );
 
-                    if completed.len() >= total_stages {
+                    if context.completed_stages.len() >= total_stages {
                         tracing::info!("All {} stages have completed!", total_stages);
 
                         // Write a SystemEvent that the pipeline supervisor will pick up

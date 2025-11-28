@@ -102,7 +102,7 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
             .bind(&self.stream_journals);
 
         // Create context with subscription factory from resources
-        let context = Arc::new(JoinContext::new(
+        let context = JoinContext::new(
             self.handler,
             self.config.stage_id,
             self.config.stage_name.clone(),
@@ -117,20 +117,20 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
             instrumentation.clone(),
             reference_subscription_factory,
             stream_subscription_factory,
-        ));
+        );
 
         // Create supervisor
         let supervisor = JoinSupervisor {
             name: format!("join_{}", self.config.stage_name),
-            context: context.clone(),
             data_journal: self.resources.data_journal.clone(),
             system_journal: self.resources.system_journal.clone(),
             stage_id: self.config.stage_id,
+            stage_name: self.config.stage_name.clone(),
+            _marker: std::marker::PhantomData,
         };
 
         // Clone what we need for the task
         let state_watcher_for_task = state_watcher.clone();
-        let context_for_task = (*context).clone();
 
         // Spawn the supervisor task
         let supervisor_name = format!("join_{}", self.config.stage_name);
@@ -147,7 +147,7 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
                 HandlerSupervisedExt::run(
                     supervisor_with_events,
                     JoinState::<H>::Created,
-                    context_for_task,
+                    context,
                 )
                 .await
             },
@@ -220,6 +220,7 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
     async fn dispatch_state(
         &mut self,
         state: &Self::State,
+        context: &mut Self::Context,
     ) -> Result<EventLoopDirective<Self::Event>, Box<dyn std::error::Error + Send + Sync>> {
         // Update state watcher (following transform/stateful pattern with explicit ignore)
         let _ = self.state_watcher.update(state.clone());
@@ -230,6 +231,6 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
         }
 
         // Otherwise delegate to supervisor
-        self.supervisor.dispatch_state(state).await
+        self.supervisor.dispatch_state(state, context).await
     }
 }

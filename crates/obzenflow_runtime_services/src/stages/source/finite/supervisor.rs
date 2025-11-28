@@ -19,6 +19,9 @@ pub(crate) struct FiniteSourceSupervisor<
     /// Supervisor name (for logging)
     pub(crate) name: String,
 
+    /// The handler instance that implements source logic
+    pub(crate) handler: H,
+
     /// The FSM context containing all mutable state
     pub(crate) context: Arc<FiniteSourceContext<H>>,
 
@@ -310,6 +313,7 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> H
     async fn dispatch_state(
         &mut self,
         state: &Self::State,
+        _context: &mut Self::Context,
     ) -> Result<EventLoopDirective<Self::Event>, Box<dyn std::error::Error + Send + Sync>> {
         // Track every event loop iteration
         match state {
@@ -334,12 +338,8 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> H
                     .event_loops_total
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-                // Get next event from handler
-                let mut handler = self.context.handler.write().await;
-
-                // Try to get next event
-                if let Some(mut event) = handler.next() {
-                    drop(handler);
+                // Get next event from handler (synchronous, no locks needed)
+                if let Some(event) = self.handler.next() {
 
                     // We have work - increment loops with work
                     self.context
@@ -396,11 +396,9 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> H
                     );
                 } else {
                     // No more events available, check if source is complete
-                    if handler.is_complete() {
-                        drop(handler);
+                    if self.handler.is_complete() {
                         return Ok(EventLoopDirective::Transition(FiniteSourceEvent::Completed));
                     }
-                    drop(handler);
                 }
 
                 Ok(EventLoopDirective::Continue)

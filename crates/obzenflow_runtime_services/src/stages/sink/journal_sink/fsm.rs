@@ -19,7 +19,6 @@ use obzenflow_fsm::{EventVariant, FsmAction, FsmContext, StateVariant};
 use serde::{Deserialize, Serialize};
 use std::marker::PhantomData;
 use std::sync::Arc;
-use tokio::sync::RwLock;
 
 // ============================================================================
 // FSM States
@@ -252,10 +251,9 @@ impl<H> std::fmt::Debug for JournalSinkAction<H> {
 // ============================================================================
 
 /// Context for journal sink handlers - contains everything actions need
-#[derive(Clone)]
 pub struct JournalSinkContext<H: SinkHandler> {
     /// The handler instance that implements sink logic
-    pub handler: Arc<RwLock<H>>,
+    pub handler: H,
 
     /// This sink's stage ID
     pub stage_id: obzenflow_core::StageId,
@@ -282,19 +280,13 @@ pub struct JournalSinkContext<H: SinkHandler> {
     pub bus: Arc<crate::message_bus::FsmMessageBus>,
 
     /// Writer ID for this sink (initialized during setup)
-    pub writer_id: Arc<RwLock<Option<WriterId>>>,
+    pub writer_id: Option<WriterId>,
 
     /// Subscription to upstream events
-    pub subscription: Arc<RwLock<Option<UpstreamSubscription<ChainEvent>>>>,
+    pub subscription: Option<UpstreamSubscription<ChainEvent>>,
 
     /// FSM-owned contract state for each upstream reader (aligned with subscription readers)
-    pub contract_state: Arc<RwLock<Vec<ReaderProgress>>>,
-
-    /// Processing task handle (moved from supervisor to follow FSM patterns)
-    pub processing_task: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
-
-    /// Track if we're currently flushing
-    pub is_flushing: Arc<RwLock<bool>>,
+    pub contract_state: Vec<ReaderProgress>,
 
     /// Stage instrumentation for metrics tracking
     pub instrumentation: Arc<StageInstrumentation>,
@@ -322,7 +314,7 @@ impl<H: SinkHandler> JournalSinkContext<H> {
         upstream_subscription_factory: BoundSubscriptionFactory,
     ) -> Self {
         Self {
-            handler: Arc::new(RwLock::new(handler)),
+            handler,
             stage_id,
             stage_name,
             flow_name,
@@ -331,11 +323,9 @@ impl<H: SinkHandler> JournalSinkContext<H> {
             error_journal,
             system_journal,
             bus,
-            writer_id: Arc::new(RwLock::new(None)),
-            subscription: Arc::new(RwLock::new(None)),
-            processing_task: Arc::new(RwLock::new(None)),
-            is_flushing: Arc::new(RwLock::new(false)),
-            contract_state: Arc::new(RwLock::new(Vec::new())),
+            writer_id: None,
+            subscription: None,
+            contract_state: Vec::new(),
             upstream_subscription_factory,
             control_strategy,
             instrumentation,
@@ -358,17 +348,14 @@ impl<H: SinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAction<H> 
             JournalSinkAction::AllocateResources => {
                 // Create WriterId from our StageId
                 let writer_id = WriterId::from(ctx.stage_id.clone());
-                *ctx.writer_id.write().await = Some(writer_id.clone());
+                ctx.writer_id = Some(writer_id.clone());
 
                 // Initialize FSM-owned contract state for each upstream reader
-                {
-                    let upstream_ids = ctx.upstream_subscription_factory.upstream_stage_ids();
-                    let mut contract_state = ctx.contract_state.write().await;
-                    *contract_state = upstream_ids
-                        .into_iter()
-                        .map(ReaderProgress::new)
-                        .collect();
-                }
+                let upstream_ids = ctx.upstream_subscription_factory.upstream_stage_ids();
+                ctx.contract_state = upstream_ids
+                    .into_iter()
+                    .map(ReaderProgress::new)
+                    .collect();
 
                 // Build subscription using bound factory with contracts
                 let subscription = ctx
@@ -387,7 +374,7 @@ impl<H: SinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAction<H> 
                         ))
                     })?;
 
-                *ctx.subscription.write().await = Some(subscription);
+                ctx.subscription = Some(subscription);
 
                 tracing::info!(
                     stage_name = %ctx.stage_name,
@@ -460,16 +447,15 @@ impl<H: SinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAction<H> 
                 tracing::info!(
                     target: "flowip-080o",
                     stage_name = %ctx.stage_name,
-                    "sink: FlushBuffers action - acquiring is_flushing lock"
+                    "sink: FlushBuffers action - starting flush"
                 );
-                *ctx.is_flushing.write().await = true;
 
                 tracing::info!(
                     target: "flowip-080o",
                     stage_name = %ctx.stage_name,
                     "sink: FlushBuffers action - acquiring handler lock"
                 );
-                let mut handler = ctx.handler.write().await;
+                let handler = &mut ctx.handler;
 
                 tracing::info!(
                     target: "flowip-080o",
@@ -486,8 +472,6 @@ impl<H: SinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAction<H> 
                         // grab a copy of the WriterId or crash; this should never be None after init
                         let writer_id = ctx
                             .writer_id
-                            .read()
-                            .await
                             .as_ref()
                             .expect("writer_id not initialised")
                             .clone();
@@ -523,22 +507,17 @@ impl<H: SinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAction<H> 
                         )))
                     }
                 }
-                // Release handler lock before acquiring subscription lock
-                drop(handler);
-
                 tracing::info!(
                     target: "flowip-080o",
                     stage_name = %ctx.stage_name,
                     "sink: FlushBuffers action - acquiring subscription lock for contract check"
                 );
                 // After flush, emit any pending contract events (final/progress/stall)
-                let maybe_subscription = {
-                    let mut sub_guard = ctx.subscription.write().await;
-                    sub_guard.take()
-                };
+                let maybe_subscription = ctx.subscription.take();
 
                 if let Some(mut subscription) = maybe_subscription {
-                    let mut contract_state = ctx.contract_state.write().await;
+                    // Take contract_state out so we don't borrow ctx across await
+                    let mut contract_state = std::mem::take(&mut ctx.contract_state);
                     tracing::info!(
                         target: "flowip-080o",
                         stage_name = %ctx.stage_name,
@@ -550,21 +529,16 @@ impl<H: SinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAction<H> 
                         stage_name = %ctx.stage_name,
                         "sink: FlushBuffers action - putting subscription back"
                     );
-                    let mut sub_guard = ctx.subscription.write().await;
-                    *sub_guard = Some(subscription);
+                    ctx.subscription = Some(subscription);
+
+                    // Restore contract_state after contract evaluation
+                    ctx.contract_state = contract_state;
                 }
 
                 tracing::info!(
                     target: "flowip-080o",
                     stage_name = %ctx.stage_name,
-                    "sink: FlushBuffers action - releasing is_flushing lock"
-                );
-                *ctx.is_flushing.write().await = false;
-
-                tracing::info!(
-                    target: "flowip-080o",
-                    stage_name = %ctx.stage_name,
-                    "sink: FlushBuffers action - COMPLETE"
+                    "sink: FlushBuffers action - COMPLETE (flush + contract check)"
                 );
                 Ok(())
             }
@@ -576,7 +550,7 @@ impl<H: SinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAction<H> 
                     "sink: Cleanup action - acquiring handler lock"
                 );
                 // Call handler drain before stopping tasks
-                let mut handler = ctx.handler.write().await;
+                let handler = &mut ctx.handler;
                 tracing::info!(
                     target: "flowip-080o",
                     stage_name = %ctx.stage_name,
@@ -590,27 +564,10 @@ impl<H: SinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAction<H> 
                     stage_name = %ctx.stage_name,
                     "sink: Cleanup action - handler.drain() complete, dropping handler lock"
                 );
-                drop(handler);
-
                 tracing::info!(
                     target: "flowip-080o",
                     stage_name = %ctx.stage_name,
-                    "sink: Cleanup action - acquiring processing_task lock"
-                );
-                // Stop the processing task
-                if let Some(task) = ctx.processing_task.write().await.take() {
-                    tracing::info!(
-                        target: "flowip-080o",
-                        stage_name = %ctx.stage_name,
-                        "sink: Cleanup action - aborting processing task"
-                    );
-                    task.abort();
-                }
-
-                tracing::info!(
-                    target: "flowip-080o",
-                    stage_name = %ctx.stage_name,
-                    "sink: Cleanup action - COMPLETE"
+                    "sink: Cleanup action - COMPLETE (handler drained)"
                 );
                 Ok(())
             }

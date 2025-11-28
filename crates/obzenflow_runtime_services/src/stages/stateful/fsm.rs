@@ -278,7 +278,6 @@ impl<H> std::fmt::Debug for StatefulAction<H> {
 // ============================================================================
 
 /// Context for stateful handlers - contains everything actions need
-#[derive(Clone)]
 pub struct StatefulContext<H: StatefulHandler> {
     /// The handler instance (immutable, so wrapped in Arc)
     pub handler: Arc<H>,
@@ -295,8 +294,8 @@ pub struct StatefulContext<H: StatefulHandler> {
     /// Flow ID from pipeline
     pub flow_id: FlowId,
 
-    /// Current accumulated state (NEW: managed by supervisor)
-    pub current_state: Arc<RwLock<H::State>>,
+    /// Current accumulated state (FSM-owned, mutated via supervisor)
+    pub current_state: H::State,
 
     /// Data journal for writing chain events
     pub data_journal: Arc<dyn Journal<ChainEvent>>,
@@ -311,22 +310,19 @@ pub struct StatefulContext<H: StatefulHandler> {
     pub bus: Arc<crate::message_bus::FsmMessageBus>,
 
     /// Writer ID for this stateful stage (initialized during setup)
-    pub writer_id: Arc<RwLock<Option<WriterId>>>,
+    pub writer_id: Option<WriterId>,
 
     /// Subscription to upstream events
-    pub subscription: Arc<RwLock<Option<UpstreamSubscription<ChainEvent>>>>,
+    pub subscription: Option<UpstreamSubscription<ChainEvent>>,
 
     /// FSM-owned contract state for each upstream reader (aligned with subscription readers)
-    pub contract_state: Arc<RwLock<Vec<ReaderProgress>>>,
-
-    /// Processing task handle
-    pub processing_task: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
+    pub contract_state: Vec<ReaderProgress>,
 
     /// Control event handling strategy
     pub control_strategy: Arc<dyn ControlEventStrategy>,
 
     /// EOF event to forward when draining completes
-    pub buffered_eof: Arc<RwLock<Option<ChainEvent>>>,
+    pub buffered_eof: Option<ChainEvent>,
 
     /// Stage instrumentation for metrics tracking
     pub instrumentation: Arc<StageInstrumentation>,
@@ -358,17 +354,16 @@ impl<H: StatefulHandler> StatefulContext<H> {
             stage_name,
             flow_name,
             flow_id,
-            current_state: Arc::new(RwLock::new(initial_state)),
+            current_state: initial_state,
             data_journal,
             error_journal,
             system_journal,
             bus,
-            writer_id: Arc::new(RwLock::new(None)),
-            subscription: Arc::new(RwLock::new(None)), // Created lazily using factory
-            contract_state: Arc::new(RwLock::new(Vec::new())),
-            processing_task: Arc::new(RwLock::new(None)),
+            writer_id: None,
+            subscription: None, // Created lazily using factory
+            contract_state: Vec::new(),
             control_strategy,
-            buffered_eof: Arc::new(RwLock::new(None)),
+            buffered_eof: None,
             instrumentation,
             upstream_subscription_factory,
         }
@@ -390,17 +385,14 @@ impl<H: StatefulHandler + Send + Sync + 'static> FsmAction for StatefulAction<H>
             StatefulAction::AllocateResources => {
                 // Create WriterId from our StageId
                 let writer_id = WriterId::from(ctx.stage_id.clone());
-                *ctx.writer_id.write().await = Some(writer_id.clone());
+                ctx.writer_id = Some(writer_id.clone());
 
                 // Initialize FSM-owned contract state for each upstream reader
-                {
-                    let upstream_ids = ctx.upstream_subscription_factory.upstream_stage_ids();
-                    let mut contract_state = ctx.contract_state.write().await;
-                    *contract_state = upstream_ids
-                        .into_iter()
-                        .map(ReaderProgress::new)
-                        .collect();
-                }
+                let upstream_ids = ctx.upstream_subscription_factory.upstream_stage_ids();
+                ctx.contract_state = upstream_ids
+                    .into_iter()
+                    .map(ReaderProgress::new)
+                    .collect();
 
                 // Create subscription using bound factory with contracts
                 if !ctx.upstream_subscription_factory.is_empty() {
@@ -420,7 +412,7 @@ impl<H: StatefulHandler + Send + Sync + 'static> FsmAction for StatefulAction<H>
                             ))
                         })?;
 
-                    *ctx.subscription.write().await = Some(subscription);
+                    ctx.subscription = Some(subscription);
 
                     tracing::info!(
                         stage_name = %ctx.stage_name,
@@ -487,8 +479,7 @@ impl<H: StatefulHandler + Send + Sync + 'static> FsmAction for StatefulAction<H>
             }
 
             StatefulAction::ForwardEOF => {
-                let writer_id_guard = ctx.writer_id.read().await;
-                let writer_id = writer_id_guard.as_ref().ok_or_else(|| {
+                let writer_id = ctx.writer_id.as_ref().ok_or_else(|| {
                     obzenflow_fsm::FsmError::HandlerError(
                         "No writer ID available to forward EOF".to_string(),
                     )
@@ -496,7 +487,7 @@ impl<H: StatefulHandler + Send + Sync + 'static> FsmAction for StatefulAction<H>
 
                 // Always emit an EOF authored by this stage, preserving upstream
                 // metadata (vector clock, last_event_id, writer_seq) when present.
-                let buffered = ctx.buffered_eof.write().await.take();
+                let buffered = ctx.buffered_eof.take();
                 let mut natural = true;
                 let mut upstream_vector_clock = None;
                 let mut upstream_last_event = None;
@@ -588,14 +579,9 @@ impl<H: StatefulHandler + Send + Sync + 'static> FsmAction for StatefulAction<H>
             }
 
             StatefulAction::Cleanup => {
-                // Stop the processing task if any
-                if let Some(task) = ctx.processing_task.write().await.take() {
-                    task.abort();
-                }
-
                 tracing::info!(
                     stage_name = %ctx.stage_name,
-                    "Stateful stage cleaned up resources"
+                    "Stateful stage cleaned up resources (no-op cleanup)"
                 );
                 Ok(())
             }

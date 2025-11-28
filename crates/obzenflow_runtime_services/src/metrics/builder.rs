@@ -87,18 +87,16 @@ impl SupervisorBuilder for MetricsAggregatorBuilder {
         let system_id = obzenflow_core::id::SystemId::new();
 
         // Create metrics context with all mutable state
-        let metrics_context = Arc::new(
-            MetricsAggregatorContext::new(
-                self.inputs.clone(),
-                self.system_journal.clone(),
-                Some(self.exporter),
-                self.export_interval_secs,
-                system_id,
-                self.stage_metadata,
-            )
-            .await
-            .map_err(|e| BuilderError::Other(e))?,
-        );
+        let metrics_context = MetricsAggregatorContext::new(
+            self.inputs.clone(),
+            self.system_journal.clone(),
+            Some(self.exporter),
+            self.export_interval_secs,
+            system_id,
+            self.stage_metadata,
+        )
+        .await
+        .map_err(BuilderError::Other)?;
 
         // Create channels for supervisor communication
         // Even though metrics runs autonomously, we still create channels
@@ -111,12 +109,11 @@ impl SupervisorBuilder for MetricsAggregatorBuilder {
         // Create supervisor (private struct)
         let supervisor = MetricsAggregatorSupervisor {
             name: "metrics_aggregator".to_string(),
-            context: metrics_context.clone(),
             system_journal: self.system_journal.clone(),
+            system_id,
         };
 
         // Clone what we need for the task
-        let context_for_task = metrics_context;
         let state_watcher_for_task = state_watcher.clone();
 
         // Spawn the supervisor task
@@ -132,7 +129,7 @@ impl SupervisorBuilder for MetricsAggregatorBuilder {
             let result = SelfSupervisedExt::run(
                 supervisor_with_state_updates,
                 MetricsAggregatorState::Initializing,
-                context_for_task.as_ref().clone(),
+                metrics_context,
             )
             .await;
 

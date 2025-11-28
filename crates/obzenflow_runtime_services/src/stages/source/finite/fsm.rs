@@ -13,7 +13,6 @@ use obzenflow_fsm::{EventVariant, FsmAction, FsmContext, StateVariant};
 use serde::{Deserialize, Serialize};
 use std::marker::PhantomData;
 use std::sync::Arc;
-use tokio::sync::RwLock;
 
 use crate::metrics::instrumentation::StageInstrumentation;
 use crate::stages::common::handlers::FiniteSourceHandler;
@@ -221,10 +220,7 @@ pub enum FiniteSourceAction<H> {
 
 /// Context for finite source handlers - contains everything actions need
 #[derive(Clone)]
-pub struct FiniteSourceContext<H: FiniteSourceHandler> {
-    /// The handler instance that implements source logic
-    pub handler: Arc<RwLock<H>>,
-
+pub struct FiniteSourceContext<H> {
     /// This source's stage ID
     pub stage_id: obzenflow_core::StageId,
 
@@ -250,15 +246,17 @@ pub struct FiniteSourceContext<H: FiniteSourceHandler> {
     pub bus: Arc<crate::message_bus::FsmMessageBus>,
 
     /// Writer ID for this source (initialized during setup)
-    pub writer_id: Arc<RwLock<Option<WriterId>>>,
+    pub writer_id: Option<WriterId>,
 
     /// Stage instrumentation for metrics tracking
     pub instrumentation: Arc<StageInstrumentation>,
+
+    /// Phantom to keep the handler type in the context's type parameters
+    _marker: PhantomData<H>,
 }
 
-impl<H: FiniteSourceHandler> FiniteSourceContext<H> {
+impl<H> FiniteSourceContext<H> {
     pub fn new(
-        handler: H,
         stage_id: obzenflow_core::StageId,
         stage_name: String,
         flow_name: String,
@@ -270,7 +268,6 @@ impl<H: FiniteSourceHandler> FiniteSourceContext<H> {
         instrumentation: Arc<StageInstrumentation>,
     ) -> Self {
         Self {
-            handler: Arc::new(RwLock::new(handler)),
             stage_id,
             stage_name,
             flow_name,
@@ -279,8 +276,9 @@ impl<H: FiniteSourceHandler> FiniteSourceContext<H> {
             error_journal,
             system_journal,
             bus,
-            writer_id: Arc::new(RwLock::new(None)),
+            writer_id: None,
             instrumentation,
+            _marker: PhantomData,
         }
     }
 }
@@ -331,7 +329,7 @@ impl<H: FiniteSourceHandler + Send + Sync + 'static> FsmAction for FiniteSourceA
             FiniteSourceAction::AllocateResources => {
                 // Create WriterId from our StageId
                 let writer_id = WriterId::from(ctx.stage_id.clone());
-                *ctx.writer_id.write().await = Some(writer_id.clone());
+                ctx.writer_id = Some(writer_id.clone());
 
                 tracing::info!(
                     stage_name = %ctx.stage_name,
@@ -342,8 +340,7 @@ impl<H: FiniteSourceHandler + Send + Sync + 'static> FsmAction for FiniteSourceA
             }
 
             FiniteSourceAction::SendEOF => {
-                let writer_id_guard = ctx.writer_id.read().await;
-                let writer_id = writer_id_guard.as_ref().ok_or_else(|| {
+                let writer_id = ctx.writer_id.as_ref().ok_or_else(|| {
                     obzenflow_fsm::FsmError::HandlerError(
                         "No writer ID available to send EOF".to_string(),
                     )
@@ -437,8 +434,7 @@ impl<H: FiniteSourceHandler + Send + Sync + 'static> FsmAction for FiniteSourceA
             }
 
             FiniteSourceAction::PublishRunning => {
-                let writer_id_guard = ctx.writer_id.read().await;
-                let writer_id = match writer_id_guard.as_ref() {
+                let writer_id = match ctx.writer_id.as_ref() {
                     Some(id) => id.clone(),
                     None => {
                         tracing::warn!(

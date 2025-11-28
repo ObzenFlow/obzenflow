@@ -18,10 +18,11 @@ pub trait HandlerSupervised: Supervisor {
     type Handler: Send + Sync;
 
     /// Dispatch state logic with access to handler
-    /// Similar to SelfSupervised but with handler access
+    /// Similar to SelfSupervised but with handler access and mutable FSM context
     async fn dispatch_state(
         &mut self,
         state: &Self::State,
+        context: &mut Self::Context,
     ) -> Result<EventLoopDirective<Self::Event>, Box<dyn std::error::Error + Send + Sync>>;
 
     /// Get the writer ID for this component
@@ -81,8 +82,8 @@ pub trait HandlerSupervisedExt: HandlerSupervised {
                 "HandlerSupervised::run loop iteration start"
             );
 
-            // Get directive from the supervisor's dispatch logic
-            let directive = self.dispatch_state(&current_state).await?;
+            // Get directive from the supervisor's dispatch logic (with mutable context)
+            let directive = self.dispatch_state(&current_state, &mut context).await?;
 
             tracing::debug!(
                 target: "obzenflow_runtime_services::supervised_base::handler_supervised",

@@ -22,6 +22,7 @@ pub trait SelfSupervised: Supervisor {
     async fn dispatch_state(
         &mut self,
         state: &Self::State,
+        context: &mut Self::Context,
     ) -> Result<EventLoopDirective<Self::Event>, Box<dyn std::error::Error + Send + Sync>>;
 
     /// Get the writer ID for this component
@@ -71,9 +72,9 @@ pub trait SelfSupervisedExt: SelfSupervised {
             let current_state = machine.state().clone();
             // tracing::debug!("Loop iteration {}: Current state: {:?}", iteration, current_state);
 
-            // Get directive from the supervisor's dispatch logic
+            // Get directive from the supervisor's dispatch logic, with full access to context
             tracing::trace!("Calling dispatch_state for state: {:?}", current_state);
-            let directive = self.dispatch_state(&current_state).await?;
+            let directive = self.dispatch_state(&current_state, &mut context).await?;
             tracing::debug!(
                 supervisor = %supervisor_name,
                 writer_id = ?supervisor_writer,

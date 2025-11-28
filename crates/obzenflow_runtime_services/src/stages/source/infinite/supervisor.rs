@@ -21,6 +21,9 @@ pub(crate) struct InfiniteSourceSupervisor<
     /// Supervisor name (for logging)
     pub(crate) name: String,
 
+    /// The handler instance that implements source logic
+    pub(crate) handler: H,
+
     /// The FSM context containing all mutable state
     pub(crate) context: Arc<InfiniteSourceContext<H>>,
 
@@ -303,6 +306,7 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
     async fn dispatch_state(
         &mut self,
         state: &Self::State,
+        _context: &mut Self::Context,
     ) -> Result<EventLoopDirective<Self::Event>, Box<dyn std::error::Error + Send + Sync>> {
         // Track every event loop iteration
         match state {
@@ -332,25 +336,20 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
                 // Check if we can emit
-                let can_emit = *self.context.can_emit.read().await;
-                if !can_emit {
+                if !self.context.can_emit {
                     return Ok(EventLoopDirective::Continue);
                 }
 
                 // Check if shutdown was requested
-                let shutdown_requested = *self.context.shutdown_requested.read().await;
-                if shutdown_requested {
+                if self.context.shutdown_requested {
                     return Ok(EventLoopDirective::Transition(
                         InfiniteSourceEvent::BeginDrain,
                     ));
                 }
 
                 // Get next event from handler
-                let mut handler = self.context.handler.write().await;
-
                 // Try to get next event
-                if let Some(mut event) = handler.next() {
-                    drop(handler);
+                if let Some(mut event) = self.handler.next() {
 
                     // We have work - increment loops with work
                     self.context

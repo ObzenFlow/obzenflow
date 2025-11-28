@@ -69,8 +69,7 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> S
             .unwrap_or_else(|| Arc::new(StageInstrumentation::new()));
 
         // Create context
-        let context = FiniteSourceContext::new(
-            self.handler,
+        let context = FiniteSourceContext::<H>::new(
             self.config.stage_id,
             self.config.stage_name.clone(),
             self.config.flow_name.clone(),
@@ -85,6 +84,7 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> S
         // Create supervisor (private - not exposed)
         let supervisor = FiniteSourceSupervisor {
             name: format!("finite_source_{}", self.config.stage_name),
+            handler: self.handler,
             context: Arc::new(context.clone()),
             data_journal: self.resources.data_journal.clone(),
             system_journal: self.resources.system_journal.clone(),
@@ -185,6 +185,7 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> H
     async fn dispatch_state(
         &mut self,
         state: &Self::State,
+        context: &mut Self::Context,
     ) -> Result<EventLoopDirective<Self::Event>, Box<dyn std::error::Error + Send + Sync>> {
         // Update state for external observers
         let _ = self.state_watcher.update(state.clone());
@@ -208,6 +209,6 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> H
             }
         }
         // Delegate to the actual supervisor
-        self.supervisor.dispatch_state(state).await
+        self.supervisor.dispatch_state(state, context).await
     }
 }

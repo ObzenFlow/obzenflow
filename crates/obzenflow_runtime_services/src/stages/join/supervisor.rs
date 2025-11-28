@@ -20,9 +20,6 @@ pub(crate) struct JoinSupervisor<H: JoinHandler + Clone + std::fmt::Debug + Send
     /// Supervisor name (for logging)
     pub(crate) name: String,
 
-    /// The FSM context containing all mutable state
-    pub(crate) context: Arc<JoinContext<H>>,
-
     /// Data journal for chain events
     pub(crate) data_journal: Arc<dyn Journal<ChainEvent>>,
 
@@ -31,6 +28,12 @@ pub(crate) struct JoinSupervisor<H: JoinHandler + Clone + std::fmt::Debug + Send
 
     /// Stage ID
     pub(crate) stage_id: StageId,
+
+    /// Human-readable stage name (for logging in methods that don't see Context)
+    pub(crate) stage_name: String,
+
+    /// Phantom marker to keep H in the type while no fields reference it directly
+    pub(crate) _marker: std::marker::PhantomData<H>,
 }
 
 // Implement Sealed directly for JoinSupervisor to satisfy Supervisor trait bound
@@ -318,7 +321,7 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
         let event = SystemEvent::stage_completed(self.stage_id);
         if let Err(e) = self.system_journal.append(event, None).await {
             tracing::error!(
-                stage_name = %self.context.stage_name,
+                stage_name = %self.stage_name,
                 journal_error = %e,
                 "Failed to write completion event; continuing without system journal entry"
             );
@@ -329,9 +332,10 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
     async fn dispatch_state(
         &mut self,
         state: &Self::State,
+        ctx: &mut Self::Context,
     ) -> Result<EventLoopDirective<Self::Event>, Box<dyn std::error::Error + Send + Sync>> {
         tracing::debug!(
-            stage_name = %self.context.stage_name,
+            stage_name = %ctx.stage_name,
             state = ?state,
             "Join dispatch_state"
         );
@@ -351,30 +355,36 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                 // Stream events queue in journal/subscription (natural backpressure)
 
                 tracing::trace!(
-                    stage_name = %self.context.stage_name,
+                    stage_name = %ctx.stage_name,
                     "Hydrating - checking reference subscription"
                 );
 
-                let mut ref_subscription_guard = self.context.reference_subscription.write().await;
-                let mut ref_contract_state_guard =
-                    self.context.reference_contract_state.write().await;
-                if let Some(ref mut subscription) = *ref_subscription_guard {
+                // Take ownership of subscription + contract state so no borrow of ctx lives across .await
+                let mut ref_subscription = ctx.reference_subscription.take();
+                let mut ref_contract_state =
+                    std::mem::take(&mut ctx.reference_contract_state);
+
+                let mut directive: Result<
+                    EventLoopDirective<Self::Event>,
+                    Box<dyn std::error::Error + Send + Sync>,
+                > = Ok(EventLoopDirective::Continue);
+
+                if let Some(ref mut subscription) = ref_subscription {
                     tracing::trace!(
-                        stage_name = %self.context.stage_name,
+                        stage_name = %ctx.stage_name,
                         "Have reference subscription, attempting to receive"
                     );
 
-                    // Receive from subscription
                     match subscription
                         .poll_next_with_state(
                             state.variant_name(),
-                            Some(&mut ref_contract_state_guard[..]),
+                            Some(&mut ref_contract_state[..]),
                         )
                         .await
                     {
                         PollResult::Event(envelope) => {
                             tracing::debug!(
-                                stage_name = %self.context.stage_name,
+                                stage_name = %ctx.stage_name,
                                 event_type = envelope.event.event_type(),
                                 "Received event from reference"
                             );
@@ -386,25 +396,21 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                     let action = match signal {
                                         FlowControlPayload::Eof { natural, .. } => {
                                             tracing::info!(
-                                                stage_name = %self.context.stage_name,
+                                                stage_name = %ctx.stage_name,
                                                 natural = natural,
                                                 writer_id = ?envelope.event.writer_id,
                                                 "Join received EOF via reference_subscription (reference complete)"
                                             );
-                                            self.context
-                                                .control_strategy
+                                            ctx.control_strategy
                                                 .handle_eof(&envelope, &mut processing_ctx)
                                         }
-                                        FlowControlPayload::Watermark { .. } => self
-                                            .context
+                                        FlowControlPayload::Watermark { .. } => ctx
                                             .control_strategy
                                             .handle_watermark(&envelope, &mut processing_ctx),
-                                        FlowControlPayload::Checkpoint { .. } => self
-                                            .context
+                                        FlowControlPayload::Checkpoint { .. } => ctx
                                             .control_strategy
                                             .handle_checkpoint(&envelope, &mut processing_ctx),
-                                        FlowControlPayload::Drain => self
-                                            .context
+                                        FlowControlPayload::Drain => ctx
                                             .control_strategy
                                             .handle_drain(&envelope, &mut processing_ctx),
                                         _ => ControlEventAction::Forward,
@@ -425,7 +431,7 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                                 if let Some(outcome) = eof_outcome {
                                                     tracing::info!(
                                                         target: "flowip-080o",
-                                                        stage_name = %self.context.stage_name,
+                                                        stage_name = %ctx.stage_name,
                                                         upstream_stage_id = ?outcome.stage_id,
                                                         upstream_stage_name = %outcome.stage_name,
                                                         reader_index = outcome.reader_index,
@@ -437,99 +443,105 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
 
                                                     if outcome.is_final {
                                                         // Reference EOF is final -> transition to Enriching
-                                                        drop(ref_subscription_guard);
-                                                        return Ok(EventLoopDirective::Transition(
-                                                            JoinEvent::ReceivedEOF,
-                                                        ));
+                                                        directive = Ok(
+                                                            EventLoopDirective::Transition(
+                                                                JoinEvent::ReceivedEOF,
+                                                            ),
+                                                        );
+                                                    } else {
+                                                        // Non-final EOF: continue hydrating.
+                                                        directive =
+                                                            Ok(EventLoopDirective::Continue);
                                                     }
+                                                } else {
+                                                    // No outcome yet; keep hydrating.
+                                                    directive =
+                                                        Ok(EventLoopDirective::Continue);
                                                 }
-
-                                                // Non-final EOF: continue hydrating.
-                                                return Ok(EventLoopDirective::Continue);
+                                            } else {
+                                                // Non-EOF control event, just continue.
+                                                directive = Ok(EventLoopDirective::Continue);
                                             }
                                         }
                                         ControlEventAction::Delay(duration) => {
                                             tracing::info!(
-                                                stage_name = %self.context.stage_name,
+                                                stage_name = %ctx.stage_name,
                                                 event_type = envelope.event.event_type(),
                                                 duration = ?duration,
                                                 "Join delaying control event during Hydrating"
                                             );
                                             tokio::time::sleep(duration).await;
+                                            directive = Ok(EventLoopDirective::Continue);
                                         }
                                         ControlEventAction::Retry | ControlEventAction::Skip => {
                                             tracing::info!(
-                                                stage_name = %self.context.stage_name,
+                                                stage_name = %ctx.stage_name,
                                                 event_type = envelope.event.event_type(),
                                                 "Join ignoring control event (Retry/Skip not implemented) during Hydrating"
                                             );
+                                            directive = Ok(EventLoopDirective::Continue);
                                         }
                                     }
-                                    // Continue hydrating after handling control event
-                                    return Ok(EventLoopDirective::Continue);
                                 }
                                 obzenflow_core::event::ChainEventContent::Data { .. } => {
                                     // Process reference event to build catalog
                                     // NO output during hydration - just building the catalog
                                     tracing::debug!(
-                                        stage_name = %self.context.stage_name,
+                                        stage_name = %ctx.stage_name,
                                         "Processing reference event to build catalog"
                                     );
-                                    let handler = (*self.context.handler).clone();
-                                    let mut handler_state =
-                                        self.context.handler_state.write().await;
+                                    let handler = (*ctx.handler).clone();
 
                                     // Get writer ID for the handler
-                                    let writer_id_guard = self.context.writer_id.read().await;
-                                    let writer_id = writer_id_guard
+                                    let writer_id = ctx
+                                        .writer_id
                                         .as_ref()
-                                        .ok_or_else(|| "No writer ID available")?;
+                                        .ok_or_else(|| "No writer ID available")?
+                                        .clone();
 
                                     let events_produced = handler.process_event(
-                                        &mut *handler_state,
+                                        &mut ctx.handler_state,
                                         envelope.event,
-                                        self.context.reference_stage_id,
+                                        ctx.reference_stage_id,
                                         writer_id.clone(),
                                     );
 
                                     tracing::debug!(
-                                        stage_name = %self.context.stage_name,
+                                        stage_name = %ctx.stage_name,
                                         events_count = events_produced.len(),
                                         "Handler produced events during hydration (should be 0)"
                                     );
 
                                     // Continue hydrating
-                                    return Ok(EventLoopDirective::Continue);
+                                    directive = Ok(EventLoopDirective::Continue);
                                 }
                                 _ => {
                                     tracing::warn!(
-                                        stage_name = %self.context.stage_name,
+                                        stage_name = %ctx.stage_name,
                                         event_type = envelope.event.event_type(),
                                         "Join received unexpected event content type during Hydrating"
                                     );
-                                    return Ok(EventLoopDirective::Continue);
+                                    directive = Ok(EventLoopDirective::Continue);
                                 }
                             }
                         }
                         PollResult::NoEvents => {
                             // Check contracts if appropriate
-                            if subscription
-                                .should_check_contracts(&ref_contract_state_guard[..])
-                            {
+                            if subscription.should_check_contracts(&ref_contract_state[..]) {
                                 match subscription
-                                    .check_contracts(&mut ref_contract_state_guard[..])
+                                    .check_contracts(&mut ref_contract_state[..])
                                     .await
                                 {
                                     Ok(crate::messaging::upstream_subscription::ContractStatus::Stalled(upstream)) => {
                                         tracing::warn!(
-                                            stage_name = %self.context.stage_name,
+                                            stage_name = %ctx.stage_name,
                                             upstream = ?upstream,
                                             "Reference upstream stalled during join loading"
                                         );
                                     }
                                     Ok(crate::messaging::upstream_subscription::ContractStatus::Violated { upstream, cause }) => {
                                         tracing::error!(
-                                            stage_name = %self.context.stage_name,
+                                            stage_name = %ctx.stage_name,
                                             upstream = ?upstream,
                                             cause = ?cause,
                                             "Reference contract violation during join loading"
@@ -538,7 +550,7 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                     Ok(_) => {}
                                     Err(e) => {
                                         tracing::error!(
-                                            stage_name = %self.context.stage_name,
+                                            stage_name = %ctx.stage_name,
                                             error = %e,
                                             "Failed to check reference contracts"
                                         );
@@ -548,43 +560,54 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
 
                             // No events available right now, sleep briefly and continue
                             tracing::trace!(
-                                stage_name = %self.context.stage_name,
+                                stage_name = %ctx.stage_name,
                                 "No reference events available, sleeping"
                             );
                             tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-                            return Ok(EventLoopDirective::Continue);
+                            directive = Ok(EventLoopDirective::Continue);
                         }
                         PollResult::Error(e) => {
                             tracing::error!("Reference subscription error: {}", e);
-                            return Ok(EventLoopDirective::Transition(JoinEvent::Error(format!(
-                                "Reference subscription error: {}",
-                                e
-                            ))));
+                            directive = Ok(EventLoopDirective::Transition(JoinEvent::Error(
+                                format!("Reference subscription error: {}", e),
+                            )));
                         }
                     }
                 } else {
                     // No subscription yet, continue
                     tracing::warn!(
-                        stage_name = %self.context.stage_name,
+                        stage_name = %ctx.stage_name,
                         "No reference subscription available in Hydrating state"
                     );
-                    Ok(EventLoopDirective::Continue)
+                    directive = Ok(EventLoopDirective::Continue);
                 }
+
+                // Restore contract state and subscription back into the context
+                ctx.reference_contract_state = ref_contract_state;
+                ctx.reference_subscription = ref_subscription;
+
+                directive
             }
 
             JoinState::Enriching => {
                 // Process stream events (reference is already complete)
                 // Following the robust pattern from Transform's Running state
 
-                let mut stream_subscription_guard =
-                    self.context.stream_subscription.write().await;
-                let mut stream_contract_state_guard =
-                    self.context.stream_contract_state.write().await;
-                if let Some(ref mut subscription) = *stream_subscription_guard {
+                // Take ownership of subscription + contract state so no borrow of ctx lives across .await
+                let mut stream_subscription = ctx.stream_subscription.take();
+                let mut stream_contract_state =
+                    std::mem::take(&mut ctx.stream_contract_state);
+
+                let mut directive: Result<
+                    EventLoopDirective<Self::Event>,
+                    Box<dyn std::error::Error + Send + Sync>,
+                > = Ok(EventLoopDirective::Continue);
+
+                if let Some(ref mut subscription) = stream_subscription {
                     match subscription
                         .poll_next_with_state(
                             state.variant_name(),
-                            Some(&mut stream_contract_state_guard[..]),
+                            Some(&mut stream_contract_state[..]),
                         )
                         .await
                     {
@@ -597,28 +620,23 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                     let action = match signal {
                                         FlowControlPayload::Eof { natural, .. } => {
                                             tracing::info!(
-                                                stage_name = %self.context.stage_name,
+                                                stage_name = %ctx.stage_name,
                                                 natural = natural,
                                                 writer_id = ?envelope.event.writer_id,
                                                 "Join received EOF via stream_subscription (stream complete)"
                                             );
                                             // Buffer EOF for downstream forwarding
-                                            *self.context.buffered_eof.write().await =
-                                                Some(envelope.event.clone());
-                                            self.context
-                                                .control_strategy
+                                            ctx.buffered_eof = Some(envelope.event.clone());
+                                            ctx.control_strategy
                                                 .handle_eof(&envelope, &mut processing_ctx)
                                         }
-                                        FlowControlPayload::Watermark { .. } => self
-                                            .context
+                                        FlowControlPayload::Watermark { .. } => ctx
                                             .control_strategy
                                             .handle_watermark(&envelope, &mut processing_ctx),
-                                        FlowControlPayload::Checkpoint { .. } => self
-                                            .context
+                                        FlowControlPayload::Checkpoint { .. } => ctx
                                             .control_strategy
                                             .handle_checkpoint(&envelope, &mut processing_ctx),
-                                        FlowControlPayload::Drain => self
-                                            .context
+                                        FlowControlPayload::Drain => ctx
                                             .control_strategy
                                             .handle_drain(&envelope, &mut processing_ctx),
                                         _ => ControlEventAction::Forward,
@@ -639,7 +657,7 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                                 if let Some(outcome) = eof_outcome {
                                                     tracing::info!(
                                                         target: "flowip-080o",
-                                                        stage_name = %self.context.stage_name,
+                                                        stage_name = %ctx.stage_name,
                                                         upstream_stage_id = ?outcome.stage_id,
                                                         upstream_stage_name = %outcome.stage_name,
                                                         reader_index = outcome.reader_index,
@@ -650,34 +668,43 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                                     );
 
                                                     if outcome.is_final {
-                                                        drop(stream_subscription_guard);
-                                                        return Ok(
+                                                        directive = Ok(
                                                             EventLoopDirective::Transition(
                                                                 JoinEvent::ReceivedEOF,
                                                             ),
                                                         );
+                                                    } else {
+                                                        // Non-final EOF: keep enriching.
+                                                        directive =
+                                                            Ok(EventLoopDirective::Continue);
                                                     }
+                                                } else {
+                                                    // No outcome yet; keep enriching.
+                                                    directive =
+                                                        Ok(EventLoopDirective::Continue);
                                                 }
-
-                                                // Non-final EOF: keep enriching.
-                                                return Ok(EventLoopDirective::Continue);
+                                            } else {
+                                                // Non-EOF control event; just continue.
+                                                directive = Ok(EventLoopDirective::Continue);
                                             }
                                         }
                                         ControlEventAction::Delay(duration) => {
                                             tracing::info!(
-                                                stage_name = %self.context.stage_name,
+                                                stage_name = %ctx.stage_name,
                                                 event_type = envelope.event.event_type(),
                                                 duration = ?duration,
                                                 "Join delaying control event"
                                             );
                                             tokio::time::sleep(duration).await;
+                                            directive = Ok(EventLoopDirective::Continue);
                                         }
                                         ControlEventAction::Retry | ControlEventAction::Skip => {
                                             tracing::info!(
-                                                stage_name = %self.context.stage_name,
+                                                stage_name = %ctx.stage_name,
                                                 event_type = envelope.event.event_type(),
                                                 "Join ignoring control event (Retry/Skip not implemented)"
                                             );
+                                            directive = Ok(EventLoopDirective::Continue);
                                         }
                                     }
                                 }
@@ -691,18 +718,17 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                         .ok_or_else(|| "Event writer is not a stage")?;
 
                                     // Process data event through handler
-                                    let handler = (*self.context.handler).clone();
-                                    let mut handler_state =
-                                        self.context.handler_state.write().await;
+                                    let handler = (*ctx.handler).clone();
 
                                     // Get writer ID for the handler
-                                    let writer_id_guard = self.context.writer_id.read().await;
-                                    let writer_id = writer_id_guard
+                                    let writer_id = ctx
+                                        .writer_id
                                         .as_ref()
-                                        .ok_or_else(|| "No writer ID available")?;
+                                        .ok_or_else(|| "No writer ID available")?
+                                        .clone();
 
                                     let events = handler.process_event(
-                                        &mut *handler_state,
+                                        &mut ctx.handler_state,
                                         envelope.event,
                                         source_id,
                                         writer_id.clone(),
@@ -714,44 +740,43 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                         // Lifecycle events (middleware metrics, etc.) are observability
                                         // overhead and should not participate in transport contracts.
                                         if event.is_data() {
-                                            self.context.instrumentation.record_emitted(&event);
+                                            ctx.instrumentation.record_emitted(&event);
                                             // Track output for contract verification
                                             subscription.track_output_event();
                                         }
                                         self.data_journal.append(event, None).await?;
                                     }
 
-                                    return Ok(EventLoopDirective::Continue);
+                                    directive = Ok(EventLoopDirective::Continue);
                                 }
                                 _ => {
                                     // Other content types - log and continue
                                     tracing::warn!(
-                                        stage_name = %self.context.stage_name,
+                                        stage_name = %ctx.stage_name,
                                         event_type = envelope.event.event_type(),
                                         "Join received unexpected event content type"
                                     );
+                                    directive = Ok(EventLoopDirective::Continue);
                                 }
                             }
                         }
                         PollResult::NoEvents => {
                             // Check contracts if appropriate
-                            if subscription
-                                .should_check_contracts(&stream_contract_state_guard[..])
-                            {
+                            if subscription.should_check_contracts(&stream_contract_state[..]) {
                                 match subscription
-                                    .check_contracts(&mut stream_contract_state_guard[..])
+                                    .check_contracts(&mut stream_contract_state[..])
                                     .await
                                 {
                                     Ok(crate::messaging::upstream_subscription::ContractStatus::Stalled(upstream)) => {
                                         tracing::warn!(
-                                            stage_name = %self.context.stage_name,
+                                            stage_name = %ctx.stage_name,
                                             upstream = ?upstream,
                                             "Stream upstream stalled during join enriching"
                                         );
                                     }
                                     Ok(crate::messaging::upstream_subscription::ContractStatus::Violated { upstream, cause }) => {
                                         tracing::error!(
-                                            stage_name = %self.context.stage_name,
+                                            stage_name = %ctx.stage_name,
                                             upstream = ?upstream,
                                             cause = ?cause,
                                             "Stream contract violation during join enriching"
@@ -760,7 +785,7 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                     Ok(_) => {}
                                     Err(e) => {
                                         tracing::error!(
-                                            stage_name = %self.context.stage_name,
+                                            stage_name = %ctx.stage_name,
                                             error = %e,
                                             "Failed to check stream contracts"
                                         );
@@ -770,47 +795,64 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
 
                             // No events available right now, sleep briefly and continue
                             tracing::trace!(
-                                stage_name = %self.context.stage_name,
+                                stage_name = %ctx.stage_name,
                                 "No stream events available, sleeping"
                             );
                             tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-                            return Ok(EventLoopDirective::Continue);
+                            directive = Ok(EventLoopDirective::Continue);
                         }
                         PollResult::Error(e) => {
                             tracing::error!("Stream subscription error: {}", e);
-                            return Ok(EventLoopDirective::Transition(JoinEvent::Error(format!(
-                                "Stream subscription error: {}",
-                                e
-                            ))));
+                            directive = Ok(EventLoopDirective::Transition(JoinEvent::Error(
+                                format!("Stream subscription error: {}", e),
+                            )));
                         }
                     }
                 } else {
                     // No subscription - wait briefly
                     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                    directive = Ok(EventLoopDirective::Continue);
                 }
 
-                Ok(EventLoopDirective::Continue)
+                // Restore contract state and subscription back into the context
+                ctx.stream_contract_state = stream_contract_state;
+                ctx.stream_subscription = stream_subscription;
+
+                directive
             }
 
             JoinState::Draining => {
                 // First, drain any remaining events from both subscriptions
                 // This is critical for contract events (FLOWIP-080o fix)
 
+                // Take ownership of reference subscription and contract state
+                let mut ref_subscription = ctx.reference_subscription.take();
+                let mut ref_contract_state =
+                    std::mem::take(&mut ctx.reference_contract_state);
+
+                // Take ownership of stream subscription and contract state
+                let mut stream_subscription = ctx.stream_subscription.take();
+                let mut stream_contract_state =
+                    std::mem::take(&mut ctx.stream_contract_state);
+
+                let mut directive: Result<
+                    EventLoopDirective<Self::Event>,
+                    Box<dyn std::error::Error + Send + Sync>,
+                > = Ok(EventLoopDirective::Continue);
+                let mut should_drain = true;
+
                 // Drain reference subscription
-                let mut ref_subscription_guard = self.context.reference_subscription.write().await;
-                let mut ref_contract_state_guard =
-                    self.context.reference_contract_state.write().await;
-                if let Some(subscription) = ref_subscription_guard.as_mut() {
+                if let Some(ref mut subscription) = ref_subscription {
                     match subscription
                         .poll_next_with_state(
                             state.variant_name(),
-                            Some(&mut ref_contract_state_guard[..]),
+                            Some(&mut ref_contract_state[..]),
                         )
                         .await
                     {
                         PollResult::Event(envelope) => {
                             tracing::debug!(
-                                stage_name = %self.context.stage_name,
+                                stage_name = %ctx.stage_name,
                                 event_type = envelope.event.event_type(),
                                 "Join draining reference subscription event"
                             );
@@ -818,19 +860,19 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                             // Process based on event type
                             if !envelope.event.is_control() {
                                 // Process data event through join handler
-                                let handler = (*self.context.handler).clone();
-                                let mut state = self.context.handler_state.write().await;
+                                let handler = (*ctx.handler).clone();
 
                                 // Get writer ID for the handler
-                                let writer_id_guard = self.context.writer_id.read().await;
-                                let writer_id = writer_id_guard
+                                let writer_id = ctx
+                                    .writer_id
                                     .as_ref()
-                                    .ok_or_else(|| "No writer ID available")?;
+                                    .ok_or_else(|| "No writer ID available")?
+                                    .clone();
 
                                 let results = handler.process_event(
-                                    &mut *state,
+                                    &mut ctx.handler_state,
                                     envelope.event.clone(),
-                                    self.context.reference_stage_id,
+                                    ctx.reference_stage_id,
                                     writer_id.clone(),
                                 );
 
@@ -839,20 +881,16 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                     // Lifecycle events (middleware metrics, etc.) are observability
                                     // overhead and should not participate in transport contracts.
                                     if event.is_data() {
-                                        self.context.instrumentation.record_emitted(&event);
+                                        ctx.instrumentation.record_emitted(&event);
                                         // Track output for contract verification
-                                        if let Some(ref mut sub) =
-                                            *self.context.reference_subscription.write().await
-                                        {
-                                            sub.track_output_event();
-                                        }
+                                        subscription.track_output_event();
                                     }
                                     self.data_journal.append(event, None).await?;
                                 }
                             } else if !envelope.event.is_eof() {
                                 // Forward non-EOF control events (CRITICAL FIX for FLOWIP-080o)
                                 tracing::debug!(
-                                    stage_name = %self.context.stage_name,
+                                    stage_name = %ctx.stage_name,
                                     event_type = envelope.event.event_type(),
                                     "Forwarding reference control event during join draining"
                                 );
@@ -861,52 +899,58 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                     .await?;
                             }
 
-                            // Continue draining
-                            return Ok(EventLoopDirective::Continue);
+                            // Continue draining on next iteration; don't call handler.drain yet
+                            should_drain = false;
+                            directive = Ok(EventLoopDirective::Continue);
                         }
                         PollResult::NoEvents => {
                             // Do a final contract check before marking as drained
                             let _ = subscription
-                                .check_contracts(&mut ref_contract_state_guard[..])
+                                .check_contracts(&mut ref_contract_state[..])
                                 .await;
 
                             // Reference queue empty
                             tracing::debug!(
-                                stage_name = %self.context.stage_name,
+                                stage_name = %ctx.stage_name,
                                 "Join reference subscription queue drained"
                             );
                         }
                         PollResult::Error(e) => {
                             tracing::error!(
-                                stage_name = %self.context.stage_name,
+                                stage_name = %ctx.stage_name,
                                 error = ?e,
                                 "Error draining reference subscription"
                             );
-                            return Ok(EventLoopDirective::Transition(JoinEvent::Error(format!(
-                                "Reference drain error: {}",
-                                e
-                            ))));
+                            directive = Ok(EventLoopDirective::Transition(JoinEvent::Error(
+                                format!("Reference drain error: {}", e),
+                            )));
+                            should_drain = false;
                         }
                     }
                 }
-                drop(ref_subscription_guard);
+
+                // If reference side still has work or errored, restore state and return
+                if !should_drain {
+                    ctx.reference_contract_state = ref_contract_state;
+                    ctx.stream_contract_state = stream_contract_state;
+                    ctx.reference_subscription = ref_subscription;
+                    ctx.stream_subscription = stream_subscription;
+
+                    return directive;
+                }
 
                 // Drain stream subscription
-                let mut stream_subscription_guard =
-                    self.context.stream_subscription.write().await;
-                let mut stream_contract_state_guard =
-                    self.context.stream_contract_state.write().await;
-                if let Some(subscription) = stream_subscription_guard.as_mut() {
+                if let Some(ref mut subscription) = stream_subscription {
                     match subscription
                         .poll_next_with_state(
                             state.variant_name(),
-                            Some(&mut stream_contract_state_guard[..]),
+                            Some(&mut stream_contract_state[..]),
                         )
                         .await
                     {
                         PollResult::Event(envelope) => {
                             tracing::debug!(
-                                stage_name = %self.context.stage_name,
+                                stage_name = %ctx.stage_name,
                                 event_type = envelope.event.event_type(),
                                 "Join draining stream subscription event"
                             );
@@ -914,26 +958,25 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                             // Process based on event type
                             if !envelope.event.is_control() {
                                 // Process data event through join handler
-                                let handler = (*self.context.handler).clone();
-                                let mut state = self.context.handler_state.write().await;
+                                let handler = (*ctx.handler).clone();
 
                                 // Get writer ID for the handler
-                                let writer_id_guard = self.context.writer_id.read().await;
-                                let writer_id = writer_id_guard
+                                let writer_id = ctx
+                                    .writer_id
                                     .as_ref()
-                                    .ok_or_else(|| "No writer ID available")?;
+                                    .ok_or_else(|| "No writer ID available")?
+                                    .clone();
 
                                 // Use the bound factory metadata to identify the first stream upstream
-                                let source_stage_id = self
-                                    .context
+                                let source_stage_id = ctx
                                     .stream_subscription_factory
                                     .upstream_stage_ids()
                                     .first()
                                     .copied()
-                                    .unwrap_or(self.context.reference_stage_id);
+                                    .unwrap_or(ctx.reference_stage_id);
 
                                 let results = handler.process_event(
-                                    &mut *state,
+                                    &mut ctx.handler_state,
                                     envelope.event.clone(),
                                     source_stage_id,
                                     writer_id.clone(),
@@ -944,7 +987,7 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                     // Lifecycle events (middleware metrics, etc.) are observability
                                     // overhead and should not participate in transport contracts.
                                     if event.is_data() {
-                                        self.context.instrumentation.record_emitted(&event);
+                                        ctx.instrumentation.record_emitted(&event);
                                         // Track output for contract verification
                                         subscription.track_output_event();
                                     }
@@ -953,7 +996,7 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                             } else if !envelope.event.is_eof() {
                                 // Forward non-EOF control events (CRITICAL FIX for FLOWIP-080o)
                                 tracing::debug!(
-                                    stage_name = %self.context.stage_name,
+                                    stage_name = %ctx.stage_name,
                                     event_type = envelope.event.event_type(),
                                     "Forwarding stream control event during join draining"
                                 );
@@ -962,45 +1005,55 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                     .await?;
                             }
 
-                            // Continue draining
-                            return Ok(EventLoopDirective::Continue);
+                            // Continue draining on next iteration; don't call handler.drain yet
+                            should_drain = false;
+                            directive = Ok(EventLoopDirective::Continue);
                         }
                         PollResult::NoEvents => {
                             // Do a final contract check before marking as drained
                             let _ = subscription
-                                .check_contracts(&mut stream_contract_state_guard[..])
+                                .check_contracts(&mut stream_contract_state[..])
                                 .await;
 
                             // Stream queue empty
                             tracing::debug!(
-                                stage_name = %self.context.stage_name,
+                                stage_name = %ctx.stage_name,
                                 "Join stream subscription queue drained"
                             );
                         }
                         PollResult::Error(e) => {
                             tracing::error!(
-                                stage_name = %self.context.stage_name,
+                                stage_name = %ctx.stage_name,
                                 error = ?e,
                                 "Error draining stream subscription"
                             );
-                            return Ok(EventLoopDirective::Transition(JoinEvent::Error(format!(
-                                "Stream drain error: {}",
-                                e
-                            ))));
+                            directive = Ok(EventLoopDirective::Transition(JoinEvent::Error(
+                                format!("Stream drain error: {}", e),
+                            )));
+                            should_drain = false;
                         }
                     }
                 }
-                drop(stream_subscription_guard);
+
+                // Restore contract state and subscriptions before deciding whether to drain
+                ctx.reference_contract_state = ref_contract_state;
+                ctx.stream_contract_state = stream_contract_state;
+                ctx.reference_subscription = ref_subscription;
+                ctx.stream_subscription = stream_subscription;
+
+                if !should_drain {
+                    return directive;
+                }
 
                 // Now call handler.drain() to emit any final joined state
                 tracing::info!(
-                    stage_name = %self.context.stage_name,
+                    stage_name = %ctx.stage_name,
                     "Join subscriptions drained, calling handler.drain()"
                 );
 
-                let handler = (*self.context.handler).clone();
-                let state = self.context.handler_state.read().await;
-                let events = handler.drain(&*state).await?;
+                let handler = (*ctx.handler).clone();
+                let final_state = ctx.handler_state.clone();
+                let events = handler.drain(&final_state).await?;
 
                 // Write any final events
                 for event in events {
@@ -1008,15 +1061,13 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                     // Lifecycle events (middleware metrics, etc.) are observability
                     // overhead and should not participate in transport contracts.
                     if event.is_data() {
-                        self.context.instrumentation.record_emitted(&event);
+                        ctx.instrumentation.record_emitted(&event);
                         // Track output for contract verification - need to check which subscription
                         // Since this is during drain, we need to track on both subscriptions
-                        if let Some(ref mut sub) =
-                            *self.context.reference_subscription.write().await
-                        {
+                        if let Some(ref mut sub) = ctx.reference_subscription {
                             sub.track_output_event();
                         }
-                        if let Some(ref mut sub) = *self.context.stream_subscription.write().await {
+                        if let Some(ref mut sub) = ctx.stream_subscription {
                             sub.track_output_event();
                         }
                     }

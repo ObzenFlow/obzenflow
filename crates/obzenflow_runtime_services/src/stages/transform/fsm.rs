@@ -238,7 +238,6 @@ impl<H> std::fmt::Debug for TransformAction<H> {
 // ============================================================================
 
 /// Context for transform handlers - contains everything actions need
-#[derive(Clone)]
 pub struct TransformContext<H: TransformHandler> {
     /// The handler instance (stateless, so no RwLock needed)
     pub handler: Arc<H>,
@@ -268,22 +267,19 @@ pub struct TransformContext<H: TransformHandler> {
     pub bus: Arc<crate::message_bus::FsmMessageBus>,
 
     /// Writer ID for this transform (initialized during setup)
-    pub writer_id: Arc<RwLock<Option<WriterId>>>,
+    pub writer_id: Option<WriterId>,
 
     /// Subscription to upstream events
-    pub subscription: Arc<RwLock<Option<UpstreamSubscription<ChainEvent>>>>,
+    pub subscription: Option<UpstreamSubscription<ChainEvent>>,
 
     /// FSM-owned contract state for each upstream reader (aligned with subscription readers)
-    pub contract_state: Arc<RwLock<Vec<ReaderProgress>>>,
-
-    /// Processing task handle (moved from supervisor to follow FSM patterns)
-    pub processing_task: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
+    pub contract_state: Vec<ReaderProgress>,
 
     /// Control event handling strategy
     pub control_strategy: Arc<dyn ControlEventStrategy>,
 
     /// EOF event to forward when draining completes
-    pub buffered_eof: Arc<RwLock<Option<ChainEvent>>>,
+    pub buffered_eof: Option<ChainEvent>,
 
     /// Stage instrumentation for metrics tracking
     pub instrumentation: Arc<StageInstrumentation>,
@@ -317,13 +313,12 @@ impl<H: TransformHandler> TransformContext<H> {
             error_journal,
             system_journal,
             bus,
-            writer_id: Arc::new(RwLock::new(None)),
-            subscription: Arc::new(RwLock::new(None)),
-             // Initialized during AllocateResources based on upstream_subscription_factory
-            contract_state: Arc::new(RwLock::new(Vec::new())),
-            processing_task: Arc::new(RwLock::new(None)),
+            writer_id: None,
+            subscription: None,
+            // Initialized during AllocateResources based on upstream_subscription_factory
+            contract_state: Vec::new(),
             control_strategy,
-            buffered_eof: Arc::new(RwLock::new(None)),
+            buffered_eof: None,
             instrumentation,
             upstream_subscription_factory,
         }
@@ -345,17 +340,14 @@ impl<H: TransformHandler + Send + Sync + 'static> FsmAction for TransformAction<
             TransformAction::AllocateResources => {
                 // Create WriterId from our StageId
                 let writer_id = WriterId::from(ctx.stage_id.clone());
-                *ctx.writer_id.write().await = Some(writer_id.clone());
+                ctx.writer_id = Some(writer_id.clone());
 
                 // Initialize FSM-owned contract state for each upstream reader
-                {
-                    let upstream_ids = ctx.upstream_subscription_factory.upstream_stage_ids();
-                    let mut contract_state = ctx.contract_state.write().await;
-                    *contract_state = upstream_ids
-                        .into_iter()
-                        .map(ReaderProgress::new)
-                        .collect();
-                }
+                let upstream_ids = ctx.upstream_subscription_factory.upstream_stage_ids();
+                ctx.contract_state = upstream_ids
+                    .into_iter()
+                    .map(ReaderProgress::new)
+                    .collect();
 
                 // Build subscription from bound factory (with contracts)
                 let subscription = ctx
@@ -374,7 +366,7 @@ impl<H: TransformHandler + Send + Sync + 'static> FsmAction for TransformAction<
                         ))
                     })?;
 
-                *ctx.subscription.write().await = Some(subscription);
+                ctx.subscription = Some(subscription);
 
                 tracing::info!(
                     stage_name = %ctx.stage_name,
@@ -404,8 +396,7 @@ impl<H: TransformHandler + Send + Sync + 'static> FsmAction for TransformAction<
             }
 
             TransformAction::ForwardEOF => {
-                let writer_id_guard = ctx.writer_id.read().await;
-                let writer_id = writer_id_guard.as_ref().ok_or_else(|| {
+                let writer_id = ctx.writer_id.as_ref().ok_or_else(|| {
                     obzenflow_fsm::FsmError::HandlerError(
                         "No writer ID available to forward EOF".to_string(),
                     )
@@ -413,7 +404,7 @@ impl<H: TransformHandler + Send + Sync + 'static> FsmAction for TransformAction<
 
                 // Preserve metadata from the buffered EOF (if any) but always emit
                 // an EOF that is authored by this stage.
-                let buffered = ctx.buffered_eof.write().await.take();
+                let buffered = ctx.buffered_eof.take();
                 let mut natural = true;
                 let mut upstream_vector_clock = None;
                 let mut upstream_last_event = None;
@@ -505,11 +496,6 @@ impl<H: TransformHandler + Send + Sync + 'static> FsmAction for TransformAction<
             }
 
             TransformAction::Cleanup => {
-                // Stop the processing task if any
-                if let Some(task) = ctx.processing_task.write().await.take() {
-                    task.abort();
-                }
-
                 tracing::info!(
                     stage_name = %ctx.stage_name,
                     "Transform cleaned up resources"

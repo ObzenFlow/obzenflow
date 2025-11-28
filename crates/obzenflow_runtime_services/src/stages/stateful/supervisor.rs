@@ -24,9 +24,6 @@ pub(crate) struct StatefulSupervisor<
     /// Supervisor name (for logging)
     pub(crate) name: String,
 
-    /// The FSM context containing all mutable state
-    pub(crate) context: Arc<StatefulContext<H>>,
-
     /// Data journal for chain events
     pub(crate) data_journal: Arc<dyn Journal<ChainEvent>>,
 
@@ -35,6 +32,9 @@ pub(crate) struct StatefulSupervisor<
 
     /// Stage ID
     pub(crate) stage_id: StageId,
+
+    /// Phantom marker to keep H in the type while no fields reference it directly
+    pub(crate) _marker: std::marker::PhantomData<H>,
 }
 
 // Implement Sealed directly for StatefulSupervisor to satisfy Supervisor trait bound
@@ -313,7 +313,7 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
         let event = SystemEvent::stage_completed(self.stage_id);
         if let Err(e) = self.system_journal.append(event, None).await {
             tracing::error!(
-                stage_name = %self.context.stage_name,
+                stage_id = %self.stage_id,
                 journal_error = %e,
                 "Failed to write completion event; continuing without system journal entry"
             );
@@ -324,6 +324,7 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
     async fn dispatch_state(
         &mut self,
         state: &Self::State,
+        ctx: &mut Self::Context,
     ) -> Result<EventLoopDirective<Self::Event>, Box<dyn std::error::Error + Send + Sync>> {
         match state {
             StatefulState::Created => {
@@ -337,57 +338,63 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
             }
 
             StatefulState::Accumulating => {
-                let loop_count = self
-                    .context
+                let loop_count = ctx
                     .instrumentation
                     .event_loops_total
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
                 tracing::info!(
                     target: "flowip-080o",
-                    stage_name = %self.context.stage_name,
+                    stage_name = %ctx.stage_name,
                     loop_iteration = loop_count + 1,
                     "stateful: Accumulating state - starting event loop iteration"
                 );
 
-                // Process events from subscription
-                let mut subscription_guard = self.context.subscription.write().await;
-                let mut contract_state_guard = self.context.contract_state.write().await;
-                if let Some(subscription) = subscription_guard.as_mut() {
+                // Take ownership of subscription and contract state so we never hold
+                // a borrow of the context across await while operating on them.
+                let mut maybe_subscription = ctx.subscription.take();
+                let mut contract_state = std::mem::take(&mut ctx.contract_state);
+
+                let mut directive: Result<
+                    EventLoopDirective<Self::Event>,
+                    Box<dyn std::error::Error + Send + Sync>,
+                > = Ok(EventLoopDirective::Continue);
+
+                if let Some(ref mut subscription) = maybe_subscription {
                     tracing::info!(
                         target: "flowip-080o",
-                        stage_name = %self.context.stage_name,
+                        stage_name = %ctx.stage_name,
                         loop_iteration = loop_count + 1,
                         "stateful: about to call subscription.poll_next()"
                     );
 
-                    match subscription
+                    let poll_result = subscription
                         .poll_next_with_state(
                             state.variant_name(),
-                            Some(&mut contract_state_guard[..]),
+                            Some(&mut contract_state[..]),
                         )
-                        .await
-                    {
+                        .await;
+
+                    match poll_result {
                         PollResult::Event(envelope) => {
                             use obzenflow_core::event::JournalEvent;
                             tracing::info!(
                                 target: "flowip-080o",
-                                stage_name = %self.context.stage_name,
+                                stage_name = %ctx.stage_name,
                                 loop_iteration = loop_count + 1,
                                 event_type = %envelope.event.event_type_name(),
                                 event_id = ?envelope.event.id,
                                 "stateful: poll_next returned Event"
                             );
-                            self.context.instrumentation.record_consumed(&envelope);
+                            ctx.instrumentation.record_consumed(&envelope);
 
                             // We have work - increment loops with work
-                            self.context
-                                .instrumentation
+                            ctx.instrumentation
                                 .event_loops_with_work_total
                                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
                             tracing::debug!(
-                                stage_name = %self.context.stage_name,
+                                stage_name = %ctx.stage_name,
                                 "Stateful stage processing event"
                             );
 
@@ -401,23 +408,19 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                                     let action = match signal {
                                         FlowControlPayload::Eof { .. } => {
                                             tracing::info!(
-                                                stage_name = %self.context.stage_name,
+                                                stage_name = %ctx.stage_name,
                                                 "Stateful stage received EOF from upstream"
                                             );
-                                            self.context
-                                                .control_strategy
+                                            ctx.control_strategy
                                                 .handle_eof(&envelope, &mut processing_ctx)
                                         }
-                                        FlowControlPayload::Watermark { .. } => self
-                                            .context
+                                        FlowControlPayload::Watermark { .. } => ctx
                                             .control_strategy
                                             .handle_watermark(&envelope, &mut processing_ctx),
-                                        FlowControlPayload::Checkpoint { .. } => self
-                                            .context
+                                        FlowControlPayload::Checkpoint { .. } => ctx
                                             .control_strategy
                                             .handle_checkpoint(&envelope, &mut processing_ctx),
-                                        FlowControlPayload::Drain => self
-                                            .context
+                                        FlowControlPayload::Drain => ctx
                                             .control_strategy
                                             .handle_drain(&envelope, &mut processing_ctx),
                                         _ => ControlEventAction::Forward,
@@ -435,17 +438,13 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                                                     subscription.take_last_eof_outcome();
                                                 // Perform a contract check at EOF time for good measure
                                                 let _ = subscription
-                                                    .check_contracts(
-                                                        &mut contract_state_guard[..],
-                                                    )
+                                                    .check_contracts(&mut contract_state[..])
                                                     .await;
-                                                // Release subscription lock before further work
-                                                drop(subscription_guard);
 
-                                                if let Some(outcome) = eof_outcome {
-                                                    tracing::info!(
-                                                        target: "flowip-080o",
-                                                        stage_name = %self.context.stage_name,
+                                            if let Some(outcome) = eof_outcome {
+                                                tracing::info!(
+                                                    target: "flowip-080o",
+                                                    stage_name = %ctx.stage_name,
                                                         upstream_stage_id = ?outcome.stage_id,
                                                         upstream_stage_name = %outcome.stage_name,
                                                         reader_index = outcome.reader_index,
@@ -457,57 +456,64 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
 
                                                     if outcome.is_final {
                                                         // All upstream readers have reached EOF: begin draining.
-                                                        *self.context.buffered_eof.write().await =
+                                                        ctx.buffered_eof =
                                                             Some(envelope.event.clone());
                                                         tracing::info!(
-                                                            stage_name = %self.context.stage_name,
+                                                            stage_name = %ctx.stage_name,
                                                             event_type = envelope
                                                                 .event
                                                                 .event_type(),
                                                             "Stateful stage received final EOF for all upstreams, transitioning to draining"
                                                         );
-                                                        return Ok(EventLoopDirective::Transition(
-                                                            StatefulEvent::ReceivedEOF,
-                                                        ));
+                                                        directive = Ok(
+                                                            EventLoopDirective::Transition(
+                                                                StatefulEvent::ReceivedEOF,
+                                                            ),
+                                                        );
+                                                    } else {
+                                                        // Non-final EOF: do not forward, do not drain yet.
+                                                        directive =
+                                                            Ok(EventLoopDirective::Continue);
                                                     }
+                                                } else {
+                                                    // No outcome yet (unexpected), remain in Accumulating.
+                                                    directive =
+                                                        Ok(EventLoopDirective::Continue);
                                                 }
-
-                                                // Non-final EOF: do not forward, do not drain yet.
-                                                return Ok(EventLoopDirective::Continue);
                                             }
 
                                             // Forward non-EOF control events downstream
-                                            self.forward_control_event(&envelope).await?;
+                                            self.forward_control_event(ctx, &envelope).await?;
 
                                             // Drain events from pipeline BeginDrain should initiate stage draining
                                             if matches!(signal, FlowControlPayload::Drain) {
-                                                *self.context.buffered_eof.write().await =
+                                                ctx.buffered_eof =
                                                     Some(envelope.event.clone());
-                                                drop(subscription_guard);
                                                 tracing::info!(
-                                                    stage_name = %self.context.stage_name,
+                                                    stage_name = %ctx.stage_name,
                                                     event_type = envelope.event.event_type(),
                                                     "Stateful stage received drain signal, transitioning to draining"
                                                 );
-                                                return Ok(EventLoopDirective::Transition(
+                                                directive = Ok(EventLoopDirective::Transition(
                                                     StatefulEvent::ReceivedEOF,
                                                 ));
                                             }
                                         }
                                         ControlEventAction::Delay(duration) => {
                                             tracing::info!(
-                                                stage_name = %self.context.stage_name,
+                                                stage_name = %ctx.stage_name,
                                                 event_type = envelope.event.event_type(),
                                                 duration = ?duration,
                                                 "Delaying control event"
                                             );
                                             tokio::time::sleep(duration).await;
                                             // Return Continue to re-process after delay
-                                            return Ok(EventLoopDirective::Continue);
+                                            directive =
+                                                Ok(EventLoopDirective::Continue);
                                         }
                                         ControlEventAction::Retry => {
                                             tracing::info!(
-                                                stage_name = %self.context.stage_name,
+                                                stage_name = %ctx.stage_name,
                                                 event_type = envelope.event.event_type(),
                                                 "Retry requested, buffering event"
                                             );
@@ -518,7 +524,7 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                                         }
                                         ControlEventAction::Skip => {
                                             tracing::warn!(
-                                                stage_name = %self.context.stage_name,
+                                                stage_name = %ctx.stage_name,
                                                 event_type = envelope.event.event_type(),
                                                 "Skipping control event (dangerous!)"
                                             );
@@ -528,49 +534,46 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                                 }
                                 obzenflow_core::event::ChainEventContent::Data { .. } => {
                                     // ✨ KEY DIFFERENCE: Accumulate without writing to journal
-                                    let mut current_state =
-                                        self.context.current_state.write().await;
+                                    let current_state = &mut ctx.current_state;
 
                                     // Clone handler to make it mutable
-                                    let mut handler = (*self.context.handler).clone();
+                                    let mut handler = (*ctx.handler).clone();
 
                                     // Just accumulate - no instrumentation needed, we're just updating state!
-                                    handler.accumulate(&mut *current_state, envelope.event.clone());
+                                    handler.accumulate(current_state, envelope.event.clone());
 
                                     // Check if we should emit
-                                    if handler.should_emit(&*current_state) {
-                                        drop(current_state);
-                                        drop(subscription_guard);
+                                    if handler.should_emit(current_state) {
                                         // Transition to Emitting state
-                                        return Ok(EventLoopDirective::Transition(
+                                        directive = Ok(EventLoopDirective::Transition(
                                             StatefulEvent::ShouldEmit,
                                         ));
                                     }
                                 }
                                 _ => {
                                     // Other content types we don't recognize - forward them
-                                    self.forward_control_event(&envelope).await?;
+                                    self.forward_control_event(ctx, &envelope).await?;
                                 }
                             }
                         }
                         PollResult::NoEvents => {
                             // No events available right now
                             // Check contracts if appropriate (FSM decides when)
-                            if subscription.should_check_contracts(&contract_state_guard[..]) {
+                            if subscription.should_check_contracts(&contract_state[..]) {
                                 match subscription
-                                    .check_contracts(&mut contract_state_guard[..])
+                                    .check_contracts(&mut contract_state[..])
                                     .await
                                 {
                                     Ok(crate::messaging::upstream_subscription::ContractStatus::Stalled(upstream)) => {
                                         tracing::warn!(
-                                            stage_name = %self.context.stage_name,
+                                            stage_name = %ctx.stage_name,
                                             upstream = ?upstream,
                                             "Upstream stalled detected during stateful processing"
                                         );
                                     }
                                     Ok(crate::messaging::upstream_subscription::ContractStatus::Violated { upstream, cause }) => {
                                         tracing::error!(
-                                            stage_name = %self.context.stage_name,
+                                            stage_name = %ctx.stage_name,
                                             upstream = ?upstream,
                                             cause = ?cause,
                                             "Contract violation detected during stateful processing"
@@ -581,7 +584,7 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                                     }
                                     Err(e) => {
                                         tracing::error!(
-                                            stage_name = %self.context.stage_name,
+                                            stage_name = %ctx.stage_name,
                                             error = %e,
                                             "Failed to check contracts"
                                         );
@@ -591,58 +594,60 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
 
                             tracing::info!(
                                 target: "flowip-080o",
-                                stage_name = %self.context.stage_name,
+                                stage_name = %ctx.stage_name,
                                 loop_iteration = loop_count + 1,
                                 "stateful: poll_next returned NoEvents, sleeping"
                             );
-                            drop(subscription_guard);
                             tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
                         }
                         PollResult::Error(e) => {
                             tracing::error!(
                                 target: "flowip-080o",
-                                stage_name = %self.context.stage_name,
+                                stage_name = %ctx.stage_name,
                                 loop_iteration = loop_count + 1,
                                 error = ?e,
                                 "stateful: poll_next returned Error"
                             );
-                            drop(subscription_guard);
-                            return Ok(EventLoopDirective::Transition(StatefulEvent::Error(
-                                format!("Subscription error: {}", e),
-                            )));
+                            directive = Ok(EventLoopDirective::Transition(
+                                StatefulEvent::Error(format!("Subscription error: {}", e)),
+                            ));
                         }
                     }
                 } else {
                     // No subscription yet, wait
                     tracing::warn!(
                         target: "flowip-080o",
-                        stage_name = %self.context.stage_name,
+                        stage_name = %ctx.stage_name,
                         loop_iteration = loop_count + 1,
                         "stateful: No subscription available, sleeping"
                     );
                     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
                 }
 
-                Ok(EventLoopDirective::Continue)
+                // Restore contract state and subscription before returning
+                ctx.contract_state = contract_state;
+                ctx.subscription = maybe_subscription;
+
+                directive
             }
 
             StatefulState::Emitting => {
                 tracing::info!(
                     target: "flowip-080o",
-                    stage_name = %self.context.stage_name,
+                    stage_name = %ctx.stage_name,
                     "stateful: Emitting state - about to emit aggregated events"
                 );
 
                 // ✨ Emit aggregated events to journal
-                let mut current_state = self.context.current_state.write().await;
-                let mut handler = (*self.context.handler).clone();
+                let mut current_state = &mut ctx.current_state;
+                let mut handler = (*ctx.handler).clone();
 
                 // Call emit to get the aggregated events
                 let events_to_emit = handler.emit(&mut *current_state);
 
                 // Wrap with instrumentation (following transform pattern)
                 let emit_result =
-                    process_with_instrumentation(&self.context.instrumentation, || async move {
+                    process_with_instrumentation(&ctx.instrumentation, || async move {
                         Ok(events_to_emit)
                     })
                     .await;
@@ -653,7 +658,7 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
 
                         tracing::info!(
                             target: "flowip-080o",
-                            stage_name = %self.context.stage_name,
+                            stage_name = %ctx.stage_name,
                             events_count = events_count,
                             "stateful: emitting aggregated events to journal"
                         );
@@ -663,58 +668,56 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                             use obzenflow_core::event::JournalEvent;
                             tracing::info!(
                                 target: "flowip-080o",
-                                stage_name = %self.context.stage_name,
+                                stage_name = %ctx.stage_name,
                                 event_type = %event.event_type_name(),
                                 event_id = ?event.id,
                                 "stateful: writing aggregated event to journal"
                             );
                             // Enrich with runtime context
                             let flow_context = FlowContext {
-                                flow_name: self.context.flow_name.clone(),
-                                flow_id: self.context.flow_id.to_string(),
-                                stage_name: self.context.stage_name.clone(),
+                                flow_name: ctx.flow_name.clone(),
+                                flow_id: ctx.flow_id.to_string(),
+                                stage_name: ctx.stage_name.clone(),
                                 stage_id: self.stage_id.clone(),
                                 stage_type: obzenflow_core::event::context::StageType::Stateful,
                             };
 
                             let enriched_event = event
                                 .with_flow_context(flow_context)
-                                .with_runtime_context(self.context.instrumentation.snapshot());
+                                .with_runtime_context(ctx.instrumentation.snapshot());
 
                             // FLOWIP-080o-part-2: Only count data events for writer_seq.
                             // Lifecycle events (middleware metrics, etc.) are observability
                             // overhead and should not participate in transport contracts.
                             if enriched_event.is_data() {
-                                self.context.instrumentation.record_emitted(&enriched_event);
+                                ctx.instrumentation.record_emitted(&enriched_event);
                                 // Track output for contract verification
-                                if let Some(ref mut sub) = *self.context.subscription.write().await
-                                {
+                                if let Some(ref mut sub) = ctx.subscription {
                                     sub.track_output_event();
                                 }
                             }
                             // Write the aggregated event
-                            self.context
-                                .data_journal
+                            ctx.data_journal
                                 .append(enriched_event, None)
                                 .await
                                 .map_err(|e| format!("Failed to write aggregated event: {}", e))?;
                         }
 
                         tracing::debug!(
-                            stage_name = %self.context.stage_name,
+                            stage_name = %ctx.stage_name,
                             events_count = events_count,
                             "Emitted aggregated events"
                         );
                     }
                     Ok(_) => {
                         tracing::debug!(
-                            stage_name = %self.context.stage_name,
+                            stage_name = %ctx.stage_name,
                             "No events to emit"
                         );
                     }
                     Err(e) => {
                         tracing::error!(
-                            stage_name = %self.context.stage_name,
+                            stage_name = %ctx.stage_name,
                             error = ?e,
                             "Failed to emit aggregated event"
                         );
@@ -728,38 +731,45 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
             StatefulState::Draining => {
                 // First, drain any remaining events from the subscription queue
                 // This is critical for contract events (FLOWIP-080o fix)
-                let mut subscription_guard = self.context.subscription.write().await;
-                let mut contract_state_guard = self.context.contract_state.write().await;
-                if let Some(subscription) = subscription_guard.as_mut() {
+                let mut maybe_subscription = ctx.subscription.take();
+                let mut contract_state = std::mem::take(&mut ctx.contract_state);
+
+                let mut directive: Result<
+                    EventLoopDirective<Self::Event>,
+                    Box<dyn std::error::Error + Send + Sync>,
+                > = Ok(EventLoopDirective::Continue);
+                let mut should_drain = false;
+
+                if let Some(ref mut subscription) = maybe_subscription {
                     // Poll for remaining events without timeout hacks
                     match subscription
                         .poll_next_with_state(
                             state.variant_name(),
-                            Some(&mut contract_state_guard[..]),
+                            Some(&mut contract_state[..]),
                         )
                         .await
                     {
                         PollResult::Event(envelope) => {
                             tracing::debug!(
-                                stage_name = %self.context.stage_name,
+                                stage_name = %ctx.stage_name,
                                 event_type = envelope.event.event_type(),
                                 "Stateful draining subscription event"
                             );
 
-                            self.context.instrumentation.record_consumed(&envelope);
+                            ctx.instrumentation.record_consumed(&envelope);
 
                             // Process the event based on type
                             if !envelope.event.is_control() {
                                 // Accumulate data events during draining
                                 let event = envelope.event.clone();
-                                let mut handler = (*self.context.handler).clone();
-                                let mut state = self.context.current_state.write().await;
+                                let mut handler = (*ctx.handler).clone();
+                                let state = &mut ctx.current_state;
 
                                 // Process with instrumentation
                                 let _result = process_with_instrumentation(
-                                    &self.context.instrumentation,
+                                    &ctx.instrumentation,
                                     || async move {
-                                        handler.accumulate(&mut state, event);
+                                        handler.accumulate(state, event);
                                         Ok(())
                                     },
                                 )
@@ -769,130 +779,141 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                                 // This ensures contract events (consumption_final, consumption_progress, etc.)
                                 // are not lost during the draining phase
                                 tracing::debug!(
-                                    stage_name = %self.context.stage_name,
+                                    stage_name = %ctx.stage_name,
                                     event_type = envelope.event.event_type(),
                                     "Forwarding control event during stateful draining"
                                 );
 
                                 // Don't forward EOF again during draining - it will be sent after drain completes
                                 if !envelope.event.is_eof() {
-                                    self.forward_control_event(&envelope).await?;
+                                    self.forward_control_event(ctx, &envelope).await?;
                                 }
                             }
 
-                            // Continue draining
-                            return Ok(EventLoopDirective::Continue);
+                            // Continue draining on next loop iteration
+                            should_drain = false;
+                            directive = Ok(EventLoopDirective::Continue);
                         }
                         PollResult::NoEvents => {
                             // Queue is truly drained - no more events available
                             // Do a final contract check before draining
                             let _ = subscription
-                                .check_contracts(&mut contract_state_guard[..])
+                                .check_contracts(&mut contract_state[..])
                                 .await;
 
                             tracing::info!(
-                                stage_name = %self.context.stage_name,
+                                stage_name = %ctx.stage_name,
                                 "Stateful subscription queue drained, calling handler.drain()"
                             );
+                            should_drain = true;
                         }
                         PollResult::Error(e) => {
                             tracing::error!(
-                                stage_name = %self.context.stage_name,
+                                stage_name = %ctx.stage_name,
                                 error = ?e,
                                 "Error during draining"
                             );
-                            drop(subscription_guard);
-                            return Ok(EventLoopDirective::Transition(StatefulEvent::Error(
+                            directive = Ok(EventLoopDirective::Transition(StatefulEvent::Error(
                                 format!("Drain error: {}", e),
                             )));
+                            should_drain = false;
                         }
                     }
+                } else {
+                    // No subscription: treat as already drained, proceed to handler.drain()
+                    should_drain = true;
                 }
-                drop(subscription_guard);
 
-                // Now call handler.drain() to emit final accumulated state
-                let final_state = self.context.current_state.read().await.clone();
-                let handler = (*self.context.handler).clone();
+                // Restore contract state and subscription before potential drain
+                ctx.contract_state = contract_state;
+                ctx.subscription = maybe_subscription;
 
-                tracing::info!(
-                    stage_name = %self.context.stage_name,
-                    "Stateful stage draining final state"
-                );
+                if should_drain {
+                    // Now call handler.drain() to emit final accumulated state
+                    let final_state = ctx.current_state.clone();
+                    let handler = (*ctx.handler).clone();
 
-                // Call handler.drain() with instrumentation
-                let drain_result =
-                    process_with_instrumentation(&self.context.instrumentation, || async move {
-                        handler.drain(&final_state).await
-                    })
-                    .await;
+                    tracing::info!(
+                        stage_name = %ctx.stage_name,
+                        "Stateful stage draining final state"
+                    );
 
-                match drain_result {
-                    Ok(drain_events) => {
-                        tracing::info!(
-                            target: "flowip-080o",
-                            stage_name = %self.context.stage_name,
-                            drain_events_count = drain_events.len(),
-                            "stateful: handler.drain() returned events"
-                        );
+                    // Call handler.drain() with instrumentation
+                    let drain_result =
+                        process_with_instrumentation(&ctx.instrumentation, || async move {
+                            handler.drain(&final_state).await
+                        })
+                        .await;
 
-                        // Write the final aggregated events (if any)
-                        for event in drain_events {
-                            use obzenflow_core::event::JournalEvent;
+                    match drain_result {
+                        Ok(drain_events) => {
                             tracing::info!(
                                 target: "flowip-080o",
-                                stage_name = %self.context.stage_name,
-                                event_type = %event.event_type_name(),
-                                event_id = ?event.id,
-                                "stateful: writing drain event to journal"
+                                stage_name = %ctx.stage_name,
+                                drain_events_count = drain_events.len(),
+                                "stateful: handler.drain() returned events"
                             );
-                            let flow_context = FlowContext {
-                                flow_name: self.context.flow_name.clone(),
-                                flow_id: self.context.flow_id.to_string(),
-                                stage_name: self.context.stage_name.clone(),
-                                stage_id: self.stage_id.clone(),
-                                stage_type: obzenflow_core::event::context::StageType::Stateful,
-                            };
 
-                            let enriched_event = event
-                                .with_flow_context(flow_context)
-                                .with_runtime_context(self.context.instrumentation.snapshot());
+                            // Write the final aggregated events (if any)
+                            for event in drain_events {
+                                use obzenflow_core::event::JournalEvent;
+                                tracing::info!(
+                                    target: "flowip-080o",
+                                    stage_name = %ctx.stage_name,
+                                    event_type = %event.event_type_name(),
+                                    event_id = ?event.id,
+                                    "stateful: writing drain event to journal"
+                                );
+                                let flow_context = FlowContext {
+                                    flow_name: ctx.flow_name.clone(),
+                                    flow_id: ctx.flow_id.to_string(),
+                                    stage_name: ctx.stage_name.clone(),
+                                    stage_id: self.stage_id.clone(),
+                                    stage_type:
+                                        obzenflow_core::event::context::StageType::Stateful,
+                                };
 
-                            // FLOWIP-080o-part-2: Only count data events for writer_seq.
-                            // Lifecycle events (middleware metrics, etc.) are observability
-                            // overhead and should not participate in transport contracts.
-                            if enriched_event.is_data() {
-                                self.context.instrumentation.record_emitted(&enriched_event);
-                                // Track output for contract verification
-                                if let Some(ref mut sub) = *self.context.subscription.write().await
-                                {
-                                    sub.track_output_event();
+                                let enriched_event = event
+                                    .with_flow_context(flow_context)
+                                    .with_runtime_context(ctx.instrumentation.snapshot());
+
+                                // FLOWIP-080o-part-2: Only count data events for writer_seq.
+                                // Lifecycle events (middleware metrics, etc.) are observability
+                                // overhead and should not participate in transport contracts.
+                                if enriched_event.is_data() {
+                                    ctx.instrumentation.record_emitted(&enriched_event);
+                                    // Track output for contract verification
+                                    if let Some(ref mut sub) = ctx.subscription {
+                                        sub.track_output_event();
+                                    }
                                 }
+                                ctx.data_journal
+                                    .append(enriched_event, None)
+                                    .await
+                                    .map_err(|e| {
+                                        format!("Failed to write final aggregated event: {}", e)
+                                    })?;
                             }
-                            self.context
-                                .data_journal
-                                .append(enriched_event, None)
-                                .await
-                                .map_err(|e| {
-                                    format!("Failed to write final aggregated event: {}", e)
-                                })?;
-                        }
 
-                        tracing::info!(
-                            stage_name = %self.context.stage_name,
-                            "Stateful stage drain complete"
-                        );
-                        Ok(EventLoopDirective::Transition(StatefulEvent::DrainComplete))
+                            tracing::info!(
+                                stage_name = %ctx.stage_name,
+                                "Stateful stage drain complete"
+                            );
+                            Ok(EventLoopDirective::Transition(StatefulEvent::DrainComplete))
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                stage_name = %ctx.stage_name,
+                                error = ?e,
+                                "Drain error"
+                            );
+                            Ok(EventLoopDirective::Transition(StatefulEvent::Error(
+                                format!("Drain error: {}", e),
+                            )))
+                        }
                     }
-                    Err(e) => {
-                        tracing::error!(
-                            stage_name = %self.context.stage_name,
-                            error = ?e,
-                            "Drain error"
-                        );
-                        Ok(EventLoopDirective::Transition(StatefulEvent::Error(
-                            format!("Drain error: {}", e),
-                        )))
-                    }
+                } else {
+                    directive
                 }
             }
 
@@ -917,11 +938,11 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> State
     /// Helper to forward control events
     async fn forward_control_event(
         &self,
+        ctx: &StatefulContext<H>,
         envelope: &EventEnvelope<ChainEvent>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let forward_event = envelope.event.clone();
-        self.context
-            .data_journal
+        ctx.data_journal
             .append(forward_event, Some(envelope))
             .await
             .map_err(|e| format!("Failed to forward control event: {}", e))?;

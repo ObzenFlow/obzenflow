@@ -90,10 +90,11 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
         // Create supervisor (private - not exposed)
         let supervisor = JournalSinkSupervisor {
             name: format!("sink_{}", self.config.stage_name),
-            context: Arc::new(context.clone()),
             data_journal: self.resources.data_journal.clone(),
             system_journal: self.resources.system_journal.clone(),
             stage_id: self.config.stage_id,
+            stage_name: self.config.stage_name.clone(),
+            _marker: std::marker::PhantomData,
         };
 
         // Clone what we need for the task
@@ -189,11 +190,12 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
     async fn dispatch_state(
         &mut self,
         state: &Self::State,
+        context: &mut Self::Context,
     ) -> Result<EventLoopDirective<Self::Event>, Box<dyn std::error::Error + Send + Sync>> {
         // Lightweight instrumentation to understand sink FSM behaviour.
         tracing::info!(
             target: "flowip-080o",
-            stage_name = %self.supervisor.context.stage_name,
+            stage_name = %self.supervisor.stage_name,
             fsm_state = %state.variant_name(),
             "sink_fsm: dispatch_state entry"
         );
@@ -206,7 +208,7 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
             Ok(event) => {
                 tracing::info!(
                     target: "flowip-080o",
-                    stage_name = %self.supervisor.context.stage_name,
+                    stage_name = %self.supervisor.stage_name,
                     event = %event.variant_name(),
                     "sink_fsm: received external event"
                 );
@@ -227,6 +229,6 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
         }
 
         // Delegate to the actual supervisor
-        self.supervisor.dispatch_state(state).await
+        self.supervisor.dispatch_state(state, context).await
     }
 }

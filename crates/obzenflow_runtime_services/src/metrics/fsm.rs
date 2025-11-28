@@ -18,7 +18,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::sync::RwLock;
 
 // Histogram configuration constants (in microseconds for precision)
 const HISTOGRAM_MIN_US: u64 = 1; // 1 microsecond minimum
@@ -129,40 +128,32 @@ pub enum MetricsAggregatorAction {
 }
 
 /// Context for the FSM - contains everything actions need to do their work
-#[derive(Clone)]
 pub struct MetricsAggregatorContext {
     /// System journal for reporting
     pub system_journal: Arc<dyn Journal<obzenflow_core::event::SystemEvent>>,
 
     /// Subscription to read from all stage data journals
-    pub data_subscription: Arc<
-        RwLock<Option<crate::messaging::upstream_subscription::UpstreamSubscription<ChainEvent>>>,
-    >,
+    pub data_subscription:
+        Option<crate::messaging::upstream_subscription::UpstreamSubscription<ChainEvent>>,
 
     /// Subscription to read from all error journals (FLOWIP-082g)
-    pub error_subscription: Arc<
-        RwLock<Option<crate::messaging::upstream_subscription::UpstreamSubscription<ChainEvent>>>,
-    >,
+    pub error_subscription:
+        Option<crate::messaging::upstream_subscription::UpstreamSubscription<ChainEvent>>,
 
     /// Subscription to read from system journal for lifecycle events (FLOWIP-059b)
-    pub system_subscription: Arc<
-        RwLock<
-            Option<
-                crate::messaging::system_subscription::SystemSubscription<
-                    obzenflow_core::event::SystemEvent,
-                >,
-            >,
-        >,
-    >,
+    pub system_subscription:
+        Option<crate::messaging::system_subscription::SystemSubscription<
+            obzenflow_core::event::SystemEvent,
+        >>,
 
     /// Whether to include error journals in metrics collection
     pub include_error_journals: bool,
 
     pub exporter: Option<Arc<dyn obzenflow_core::metrics::MetricsExporter>>,
-    pub metrics_store: Arc<RwLock<MetricsStore>>,
+    pub metrics_store: MetricsStore,
     pub export_interval_secs: u64,
     pub system_id: SystemId,
-    pub export_timer: Arc<tokio::sync::Mutex<Option<tokio::time::Interval>>>,
+    pub export_timer: Option<tokio::time::Interval>,
     pub stage_metadata: HashMap<StageId, StageMetadata>,
 }
 
@@ -358,15 +349,15 @@ impl MetricsAggregatorContext {
 
         Ok(Self {
             system_journal,
-            data_subscription: Arc::new(RwLock::new(Some(data_subscription))),
-            error_subscription: Arc::new(RwLock::new(error_subscription)),
-            system_subscription: Arc::new(RwLock::new(Some(system_subscription))),
+            data_subscription: Some(data_subscription),
+            error_subscription,
+            system_subscription: Some(system_subscription),
             include_error_journals: true, // Default to true per FLOWIP-082g
             exporter,
-            metrics_store: Arc::new(RwLock::new(MetricsStore::default())),
+            metrics_store: MetricsStore::default(),
             export_interval_secs,
             system_id,
-            export_timer: Arc::new(tokio::sync::Mutex::new(None)),
+            export_timer: None,
             stage_metadata,
         })
     }
@@ -392,7 +383,7 @@ impl FsmAction for MetricsAggregatorAction {
                     "Metrics aggregator ProcessSystemEvent action"
                 );
                 // FLOWIP-059b: Process system journal events for lifecycle tracking
-                let mut store = ctx.metrics_store.write().await;
+                let store = &mut ctx.metrics_store;
 
                 match &envelope.event.event {
                     obzenflow_core::event::SystemEventType::StageLifecycle { stage_id, event } => {
@@ -445,7 +436,7 @@ impl FsmAction for MetricsAggregatorAction {
                     event_type = envelope.event.event_type(),
                     "Metrics aggregator UpdateMetrics action"
                 );
-                let mut store = ctx.metrics_store.write().await;
+                let store = &mut ctx.metrics_store;
 
                 // Update last event ID
                 store.last_event_id = Some(envelope.event.id.clone());
@@ -735,7 +726,7 @@ impl FsmAction for MetricsAggregatorAction {
             MetricsAggregatorAction::ExportMetrics => {
                 tracing::info!("ExportMetrics action triggered");
                 if let Some(exporter) = &ctx.exporter {
-                    let store = ctx.metrics_store.read().await;
+                    let store = &ctx.metrics_store;
                     let mut snapshot = obzenflow_core::metrics::AppMetricsSnapshot::default();
 
                     tracing::info!(
@@ -907,8 +898,6 @@ impl FsmAction for MetricsAggregatorAction {
                                 .insert(*stage_id, last_datetime);
                         }
                     }
-
-                    drop(store); // Release the lock before exporting
 
                     tracing::info!("Pushing metrics snapshot to exporter");
 

@@ -96,10 +96,10 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Supe
         // Create supervisor (private - not exposed)
         let supervisor = TransformSupervisor {
             name: format!("transform_{}", self.config.stage_name),
-            context: Arc::new(context.clone()),
             data_journal: self.resources.data_journal.clone(),
             system_journal: self.resources.system_journal.clone(),
             stage_id: self.config.stage_id,
+            _marker: std::marker::PhantomData,
         };
 
         // Clone what we need for the task
@@ -196,6 +196,7 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Hand
     async fn dispatch_state(
         &mut self,
         state: &Self::State,
+        context: &mut Self::Context,
     ) -> Result<EventLoopDirective<Self::Event>, Box<dyn std::error::Error + Send + Sync>> {
         // Update state for external observers
         let _ = self.state_watcher.update(state.clone());
@@ -220,6 +221,6 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Hand
         }
 
         // Delegate to the actual supervisor
-        self.supervisor.dispatch_state(state).await
+        self.supervisor.dispatch_state(state, context).await
     }
 }
