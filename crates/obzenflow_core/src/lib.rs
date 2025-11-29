@@ -12,6 +12,7 @@ pub mod metrics;
 pub mod contracts;
 pub mod time;
 pub mod web;
+pub mod circuit_breaker_registry;
 
 // Re-export key types for convenience
 pub use error::Result;

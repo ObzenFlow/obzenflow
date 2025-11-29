@@ -431,7 +431,7 @@ impl FsmAction for MetricsAggregatorAction {
             }
 
             MetricsAggregatorAction::UpdateMetrics { envelope } => {
-                tracing::info!(
+                tracing::trace!(
                     event_id = %envelope.event.id(),
                     event_type = envelope.event.event_type(),
                     "Metrics aggregator UpdateMetrics action"

@@ -203,41 +203,37 @@ impl OrderStreamSource {
 }
 
 impl FiniteSourceHandler for OrderStreamSource {
-    fn next(&mut self) -> Option<ChainEvent> {
-        if self.current_index < self.orders.len() {
-            let (product_id, product_name, price, quantity, category) =
-                &self.orders[self.current_index];
-            self.current_index += 1;
-
-            let order_value = price * (*quantity as f64);
-
-            println!(
-                "📦 Order #{}: {} x{} ({}) = ${:.2}",
-                self.current_index, product_name, quantity, product_id, order_value
-            );
-
-            // ✨ FLOWIP-082a: Emit typed event using EVENT_TYPE constant
-            Some(ChainEventFactory::data_event(
-                self.writer_id.clone(),
-                OrderEvent::EVENT_TYPE,
-                json!({
-                    "order_id": format!("ORD-{:04}", self.current_index),
-                    "product_id": product_id,
-                    "product_name": product_name,
-                    "category": category,
-                    "unit_price": price,
-                    "quantity": quantity,
-                    "total_value": order_value,
-                    "timestamp": self.current_index, // Simulated timestamp
-                }),
-            ))
-        } else {
-            None
+    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, obzenflow_runtime_services::stages::common::handlers::source::traits::SourceError> {
+        if self.current_index >= self.orders.len() {
+            return Ok(None);
         }
-    }
 
-    fn is_complete(&self) -> bool {
-        self.current_index >= self.orders.len()
+        let (product_id, product_name, price, quantity, category) =
+            &self.orders[self.current_index];
+        self.current_index += 1;
+
+        let order_value = price * (*quantity as f64);
+
+        println!(
+            "📦 Order #{}: {} x{} ({}) = ${:.2}",
+            self.current_index, product_name, quantity, product_id, order_value
+        );
+
+        // ✨ FLOWIP-082a: Emit typed event using EVENT_TYPE constant
+        Ok(Some(vec![ChainEventFactory::data_event(
+            self.writer_id.clone(),
+            OrderEvent::EVENT_TYPE,
+            json!({
+                "order_id": format!("ORD-{:04}", self.current_index),
+                "product_id": product_id,
+                "product_name": product_name,
+                "category": category,
+                "unit_price": price,
+                "quantity": quantity,
+                "total_value": order_value,
+                "timestamp": self.current_index, // Simulated timestamp
+            }),
+        )]))
     }
 }
 

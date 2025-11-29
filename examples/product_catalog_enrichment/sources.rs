@@ -26,23 +26,19 @@ impl CategorySource {
 }
 
 impl FiniteSourceHandler for CategorySource {
-    fn next(&mut self) -> Option<ChainEvent> {
+    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, obzenflow_runtime_services::stages::common::handlers::source::traits::SourceError> {
         if self.current_index < self.categories.len() {
             let category = &self.categories[self.current_index];
             self.current_index += 1;
 
-            Some(ChainEventFactory::data_event(
+            Ok(Some(vec![ChainEventFactory::data_event(
                 self.writer_id.clone(),
                 Category::EVENT_TYPE,
                 json!(category),
-            ))
+            )]))
         } else {
-            None
+            Ok(None)
         }
-    }
-
-    fn is_complete(&self) -> bool {
-        self.current_index >= self.categories.len()
     }
 }
 
@@ -64,23 +60,19 @@ impl ProductSource {
 }
 
 impl FiniteSourceHandler for ProductSource {
-    fn next(&mut self) -> Option<ChainEvent> {
+    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, obzenflow_runtime_services::stages::common::handlers::source::traits::SourceError> {
         if self.current_index < self.products.len() {
             let product = &self.products[self.current_index];
             self.current_index += 1;
 
-            Some(ChainEventFactory::data_event(
+            Ok(Some(vec![ChainEventFactory::data_event(
                 self.writer_id.clone(),
                 Product::EVENT_TYPE,
                 json!(product),
-            ))
+            )]))
         } else {
-            None
+            Ok(None)
         }
-    }
-
-    fn is_complete(&self) -> bool {
-        self.current_index >= self.products.len()
     }
 }
 
@@ -102,23 +94,19 @@ impl SKUSource {
 }
 
 impl FiniteSourceHandler for SKUSource {
-    fn next(&mut self) -> Option<ChainEvent> {
+    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, obzenflow_runtime_services::stages::common::handlers::source::traits::SourceError> {
         if self.current_index < self.skus.len() {
             let sku = &self.skus[self.current_index];
             self.current_index += 1;
 
-            Some(ChainEventFactory::data_event(
+            Ok(Some(vec![ChainEventFactory::data_event(
                 self.writer_id.clone(),
                 SKU::EVENT_TYPE,
                 json!(sku),
-            ))
+            )]))
         } else {
-            None
+            Ok(None)
         }
-    }
-
-    fn is_complete(&self) -> bool {
-        self.current_index >= self.skus.len()
     }
 }
 
@@ -140,23 +128,19 @@ impl PromotionSource {
 }
 
 impl FiniteSourceHandler for PromotionSource {
-    fn next(&mut self) -> Option<ChainEvent> {
+    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, obzenflow_runtime_services::stages::common::handlers::source::traits::SourceError> {
         if self.current_index < self.promotions.len() {
             let promo = &self.promotions[self.current_index];
             self.current_index += 1;
 
-            Some(ChainEventFactory::data_event(
+            Ok(Some(vec![ChainEventFactory::data_event(
                 self.writer_id.clone(),
                 Promotion::EVENT_TYPE,
                 json!(promo),
-            ))
+            )]))
         } else {
-            None
+            Ok(None)
         }
-    }
-
-    fn is_complete(&self) -> bool {
-        self.current_index >= self.promotions.len()
     }
 }
 
@@ -178,23 +162,19 @@ impl PaymentSource {
 }
 
 impl FiniteSourceHandler for PaymentSource {
-    fn next(&mut self) -> Option<ChainEvent> {
+    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, obzenflow_runtime_services::stages::common::handlers::source::traits::SourceError> {
         if self.current_index < self.payments.len() {
             let payment = &self.payments[self.current_index];
             self.current_index += 1;
 
-            Some(ChainEventFactory::data_event(
+            Ok(Some(vec![ChainEventFactory::data_event(
                 self.writer_id.clone(),
                 PaymentMethod::EVENT_TYPE,
                 json!(payment),
-            ))
+            )]))
         } else {
-            None
+            Ok(None)
         }
-    }
-
-    fn is_complete(&self) -> bool {
-        self.current_index >= self.payments.len()
     }
 }
 
@@ -217,22 +197,18 @@ impl OrderSource {
 }
 
 impl FiniteSourceHandler for OrderSource {
-    fn next(&mut self) -> Option<ChainEvent> {
+    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, obzenflow_runtime_services::stages::common::handlers::source::traits::SourceError> {
         if self.current_index < self.orders.len() {
             let order = &self.orders[self.current_index];
             self.current_index += 1;
 
-            Some(ChainEventFactory::data_event(
+            Ok(Some(vec![ChainEventFactory::data_event(
                 self.writer_id.clone(),
                 OrderEvent::EVENT_TYPE,
                 json!(order),
-            ))
+            )]))
         } else {
-            None
+            Ok(None)
         }
-    }
-
-    fn is_complete(&self) -> bool {
-        self.current_index >= self.orders.len()
     }
 }

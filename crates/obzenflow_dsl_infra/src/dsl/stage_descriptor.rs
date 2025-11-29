@@ -41,6 +41,7 @@ use obzenflow_runtime_services::{
                 InfiniteSourceBuilder, InfiniteSourceConfig, InfiniteSourceEvent,
                 InfiniteSourceState,
             },
+            strategies::CircuitBreakerSourceStrategy,
         },
         stateful::{StatefulBuilder, StatefulConfig, StatefulEvent, StatefulState},
         transform::{TransformBuilder, TransformConfig, TransformEvent, TransformState},
@@ -147,6 +148,191 @@ pub trait StageDescriptor: Send + Sync {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use obzenflow_adapters::middleware::control::circuit_breaker::circuit_breaker;
+    use obzenflow_core::event::{JournalEvent, SystemEvent};
+    use obzenflow_core::{EventEnvelope, FlowId};
+    use obzenflow_runtime_services::message_bus::FsmMessageBus;
+    use obzenflow_runtime_services::stages::resources_builder::SubscriptionFactory;
+
+    #[derive(Clone, Debug)]
+    struct DummyFiniteSource;
+
+    impl FiniteSourceHandler for DummyFiniteSource {
+        fn next(
+            &mut self,
+        ) -> Result<Option<Vec<ChainEvent>>, obzenflow_runtime_services::stages::SourceError> {
+            // This dummy source never emits data; it's used only to verify that the
+            // circuit breaker middleware wires up a CircuitBreakerSourceStrategy.
+            Ok(None)
+        }
+    }
+
+    #[tokio::test]
+    async fn finite_source_with_circuit_breaker_uses_cb_strategy() {
+        let stage_id = StageId::new();
+        let config = StageConfig {
+            stage_id,
+            name: "cb_source".to_string(),
+            flow_name: "test_flow".to_string(),
+        };
+
+        // Minimal StageResources: journals are never actually written in this unit test.
+        use obzenflow_core::journal::journal::Journal;
+        use obzenflow_core::journal::journal_error::JournalError;
+        use obzenflow_core::journal::journal_owner::JournalOwner;
+        use obzenflow_core::journal::journal_reader::JournalReader;
+        use obzenflow_core::id::JournalId;
+
+        struct NoopJournal<T: JournalEvent> {
+            id: JournalId,
+            owner: Option<JournalOwner>,
+            _marker: std::marker::PhantomData<T>,
+        }
+
+        impl<T: JournalEvent> NoopJournal<T> {
+            fn new(owner: JournalOwner) -> Self {
+                Self {
+                    id: JournalId::new(),
+                    owner: Some(owner),
+                    _marker: std::marker::PhantomData,
+                }
+            }
+        }
+
+        struct NoopReader;
+
+        #[async_trait]
+        impl<T: JournalEvent + 'static> Journal<T> for NoopJournal<T> {
+            fn id(&self) -> &JournalId {
+                &self.id
+            }
+
+            fn owner(&self) -> Option<&JournalOwner> {
+                self.owner.as_ref()
+            }
+
+            async fn append(
+                &self,
+                _event: T,
+                _parent: Option<&EventEnvelope<T>>,
+            ) -> Result<EventEnvelope<T>, JournalError> {
+                Err(JournalError::Implementation {
+                    message: "noop journal".to_string(),
+                    source: "noop".into(),
+                })
+            }
+
+            async fn read_causally_ordered(
+                &self,
+            ) -> Result<Vec<EventEnvelope<T>>, JournalError> {
+                Ok(Vec::new())
+            }
+
+            async fn read_causally_after(
+                &self,
+                _after_event_id: &obzenflow_core::EventId,
+            ) -> Result<Vec<EventEnvelope<T>>, JournalError> {
+                Ok(Vec::new())
+            }
+
+            async fn read_event(
+                &self,
+                _event_id: &obzenflow_core::EventId,
+            ) -> Result<Option<EventEnvelope<T>>, JournalError> {
+                Ok(None)
+            }
+
+            async fn reader(&self) -> Result<Box<dyn JournalReader<T>>, JournalError> {
+                Ok(Box::new(NoopReader))
+            }
+
+            async fn reader_from(
+                &self,
+                _position: u64,
+            ) -> Result<Box<dyn JournalReader<T>>, JournalError> {
+                Ok(Box::new(NoopReader))
+            }
+        }
+
+        #[async_trait]
+        impl<T: JournalEvent + 'static> JournalReader<T> for NoopReader {
+            async fn next(
+                &mut self,
+            ) -> Result<Option<EventEnvelope<T>>, JournalError> {
+                Ok(None)
+            }
+
+            async fn skip(&mut self, _n: u64) -> Result<u64, JournalError> {
+                Ok(0)
+            }
+
+            fn position(&self) -> u64 {
+                0
+            }
+
+            fn is_at_end(&self) -> bool {
+                true
+            }
+        }
+
+        let system_owner = JournalOwner::system(obzenflow_core::SystemId::new());
+        let stage_owner = JournalOwner::stage(stage_id);
+
+        let data_journal: Arc<dyn Journal<ChainEvent>> =
+            Arc::new(NoopJournal::new(stage_owner.clone()));
+        let error_journal: Arc<dyn Journal<ChainEvent>> =
+            Arc::new(NoopJournal::new(stage_owner.clone()));
+        let system_journal: Arc<dyn Journal<SystemEvent>> =
+            Arc::new(NoopJournal::new(system_owner));
+
+        let resources = StageResources {
+            flow_id: FlowId::new(),
+            data_journal,
+            error_journal,
+            system_journal,
+            upstream_journals: Vec::new(),
+            upstream_stage_names: std::collections::HashMap::new(),
+            subscription_factory: SubscriptionFactory::new(std::collections::HashMap::new()),
+            upstream_subscription_factory: SubscriptionFactory::new(
+                std::collections::HashMap::new(),
+            )
+            .bind(&[]),
+            message_bus: Arc::new(FsmMessageBus::new()),
+            upstream_stages: Vec::new(),
+            error_journals: Vec::new(),
+        };
+
+        let descriptor = FiniteSourceDescriptor {
+            name: "cb_source".to_string(),
+            handler: DummyFiniteSource,
+            middleware: vec![circuit_breaker(1)],
+        };
+
+        let mut boxed: Box<dyn StageDescriptor> = Box::new(descriptor);
+        let handle = boxed
+            .create_handle(config, resources)
+            .await
+            .expect("handle creation should succeed");
+
+        // We can't directly inspect the internal config from the handle, but we can
+        // at least check that the CircuitBreakerSourceStrategy was constructed for
+        // this stage via the global circuit breaker registry, which is how the
+        // strategy observes breaker state.
+        let cb_state =
+            obzenflow_core::circuit_breaker_registry::get_stage_state(&stage_id);
+        assert!(
+            cb_state.is_some(),
+            "circuit breaker state should be registered for source with circuit_breaker middleware"
+        );
+
+        // Avoid unused variable warning
+        drop(handle);
+    }
+}
+
 /// Descriptor for finite source stages
 pub struct FiniteSourceDescriptor<H: FiniteSourceHandler + 'static> {
     pub name: String,
@@ -193,12 +379,25 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> S
         // Create system middleware with instrumentation
         let mut all_middleware = create_system_middleware(&config, StageType::FiniteSource);
 
-        // Add resolved user middleware
-        let user_middleware: Vec<Box<dyn Middleware>> = resolved
-            .middleware
-            .into_iter()
-            .map(|spec| spec.factory.create(&config))
-            .collect();
+        // Add resolved user middleware, tracking whether circuit_breaker is present.
+        // For sources specifically, circuit_breaker middleware is used only to
+        // register shared breaker state in the global registry (so
+        // CircuitBreakerSourceStrategy can observe it); we do not attach the
+        // middleware to the source handler itself. This avoids treating
+        // "empty output batches" from sources as failures, which would
+        // conflict with the explicit SourceError-based API (FLOWIP-051b).
+        let mut has_circuit_breaker = false;
+        let mut user_middleware: Vec<Box<dyn Middleware>> = Vec::new();
+        for spec in resolved.middleware.into_iter() {
+            if spec.factory.name() == "circuit_breaker" {
+                has_circuit_breaker = true;
+                // Instantiate once for side effects (registry registration),
+                // but deliberately do not attach to the source middleware chain.
+                let _ = spec.factory.create(&config);
+                continue;
+            }
+            user_middleware.push(spec.factory.create(&config));
+        }
         all_middleware.extend(user_middleware);
 
         // Apply all middleware
@@ -213,7 +412,11 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> S
             stage_id: config.stage_id,
             stage_name: config.name.clone(),
             flow_name: config.flow_name.clone(),
-            control_strategy: None,
+            control_strategy: if has_circuit_breaker {
+                Some(Arc::new(CircuitBreakerSourceStrategy::new(config.stage_id)))
+            } else {
+                None
+            },
         };
 
         // Use the builder to create the handle
@@ -283,12 +486,21 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
         // Create system middleware with instrumentation
         let mut all_middleware = create_system_middleware(&config, StageType::InfiniteSource);
 
-        // Add resolved user middleware
-        let user_middleware: Vec<Box<dyn Middleware>> = resolved
-            .middleware
-            .into_iter()
-            .map(|spec| spec.factory.create(&config))
-            .collect();
+        // Add resolved user middleware, tracking whether circuit_breaker is present.
+        // As with finite sources, we do not attach circuit_breaker middleware
+        // directly to infinite sources; it is used only for global breaker
+        // state registration. This keeps "empty output" semantics from being
+        // interpreted as failures at sources.
+        let mut has_circuit_breaker = false;
+        let mut user_middleware: Vec<Box<dyn Middleware>> = Vec::new();
+        for spec in resolved.middleware.into_iter() {
+            if spec.factory.name() == "circuit_breaker" {
+                has_circuit_breaker = true;
+                let _ = spec.factory.create(&config);
+                continue;
+            }
+            user_middleware.push(spec.factory.create(&config));
+        }
         all_middleware.extend(user_middleware);
 
         // Apply all middleware
@@ -303,7 +515,11 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
             stage_id: config.stage_id,
             stage_name: config.name.clone(),
             flow_name: config.flow_name.clone(),
-            control_strategy: None,
+            control_strategy: if has_circuit_breaker {
+                Some(Arc::new(CircuitBreakerSourceStrategy::new(config.stage_id)))
+            } else {
+                None
+            },
         };
 
         // Use the builder to create the handle

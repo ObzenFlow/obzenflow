@@ -355,19 +355,24 @@ impl<H: InfiniteSourceHandler + Send + Sync + 'static> FsmAction for InfiniteSou
             }
 
             InfiniteSourceAction::SendEOF => {
-                // Consult the source control strategy (FLOWIP-081a). For now
-                // we preserve existing behaviour for all decisions; strategy
-                // hooks become meaningful in later FLOWIPs (e.g. 051b).
+                // Consult the source control strategy (FLOWIP-081a / 051b).
                 let decision = ctx
                     .control_strategy
                     .on_begin_drain(&mut ctx.control_context);
-                let _ = decision;
 
                 let writer_id = ctx.writer_id.as_ref().ok_or_else(|| {
                     obzenflow_fsm::FsmError::HandlerError(
                         "No writer ID available to send EOF".to_string(),
                     )
                 })?;
+
+                // Infinite sources already use non-natural EOF for shutdown; a breaker
+                // can still influence semantics via additional Drain or downstream
+                // interpretation, but we keep `natural = false` here.
+                let _is_poison = matches!(
+                    decision,
+                    crate::stages::source::strategies::SourceShutdownDecision::PoisonEof
+                );
 
                 let eof_event = ChainEventFactory::eof_event(
                     writer_id.clone(),

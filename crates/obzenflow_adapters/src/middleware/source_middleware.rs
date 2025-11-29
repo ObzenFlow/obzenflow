@@ -56,7 +56,9 @@ impl<H: FiniteSourceHandler> MiddlewareFiniteSource<H> {
 }
 
 impl<H: FiniteSourceHandler> FiniteSourceHandler for MiddlewareFiniteSource<H> {
-    fn next(&mut self) -> Option<ChainEvent> {
+    fn next(
+        &mut self,
+    ) -> Result<Option<Vec<ChainEvent>>, obzenflow_runtime_services::stages::common::handlers::source::traits::SourceError> {
         // Create a synthetic event for middleware to process
         let synthetic_event = ChainEventFactory::data_event(
             self.writer_id.clone(),
@@ -78,52 +80,58 @@ impl<H: FiniteSourceHandler> FiniteSourceHandler for MiddlewareFiniteSource<H> {
             match middleware.pre_handle(&synthetic_event, &mut ctx) {
                 MiddlewareAction::Continue => continue,
                 MiddlewareAction::Skip(mut results) => {
-                    // If middleware provides results, enrich them before returning
-                    if let Some(mut event) = results.pop() {
-                        // Call pre_write to enrich the skipped event
+                    // Pre-write phase for skip results
+                    for result in &mut results {
                         for mw in &self.middleware_chain {
-                            mw.pre_write(&mut event, &ctx);
+                            mw.pre_write(result, &ctx);
                         }
-                        return Some(event);
                     }
-                    return None;
+
+                    // Append any control events emitted during skip
+                    let mut control_events = std::mem::take(&mut ctx.control_events);
+                    for control_event in &mut control_events {
+                        for mw in &self.middleware_chain {
+                            mw.pre_write(control_event, &ctx);
+                        }
+                    }
+                    results.extend(control_events);
+                    return Ok(Some(results));
                 }
-                MiddlewareAction::Abort => return None,
+                MiddlewareAction::Abort => {
+                    return Ok(Some(Vec::new()));
+                }
             }
         }
 
-        // Get next from inner source
-        let result = self.inner.next();
+        // Get next batch from inner source
+        let mut results = match self.inner.next() {
+            Ok(Some(events)) => events,
+            Ok(None) => return Ok(None),
+            Err(e) => return Err(e),
+        };
 
-        // Post-processing phase (only if we got an event)
-        if let Some(mut event) = result {
-            let results = vec![event.clone()];
-
-            // Call post_handle for observation
-            for middleware in &self.middleware_chain {
-                middleware.post_handle(&synthetic_event, &results, &mut ctx);
-            }
-
-            // Now call pre_write to enrich the event before returning
-            for middleware in &self.middleware_chain {
-                middleware.pre_write(&mut event, &ctx);
-            }
-
-            // Return the enriched event
-            Some(event)
-        } else {
-            // Let middleware know we got no event
-            let empty = vec![];
-            for middleware in &self.middleware_chain {
-                middleware.post_handle(&synthetic_event, &empty, &mut ctx);
-            }
-            None
+        // Post-processing phase (observation)
+        for middleware in self.middleware_chain.iter() {
+            middleware.post_handle(&synthetic_event, &results, &mut ctx);
         }
-    }
 
-    fn is_complete(&self) -> bool {
-        // Completion check is not intercepted by middleware
-        self.inner.is_complete()
+        // Pre-write phase: enrich each result event
+        for result in &mut results {
+            for middleware in &self.middleware_chain {
+                middleware.pre_write(result, &ctx);
+            }
+        }
+
+        // Append control events after all middleware runs
+        let mut control_events = std::mem::take(&mut ctx.control_events);
+        for control_event in &mut control_events {
+            for middleware in &self.middleware_chain {
+                middleware.pre_write(control_event, &ctx);
+            }
+        }
+        results.extend(control_events);
+
+        Ok(Some(results))
     }
 }
 
@@ -173,7 +181,9 @@ impl<H: InfiniteSourceHandler> MiddlewareInfiniteSource<H> {
 }
 
 impl<H: InfiniteSourceHandler> InfiniteSourceHandler for MiddlewareInfiniteSource<H> {
-    fn next(&mut self) -> Option<ChainEvent> {
+    fn next(
+        &mut self,
+    ) -> Result<Vec<ChainEvent>, obzenflow_runtime_services::stages::common::handlers::source::traits::SourceError> {
         // Create a synthetic event for middleware to process
         let synthetic_event = ChainEventFactory::data_event(
             self.writer_id.clone(),
@@ -195,47 +205,54 @@ impl<H: InfiniteSourceHandler> InfiniteSourceHandler for MiddlewareInfiniteSourc
             match middleware.pre_handle(&synthetic_event, &mut ctx) {
                 MiddlewareAction::Continue => continue,
                 MiddlewareAction::Skip(mut results) => {
-                    // If middleware provides results, enrich them before returning
-                    if let Some(mut event) = results.pop() {
-                        // Call pre_write to enrich the skipped event
+                    // Pre-write phase for skip results
+                    for result in &mut results {
                         for mw in &self.middleware_chain {
-                            mw.pre_write(&mut event, &ctx);
+                            mw.pre_write(result, &ctx);
                         }
-                        return Some(event);
                     }
-                    return None;
+
+                    // Append any control events emitted during skip
+                    let mut control_events = std::mem::take(&mut ctx.control_events);
+                    for control_event in &mut control_events {
+                        for mw in &self.middleware_chain {
+                            mw.pre_write(control_event, &ctx);
+                        }
+                    }
+                    results.extend(control_events);
+                    return Ok(results);
                 }
-                MiddlewareAction::Abort => return None,
+                MiddlewareAction::Abort => {
+                    return Ok(Vec::new());
+                }
             }
         }
 
-        // Get next from inner source
-        let result = self.inner.next();
+        // Get next batch from inner source
+        let mut results = self.inner.next()?;
 
-        // Post-processing phase (only if we got an event)
-        if let Some(mut event) = result {
-            let results = vec![event.clone()];
-
-            // Call post_handle for observation
-            for middleware in &self.middleware_chain {
-                middleware.post_handle(&synthetic_event, &results, &mut ctx);
-            }
-
-            // Now call pre_write to enrich the event before returning
-            for middleware in &self.middleware_chain {
-                middleware.pre_write(&mut event, &ctx);
-            }
-
-            // Return the enriched event
-            Some(event)
-        } else {
-            // Let middleware know we got no event
-            let empty = vec![];
-            for middleware in &self.middleware_chain {
-                middleware.post_handle(&synthetic_event, &empty, &mut ctx);
-            }
-            None
+        // Post-processing phase (observation)
+        for middleware in self.middleware_chain.iter() {
+            middleware.post_handle(&synthetic_event, &results, &mut ctx);
         }
+
+        // Pre-write phase: enrich each result event
+        for result in &mut results {
+            for middleware in &self.middleware_chain {
+                middleware.pre_write(result, &ctx);
+            }
+        }
+
+        // Append control events after all middleware runs
+        let mut control_events = std::mem::take(&mut ctx.control_events);
+        for control_event in &mut control_events {
+            for middleware in &self.middleware_chain {
+                middleware.pre_write(control_event, &ctx);
+            }
+        }
+        results.extend(control_events);
+
+        Ok(results)
     }
 }
 

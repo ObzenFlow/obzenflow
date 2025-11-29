@@ -55,25 +55,21 @@ impl NumberSource {
 }
 
 impl FiniteSourceHandler for NumberSource {
-    fn next(&mut self) -> Option<ChainEvent> {
+    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, obzenflow_runtime_services::stages::common::handlers::source::traits::SourceError> {
         if self.current <= self.max {
             let num = self.current;
             self.current += 1;
 
             println!("📤 Source emitting: {}", num);
 
-            Some(ChainEventFactory::data_event(
+            Ok(Some(vec![ChainEventFactory::data_event(
                 self.writer_id.clone(),
                 "number",
                 json!({ "value": num }),
-            ))
+            )]))
         } else {
-            None
+            Ok(None)
         }
-    }
-
-    fn is_complete(&self) -> bool {
-        self.current > self.max
     }
 }
 

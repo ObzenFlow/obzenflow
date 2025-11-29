@@ -347,66 +347,88 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
                     ));
                 }
 
-                // Get next event from handler
-                // Try to get next event
-                if let Some(mut event) = self.handler.next() {
+                // Get next batch of events from handler.
+                // 051b: handler now returns Result<Vec<ChainEvent>, SourceError>.
+                let next_result = self.handler.next();
 
-                    // We have work - increment loops with work
-                    self.context
-                        .instrumentation
-                        .event_loops_with_work_total
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                match next_result {
+                    Ok(events) if !events.is_empty() => {
+                        // We have work - increment loops with work
+                        self.context
+                            .instrumentation
+                            .event_loops_with_work_total
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-                    // Enrich with runtime context
-                    let flow_context = FlowContext {
-                        flow_name: self.context.flow_name.clone(),
-                        flow_id: self.context.flow_id.to_string(),
-                        stage_name: self.context.stage_name.clone(),
-                        stage_id: self.stage_id.clone(),
-                        stage_type: obzenflow_core::event::context::StageType::InfiniteSource,
-                    };
+                        for event in events {
+                            // Enrich with runtime context
+                            let flow_context = FlowContext {
+                                flow_name: self.context.flow_name.clone(),
+                                flow_id: self.context.flow_id.to_string(),
+                                stage_name: self.context.stage_name.clone(),
+                                stage_id: self.stage_id.clone(),
+                                stage_type:
+                                    obzenflow_core::event::context::StageType::InfiniteSource,
+                            };
 
-                    let enriched_event = event
-                        .with_flow_context(flow_context)
-                        .with_runtime_context(self.context.instrumentation.snapshot());
+                            let enriched_event = event
+                                .with_flow_context(flow_context)
+                                .with_runtime_context(self.context.instrumentation.snapshot());
 
-                    // Apply run_if_not_error pattern (FLOWIP-082g)
-                    let events_to_write =
-                        self.run_if_not_error(enriched_event.clone(), |e| vec![e]);
+                            // Apply run_if_not_error pattern (FLOWIP-082g)
+                            let events_to_write =
+                                self.run_if_not_error(enriched_event.clone(), |e| vec![e]);
 
-                    // Write events based on their status
-                    for event_to_write in events_to_write {
-                        let journal = if matches!(event_to_write.processing_info.status, obzenflow_core::event::status::processing_status::ProcessingStatus::Error(_)) {
-                            &self.context.error_journal
-                        } else {
-                            &self.context.data_journal
-                        };
+                            // Write events based on their status
+                            for event_to_write in events_to_write {
+                                let journal = if matches!(event_to_write.processing_info.status, obzenflow_core::event::status::processing_status::ProcessingStatus::Error(_)) {
+                                    &self.context.error_journal
+                                } else {
+                                    &self.context.data_journal
+                                };
 
-                        // FLOWIP-080o-part-2: Only count data events for writer_seq.
-                        // Lifecycle events (middleware metrics, etc.) are observability
-                        // overhead and should not participate in transport contracts.
-                        if event_to_write.is_data() {
-                            self.context.instrumentation.record_emitted(&event_to_write);
+                                // FLOWIP-080o-part-2: Only count data events for writer_seq.
+                                // Lifecycle events (middleware metrics, etc.) are observability
+                                // overhead and should not participate in transport contracts.
+                                if event_to_write.is_data() {
+                                    self.context
+                                        .instrumentation
+                                        .record_emitted(&event_to_write);
+                                    self.context
+                                        .instrumentation
+                                        .events_processed_total
+                                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                }
+                                journal
+                                    .append(event_to_write, None)
+                                    .await
+                                    .map_err(|e| format!("Failed to write event: {}", e))?;
+                            }
                         }
-                        journal
-                            .append(event_to_write, None)
-                            .await
-                            .map_err(|e| format!("Failed to write event: {}", e))?;
+
+                        tracing::trace!(
+                            stage_name = %self.context.stage_name,
+                            "Infinite source emitted batch of events"
+                        );
+
+                        Ok(EventLoopDirective::Continue)
                     }
-
-                    // Increment events processed counter after successful write
-                    self.context
-                        .instrumentation
-                        .events_processed_total
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
-                    tracing::trace!(
-                        stage_name = %self.context.stage_name,
-                        "Infinite source emitted event"
-                    );
+                    Ok(_events) => {
+                        // Handler advanced but produced no data/control events this tick.
+                        Ok(EventLoopDirective::Continue)
+                    }
+                    Err(e) => {
+                        // SourceError surfaced from handler; delegate to control strategy
+                        // via the standard error path.
+                        tracing::error!(
+                            stage_name = %self.context.stage_name,
+                            error = %e,
+                            "Infinite source handler.next() returned error"
+                        );
+                        Ok(EventLoopDirective::Transition(InfiniteSourceEvent::Error(
+                            e.to_string(),
+                        )))
+                    }
                 }
-
-                Ok(EventLoopDirective::Continue)
             }
 
             InfiniteSourceState::Draining => {

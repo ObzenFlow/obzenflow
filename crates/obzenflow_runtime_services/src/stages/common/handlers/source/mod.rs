@@ -2,4 +2,4 @@
 
 pub mod traits;
 
-pub use traits::{FiniteSourceHandler, InfiniteSourceHandler};
+pub use traits::{FiniteSourceHandler, InfiniteSourceHandler, SourceError};

@@ -124,9 +124,8 @@ impl CarrierDataSource {
     }
 }
 
-#[async_trait]
 impl FiniteSourceHandler for CarrierDataSource {
-    fn next(&mut self) -> Option<ChainEvent> {
+    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, obzenflow_runtime_services::stages::common::handlers::source::traits::SourceError> {
         // Static carrier reference data
         let carriers = vec![
             ("AA", "American Airlines", "USA", 950),
@@ -149,18 +148,14 @@ impl FiniteSourceHandler for CarrierDataSource {
                 fleet_size: fleet,
             };
 
-            Some(ChainEventFactory::data_event(
+            Ok(Some(vec![ChainEventFactory::data_event(
                 WriterId::from(StageId::new()),
                 &CarrierDetails::versioned_event_type(),
                 serde_json::to_value(&carrier).unwrap(),
-            ))
+            )]))
         } else {
-            None
+            Ok(None)
         }
-    }
-
-    fn is_complete(&self) -> bool {
-        self.carriers_emitted >= 7 // We have 7 carriers
     }
 }
 
@@ -254,7 +249,7 @@ impl FlightDataSource {
 }
 
 impl FiniteSourceHandler for FlightDataSource {
-    fn next(&mut self) -> Option<ChainEvent> {
+    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, obzenflow_runtime_services::stages::common::handlers::source::traits::SourceError> {
         if self.current_index < self.flights.len() {
             let (carrier, date, origin, dest, duration, delay) = &self.flights[self.current_index];
             self.current_index += 1;
@@ -272,18 +267,14 @@ impl FiniteSourceHandler for FlightDataSource {
             };
 
             // Emit event with TypedPayload's EVENT_TYPE
-            Some(ChainEventFactory::data_event(
+            Ok(Some(vec![ChainEventFactory::data_event(
                 self.writer_id.clone(),
                 &FlightRecord::versioned_event_type(),
                 serde_json::to_value(&flight).unwrap(),
-            ))
+            )]))
         } else {
-            None
+            Ok(None)
         }
-    }
-
-    fn is_complete(&self) -> bool {
-        self.current_index >= self.flights.len()
     }
 }
 

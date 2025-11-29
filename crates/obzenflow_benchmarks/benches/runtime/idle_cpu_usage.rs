@@ -6,7 +6,7 @@
 
 use criterion::{criterion_group, criterion_main, Criterion};
 use obzenflow_benchmarks::prelude::*;
-use obzenflow_core::event::chain_event::ChainEvent;
+use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::event::event_id::EventId;
 use obzenflow_core::journal::writer_id::WriterId;
 use obzenflow_dsl_infra::{flow, sink, source, transform};
@@ -14,6 +14,7 @@ use obzenflow_infra::journal::DiskJournal;
 use obzenflow_runtime_services::stages::common::handlers::{
     FiniteSourceHandler, SinkHandler, TransformHandler,
 };
+use obzenflow_runtime_services::stages::SourceError;
 // Monitoring removed per FLOWIP-056-666
 use async_trait::async_trait;
 use serde_json::json;
@@ -38,14 +39,10 @@ impl IdleSource {
 }
 
 impl FiniteSourceHandler for IdleSource {
-    fn next(&mut self) -> Option<ChainEvent> {
+    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
         // Mark as completed immediately
         self.completed.store(1, Ordering::Relaxed);
-        None
-    }
-
-    fn is_complete(&self) -> bool {
-        self.completed.load(Ordering::Relaxed) > 0
+        Ok(None)
     }
 }
 

@@ -164,24 +164,20 @@ impl UserEventSource {
 }
 
 impl FiniteSourceHandler for UserEventSource {
-    fn next(&mut self) -> Option<ChainEvent> {
+    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, obzenflow_runtime_services::stages::common::handlers::source::traits::SourceError> {
         if self.event_count >= self.max_events {
-            return None;
+            return Ok(None);
         }
 
         let payload = self.generate_event_payload();
         self.event_count += 1;
 
         // ✨ FLOWIP-082a: Emit typed event using EVENT_TYPE constant
-        Some(ChainEventFactory::data_event(
+        Ok(Some(vec![ChainEventFactory::data_event(
             self.writer_id.clone(),
             UserEvent::EVENT_TYPE,
             payload,
-        ))
-    }
-
-    fn is_complete(&self) -> bool {
-        self.event_count >= self.max_events
+        )]))
     }
 }
 

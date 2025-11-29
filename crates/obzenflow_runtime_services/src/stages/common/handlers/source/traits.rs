@@ -1,13 +1,48 @@
 //! Source handler traits for both finite and infinite sources
+//!
+//! 051b refinement:
+//! - Finite sources now use Result<Option<Vec<ChainEvent>>, SourceError> so EOF
+//!   and infra failures are explicit in the type system.
+//! - Infinite sources use Result<Vec<ChainEvent>, SourceError>.
 
 use obzenflow_core::ChainEvent;
+use std::fmt;
+
+/// Errors that can occur while polling a source.
+///
+/// This is intentionally small for now; 082h will own any cross-stage
+/// unification with a broader StageError taxonomy.
+#[derive(Debug)]
+pub enum SourceError {
+    /// The underlying transport or dependency timed out.
+    Timeout(String),
+    /// The underlying transport or dependency failed (e.g. network error).
+    Transport(String),
+    /// The source encountered malformed data it could not deserialize.
+    Deserialization(String),
+    /// Catch-all for other source-specific failures.
+    Other(String),
+}
+
+impl fmt::Display for SourceError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SourceError::Timeout(msg) => write!(f, "source timeout: {}", msg),
+            SourceError::Transport(msg) => write!(f, "source transport error: {}", msg),
+            SourceError::Deserialization(msg) => write!(f, "source deserialization error: {}", msg),
+            SourceError::Other(msg) => write!(f, "source error: {}", msg),
+        }
+    }
+}
+
+impl std::error::Error for SourceError {}
 
 /// Handler for sources that eventually complete (files, bounded collections)
 ///
 /// Finite sources:
 /// - Pull events using `next()`
-/// - Eventually complete when data is exhausted
-/// - Automatically send EOF when `is_complete()` returns true
+/// - Eventually complete when data is exhausted (signalled via `Ok(None)`)
+/// - Supervisor sends EOF when `next()` returns `Ok(None)`
 ///
 /// # Example
 /// ```ignore
@@ -22,37 +57,31 @@ use obzenflow_core::ChainEvent;
 /// }
 ///
 /// impl FiniteSourceHandler for ListSource {
-///     fn next(&mut self) -> Option<ChainEvent> {
+///     fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
 ///         if self.index < self.items.len() {
 ///             let item = self.items[self.index].clone();
 ///             self.index += 1;
-///             Some(ChainEvent::data(
+///             Ok(Some(vec![ChainEvent::data(
 ///                 EventId::new(),
 ///                 self.writer_id,
 ///                 "data",
 ///                 json!({"item": item}),
-///             ))
+///             )]))
 ///         } else {
-///             None
+///             Ok(None)
 ///         }
-///     }
-///     
-///     fn is_complete(&self) -> bool {
-///         self.index >= self.items.len()
 ///     }
 /// }
 /// ```
 pub trait FiniteSourceHandler: Send + Sync {
-    /// Pull the next event from the source
+    /// Pull zero or more events from the source.
     ///
-    /// Returns None when temporarily out of events.
-    /// Check `is_complete()` to know if source is exhausted.
-    fn next(&mut self) -> Option<ChainEvent>;
-
-    /// Check if this source has completed
-    ///
-    /// When true, supervisor will send EOF and terminate
-    fn is_complete(&self) -> bool;
+    /// - `Ok(Some(events))` means the source advanced; `events` may be empty
+    ///   (no new data right now) or contain one or more events.
+    /// - `Ok(None)` means the source is exhausted; supervisor will send EOF.
+    /// - `Err(SourceError)` means polling the source failed (timeout,
+    ///   transport error, deserialization error, etc.).
+    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError>;
 }
 
 /// Handler for sources that run indefinitely
@@ -76,26 +105,28 @@ pub trait FiniteSourceHandler: Send + Sync {
 /// }
 ///
 /// impl InfiniteSourceHandler for HeartbeatSource {
-///     fn next(&mut self) -> Option<ChainEvent> {
+///     fn next(&mut self) -> Result<Vec<ChainEvent>, SourceError> {
 ///         let now = Instant::now();
 ///         if now.duration_since(self.last_beat) >= self.interval {
 ///             self.last_beat = now;
-///             Some(ChainEvent::data(
+///             Ok(vec![ChainEvent::data(
 ///                 EventId::new(),
 ///                 self.writer_id,
 ///                 "heartbeat",
 ///                 json!({"heartbeat": true, "timestamp": chrono::Utc::now().to_rfc3339()}),
-///             ))
+///             )])
 ///         } else {
-///             None
+///             Ok(Vec::new())
 ///         }
 ///     }
 /// }
 /// ```
 pub trait InfiniteSourceHandler: Send + Sync {
-    /// Pull the next event from the source
+    /// Pull zero or more events from the source.
     ///
-    /// Returns None when temporarily out of events.
-    /// Infinite sources never complete - they run until shutdown.
-    fn next(&mut self) -> Option<ChainEvent>;
+    /// - `Ok(events)` means the source advanced; `events` may be empty or non-empty.
+    /// - `Err(SourceError)` means polling the source failed.
+    ///
+    /// Infinite sources never complete naturally - they run until shutdown.
+    fn next(&mut self) -> Result<Vec<ChainEvent>, SourceError>;
 }

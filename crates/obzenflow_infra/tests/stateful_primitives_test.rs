@@ -13,6 +13,7 @@ use obzenflow_dsl_infra::{flow, sink, source, stateful};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime_services::stages::common::handlers::{FiniteSourceHandler, SinkHandler};
+use obzenflow_runtime_services::stages::SourceError;
 use obzenflow_runtime_services::stages::stateful::{Conflate, GroupBy, Reduce};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -40,35 +41,32 @@ impl TransactionSource {
 }
 
 impl FiniteSourceHandler for TransactionSource {
-    fn next(&mut self) -> Option<ChainEvent> {
+    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
         if self.count == 0 {
-            return None;
+            Ok(None)
+        } else {
+            self.count -= 1;
+
+            let products = vec!["laptop", "phone"];
+            let product = products[self.count % products.len()];
+            let quantity = (self.count % 3) + 1;
+            let base_price = match product {
+                "laptop" => 100.0,
+                "phone" => 50.0,
+                _ => 10.0,
+            };
+            let revenue = base_price * quantity as f64;
+
+            Ok(Some(vec![ChainEventFactory::data_event(
+                self.writer_id.clone(),
+                "transaction",
+                json!({
+                    "product_id": product,
+                    "quantity": quantity,
+                    "revenue": revenue,
+                }),
+            )]))
         }
-        self.count -= 1;
-
-        let products = vec!["laptop", "phone"];
-        let product = products[self.count % products.len()];
-        let quantity = (self.count % 3) + 1;
-        let base_price = match product {
-            "laptop" => 100.0,
-            "phone" => 50.0,
-            _ => 10.0,
-        };
-        let revenue = base_price * quantity as f64;
-
-        Some(ChainEventFactory::data_event(
-            self.writer_id.clone(),
-            "transaction",
-            json!({
-                "product_id": product,
-                "quantity": quantity,
-                "revenue": revenue,
-            }),
-        ))
-    }
-
-    fn is_complete(&self) -> bool {
-        self.count == 0
     }
 }
 

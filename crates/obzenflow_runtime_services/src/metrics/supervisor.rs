@@ -274,19 +274,24 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                                     );
                                     // Clear the timer when transitioning away from Running
                                     export_timer = None;
-                                    directive = Ok(EventLoopDirective::Transition(MetricsAggregatorEvent::StartDraining));
-                                    // Short-circuit after select
-                                    // (no further branches will run this iteration)
-                                    ()
-                                }
-
-                                // Skip control and system events - they shouldn't be counted in metrics
-                                if envelope.event.is_control() || envelope.event.is_system() {
+                                    // Immediately transition into draining; don't process this
+                                    // event as a normal metrics update.
+                                    directive = Ok(EventLoopDirective::Transition(
+                                        MetricsAggregatorEvent::StartDraining,
+                                    ));
+                                } else if envelope.event.is_control() || envelope.event.is_system()
+                                {
+                                    // Skip control and system events - they shouldn't be counted
+                                    // in metrics
                                     directive = Ok(EventLoopDirective::Continue);
+                                } else {
+                                    // Process single event through FSM
+                                    directive = Ok(EventLoopDirective::Transition(
+                                        MetricsAggregatorEvent::ProcessBatch {
+                                            events: vec![envelope],
+                                        },
+                                    ));
                                 }
-
-                                // Process single event through FSM
-                                directive = Ok(EventLoopDirective::Transition(MetricsAggregatorEvent::ProcessBatch { events: vec![envelope] }))
                             }
                             PollResult::NoEvents => {
                                 // No events available, continue
@@ -302,9 +307,12 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                                     );
                                     return Ok(EventLoopDirective::Continue);
                                 }
-                                tracing::error!(error = %err_msg, "Metrics aggregator emitting Error event");
+                                tracing::error!(
+                                    error = %err_msg,
+                                    "Metrics aggregator emitting Error event"
+                                );
                                 directive = Ok(EventLoopDirective::Transition(
-                                    MetricsAggregatorEvent::Error(err_msg)
+                                    MetricsAggregatorEvent::Error(err_msg),
                                 ));
                             }
                         }
@@ -332,17 +340,16 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                                     directive = Ok(EventLoopDirective::Transition(
                                         MetricsAggregatorEvent::StartDraining,
                                     ));
-                                    // No further work this iteration; other branches won't run.
-                                    ()
-                                }
-
-                                // Skip control and system events
-                                if envelope.event.is_control() || envelope.event.is_system() {
+                                } else if envelope.event.is_control() || envelope.event.is_system()
+                                {
+                                    // Skip control and system events
                                     directive = Ok(EventLoopDirective::Continue);
                                 } else {
                                     // Process error event through FSM
                                     directive = Ok(EventLoopDirective::Transition(
-                                        MetricsAggregatorEvent::ProcessBatch { events: vec![envelope] },
+                                        MetricsAggregatorEvent::ProcessBatch {
+                                            events: vec![envelope],
+                                        },
                                     ));
                                 }
                             }
@@ -361,9 +368,12 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                                     );
                                     return Ok(EventLoopDirective::Continue);
                                 }
-                                tracing::error!(error = %err_msg, "Metrics aggregator emitting Error event");
+                                tracing::error!(
+                                    error = %err_msg,
+                                    "Metrics aggregator emitting Error event"
+                                );
                                 directive = Ok(EventLoopDirective::Transition(
-                                    MetricsAggregatorEvent::Error(err_msg)
+                                    MetricsAggregatorEvent::Error(err_msg),
                                 ));
                             }
                         }

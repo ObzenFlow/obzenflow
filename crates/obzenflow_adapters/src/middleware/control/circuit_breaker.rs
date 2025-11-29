@@ -10,7 +10,7 @@ use obzenflow_core::event::payloads::observability_payload::{
     CircuitBreakerEvent, MiddlewareLifecycle, ObservabilityPayload,
 };
 use obzenflow_core::event::ChainEventFactory;
-use obzenflow_core::{EventId, StageId, WriterId};
+use obzenflow_core::{circuit_breaker_registry, EventId, StageId, WriterId};
 use obzenflow_runtime_services::pipeline::config::StageConfig;
 use serde_json::json;
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
@@ -60,6 +60,16 @@ pub struct CircuitBreakerMiddleware {
     stats: Arc<Mutex<CircuitBreakerStats>>,
     /// When the last state change occurred
     last_state_change: Arc<Mutex<Instant>>,
+    /// Optional fallback generator used when the circuit is open.
+    ///
+    /// When configured, requests that would normally be rejected in the
+    /// Open or HalfOpen (non‑probe) states will instead be short‑circuited
+    /// to these synthetic results via `MiddlewareAction::Skip(results)`.
+    ///
+    /// This keeps the handler itself unaware of circuit breaker policy while
+    /// allowing flows to provide domain‑specific degraded responses purely
+    /// via circuit breaker configuration.
+    fallback: Option<Arc<dyn Fn(&ChainEvent) -> Vec<ChainEvent> + Send + Sync>>,
 }
 
 #[derive(Debug)]
@@ -82,11 +92,24 @@ impl Default for CircuitBreakerStats {
 impl CircuitBreakerMiddleware {
     /// Create a new circuit breaker with the given failure threshold
     pub fn new(threshold: usize) -> Self {
-        Self::with_cooldown(threshold, Duration::from_secs(60))
+        Self::with_cooldown_and_fallback(threshold, Duration::from_secs(60), None)
     }
 
     /// Create a circuit breaker with custom cooldown duration
     pub fn with_cooldown(threshold: usize, cooldown: Duration) -> Self {
+        Self::with_cooldown_and_fallback(threshold, cooldown, None)
+    }
+
+    /// Create a circuit breaker with custom cooldown and optional fallback.
+    ///
+    /// This is primarily used by CircuitBreakerFactory so that flows can
+    /// configure domain‑specific fallback behavior via the builder API
+    /// without coupling handler logic to circuit breaker internals.
+    pub fn with_cooldown_and_fallback(
+        threshold: usize,
+        cooldown: Duration,
+        fallback: Option<Arc<dyn Fn(&ChainEvent) -> Vec<ChainEvent> + Send + Sync>>,
+    ) -> Self {
         Self {
             state: Arc::new(AtomicU8::new(CircuitState::Closed as u8)),
             success_count: Arc::new(AtomicUsize::new(0)),
@@ -101,6 +124,7 @@ impl CircuitBreakerMiddleware {
                 last_summary: Instant::now(),
             })),
             last_state_change: Arc::new(Mutex::new(Instant::now())),
+            fallback,
         }
     }
 
@@ -227,7 +251,7 @@ impl CircuitBreakerMiddleware {
 }
 
 impl Middleware for CircuitBreakerMiddleware {
-    fn pre_handle(&self, _event: &ChainEvent, ctx: &mut MiddlewareContext) -> MiddlewareAction {
+    fn pre_handle(&self, event: &ChainEvent, ctx: &mut MiddlewareContext) -> MiddlewareAction {
         match self.current_state() {
             CircuitState::Closed => {
                 // Normal operation
@@ -240,7 +264,7 @@ impl Middleware for CircuitBreakerMiddleware {
                     self.transition_to(CircuitState::HalfOpen, ctx);
                     self.probe_in_flight.store(0, Ordering::SeqCst);
                     // Continue to half-open handling
-                    self.pre_handle(_event, ctx)
+                    self.pre_handle(event, ctx)
                 } else {
                     // Reject the request and emit event
                     let cooldown_remaining =
@@ -264,7 +288,18 @@ impl Middleware for CircuitBreakerMiddleware {
                     // Track rejection
                     self.stats.lock().unwrap().requests_rejected += 1;
 
-                    MiddlewareAction::Skip(vec![])
+                    // If a fallback is configured, short‑circuit to the
+                    // synthetic results instead of propagating an empty
+                    // result set downstream.
+                    if let Some(fallback) = &self.fallback {
+                        let mut results = (fallback)(event);
+                        // Even fallback results should not be flagged as
+                        // infra failures by default; handler logic can still
+                        // choose appropriate ProcessingStatus if desired.
+                        MiddlewareAction::Skip(results)
+                    } else {
+                        MiddlewareAction::Skip(vec![])
+                    }
                 }
             }
 
@@ -298,7 +333,15 @@ impl Middleware for CircuitBreakerMiddleware {
                     // Track rejection
                     self.stats.lock().unwrap().requests_rejected += 1;
 
-                    MiddlewareAction::Skip(vec![])
+                    // When a fallback is configured, treat additional
+                    // requests during HalfOpen as degraded responses
+                    // rather than returning no data.
+                    if let Some(fallback) = &self.fallback {
+                        let results = (fallback)(event);
+                        MiddlewareAction::Skip(results)
+                    } else {
+                        MiddlewareAction::Skip(vec![])
+                    }
                 }
             }
         }
@@ -310,7 +353,16 @@ impl Middleware for CircuitBreakerMiddleware {
         outputs: &[ChainEvent],
         ctx: &mut MiddlewareContext,
     ) {
-        let is_success = !outputs.is_empty();
+        // Treat any output marked with ProcessingStatus::Error as a failure.
+        // This avoids overloading "empty == failure" and lets handlers signal
+        // infra problems explicitly until cross-stage Result-based APIs (082h).
+        let has_error = outputs.iter().any(|e| {
+            matches!(
+                e.processing_info.status,
+                obzenflow_core::event::status::processing_status::ProcessingStatus::Error(_)
+            )
+        });
+        let is_success = !has_error;
         let is_probe = ctx
             .get_baggage("circuit_breaker.is_probe")
             .and_then(|v| v.as_bool())
@@ -402,6 +454,7 @@ impl Middleware for CircuitBreakerMiddleware {
 pub struct CircuitBreakerBuilder {
     threshold: usize,
     cooldown: Duration,
+    fallback: Option<Arc<dyn Fn(&ChainEvent) -> Vec<ChainEvent> + Send + Sync>>,
 }
 
 impl CircuitBreakerBuilder {
@@ -410,6 +463,7 @@ impl CircuitBreakerBuilder {
         Self {
             threshold,
             cooldown: Duration::from_secs(60),
+            fallback: None,
         }
     }
 
@@ -419,11 +473,28 @@ impl CircuitBreakerBuilder {
         self
     }
 
+    /// Configure a fallback factory used when the circuit is open.
+    ///
+    /// The closure receives the original input event and is expected to
+    /// produce a set of synthetic result events that represent a degraded
+    /// but well-defined outcome (e.g., cached response, sentinel value).
+    ///
+    /// This keeps circuit breaker concerns encapsulated in configuration so
+    /// handler implementations remain oblivious to failure policy.
+    pub fn with_fallback<F>(mut self, f: F) -> Self
+    where
+        F: Fn(&ChainEvent) -> Vec<ChainEvent> + Send + Sync + 'static,
+    {
+        self.fallback = Some(Arc::new(f));
+        self
+    }
+
     /// Build the circuit breaker middleware factory
     pub fn build(self) -> Box<dyn MiddlewareFactory> {
         Box::new(CircuitBreakerFactory {
             threshold: self.threshold,
             cooldown: self.cooldown,
+            fallback: self.fallback,
         })
     }
 }
@@ -432,6 +503,7 @@ impl CircuitBreakerBuilder {
 pub struct CircuitBreakerFactory {
     threshold: usize,
     cooldown: Duration,
+    fallback: Option<Arc<dyn Fn(&ChainEvent) -> Vec<ChainEvent> + Send + Sync>>,
 }
 
 impl CircuitBreakerFactory {
@@ -440,6 +512,7 @@ impl CircuitBreakerFactory {
         Self {
             threshold,
             cooldown: Duration::from_secs(60),
+            fallback: None,
         }
     }
 
@@ -448,14 +521,32 @@ impl CircuitBreakerFactory {
         self.cooldown = duration;
         self
     }
+
+    /// Configure the fallback factory for this circuit breaker.
+    pub fn with_fallback<F>(mut self, f: F) -> Self
+    where
+        F: Fn(&ChainEvent) -> Vec<ChainEvent> + Send + Sync + 'static,
+    {
+        self.fallback = Some(Arc::new(f));
+        self
+    }
 }
 
 impl MiddlewareFactory for CircuitBreakerFactory {
-    fn create(&self, _config: &StageConfig) -> Box<dyn Middleware> {
-        Box::new(CircuitBreakerMiddleware::with_cooldown(
+    fn create(&self, config: &StageConfig) -> Box<dyn Middleware> {
+        // Create middleware instance
+        let middleware = CircuitBreakerMiddleware::with_cooldown_and_fallback(
             self.threshold,
             self.cooldown,
-        ))
+            self.fallback.clone(),
+        );
+
+        // Register its state handle in the global registry so runtime
+        // strategies (e.g. CircuitBreakerSourceStrategy) can observe
+        // breaker state for this stage without a direct dependency.
+        circuit_breaker_registry::register_stage_state(config.stage_id, middleware.state.clone());
+
+        Box::new(middleware)
     }
 
     fn name(&self) -> &str {
@@ -471,6 +562,7 @@ pub fn circuit_breaker(threshold: usize) -> Box<dyn MiddlewareFactory> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use obzenflow_core::event::status::processing_status::ProcessingStatus;
 
     fn create_test_event() -> ChainEvent {
         ChainEventFactory::data_event(WriterId::from(StageId::new()), "test", json!({}))
@@ -488,7 +580,11 @@ mod tests {
                 cb.pre_handle(&event, &mut ctx),
                 MiddlewareAction::Continue
             ));
-            cb.post_handle(&event, &vec![], &mut ctx); // Empty outputs = failure
+            // Mark output as an explicit error so the breaker treats this as a failure.
+            let mut failed_output = create_test_event();
+            failed_output.processing_info.status =
+                ProcessingStatus::error("simulated_failure_closed_to_open");
+            cb.post_handle(&event, &[failed_output], &mut ctx);
         }
 
         // Third failure should open the circuit
@@ -498,7 +594,10 @@ mod tests {
             cb.pre_handle(&event, &mut ctx),
             MiddlewareAction::Continue
         ));
-        cb.post_handle(&event, &vec![], &mut ctx); // This triggers the opening
+        let mut failed_output = create_test_event();
+        failed_output.processing_info.status =
+            ProcessingStatus::error("simulated_failure_closed_to_open");
+        cb.post_handle(&event, &[failed_output], &mut ctx); // This triggers the opening
 
         // Next request should be rejected
         let event = create_test_event();
@@ -519,7 +618,10 @@ mod tests {
             let event = create_test_event();
             let mut ctx = MiddlewareContext::new();
             let _ = cb.pre_handle(&event, &mut ctx);
-            cb.post_handle(&event, &vec![], &mut ctx);
+            let mut failed_output = create_test_event();
+            failed_output.processing_info.status =
+                ProcessingStatus::error("simulated_failure_success_resets");
+            cb.post_handle(&event, &[failed_output], &mut ctx);
         }
 
         // Success should reset the count

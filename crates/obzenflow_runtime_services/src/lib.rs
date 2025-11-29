@@ -33,7 +33,7 @@ pub mod prelude {
     // Handlers
     pub use crate::stages::{
         FiniteSourceHandler, InfiniteSourceHandler, ObserverHandler, ResourceManaged, SinkHandler,
-        StatefulHandler, TransformHandler,
+        SourceError, StatefulHandler, TransformHandler,
     };
 
     // Note: Supervisors are internal implementation details and not exported.

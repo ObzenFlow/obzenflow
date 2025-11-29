@@ -9,7 +9,10 @@ use obzenflow_core::{
 use obzenflow_dsl_infra::{flow, sink, source, stateful};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime_services::stages::common::handlers::{FiniteSourceHandler, SinkHandler, StatefulHandler};
+use obzenflow_runtime_services::stages::common::handlers::{
+    FiniteSourceHandler, SinkHandler, StatefulHandler,
+};
+use obzenflow_runtime_services::stages::SourceError;
 use serde_json::json;
 
 #[derive(Clone, Debug)]
@@ -30,22 +33,18 @@ impl NumberSource {
 }
 
 impl FiniteSourceHandler for NumberSource {
-    fn next(&mut self) -> Option<ChainEvent> {
+    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
         if self.current <= self.max {
             let num = self.current;
             self.current += 1;
-            Some(ChainEventFactory::data_event(
+            Ok(Some(vec![ChainEventFactory::data_event(
                 self.writer_id.clone(),
                 "number",
                 json!({ "value": num }),
-            ))
+            )]))
         } else {
-            None
+            Ok(None)
         }
-    }
-
-    fn is_complete(&self) -> bool {
-        self.current > self.max
     }
 }
 
@@ -63,12 +62,8 @@ impl EmptySource {
 }
 
 impl FiniteSourceHandler for EmptySource {
-    fn next(&mut self) -> Option<ChainEvent> {
-        None
-    }
-
-    fn is_complete(&self) -> bool {
-        true
+    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+        Ok(None)
     }
 }
 

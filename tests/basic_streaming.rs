@@ -1,9 +1,9 @@
 // tests/basic_streaming.rs
-use obzenflow_core::event::chain_event::ChainEvent;
-use obzenflow_core::event::event_id::EventId;
-use obzenflow_core::journal::writer_id::WriterId;
+use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
+use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
+use obzenflow_core::{StageId, WriterId};
 use obzenflow_dsl_infra::{flow, sink, source, transform};
-use obzenflow_infra::journal::DiskJournal;
+use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime_services::stages::common::handlers::{
     FiniteSourceHandler, SinkHandler, TransformHandler,
 };
@@ -16,7 +16,7 @@ use std::sync::Arc;
 use tempfile::tempdir;
 
 /// Simple test sink that counts events
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct EventCounterSink {
     count: Arc<AtomicU64>,
 }
@@ -35,13 +35,23 @@ impl EventCounterSink {
 
 #[async_trait]
 impl SinkHandler for EventCounterSink {
-    fn consume(&mut self, _event: ChainEvent) -> obzenflow_core::Result<()> {
-        self.count.fetch_add(1, Ordering::Relaxed);
-        Ok(())
+    async fn consume(
+        &mut self,
+        _event: ChainEvent,
+    ) -> obzenflow_core::Result<DeliveryPayload> {
+        if _event.is_data() {
+            self.count.fetch_add(1, Ordering::Relaxed);
+        }
+        Ok(DeliveryPayload::success(
+            "counter_sink",
+            DeliveryMethod::Custom("Count".to_string()),
+            None,
+        ))
     }
 }
 
 /// Source that generates a fixed number of events
+#[derive(Clone, Debug)]
 struct TestEventSource {
     count: usize,
     emitted: usize,
@@ -53,44 +63,40 @@ impl TestEventSource {
         Self {
             count,
             emitted: 0,
-            writer_id: WriterId::new(),
+            writer_id: WriterId::from(StageId::new()),
         }
     }
 }
 
 impl FiniteSourceHandler for TestEventSource {
-    fn next(&mut self) -> Option<ChainEvent> {
+    fn next(
+        &mut self,
+    ) -> Result<
+        Option<Vec<ChainEvent>>,
+        obzenflow_runtime_services::stages::common::handlers::source::traits::SourceError,
+    > {
         if self.emitted < self.count {
             let index = self.emitted;
             self.emitted += 1;
-            Some(ChainEvent::new(
-                EventId::new(),
+            Ok(Some(vec![ChainEventFactory::data_event(
                 self.writer_id.clone(),
                 "TestEvent",
                 json!({ "index": index }),
-            ))
+            )]))
         } else {
-            None
+            Ok(None)
         }
-    }
-
-    fn is_complete(&self) -> bool {
-        self.emitted >= self.count
     }
 }
 
 #[tokio::test]
 async fn test_basic_flow() -> Result<()> {
-    let temp_dir = tempdir()?;
-    let journal_path = temp_dir.path().to_path_buf();
-
     let (counter_sink, counter) = EventCounterSink::new();
-    let journal = Arc::new(DiskJournal::new(journal_path, "test_basic").await?);
 
     // Create a simple flow
     let handle = flow! {
         name: "basic_flow_test",
-        journal: journal,
+        journals: disk_journals(std::path::PathBuf::from("target/basic_streaming_basic")),
         middleware: [],
 
         stages: {
@@ -121,6 +127,7 @@ async fn test_basic_flow() -> Result<()> {
 }
 
 /// Stage that doubles each event
+#[derive(Clone, Debug)]
 struct Doubler;
 
 impl Doubler {
@@ -129,24 +136,25 @@ impl Doubler {
     }
 }
 
+#[async_trait]
 impl TransformHandler for Doubler {
     fn process(&self, event: ChainEvent) -> Vec<ChainEvent> {
         // Return doubled events
         vec![event.clone(), event]
     }
+
+    async fn drain(&mut self) -> obzenflow_core::Result<()> {
+        Ok(())
+    }
 }
 
 #[tokio::test]
 async fn test_multi_stage_flow() -> Result<()> {
-    let temp_dir = tempdir()?;
-    let journal_path = temp_dir.path().to_path_buf();
-
     let (counter_sink, counter) = EventCounterSink::new();
-    let journal = Arc::new(DiskJournal::new(journal_path, "test_multi_stage").await?);
 
     let handle = flow! {
         name: "multi_stage_flow_test",
-        journal: journal,
+        journals: disk_journals(std::path::PathBuf::from("target/basic_streaming_multi")),
         middleware: [],
 
         stages: {
@@ -179,6 +187,7 @@ async fn test_multi_stage_flow() -> Result<()> {
 }
 
 /// A source that generates numbered events
+#[derive(Clone, Debug)]
 struct NumberSource {
     count: usize,
     emitted: usize,
@@ -190,33 +199,34 @@ impl NumberSource {
         Self {
             count,
             emitted: 0,
-            writer_id: WriterId::new(),
+            writer_id: WriterId::from(StageId::new()),
         }
     }
 }
 
 impl FiniteSourceHandler for NumberSource {
-    fn next(&mut self) -> Option<ChainEvent> {
+    fn next(
+        &mut self,
+    ) -> Result<
+        Option<Vec<ChainEvent>>,
+        obzenflow_runtime_services::stages::common::handlers::source::traits::SourceError,
+    > {
         if self.emitted < self.count {
             let value = self.emitted + 1;
             self.emitted += 1;
-            Some(ChainEvent::new(
-                EventId::new(),
+            Ok(Some(vec![ChainEventFactory::data_event(
                 self.writer_id.clone(),
                 "Number",
                 json!({ "value": value }),
-            ))
+            )]))
         } else {
-            None
+            Ok(None)
         }
-    }
-
-    fn is_complete(&self) -> bool {
-        self.emitted >= self.count
     }
 }
 
 /// A transform that doubles numbers
+#[derive(Clone, Debug)]
 struct NumberDoubler;
 
 impl NumberDoubler {
@@ -225,11 +235,15 @@ impl NumberDoubler {
     }
 }
 
+#[async_trait]
 impl TransformHandler for NumberDoubler {
     fn process(&self, event: ChainEvent) -> Vec<ChainEvent> {
-        if let Some(value) = event.payload.get("value").and_then(|v| v.as_u64()) {
-            vec![ChainEvent::new(
-                EventId::new(),
+        if let Some(value) = event
+            .payload()
+            .get("value")
+            .and_then(|v| v.as_u64())
+        {
+            vec![ChainEventFactory::data_event(
                 event.writer_id.clone(),
                 "DoubledNumber",
                 json!({ "value": value * 2 }),
@@ -238,10 +252,14 @@ impl TransformHandler for NumberDoubler {
             vec![]
         }
     }
+
+    async fn drain(&mut self) -> obzenflow_core::Result<()> {
+        Ok(())
+    }
 }
 
 /// A sink that sums all numbers it receives
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct SumSink {
     sum: Arc<AtomicU64>,
 }
@@ -255,28 +273,37 @@ impl SumSink {
 
 #[async_trait]
 impl SinkHandler for SumSink {
-    fn consume(&mut self, event: ChainEvent) -> obzenflow_core::Result<()> {
-        if let Some(value) = event.payload.get("value").and_then(|v| v.as_u64()) {
+    async fn consume(
+        &mut self,
+        event: ChainEvent,
+    ) -> obzenflow_core::Result<DeliveryPayload> {
+        if let Some(value) = event
+            .payload()
+            .get("value")
+            .and_then(|v| v.as_u64())
+        {
             self.sum.fetch_add(value, Ordering::Relaxed);
         }
-        Ok(())
+        Ok(DeliveryPayload::success(
+            "sum_sink",
+            DeliveryMethod::Custom("Sum".to_string()),
+            None,
+        ))
     }
 }
 
 #[tokio::test]
 async fn test_pipeline_topology() -> Result<()> {
-    let temp_dir = tempdir()?;
-    let journal_path = temp_dir.path().to_path_buf();
-
     let (sum_sink, sum) = SumSink::new();
-    let journal = Arc::new(DiskJournal::new(journal_path, "test_topology").await?);
 
     // Pipeline: Source(1,2,3) -> Doubler(2,4,6) -> Sum
     // If topology filtering works, Sum should be 12 (2+4+6)
     // If it doesn't work (broadcast), Sum would be 21 (1+2+3+2+4+6)
     let handle = flow! {
         name: "pipeline_topology_test",
-        journal: journal,
+        journals: disk_journals(std::path::PathBuf::from(
+            "target/basic_streaming_topology",
+        )),
         middleware: [],
 
         stages: {

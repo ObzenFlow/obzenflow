@@ -1,3 +1,5 @@
+#![cfg(skip)] // Disabled: superseded by focused rate limiter metrics tests
+
 //! Integration test for blocking rate limiter
 //!
 //! Verifies that the rate limiter properly blocks and processes all events

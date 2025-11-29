@@ -72,34 +72,30 @@ impl GameScoreSource {
 }
 
 impl FiniteSourceHandler for GameScoreSource {
-    fn next(&mut self) -> Option<ChainEvent> {
-        if self.current_index < self.events.len() {
-            let (player, score, game_mode) = &self.events[self.current_index];
-            self.current_index += 1;
-
-            println!(
-                "📊 Score Update: {} scored {:.0} points in {} mode",
-                player, score, game_mode
-            );
-
-            // ✨ FLOWIP-082a: Emit typed event using EVENT_TYPE constant
-            Some(ChainEventFactory::data_event(
-                self.writer_id.clone(),
-                GameScore::EVENT_TYPE,
-                json!({
-                    "player": player,
-                    "score": score,
-                    "game_mode": game_mode,
-                    "timestamp": self.current_index, // Simulated timestamp
-                }),
-            ))
-        } else {
-            None
+    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, obzenflow_runtime_services::stages::common::handlers::source::traits::SourceError> {
+        if self.current_index >= self.events.len() {
+            return Ok(None);
         }
-    }
 
-    fn is_complete(&self) -> bool {
-        self.current_index >= self.events.len()
+        let (player, score, game_mode) = &self.events[self.current_index];
+        self.current_index += 1;
+
+        println!(
+            "📊 Score Update: {} scored {:.0} points in {} mode",
+            player, score, game_mode
+        );
+
+        // ✨ FLOWIP-082a: Emit typed event using EVENT_TYPE constant
+        Ok(Some(vec![ChainEventFactory::data_event(
+            self.writer_id.clone(),
+            GameScore::EVENT_TYPE,
+            json!({
+                "player": player,
+                "score": score,
+                "game_mode": game_mode,
+                "timestamp": self.current_index, // Simulated timestamp
+            }),
+        )]))
     }
 }
 

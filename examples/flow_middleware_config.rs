@@ -59,9 +59,9 @@ impl EventCounter {
 }
 
 impl FiniteSourceHandler for EventCounter {
-    fn next(&mut self) -> Option<ChainEvent> {
+    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, obzenflow_runtime_services::stages::common::handlers::source::traits::SourceError> {
         if self.count >= self.max_count {
-            return None;
+            return Ok(None);
         }
 
         self.count += 1;
@@ -71,17 +71,13 @@ impl FiniteSourceHandler for EventCounter {
             println!("[SOURCE] Generated {} events", self.count);
         }
 
-        Some(ChainEventFactory::data_event(
+        Ok(Some(vec![ChainEventFactory::data_event(
             self.writer_id.clone(),
             "counter.event",
             json!({
                 "count": self.count,
             }),
-        ))
-    }
-
-    fn is_complete(&self) -> bool {
-        self.count >= self.max_count
+        )]))
     }
 }
 

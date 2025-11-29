@@ -350,13 +350,10 @@ impl<H: FiniteSourceHandler + Send + Sync + 'static> FsmAction for FiniteSourceA
             }
 
             FiniteSourceAction::SendEOF => {
-                // Consult the source control strategy (FLOWIP-081a). For now we
-                // preserve existing behaviour for all decisions; strategy hooks
-                // become meaningful in later FLOWIPs (e.g. 051b).
+                // Consult the source control strategy (FLOWIP-081a / 051b).
                 let decision = ctx
                     .control_strategy
                     .on_natural_completion(&mut ctx.control_context);
-                let _ = decision;
 
                 let writer_id = ctx.writer_id.as_ref().ok_or_else(|| {
                     obzenflow_fsm::FsmError::HandlerError(
@@ -370,11 +367,14 @@ impl<H: FiniteSourceHandler + Send + Sync + 'static> FsmAction for FiniteSourceA
                     .events_processed_total
                     .load(std::sync::atomic::Ordering::Relaxed);
 
+                // Determine whether EOF should be natural or "poison"
+                let natural = match decision {
+                    crate::stages::source::strategies::SourceShutdownDecision::PoisonEof => false,
+                    _ => true,
+                };
+
                 // Emit EOF with writer positions populated
-                let mut eof_event = ChainEventFactory::eof_event(
-                    writer_id.clone(),
-                    true, // natural EOF for finite sources
-                );
+                let mut eof_event = ChainEventFactory::eof_event(writer_id.clone(), natural);
                 if let ChainEventContent::FlowControl(FlowControlPayload::Eof {
                     writer_id: writer_id_field,
                     writer_seq,
@@ -529,5 +529,258 @@ impl<H: FiniteSourceHandler + Send + Sync + 'static> FsmAction for FiniteSourceA
 
             FiniteSourceAction::_Phantom(_) => unreachable!("PhantomData variant"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::message_bus::FsmMessageBus;
+    use crate::metrics::instrumentation::StageInstrumentation;
+    use async_trait::async_trait;
+    use obzenflow_core::circuit_breaker_registry;
+    use obzenflow_core::event::event_envelope::EventEnvelope;
+    use obzenflow_core::event::identity::JournalWriterId;
+    use obzenflow_core::event::journal_event::JournalEvent;
+    use obzenflow_core::event::system_event::SystemEvent;
+    use obzenflow_core::journal::journal::Journal;
+    use obzenflow_core::journal::journal_error::JournalError;
+    use obzenflow_core::journal::journal_owner::JournalOwner;
+    use obzenflow_core::journal::journal_reader::JournalReader;
+    use obzenflow_core::id::JournalId;
+    use obzenflow_core::StageId as CoreStageId;
+    use std::sync::atomic::{AtomicU8, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    use crate::stages::source::strategies::CircuitBreakerSourceStrategy;
+    use crate::stages::common::handlers::FiniteSourceHandler as TestFiniteSourceHandler;
+
+    /// Minimal in-memory journal for tests
+    struct TestJournal<T: JournalEvent> {
+        id: JournalId,
+        owner: Option<JournalOwner>,
+        events: Arc<Mutex<Vec<EventEnvelope<T>>>>,
+    }
+
+    impl<T: JournalEvent> TestJournal<T> {
+        fn new(owner: JournalOwner) -> Self {
+            Self {
+                id: JournalId::new(),
+                owner: Some(owner),
+                events: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+    }
+
+    struct TestJournalReader<T: JournalEvent> {
+        events: Vec<EventEnvelope<T>>,
+        pos: usize,
+    }
+
+    #[async_trait]
+    impl<T: JournalEvent + 'static> Journal<T> for TestJournal<T> {
+        fn id(&self) -> &JournalId {
+            &self.id
+        }
+
+        fn owner(&self) -> Option<&JournalOwner> {
+            self.owner.as_ref()
+        }
+
+        async fn append(
+            &self,
+            event: T,
+            _parent: Option<&EventEnvelope<T>>,
+        ) -> Result<EventEnvelope<T>, JournalError> {
+            let env = EventEnvelope::new(JournalWriterId::from(self.id), event);
+            let mut guard = self.events.lock().unwrap();
+            guard.push(env.clone());
+            Ok(env)
+        }
+
+        async fn read_causally_ordered(
+            &self,
+        ) -> Result<Vec<EventEnvelope<T>>, JournalError> {
+            let guard = self.events.lock().unwrap();
+            Ok(guard.clone())
+        }
+
+        async fn read_causally_after(
+            &self,
+            _after_event_id: &obzenflow_core::EventId,
+        ) -> Result<Vec<EventEnvelope<T>>, JournalError> {
+            // Not needed for this test
+            Ok(Vec::new())
+        }
+
+        async fn read_event(
+            &self,
+            _event_id: &obzenflow_core::EventId,
+        ) -> Result<Option<EventEnvelope<T>>, JournalError> {
+            // Not needed for this test
+            Ok(None)
+        }
+
+        async fn reader(&self) -> Result<Box<dyn JournalReader<T>>, JournalError> {
+            let guard = self.events.lock().unwrap();
+            Ok(Box::new(TestJournalReader {
+                events: guard.clone(),
+                pos: 0,
+            }))
+        }
+
+        async fn reader_from(
+            &self,
+            position: u64,
+        ) -> Result<Box<dyn JournalReader<T>>, JournalError> {
+            let guard = self.events.lock().unwrap();
+            Ok(Box::new(TestJournalReader {
+                events: guard.clone(),
+                pos: position as usize,
+            }))
+        }
+    }
+
+    #[async_trait]
+    impl<T: JournalEvent + 'static> JournalReader<T> for TestJournalReader<T> {
+        async fn next(
+            &mut self,
+        ) -> Result<Option<EventEnvelope<T>>, JournalError> {
+            if self.pos >= self.events.len() {
+                Ok(None)
+            } else {
+                let env = self.events.get(self.pos).cloned();
+                self.pos += 1;
+                Ok(env)
+            }
+        }
+
+        async fn skip(&mut self, n: u64) -> Result<u64, JournalError> {
+            let start = self.pos as u64;
+            self.pos = (self.pos as u64 + n) as usize;
+            Ok((self.pos as u64).saturating_sub(start))
+        }
+
+        fn position(&self) -> u64 {
+            self.pos as u64
+        }
+
+        fn is_at_end(&self) -> bool {
+            self.pos >= self.events.len()
+        }
+    }
+
+    struct DummySource;
+
+    impl TestFiniteSourceHandler for DummySource {
+        fn next(
+            &mut self,
+        ) -> Result<Option<Vec<ChainEvent>>, crate::stages::common::handlers::source::traits::SourceError>
+        {
+            // This test source never emits data; it's only used to drive EOF behaviour
+            // in combination with the control strategy and breaker state.
+            Ok(None)
+        }
+    }
+
+    #[tokio::test]
+    async fn send_eof_uses_poison_flag_when_breaker_open() {
+        // Shared setup
+        let stage_id = CoreStageId::new();
+        let flow_id = FlowId::new();
+        let flow_name = "test_flow".to_string();
+        let stage_name = "finite_source".to_string();
+
+        let data_journal: Arc<dyn Journal<ChainEvent>> =
+            Arc::new(TestJournal::new(JournalOwner::stage(stage_id)));
+        let error_journal: Arc<dyn Journal<ChainEvent>> =
+            Arc::new(TestJournal::new(JournalOwner::stage(stage_id)));
+        let system_journal: Arc<dyn Journal<SystemEvent>> =
+            Arc::new(TestJournal::new(JournalOwner::stage(stage_id)));
+
+        let bus = Arc::new(FsmMessageBus::new());
+        let instrumentation = Arc::new(StageInstrumentation::new());
+
+        // Helper to build a fresh context with a given control strategy
+        let build_ctx = |control_strategy: Arc<dyn SourceControlStrategy>| {
+            FiniteSourceContext::<DummySource>::new(
+                stage_id,
+                stage_name.clone(),
+                flow_name.clone(),
+                flow_id,
+                data_journal.clone(),
+                error_journal.clone(),
+                system_journal.clone(),
+                bus.clone(),
+                instrumentation.clone(),
+                control_strategy,
+            )
+        };
+
+        // Case 1: breaker closed -> natural EOF
+        let state_closed = Arc::new(AtomicU8::new(0)); // Closed
+        circuit_breaker_registry::register_stage_state(stage_id, state_closed.clone());
+        let mut ctx = build_ctx(Arc::new(CircuitBreakerSourceStrategy::new(stage_id)));
+
+        // Allocate resources to set writer_id
+        FiniteSourceAction::<DummySource>::AllocateResources
+            .execute(&mut ctx)
+            .await
+            .unwrap();
+
+        // Pretend we emitted some data events
+        ctx.instrumentation
+            .events_processed_total
+            .store(5, std::sync::atomic::Ordering::Relaxed);
+
+        // Send EOF with breaker closed
+        FiniteSourceAction::<DummySource>::SendEOF
+            .execute(&mut ctx)
+            .await
+            .unwrap();
+
+        let events_closed = data_journal.read_causally_ordered().await.unwrap();
+        let eof_natural_closed = events_closed.iter().any(|env| {
+            matches!(
+                env.event.content,
+                ChainEventContent::FlowControl(FlowControlPayload::Eof { natural: true, .. })
+            )
+        });
+        assert!(
+            eof_natural_closed,
+            "Expected natural EOF when breaker is closed"
+        );
+
+        // Case 2: breaker open -> poison EOF
+        let state_open = Arc::new(AtomicU8::new(1)); // Open
+        circuit_breaker_registry::register_stage_state(stage_id, state_open.clone());
+        let mut ctx_open = build_ctx(Arc::new(CircuitBreakerSourceStrategy::new(stage_id)));
+
+        FiniteSourceAction::<DummySource>::AllocateResources
+            .execute(&mut ctx_open)
+            .await
+            .unwrap();
+
+        ctx_open
+            .instrumentation
+            .events_processed_total
+            .store(10, std::sync::atomic::Ordering::Relaxed);
+
+        FiniteSourceAction::<DummySource>::SendEOF
+            .execute(&mut ctx_open)
+            .await
+            .unwrap();
+
+        let events_open = data_journal.read_causally_ordered().await.unwrap();
+        let eof_poison = events_open.iter().any(|env| {
+            matches!(
+                env.event.content,
+                ChainEventContent::FlowControl(FlowControlPayload::Eof { natural: false, .. })
+            )
+        });
+        assert!(
+            eof_poison,
+            "Expected poison EOF (natural = false) when breaker is open"
+        );
     }
 }

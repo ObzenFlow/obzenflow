@@ -338,70 +338,95 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> H
                     .event_loops_total
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-                // Get next event from handler (synchronous, no locks needed)
-                if let Some(event) = self.handler.next() {
+                // Get next batch of events from handler (synchronous, no locks needed).
+                // 051b: handler now returns Result<Option<Vec<ChainEvent>>, SourceError>
+                let next_result = self.handler.next();
 
+                match next_result {
+                    Ok(Some(events)) if !events.is_empty() => {
                     // We have work - increment loops with work
                     self.context
                         .instrumentation
                         .event_loops_with_work_total
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-                    // Enrich with runtime context
-                    let flow_context = FlowContext {
-                        flow_name: self.context.flow_name.clone(),
-                        flow_id: self.context.flow_id.to_string(),
-                        stage_name: self.context.stage_name.clone(),
-                        stage_id: self.stage_id.clone(),
-                        stage_type: obzenflow_core::event::context::StageType::FiniteSource,
-                    };
+                    // Track whether this tick produced any data events.
+                    // Control/observability-only batches should still be written
+                    // but treated as "no data" for completion semantics (051b/081a).
+                    let mut had_data = false;
 
-                    let enriched_event = event
-                        .with_flow_context(flow_context)
-                        .with_runtime_context(self.context.instrumentation.snapshot());
-
-                    // Apply run_if_not_error pattern (FLOWIP-082g)
-                    let events_to_write =
-                        self.run_if_not_error(enriched_event.clone(), |e| vec![e]);
-
-                    // Write events based on their status
-                    for event_to_write in events_to_write {
-                        let journal = if matches!(event_to_write.processing_info.status, obzenflow_core::event::status::processing_status::ProcessingStatus::Error(_)) {
-                            &self.context.error_journal
-                        } else {
-                            &self.context.data_journal
+                    for event in events {
+                        // Enrich with runtime context
+                        let flow_context = FlowContext {
+                            flow_name: self.context.flow_name.clone(),
+                            flow_id: self.context.flow_id.to_string(),
+                            stage_name: self.context.stage_name.clone(),
+                            stage_id: self.stage_id.clone(),
+                            stage_type: obzenflow_core::event::context::StageType::FiniteSource,
                         };
 
-                        // FLOWIP-080o-part-2: Only count data events for writer_seq.
-                        // Lifecycle events (middleware metrics, etc.) are observability
-                        // overhead and should not participate in transport contracts.
-                        if event_to_write.is_data() {
-                            self.context.instrumentation.record_emitted(&event_to_write);
-                        }
-                        journal
-                            .append(event_to_write, None)
-                            .await
-                            .map_err(|e| format!("Failed to write event: {}", e))?;
-                    }
+                        let enriched_event = event
+                            .with_flow_context(flow_context)
+                            .with_runtime_context(self.context.instrumentation.snapshot());
 
-                    // Increment events processed counter after successful write
-                    self.context
-                        .instrumentation
-                        .events_processed_total
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        // Apply run_if_not_error pattern (FLOWIP-082g)
+                        let events_to_write =
+                            self.run_if_not_error(enriched_event.clone(), |e| vec![e]);
+
+                        // Write events based on their status
+                        for event_to_write in events_to_write {
+                            let journal = if matches!(event_to_write.processing_info.status, obzenflow_core::event::status::processing_status::ProcessingStatus::Error(_)) {
+                                &self.context.error_journal
+                            } else {
+                                &self.context.data_journal
+                            };
+                            // FLOWIP-080o-part-2: Only count data events for writer_seq.
+                            // Lifecycle/control events are observability overhead and
+                            // should not participate in transport contracts.
+                            if event_to_write.is_data() {
+                                had_data = true;
+                                self.context.instrumentation.record_emitted(&event_to_write);
+                                self.context
+                                    .instrumentation
+                                    .events_processed_total
+                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            }
+                            journal
+                                .append(event_to_write, None)
+                                .await
+                                .map_err(|e| format!("Failed to write event: {}", e))?;
+                        }
+                    }
 
                     tracing::trace!(
                         stage_name = %self.context.stage_name,
-                        "Source emitted event"
+                        "Finite source emitted batch of events"
                     );
-                } else {
-                    // No more events available, check if source is complete
-                    if self.handler.is_complete() {
-                        return Ok(EventLoopDirective::Transition(FiniteSourceEvent::Completed));
+
+                    Ok(EventLoopDirective::Continue)
+                }
+                    Ok(Some(_events)) => {
+                        // Handler advanced but produced only control/observability events.
+                        // Treat as "no data" for completion semantics.
+                        Ok(EventLoopDirective::Continue)
+                    }
+                    Ok(None) => {
+                        // Natural completion signalled by handler.
+                        Ok(EventLoopDirective::Transition(FiniteSourceEvent::Completed))
+                    }
+                    Err(e) => {
+                        // SourceError surfaced from handler; delegate to control strategy
+                        // via the standard error path.
+                        tracing::error!(
+                            stage_name = %self.context.stage_name,
+                            error = %e,
+                            "Finite source handler.next() returned error"
+                        );
+                        Ok(EventLoopDirective::Transition(FiniteSourceEvent::Error(
+                            e.to_string(),
+                        )))
                     }
                 }
-
-                Ok(EventLoopDirective::Continue)
             }
 
             FiniteSourceState::Draining => {

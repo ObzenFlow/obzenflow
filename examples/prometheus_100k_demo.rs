@@ -57,10 +57,10 @@ impl HighVolumeSource {
 }
 
 impl FiniteSourceHandler for HighVolumeSource {
-    fn next(&mut self) -> Option<ChainEvent> {
-        if self.count >= self.total_events {
+    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, obzenflow_runtime_services::stages::common::handlers::source::traits::SourceError> {
+        if self.is_complete() {
             println!("🏁 Source complete: Generated {} total events", self.count);
-            return None;
+            return Ok(None);
         }
 
         // Increment after we know we're emitting an event
@@ -76,7 +76,7 @@ impl FiniteSourceHandler for HighVolumeSource {
         let should_fail = current_id % 100 == 0;
 
         // ✨ FLOWIP-082a: Emit typed event using EVENT_TYPE constant
-        Some(ChainEventFactory::data_event(
+        Ok(Some(vec![ChainEventFactory::data_event(
             self.writer_id.clone(),
             &DataRequest::versioned_event_type(),
             json!({
@@ -84,11 +84,7 @@ impl FiniteSourceHandler for HighVolumeSource {
                 "should_fail": should_fail,
                 "batch": current_id / 100,  // Group into batches of 100
             }),
-        ))
-    }
-
-    fn is_complete(&self) -> bool {
-        self.count >= self.total_events
+        )]))
     }
 }
 

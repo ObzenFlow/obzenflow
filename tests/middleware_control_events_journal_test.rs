@@ -2,24 +2,29 @@
 //!
 //! This test verifies that control events emitted by middleware during
 //! transform processing are properly written to the journal and can be
-//! collected via subscriptions.
+//! observed by reading the journal.
 
+use async_trait::async_trait;
 use obzenflow_adapters::middleware::{
     Middleware, MiddlewareAction, MiddlewareContext, TransformHandlerExt,
 };
-use obzenflow_core::{ChainEvent, EventId};
+use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
+use obzenflow_core::journal::journal::Journal;
+use obzenflow_core::{JournalOwner, StageId, WriterId};
 use obzenflow_infra::journal::MemoryJournal;
-use obzenflow_runtime_services::messaging::reactive_journal::ReactiveJournal;
 use obzenflow_runtime_services::stages::common::handlers::TransformHandler;
 use serde_json::json;
-use std::sync::Arc;
 
 struct SimpleTransform;
 
+#[async_trait]
 impl TransformHandler for SimpleTransform {
-    fn process(&self, mut event: ChainEvent) -> Vec<ChainEvent> {
-        event.payload["transformed"] = json!(true);
+    fn process(&self, event: ChainEvent) -> Vec<ChainEvent> {
         vec![event]
+    }
+
+    async fn drain(&mut self) -> obzenflow_core::Result<()> {
+        Ok(())
     }
 }
 
@@ -28,8 +33,9 @@ struct MetricsEmittingMiddleware;
 impl Middleware for MetricsEmittingMiddleware {
     fn pre_handle(&self, _event: &ChainEvent, ctx: &mut MiddlewareContext) -> MiddlewareAction {
         // Emit metrics state control event
-        ctx.write_control_event(ChainEvent::control(
-            ChainEvent::CONTROL_METRICS_STATE,
+        let writer_id = WriterId::from(StageId::new());
+        ctx.write_control_event(ChainEventFactory::metrics_state_snapshot(
+            writer_id.clone(),
             json!({
                 "queue_depth": 10,
                 "in_flight": 5
@@ -44,9 +50,10 @@ impl Middleware for MetricsEmittingMiddleware {
         _results: &[ChainEvent],
         ctx: &mut MiddlewareContext,
     ) {
-        // Emit middleware state control event
-        ctx.write_control_event(ChainEvent::control(
-            ChainEvent::CONTROL_MIDDLEWARE_STATE,
+        // Emit middleware state control event (also modeled as metrics snapshot)
+        let writer_id = WriterId::from(StageId::new());
+        ctx.write_control_event(ChainEventFactory::metrics_state_snapshot(
+            writer_id,
             json!({
                 "middleware": "test",
                 "state_transition": {
@@ -60,25 +67,10 @@ impl Middleware for MetricsEmittingMiddleware {
 
 #[tokio::test]
 async fn test_middleware_control_events_flow_to_journal() {
-    // Create journal without observer - using subscription pattern now
-    let base_journal = Arc::new(MemoryJournal::new());
-    let journal = ReactiveJournal::new(base_journal);
-
-    // Create subscription for control events
-    let mut subscription = journal.subscribe(
-        obzenflow_runtime_services::messaging::reactive_journal::SubscriptionFilter::EventTypes {
-            event_types: vec![
-                ChainEvent::CONTROL_METRICS_STATE.to_string(),
-                ChainEvent::CONTROL_MIDDLEWARE_STATE.to_string(),
-            ],
-        }
-    ).await.unwrap();
-
-    // Register a writer for the transform
-    let writer_id = journal
-        .register_writer(obzenflow_topology::StageId::new(), None)
-        .await
-        .unwrap();
+    // Create a stage-owned in-memory journal
+    let stage_id = StageId::new();
+    let owner = JournalOwner::stage(stage_id);
+    let journal: MemoryJournal<ChainEvent> = MemoryJournal::with_owner(owner);
 
     // Create handler with middleware
     let handler = SimpleTransform
@@ -86,9 +78,11 @@ async fn test_middleware_control_events_flow_to_journal() {
         .with(MetricsEmittingMiddleware)
         .build();
 
+    // Writer for the transform
+    let writer_id = WriterId::from(stage_id);
+
     // Create test event
-    let event = ChainEvent::new(
-        EventId::new(),
+    let event = ChainEventFactory::data_event(
         writer_id.clone(),
         "test.data",
         json!({"value": 42}),
@@ -99,42 +93,58 @@ async fn test_middleware_control_events_flow_to_journal() {
 
     // Write all outputs to journal (as TransformSupervisor does)
     for output in outputs {
-        journal.write(&writer_id, output, None).await.unwrap();
+        journal.append(output, None).await.unwrap();
     }
 
-    // Collect control events from subscription
-    let mut control_events = Vec::new();
-    // Receive events one at a time
-    for _ in 0..2 {
-        let batch = subscription.recv_batch().await.unwrap();
-        control_events.extend(batch);
-    }
+    // Read back all events from journal
+    let envelopes = journal.read_causally_ordered().await.unwrap();
+    let control_events: Vec<ChainEvent> = envelopes
+        .into_iter()
+        .map(|env| env.event)
+        .filter(|e| e.is_lifecycle())
+        .collect();
 
     // Should have received 2 control events
     assert_eq!(control_events.len(), 2);
 
-    // Verify metrics state event
+    // Verify metrics state event (queue depth snapshot)
     let metrics_event = control_events
         .iter()
-        .find(|e| e.event.event_type == ChainEvent::CONTROL_METRICS_STATE)
+        .find(|e| {
+            let payload = e.payload();
+            payload
+                .get("metrics")
+                .and_then(|m| m.get("queue_depth"))
+                .map(|v| v == &json!(10))
+                .unwrap_or(false)
+        })
         .expect("Should have metrics state event");
 
-    assert_eq!(metrics_event.event.payload["queue_depth"], 10);
-    assert_eq!(metrics_event.event.payload["in_flight"], 5);
+    let metrics_payload = metrics_event.payload();
+    assert_eq!(metrics_payload["metrics"]["queue_depth"], 10);
+    assert_eq!(metrics_payload["metrics"]["in_flight"], 5);
 
-    // Verify middleware state event
+    // Verify middleware state event (modeled as metrics snapshot)
     let middleware_event = control_events
         .iter()
-        .find(|e| e.event.event_type == ChainEvent::CONTROL_MIDDLEWARE_STATE)
+        .find(|e| {
+            let payload = e.payload();
+            payload
+                .get("metrics")
+                .and_then(|m| m.get("middleware"))
+                .map(|v| v == &json!("test"))
+                .unwrap_or(false)
+        })
         .expect("Should have middleware state event");
 
-    assert_eq!(middleware_event.event.payload["middleware"], "test");
+    let middleware_payload = middleware_event.payload();
+    assert_eq!(middleware_payload["metrics"]["middleware"], "test");
     assert_eq!(
-        middleware_event.event.payload["state_transition"]["from"],
+        middleware_payload["metrics"]["state_transition"]["from"],
         "processing"
     );
     assert_eq!(
-        middleware_event.event.payload["state_transition"]["to"],
+        middleware_payload["metrics"]["state_transition"]["to"],
         "complete"
     );
 }

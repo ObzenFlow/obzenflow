@@ -10,6 +10,7 @@ use obzenflow_dsl_infra::{flow, sink, source, transform};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime_services::stages::common::handlers::{FiniteSourceHandler, SinkHandler};
+use obzenflow_runtime_services::stages::SourceError;
 use obzenflow_runtime_services::stages::transform::Map;
 use serde_json::json;
 
@@ -29,23 +30,20 @@ impl SimpleSource {
 }
 
 impl FiniteSourceHandler for SimpleSource {
-    fn next(&mut self) -> Option<ChainEvent> {
+    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
         if self.count == 0 {
-            return None;
+            Ok(None)
+        } else {
+            self.count -= 1;
+
+            Ok(Some(vec![ChainEventFactory::data_event(
+                self.writer_id.clone(),
+                "number",
+                json!({
+                    "value": self.count + 1,
+                }),
+            )]))
         }
-        self.count -= 1;
-
-        Some(ChainEventFactory::data_event(
-            self.writer_id.clone(),
-            "number",
-            json!({
-                "value": self.count + 1,
-            }),
-        ))
-    }
-
-    fn is_complete(&self) -> bool {
-        self.count == 0
     }
 }
 
@@ -101,4 +99,3 @@ async fn stateless_pipeline_runs_to_completion() {
     .await
     .expect("flow should complete without stateful stages");
 }
-

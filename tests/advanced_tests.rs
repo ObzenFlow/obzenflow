@@ -1,9 +1,9 @@
 // tests/advanced_tests.rs
-use obzenflow_core::event::chain_event::ChainEvent;
-use obzenflow_core::event::event_id::EventId;
-use obzenflow_core::journal::writer_id::WriterId;
+use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
+use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
+use obzenflow_core::{StageId, WriterId};
 use obzenflow_dsl_infra::{flow, sink, source, transform};
-use obzenflow_infra::journal::DiskJournal;
+use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime_services::stages::common::handlers::{
     FiniteSourceHandler, SinkHandler, TransformHandler,
 };
@@ -13,15 +13,13 @@ use async_trait::async_trait;
 use serde_json::json;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use tempfile::tempdir;
+use std::path::PathBuf;
 
 /// Test using the DSL macros with EventStore
 #[tokio::test]
 async fn test_dsl_pipeline() -> Result<()> {
-    let temp_dir = tempdir()?;
-    let store_path = temp_dir.path().join("test_dsl_event_store");
-
     // Define pipeline stages
+    #[derive(Clone, Debug)]
     struct EventGenerator {
         events: Vec<(String, serde_json::Value)>,
         emitted: usize,
@@ -38,32 +36,33 @@ async fn test_dsl_pipeline() -> Result<()> {
             Self {
                 events,
                 emitted: 0,
-                writer_id: WriterId::new(),
+                writer_id: WriterId::from(StageId::new()),
             }
         }
     }
 
     impl FiniteSourceHandler for EventGenerator {
-        fn next(&mut self) -> Option<ChainEvent> {
+        fn next(
+            &mut self,
+        ) -> Result<
+            Option<Vec<ChainEvent>>,
+            obzenflow_runtime_services::stages::common::handlers::source::traits::SourceError,
+        > {
             if self.emitted < self.events.len() {
                 let (event_type, payload) = &self.events[self.emitted];
                 self.emitted += 1;
-                Some(ChainEvent::new(
-                    EventId::new(),
+                Ok(Some(vec![ChainEventFactory::data_event(
                     self.writer_id.clone(),
-                    event_type,
+                    event_type.clone(),
                     payload.clone(),
-                ))
+                )]))
             } else {
-                None
+                Ok(None)
             }
-        }
-
-        fn is_complete(&self) -> bool {
-            self.emitted >= self.events.len()
         }
     }
 
+    #[derive(Clone, Debug)]
     struct Doubler;
 
     impl Doubler {
@@ -72,17 +71,33 @@ async fn test_dsl_pipeline() -> Result<()> {
         }
     }
 
+    #[async_trait]
     impl TransformHandler for Doubler {
-        fn process(&self, mut event: ChainEvent) -> Vec<ChainEvent> {
-            if let Some(value) = event.payload["value"].as_u64() {
-                event.payload["doubled"] = json!(value * 2);
-                event.event_type = "Doubled".to_string();
+        fn process(&self, event: ChainEvent) -> Vec<ChainEvent> {
+            if let Some(value) = event
+                .payload()
+                .get("value")
+                .and_then(|v| v.as_u64())
+            {
+                vec![ChainEventFactory::data_event(
+                    event.writer_id.clone(),
+                    "Doubled",
+                    json!({
+                        "value": value,
+                        "doubled": value * 2,
+                    }),
+                )]
+            } else {
+                vec![event]
             }
-            vec![event]
+        }
+
+        async fn drain(&mut self) -> obzenflow_core::Result<()> {
+            Ok(())
         }
     }
 
-    #[derive(Clone)]
+    #[derive(Clone, Debug)]
     struct Summer {
         total: Arc<AtomicU64>,
     }
@@ -95,11 +110,22 @@ async fn test_dsl_pipeline() -> Result<()> {
 
     #[async_trait]
     impl SinkHandler for Summer {
-        fn consume(&mut self, event: ChainEvent) -> obzenflow_core::Result<()> {
-            if let Some(doubled) = event.payload["doubled"].as_u64() {
+        async fn consume(
+            &mut self,
+            event: ChainEvent,
+        ) -> obzenflow_core::Result<DeliveryPayload> {
+            if let Some(doubled) = event
+                .payload()
+                .get("doubled")
+                .and_then(|v| v.as_u64())
+            {
                 self.total.fetch_add(doubled, Ordering::Relaxed);
             }
-            Ok(())
+            Ok(DeliveryPayload::success(
+                "summer",
+                DeliveryMethod::Custom("Sum".to_string()),
+                None,
+            ))
         }
     }
 
@@ -107,14 +133,10 @@ async fn test_dsl_pipeline() -> Result<()> {
     let total = Arc::new(AtomicU64::new(0));
     let summer = Summer::new(total.clone());
 
-    // Create journal
-    let journal_path = temp_dir.path().to_path_buf();
-    let journal = Arc::new(DiskJournal::new(journal_path, "test_dsl").await?);
-
     // Run pipeline with DSL
     let handle = flow! {
         name: "dsl_transformation_test",
-        journal: journal,
+        journals: disk_journals(PathBuf::from("target/advanced_tests")),
         middleware: [],
 
         stages: {

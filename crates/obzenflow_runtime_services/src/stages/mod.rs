@@ -14,6 +14,7 @@ pub use common::{
     ObserverHandler, ProcessingContext, ResourceManaged, SinkHandler, StatefulHandler,
     TransformHandler,
 };
+pub use common::handlers::source::SourceError;
 
 // Re-export JoinHandler from common::handlers
 pub use common::handlers::JoinHandler;

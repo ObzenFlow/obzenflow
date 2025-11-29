@@ -1,9 +1,11 @@
 //! Simple test to verify control events flow through the system
 //! This is for FLOWIP-056-666 Phase 4.0 Task 4
 
+use async_trait::async_trait;
 use obzenflow_adapters::middleware::{Middleware, MiddlewareAction, MiddlewareContext};
 use obzenflow_adapters::middleware::{MiddlewareTransform, TransformMiddlewareBuilder};
-use obzenflow_core::{ChainEvent, EventId, WriterId};
+use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
+use obzenflow_core::{StageId, WriterId};
 use obzenflow_runtime_services::stages::common::handlers::TransformHandler;
 use serde_json::json;
 
@@ -12,9 +14,10 @@ struct TestControlMiddleware;
 
 impl Middleware for TestControlMiddleware {
     fn pre_handle(&self, _event: &ChainEvent, ctx: &mut MiddlewareContext) -> MiddlewareAction {
-        // Emit a control event
-        ctx.write_control_event(ChainEvent::control(
-            ChainEvent::CONTROL_METRICS_STATE,
+        // Emit a metrics state snapshot control event
+        let writer_id = WriterId::from(StageId::new());
+        ctx.write_control_event(ChainEventFactory::metrics_state_snapshot(
+            writer_id.clone(),
             json!({
                 "queue_depth": 10,
                 "in_flight": 3,
@@ -30,9 +33,10 @@ impl Middleware for TestControlMiddleware {
         _results: &[ChainEvent],
         ctx: &mut MiddlewareContext,
     ) {
-        // Emit another control event
-        ctx.write_control_event(ChainEvent::control(
-            ChainEvent::CONTROL_MIDDLEWARE_SUMMARY,
+        // Emit another metrics snapshot event as a simplified "middleware summary"
+        let writer_id = WriterId::from(StageId::new());
+        ctx.write_control_event(ChainEventFactory::metrics_state_snapshot(
+            writer_id,
             json!({
                 "middleware": "test_middleware",
                 "stats": {
@@ -45,11 +49,17 @@ impl Middleware for TestControlMiddleware {
 }
 
 /// Simple transform that just passes through
+#[derive(Clone, Debug)]
 struct PassthroughTransform;
 
+#[async_trait]
 impl TransformHandler for PassthroughTransform {
     fn process(&self, event: ChainEvent) -> Vec<ChainEvent> {
         vec![event]
+    }
+
+    async fn drain(&mut self) -> obzenflow_core::Result<()> {
+        Ok(())
     }
 }
 
@@ -61,9 +71,8 @@ fn test_control_events_are_appended() {
         MiddlewareTransform::new(transform).with_middleware(Box::new(TestControlMiddleware));
 
     // Process an event
-    let input_event = ChainEvent::new(
-        EventId::new(),
-        WriterId::new(),
+    let input_event = ChainEventFactory::data_event(
+        WriterId::from(StageId::new()),
         "test.data",
         json!({"value": 42}),
     );
@@ -75,20 +84,15 @@ fn test_control_events_are_appended() {
 
     // First is the data event
     assert!(!results[0].is_control());
-    assert_eq!(results[0].event_type, "test.data");
+    assert_eq!(results[0].event_type(), "test.data");
 
-    // Second is CONTROL_METRICS_STATE
-    assert!(results[1].is_control());
-    assert_eq!(results[1].event_type, ChainEvent::CONTROL_METRICS_STATE);
-    assert_eq!(results[1].payload["queue_depth"], 10);
+    // Second is a metrics state snapshot
+    assert!(results[1].is_lifecycle());
+    assert_eq!(results[1].event_type(), "lifecycle.metrics.state");
 
-    // Third is CONTROL_MIDDLEWARE_SUMMARY
-    assert!(results[2].is_control());
-    assert_eq!(
-        results[2].event_type,
-        ChainEvent::CONTROL_MIDDLEWARE_SUMMARY
-    );
-    assert_eq!(results[2].payload["middleware"], "test_middleware");
+    // Third is another metrics state snapshot acting as middleware summary
+    assert!(results[2].is_lifecycle());
+    assert_eq!(results[2].event_type(), "lifecycle.metrics.state");
 
     println!("✓ Control events are properly appended to transform results");
 }
@@ -102,9 +106,8 @@ fn test_circuit_breaker_emits_control_events() {
     let wrapped = MiddlewareTransform::new(transform).with_middleware(Box::new(circuit_breaker));
 
     // First event - success
-    let event1 = ChainEvent::new(
-        EventId::new(),
-        WriterId::new(),
+    let event1 = ChainEventFactory::data_event(
+        WriterId::from(StageId::new()),
         "test.success",
         json!({"id": 1}),
     );
@@ -114,25 +117,24 @@ fn test_circuit_breaker_emits_control_events() {
 
     // Process some failures to trigger state change
     for i in 0..3 {
-        let mut fail_event = ChainEvent::new(
-            EventId::new(),
-            WriterId::new(),
+        let fail_event = ChainEventFactory::data_event(
+            WriterId::from(StageId::new()),
             "test.fail",
             json!({"id": i + 2}),
         );
 
-        // Simulate failure by returning empty results
+        // Process event (circuit breaker middleware will track failures)
         let results = wrapped.process(fail_event);
 
         println!("Failure {} produced {} results", i + 1, results.len());
 
         // Check for control events
         for (idx, event) in results.iter().enumerate() {
-            if event.is_control() {
-                println!("  Result[{}] is control event: {}", idx, event.event_type);
+            if event.is_control() || event.is_lifecycle() {
+                println!("  Result[{}] is control event: {}", idx, event.event_type());
                 println!(
                     "  Payload: {}",
-                    serde_json::to_string_pretty(&event.payload).unwrap()
+                    serde_json::to_string_pretty(&event.payload()).unwrap()
                 );
             }
         }

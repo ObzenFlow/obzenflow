@@ -58,10 +58,10 @@ impl TextCharSource {
 }
 
 impl FiniteSourceHandler for TextCharSource {
-    fn next(&mut self) -> Option<ChainEvent> {
+    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, obzenflow_runtime_services::stages::common::handlers::source::traits::SourceError> {
         // Check if we've processed all sentences
         if self.current_sentence >= self.sentences.len() {
-            return None;
+            return Ok(None);
         }
 
         let sentence = &self.sentences[self.current_sentence];
@@ -78,11 +78,11 @@ impl FiniteSourceHandler for TextCharSource {
                 char_idx: self.current_char - 1,
             };
 
-            Some(ChainEventFactory::data_event(
+            Ok(Some(vec![ChainEventFactory::data_event(
                 self.writer_id.clone(),
                 CharEvent::EVENT_TYPE,
                 serde_json::to_value(&char_event).unwrap(),
-            ))
+            )]))
         } else {
             // Move to next sentence
             self.current_sentence += 1;
@@ -97,20 +97,16 @@ impl FiniteSourceHandler for TextCharSource {
                     char_idx: chars.len(),
                 };
 
-                Some(ChainEventFactory::data_event(
+                Ok(Some(vec![ChainEventFactory::data_event(
                     self.writer_id.clone(),
                     CharEvent::EVENT_TYPE,
                     serde_json::to_value(&newline_event).unwrap(),
-                ))
+                )]))
             } else {
                 // Recursively call to handle end or get next character
                 self.next()
             }
         }
-    }
-
-    fn is_complete(&self) -> bool {
-        self.current_sentence >= self.sentences.len()
     }
 }
 

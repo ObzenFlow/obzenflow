@@ -13,6 +13,11 @@
 //! unchanged.
 
 use std::collections::HashMap;
+use std::sync::Arc;
+
+use obzenflow_core::circuit_breaker_registry;
+use obzenflow_core::StageId;
+use std::sync::atomic::Ordering;
 
 /// High-level decision a source control strategy can make
 ///
@@ -114,3 +119,51 @@ pub trait SourceControlStrategy: Send + Sync + std::fmt::Debug {
 pub struct JonestownSourceStrategy;
 
 impl SourceControlStrategy for JonestownSourceStrategy {}
+
+/// Circuit breaker-aware source strategy
+///
+/// This strategy consults the global circuit breaker registry to decide
+/// whether to emit a natural EOF (normal operation) or a "poison" EOF /
+/// drain when the breaker is open for this stage.
+#[derive(Debug)]
+pub struct CircuitBreakerSourceStrategy {
+    stage_id: StageId,
+}
+
+impl CircuitBreakerSourceStrategy {
+    pub fn new(stage_id: StageId) -> Self {
+        Self { stage_id }
+    }
+
+    fn is_breaker_open(&self) -> bool {
+        if let Some(state) = circuit_breaker_registry::get_stage_state(&self.stage_id) {
+            let raw = state.load(Ordering::SeqCst);
+            // Mirror CircuitState::Open = 1 from the circuit breaker middleware.
+            raw == 1
+        } else {
+            false
+        }
+    }
+}
+
+impl SourceControlStrategy for CircuitBreakerSourceStrategy {
+    fn on_natural_completion(
+        &self,
+        _ctx: &mut SourceControlContext,
+    ) -> SourceShutdownDecision {
+        if self.is_breaker_open() {
+            SourceShutdownDecision::PoisonEof
+        } else {
+            SourceShutdownDecision::DefaultEof
+        }
+    }
+
+    fn on_begin_drain(&self, _ctx: &mut SourceControlContext) -> SourceShutdownDecision {
+        if self.is_breaker_open() {
+            // For now, align drain with poison EOF semantics when breaker is open.
+            SourceShutdownDecision::PoisonEof
+        } else {
+            SourceShutdownDecision::DefaultEof
+        }
+    }
+}

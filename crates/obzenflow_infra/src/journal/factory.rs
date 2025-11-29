@@ -106,18 +106,28 @@ impl MemoryJournalFactory {
         }
     }
     
-    pub fn create_chain_journal(&mut self, name: JournalName, owner: JournalOwner) -> Arc<dyn Journal<ChainEvent>> {
-        self.chain_journals
+    pub fn create_chain_journal(
+        &mut self,
+        name: JournalName,
+        owner: JournalOwner,
+    ) -> Result<Arc<dyn Journal<ChainEvent>>, JournalError> {
+        Ok(self
+            .chain_journals
             .entry(name)
             .or_insert_with(|| Arc::new(MemoryJournal::<ChainEvent>::with_owner(owner)))
-            .clone()
+            .clone())
     }
     
-    pub fn create_system_journal(&mut self, name: JournalName, owner: JournalOwner) -> Arc<dyn Journal<SystemEvent>> {
-        self.system_journals
+    pub fn create_system_journal(
+        &mut self,
+        name: JournalName,
+        owner: JournalOwner,
+    ) -> Result<Arc<dyn Journal<SystemEvent>>, JournalError> {
+        Ok(self
+            .system_journals
             .entry(name)
             .or_insert_with(|| Arc::new(MemoryJournal::<SystemEvent>::with_owner(owner)))
-            .clone()
+            .clone())
     }
 }
 
@@ -127,6 +137,6 @@ pub fn disk_journals(base_path: PathBuf) -> impl Fn(FlowId) -> Result<DiskJourna
     move |flow_id| DiskJournalFactory::new(base_path.clone(), flow_id)
 }
 
-pub fn memory_journals() -> impl Fn(FlowId) -> MemoryJournalFactory {
-    move |flow_id| MemoryJournalFactory::new(flow_id)
+pub fn memory_journals() -> impl Fn(FlowId) -> Result<MemoryJournalFactory, JournalError> {
+    move |flow_id| Ok(MemoryJournalFactory::new(flow_id))
 }

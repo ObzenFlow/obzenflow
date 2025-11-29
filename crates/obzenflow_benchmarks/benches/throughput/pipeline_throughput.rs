@@ -10,7 +10,7 @@ use obzenflow_adapters::monitoring::taxonomies::{
     golden_signals::GoldenSignals, red::RED, use_taxonomy::USE,
 };
 use obzenflow_benchmarks::prelude::*;
-use obzenflow_core::event::chain_event::ChainEvent;
+use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::event::event_id::EventId;
 use obzenflow_core::journal::writer_id::WriterId;
 use obzenflow_dsl_infra::{flow, sink, source, transform};
@@ -18,6 +18,7 @@ use obzenflow_infra::journal::DiskJournal;
 use obzenflow_runtime_services::stages::common::handlers::{
     FiniteSourceHandler, SinkHandler, TransformHandler,
 };
+use obzenflow_runtime_services::stages::SourceError;
 use serde_json::json;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -49,7 +50,7 @@ impl TimestampedSource {
 }
 
 impl FiniteSourceHandler for TimestampedSource {
-    fn next(&mut self) -> Option<ChainEvent> {
+    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
         let current = self.emitted.fetch_add(1, Ordering::Relaxed);
         if current < self.total_events {
             let emit_time_nanos = std::time::SystemTime::now()
@@ -57,22 +58,17 @@ impl FiniteSourceHandler for TimestampedSource {
                 .unwrap()
                 .as_nanos() as u64;
 
-            Some(ChainEvent::new(
-                EventId::new(),
+            Ok(Some(vec![ChainEventFactory::data_event(
                 self.writer_id.clone(),
                 "TimestampedEvent",
                 json!({
                     "index": current,
                     "emit_time_nanos": emit_time_nanos,
                 }),
-            ))
+            )]))
         } else {
-            None
+            Ok(None)
         }
-    }
-
-    fn is_complete(&self) -> bool {
-        self.emitted.load(Ordering::Relaxed) >= self.total_events
     }
 }
 
