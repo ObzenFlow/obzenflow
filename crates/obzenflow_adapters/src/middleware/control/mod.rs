@@ -5,6 +5,7 @@ pub mod rate_limiter;
 // Re-export key types for convenience
 pub use circuit_breaker::{
     circuit_breaker, CircuitBreakerBuilder, CircuitBreakerFactory, CircuitBreakerMiddleware,
+    HalfOpenPolicy, OpenPolicy,
 };
 pub use cycle_guard::{cycle_guard, CycleGuardMiddleware, CycleGuardMiddlewareFactory};
 pub use rate_limiter::{

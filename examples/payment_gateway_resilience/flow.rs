@@ -18,6 +18,7 @@ use super::sinks::PaymentSummarySink;
 use super::sources::PaymentCommandSource;
 use anyhow::Result;
 use async_trait::async_trait;
+use obzenflow_adapters::middleware::circuit_breaker::{HalfOpenPolicy, OpenPolicy};
 use obzenflow_adapters::middleware::{rate_limit, CircuitBreakerBuilder};
 use obzenflow_core::event::status::processing_status::ProcessingStatus;
 use obzenflow_core::{
@@ -31,6 +32,7 @@ use obzenflow_runtime_services::prelude::FlowHandle;
 use obzenflow_runtime_services::stages::SourceError;
 use obzenflow_runtime_services::stages::common::handlers::TransformHandler;
 use serde_json::json;
+use std::num::NonZeroU32;
 use std::time::Duration;
 
 /// Stateless transform that performs cheap local validation.
@@ -203,12 +205,22 @@ async fn build_flow() -> Result<FlowHandle> {
             // tagged with ProcessingStatus::Error to decide when to open. For
             // this demo we only treat gateway_* errors as breaker failures so
             // local validation problems don't open the circuit.
-            // When open, it short‑circuits requests to a degraded but
-            // well‑defined AuthorizedPayment fallback, so that downstream
-            // stages see a consistent event stream instead of hard failures.
+            //
+            // In 051b‑part‑3 we also demonstrate rate-based failure detection
+            // and explicit Open/HalfOpen policies:
+            // - Rate-based over the last 5 calls with a 60% failure threshold.
+            // - Slow-call contribution for gateway calls that take too long.
+            // - Explicit Open/HalfOpen policies that still match the original
+            //   semantics (emit fallback while Open; single-probe HalfOpen).
             gateway = transform!("gateway" => GatewayTransform, [
                 CircuitBreakerBuilder::new(3)
                     .cooldown(std::time::Duration::from_secs(5))
+                    // Rate-based failure mode: open when >= 60% of the last
+                    // 5 gateway calls fail, with at least 5 observations.
+                    .rate_based_over_last_n_calls(5, 0.6)
+                    // Additionally count very slow calls toward opening the
+                    // breaker when at least half of recent calls are slow.
+                    .slow_call(std::time::Duration::from_millis(250), 0.5)
                     .with_typed_fallback::<ValidatedPayment, AuthorizedPayment, _>(|validated| AuthorizedPayment {
                         request_id: validated.request_id.clone(),
                         customer_id: validated.customer_id.clone(),
@@ -224,6 +236,14 @@ async fn build_flow() -> Result<FlowHandle> {
                             )
                         })
                     })
+                    // Make the Open/HalfOpen behaviour explicit; these match
+                    // the original defaults but are configurable knobs for
+                    // more advanced scenarios.
+                    .open_policy(OpenPolicy::EmitFallback)
+                    .half_open_policy(HalfOpenPolicy::new(
+                        NonZeroU32::new(1).expect("permitted_probes must be non-zero"),
+                        OpenPolicy::EmitFallback,
+                    ))
                     .with_contract_mode(CircuitBreakerContractMode::BreakerAware)
                     .build()
             ]);
