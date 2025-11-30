@@ -1,3 +1,18 @@
+//! Payment Gateway Resilience demo
+//!
+//! This example is used to teach:
+//! - Strict transport contracts under a flaky gateway (no circuit breaker).
+//! - Breaker-aware contracts with typed fallback and circuit breaker.
+//!
+//! Two modes are relevant:
+//! - `run_example` uses the circuit breaker around `gateway` with
+//!   `with_typed_fallback` and `CircuitBreakerContractMode::BreakerAware`.
+//!   Under outages, the breaker opens and emits degraded AuthorizedPayment
+//!   events; contracts stay green and the pipeline completes successfully.
+//! - `run_strict_example_in_tests` builds a strict flow without CB; the same
+//!   outage pattern eventually causes a SeqDivergence transport violation on
+//!   `gateway → summary`, and the flow is expected to fail in tests.
+
 use super::domain::{AuthorizedPayment, PaymentCommand, TrafficPhase, ValidatedPayment};
 use super::sinks::PaymentSummarySink;
 use super::sources::PaymentCommandSource;
@@ -7,7 +22,7 @@ use obzenflow_adapters::middleware::{rate_limit, CircuitBreakerBuilder};
 use obzenflow_core::event::status::processing_status::ProcessingStatus;
 use obzenflow_core::{
     event::chain_event::{ChainEvent, ChainEventFactory},
-    TypedPayload,
+    CircuitBreakerContractMode, TypedPayload,
 };
 use obzenflow_dsl_infra::{flow, sink, source, transform};
 use obzenflow_infra::application::FlowApplication;
@@ -185,48 +200,31 @@ async fn build_flow() -> Result<FlowHandle> {
             // Gateway stage: where we "talk" to the unreliable dependency.
             //
             // The circuit breaker wraps this stage and watches for events
-            // tagged with ProcessingStatus::Error to decide when to open.
+            // tagged with ProcessingStatus::Error to decide when to open. For
+            // this demo we only treat gateway_* errors as breaker failures so
+            // local validation problems don't open the circuit.
             // When open, it short‑circuits requests to a degraded but
             // well‑defined AuthorizedPayment fallback, so that downstream
             // stages see a consistent event stream instead of hard failures.
             gateway = transform!("gateway" => GatewayTransform, [
                 CircuitBreakerBuilder::new(3)
                     .cooldown(std::time::Duration::from_secs(5))
-                    .with_fallback(|event| {
-                        // Domain-specific fallback: if we can see a validated
-                        // payment, emit a synthetic AuthorizedPayment that
-                        // makes it clear this came from the breaker path.
-                        if let Ok(validated) = serde_json::from_value::<ValidatedPayment>(event.payload()) {
-                            let fallback = AuthorizedPayment {
-                                request_id: validated.request_id.clone(),
-                                customer_id: validated.customer_id.clone(),
-                                amount_cents: validated.amount_cents,
-                                phase: validated.phase.clone(),
-                                authorization_id: "AUTH-FALLBACK-CB-OPEN".to_string(),
-                            };
-
-                            let mut out = ChainEventFactory::data_event(
-                                event.writer_id.clone(),
-                                AuthorizedPayment::EVENT_TYPE,
-                                json!(fallback),
-                            );
-                            // Preserve flow / causality metadata so contracts,
-                            // metrics, and correlation all remain coherent.
-                            out.flow_context = event.flow_context.clone();
-                            out.processing_info = event.processing_info.clone();
-                            out.causality = event.causality.clone();
-                            out.correlation_id = event.correlation_id.clone();
-                            out.correlation_payload = event.correlation_payload.clone();
-                            out.runtime_context = event.runtime_context.clone();
-                            out.observability = event.observability.clone();
-
-                            vec![out]
-                        } else {
-                            // If we can't deserialize, just pass the original
-                            // event through so we don't accidentally drop data.
-                            vec![event.clone()]
-                        }
+                    .with_typed_fallback::<ValidatedPayment, AuthorizedPayment, _>(|validated| AuthorizedPayment {
+                        request_id: validated.request_id.clone(),
+                        customer_id: validated.customer_id.clone(),
+                        amount_cents: validated.amount_cents,
+                        phase: validated.phase.clone(),
+                        authorization_id: "AUTH-FALLBACK-CB-OPEN".to_string(),
                     })
+                    .with_failure_classifier(|_input, outputs| {
+                        outputs.iter().any(|e| {
+                            matches!(
+                                e.processing_info.status,
+                                ProcessingStatus::Error(ref msg) if msg.starts_with("gateway_")
+                            )
+                        })
+                    })
+                    .with_contract_mode(CircuitBreakerContractMode::BreakerAware)
                     .build()
             ]);
 
@@ -291,5 +289,54 @@ pub fn run_example_in_tests() -> Result<()> {
             .run()
             .await
             .map_err(|e| anyhow::anyhow!("Flow execution failed: {:?}", e))
+    })
+}
+
+/// Strict-mode variant of the flow used for tests.
+///
+/// This version omits the circuit breaker entirely so that downstream
+/// contracts see the raw effects of a flaky gateway. Under the scripted
+/// outage pattern, the `gateway → summary` edge should eventually fail
+/// with a SeqDivergence transport violation.
+async fn build_strict_flow() -> Result<FlowHandle> {
+    flow! {
+        name: "payment_gateway_resilience_strict_demo",
+        journals: disk_journals(std::path::PathBuf::from("target/payment-gateway-logs-strict")),
+
+        middleware: [
+            rate_limit(1.0)
+        ],
+
+        stages: {
+            payments = source!("payments_strict" => PaymentCommandSource::new());
+            validated = transform!("validation_strict" => ValidationTransform);
+            gateway = transform!("gateway_strict" => GatewayTransform);
+            summary = sink!("summary_strict" => PaymentSummarySink::new());
+        },
+
+        topology: {
+            payments |> validated;
+            validated |> gateway;
+            gateway |> summary;
+        }
+    }
+    .await
+    .map_err(|e| anyhow::anyhow!("Failed to create strict payment gateway flow: {:?}", e))
+}
+
+/// Test-only runner for the strict flow; expected to fail with a contract violation.
+pub fn run_strict_example_in_tests() -> Result<()> {
+    let _ = tracing_subscriber::fmt::try_init();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| anyhow::anyhow!("Failed to create runtime: {:?}", e))?;
+
+    runtime.block_on(async {
+        let handle = build_strict_flow().await?;
+        handle
+            .run()
+            .await
+            .map_err(|e| anyhow::anyhow!("Flow execution failed (strict mode): {:?}", e))
     })
 }

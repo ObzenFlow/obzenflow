@@ -10,12 +10,21 @@ use obzenflow_core::event::payloads::observability_payload::{
     CircuitBreakerEvent, MiddlewareLifecycle, ObservabilityPayload,
 };
 use obzenflow_core::event::ChainEventFactory;
-use obzenflow_core::{circuit_breaker_registry, EventId, StageId, WriterId};
+use obzenflow_core::TypedPayload;
+use obzenflow_core::{
+    circuit_breaker_contract_registry, circuit_breaker_registry, CircuitBreakerContractMode,
+    EventId, StageId, WriterId,
+};
 use obzenflow_runtime_services::pipeline::config::StageConfig;
+use serde::de::DeserializeOwned;
+use serde::Serialize;
 use serde_json::json;
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+type FailureClassifier =
+    Arc<dyn Fn(&ChainEvent, &[ChainEvent]) -> bool + Send + Sync>;
 
 /// Circuit breaker states
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,6 +69,8 @@ pub struct CircuitBreakerMiddleware {
     stats: Arc<Mutex<CircuitBreakerStats>>,
     /// When the last state change occurred
     last_state_change: Arc<Mutex<Instant>>,
+    /// Stage identifier for this breaker (when known).
+    stage_id: Option<StageId>,
     /// Optional fallback generator used when the circuit is open.
     ///
     /// When configured, requests that would normally be rejected in the
@@ -70,6 +81,10 @@ pub struct CircuitBreakerMiddleware {
     /// allowing flows to provide domain‑specific degraded responses purely
     /// via circuit breaker configuration.
     fallback: Option<Arc<dyn Fn(&ChainEvent) -> Vec<ChainEvent> + Send + Sync>>,
+    /// Optional classifier that decides whether a given call should be counted
+    /// as a failure for breaker purposes based on the input event and the
+    /// outputs produced by the handler.
+    failure_classifier: Option<FailureClassifier>,
 }
 
 #[derive(Debug)]
@@ -92,12 +107,12 @@ impl Default for CircuitBreakerStats {
 impl CircuitBreakerMiddleware {
     /// Create a new circuit breaker with the given failure threshold
     pub fn new(threshold: usize) -> Self {
-        Self::with_cooldown_and_fallback(threshold, Duration::from_secs(60), None)
+        Self::with_cooldown_and_fallback(threshold, Duration::from_secs(60), None, None, None)
     }
 
     /// Create a circuit breaker with custom cooldown duration
     pub fn with_cooldown(threshold: usize, cooldown: Duration) -> Self {
-        Self::with_cooldown_and_fallback(threshold, cooldown, None)
+        Self::with_cooldown_and_fallback(threshold, cooldown, None, None, None)
     }
 
     /// Create a circuit breaker with custom cooldown and optional fallback.
@@ -109,6 +124,8 @@ impl CircuitBreakerMiddleware {
         threshold: usize,
         cooldown: Duration,
         fallback: Option<Arc<dyn Fn(&ChainEvent) -> Vec<ChainEvent> + Send + Sync>>,
+        failure_classifier: Option<FailureClassifier>,
+        stage_id: Option<StageId>,
     ) -> Self {
         Self {
             state: Arc::new(AtomicU8::new(CircuitState::Closed as u8)),
@@ -125,6 +142,8 @@ impl CircuitBreakerMiddleware {
             })),
             last_state_change: Arc::new(Mutex::new(Instant::now())),
             fallback,
+            failure_classifier,
+            stage_id,
         }
     }
 
@@ -142,6 +161,9 @@ impl CircuitBreakerMiddleware {
         // Track when we open the circuit
         if new_state == CircuitState::Open {
             *self.opened_at.lock().unwrap() = Some(Instant::now());
+            if let Some(stage_id) = self.stage_id {
+                circuit_breaker_contract_registry::mark_stage_opened(stage_id);
+            }
         }
 
         // Emit lifecycle event for state transition
@@ -349,19 +371,25 @@ impl Middleware for CircuitBreakerMiddleware {
 
     fn post_handle(
         &self,
-        _event: &ChainEvent,
+        event: &ChainEvent,
         outputs: &[ChainEvent],
         ctx: &mut MiddlewareContext,
     ) {
-        // Treat any output marked with ProcessingStatus::Error as a failure.
-        // This avoids overloading "empty == failure" and lets handlers signal
-        // infra problems explicitly until cross-stage Result-based APIs (082h).
-        let has_error = outputs.iter().any(|e| {
-            matches!(
-                e.processing_info.status,
-                obzenflow_core::event::status::processing_status::ProcessingStatus::Error(_)
-            )
-        });
+        // Determine whether this call should be treated as a failure from the
+        // breaker’s perspective. By default we treat any output marked with
+        // ProcessingStatus::Error as a failure, but flows can override this
+        // behaviour via `with_failure_classifier` when they need finer-grained
+        // control (for example, ignoring pure validation failures).
+        let has_error = if let Some(classifier) = &self.failure_classifier {
+            classifier(event, outputs)
+        } else {
+            outputs.iter().any(|e| {
+                matches!(
+                    e.processing_info.status,
+                    obzenflow_core::event::status::processing_status::ProcessingStatus::Error(_)
+                )
+            })
+        };
         let is_success = !has_error;
         let is_probe = ctx
             .get_baggage("circuit_breaker.is_probe")
@@ -450,11 +478,67 @@ impl Middleware for CircuitBreakerMiddleware {
     }
 }
 
+fn copy_metadata_from(target: &mut ChainEvent, source: &ChainEvent) {
+    target.flow_context = source.flow_context.clone();
+    target.processing_info = source.processing_info.clone();
+    target.causality = source.causality.clone();
+    target.correlation_id = source.correlation_id.clone();
+    target.correlation_payload = source.correlation_payload.clone();
+    target.runtime_context = source.runtime_context.clone();
+    target.observability = source.observability.clone();
+}
+
+fn build_typed_fallback_event<In, Out, F>(f: &F, event: &ChainEvent) -> Vec<ChainEvent>
+where
+    In: TypedPayload + DeserializeOwned,
+    Out: TypedPayload + Serialize,
+    F: Fn(&In) -> Out + Send + Sync + 'static,
+{
+    use obzenflow_core::event::status::processing_status::ProcessingStatus;
+
+    // 1. Deserialize input payload into In
+    let payload = event.payload();
+    let input: In = match serde_json::from_value(payload.clone()) {
+        Ok(v) => v,
+        Err(err) => {
+            let mut clone = event.clone();
+            clone.processing_info.status = ProcessingStatus::error(format!(
+                "cb_fallback_deserialize_failed: {err}"
+            ));
+            return vec![clone];
+        }
+    };
+
+    // 2. Call user-provided closure
+    let out = f(&input);
+
+    // 3. Serialize Out
+    let out_value = match serde_json::to_value(&out) {
+        Ok(v) => v,
+        Err(err) => {
+            let mut clone = event.clone();
+            clone.processing_info.status = ProcessingStatus::error(format!(
+                "cb_fallback_serialize_failed: {err}"
+            ));
+            return vec![clone];
+        }
+    };
+
+    // 4. Wrap into a ChainEvent, copying metadata
+    let mut ev =
+        ChainEventFactory::data_event(event.writer_id.clone(), Out::EVENT_TYPE, out_value);
+    copy_metadata_from(&mut ev, event);
+
+    vec![ev]
+}
+
 /// Builder for circuit breaker middleware
 pub struct CircuitBreakerBuilder {
     threshold: usize,
     cooldown: Duration,
     fallback: Option<Arc<dyn Fn(&ChainEvent) -> Vec<ChainEvent> + Send + Sync>>,
+    contract_mode: Option<CircuitBreakerContractMode>,
+    failure_classifier: Option<FailureClassifier>,
 }
 
 impl CircuitBreakerBuilder {
@@ -464,6 +548,8 @@ impl CircuitBreakerBuilder {
             threshold,
             cooldown: Duration::from_secs(60),
             fallback: None,
+            contract_mode: None,
+            failure_classifier: None,
         }
     }
 
@@ -489,12 +575,51 @@ impl CircuitBreakerBuilder {
         self
     }
 
+    /// Configure how downstream contracts should interpret breaker activity
+    /// for this stage.
+    pub fn with_contract_mode(mut self, mode: CircuitBreakerContractMode) -> Self {
+        self.contract_mode = Some(mode);
+        self
+    }
+
+    /// Configure a typed fallback factory used when the circuit is open.
+    ///
+    /// This adapter lets flows express degraded responses purely in terms of
+    /// domain types (`In` -> `Out`) while the circuit breaker handles all
+    /// `ChainEvent` plumbing (serde and metadata copying).
+    pub fn with_typed_fallback<In, Out, F>(mut self, f: F) -> Self
+    where
+        In: TypedPayload + DeserializeOwned,
+        Out: TypedPayload + Serialize,
+        F: Fn(&In) -> Out + Send + Sync + 'static,
+    {
+        let adapter = move |event: &ChainEvent| -> Vec<ChainEvent> {
+            build_typed_fallback_event::<In, Out, F>(&f, event)
+        };
+
+        self.fallback = Some(Arc::new(adapter));
+        self
+    }
+
+    /// Configure a custom failure classifier used to decide whether a given
+    /// call should be treated as a breaker failure based on the input event
+    /// and the outputs produced by the handler.
+    pub fn with_failure_classifier<F>(mut self, f: F) -> Self
+    where
+        F: Fn(&ChainEvent, &[ChainEvent]) -> bool + Send + Sync + 'static,
+    {
+        self.failure_classifier = Some(Arc::new(f));
+        self
+    }
+
     /// Build the circuit breaker middleware factory
     pub fn build(self) -> Box<dyn MiddlewareFactory> {
         Box::new(CircuitBreakerFactory {
             threshold: self.threshold,
             cooldown: self.cooldown,
             fallback: self.fallback,
+            contract_mode: self.contract_mode,
+            failure_classifier: self.failure_classifier,
         })
     }
 }
@@ -504,6 +629,8 @@ pub struct CircuitBreakerFactory {
     threshold: usize,
     cooldown: Duration,
     fallback: Option<Arc<dyn Fn(&ChainEvent) -> Vec<ChainEvent> + Send + Sync>>,
+    contract_mode: Option<CircuitBreakerContractMode>,
+    failure_classifier: Option<FailureClassifier>,
 }
 
 impl CircuitBreakerFactory {
@@ -513,6 +640,8 @@ impl CircuitBreakerFactory {
             threshold,
             cooldown: Duration::from_secs(60),
             fallback: None,
+            contract_mode: None,
+            failure_classifier: None,
         }
     }
 
@@ -530,21 +659,69 @@ impl CircuitBreakerFactory {
         self.fallback = Some(Arc::new(f));
         self
     }
+
+    /// Configure the breaker-aware contract mode for this stage.
+    pub fn with_contract_mode(mut self, mode: CircuitBreakerContractMode) -> Self {
+        self.contract_mode = Some(mode);
+        self
+    }
+
+    /// Configure a custom failure classifier used to decide whether a given
+    /// call should be treated as a breaker failure based on the input event
+    /// and the outputs produced by the handler.
+    pub fn with_failure_classifier<F>(mut self, f: F) -> Self
+    where
+        F: Fn(&ChainEvent, &[ChainEvent]) -> bool + Send + Sync + 'static,
+    {
+        self.failure_classifier = Some(Arc::new(f));
+        self
+    }
 }
 
 impl MiddlewareFactory for CircuitBreakerFactory {
     fn create(&self, config: &StageConfig) -> Box<dyn Middleware> {
+        // Determine the effective contract mode for this stage. BreakerAware
+        // without any fallback configured is unsafe because it could mask
+        // genuine data loss. In that case we degrade to Strict semantics and
+        // emit a loud warning rather than silently registering BreakerAware.
+        let mut effective_mode = self.contract_mode;
+        if let Some(CircuitBreakerContractMode::BreakerAware) = self.contract_mode {
+            if self.fallback.is_none() {
+                tracing::warn!(
+                    target: "flowip-051b-part-2",
+                    stage_id = ?config.stage_id,
+                    "CircuitBreaker configured with BreakerAware contract mode but no fallback; \
+                     degrading to Strict mode to avoid masking genuine data loss"
+                );
+                effective_mode = Some(CircuitBreakerContractMode::Strict);
+            }
+        }
+
         // Create middleware instance
         let middleware = CircuitBreakerMiddleware::with_cooldown_and_fallback(
             self.threshold,
             self.cooldown,
             self.fallback.clone(),
+            self.failure_classifier.clone(),
+            Some(config.stage_id),
         );
 
         // Register its state handle in the global registry so runtime
         // strategies (e.g. CircuitBreakerSourceStrategy) can observe
         // breaker state for this stage without a direct dependency.
         circuit_breaker_registry::register_stage_state(config.stage_id, middleware.state.clone());
+
+        // Register the configured contract mode (if any) so contract policies
+        // can interpret TransportContract results in a breaker-aware way for
+        // this stage's downstream edges.
+        if let Some(mode) = effective_mode {
+            let has_fallback = self.fallback.is_some();
+            circuit_breaker_contract_registry::register_stage_mode(
+                config.stage_id,
+                mode,
+                has_fallback,
+            );
+        }
 
         Box::new(middleware)
     }

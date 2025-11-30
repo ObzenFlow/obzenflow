@@ -32,9 +32,52 @@ impl PaymentSummarySink {
 #[async_trait]
 impl SinkHandler for PaymentSummarySink {
     async fn consume(&mut self, event: ChainEvent) -> obzenflow_core::Result<DeliveryPayload> {
-        self.total_seen += 1;
+        // Ignore lifecycle/observability/control events for the high-level story.
+        // We only want to count domain data events that represent payments.
+        if !event.is_data() {
+            return Ok(DeliveryPayload::success(
+                "payment_summary",
+                DeliveryMethod::Custom("InMemory".to_string()),
+                None,
+            ));
+        }
 
-        if let Some(authorized) = AuthorizedPayment::from_event(&event) {
+        // First, treat explicit validation failures as such, regardless of how
+        // they are represented downstream (ValidatedPayment or even a fallback
+        // AuthorizedPayment that preserved the validation error status).
+        let is_validation_failure = matches!(
+            event.processing_info.status,
+            obzenflow_core::event::status::processing_status::ProcessingStatus::Error(ref msg)
+                if msg == "payment_validation_failed"
+        );
+
+        if is_validation_failure {
+            self.total_seen += 1;
+            self.validation_errors += 1;
+
+            if let Some(validated) = ValidatedPayment::from_event(&event) {
+                println!(
+                    "⚠️  Dropped locally invalid payment {} (error: {})",
+                    validated.request_id,
+                    validated
+                        .validation_error
+                        .as_deref()
+                        .unwrap_or("unknown validation error")
+                );
+            } else if let Some(authorized) = AuthorizedPayment::from_event(&event) {
+                println!(
+                    "⚠️  Locally invalid payment {} reached sink as degraded authorization (status: payment_validation_failed)",
+                    authorized.request_id
+                );
+            } else {
+                println!(
+                    "⚠️  Locally invalid payment reached sink with status=payment_validation_failed (unknown payload type)"
+                );
+            }
+        } else if let Some(authorized) = AuthorizedPayment::from_event(&event) {
+            // Only treat clean AuthorizedPayment events (no error status) as
+            // successful authorizations in the summary.
+            self.total_seen += 1;
             self.authorized += 1;
             println!(
                 "✅ Authorized payment {} for customer {} (phase: {:?}, amount: ${:.2})",
@@ -44,7 +87,12 @@ impl SinkHandler for PaymentSummarySink {
                 authorized.amount_cents as f64 / 100.0
             );
         } else if let Some(validated) = ValidatedPayment::from_event(&event) {
+            // Validated payments without a validation_error should normally have
+            // gone through the gateway and become AuthorizedPayment. If they
+            // appear here, we log them but keep the counters focused on
+            // authorized vs validation failures for simplicity.
             if validated.validation_error.is_some() {
+                self.total_seen += 1;
                 self.validation_errors += 1;
                 println!(
                     "⚠️  Dropped locally invalid payment {} (error: {})",
@@ -88,4 +136,3 @@ impl SinkHandler for PaymentSummarySink {
         Ok(None)
     }
 }
-

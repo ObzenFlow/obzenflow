@@ -34,6 +34,10 @@ use tokio::time::Instant;
 
 use async_trait::async_trait;
 use crate::contracts::ContractChain;
+use crate::messaging::upstream_subscription_policy::{
+    build_policy_stack_for_upstream, ContractPolicyStack, EdgeContext, EdgeContractDecision,
+    PolicyHints,
+};
 
 // Import PollResult from the trait module
 pub use super::subscription_poller::{PollResult, SubscriptionPoller};
@@ -274,6 +278,12 @@ where
     /// and each entry holds the contract chain for the corresponding edge.
     contract_chains: Vec<Option<ContractChain>>,
 
+    /// Optional contract policies for each upstream reader (edge-scoped policies).
+    ///
+    /// When `with_contracts` is used, this vector is sized to match `readers`
+    /// and each entry holds the policy stack for the corresponding edge.
+    contract_policies: Vec<Option<ContractPolicyStack>>,
+
     /// Last EOF accounting outcome (set when an EOF is observed)
     last_eof_outcome: Option<EofOutcome>,
 }
@@ -347,6 +357,7 @@ where
             state,
             contract_tracker: None,
             contract_chains: Vec::new(),
+            contract_policies: Vec::new(),
             last_eof_outcome: None,
         })
     }
@@ -392,6 +403,16 @@ where
                 .map(|_| {
                     let chain = ContractChain::new().with_contract(TransportContract::new());
                     Some(chain)
+                })
+                .collect();
+
+            // Initialize per-reader policy stacks using the upstream stage IDs.
+            self.contract_policies = self
+                .readers
+                .iter()
+                .map(|(upstream_stage, _, _)| {
+                    let stack = build_policy_stack_for_upstream(*upstream_stage);
+                    Some(stack)
                 })
                 .collect();
         }
@@ -840,93 +861,115 @@ where
                     // Prefer the new contract framework (TransportContract via
                     // ContractChain) when available. This ensures that the
                     // same verification logic is used for both runtime gating
-                    // and contract evidence.
+                    // and contract evidence. Policies are applied on top.
                     if let (Some(reader_stage), Some(chain_slot)) = (
                         tracker.reader_stage,
                         self.contract_chains.get(index).and_then(|c| c.as_ref()),
                     ) {
-                        for result in chain_slot.verify_all(progress.stage_id, reader_stage) {
-                            match result {
-                                ContractResult::Passed(_) => {
-                                    // Leave `pass = true`
-                                }
-                                ContractResult::Failed(violation) => {
-                                    pass = false;
-                                    // Map contract-level cause into event-level cause
-                                    let event_cause = match &violation.cause {
-                                        ViolationCause::SeqDivergence { advertised, reader } => {
-                                            EventViolationCause::SeqDivergence {
-                                                advertised: *advertised,
-                                                reader: *reader,
-                                            }
-                                        }
-                                        ViolationCause::ContentMismatch { .. } => {
-                                            EventViolationCause::Other("content_mismatch".into())
-                                        }
-                                        ViolationCause::DeliveryMismatch { .. } => {
-                                            EventViolationCause::Other("delivery_mismatch".into())
-                                        }
-                                        ViolationCause::AccountingMismatch { .. } => {
-                                            EventViolationCause::Other(
-                                                "accounting_mismatch".into(),
-                                            )
-                                        }
-                                        ViolationCause::Other(msg) => {
-                                            EventViolationCause::Other(msg.clone())
-                                        }
-                                    };
-                                    failure_reason = Some(event_cause.clone());
+                        let results = chain_slot.verify_all(progress.stage_id, reader_stage);
 
-                                    // Any explicit contract failure is surfaced
-                                    // as a violation for this upstream.
-                                    status = ContractStatus::Violated {
-                                        upstream: progress.stage_id,
-                                        cause: event_cause.clone(),
-                                    };
+                        let edge = EdgeContext {
+                            upstream_stage: progress.stage_id,
+                            downstream_stage: reader_stage,
+                            advertised_writer_seq: progress.advertised_writer_seq,
+                            reader_seq: progress.reader_seq,
+                        };
 
-                                    // For transport SeqDivergence, emit a gap
-                                    // event when we are missing events.
-                                    if let ViolationCause::SeqDivergence { advertised, reader } =
-                                        &violation.cause
+                        let cb_info =
+                            obzenflow_core::circuit_breaker_contract_registry::get_stage_info(
+                                &progress.stage_id,
+                            );
+                        let hints = PolicyHints {
+                            breaker_mode: cb_info.as_ref().map(|i| i.mode),
+                            has_opened_since_registration: cb_info
+                                .as_ref()
+                                .map(|i| i.has_opened_since_registration)
+                                .unwrap_or(false),
+                            has_fallback_configured: cb_info
+                                .as_ref()
+                                .map(|i| i.has_fallback_configured)
+                                .unwrap_or(false),
+                        };
+
+                        if let Some(policy_stack) =
+                            self.contract_policies.get(index).and_then(|p| p.as_ref())
+                        {
+                            let raw_failure_cause: Option<ViolationCause> = results
+                                .iter()
+                                .find_map(|r| match r {
+                                    ContractResult::Failed(v) => Some(v.cause.clone()),
+                                    _ => None,
+                                });
+
+                            let decision = policy_stack.decide(&results, &edge, &hints);
+
+                            match decision {
+                                EdgeContractDecision::Pass => {
+                                    pass = true;
+                                    failure_reason = None;
+
+                                    // If raw contracts reported a failure but policies
+                                    // overrode it to Pass, emit an override system event.
+                                    if let (Some(system_journal), Some(reader_stage), Some(cause)) =
+                                        (&tracker.system_journal,
+                                         tracker.reader_stage,
+                                         raw_failure_cause)
                                     {
-                                        if let Some(advertised) = advertised {
-                                            if advertised.0 > reader.0 {
-                                                let gap_event =
-                                                    ChainEventFactory::consumption_gap_event(
-                                                        tracker.writer_id.clone(),
-                                                        SeqNo(reader.0 + 1),
-                                                        *advertised,
-                                                        progress.stage_id,
-                                                    );
-                                                tracker
-                                                    .journal
-                                                    .append(gap_event, None)
-                                                    .await
-                                                    .map_err(|e| {
-                                                        format!(
-                                                            "Failed to append gap event: {}",
-                                                            e
-                                                        )
-                                                    })?;
-                                            }
-                                        }
+                                        let override_event = SystemEvent::new(
+                                            tracker.writer_id,
+                                            SystemEventType::ContractOverrideByPolicy {
+                                                upstream: progress.stage_id,
+                                                reader: reader_stage,
+                                                original_cause: cause,
+                                                policy: "breaker_aware".to_string(),
+                                            },
+                                        );
+                                        system_journal
+                                            .append(override_event, None)
+                                            .await
+                                            .map_err(|e| {
+                                                format!(
+                                                    "Failed to append contract override event: {}",
+                                                    e
+                                                )
+                                            })?;
                                     }
-
-                                    break;
                                 }
-                                ContractResult::Pending => {
-                                    // At EOF we expect a definitive result; treat
-                                    // Pending as a violation with a generic cause.
+                                EdgeContractDecision::Fail(cause) => {
                                     pass = false;
-                                    let cause = EventViolationCause::Other(
-                                        "contract_pending_at_eof".into(),
-                                    );
                                     failure_reason = Some(cause.clone());
                                     status = ContractStatus::Violated {
                                         upstream: progress.stage_id,
-                                        cause,
+                                        cause: cause.clone(),
                                     };
-                                    break;
+
+                                    // For transport SeqDivergence, emit a gap event
+                                    // when we are missing events.
+                                    if let EventViolationCause::SeqDivergence {
+                                        advertised: Some(advertised),
+                                        reader,
+                                    } = cause
+                                    {
+                                        if advertised.0 > reader.0 {
+                                            let gap_event =
+                                                ChainEventFactory::consumption_gap_event(
+                                                    tracker.writer_id.clone(),
+                                                    SeqNo(reader.0 + 1),
+                                                    advertised,
+                                                    progress.stage_id,
+                                                );
+                                            tracker
+                                                .journal
+                                                .append(gap_event, None)
+                                                .await
+                                                .map_err(|e| {
+                                                    format!(
+                                                        "Failed to append gap event: {}",
+                                                        e
+                                                    )
+                                                })?;
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -1150,5 +1193,463 @@ where
 
     fn name(&self) -> &str {
         "upstream_subscription"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+    use obzenflow_core::event::event_envelope::EventEnvelope;
+    use obzenflow_core::event::identity::JournalWriterId;
+    use obzenflow_core::event::journal_event::JournalEvent;
+    use obzenflow_core::event::system_event::SystemEvent;
+    use obzenflow_core::journal::journal::Journal;
+    use obzenflow_core::journal::journal_error::JournalError;
+    use obzenflow_core::journal::journal_owner::JournalOwner;
+    use obzenflow_core::journal::journal_reader::JournalReader;
+    use obzenflow_core::id::JournalId;
+    use obzenflow_core::CircuitBreakerContractMode;
+    use serde_json::json;
+    use std::sync::{Arc, Mutex};
+
+    /// Minimal in-memory journal implementation for tests.
+    struct TestJournal<T: JournalEvent> {
+        id: JournalId,
+        owner: Option<JournalOwner>,
+        events: Arc<Mutex<Vec<EventEnvelope<T>>>>,
+    }
+
+    impl<T: JournalEvent> TestJournal<T> {
+        fn new(owner: JournalOwner) -> Self {
+            Self {
+                id: JournalId::new(),
+                owner: Some(owner),
+                events: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+    }
+
+    struct TestJournalReader<T: JournalEvent> {
+        events: Vec<EventEnvelope<T>>,
+        pos: usize,
+    }
+
+    #[async_trait]
+    impl<T: JournalEvent + 'static> Journal<T> for TestJournal<T> {
+        fn id(&self) -> &JournalId {
+            &self.id
+        }
+
+        fn owner(&self) -> Option<&JournalOwner> {
+            self.owner.as_ref()
+        }
+
+        async fn append(
+            &self,
+            event: T,
+            _parent: Option<&EventEnvelope<T>>,
+        ) -> std::result::Result<EventEnvelope<T>, JournalError> {
+            let envelope = EventEnvelope::new(JournalWriterId::from(self.id), event);
+            let mut guard = self.events.lock().unwrap();
+            guard.push(envelope.clone());
+            Ok(envelope)
+        }
+
+        async fn read_causally_ordered(
+            &self,
+        ) -> std::result::Result<Vec<EventEnvelope<T>>, JournalError> {
+            let guard = self.events.lock().unwrap();
+            Ok(guard.clone())
+        }
+
+        async fn read_causally_after(
+            &self,
+            _after_event_id: &obzenflow_core::EventId,
+        ) -> std::result::Result<Vec<EventEnvelope<T>>, JournalError> {
+            Ok(Vec::new())
+        }
+
+        async fn read_event(
+            &self,
+            _event_id: &obzenflow_core::EventId,
+        ) -> std::result::Result<Option<EventEnvelope<T>>, JournalError> {
+            Ok(None)
+        }
+
+        async fn reader(
+            &self,
+        ) -> std::result::Result<Box<dyn JournalReader<T>>, JournalError> {
+            let guard = self.events.lock().unwrap();
+            Ok(Box::new(TestJournalReader {
+                events: guard.clone(),
+                pos: 0,
+            }))
+        }
+
+        async fn reader_from(
+            &self,
+            position: u64,
+        ) -> std::result::Result<Box<dyn JournalReader<T>>, JournalError> {
+            let guard = self.events.lock().unwrap();
+            Ok(Box::new(TestJournalReader {
+                events: guard.clone(),
+                pos: position as usize,
+            }))
+        }
+    }
+
+    #[async_trait]
+    impl<T: JournalEvent + 'static> JournalReader<T> for TestJournalReader<T> {
+        async fn next(
+            &mut self,
+        ) -> std::result::Result<Option<EventEnvelope<T>>, JournalError> {
+            if self.pos >= self.events.len() {
+                Ok(None)
+            } else {
+                let envelope = self.events.get(self.pos).cloned();
+                self.pos += 1;
+                Ok(envelope)
+            }
+        }
+
+        async fn skip(
+            &mut self,
+            n: u64,
+        ) -> std::result::Result<u64, JournalError> {
+            let start = self.pos as u64;
+            self.pos = (self.pos as u64 + n) as usize;
+            Ok(self.pos as u64 - start)
+        }
+
+        fn position(&self) -> u64 {
+            self.pos as u64
+        }
+
+        fn is_at_end(&self) -> bool {
+            self.pos >= self.events.len()
+        }
+    }
+
+    async fn build_upstream_with_seq_divergence(
+    ) -> (UpstreamSubscription<ChainEvent>, Arc<dyn Journal<ChainEvent>>, Arc<dyn Journal<SystemEvent>>, StageId, StageId)
+    {
+        let upstream_stage = StageId::new();
+        let reader_stage = StageId::new();
+
+        let upstream_owner = JournalOwner::stage(upstream_stage);
+        let reader_owner = JournalOwner::stage(reader_stage);
+
+        let upstream_journal: Arc<dyn Journal<ChainEvent>> =
+            Arc::new(TestJournal::new(upstream_owner));
+        let contract_journal: Arc<dyn Journal<ChainEvent>> =
+            Arc::new(TestJournal::new(reader_owner.clone()));
+        let system_journal: Arc<dyn Journal<SystemEvent>> =
+            Arc::new(TestJournal::new(reader_owner));
+
+        // One data event followed by EOF that advertises more events than read.
+        let writer_id = WriterId::Stage(upstream_stage);
+        let data_event = ChainEventFactory::data_event(writer_id.clone(), "test.event", json!({}));
+        upstream_journal.append(data_event, None).await.unwrap();
+
+        let mut eof_event = ChainEventFactory::eof_event(writer_id.clone(), true);
+        if let ChainEventContent::FlowControl(FlowControlPayload::Eof {
+            writer_id: writer_id_field,
+            writer_seq,
+            ..
+        }) = &mut eof_event.content
+        {
+            *writer_id_field = Some(writer_id);
+            *writer_seq = Some(SeqNo(3));
+        }
+        upstream_journal.append(eof_event, None).await.unwrap();
+
+        let upstreams: Vec<(StageId, String, Arc<dyn Journal<ChainEvent>>)> =
+            vec![(upstream_stage, "upstream".to_string(), upstream_journal.clone())];
+
+        let mut subscription =
+            UpstreamSubscription::new_with_names("test_owner", &upstreams)
+                .await
+                .unwrap();
+
+        let contract_config = ContractConfig::default();
+        let writer_id_for_contracts = WriterId::from(reader_stage);
+        subscription = subscription.with_contracts(
+            writer_id_for_contracts,
+            contract_journal.clone(),
+            contract_config,
+            Some(system_journal.clone()),
+            Some(reader_stage),
+        );
+
+        (
+            subscription,
+            contract_journal,
+            system_journal,
+            upstream_stage,
+            reader_stage,
+        )
+    }
+
+    async fn drive_subscription_to_eof(subscription: &mut UpstreamSubscription<ChainEvent>, reader_progress: &mut [ReaderProgress]) {
+        loop {
+            match subscription
+                .poll_next_with_state("test_fsm", Some(reader_progress))
+                .await
+            {
+                PollResult::Event(_env) => continue,
+                PollResult::NoEvents => break,
+                PollResult::Error(e) => {
+                    panic!("poll_next_with_state returned error: {:?}", e);
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn strict_mode_produces_seq_divergence_and_gap_event() {
+        let (
+            mut subscription,
+            contract_journal,
+            system_journal,
+            upstream_stage,
+            reader_stage,
+        ) = build_upstream_with_seq_divergence().await;
+
+        let mut reader_progress = vec![ReaderProgress::new(upstream_stage)];
+        drive_subscription_to_eof(&mut subscription, &mut reader_progress[..]).await;
+
+        let status = subscription
+            .check_contracts(&mut reader_progress[..])
+            .await
+            .unwrap();
+
+        match status {
+            ContractStatus::Violated { upstream, cause } => {
+                assert_eq!(upstream, upstream_stage);
+                match cause {
+                    EventViolationCause::SeqDivergence { advertised, reader } => {
+                        assert_eq!(advertised, Some(SeqNo(3)));
+                        assert_eq!(reader, SeqNo(1));
+                    }
+                    other => panic!("expected SeqDivergence cause, got {:?}", other),
+                }
+            }
+            other => panic!("expected violated status, got {:?}", other),
+        }
+
+        let events = contract_journal.read_causally_ordered().await.unwrap();
+
+        let mut final_found = false;
+        let mut gap_found = false;
+
+        for env in &events {
+            match &env.event.content {
+                ChainEventContent::FlowControl(FlowControlPayload::ConsumptionFinal {
+                    pass,
+                    reader_seq,
+                    advertised_writer_seq,
+                    failure_reason,
+                    ..
+                }) => {
+                    final_found = true;
+                    assert!(!pass);
+                    assert_eq!(*reader_seq, SeqNo(1));
+                    assert_eq!(*advertised_writer_seq, Some(SeqNo(3)));
+                    match failure_reason {
+                        Some(EventViolationCause::SeqDivergence { advertised, reader }) => {
+                            assert_eq!(*advertised, Some(SeqNo(3)));
+                            assert_eq!(*reader, SeqNo(1));
+                        }
+                        other => panic!(
+                            "expected SeqDivergence failure_reason, got {:?}",
+                            other
+                        ),
+                    }
+                }
+                ChainEventContent::FlowControl(FlowControlPayload::ConsumptionGap {
+                    from_seq,
+                    to_seq,
+                    upstream,
+                }) => {
+                    gap_found = true;
+                    assert_eq!(*from_seq, SeqNo(2));
+                    assert_eq!(*to_seq, SeqNo(3));
+                    assert_eq!(*upstream, upstream_stage);
+                }
+                _ => {}
+            }
+        }
+
+        assert!(final_found, "expected a ConsumptionFinal event");
+        assert!(gap_found, "expected a ConsumptionGap event");
+
+        let system_events = system_journal.read_causally_ordered().await.unwrap();
+        let mut status_found = false;
+        let mut override_found = false;
+
+        for env in &system_events {
+            match &env.event.event {
+                SystemEventType::ContractStatus {
+                    upstream,
+                    reader,
+                    pass,
+                    reason,
+                    ..
+                } => {
+                    status_found = true;
+                    assert_eq!(*upstream, upstream_stage);
+                    assert_eq!(*reader, reader_stage);
+                    assert!(!pass);
+                    match reason {
+                        Some(EventViolationCause::SeqDivergence { .. }) => {}
+                        other => panic!(
+                            "expected SeqDivergence reason in ContractStatus, got {:?}",
+                            other
+                        ),
+                    }
+                }
+                SystemEventType::ContractOverrideByPolicy { .. } => {
+                    override_found = true;
+                }
+                _ => {}
+            }
+        }
+
+        assert!(status_found, "expected ContractStatus system event");
+        assert!(
+            !override_found,
+            "did not expect ContractOverrideByPolicy in strict mode"
+        );
+    }
+
+    #[tokio::test]
+    async fn breaker_aware_mode_overrides_seq_divergence_and_emits_override_event() {
+        let (
+            mut subscription,
+            contract_journal,
+            system_journal,
+            upstream_stage,
+            reader_stage,
+        ) = build_upstream_with_seq_divergence().await;
+
+        // Register breaker-aware contract mode with fallback configured and mark
+        // that the breaker has opened at least once. This makes the policy
+        // layer eligible to override pure SeqDivergence failures.
+        obzenflow_core::circuit_breaker_contract_registry::register_stage_mode(
+            upstream_stage,
+            CircuitBreakerContractMode::BreakerAware,
+            true,
+        );
+        obzenflow_core::circuit_breaker_contract_registry::mark_stage_opened(upstream_stage);
+
+        // Rebuild the policy stack so that it includes BreakerAwarePolicy.
+        subscription.contract_policies = subscription
+            .readers
+            .iter()
+            .map(|(upstream, _name, _reader)| {
+                let stack = build_policy_stack_for_upstream(*upstream);
+                Some(stack)
+            })
+            .collect();
+
+        let mut reader_progress = vec![ReaderProgress::new(upstream_stage)];
+        drive_subscription_to_eof(&mut subscription, &mut reader_progress[..]).await;
+
+        let status = subscription
+            .check_contracts(&mut reader_progress[..])
+            .await
+            .unwrap();
+
+        // With breaker-aware contracts, the SeqDivergence should be treated as pass.
+        match status {
+            ContractStatus::ProgressEmitted | ContractStatus::Healthy => {}
+            other => panic!(
+                "expected non-violated status under BreakerAware, got {:?}",
+                other
+            ),
+        }
+
+        let events = contract_journal.read_causally_ordered().await.unwrap();
+
+        let mut final_pass_found = false;
+        let mut gap_found = false;
+
+        for env in &events {
+            match &env.event.content {
+                ChainEventContent::FlowControl(FlowControlPayload::ConsumptionFinal {
+                    pass,
+                    reader_seq,
+                    advertised_writer_seq,
+                    failure_reason,
+                    ..
+                }) => {
+                    final_pass_found = true;
+                    assert!(*pass, "expected pass=true in ConsumptionFinal");
+                    assert_eq!(*reader_seq, SeqNo(1));
+                    assert_eq!(*advertised_writer_seq, Some(SeqNo(3)));
+                    assert!(
+                        failure_reason.is_none(),
+                        "expected no failure_reason when overridden by policy"
+                    );
+                }
+                ChainEventContent::FlowControl(FlowControlPayload::ConsumptionGap { .. }) => {
+                    gap_found = true;
+                }
+                _ => {}
+            }
+        }
+
+        assert!(
+            final_pass_found,
+            "expected a ConsumptionFinal event under BreakerAware mode"
+        );
+        assert!(
+            !gap_found,
+            "did not expect a ConsumptionGap event when override is applied"
+        );
+
+        let system_events = system_journal.read_causally_ordered().await.unwrap();
+        let mut status_found = false;
+        let mut override_found = false;
+
+        for env in &system_events {
+            match &env.event.event {
+                SystemEventType::ContractStatus {
+                    upstream,
+                    reader,
+                    pass,
+                    reason,
+                    ..
+                } => {
+                    status_found = true;
+                    assert_eq!(*upstream, upstream_stage);
+                    assert_eq!(*reader, reader_stage);
+                    assert!(*pass, "expected pass=true in ContractStatus");
+                    assert!(
+                        reason.is_none(),
+                        "expected no reason when contracts are overridden to pass"
+                    );
+                }
+                SystemEventType::ContractOverrideByPolicy {
+                    upstream,
+                    reader,
+                    policy,
+                    ..
+                } => {
+                    override_found = true;
+                    assert_eq!(*upstream, upstream_stage);
+                    assert_eq!(*reader, reader_stage);
+                    assert_eq!(policy, "breaker_aware");
+                }
+                _ => {}
+            }
+        }
+
+        assert!(status_found, "expected ContractStatus system event");
+        assert!(
+            override_found,
+            "expected ContractOverrideByPolicy system event in BreakerAware mode"
+        );
     }
 }

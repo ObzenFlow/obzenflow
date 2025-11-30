@@ -13,6 +13,7 @@ pub mod contracts;
 pub mod time;
 pub mod web;
 pub mod circuit_breaker_registry;
+pub mod circuit_breaker_contract_registry;
 
 // Re-export key types for convenience
 pub use error::Result;
@@ -40,3 +41,7 @@ pub use contracts::{
     ContractState, ContractViolation, ContractWriteContext, HashMismatch, TransportContract,
     ViolationCause,
 };
+
+// Re-export CB contract mode so adapters/runtime can depend on it without
+// reaching into the registry module directly.
+pub use circuit_breaker_contract_registry::CircuitBreakerContractMode;

@@ -54,6 +54,15 @@ pub enum SystemEventType {
         #[serde(skip_serializing_if = "Option::is_none")]
         reason: Option<crate::event::types::ViolationCause>,
     },
+
+    /// Contract decision overridden by a policy layer (e.g., breaker-aware).
+    #[serde(rename = "contract_override_by_policy")]
+    ContractOverrideByPolicy {
+        upstream: StageId,
+        reader: StageId,
+        original_cause: crate::contracts::ViolationCause,
+        policy: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -367,6 +376,9 @@ impl JournalEvent for SystemEvent {
                 } else {
                     "system.contract.fail"
                 }
+            }
+            SystemEventType::ContractOverrideByPolicy { .. } => {
+                "system.contract.override_by_policy"
             }
         }
     }

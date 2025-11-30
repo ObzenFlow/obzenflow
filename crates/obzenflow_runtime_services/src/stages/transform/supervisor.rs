@@ -493,15 +493,31 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Hand
                                         Ok(transformed_events) => {
                                             // Write transformed events
                                             for event in transformed_events {
-                                                // Check if this is an error event that was passed through
-                                                if matches!(event.processing_info.status, obzenflow_core::event::status::processing_status::ProcessingStatus::Error(_)) {
+                                                use obzenflow_core::event::status::processing_status::ProcessingStatus;
+
+                                                let is_error = matches!(
+                                                    event.processing_info.status,
+                                                    ProcessingStatus::Error(_)
+                                                );
+
+                                                // For some domain errors we want events to remain on the main
+                                                // data path instead of being isolated to the error_journal.
+                                                // This keeps them visible to downstream stages and summaries
+                                                // while still being counted as errors via status/metrics.
+                                                let treat_as_domain_error = matches!(
+                                                    event.processing_info.status,
+                                                    ProcessingStatus::Error(ref msg)
+                                                        if msg == "payment_validation_failed"
+                                                );
+
+                                                if is_error && !treat_as_domain_error {
                                                     tracing::info!(
                                                         stage_name = %ctx.stage_name,
                                                         event_id = %event.id,
                                                         "Writing error event to error journal (FLOWIP-082e)"
                                                     );
-                                                    // Only count data events for transport contracts (FLOWIP-080o-part-2)
-                                                    // Error events are still data, so count them
+                                                    // Error events are still data, so record them for
+                                                    // transport contracts and metrics.
                                                     ctx.instrumentation
                                                         .record_emitted(&event);
                                                     ctx.error_journal
@@ -512,7 +528,7 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Hand
                                                     // Track output for contract verification
                                                     subscription.track_output_event();
                                                 } else {
-                                                    // Enrich with runtime context
+                                                    // Enrich with flow/runtime context before writing to data journal
                                                     let flow_context = FlowContext {
                                                         flow_name: ctx.flow_name.clone(),
                                                         flow_id: ctx.flow_id.to_string(),
