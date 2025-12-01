@@ -292,3 +292,127 @@ impl Contract for TransportContract {
         }
     }
 }
+
+// ======================================================================
+// Source contract (FLOWIP-081b)
+// ======================================================================
+
+/// Internal writer-side state for SourceContract.
+#[derive(Debug, Default)]
+struct SourceWriterState {
+    expected_count: Option<u64>,
+    eof_writer_seq: Option<u64>,
+}
+
+/// Verifies that a finite source's declared expectations (when configured)
+/// match what it ultimately reports at EOF.
+///
+/// This contract is intentionally conservative for 081b:
+/// - If no `expected_count` is ever observed, it always passes.
+/// - If `expected_count` is present and an EOF with `writer_seq` is seen,
+///   it fails only when the two disagree.
+pub struct SourceContract;
+
+impl SourceContract {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Contract for SourceContract {
+    fn name(&self) -> &str {
+        "source"
+    }
+
+    fn on_write(&self, event: &ChainEvent, ctx: &mut ContractWriteContext) {
+        use crate::event::payloads::flow_control_payload::FlowControlPayload;
+
+        if let crate::event::ChainEventContent::FlowControl(payload) = &event.content {
+            match payload {
+                FlowControlPayload::SourceContract { expected_count, .. } => {
+                    if let Some(count) = expected_count {
+                        let state = ctx
+                            .state
+                            .get_or_insert_with::<SourceWriterState, _>(SourceWriterState::default);
+                        state.expected_count = Some(count.0);
+                    }
+                }
+                FlowControlPayload::Eof { writer_seq, .. } => {
+                    if let Some(seq) = writer_seq {
+                        let state = ctx
+                            .state
+                            .get_or_insert_with::<SourceWriterState, _>(SourceWriterState::default);
+                        state.eof_writer_seq = Some(seq.0);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn on_read(&self, _event: &ChainEvent, _ctx: &mut ContractReadContext) {
+        // For 081b we don't need reader-side state for the source contract.
+    }
+
+    fn verify(&self, ctx: &ContractContext<'_>) -> ContractResult {
+        let state = match ctx.write_state.get::<SourceWriterState>() {
+            Some(s) => s,
+            None => {
+                // No writer-side evidence; treat as pass for now.
+                return ContractResult::Passed(ContractEvidence {
+                    contract_name: self.name().to_string(),
+                    upstream_stage: ctx.upstream_stage,
+                    downstream_stage: ctx.downstream_stage,
+                    verified_at: Utc::now(),
+                    details: JsonValue::String(
+                        "no source_contract / EOF evidence observed".to_string(),
+                    ),
+                });
+            }
+        };
+
+        match (state.expected_count, state.eof_writer_seq) {
+            (Some(expected), Some(observed)) if expected != observed => {
+                ContractResult::Failed(ContractViolation {
+                    contract_name: self.name().to_string(),
+                    upstream_stage: ctx.upstream_stage,
+                    downstream_stage: ctx.downstream_stage,
+                    detected_at: Utc::now(),
+                    cause: ViolationCause::Other("source_expected_count_mismatch".into()),
+                    details: JsonValue::Object(
+                        [
+                            ("expected_count".to_string(), JsonValue::from(expected)),
+                            ("observed_writer_seq".to_string(), JsonValue::from(observed)),
+                            (
+                                "delta".to_string(),
+                                JsonValue::from(observed as i64 - expected as i64),
+                            ),
+                        ]
+                        .into_iter()
+                        .collect(),
+                    ),
+                })
+            }
+            _ => ContractResult::Passed(ContractEvidence {
+                contract_name: self.name().to_string(),
+                upstream_stage: ctx.upstream_stage,
+                downstream_stage: ctx.downstream_stage,
+                verified_at: Utc::now(),
+                details: JsonValue::Object(
+                    [
+                        (
+                            "expected_count".to_string(),
+                            JsonValue::from(state.expected_count.unwrap_or(0)),
+                        ),
+                        (
+                            "observed_writer_seq".to_string(),
+                            JsonValue::from(state.eof_writer_seq.unwrap_or(0)),
+                        ),
+                    ]
+                    .into_iter()
+                    .collect(),
+                ),
+            }),
+        }
+    }
+}

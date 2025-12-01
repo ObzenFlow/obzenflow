@@ -401,7 +401,9 @@ where
                 .readers
                 .iter()
                 .map(|_| {
-                    let chain = ContractChain::new().with_contract(TransportContract::new());
+                    let chain = ContractChain::new()
+                        .with_contract(TransportContract::new())
+                        .with_contract(obzenflow_core::SourceContract::new());
                     Some(chain)
                 })
                 .collect();
@@ -1010,6 +1012,41 @@ where
                     // Capture reason for downstream system status before moving it into events
                     let status_reason = failure_reason.clone();
 
+                    // Emit an explicit at-least-once violation event when we detect
+                    // a SeqDivergence (advertised > reader). This complements the
+                    // generic ContractStatus system event and makes at-least-once
+                    // violations first-class in the data journal for observability.
+                    if !pass {
+                        if let Some(EventViolationCause::SeqDivergence {
+                            advertised,
+                            reader,
+                        }) = failure_reason.clone()
+                        {
+                            let violation_event =
+                                ChainEventFactory::at_least_once_violation_event(
+                                    tracker.writer_id.clone(),
+                                    progress.stage_id,
+                                    EventViolationCause::SeqDivergence {
+                                        advertised,
+                                        reader,
+                                    },
+                                    progress.reader_seq,
+                                    progress.advertised_writer_seq,
+                                );
+
+                            tracker
+                                .journal
+                                .append(violation_event, None)
+                                .await
+                                .map_err(|e| {
+                                    format!(
+                                        "Failed to append at_least_once_violation event: {}",
+                                        e
+                                    )
+                                })?;
+                        }
+                    }
+
                     // Emit final event
                     let final_event = ChainEventFactory::consumption_final_event(
                         tracker.writer_id.clone(),
@@ -1442,6 +1479,7 @@ mod tests {
 
         let mut final_found = false;
         let mut gap_found = false;
+        let mut violation_found = false;
 
         for env in &events {
             match &env.event.content {
@@ -1477,12 +1515,37 @@ mod tests {
                     assert_eq!(*to_seq, SeqNo(3));
                     assert_eq!(*upstream, upstream_stage);
                 }
+                ChainEventContent::FlowControl(FlowControlPayload::AtLeastOnceViolation {
+                    upstream,
+                    reason,
+                    reader_seq,
+                    advertised_writer_seq,
+                }) => {
+                    violation_found = true;
+                    assert_eq!(*upstream, upstream_stage);
+                    assert_eq!(*reader_seq, SeqNo(1));
+                    assert_eq!(*advertised_writer_seq, Some(SeqNo(3)));
+                    match reason {
+                        EventViolationCause::SeqDivergence { advertised, reader } => {
+                            assert_eq!(*advertised, Some(SeqNo(3)));
+                            assert_eq!(*reader, SeqNo(1));
+                        }
+                        other => panic!(
+                            "expected SeqDivergence reason in AtLeastOnceViolation, got {:?}",
+                            other
+                        ),
+                    }
+                }
                 _ => {}
             }
         }
 
         assert!(final_found, "expected a ConsumptionFinal event");
         assert!(gap_found, "expected a ConsumptionGap event");
+        assert!(
+            violation_found,
+            "expected an AtLeastOnceViolation event for SeqDivergence"
+        );
 
         let system_events = system_journal.read_causally_ordered().await.unwrap();
         let mut status_found = false;

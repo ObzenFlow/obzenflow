@@ -14,7 +14,10 @@ use obzenflow_core::event::{SystemEvent, WriterId};
 use obzenflow_core::journal::journal::Journal;
 use obzenflow_core::{StageId, id::SystemId};
 use obzenflow_fsm::{fsm, EventVariant, StateVariant, Transition};
-use std::{sync::Arc, time::{Duration, Instant}};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 const IDLE_BACKOFF_MS: u64 = 10;
 const DRAIN_LIVENESS_MAX_IDLE: u64 = 100;
@@ -35,6 +38,49 @@ pub(crate) struct PipelineSupervisor {
 
     /// Idle iterations observed during draining (for liveness guard)
     pub(crate) drain_idle_iters: u64,
+}
+
+/// Strictness mode for source at-least-once contracts.
+///
+/// This is a minimal, flow-wide toggle for how contract failures on
+/// *source* edges influence pipeline behaviour:
+/// - `Abort` (default): any failed source contract aborts the pipeline.
+/// - `Warn`: failures are logged and surfaced via contract events, but
+///   do not cause a pipeline abort. This is intended as a transitional
+///   mode until full contract strictness plumbing lands in 090d.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SourceContractStrictMode {
+    Abort,
+    Warn,
+}
+
+fn source_contract_mode() -> SourceContractStrictMode {
+    use std::sync::OnceLock;
+
+    static MODE: OnceLock<SourceContractStrictMode> = OnceLock::new();
+
+    *MODE.get_or_init(|| {
+        match std::env::var("OBZENFLOW_SOURCE_CONTRACT_STRICT_MODE") {
+            Ok(val) => match val.to_ascii_lowercase().as_str() {
+                "warn" => SourceContractStrictMode::Warn,
+                // Treat any other explicit value as Abort to avoid surprises.
+                _ => SourceContractStrictMode::Abort,
+            },
+            Err(_) => SourceContractStrictMode::Abort,
+        }
+    })
+}
+
+/// Helper used to decide whether a given edge should be treated as
+/// gating for the purposes of contract-driven pipeline aborts.
+#[inline]
+fn is_gating_edge_for_contract(
+    is_source: bool,
+    mode: SourceContractStrictMode,
+) -> bool {
+    // Non-source edges are always gating; source edges are gating
+    // only when strict mode is configured to Abort.
+    !is_source || matches!(mode, SourceContractStrictMode::Abort)
 }
 
 impl crate::supervised_base::base::Supervisor for PipelineSupervisor {
@@ -646,20 +692,38 @@ impl SelfSupervised for PipelineSupervisor {
                                 }
 
                                 if !pass {
+                                    let is_source = context.expected_sources.contains(upstream);
+                                    let mode = source_contract_mode();
+
+                                    let should_abort =
+                                        is_gating_edge_for_contract(is_source, mode);
+
                                     tracing::error!(
                                         ?upstream,
                                         ?reader,
                                         ?reason,
+                                        is_source,
+                                        mode = ?mode,
                                         "Contract status failure"
                                     );
-                                    return Ok(EventLoopDirective::Transition(PipelineEvent::Abort {
-                                        reason: reason.clone().unwrap_or_else(|| {
-                                            obzenflow_core::event::types::ViolationCause::Other(
-                                                "contract_failed".into(),
-                                            )
-                                        }),
-                                        upstream: Some(*upstream),
-                                    }));
+
+                                    if should_abort {
+                                        return Ok(EventLoopDirective::Transition(
+                                            PipelineEvent::Abort {
+                                                reason: reason.clone().unwrap_or_else(|| {
+                                                    obzenflow_core::event::types::ViolationCause::Other(
+                                                        "contract_failed".into(),
+                                                    )
+                                                }),
+                                                upstream: Some(*upstream),
+                                            },
+                                        ));
+                                    } else {
+                                        // Warn-only for source contracts: treat as
+                                        // "completed" for shutdown gating but do not abort.
+                                        context.contract_status.insert(*upstream, true);
+                                        return Ok(EventLoopDirective::Continue);
+                                    }
                                 }
 
                                 // Mark upstream source as having passed its contract
@@ -756,22 +820,39 @@ impl SelfSupervised for PipelineSupervisor {
                                 }
 
                                 if !pass {
+                                    let is_source =
+                                        context.expected_sources.contains(&upstream.clone());
+                                    let mode = source_contract_mode();
+
+                                    let should_abort = !is_source
+                                        || matches!(mode, SourceContractStrictMode::Abort);
+
                                     tracing::error!(
                                         ?upstream,
                                         ?reader,
                                         ?reason,
+                                        is_source,
+                                        mode = ?mode,
                                         "Contract status failure during drain"
                                     );
-                                    return Ok(EventLoopDirective::Transition(
-                                        PipelineEvent::Abort {
-                                            reason: reason.clone().unwrap_or_else(|| {
-                                                obzenflow_core::event::types::ViolationCause::Other(
-                                                    "contract_failed".into(),
-                                                )
-                                            }),
-                                            upstream: Some(upstream.clone()),
-                                        },
-                                    ));
+
+                                    if should_abort {
+                                        return Ok(EventLoopDirective::Transition(
+                                            PipelineEvent::Abort {
+                                                reason: reason.clone().unwrap_or_else(|| {
+                                                    obzenflow_core::event::types::ViolationCause::Other(
+                                                        "contract_failed".into(),
+                                                    )
+                                                }),
+                                                upstream: Some(upstream.clone()),
+                                            },
+                                        ));
+                                    } else {
+                                        // Warn-only for source contracts during drain:
+                                        // mark as completed for barrier gating but do not abort.
+                                        context.contract_status.insert(upstream.clone(), true);
+                                        return Ok(EventLoopDirective::Continue);
+                                    }
                                 } else {
                                     context.contract_status.insert(upstream.clone(), true);
                                 }
@@ -887,8 +968,14 @@ impl PipelineSupervisor {
         let seen = &context.contract_pairs;
 
         // Find any edge with an explicit failure (contract violated)
-        if let Some(((upstream, reader), status)) =
-            seen.iter().find(|(_pair, status)| !status.is_passed())
+        if let Some(((upstream, reader), status)) = seen
+            .iter()
+            .find(|((upstream, _reader), status)| {
+                let is_source = context.expected_sources.contains(upstream);
+                let mode = source_contract_mode();
+                let is_gating = is_gating_edge_for_contract(is_source, mode);
+                is_gating && !status.is_passed()
+            })
         {
             let upstream_name = context
                 .topology
@@ -935,10 +1022,16 @@ impl PipelineSupervisor {
 
         let seen = &context.contract_pairs;
 
-        // Success requires that no contract edge has an explicit failure recorded.
+        // Success requires that no *gating* contract edge has an explicit failure recorded.
         // Missing contract evidence is tolerated here; it is surfaced via logs/metrics
-        // but does not block drain at the transport-contract layer.
-        !seen.values().any(|status| !status.is_passed())
+        // but does not block drain at the transport-contract layer. Source edges configured
+        // in warn-only mode are treated as non-gating for this check.
+        !seen.iter().any(|((upstream, _reader), status)| {
+            let is_source = context.expected_sources.contains(upstream);
+            let mode = source_contract_mode();
+            let is_gating = is_gating_edge_for_contract(is_source, mode);
+            is_gating && !status.is_passed()
+        })
     }
 
     /// Synthesize and write AllStagesCompleted when we know we’re done
@@ -977,14 +1070,30 @@ impl PipelineSupervisor {
         let seen = &context.contract_pairs;
         let missing_contracts: Vec<(StageId, StageId)> = expected_contracts
             .iter()
-            .filter(|pair| !matches!(seen.get(pair), Some(status) if status.is_passed()))
+            .filter(|(upstream, reader)| {
+                let is_source = context.expected_sources.contains(upstream);
+                let mode = source_contract_mode();
+                let is_gating = is_gating_edge_for_contract(is_source, mode);
+                if !is_gating {
+                    return false;
+                }
+                !matches!(seen.get(&(*upstream, *reader)), Some(status) if status.is_passed())
+            })
             .copied()
             .collect();
 
         let total_contracts = expected_contracts.len();
         let satisfied_contracts = expected_contracts
             .iter()
-            .filter(|pair| matches!(seen.get(pair), Some(status) if status.is_passed()))
+            .filter(|(upstream, reader)| {
+                let is_source = context.expected_sources.contains(upstream);
+                let mode = source_contract_mode();
+                let is_gating = is_gating_edge_for_contract(is_source, mode);
+                if !is_gating {
+                    return false;
+                }
+                matches!(seen.get(&(*upstream, *reader)), Some(status) if status.is_passed())
+            })
             .count();
 
         BarrierSnapshot {
@@ -1055,6 +1164,34 @@ impl ContractEdgeStatus {
 
     pub(crate) fn is_passed(&self) -> bool {
         self.passed
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn is_gating_edge_for_contract_behaves_as_expected() {
+        // Non-source edges are always gating, regardless of mode.
+        assert!(is_gating_edge_for_contract(
+            false,
+            SourceContractStrictMode::Abort
+        ));
+        assert!(is_gating_edge_for_contract(
+            false,
+            SourceContractStrictMode::Warn
+        ));
+
+        // Source edges are gating only when strict mode is Abort.
+        assert!(is_gating_edge_for_contract(
+            true,
+            SourceContractStrictMode::Abort
+        ));
+        assert!(
+            !is_gating_edge_for_contract(true, SourceContractStrictMode::Warn),
+            "source edges should be non-gating when strict mode is Warn"
+        );
     }
 }
 

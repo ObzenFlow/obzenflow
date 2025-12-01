@@ -666,13 +666,6 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                         // Write all aggregated events
                         for event in events {
                             use obzenflow_core::event::JournalEvent;
-                            tracing::info!(
-                                target: "flowip-080o",
-                                stage_name = %ctx.stage_name,
-                                event_type = %event.event_type_name(),
-                                event_id = ?event.id,
-                                "stateful: writing aggregated event to journal"
-                            );
                             // Enrich with runtime context
                             let flow_context = FlowContext {
                                 flow_name: ctx.flow_name.clone(),
@@ -750,30 +743,67 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                         .await
                     {
                         PollResult::Event(envelope) => {
-                            tracing::debug!(
-                                stage_name = %ctx.stage_name,
-                                event_type = envelope.event.event_type(),
-                                "Stateful draining subscription event"
-                            );
-
                             ctx.instrumentation.record_consumed(&envelope);
 
                             // Process the event based on type
                             if !envelope.event.is_control() {
-                                // Accumulate data events during draining
+                                // Accumulate data events during draining, synchronously
                                 let event = envelope.event.clone();
                                 let mut handler = (*ctx.handler).clone();
-                                let state = &mut ctx.current_state;
+                                handler.accumulate(&mut ctx.current_state, event);
 
-                                // Process with instrumentation
-                                let _result = process_with_instrumentation(
-                                    &ctx.instrumentation,
-                                    || async move {
-                                        handler.accumulate(state, event);
-                                        Ok(())
-                                    },
-                                )
-                                .await;
+                                // After accumulation, mirror Accumulating semantics:
+                                // if the handler says we should emit, do so inline.
+                                if handler.should_emit(&ctx.current_state) {
+                                    let events_to_emit =
+                                        handler.emit(&mut ctx.current_state);
+
+                                    if !events_to_emit.is_empty() {
+                                        let events_count = events_to_emit.len();
+                                        tracing::info!(
+                                            target: "flowip-080o",
+                                            stage_name = %ctx.stage_name,
+                                            events_count = events_count,
+                                            "stateful: emitting aggregated events to journal during draining"
+                                        );
+
+                                        for event in events_to_emit {
+                                            use obzenflow_core::event::JournalEvent;
+
+                                            let flow_context = FlowContext {
+                                                flow_name: ctx.flow_name.clone(),
+                                                flow_id: ctx.flow_id.to_string(),
+                                                stage_name: ctx.stage_name.clone(),
+                                                stage_id: self.stage_id.clone(),
+                                                stage_type: obzenflow_core::event::context::StageType::Stateful,
+                                            };
+
+                                            let enriched_event = event
+                                                .with_flow_context(flow_context)
+                                                .with_runtime_context(
+                                                    ctx.instrumentation.snapshot(),
+                                                );
+
+                                            if enriched_event.is_data() {
+                                                ctx.instrumentation
+                                                    .record_emitted(&enriched_event);
+                                                if let Some(ref mut sub) = ctx.subscription {
+                                                    sub.track_output_event();
+                                                }
+                                            }
+
+                                            ctx.data_journal
+                                                .append(enriched_event, None)
+                                                .await
+                                                .map_err(|e| {
+                                                    format!(
+                                                        "Failed to write aggregated event during draining: {}",
+                                                        e
+                                                    )
+                                                })?;
+                                        }
+                                    }
+                                }
                             } else {
                                 // Forward control events during draining (CRITICAL FIX for FLOWIP-080o)
                                 // This ensures contract events (consumption_final, consumption_progress, etc.)
@@ -833,11 +863,6 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                     let final_state = ctx.current_state.clone();
                     let handler = (*ctx.handler).clone();
 
-                    tracing::info!(
-                        stage_name = %ctx.stage_name,
-                        "Stateful stage draining final state"
-                    );
-
                     // Call handler.drain() with instrumentation
                     let drain_result =
                         process_with_instrumentation(&ctx.instrumentation, || async move {
@@ -847,13 +872,6 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
 
                     match drain_result {
                         Ok(drain_events) => {
-                            tracing::info!(
-                                target: "flowip-080o",
-                                stage_name = %ctx.stage_name,
-                                drain_events_count = drain_events.len(),
-                                "stateful: handler.drain() returned events"
-                            );
-
                             // Write the final aggregated events (if any)
                             for event in drain_events {
                                 use obzenflow_core::event::JournalEvent;

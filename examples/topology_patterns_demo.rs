@@ -89,6 +89,8 @@ struct AggregatorState {
     expected_counts: BTreeMap<String, usize>,
     /// Total events processed
     total_events: usize,
+    /// Total output events emitted (for demo-local accounting)
+    outputs_emitted: usize,
     /// Current event being processed (for emission)
     current_event: Option<ChainEvent>,
     /// Flag when EOF has been observed for audit
@@ -173,6 +175,14 @@ impl StatefulHandler for MultiSourceAggregator {
                 enriched,
             );
 
+            // Demo-local accounting: track outputs emitted so we can ensure
+            // that every input observed by this stateful handler results in
+            // a corresponding output (for this immediate-enrichment pattern).
+            // FLOWIP-090c/090d: Once `StatefulAccountingContract` is available and wired
+            // via the contract DSL, this counter/assertion is expected to be removed
+            // in favor of a generic accounting contract; see FLOWIP-090d exit criteria.
+            state.outputs_emitted += 1;
+
             vec![aggregated_event]
         } else {
             vec![]
@@ -225,6 +235,22 @@ impl StatefulHandler for MultiSourceAggregator {
                     src, expected, got, state.eof_seen
                 );
             }
+        }
+
+        // Demo-local stateful accounting guard (FLOWIP-081b):
+        // For this immediate-enrichment handler, every input that was
+        // accumulated should have produced exactly one output event via
+        // `emit`. If this ever diverges, it means the stateful FSM or
+        // handler semantics have regressed and are silently dropping
+        // inputs during draining or emission. FLOWIP-090c/090d will replace this
+        // handler-local guard with a first-class `StatefulAccountingContract`
+        // configured from the contract DSL; at that point this demo-local logic
+        // should be removed and enforced purely via contracts.
+        if state.outputs_emitted != state.total_events {
+            panic!(
+                "STATEFUL ACCOUNTING FAILED: inputs_observed={} outputs_emitted={} (eof_seen={})",
+                state.total_events, state.outputs_emitted, state.eof_seen
+            );
         }
         vec![]
     }

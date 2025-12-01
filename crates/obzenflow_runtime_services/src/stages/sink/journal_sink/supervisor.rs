@@ -503,13 +503,6 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                                                 "Sink received EOF; evaluated drain decision"
                                                             );
 
-                                                            tracing::info!(
-                                                                target: "flowip-080o",
-                                                                stage_name = %ctx.stage_name,
-                                                                is_final = outcome.is_final,
-                                                                ">>> CLAUDE CHECK: EOF OUTCOME RECEIVED, ABOUT TO CHECK is_final <<<"
-                                                            );
-
                                                             if outcome.is_final {
                                                                 tracing::info!(
                                                                     target: "flowip-080o",

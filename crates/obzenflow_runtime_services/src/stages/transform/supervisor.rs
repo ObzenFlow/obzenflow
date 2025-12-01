@@ -412,15 +412,45 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Hand
                                     // Execute the action
                                     match action {
                                         ControlEventAction::Forward => {
-                                            // Forward control events immediately
-                                            // Always forward control events downstream
-                                            self.forward_control_event(&envelope).await?;
+                                            // Handle EOF specially: only transition when ALL upstreams have EOF'd
+                                            if envelope.event.is_eof() {
+                                                let eof_outcome =
+                                                    subscription.take_last_eof_outcome();
 
-                                            // EOF or Drain triggers local drain after forwarding
-                                            // Drain events from pipeline BeginDrain should initiate stage draining
-                                            if envelope.event.is_eof()
-                                                || matches!(signal, FlowControlPayload::Drain)
-                                            {
+                                                // Contract check at EOF time
+                                                let _ = subscription
+                                                    .check_contracts(&mut contract_state[..])
+                                                    .await;
+
+                                                if let Some(outcome) = eof_outcome {
+                                                    if outcome.is_final {
+                                                        // All upstream readers have reached EOF: begin draining.
+                                                        ctx.buffered_eof =
+                                                            Some(envelope.event.clone());
+                                                        tracing::info!(
+                                                            stage_name = %ctx.stage_name,
+                                                            event_type = envelope.event.event_type(),
+                                                            "Transform stage received final EOF for all upstreams, transitioning to draining"
+                                                        );
+                                                        // Forward EOF downstream before transitioning
+                                                        self.forward_control_event(&envelope).await?;
+                                                        // Restore before returning
+                                                        ctx.subscription = subscription_opt;
+                                                        ctx.contract_state = contract_state;
+                                                        return Ok(EventLoopDirective::Transition(
+                                                            TransformEvent::ReceivedEOF,
+                                                        ));
+                                                    } else {
+                                                        // Non-final EOF: forward but don't drain yet.
+                                                        // Continue processing events from other upstreams.
+                                                        self.forward_control_event(&envelope).await?;
+                                                    }
+                                                } else {
+                                                    // No outcome yet (unexpected), forward and continue.
+                                                    self.forward_control_event(&envelope).await?;
+                                                }
+                                            } else if matches!(signal, FlowControlPayload::Drain) {
+                                                // Drain events from pipeline BeginDrain should initiate stage draining
                                                 ctx.buffered_eof =
                                                     Some(envelope.event.clone());
                                                 tracing::info!(
@@ -428,9 +458,16 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Hand
                                                     event_type = envelope.event.event_type(),
                                                     "Transform stage received drain signal, transitioning to draining"
                                                 );
+                                                self.forward_control_event(&envelope).await?;
+                                                // Restore before returning
+                                                ctx.subscription = subscription_opt;
+                                                ctx.contract_state = contract_state;
                                                 return Ok(EventLoopDirective::Transition(
                                                     TransformEvent::ReceivedEOF,
                                                 ));
+                                            } else {
+                                                // Other control events: just forward
+                                                self.forward_control_event(&envelope).await?;
                                             }
                                         }
                                         ControlEventAction::Delay(duration) => {
@@ -540,12 +577,6 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Hand
                                                     let enriched_event = event
                                                         .with_flow_context(flow_context)
                                                         .with_runtime_context(ctx.instrumentation.snapshot());
-
-                                                    tracing::debug!(
-                                                        "Transform {} writing event to data_journal ptr: {:p}",
-                                                        ctx.stage_name,
-                                                        ctx.data_journal.as_ref() as *const _
-                                                    );
 
                                                     // FLOWIP-080o-part-2: Only count data events for writer_seq.
                                                     // Lifecycle events (middleware metrics, etc.) are observability

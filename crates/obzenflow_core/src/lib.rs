@@ -38,8 +38,8 @@ pub use ulid::Ulid;
 // Re-export core contract types (FLOWIP-090c)
 pub use contracts::{
     Contract, ContractContext, ContractEvidence, ContractReadContext, ContractResult,
-    ContractState, ContractViolation, ContractWriteContext, HashMismatch, TransportContract,
-    ViolationCause,
+    ContractState, ContractViolation, ContractWriteContext, HashMismatch, SourceContract,
+    TransportContract, ViolationCause,
 };
 
 // Re-export CB contract mode so adapters/runtime can depend on it without
