@@ -40,7 +40,7 @@ pub trait HandlerSupervised: Supervisor {
     where
         F: FnOnce(ChainEvent) -> Vec<ChainEvent>,
     {
-        if matches!(event.processing_info.status, ProcessingStatus::Error(_)) {
+        if matches!(event.processing_info.status, ProcessingStatus::Error { .. }) {
             vec![event] // pass straight through
         } else {
             next(event)

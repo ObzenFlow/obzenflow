@@ -508,7 +508,7 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Hand
                                     let event_to_process = envelope.event.clone();
 
                                     // Use run_if_not_error to handle error events
-                                    if matches!(event_to_process.processing_info.status, obzenflow_core::event::status::processing_status::ProcessingStatus::Error(_)) {
+                                    if matches!(event_to_process.processing_info.status, obzenflow_core::event::status::processing_status::ProcessingStatus::Error { .. }) {
                                         tracing::info!(
                                             "Transform supervisor {} received error event {}: {:?}",
                                             ctx.stage_name,
@@ -534,18 +534,23 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Hand
 
                                                 let is_error = matches!(
                                                     event.processing_info.status,
-                                                    ProcessingStatus::Error(_)
+                                                    ProcessingStatus::Error { .. }
                                                 );
 
                                                 // For some domain errors we want events to remain on the main
                                                 // data path instead of being isolated to the error_journal.
                                                 // This keeps them visible to downstream stages and summaries
                                                 // while still being counted as errors via status/metrics.
-                                                let treat_as_domain_error = matches!(
-                                                    event.processing_info.status,
-                                                    ProcessingStatus::Error(ref msg)
-                                                        if msg == "payment_validation_failed"
-                                                );
+                                                let treat_as_domain_error =
+                                                    match &event.processing_info.status {
+                                                        ProcessingStatus::Error { message, .. }
+                                                            if message
+                                                                == "payment_validation_failed" =>
+                                                        {
+                                                            true
+                                                        }
+                                                        _ => false,
+                                                    };
 
                                                 if is_error && !treat_as_domain_error {
                                                     tracing::info!(
@@ -601,7 +606,6 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Hand
                                                 error = ?e,
                                                 "Transform processing error"
                                             );
-                                            // Error already tracked by process_with_instrumentation
                                         }
                                     }
                                 }
@@ -746,7 +750,7 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Hand
                                 // Write transformed events using new journal.write() API
                                 for event in transformed_events {
                                     // Check if this is an error event that was passed through
-                                    if matches!(event.processing_info.status, obzenflow_core::event::status::processing_status::ProcessingStatus::Error(_)) {
+                                    if matches!(event.processing_info.status, obzenflow_core::event::status::processing_status::ProcessingStatus::Error { .. }) {
                                         tracing::info!(
                                             stage_name = %ctx.stage_name,
                                             event_id = %event.id,

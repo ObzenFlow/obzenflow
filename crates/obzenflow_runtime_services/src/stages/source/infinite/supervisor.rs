@@ -380,7 +380,7 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
 
                             // Write events based on their status
                             for event_to_write in events_to_write {
-                                let journal = if matches!(event_to_write.processing_info.status, obzenflow_core::event::status::processing_status::ProcessingStatus::Error(_)) {
+                                let journal = if matches!(event_to_write.processing_info.status, obzenflow_core::event::status::processing_status::ProcessingStatus::Error { .. }) {
                                     &self.context.error_journal
                                 } else {
                                     &self.context.data_journal

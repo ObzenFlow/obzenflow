@@ -139,15 +139,16 @@ impl Middleware for CycleGuardMiddleware {
             let mut error_event = event.clone();
 
             // Set the error status with detailed information
-            error_event.processing_info.status = obzenflow_core::event::status::processing_status::ProcessingStatus::Error(
-                format!(
-                    "Cycle limit exceeded after {} iterations (max: {}) for correlation {} in stage {}", 
-                    iterations, 
-                    self.max_iterations,
-                    correlation_id,
-                    self.stage_name
-                )
-            );
+            error_event.processing_info.status =
+                obzenflow_core::event::status::processing_status::ProcessingStatus::error(
+                    format!(
+                        "Cycle limit exceeded after {} iterations (max: {}) for correlation {} in stage {}",
+                        iterations,
+                        self.max_iterations,
+                        correlation_id,
+                        self.stage_name
+                    ),
+                );
 
             // Return the original event with error status - transforms will skip it
             return MiddlewareAction::Skip(vec![error_event]);

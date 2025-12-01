@@ -4,6 +4,7 @@
 use crate::event::context::causality_context::CausalityContext;
 use crate::event::context::observability_context::ObservabilityContext;
 use crate::event::context::{FlowContext, IntentContext, ProcessingContext, RuntimeContext};
+use crate::event::status::processing_status::{ErrorKind, ProcessingStatus};
 use crate::event::types::{CorrelationId, EventId, WriterId};
 use crate::id::StageId;
 use serde::{Deserialize, Serialize};
@@ -195,6 +196,28 @@ impl ChainEvent {
 
     pub fn is_lifecycle(&self) -> bool {
         matches!(self.content, ChainEventContent::Observability(_))
+    }
+
+    /// Mark this event as an error with a structured ErrorKind.
+    ///
+    /// This sets `processing_info.status` to `ProcessingStatus::Error` with
+    /// the provided message and kind, and primes `error_hops_remaining` so
+    /// stage supervisors can route the event according to FLOWIP-082e/082g.
+    pub fn mark_as_error(mut self, reason: impl Into<String>, kind: ErrorKind) -> Self {
+        self.processing_info.status =
+            ProcessingStatus::error_with_kind(reason.into(), Some(kind));
+        self.processing_info.error_hops_remaining = Some(1);
+        self
+    }
+
+    /// Convenience: mark this event as a domain/validation error.
+    pub fn mark_as_validation_error(self, reason: impl Into<String>) -> Self {
+        self.mark_as_error(reason, ErrorKind::Validation)
+    }
+
+    /// Convenience: mark this event as an infra/remote error.
+    pub fn mark_as_infra_error(self, reason: impl Into<String>) -> Self {
+        self.mark_as_error(reason, ErrorKind::Remote)
     }
 
     /// Return a concise “category.kind” string for logging & metrics.

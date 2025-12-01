@@ -588,7 +588,7 @@ impl FsmAction for MetricsAggregatorAction {
                     metrics.last_event_time = Some(now);
 
                     // Check for errors from processing outcome
-                    if matches!(event.processing_info.status, ProcessingStatus::Error(_)) {
+                    if matches!(event.processing_info.status, ProcessingStatus::Error { .. }) {
                         metrics.errors += 1;
                     }
 
@@ -693,7 +693,7 @@ impl FsmAction for MetricsAggregatorAction {
                 }
 
                 // Aggregate flow-level metrics
-                if matches!(event.processing_info.status, ProcessingStatus::Error(_)) {
+                if matches!(event.processing_info.status, ProcessingStatus::Error { .. }) {
                     store.flow_errors_total += 1;
 
                     // Handle errored journeys (FLOWIP-082g)

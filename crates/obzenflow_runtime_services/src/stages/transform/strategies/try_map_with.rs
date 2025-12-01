@@ -440,8 +440,10 @@ where
                     ErrorStrategy::ToErrorJournal => {
                         // Mark event with error status for error journal routing
                         let mut error_event = event;
-                        error_event.processing_info.status =
-                            ProcessingStatus::Error(format!("Conversion failed: {}", error_msg));
+                        error_event.processing_info.status = ProcessingStatus::error(format!(
+                            "Conversion failed: {}",
+                            error_msg
+                        ));
                         vec![error_event]
                     }
                     ErrorStrategy::ToEventType(event_type) => {
@@ -710,7 +712,7 @@ where
             ErrorStrategy::Drop => vec![],
             ErrorStrategy::ToErrorJournal => {
                 let mut error_event = event;
-                error_event.processing_info.status = ProcessingStatus::Error(error_msg);
+                error_event.processing_info.status = ProcessingStatus::error(error_msg);
                 vec![error_event]
             }
             ErrorStrategy::ToEventType(event_type) => {
@@ -843,10 +845,10 @@ mod tests {
         // Event should be marked with error status
         assert!(matches!(
             result[0].processing_info.status,
-            ProcessingStatus::Error(_)
+            ProcessingStatus::Error { .. }
         ));
 
-        if let ProcessingStatus::Error(msg) = &result[0].processing_info.status {
+        if let ProcessingStatus::Error { message: msg, .. } = &result[0].processing_info.status {
             assert!(msg.contains("Negative amount"));
         }
     }
@@ -872,10 +874,10 @@ mod tests {
 
         assert!(matches!(
             result[0].processing_info.status,
-            ProcessingStatus::Error(_)
+            ProcessingStatus::Error { .. }
         ));
 
-        if let ProcessingStatus::Error(msg) = &result[0].processing_info.status {
+        if let ProcessingStatus::Error { message: msg, .. } = &result[0].processing_info.status {
             assert!(msg.contains("Missing user_id"));
         }
     }
@@ -1018,7 +1020,7 @@ mod tests {
         // Should have error status
         assert!(matches!(
             result[0].processing_info.status,
-            ProcessingStatus::Error(_)
+            ProcessingStatus::Error { .. }
         ));
     }
 
@@ -1160,10 +1162,10 @@ mod tests {
         // Should be marked with error status (default strategy)
         assert!(matches!(
             result[0].processing_info.status,
-            ProcessingStatus::Error(_)
+            ProcessingStatus::Error { .. }
         ));
 
-        if let ProcessingStatus::Error(msg) = &result[0].processing_info.status {
+        if let ProcessingStatus::Error { message: msg, .. } = &result[0].processing_info.status {
             assert!(msg.contains("Negative value"));
         }
     }
@@ -1193,10 +1195,10 @@ mod tests {
         // Should be marked with error status
         assert!(matches!(
             result[0].processing_info.status,
-            ProcessingStatus::Error(_)
+            ProcessingStatus::Error { .. }
         ));
 
-        if let ProcessingStatus::Error(msg) = &result[0].processing_info.status {
+        if let ProcessingStatus::Error { message: msg, .. } = &result[0].processing_info.status {
             assert!(msg.contains("Failed to deserialize"));
             assert!(msg.contains("TestInput"));
         }

@@ -90,7 +90,7 @@ impl<H: TransformHandler> MiddlewareTransform<H> {
                 MiddlewareAction::Abort => {
                     let mut err = event.clone();
                     err.processing_info.status =
-                        ProcessingStatus::Error("aborted by middleware".into());
+                        ProcessingStatus::error("aborted by middleware");
                     return vec![err];
                 }
             }
@@ -135,7 +135,7 @@ impl<H: TransformHandler> MiddlewareTransform<H> {
 impl<H: TransformHandler> TransformHandler for MiddlewareTransform<H> {
     fn process(&self, event: ChainEvent) -> Vec<ChainEvent> {
         // Short-circuit if event already has Error status
-        if matches!(event.processing_info.status, ProcessingStatus::Error(_)) {
+        if matches!(event.processing_info.status, ProcessingStatus::Error { .. }) {
             tracing::debug!(
                 "MiddlewareTransform: Skipping event with Error status: {:?}",
                 event.processing_info.status

@@ -575,14 +575,16 @@ impl Middleware for CircuitBreakerMiddleware {
         // breaker’s perspective. By default we treat any output marked with
         // ProcessingStatus::Error as a failure, but flows can override this
         // behaviour via `with_failure_classifier` when they need finer-grained
-        // control (for example, ignoring pure validation failures).
+        // control (for example, ignoring pure validation failures). 082h-phase-2
+        // will switch this default to be ErrorKind-driven instead of matching
+        // on Error(String).
         let has_error = if let Some(classifier) = &self.failure_classifier {
             classifier(event, outputs)
         } else {
             outputs.iter().any(|e| {
                 matches!(
                     e.processing_info.status,
-                    obzenflow_core::event::status::processing_status::ProcessingStatus::Error(_)
+                    obzenflow_core::event::status::processing_status::ProcessingStatus::Error { .. }
                 )
             })
         };

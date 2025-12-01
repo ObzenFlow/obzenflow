@@ -20,7 +20,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use obzenflow_adapters::middleware::circuit_breaker::{HalfOpenPolicy, OpenPolicy};
 use obzenflow_adapters::middleware::{rate_limit, CircuitBreakerBuilder};
-use obzenflow_core::event::status::processing_status::ProcessingStatus;
+use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
 use obzenflow_core::{
     event::chain_event::{ChainEvent, ChainEventFactory},
     CircuitBreakerContractMode, TypedPayload,
@@ -52,8 +52,10 @@ impl TransformHandler for ValidationTransform {
         let cmd = match serde_json::from_value::<PaymentCommand>(payload.clone()) {
             Ok(cmd) => cmd,
             Err(_) => {
-                event.processing_info.status =
-                    ProcessingStatus::error("failed_to_deserialize_payment_command");
+                event = event.mark_as_error(
+                    "failed_to_deserialize_payment_command",
+                    ErrorKind::Deserialization,
+                );
                 return vec![event];
             }
         };
@@ -66,8 +68,7 @@ impl TransformHandler for ValidationTransform {
         }
 
         if validation_error.is_some() {
-            event.processing_info.status =
-                ProcessingStatus::error("payment_validation_failed".to_string());
+            event = event.mark_as_error("payment_validation_failed", ErrorKind::Validation);
         }
 
         // Replace payload with a typed ValidatedPayment projection while
@@ -116,7 +117,10 @@ struct GatewayTransform;
 impl TransformHandler for GatewayTransform {
     fn process(&self, mut event: ChainEvent) -> Vec<ChainEvent> {
         // If validation has already failed we leave the event alone.
-        if matches!(event.processing_info.status, ProcessingStatus::Error(_)) {
+        if matches!(
+            event.processing_info.status,
+            ProcessingStatus::Error { .. }
+        ) {
             return vec![event];
         }
 
@@ -167,8 +171,7 @@ impl TransformHandler for GatewayTransform {
                 // rather than by returning an empty Vec. CircuitBreaker
                 // middleware now keys off ProcessingStatus::Error instead of
                 // container emptiness, which is both clearer and safer.
-                event.processing_info.status =
-                    ProcessingStatus::error("gateway_timeout_simulated");
+                event = event.mark_as_error("gateway_timeout_simulated", ErrorKind::Timeout);
                 vec![event]
             }
         }
@@ -230,10 +233,14 @@ async fn build_flow() -> Result<FlowHandle> {
                     })
                     .with_failure_classifier(|_input, outputs| {
                         outputs.iter().any(|e| {
-                            matches!(
-                                e.processing_info.status,
-                                ProcessingStatus::Error(ref msg) if msg.starts_with("gateway_")
-                            )
+                            match &e.processing_info.status {
+                                ProcessingStatus::Error { message, .. }
+                                    if message.starts_with("gateway_") =>
+                                {
+                                    true
+                                }
+                                _ => false,
+                            }
                         })
                     })
                     // Make the Open/HalfOpen behaviour explicit; these match

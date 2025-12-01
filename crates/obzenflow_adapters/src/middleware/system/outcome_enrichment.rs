@@ -40,9 +40,9 @@ impl OutcomeEnrichmentMiddleware {
                 .and_then(|v| v.as_str())
                 .or_else(|| payload.get("message").and_then(|v| v.as_str()))
             {
-                return ProcessingStatus::Error(msg.to_string());
+                return ProcessingStatus::error(msg.to_string());
             }
-            return ProcessingStatus::Error(format!(
+            return ProcessingStatus::error(format!(
                 "Error in {}: {}",
                 self.stage_name,
                 event.event_type()
@@ -59,16 +59,16 @@ impl OutcomeEnrichmentMiddleware {
                 .get("_error_message")
                 .and_then(|v| v.as_str())
                 .unwrap_or("Processing error");
-            return ProcessingStatus::Error(msg.to_string());
+            return ProcessingStatus::error(msg.to_string());
         }
 
         // 3) explicit `error` field
         if let Some(err) = payload.get("error") {
             if let Some(s) = err.as_str() {
-                return ProcessingStatus::Error(s.to_string());
+                return ProcessingStatus::error(s.to_string());
             }
             if let Some(msg) = err.get("message").and_then(|v| v.as_str()) {
-                return ProcessingStatus::Error(msg.to_string());
+                return ProcessingStatus::error(msg.to_string());
             }
         }
 
@@ -115,7 +115,7 @@ impl Middleware for OutcomeEnrichmentMiddleware {
             let detected = self.detect_outcome(event, ctx);
             event.processing_info.status = detected.clone();
 
-            if matches!(detected, ProcessingStatus::Error(_)) {
+            if matches!(detected, ProcessingStatus::Error { .. }) {
                 event.processing_info.processed_by = self.stage_name.clone();
             }
 
@@ -180,7 +180,7 @@ mod tests {
         mw.pre_write(&mut event, &ctx);
 
         match &event.processing_info.status {
-            ProcessingStatus::Error(msg) => {
+            ProcessingStatus::Error { message: msg, .. } => {
                 assert!(msg.contains("test_stage"));
                 assert!(msg.contains("validation.error"));
             }
@@ -202,7 +202,7 @@ mod tests {
         mw.pre_write(&mut event, &ctx);
 
         match &event.processing_info.status {
-            ProcessingStatus::Error(msg) => assert_eq!(msg, "Insufficient funds"),
+            ProcessingStatus::Error { message: msg, .. } => assert_eq!(msg, "Insufficient funds"),
             _ => panic!("Expected Error outcome"),
         }
     }
@@ -221,7 +221,7 @@ mod tests {
         mw.pre_write(&mut event, &ctx);
 
         match &event.processing_info.status {
-            ProcessingStatus::Error(msg) => assert_eq!(msg, "Card declined"),
+            ProcessingStatus::Error { message: msg, .. } => assert_eq!(msg, "Card declined"),
             _ => panic!("Expected Error outcome"),
         }
     }

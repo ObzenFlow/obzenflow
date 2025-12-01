@@ -67,7 +67,7 @@ impl<H: JoinHandler> MiddlewareJoin<H> {
     /// Apply middleware chain and return whether to continue processing
     fn apply_pre_middleware(&self, event: &ChainEvent, ctx: &mut MiddlewareContext) -> bool {
         // Short-circuit if event already has Error status
-        if matches!(event.processing_info.status, ProcessingStatus::Error(_)) {
+        if matches!(event.processing_info.status, ProcessingStatus::Error { .. }) {
             tracing::debug!(
                 "MiddlewareJoin: Skipping pre_handle for event with Error status: {:?}",
                 event.processing_info.status

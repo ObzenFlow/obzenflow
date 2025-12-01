@@ -245,7 +245,7 @@ where
                     ErrorStrategy::ToErrorJournal => {
                         // Mark event with error status for error journal routing
                         let mut error_event = event;
-                        error_event.processing_info.status = ProcessingStatus::Error(error_msg);
+                        error_event.processing_info.status = ProcessingStatus::error(error_msg);
                         vec![error_event]
                     }
                     ErrorStrategy::ToEventType(event_type) => {
@@ -362,10 +362,10 @@ mod tests {
         let error_event = &result[0];
         assert!(matches!(
             error_event.processing_info.status,
-            ProcessingStatus::Error(_)
+            ProcessingStatus::Error { .. }
         ));
 
-        if let ProcessingStatus::Error(msg) = &error_event.processing_info.status {
+        if let ProcessingStatus::Error { message: msg, .. } = &error_event.processing_info.status {
             assert!(msg.contains("Type conversion"));
             assert!(msg.contains("TestOrder"));
         }

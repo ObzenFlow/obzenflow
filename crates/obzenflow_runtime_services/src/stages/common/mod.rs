@@ -2,6 +2,7 @@
 
 pub mod control_strategies;
 pub mod handlers;
+pub mod handler_error;
 pub mod source_handle;
 pub mod stage_handle;
 
@@ -10,6 +11,10 @@ pub use handlers::{
     FiniteSourceHandler, InfiniteSourceHandler, ObserverHandler, ResourceManaged, SinkHandler,
     StatefulHandler, TransformHandler,
 };
+
+// Re-export handler error type so stage code can depend on a single error enum
+// for handler failures without pulling in stage coordination errors.
+pub use handler_error::HandlerError;
 
 // Re-export control strategies
 pub use control_strategies::{

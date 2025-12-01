@@ -18,7 +18,10 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use obzenflow_core::{
-    event::chain_event::{ChainEvent, ChainEventFactory},
+    event::{
+        chain_event::{ChainEvent, ChainEventFactory},
+        status::processing_status::ErrorKind,
+    },
     event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload},
     id::StageId,
     TypedPayload, // ✨ FLOWIP-082a
@@ -298,16 +301,20 @@ impl TransformHandler for FlightValidator {
         // ✨ FLOWIP-082a: Check event type using constant
         if FlightRecord::event_type_matches(&event.event_type()) {
             // Validate that all required fields are present
-            let valid = event.payload().get("carrier").is_some()
-                && event.payload().get("delay_minutes").is_some()
-                && event.payload().get("scheduled_duration").is_some();
+            let has_carrier = event.payload().get("carrier").is_some();
+            let has_delay = event.payload().get("delay_minutes").is_some();
+            let has_duration = event.payload().get("scheduled_duration").is_some();
 
-            if valid {
-                vec![event]
-            } else {
-                // Error handling would go here
-                vec![]
+            if !(has_carrier && has_delay && has_duration) {
+                // ✨ FLOWIP-082h: Mark invalid records with a structured validation error.
+                // The transform supervisor will route these to the stage's error_journal
+                // while keeping valid records on the main data path.
+                return vec![event.mark_as_validation_error(
+                    "flight_validation_failed: missing carrier, delay_minutes, or scheduled_duration",
+                )];
             }
+
+            vec![event]
         } else {
             vec![]
         }

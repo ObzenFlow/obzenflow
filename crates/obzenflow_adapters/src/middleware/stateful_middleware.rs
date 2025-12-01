@@ -59,7 +59,7 @@ where
 
     fn accumulate(&mut self, state: &mut Self::State, event: ChainEvent) {
         // Short-circuit if event already has Error status
-        if matches!(event.processing_info.status, ProcessingStatus::Error(_)) {
+        if matches!(event.processing_info.status, ProcessingStatus::Error { .. }) {
             tracing::debug!(
                 "MiddlewareStateful: Skipping accumulate for event with Error status: {:?}",
                 event.processing_info.status
