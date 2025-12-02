@@ -4,6 +4,7 @@
 //! It receives snapshots from collectors and renders them as Prometheus text.
 //! No collection logic, no dependencies on aggregators - pure export functionality.
 
+use obzenflow_core::event::status::processing_status::ErrorKind;
 use obzenflow_core::metrics::{
     AppMetricsSnapshot, HistogramSnapshot, InfraMetricsSnapshot, MetricsExporter, StageMetadata,
 };
@@ -145,8 +146,39 @@ impl PrometheusExporter {
             writeln!(output)?;
         }
 
-        // Error counts
-        if !snapshot.error_counts.is_empty() {
+        // Error counts by ErrorKind (if available).
+        if !snapshot.error_counts_by_kind.is_empty() {
+            writeln!(
+                output,
+                "# HELP obzenflow_errors_total Total number of errors by stage and kind"
+            )?;
+            writeln!(output, "# TYPE obzenflow_errors_total counter")?;
+
+            for (stage_id, by_kind) in &snapshot.error_counts_by_kind {
+                if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
+                    for (kind, count) in by_kind {
+                        let kind_label = match kind {
+                            ErrorKind::Timeout => "timeout",
+                            ErrorKind::Remote => "remote",
+                            ErrorKind::Deserialization => "deserialization",
+                            ErrorKind::Validation => "validation",
+                            ErrorKind::Domain => "domain",
+                            ErrorKind::Unknown => "unknown",
+                        };
+                        writeln!(
+                            output,
+                            "obzenflow_errors_total{{flow=\"{}\",stage=\"{}\",error_kind=\"{}\"}} {}",
+                            escape_label(&metadata.flow_name),
+                            escape_label(&metadata.name),
+                            kind_label,
+                            count
+                        )?;
+                    }
+                }
+            }
+            writeln!(output)?;
+        } else if !snapshot.error_counts.is_empty() {
+            // Backward-compatible fallback when per-kind counts are not present.
             writeln!(
                 output,
                 "# HELP obzenflow_errors_total Total number of errors by stage"
@@ -1012,6 +1044,7 @@ mod tests {
             timestamp: chrono::Utc::now(),
             event_counts,
             error_counts: HashMap::new(),
+            error_counts_by_kind: HashMap::new(),
             processing_times: HashMap::new(),
             in_flight: HashMap::new(),
             cpu_usage_ratio: HashMap::new(),

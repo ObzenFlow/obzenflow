@@ -6,7 +6,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Structured classification for processing errors (FLOWIP-082h).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum ErrorKind {
     /// Timeout talking to a remote dependency.
     Timeout,

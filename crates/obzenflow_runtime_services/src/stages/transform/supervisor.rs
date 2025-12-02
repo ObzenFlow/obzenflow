@@ -530,29 +530,20 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Hand
                                         Ok(transformed_events) => {
                                             // Write transformed events
                                             for event in transformed_events {
-                                                use obzenflow_core::event::status::processing_status::ProcessingStatus;
+                                                use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
 
-                                                let is_error = matches!(
-                                                    event.processing_info.status,
-                                                    ProcessingStatus::Error { .. }
-                                                );
+                                                let route_to_error_journal = match &event.processing_info.status {
+                                                    ProcessingStatus::Error { kind, .. } => match kind {
+                                                        Some(ErrorKind::Timeout)
+                                                        | Some(ErrorKind::Remote)
+                                                        | Some(ErrorKind::Deserialization) => true,
+                                                        Some(ErrorKind::Validation) | Some(ErrorKind::Domain) => false,
+                                                        None | Some(ErrorKind::Unknown) => true,
+                                                    },
+                                                    _ => false,
+                                                };
 
-                                                // For some domain errors we want events to remain on the main
-                                                // data path instead of being isolated to the error_journal.
-                                                // This keeps them visible to downstream stages and summaries
-                                                // while still being counted as errors via status/metrics.
-                                                let treat_as_domain_error =
-                                                    match &event.processing_info.status {
-                                                        ProcessingStatus::Error { message, .. }
-                                                            if message
-                                                                == "payment_validation_failed" =>
-                                                        {
-                                                            true
-                                                        }
-                                                        _ => false,
-                                                    };
-
-                                                if is_error && !treat_as_domain_error {
+                                                if route_to_error_journal {
                                                     tracing::info!(
                                                         stage_name = %ctx.stage_name,
                                                         event_id = %event.id,
@@ -749,8 +740,20 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Hand
 
                                 // Write transformed events using new journal.write() API
                                 for event in transformed_events {
-                                    // Check if this is an error event that was passed through
-                                    if matches!(event.processing_info.status, obzenflow_core::event::status::processing_status::ProcessingStatus::Error { .. }) {
+                                    use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
+
+                                    let route_to_error_journal = match &event.processing_info.status {
+                                        ProcessingStatus::Error { kind, .. } => match kind {
+                                            Some(ErrorKind::Timeout)
+                                            | Some(ErrorKind::Remote)
+                                            | Some(ErrorKind::Deserialization) => true,
+                                            Some(ErrorKind::Validation) | Some(ErrorKind::Domain) => false,
+                                            None | Some(ErrorKind::Unknown) => true,
+                                        },
+                                        _ => false,
+                                    };
+
+                                    if route_to_error_journal {
                                         tracing::info!(
                                             stage_name = %ctx.stage_name,
                                             event_id = %event.id,

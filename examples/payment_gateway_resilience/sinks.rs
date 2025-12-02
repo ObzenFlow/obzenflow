@@ -45,11 +45,14 @@ impl SinkHandler for PaymentSummarySink {
         // First, treat explicit validation failures as such, regardless of how
         // they are represented downstream (ValidatedPayment or even a fallback
         // AuthorizedPayment that preserved the validation error status).
-        let is_validation_failure = matches!(
-            event.processing_info.status,
-            obzenflow_core::event::status::processing_status::ProcessingStatus::Error(ref msg)
-                if msg == "payment_validation_failed"
-        );
+        let is_validation_failure =
+            matches!(
+                event.processing_info.status,
+                obzenflow_core::event::status::processing_status::ProcessingStatus::Error {
+                    kind: Some(obzenflow_core::event::status::processing_status::ErrorKind::Validation),
+                    ..
+                }
+            );
 
         if is_validation_failure {
             self.total_seen += 1;

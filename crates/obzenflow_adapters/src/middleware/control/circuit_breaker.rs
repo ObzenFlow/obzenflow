@@ -9,6 +9,7 @@ use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::payloads::observability_payload::{
     CircuitBreakerEvent, MiddlewareLifecycle, ObservabilityPayload,
 };
+use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
 use obzenflow_core::event::ChainEventFactory;
 use obzenflow_core::TypedPayload;
 use obzenflow_core::{
@@ -26,6 +27,16 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 type FailureClassifier =
     Arc<dyn Fn(&ChainEvent, &[ChainEvent]) -> bool + Send + Sync>;
+
+/// Policy for how the breaker should treat errors whose `ErrorKind` is
+/// `Unknown` or `None` (legacy/unclassified cases).
+#[derive(Debug, Clone, Copy)]
+pub enum UnknownErrorKindPolicy {
+    /// Treat Unknown/None as infra failures for breaker purposes.
+    TreatAsInfraFailure,
+    /// Do not count Unknown/None toward breaker thresholds.
+    IgnoreForBreaker,
+}
 
 /// How the circuit breaker decides when to open while in the Closed state.
 #[derive(Debug, Clone)]
@@ -225,6 +236,8 @@ pub struct CircuitBreakerMiddleware {
     open_policy: OpenPolicy,
     /// Policy controlling behaviour while the circuit is HalfOpen.
     half_open_policy: HalfOpenPolicy,
+    /// Policy for how Unknown/None ErrorKind should be treated.
+    unknown_error_kind_policy: UnknownErrorKindPolicy,
 }
 
 #[derive(Debug)]
@@ -295,6 +308,7 @@ impl CircuitBreakerMiddleware {
             failure_classifier,
             open_policy: OpenPolicy::default(),
             half_open_policy: HalfOpenPolicy::default(),
+            unknown_error_kind_policy: UnknownErrorKindPolicy::TreatAsInfraFailure,
         }
     }
 
@@ -572,20 +586,30 @@ impl Middleware for CircuitBreakerMiddleware {
         ctx: &mut MiddlewareContext,
     ) {
         // Determine whether this call should be treated as a failure from the
-        // breaker’s perspective. By default we treat any output marked with
-        // ProcessingStatus::Error as a failure, but flows can override this
-        // behaviour via `with_failure_classifier` when they need finer-grained
-        // control (for example, ignoring pure validation failures). 082h-phase-2
-        // will switch this default to be ErrorKind-driven instead of matching
-        // on Error(String).
+        // breaker’s perspective. By default we now use an ErrorKind-driven
+        // classifier: infra-ish kinds (Timeout/Remote/Deserialization) count
+        // as failures, while Domain/Validation do not. Unknown/None are
+        // handled according to `unknown_error_kind_policy`. Flows can still
+        // override this behaviour via `with_failure_classifier`.
         let has_error = if let Some(classifier) = &self.failure_classifier {
             classifier(event, outputs)
         } else {
             outputs.iter().any(|e| {
-                matches!(
-                    e.processing_info.status,
-                    obzenflow_core::event::status::processing_status::ProcessingStatus::Error { .. }
-                )
+                match &e.processing_info.status {
+                    ProcessingStatus::Error { kind, .. } => match kind {
+                        Some(ErrorKind::Timeout)
+                        | Some(ErrorKind::Remote)
+                        | Some(ErrorKind::Deserialization) => true,
+                        Some(ErrorKind::Validation) | Some(ErrorKind::Domain) => false,
+                        None | Some(ErrorKind::Unknown) => {
+                            matches!(
+                                self.unknown_error_kind_policy,
+                                UnknownErrorKindPolicy::TreatAsInfraFailure
+                            )
+                        }
+                    },
+                    _ => false,
+                }
             })
         };
         let is_success = !has_error;
@@ -857,6 +881,7 @@ pub struct CircuitBreakerBuilder {
     failure_mode: Option<CircuitBreakerFailureMode>,
     open_policy: Option<OpenPolicy>,
     half_open_policy: Option<HalfOpenPolicy>,
+    unknown_error_kind_policy: UnknownErrorKindPolicy,
 }
 
 impl CircuitBreakerBuilder {
@@ -871,6 +896,7 @@ impl CircuitBreakerBuilder {
             failure_mode: None,
             open_policy: None,
             half_open_policy: None,
+            unknown_error_kind_policy: UnknownErrorKindPolicy::TreatAsInfraFailure,
         }
     }
 
@@ -953,6 +979,7 @@ impl CircuitBreakerBuilder {
         self.failure_mode = Some(CircuitBreakerFailureMode::Consecutive { max_failures: nz });
         self
     }
+
 
     /// Internal helper to configure rate-based failure detection over a sliding window.
     /// User-facing APIs should use the `rate_based_over_*` helpers instead of this
@@ -1087,6 +1114,7 @@ impl CircuitBreakerBuilder {
         self
     }
 
+
     /// Build the circuit breaker middleware factory
     pub fn build(self) -> Box<dyn MiddlewareFactory> {
         Box::new(CircuitBreakerFactory {
@@ -1098,6 +1126,7 @@ impl CircuitBreakerBuilder {
             failure_mode: self.failure_mode,
              open_policy: self.open_policy,
              half_open_policy: self.half_open_policy,
+             unknown_error_kind_policy: self.unknown_error_kind_policy,
         })
     }
 }
@@ -1112,6 +1141,7 @@ pub struct CircuitBreakerFactory {
     failure_mode: Option<CircuitBreakerFailureMode>,
     open_policy: Option<OpenPolicy>,
     half_open_policy: Option<HalfOpenPolicy>,
+    unknown_error_kind_policy: UnknownErrorKindPolicy,
 }
 
 impl CircuitBreakerFactory {
@@ -1126,6 +1156,7 @@ impl CircuitBreakerFactory {
             failure_mode: None,
             open_policy: None,
             half_open_policy: None,
+            unknown_error_kind_policy: UnknownErrorKindPolicy::TreatAsInfraFailure,
         }
     }
 
@@ -1360,6 +1391,8 @@ impl MiddlewareFactory for CircuitBreakerFactory {
             .clone()
             .unwrap_or_else(HalfOpenPolicy::default);
 
+        let unknown_error_kind_policy = self.unknown_error_kind_policy;
+
         // Create middleware instance
         let mut middleware = CircuitBreakerMiddleware::with_cooldown_and_fallback(
             self.threshold,
@@ -1372,6 +1405,7 @@ impl MiddlewareFactory for CircuitBreakerFactory {
         middleware.rate_window = rate_window;
         middleware.open_policy = open_policy;
         middleware.half_open_policy = half_open_policy;
+        middleware.unknown_error_kind_policy = unknown_error_kind_policy;
 
         // Register its state handle in the global registry so runtime
         // strategies (e.g. CircuitBreakerSourceStrategy) can observe
@@ -1406,7 +1440,7 @@ pub fn circuit_breaker(threshold: usize) -> Box<dyn MiddlewareFactory> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use obzenflow_core::event::status::processing_status::ProcessingStatus;
+    use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
     use obzenflow_core::time::MetricsDuration;
     use std::num::NonZeroU32;
     use std::time::Duration as StdDuration;
@@ -1681,6 +1715,33 @@ mod tests {
         assert!(
             matches!(cb.current_state(), CircuitState::Open),
             "expected circuit to be Open after slow-call rate threshold exceeded"
+        );
+    }
+
+    #[test]
+    fn default_failure_classifier_uses_errorkind() {
+        let cb = CircuitBreakerMiddleware::new(1);
+        let event = create_test_event();
+        let mut ctx = MiddlewareContext::new();
+
+        // Domain/validation error should NOT count as a breaker failure by default.
+        let mut domain_err = create_test_event();
+        domain_err.processing_info.status =
+            ProcessingStatus::error_with_kind("validation_failed", Some(ErrorKind::Validation));
+        cb.post_handle(&event, &[domain_err], &mut ctx);
+        assert!(
+            matches!(cb.current_state(), CircuitState::Closed),
+            "expected circuit to remain Closed for validation/domain errors"
+        );
+
+        // Timeout (infra) error SHOULD count as a breaker failure.
+        let mut timeout_err = create_test_event();
+        timeout_err.processing_info.status =
+            ProcessingStatus::error_with_kind("gateway_timeout", Some(ErrorKind::Timeout));
+        cb.post_handle(&event, &[timeout_err], &mut ctx);
+        assert!(
+            matches!(cb.current_state(), CircuitState::Open),
+            "expected circuit to be Open after infra/timeout error"
         );
     }
 

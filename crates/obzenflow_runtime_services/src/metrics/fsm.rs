@@ -5,7 +5,7 @@
 //! Event processing happens directly without FSM state tracking
 
 use obzenflow_core::event::chain_event::ChainEventContent;
-use obzenflow_core::event::status::processing_status::ProcessingStatus;
+use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
 use obzenflow_core::event::{CorrelationId, JournalEvent, WriterId};
 use obzenflow_core::id::{StageId, SystemId};
 use obzenflow_core::metrics::{Percentile, StageMetadata};
@@ -197,6 +197,7 @@ pub struct StageMetrics {
     pub events_in: u64,
     pub events_out: u64,
     pub errors: u64,
+    pub errors_by_kind: HashMap<ErrorKind, u64>,
     pub total_processing_time: MetricsDuration,
     pub event_count: u64,
     pub processing_time_histogram: hdrhistogram::Histogram<u64>,
@@ -245,6 +246,7 @@ impl Default for StageMetrics {
             events_in: 0,
             events_out: 0,
             errors: 0,
+            errors_by_kind: HashMap::new(),
             total_processing_time: MetricsDuration::ZERO,
             event_count: 0,
             // Create histogram with configured bounds
@@ -587,9 +589,11 @@ impl FsmAction for MetricsAggregatorAction {
                     }
                     metrics.last_event_time = Some(now);
 
-                    // Check for errors from processing outcome
-                    if matches!(event.processing_info.status, ProcessingStatus::Error { .. }) {
+                    // Check for errors from processing outcome and classify by ErrorKind
+                    if let ProcessingStatus::Error { kind, .. } = &event.processing_info.status {
                         metrics.errors += 1;
+                        let key = kind.clone().unwrap_or(ErrorKind::Unknown);
+                        *metrics.errors_by_kind.entry(key).or_insert(0) += 1;
                     }
 
                     // Record processing time
@@ -740,6 +744,11 @@ impl FsmAction for MetricsAggregatorAction {
                         snapshot.event_counts.insert(*stage_id, metrics.events_in);
 
                         snapshot.error_counts.insert(*stage_id, metrics.errors);
+                        if !metrics.errors_by_kind.is_empty() {
+                            snapshot
+                                .error_counts_by_kind
+                                .insert(*stage_id, metrics.errors_by_kind.clone());
+                        }
 
                         // Add processing time histogram with real percentiles
                         if metrics.event_count > 0 {

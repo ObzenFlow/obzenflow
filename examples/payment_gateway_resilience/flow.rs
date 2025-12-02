@@ -205,9 +205,11 @@ async fn build_flow() -> Result<FlowHandle> {
             // Gateway stage: where we "talk" to the unreliable dependency.
             //
             // The circuit breaker wraps this stage and watches for events
-            // tagged with ProcessingStatus::Error to decide when to open. For
-            // this demo we only treat gateway_* errors as breaker failures so
-            // local validation problems don't open the circuit.
+            // tagged with ProcessingStatus::Error to decide when to open. With
+            // ErrorKind wired in via FLOWIP-082h, gateway timeouts marked with
+            // ErrorKind::Timeout are treated as breaker failures by default,
+            // while local validation problems (ErrorKind::Validation) do not
+            // open the circuit.
             //
             // In 051b‑part‑3 we also demonstrate rate-based failure detection
             // and explicit Open/HalfOpen policies:
@@ -230,18 +232,6 @@ async fn build_flow() -> Result<FlowHandle> {
                         amount_cents: validated.amount_cents,
                         phase: validated.phase.clone(),
                         authorization_id: "AUTH-FALLBACK-CB-OPEN".to_string(),
-                    })
-                    .with_failure_classifier(|_input, outputs| {
-                        outputs.iter().any(|e| {
-                            match &e.processing_info.status {
-                                ProcessingStatus::Error { message, .. }
-                                    if message.starts_with("gateway_") =>
-                                {
-                                    true
-                                }
-                                _ => false,
-                            }
-                        })
                     })
                     // Make the Open/HalfOpen behaviour explicit; these match
                     // the original defaults but are configurable knobs for

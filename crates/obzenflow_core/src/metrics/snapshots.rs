@@ -4,6 +4,7 @@
 //! implementing the dual collection pattern for application and infrastructure metrics.
 
 use crate::event::context::StageType;
+use crate::event::status::processing_status::ErrorKind;
 use crate::id::StageId;
 use crate::metrics::Percentile;
 use crate::time::MetricsDuration;
@@ -21,6 +22,9 @@ pub struct AppMetricsSnapshot {
 
     /// Error counts by stage
     pub error_counts: HashMap<StageId, u64>,
+
+    /// Error counts by stage and ErrorKind
+    pub error_counts_by_kind: HashMap<StageId, HashMap<ErrorKind, u64>>,
 
     /// Processing time histograms by stage (in seconds)
     pub processing_times: HashMap<StageId, HistogramSnapshot>,
@@ -210,6 +214,7 @@ impl Default for AppMetricsSnapshot {
             timestamp: chrono::Utc::now(),
             event_counts: HashMap::new(),
             error_counts: HashMap::new(),
+            error_counts_by_kind: HashMap::new(),
             processing_times: HashMap::new(),
             in_flight: HashMap::new(),
             cpu_usage_ratio: HashMap::new(),
