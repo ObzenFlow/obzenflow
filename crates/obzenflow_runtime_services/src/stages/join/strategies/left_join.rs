@@ -321,17 +321,19 @@ mod tests {
         let mut state = handler.initial_state();
         let w = WriterId::from(StageId::new());
 
-        let out = handler.process_event(
-            &mut state,
-            StreamRow {
-                key: "missing".into(),
-            }
-            .to_event(w.clone()),
-            StageId::new(),
-            w.clone(),
-        );
+        let out = handler
+            .process_event(
+                &mut state,
+                StreamRow {
+                    key: "missing".into(),
+                }
+                .to_event(w.clone()),
+                StageId::new(),
+                w.clone(),
+            )
+            .expect("process_event should succeed for left join miss case");
 
-        let typed = OutputRow::from_event(&out[0]).unwrap();
+        let typed = OutputRow::from_event(&out[0]).expect("should deserialize left join output row");
         assert_eq!(
             typed,
             OutputRow {

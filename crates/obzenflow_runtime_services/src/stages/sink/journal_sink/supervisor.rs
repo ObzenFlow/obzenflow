@@ -580,20 +580,44 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                     }
                                 }
                                 obzenflow_core::event::ChainEventContent::Data { .. } => {
-                                    let envelope_event = envelope.event.clone();
+                                    use obzenflow_core::event::status::processing_status::{
+                                        ErrorKind, ProcessingStatus,
+                                    };
 
+                                    let envelope_event = envelope.event.clone();
+                                    let stage_name = ctx.stage_name.clone();
+
+                                    // Use instrumentation wrapper but keep handler-level failures
+                                    // as per-record outcomes instead of stage-fatal errors. The
+                                    // closure returns a tuple of:
+                                    //   (DeliveryPayload, Option<HandlerError>)
+                                    // so we can journal both the delivery outcome and an error
+                                    // event with ErrorKind.
                                     let ack_result = process_with_instrumentation(
                                         &ctx.instrumentation,
                                         || async {
                                             let handler = &mut ctx.handler;
-                                            handler.consume(envelope_event).await
-                                            // ← returns Result<DeliveryPayload, Box<…>>
+                                            let result = handler.consume(envelope_event).await;
+
+                                            match result {
+                                                Ok(payload) => Ok((payload, None)),
+                                                Err(err) => {
+                                                    let fail_payload = DeliveryPayload::failed(
+                                                        stage_name.clone(), // destination
+                                                        DeliveryMethod::Noop,
+                                                        "sink_error",
+                                                        err.to_string(),
+                                                        /* final_attempt */ false,
+                                                    );
+                                                    Ok((fail_payload, Some(err)))
+                                                }
+                                            }
                                         },
                                     )
                                     .await;
 
                                     match ack_result {
-                                        Ok(payload) => {
+                                        Ok((payload, maybe_err)) => {
                                             let flow_context = FlowContext {
                                                 flow_name: ctx.flow_name.clone(),
                                                 flow_id: ctx.flow_id.to_string(),
@@ -605,7 +629,7 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
 
                                             let delivery_event = ChainEventFactory::delivery_event(
                                                 self.writer_id(),
-                                                payload, // <-- just pass it through
+                                                payload,
                                             )
                                             .with_flow_context(flow_context)
                                             .with_runtime_context(
@@ -623,16 +647,107 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                             if delivery_event.is_data()
                                                 || delivery_event.is_delivery()
                                             {
-                                                ctx.instrumentation.record_emitted(&delivery_event);
+                                                ctx.instrumentation
+                                                    .record_emitted(&delivery_event);
                                             }
                                             ctx.data_journal
                                                 .append(delivery_event, Some(&envelope))
                                                 .await?;
+
+                                            // If the handler returned a per-record error, surface it
+                                            // as an error-marked event routed by ErrorKind policy.
+                                            if let Some(handler_err) = maybe_err {
+                                                let reason = format!(
+                                                    "Sink handler error: {:?}",
+                                                    handler_err
+                                                );
+                                                let mut error_event = envelope
+                                                    .event
+                                                    .clone()
+                                                    .mark_as_error(
+                                                        reason,
+                                                        handler_err.kind(),
+                                                    );
+
+                                                let route_to_error_journal =
+                                                    match &error_event.processing_info.status {
+                                                        ProcessingStatus::Error { kind, .. } => {
+                                                            match kind {
+                                                                Some(ErrorKind::Timeout)
+                                                                | Some(ErrorKind::Remote)
+                                                                | Some(
+                                                                    ErrorKind::Deserialization,
+                                                                ) => true,
+                                                                Some(ErrorKind::Validation)
+                                                                | Some(ErrorKind::Domain) => false,
+                                                                None
+                                                                | Some(ErrorKind::Unknown) => {
+                                                                    true
+                                                                }
+                                                            }
+                                                        }
+                                                        _ => false,
+                                                    };
+
+                                                if route_to_error_journal {
+                                                    tracing::info!(
+                                                        stage_name = %ctx.stage_name,
+                                                        event_id = %error_event.id,
+                                                        "Writing sink error event to error journal (FLOWIP-082h)"
+                                                    );
+
+                                                    if error_event.is_data() {
+                                                        ctx.instrumentation
+                                                            .record_emitted(&error_event);
+                                                    }
+
+                                                    ctx.error_journal
+                                                        .append(error_event, Some(&envelope))
+                                                        .await
+                                                        .map_err(|je| {
+                                                            format!(
+                                                                "Failed to journal sink error event: {je}"
+                                                            )
+                                                        })?;
+                                                } else {
+                                                    use obzenflow_core::event::JournalEvent;
+
+                                                    let flow_ctx = FlowContext {
+                                                        flow_name: ctx.flow_name.clone(),
+                                                        flow_id: ctx.flow_id.to_string(),
+                                                        stage_name: ctx.stage_name.clone(),
+                                                        stage_id: self.stage_id.clone(),
+                                                        stage_type: StageType::Sink,
+                                                    };
+
+                                                    let enriched_error = error_event
+                                                        .with_flow_context(flow_ctx)
+                                                        .with_runtime_context(
+                                                            ctx.instrumentation.snapshot(),
+                                                        );
+
+                                                    if enriched_error.is_data() {
+                                                        ctx.instrumentation
+                                                            .record_emitted(&enriched_error);
+                                                    }
+
+                                                    ctx.data_journal
+                                                        .append(enriched_error, Some(&envelope))
+                                                        .await
+                                                        .map_err(|je| {
+                                                            format!(
+                                                                "Failed to write sink error event to data journal: {je}"
+                                                            )
+                                                        })?;
+                                                }
+                                            }
                                         }
                                         Err(e) => {
+                                            // Instrumentation-level or unexpected failure: treat as
+                                            // stage-fatal and surface as before.
                                             let fail_payload = DeliveryPayload::failed(
                                                 ctx.stage_name.clone(), // destination
-                                                DeliveryMethod::Noop, // or HttpPost { url: … } etc.
+                                                DeliveryMethod::Noop,
                                                 "sink_error",
                                                 e.to_string(),
                                                 /* final_attempt */ false,
@@ -661,8 +776,6 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                             ))
                                             .with_correlation_from(&envelope.event);
 
-                                            // FLOWIP-080o-part-2: Only count data/delivery events for writer_seq.
-                                            // Failure events are still delivery events, so count them.
                                             if fail_event.is_data() || fail_event.is_delivery() {
                                                 ctx.instrumentation.record_emitted(&fail_event);
                                             }
@@ -673,8 +786,6 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                                     format!("Failed to journal sink failure: {je}")
                                                 })?;
 
-                                            // propagate the original error up the FSM so the stage can decide
-                                            // whether to retry or transition to an error state
                                             directive = Err(
                                                 format!("Sink consume failed: {e}").into(),
                                             );

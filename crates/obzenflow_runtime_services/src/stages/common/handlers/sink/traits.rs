@@ -45,8 +45,9 @@
 //! ```
 
 use async_trait::async_trait;
+use crate::stages::common::handler_error::HandlerError;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryPayload;
-use obzenflow_core::{ChainEvent, Result};
+use obzenflow_core::ChainEvent;
 
 /// Trait every **sink stage** must implement.
 #[async_trait]
@@ -54,22 +55,26 @@ pub trait SinkHandler: Send + Sync {
     /// Consume a single event and return a `DeliveryPayload` describing
     /// the outcome (success, partial, or failure).
     ///
-    /// Returning `Err(_)` means the handler itself experienced an unrecoverable
-    /// failure *before* it could build a coherent receipt (e.g., panicked,
-    /// network down, etc.).
-    async fn consume(&mut self, event: ChainEvent) -> Result<DeliveryPayload>;
+    /// Returning `Err(HandlerError)` means the handler experienced a failure
+    /// while processing this event (e.g., remote timeout, decode failure).
+    /// The supervisor will turn this into an error-marked event using
+    /// ErrorKind, route it appropriately, and keep the sink running.
+    async fn consume(
+        &mut self,
+        event: ChainEvent,
+    ) -> Result<DeliveryPayload, HandlerError>;
 
     /// Flush in‑memory buffers **and optionally** emit a `DeliveryPayload`
     /// capturing the flush action (e.g., `DeliveryResult::Success` for a batch
     /// commit).  Default impl returns `Ok(None)` so simple sinks can ignore it.
-    async fn flush(&mut self) -> Result<Option<DeliveryPayload>> {
+    async fn flush(&mut self) -> Result<Option<DeliveryPayload>, HandlerError> {
         Ok(None)
     }
 
     /// Draining hook called during graceful shutdown.
     /// Default behaviour delegates to `flush()` so most sinks only override
     /// one method.
-    async fn drain(&mut self) -> Result<Option<DeliveryPayload>> {
+    async fn drain(&mut self) -> Result<Option<DeliveryPayload>, HandlerError> {
         self.flush().await
     }
 }

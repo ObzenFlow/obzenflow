@@ -25,6 +25,7 @@ use obzenflow_core::{
 use obzenflow_dsl_infra::{flow, sink, source, stateful, transform};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
+use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
 use obzenflow_runtime_services::stages::common::handlers::{
     FiniteSourceHandler, SinkHandler, StatefulHandler,
 };
@@ -151,7 +152,10 @@ impl StatefulHandler for MultiSourceAggregator {
         state.current_event.is_some()
     }
 
-    fn emit(&self, state: &mut Self::State) -> Vec<ChainEvent> {
+    fn emit(
+        &self,
+        state: &mut Self::State,
+    ) -> Result<Vec<ChainEvent>, HandlerError> {
         if let Some(event) = state.current_event.take() {
             let payload = event.payload();
             let source = payload["source"].as_str().unwrap_or("unknown").to_string();
@@ -183,9 +187,9 @@ impl StatefulHandler for MultiSourceAggregator {
             // in favor of a generic accounting contract; see FLOWIP-090d exit criteria.
             state.outputs_emitted += 1;
 
-            vec![aggregated_event]
+            Ok(vec![aggregated_event])
         } else {
-            vec![]
+            Ok(vec![])
         }
     }
 
@@ -197,7 +201,10 @@ impl StatefulHandler for MultiSourceAggregator {
         }
     }
 
-    fn create_events(&self, state: &Self::State) -> Vec<ChainEvent> {
+    fn create_events(
+        &self,
+        state: &Self::State,
+    ) -> Result<Vec<ChainEvent>, HandlerError> {
         // Audit: verify counts match expectations, log loudly if not
         for (src, expected) in &state.expected_counts {
             let got = state.events_by_source.get(src).cloned().unwrap_or(0);
@@ -252,7 +259,8 @@ impl StatefulHandler for MultiSourceAggregator {
                 state.total_events, state.outputs_emitted, state.eof_seen
             );
         }
-        vec![]
+
+        Ok(vec![])
     }
 }
 
@@ -346,7 +354,10 @@ impl PrioritySink {
 
 #[async_trait]
 impl SinkHandler for PrioritySink {
-    async fn consume(&mut self, event: ChainEvent) -> obzenflow_core::Result<DeliveryPayload> {
+    async fn consume(
+        &mut self,
+        event: ChainEvent,
+    ) -> Result<DeliveryPayload, HandlerError> {
         let payload = event.payload();
         let route = payload["route"].as_str().unwrap_or("");
 

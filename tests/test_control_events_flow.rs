@@ -6,6 +6,7 @@ use obzenflow_adapters::middleware::{Middleware, MiddlewareAction, MiddlewareCon
 use obzenflow_adapters::middleware::{MiddlewareTransform, TransformMiddlewareBuilder};
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::{StageId, WriterId};
+use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
 use obzenflow_runtime_services::stages::common::handlers::TransformHandler;
 use serde_json::json;
 
@@ -54,13 +55,14 @@ struct PassthroughTransform;
 
 #[async_trait]
 impl TransformHandler for PassthroughTransform {
-    fn process(&self, event: ChainEvent) -> Vec<ChainEvent> {
-        vec![event]
+    fn process(
+        &self,
+        event: ChainEvent,
+    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
+        Ok(vec![event])
     }
 
-    async fn drain(&mut self) -> obzenflow_core::Result<()> {
-        Ok(())
-    }
+    async fn drain(&mut self) -> std::result::Result<(), HandlerError> { Ok(()) }
 }
 
 #[test]
@@ -77,7 +79,9 @@ fn test_control_events_are_appended() {
         json!({"value": 42}),
     );
 
-    let results = wrapped.process(input_event);
+    let results = wrapped
+        .process(input_event)
+        .expect("PassthroughTransform should not fail in control-events flow test");
 
     // Should have 3 events: original + 2 control events
     assert_eq!(results.len(), 3, "Expected 1 data event + 2 control events");
@@ -124,7 +128,9 @@ fn test_circuit_breaker_emits_control_events() {
         );
 
         // Process event (circuit breaker middleware will track failures)
-        let results = wrapped.process(fail_event);
+        let results = wrapped
+            .process(fail_event)
+            .expect("PassthroughTransform should not fail in control-events flow test");
 
         println!("Failure {} produced {} results", i + 1, results.len());
 

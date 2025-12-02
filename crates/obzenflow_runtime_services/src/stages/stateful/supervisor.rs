@@ -638,17 +638,24 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                     "stateful: Emitting state - about to emit aggregated events"
                 );
 
-                // ✨ Emit aggregated events to journal
+                // ✨ Emit aggregated events to journal.
+                //
+                // At this point the handler is operating purely over state; there
+                // is no single "current input event" to attribute failures to.
+                // An `Err(HandlerError)` here is therefore treated as
+                // stage‑fatal and surfaced via the FSM, while the common
+                // per‑record failure path remains `accumulate` marking events
+                // with `mark_as_error` when appropriate.
                 let mut current_state = &mut ctx.current_state;
                 let mut handler = (*ctx.handler).clone();
 
-                // Call emit to get the aggregated events
-                let events_to_emit = handler.emit(&mut *current_state);
-
-                // Wrap with instrumentation (following transform pattern)
                 let emit_result =
                     process_with_instrumentation(&ctx.instrumentation, || async move {
-                        Ok(events_to_emit)
+                        handler
+                            .emit(&mut *current_state)
+                            .map_err(|err| -> Box<dyn std::error::Error + Send + Sync> {
+                                err.into()
+                            })
                     })
                     .await;
 
@@ -666,7 +673,7 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                         // Write all aggregated events
                         for event in events {
                             use obzenflow_core::event::JournalEvent;
-                            // Enrich with runtime context
+
                             let flow_context = FlowContext {
                                 flow_name: ctx.flow_name.clone(),
                                 flow_id: ctx.flow_id.to_string(),
@@ -684,12 +691,11 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                             // overhead and should not participate in transport contracts.
                             if enriched_event.is_data() {
                                 ctx.instrumentation.record_emitted(&enriched_event);
-                                // Track output for contract verification
                                 if let Some(ref mut sub) = ctx.subscription {
                                     sub.track_output_event();
                                 }
                             }
-                            // Write the aggregated event
+
                             ctx.data_journal
                                 .append(enriched_event, None)
                                 .await
@@ -712,12 +718,14 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                         tracing::error!(
                             stage_name = %ctx.stage_name,
                             error = ?e,
-                            "Failed to emit aggregated event"
+                            "Failed to emit aggregated event, transitioning to Failed"
                         );
+                        return Ok(EventLoopDirective::Transition(StatefulEvent::Error(
+                            format!("Emit error: {}", e),
+                        )));
                     }
                 }
 
-                // Return to accumulating
                 Ok(EventLoopDirective::Transition(StatefulEvent::EmitComplete))
             }
 
@@ -755,52 +763,153 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                                 // After accumulation, mirror Accumulating semantics:
                                 // if the handler says we should emit, do so inline.
                                 if handler.should_emit(&ctx.current_state) {
-                                    let events_to_emit =
-                                        handler.emit(&mut ctx.current_state);
-
-                                    if !events_to_emit.is_empty() {
-                                        let events_count = events_to_emit.len();
-                                        tracing::info!(
-                                            target: "flowip-080o",
-                                            stage_name = %ctx.stage_name,
-                                            events_count = events_count,
-                                            "stateful: emitting aggregated events to journal during draining"
-                                        );
-
-                                        for event in events_to_emit {
-                                            use obzenflow_core::event::JournalEvent;
-
-                                            let flow_context = FlowContext {
-                                                flow_name: ctx.flow_name.clone(),
-                                                flow_id: ctx.flow_id.to_string(),
-                                                stage_name: ctx.stage_name.clone(),
-                                                stage_id: self.stage_id.clone(),
-                                                stage_type: obzenflow_core::event::context::StageType::Stateful,
-                                            };
-
-                                            let enriched_event = event
-                                                .with_flow_context(flow_context)
-                                                .with_runtime_context(
-                                                    ctx.instrumentation.snapshot(),
+                                    match handler.emit(&mut ctx.current_state) {
+                                        Ok(events_to_emit) => {
+                                            if !events_to_emit.is_empty() {
+                                                let events_count = events_to_emit.len();
+                                                tracing::info!(
+                                                    target: "flowip-080o",
+                                                    stage_name = %ctx.stage_name,
+                                                    events_count = events_count,
+                                                    "stateful: emitting aggregated events to journal during draining"
                                                 );
 
-                                            if enriched_event.is_data() {
-                                                ctx.instrumentation
-                                                    .record_emitted(&enriched_event);
-                                                if let Some(ref mut sub) = ctx.subscription {
-                                                    sub.track_output_event();
+                                                for event in events_to_emit {
+                                                    use obzenflow_core::event::JournalEvent;
+
+                                                    let flow_context = FlowContext {
+                                                        flow_name: ctx.flow_name.clone(),
+                                                        flow_id: ctx.flow_id.to_string(),
+                                                        stage_name: ctx.stage_name.clone(),
+                                                        stage_id: self.stage_id.clone(),
+                                                        stage_type: obzenflow_core::event::context::StageType::Stateful,
+                                                    };
+
+                                                    let enriched_event = event
+                                                        .with_flow_context(flow_context)
+                                                        .with_runtime_context(
+                                                            ctx.instrumentation.snapshot(),
+                                                        );
+
+                                                    if enriched_event.is_data() {
+                                                        ctx.instrumentation
+                                                            .record_emitted(&enriched_event);
+                                                        // Track output for contract verification
+                                                        subscription.track_output_event();
+                                                    }
+
+                                                    ctx.data_journal
+                                                        .append(enriched_event, None)
+                                                        .await
+                                                        .map_err(|e| {
+                                                            format!(
+                                                                "Failed to write aggregated event during draining: {}",
+                                                                e
+                                                            )
+                                                        })?;
                                                 }
                                             }
+                                        }
+                                        Err(err) => {
+                                            use obzenflow_core::event::status::processing_status::{
+                                                ErrorKind, ProcessingStatus,
+                                            };
 
-                                            ctx.data_journal
-                                                .append(enriched_event, None)
-                                                .await
-                                                .map_err(|e| {
-                                                    format!(
-                                                        "Failed to write aggregated event during draining: {}",
-                                                        e
-                                                    )
-                                                })?;
+                                            tracing::error!(
+                                                stage_name = %ctx.stage_name,
+                                                error = ?err,
+                                                "Failed to emit aggregated events during draining; mapping to error-marked event"
+                                            );
+
+                                            // Per-record handler failure during draining: turn the
+                                            // input into an error-marked event and route it using
+                                            // the ErrorKind policy instead of failing the stage.
+                                            let reason = format!(
+                                                "Stateful handler emit error during drain: {:?}",
+                                                err
+                                            );
+                                            let mut error_event = envelope
+                                                .event
+                                                .clone()
+                                                .mark_as_error(reason, err.kind());
+
+                                            let route_to_error_journal =
+                                                match &error_event.processing_info.status {
+                                                    ProcessingStatus::Error { kind, .. } => {
+                                                        match kind {
+                                                            Some(ErrorKind::Timeout)
+                                                            | Some(ErrorKind::Remote)
+                                                            | Some(ErrorKind::Deserialization) => true,
+                                                            Some(ErrorKind::Validation)
+                                                            | Some(ErrorKind::Domain) => false,
+                                                            None | Some(ErrorKind::Unknown) => true,
+                                                        }
+                                                    }
+                                                    _ => false,
+                                                };
+
+                                            if route_to_error_journal {
+                                                tracing::info!(
+                                                    stage_name = %ctx.stage_name,
+                                                    event_id = %error_event.id,
+                                                    "Writing stateful drain error event to error journal (FLOWIP-082h)"
+                                                );
+
+                                                // Error events are still data, so record them for
+                                                // transport contracts and metrics.
+                                                if error_event.is_data() {
+                                                    ctx.instrumentation
+                                                        .record_emitted(&error_event);
+                                                    subscription.track_output_event();
+                                                }
+
+                                                ctx.error_journal
+                                                    .append(error_event, Some(&envelope))
+                                                    .await
+                                                    .map_err(|e| {
+                                                        format!(
+                                                            "Failed to write stateful drain error event: {}",
+                                                            e
+                                                        )
+                                                    })?;
+                                            } else {
+                                                use obzenflow_core::event::JournalEvent;
+
+                                                let flow_context = FlowContext {
+                                                    flow_name: ctx.flow_name.clone(),
+                                                    flow_id: ctx.flow_id.to_string(),
+                                                    stage_name: ctx.stage_name.clone(),
+                                                    stage_id: self.stage_id.clone(),
+                                                    stage_type: obzenflow_core::event::context::StageType::Stateful,
+                                                };
+
+                                                let enriched_error = error_event
+                                                    .with_flow_context(flow_context)
+                                                    .with_runtime_context(
+                                                        ctx.instrumentation.snapshot(),
+                                                    );
+
+                                                if enriched_error.is_data() {
+                                                    ctx.instrumentation
+                                                        .record_emitted(&enriched_error);
+                                                    subscription.track_output_event();
+                                                }
+
+                                                ctx.data_journal
+                                                    .append(enriched_error, Some(&envelope))
+                                                    .await
+                                                    .map_err(|e| {
+                                                        format!(
+                                                            "Failed to write stateful drain error event to data journal: {}",
+                                                            e
+                                                        )
+                                                    })?;
+                                            }
+
+                                            // Keep draining; do not transition to Failed on
+                                            // per-record handler errors.
+                                            directive = Ok(EventLoopDirective::Continue);
+                                            should_drain = false;
                                         }
                                     }
                                 }
@@ -863,10 +972,15 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                     let final_state = ctx.current_state.clone();
                     let handler = (*ctx.handler).clone();
 
-                    // Call handler.drain() with instrumentation
+                    // Call handler.drain() with instrumentation; treat failures as stage-fatal.
                     let drain_result =
                         process_with_instrumentation(&ctx.instrumentation, || async move {
-                            handler.drain(&final_state).await
+                            handler
+                                .drain(&final_state)
+                                .await
+                                .map_err(|err| -> Box<dyn std::error::Error + Send + Sync> {
+                                    err.into()
+                                })
                         })
                         .await;
 

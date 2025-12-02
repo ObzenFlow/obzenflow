@@ -6,7 +6,8 @@
 use super::{Middleware, MiddlewareAction, MiddlewareContext};
 use async_trait::async_trait;
 use obzenflow_core::event::status::processing_status::ProcessingStatus;
-use obzenflow_core::{ChainEvent, Result};
+use obzenflow_core::ChainEvent;
+use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
 use obzenflow_runtime_services::stages::common::handlers::StatefulHandler;
 
 /// A StatefulHandler wrapper that applies middleware to stateful operations
@@ -100,12 +101,15 @@ where
         self.inner.initial_state()
     }
 
-    fn create_events(&self, state: &Self::State) -> Vec<ChainEvent> {
+    fn create_events(
+        &self,
+        state: &Self::State,
+    ) -> Result<Vec<ChainEvent>, HandlerError> {
         // Create ephemeral context for emission
         let ctx = MiddlewareContext::new();
 
         // Get events from inner handler
-        let mut results = self.inner.create_events(state);
+        let mut results = self.inner.create_events(state)?;
 
         // Pre-write phase: allow middleware to enrich each result event
         for result in &mut results {
@@ -114,7 +118,7 @@ where
             }
         }
 
-        results
+        Ok(results)
     }
 
     fn should_emit(&self, state: &Self::State) -> bool {
@@ -122,12 +126,15 @@ where
         self.inner.should_emit(state)
     }
 
-    fn emit(&self, state: &mut Self::State) -> Vec<ChainEvent> {
+    fn emit(
+        &self,
+        state: &mut Self::State,
+    ) -> Result<Vec<ChainEvent>, HandlerError> {
         // Create ephemeral context for emission
         let ctx = MiddlewareContext::new();
 
         // Emit from inner handler
-        let mut results = self.inner.emit(state);
+        let mut results = self.inner.emit(state)?;
 
         // Pre-write phase: allow middleware to enrich each result event
         for result in &mut results {
@@ -136,10 +143,13 @@ where
             }
         }
 
-        results
+        Ok(results)
     }
 
-    async fn drain(&self, state: &Self::State) -> Result<Vec<ChainEvent>> {
+    async fn drain(
+        &self,
+        state: &Self::State,
+    ) -> Result<Vec<ChainEvent>, HandlerError> {
         // Create ephemeral context for drain
         let mut ctx = MiddlewareContext::new();
 
@@ -236,27 +246,36 @@ mod tests {
             Vec::new()
         }
 
-        fn create_events(&self, state: &Self::State) -> Vec<ChainEvent> {
+        fn create_events(
+            &self,
+            state: &Self::State,
+        ) -> Result<Vec<ChainEvent>, HandlerError> {
             let writer_id = WriterId::from(StageId::new());
-            vec![ChainEventFactory::data_event(
+            Ok(vec![ChainEventFactory::data_event(
                 writer_id,
                 "aggregated",
                 json!({ "count": state.len() }),
-            )]
+            )])
         }
 
         fn should_emit(&self, state: &Self::State) -> bool {
             state.len() >= 3
         }
 
-        fn emit(&self, state: &mut Self::State) -> Vec<ChainEvent> {
-            let events = self.create_events(state);
+        fn emit(
+            &self,
+            state: &mut Self::State,
+        ) -> Result<Vec<ChainEvent>, HandlerError> {
+            let events = self.create_events(state)?;
             state.clear();
-            events
+            Ok(events)
         }
 
-        async fn drain(&self, state: &Self::State) -> Result<Vec<ChainEvent>> {
-            Ok(self.create_events(state))
+        async fn drain(
+            &self,
+            state: &Self::State,
+        ) -> Result<Vec<ChainEvent>, HandlerError> {
+            self.create_events(state)
         }
     }
 

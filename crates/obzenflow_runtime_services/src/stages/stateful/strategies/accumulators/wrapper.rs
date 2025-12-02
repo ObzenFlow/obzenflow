@@ -4,11 +4,12 @@
 // This is the bridge between the composable primitives and the existing infrastructure.
 
 use super::Accumulator;
+use crate::stages::common::handler_error::HandlerError;
 use crate::stages::common::handlers::StatefulHandler;
 use crate::stages::stateful::strategies::emissions::EmissionStrategy;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::ChainEventContent;
-use obzenflow_core::{ChainEvent, Result};
+use obzenflow_core::ChainEvent;
 use std::fmt::Debug;
 use std::time::Instant;
 
@@ -115,7 +116,10 @@ where
         emission.should_emit(state.events_seen, state.last_emit)
     }
 
-    fn emit(&self, state: &mut Self::State) -> Vec<ChainEvent> {
+    fn emit(
+        &self,
+        state: &mut Self::State,
+    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
         // Get the aggregated events from accumulator
         let events = self.accumulator.emit(&state.inner);
 
@@ -124,7 +128,7 @@ where
         state.last_emit = Some(Instant::now());
 
         // Return all events (GroupBy/Conflate emit multiple, others emit one)
-        events
+        Ok(events)
     }
 
     fn initial_state(&self) -> Self::State {
@@ -136,11 +140,17 @@ where
         }
     }
 
-    fn create_events(&self, state: &Self::State) -> Vec<ChainEvent> {
-        self.accumulator.emit(&state.inner)
+    fn create_events(
+        &self,
+        state: &Self::State,
+    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
+        Ok(self.accumulator.emit(&state.inner))
     }
 
-    async fn drain(&self, state: &Self::State) -> Result<Vec<ChainEvent>> {
+    async fn drain(
+        &self,
+        state: &Self::State,
+    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
         // Always emit remaining state on drain if we have any
         let events = self.accumulator.emit(&state.inner);
         Ok(events)
@@ -210,7 +220,9 @@ mod tests {
         assert!(handler.should_emit(&state)); // Should emit after EOF
 
         // Emit should return aggregated events (one per group for GroupBy)
-        let emitted = handler.emit(&mut state);
+        let emitted = handler
+            .emit(&mut state)
+            .expect("StatefulWithEmission::emit should succeed in GroupBy EOF test");
         assert!(!emitted.is_empty());
         // GroupBy with 2 categories should emit 2 events
         assert_eq!(emitted.len(), 2);
@@ -241,7 +253,9 @@ mod tests {
         assert!(handler.should_emit(&state)); // Should emit after 3 events
 
         // Emit should return an event (Reduce emits one event)
-        let emitted = handler.emit(&mut state);
+        let emitted = handler
+            .emit(&mut state)
+            .expect("StatefulWithEmission::emit should succeed in EveryN test");
         assert!(!emitted.is_empty());
         assert_eq!(emitted.len(), 1);
     }
@@ -264,7 +278,9 @@ mod tests {
         assert!(handler.should_emit(&state)); // Should always emit
 
         // Emit should return an event (Reduce emits one event)
-        let emitted = handler.emit(&mut state);
+        let emitted = handler
+            .emit(&mut state)
+            .expect("StatefulWithEmission::emit should succeed in EmitAlways test");
         assert!(!emitted.is_empty());
         assert_eq!(emitted.len(), 1);
     }

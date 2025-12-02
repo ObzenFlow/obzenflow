@@ -26,6 +26,7 @@ use obzenflow_core::{
 };
 use obzenflow_dsl_infra::{flow, sink, source, stateful, transform};
 use obzenflow_infra::journal::disk_journals;
+use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
 use obzenflow_runtime_services::stages::common::handlers::{
     FiniteSourceHandler, SinkHandler, StatefulHandler,
 };
@@ -144,7 +145,10 @@ impl StatefulHandler for CounterHandler {
         CounterState::default()
     }
 
-    fn create_events(&self, state: &Self::State) -> Vec<ChainEvent> {
+    fn create_events(
+        &self,
+        state: &Self::State,
+    ) -> Result<Vec<ChainEvent>, HandlerError> {
         println!("\n    💧 Stateful DRAINING final state:");
         println!("       Total events: {}", state.count);
         println!("       Total sum: {}", state.sum);
@@ -164,9 +168,9 @@ impl StatefulHandler for CounterHandler {
                 }),
             );
 
-            vec![result_event]
+            Ok(vec![result_event])
         } else {
-            vec![]
+            Ok(vec![])
         }
     }
 }
@@ -186,7 +190,10 @@ impl PrintSink {
 
 #[async_trait]
 impl SinkHandler for PrintSink {
-    async fn consume(&mut self, event: ChainEvent) -> obzenflow_core::Result<DeliveryPayload> {
+    async fn consume(
+        &mut self,
+        event: ChainEvent,
+    ) -> Result<DeliveryPayload, HandlerError> {
         if event.event_type() == "aggregation" {
             println!("\n✨ FINAL RESULT:");
             println!("   Count: {}", event.payload()["count"]);

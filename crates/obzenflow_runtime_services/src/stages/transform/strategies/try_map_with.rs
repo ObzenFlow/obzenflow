@@ -63,6 +63,7 @@
 //! - `.on_error_drop()` - Silently drop failures
 //! - `.on_error_with(handler)` - Custom error handling
 
+use crate::stages::common::handler_error::HandlerError;
 use crate::stages::common::handlers::TransformHandler;
 use async_trait::async_trait;
 use obzenflow_core::event::{status::processing_status::ProcessingStatus, ChainEventFactory};
@@ -319,12 +320,16 @@ where
     /// let validator = TryMapWith::new(|event| {
     ///     let missing = find_missing_fields(&event);
     ///     if !missing.is_empty() {
-    ///         return Err(serde_json::to_string(&missing).unwrap());
+    ///         return Err(
+    ///             serde_json::to_string(&missing)
+    ///                 .expect("serializing missing field list should not fail"),
+    ///         );
     ///     }
     ///     Ok(event)
     /// })
     /// .on_error_emit_with("Record.invalid", |_event, error_json| {
-    ///     let fields: Vec<String> = serde_json::from_str(error_json).unwrap();
+    ///     let fields: Vec<String> = serde_json::from_str(error_json)
+    ///         .expect("parsing error_json into Vec<String> should not fail");
     ///     json!({"validation_errors": {"missing_fields": fields}})
     /// });
     ///
@@ -427,12 +432,15 @@ impl<F> TransformHandler for TryMapWith<F>
 where
     F: Fn(ChainEvent) -> Result<ChainEvent, String> + Send + Sync + Clone + 'static,
 {
-    fn process(&self, event: ChainEvent) -> Vec<ChainEvent> {
+    fn process(
+        &self,
+        event: ChainEvent,
+    ) -> Result<Vec<ChainEvent>, crate::stages::common::handler_error::HandlerError> {
         match (self.converter)(event.clone()) {
-            Ok(converted) => vec![converted],
+            Ok(converted) => Ok(vec![converted]),
             Err(error_msg) => {
                 // Handle conversion failure according to error strategy
-                match &self.error_strategy {
+                let events = match &self.error_strategy {
                     ErrorStrategy::Drop => {
                         // Silently drop failed conversions
                         vec![]
@@ -440,10 +448,8 @@ where
                     ErrorStrategy::ToErrorJournal => {
                         // Mark event with error status for error journal routing
                         let mut error_event = event;
-                        error_event.processing_info.status = ProcessingStatus::error(format!(
-                            "Conversion failed: {}",
-                            error_msg
-                        ));
+                        error_event.processing_info.status =
+                            ProcessingStatus::error(format!("Conversion failed: {}", error_msg));
                         vec![error_event]
                     }
                     ErrorStrategy::ToEventType(event_type) => {
@@ -483,12 +489,15 @@ where
                         // Use custom error handler
                         handler(event, error_msg).into_iter().collect()
                     }
-                }
+                };
+                Ok(events)
             }
         }
     }
 
-    async fn drain(&mut self) -> obzenflow_core::Result<()> {
+    async fn drain(
+        &mut self,
+    ) -> Result<(), crate::stages::common::handler_error::HandlerError> {
         Ok(())
     }
 }
@@ -648,7 +657,7 @@ where
     O: Serialize + Send + Sync + TypedPayload + 'static,
     F: Fn(T) -> Result<O, String> + Send + Sync + Clone + 'static,
 {
-    fn process(&self, event: ChainEvent) -> Vec<ChainEvent> {
+    fn process(&self, event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
         // Step 1: Deserialize ChainEvent payload → T
         let input_value: T = match serde_json::from_value(event.payload().clone()) {
             Ok(v) => v,
@@ -659,7 +668,7 @@ where
                     e
                 );
                 // Deserialization failed - handle according to error strategy
-                return self.handle_error(event, error_msg);
+                return Ok(self.handle_error(event, error_msg));
             }
         };
 
@@ -671,12 +680,12 @@ where
                     Ok(payload) => {
                         // FLOWIP-082a: Use TypedPayload::EVENT_TYPE (compile-time constant)
                         let event_type = O::versioned_event_type();
-                        vec![ChainEventFactory::derived_data_event(
+                        Ok(vec![ChainEventFactory::derived_data_event(
                             event.writer_id.clone(),
                             &event,
                             &event_type,
                             payload,
-                        )]
+                        )])
                     }
                     Err(e) => {
                         let error_msg = format!(
@@ -684,18 +693,18 @@ where
                             std::any::type_name::<O>(),
                             e
                         );
-                        self.handle_error(event, error_msg)
+                        Ok(self.handle_error(event, error_msg))
                     }
                 }
             }
             Err(error_msg) => {
                 // Transformation failed - handle according to error strategy
-                self.handle_error(event, error_msg)
+                Ok(self.handle_error(event, error_msg))
             }
         }
     }
 
-    async fn drain(&mut self) -> obzenflow_core::Result<()> {
+    async fn drain(&mut self) -> Result<(), HandlerError> {
         Ok(())
     }
 }
@@ -813,7 +822,9 @@ mod tests {
             json!({"user_id": "user123", "action": "login"}),
         );
 
-        let result = try_mapper.process(event);
+        let result = try_mapper
+            .process(event)
+            .expect("TryMapWith basic success case should not fail in tests");
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].event_type(), "user_id_extracted");
         assert_eq!(result[0].payload()["user_id"], json!("user123"));
@@ -839,7 +850,9 @@ mod tests {
             json!({"amount": -100.0}),
         );
 
-        let result = try_mapper.process(event);
+        let result = try_mapper
+            .process(event)
+            .expect("TryMapWith validation_error should not fail handler itself");
         assert_eq!(result.len(), 1);
 
         // Event should be marked with error status
@@ -869,7 +882,9 @@ mod tests {
             json!({"other_field": "value"}),
         );
 
-        let result = try_mapper.process(event);
+        let result = try_mapper
+            .process(event)
+            .expect("TryMapWith missing_field should not fail handler itself");
         assert_eq!(result.len(), 1);
 
         assert!(matches!(
@@ -902,7 +917,9 @@ mod tests {
             json!({"value": 42}),
         );
 
-        let result = try_mapper.process(event);
+        let result = try_mapper
+            .process(event)
+            .expect("TryMapWith passthrough should not fail handler itself");
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].payload()["validated"], json!(true));
         assert_eq!(result[0].payload()["value"], json!(42));
@@ -938,7 +955,9 @@ mod tests {
             "transaction",
             json!({"amount": 100.0}),
         );
-        let result = try_mapper.process(valid_event);
+        let result = try_mapper
+            .process(valid_event)
+            .expect("TryMapWith on_error_drop valid case should not fail");
         assert_eq!(result.len(), 1);
 
         // Invalid event should be dropped
@@ -947,7 +966,9 @@ mod tests {
             "transaction",
             json!({"amount": -50.0}),
         );
-        let result = try_mapper.process(invalid_event);
+        let result = try_mapper
+            .process(invalid_event)
+            .expect("TryMapWith on_error_drop invalid case should not fail handler itself");
         assert_eq!(result.len(), 0); // Dropped!
     }
 
@@ -971,7 +992,9 @@ mod tests {
             json!({"amount": -50.0}),
         );
 
-        let result = try_mapper.process(invalid_event);
+        let result = try_mapper
+            .process(invalid_event)
+            .expect("TryMapWith ToErrorJournal should not fail in tests");
         assert_eq!(result.len(), 1);
 
         // Check event type
@@ -980,7 +1003,9 @@ mod tests {
         // Check validation_error field was added
         assert!(result[0].payload().get("validation_error").is_some());
         assert_eq!(
-            result[0].payload()["validation_error"].as_str().unwrap(),
+            result[0].payload()["validation_error"]
+                .as_str()
+                .expect("validation_error should be a string"),
             "Negative amount"
         );
 
@@ -1014,7 +1039,9 @@ mod tests {
             json!({"amount": -50.0}),
         );
 
-        let result = try_mapper.process(invalid_event);
+        let result = try_mapper
+            .process(invalid_event)
+            .expect("TryMapWith on_error_journal should not fail in tests");
         assert_eq!(result.len(), 1);
 
         // Should have error status
@@ -1056,7 +1083,9 @@ mod tests {
             json!({"amount": -50.0}),
         );
 
-        let result = try_mapper.process(invalid_event);
+        let result = try_mapper
+            .process(invalid_event)
+            .expect("TryMapWith custom handler should not fail in tests");
         assert_eq!(result.len(), 1);
 
         // Check custom event type
@@ -1081,7 +1110,9 @@ mod tests {
         let event =
             ChainEventFactory::data_event(WriterId::from(StageId::new()), "test", json!({}));
 
-        let result = try_mapper.process(event);
+        let result = try_mapper
+            .process(event)
+            .expect("TryMapWith custom drop handler should not fail in tests");
         assert_eq!(result.len(), 0); // Dropped by custom handler
     }
 
@@ -1127,7 +1158,9 @@ mod tests {
             json!({"value": 42, "name": "test"}),
         );
 
-        let result = validator.process(event);
+        let result = validator
+            .process(event)
+            .expect("TryMapWithTyped success case should not fail in tests");
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].event_type(), "test.output.validated.v1");
         assert_eq!(result[0].payload()["value"], json!(42));
@@ -1156,7 +1189,9 @@ mod tests {
             json!({"value": -10, "name": "test"}),
         );
 
-        let result = validator.process(event);
+        let result = validator
+            .process(event)
+            .expect("TryMapWithTyped validation_failure should not fail handler itself");
         assert_eq!(result.len(), 1);
 
         // Should be marked with error status (default strategy)
@@ -1189,7 +1224,9 @@ mod tests {
             json!({"wrong_field": "value"}),
         );
 
-        let result = validator.process(event);
+        let result = validator
+            .process(event)
+            .expect("TryMapWithTyped deserialization_failure should not fail handler itself");
         assert_eq!(result.len(), 1);
 
         // Should be marked with error status
@@ -1226,7 +1263,9 @@ mod tests {
             json!({"value": -10, "name": "test"}),
         );
 
-        let result = validator.process(event);
+        let result = validator
+            .process(event)
+            .expect("TryMapWithTyped on_error_emit should not fail handler itself");
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].event_type(), "TestInput.invalid");
         assert!(result[0].payload().get("validation_error").is_some());
@@ -1260,7 +1299,9 @@ mod tests {
             json!({"value": -10, "name": "test"}),
         );
 
-        let result = validator.process(event);
+        let result = validator
+            .process(event)
+            .expect("TryMapWithTyped on_error_emit_with should not fail handler itself");
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].event_type(), "TestInput.invalid");
 
@@ -1300,7 +1341,9 @@ mod tests {
             "TestInput",
             json!({"value": 42, "name": "test"}),
         );
-        let result = validator.process(valid_event);
+        let result = validator
+            .process(valid_event)
+            .expect("TryMapWithTyped on_error_drop valid case should not fail");
         assert_eq!(result.len(), 1);
 
         // Invalid event should be dropped
@@ -1309,7 +1352,9 @@ mod tests {
             "TestInput",
             json!({"value": -10, "name": "test"}),
         );
-        let result = validator.process(invalid_event);
+        let result = validator
+            .process(invalid_event)
+            .expect("TryMapWithTyped on_error_drop invalid case should not fail handler itself");
         assert_eq!(result.len(), 0); // Dropped!
     }
 

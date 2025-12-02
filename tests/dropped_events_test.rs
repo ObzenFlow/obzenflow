@@ -10,6 +10,7 @@ use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, Delivery
 use obzenflow_core::{StageId, WriterId};
 use obzenflow_dsl_infra::{flow, sink, source, transform};
 use obzenflow_infra::journal::disk_journals;
+use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
 use obzenflow_runtime_services::stages::common::handlers::{
     FiniteSourceHandler, SinkHandler, TransformHandler,
 };
@@ -76,7 +77,10 @@ impl DroppingTransform {
 
 #[async_trait]
 impl TransformHandler for DroppingTransform {
-    fn process(&self, event: ChainEvent) -> Vec<ChainEvent> {
+    fn process(
+        &self,
+        event: ChainEvent,
+    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
         // Extract index from payload
         if let Some(index) = event
             .payload()
@@ -85,17 +89,15 @@ impl TransformHandler for DroppingTransform {
         {
             if self.drop_indices.contains(&(index as usize)) {
                 // Drop this event (return empty vec)
-                return vec![];
+                return Ok(vec![]);
             }
         }
 
         // Pass through
-        vec![event]
+        Ok(vec![event])
     }
 
-    async fn drain(&mut self) -> obzenflow_core::Result<()> {
-        Ok(())
-    }
+    async fn drain(&mut self) -> std::result::Result<(), HandlerError> { Ok(()) }
 }
 
 /// Simple sink that just collects events
@@ -121,7 +123,7 @@ impl SinkHandler for CollectorSink {
     async fn consume(
         &mut self,
         event: ChainEvent,
-    ) -> obzenflow_core::Result<DeliveryPayload> {
+    ) -> std::result::Result<DeliveryPayload, HandlerError> {
         if let Ok(mut events) = self.events.lock() {
             if event.is_data() {
                 events.push(event);

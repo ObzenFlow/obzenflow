@@ -9,6 +9,7 @@ use obzenflow_core::{
 use obzenflow_dsl_infra::{flow, sink, source, transform};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
+use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
 use obzenflow_runtime_services::stages::common::handlers::{FiniteSourceHandler, SinkHandler};
 use obzenflow_runtime_services::stages::SourceError;
 use obzenflow_runtime_services::stages::transform::Map;
@@ -52,7 +53,10 @@ struct Printer;
 
 #[async_trait]
 impl SinkHandler for Printer {
-    async fn consume(&mut self, _event: ChainEvent) -> CoreResult<DeliveryPayload> {
+    async fn consume(
+        &mut self,
+        _event: ChainEvent,
+    ) -> std::result::Result<DeliveryPayload, HandlerError> {
         Ok(DeliveryPayload::success(
             "printer",
             DeliveryMethod::Custom("Print".to_string()),

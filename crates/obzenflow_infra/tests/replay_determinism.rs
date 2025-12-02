@@ -12,6 +12,7 @@ use obzenflow_infra::journal::MemoryJournal;
 use obzenflow_infra::journal::disk::disk_journal::DiskJournal;
 use obzenflow_runtime_services::id_conversions::StageIdExt;
 use obzenflow_runtime_services::stages::JoinHandler;
+use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
 use obzenflow_runtime_services::stages::common::handlers::StatefulHandler;
 use obzenflow_runtime_services::stages::common::control_strategies::JonestownStrategy;
 use obzenflow_runtime_services::stages::join::{JoinBuilder, JoinConfig, StrictJoinBuilder, TypedJoinState};
@@ -217,7 +218,9 @@ async fn run_strict_join_once() -> Vec<JoinedRow> {
     ];
     for row in &ref_rows {
         let event = row.clone().to_event(writer.clone());
-        handler.process_event(&mut state, event, StageId::new(), writer.clone());
+        let _ = handler
+            .process_event(&mut state, event, StageId::new(), writer.clone())
+            .expect("Reference catalog hydration should not fail");
     }
 
     // Ensure catalog hydration worked as expected.
@@ -237,7 +240,9 @@ async fn run_strict_join_once() -> Vec<JoinedRow> {
     let mut joined = Vec::new();
     for (idx, row) in stream_rows.iter().enumerate() {
         let event = row.clone().to_event(writer.clone());
-        let out = handler.process_event(&mut state, event, StageId::new(), writer.clone());
+        let out = handler
+            .process_event(&mut state, event, StageId::new(), writer.clone())
+            .expect("Join handler in replay_determinism test should not fail");
         if idx == 0 {
             assert!(
                 !out.is_empty(),
@@ -300,15 +305,18 @@ impl StatefulHandler for SupervisorCountingHandler {
         0
     }
 
-    fn create_events(&self, state: &Self::State) -> Vec<ChainEvent> {
+    fn create_events(
+        &self,
+        state: &Self::State,
+    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
         if *state == 0 {
-            Vec::new()
+            Ok(Vec::new())
         } else {
-            vec![ChainEventFactory::data_event(
+            Ok(vec![ChainEventFactory::data_event(
                 self.writer_id.clone(),
                 "test.stateful.count.supervisor",
                 json!({ "count": *state }),
-            )]
+            )])
         }
     }
 }

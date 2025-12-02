@@ -25,6 +25,7 @@ use obzenflow_core::{
 use obzenflow_dsl_infra::{flow, sink, source, stateful};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
+use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
 use obzenflow_runtime_services::stages::common::handlers::{FiniteSourceHandler, SinkHandler};
 // FLOWIP-080j: Typed stateful accumulators
 use obzenflow_runtime_services::stages::stateful::strategies::accumulators::{
@@ -305,7 +306,10 @@ impl AnalyticsSink {
 
 #[async_trait]
 impl SinkHandler for AnalyticsSink {
-    async fn consume(&mut self, event: ChainEvent) -> obzenflow_core::Result<DeliveryPayload> {
+    async fn consume(
+        &mut self,
+        event: ChainEvent,
+    ) -> Result<DeliveryPayload, HandlerError> {
         let payload = event.payload();
 
         // ✨ FLOWIP-082a: GroupByTyped emits with state's EVENT_TYPE

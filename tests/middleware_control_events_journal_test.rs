@@ -12,6 +12,7 @@ use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::journal::journal::Journal;
 use obzenflow_core::{JournalOwner, StageId, WriterId};
 use obzenflow_infra::journal::MemoryJournal;
+use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
 use obzenflow_runtime_services::stages::common::handlers::TransformHandler;
 use serde_json::json;
 
@@ -19,13 +20,14 @@ struct SimpleTransform;
 
 #[async_trait]
 impl TransformHandler for SimpleTransform {
-    fn process(&self, event: ChainEvent) -> Vec<ChainEvent> {
-        vec![event]
+    fn process(
+        &self,
+        event: ChainEvent,
+    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
+        Ok(vec![event])
     }
 
-    async fn drain(&mut self) -> obzenflow_core::Result<()> {
-        Ok(())
-    }
+    async fn drain(&mut self) -> std::result::Result<(), HandlerError> { Ok(()) }
 }
 
 struct MetricsEmittingMiddleware;
@@ -89,7 +91,9 @@ async fn test_middleware_control_events_flow_to_journal() {
     );
 
     // Process event (simulating what TransformSupervisor does)
-    let outputs = handler.process(event);
+    let outputs = handler
+        .process(event)
+        .expect("SimpleTransform should not fail in middleware control-events journal test");
 
     // Write all outputs to journal (as TransformSupervisor does)
     for output in outputs {

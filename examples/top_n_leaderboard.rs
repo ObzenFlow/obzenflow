@@ -16,6 +16,7 @@ use obzenflow_core::{
 use obzenflow_dsl_infra::{flow, sink, source, stateful};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
+use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
 use obzenflow_runtime_services::stages::common::handlers::{FiniteSourceHandler, SinkHandler};
 use obzenflow_runtime_services::stages::stateful::strategies::accumulators::TopNTyped;
 use serde::{Deserialize, Serialize};
@@ -111,7 +112,10 @@ impl LeaderboardDisplay {
 
 #[async_trait]
 impl SinkHandler for LeaderboardDisplay {
-    async fn consume(&mut self, event: ChainEvent) -> obzenflow_core::Result<DeliveryPayload> {
+    async fn consume(
+        &mut self,
+        event: ChainEvent,
+    ) -> Result<DeliveryPayload, HandlerError> {
         // ✨ FLOWIP-082a: TopNTyped emits with input type's EVENT_TYPE
         if event.event_type() == GameScore::EVENT_TYPE {
             let payload = event.payload();

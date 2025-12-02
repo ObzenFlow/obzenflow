@@ -29,6 +29,7 @@ use obzenflow_core::{
 use obzenflow_dsl_infra::{flow, sink, source, stateful, transform};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
+use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
 use obzenflow_runtime_services::stages::common::handlers::{FiniteSourceHandler, SinkHandler};
 // ✨ FLOWIP-080h: Import Map helper
 use obzenflow_runtime_services::stages::transform::Map;
@@ -210,7 +211,10 @@ impl CompletionSink {
 
 #[async_trait]
 impl SinkHandler for CompletionSink {
-    async fn consume(&mut self, _event: ChainEvent) -> obzenflow_core::Result<DeliveryPayload> {
+    async fn consume(
+        &mut self,
+        _event: ChainEvent,
+    ) -> Result<DeliveryPayload, HandlerError> {
         Ok(DeliveryPayload::success(
             "completion_sink",
             DeliveryMethod::Custom("InMemory".to_string()),
@@ -231,7 +235,10 @@ impl SummarySink {
 
 #[async_trait]
 impl SinkHandler for SummarySink {
-    async fn consume(&mut self, event: ChainEvent) -> obzenflow_core::Result<DeliveryPayload> {
+    async fn consume(
+        &mut self,
+        event: ChainEvent,
+    ) -> Result<DeliveryPayload, HandlerError> {
         // ✨ FLOWIP-082a: ReduceTyped emits with state's EVENT_TYPE
         if EventCountState::event_type_matches(&event.event_type()) {
             let payload = event.payload();

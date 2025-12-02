@@ -7,7 +7,8 @@ use super::{Middleware, MiddlewareAction, MiddlewareContext};
 use async_trait::async_trait;
 use obzenflow_core::event::status::processing_status::ProcessingStatus;
 use obzenflow_core::event::ChainEventFactory;
-use obzenflow_core::{ChainEvent, Result};
+use obzenflow_core::ChainEvent;
+use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
 use obzenflow_runtime_services::stages::common::handlers::TransformHandler;
 
 /// A TransformHandler wrapper that applies middleware to transform operations
@@ -51,9 +52,13 @@ impl<H: TransformHandler> MiddlewareTransform<H> {
     }
 
     /// Apply the middleware chain to a transform operation
-    fn apply_middleware<F>(&self, event: ChainEvent, transform_fn: F) -> Vec<ChainEvent>
+    fn apply_middleware<F>(
+        &self,
+        event: ChainEvent,
+        transform_fn: F,
+    ) -> Result<Vec<ChainEvent>, HandlerError>
     where
-        F: FnOnce(ChainEvent) -> Vec<ChainEvent>,
+        F: FnOnce(ChainEvent) -> Result<Vec<ChainEvent>, HandlerError>,
     {
         // Create ephemeral context for this processing
         let mut ctx = MiddlewareContext::new();
@@ -85,19 +90,19 @@ impl<H: TransformHandler> MiddlewareTransform<H> {
                         }
                     }
                     results.extend(control_events);
-                    return results;
+                    return Ok(results);
                 }
                 MiddlewareAction::Abort => {
                     let mut err = event.clone();
                     err.processing_info.status =
                         ProcessingStatus::error("aborted by middleware");
-                    return vec![err];
+                    return Ok(vec![err]);
                 }
             }
         }
 
         // Execute the transform
-        let mut results = transform_fn(event.clone());
+        let mut results = transform_fn(event.clone())?;
 
         // Post-processing phase (reverse order)
         for middleware in self.middleware_chain.iter().rev() {
@@ -127,25 +132,25 @@ impl<H: TransformHandler> MiddlewareTransform<H> {
         }
         results.extend(control_events);
 
-        results
+        Ok(results)
     }
 }
 
 #[async_trait]
 impl<H: TransformHandler> TransformHandler for MiddlewareTransform<H> {
-    fn process(&self, event: ChainEvent) -> Vec<ChainEvent> {
+    fn process(&self, event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
         // Short-circuit if event already has Error status
         if matches!(event.processing_info.status, ProcessingStatus::Error { .. }) {
             tracing::debug!(
                 "MiddlewareTransform: Skipping event with Error status: {:?}",
                 event.processing_info.status
             );
-            return vec![event];
+            return Ok(vec![event]);
         }
         self.apply_middleware(event, |e| self.inner.process(e))
     }
 
-    async fn drain(&mut self) -> Result<()> {
+    async fn drain(&mut self) -> Result<(), HandlerError> {
         // Drain is not intercepted by middleware - it's an infrastructure concern
         self.inner.drain().await
     }
@@ -196,7 +201,7 @@ mod tests {
 
     #[async_trait]
     impl TransformHandler for TestTransform {
-        fn process(&self, event: ChainEvent) -> Vec<ChainEvent> {
+        fn process(&self, event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
             let mut payload = event.payload().clone();
             payload["processed"] = json!(true);
 
@@ -207,10 +212,10 @@ mod tests {
             new_event.processing_info = event.processing_info.clone();
             new_event.causality = event.causality.clone();
 
-            vec![new_event]
+            Ok(vec![new_event])
         }
 
-        async fn drain(&mut self) -> Result<()> {
+        async fn drain(&mut self) -> Result<(), HandlerError> {
             Ok(())
         }
     }
@@ -264,7 +269,9 @@ mod tests {
             json!({}),
         );
 
-        let results = handler.process(event);
+        let results = handler
+            .process(event)
+            .expect("TestTransform in middleware tests should not fail");
 
         // Middleware can't modify events anymore, just verify the transform worked
         assert_eq!(results.len(), 1);
@@ -325,7 +332,9 @@ mod tests {
             json!({}),
         );
 
-        let results = handler.process(event);
+        let results = handler
+            .process(event)
+            .expect("TestTransform in middleware tests should not fail");
 
         // Should have 3 events: 1 from handler + 2 control events
         assert_eq!(results.len(), 3);
@@ -377,7 +386,9 @@ mod tests {
             json!({}),
         );
 
-        let results = handler.process(event);
+        let results = handler
+            .process(event)
+            .expect("TestTransform in middleware tests should not fail");
 
         // Should have 2 events: 1 skip result + 1 control event
         assert_eq!(results.len(), 2);

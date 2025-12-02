@@ -1,11 +1,12 @@
 //! Wrapper for composing StatefulHandler with emission strategies
 
 use super::traits::StatefulHandler;
+use crate::stages::common::handler_error::HandlerError;
 use crate::stages::stateful::strategies::emissions::{EmissionStrategy, OnEOF};
 use async_trait::async_trait;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::ChainEventContent;
-use obzenflow_core::{ChainEvent, Result};
+use obzenflow_core::ChainEvent;
 use std::time::Instant;
 
 /// State wrapper that includes handler state and emission tracking
@@ -129,7 +130,10 @@ where
         }
     }
 
-    fn create_events(&self, state: &Self::State) -> Vec<ChainEvent> {
+    fn create_events(
+        &self,
+        state: &Self::State,
+    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
         self.handler.create_events(&state.handler_state)
     }
 
@@ -139,7 +143,10 @@ where
         emission.should_emit(state.events_seen, state.last_emit)
     }
 
-    fn emit(&self, state: &mut Self::State) -> Vec<ChainEvent> {
+    fn emit(
+        &self,
+        state: &mut Self::State,
+    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
         // Update last emit time
         state.last_emit = Some(Instant::now());
 
@@ -150,7 +157,10 @@ where
         self.handler.emit(&mut state.handler_state)
     }
 
-    async fn drain(&self, state: &Self::State) -> Result<Vec<ChainEvent>> {
+    async fn drain(
+        &self,
+        state: &Self::State,
+    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
         self.handler.drain(&state.handler_state).await
     }
 }

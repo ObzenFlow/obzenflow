@@ -12,6 +12,7 @@ use obzenflow_core::{
 use obzenflow_dsl_infra::{flow, sink, source, stateful};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
+use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
 use obzenflow_runtime_services::stages::common::handlers::{FiniteSourceHandler, SinkHandler};
 use obzenflow_runtime_services::stages::SourceError;
 use obzenflow_runtime_services::stages::stateful::{Conflate, GroupBy, Reduce};
@@ -89,7 +90,10 @@ impl CollectingSink {
 
 #[async_trait]
 impl SinkHandler for CollectingSink {
-    async fn consume(&mut self, event: ChainEvent) -> CoreResult<DeliveryPayload> {
+    async fn consume(
+        &mut self,
+        event: ChainEvent,
+    ) -> std::result::Result<DeliveryPayload, HandlerError> {
         self.events.lock().unwrap().push(event.clone());
         Ok(DeliveryPayload::success(
             "test",

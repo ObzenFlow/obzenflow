@@ -7,6 +7,7 @@ use obzenflow_core::{
     },
     TypedPayload,
 };
+use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
 use obzenflow_runtime_services::stages::common::handlers::SinkHandler;
 
 /// Sink that prints a concise summary of how many payments
@@ -31,7 +32,10 @@ impl PaymentSummarySink {
 
 #[async_trait]
 impl SinkHandler for PaymentSummarySink {
-    async fn consume(&mut self, event: ChainEvent) -> obzenflow_core::Result<DeliveryPayload> {
+    async fn consume(
+        &mut self,
+        event: ChainEvent,
+    ) -> Result<DeliveryPayload, HandlerError> {
         // Ignore lifecycle/observability/control events for the high-level story.
         // We only want to count domain data events that represent payments.
         if !event.is_data() {
@@ -116,7 +120,7 @@ impl SinkHandler for PaymentSummarySink {
     }
 
     /// During drain we print the high-level story the example teaches.
-    async fn drain(&mut self) -> obzenflow_core::Result<Option<DeliveryPayload>> {
+    async fn drain(&mut self) -> Result<Option<DeliveryPayload>, HandlerError> {
         println!("\n============================================================");
         println!("📊 PAYMENT GATEWAY RESILIENCE SUMMARY");
         println!("============================================================");

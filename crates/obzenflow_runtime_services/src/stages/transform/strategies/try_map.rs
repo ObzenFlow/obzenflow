@@ -24,6 +24,7 @@
 //!     .on_error_drop();
 //! ```
 
+use crate::stages::common::handler_error::HandlerError;
 use crate::stages::common::handlers::TransformHandler;
 use async_trait::async_trait;
 use obzenflow_core::event::{status::processing_status::ProcessingStatus, ChainEventFactory};
@@ -223,11 +224,14 @@ where
     T: TryFrom<ChainEvent> + Into<ChainEvent> + Send + Sync + 'static,
     <T as TryFrom<ChainEvent>>::Error: std::fmt::Display,
 {
-    fn process(&self, event: ChainEvent) -> Vec<ChainEvent> {
+    fn process(
+        &self,
+        event: ChainEvent,
+    ) -> Result<Vec<ChainEvent>, HandlerError> {
         match T::try_from(event.clone()) {
             Ok(typed_value) => {
                 // Successful conversion - convert back to ChainEvent
-                vec![typed_value.into()]
+                Ok(vec![typed_value.into()])
             }
             Err(e) => {
                 let error_msg = format!(
@@ -237,7 +241,7 @@ where
                 );
 
                 // Handle conversion failure according to error strategy
-                match &self.error_strategy {
+                let events = match &self.error_strategy {
                     ErrorStrategy::Drop => {
                         // Silently drop failed conversions
                         vec![]
@@ -285,12 +289,13 @@ where
                         // Use custom error handler
                         handler(event, error_msg).into_iter().collect()
                     }
-                }
+                };
+                Ok(events)
             }
         }
     }
 
-    async fn drain(&mut self) -> obzenflow_core::Result<()> {
+    async fn drain(&mut self) -> Result<(), HandlerError> {
         Ok(())
     }
 }
@@ -335,7 +340,9 @@ mod tests {
             json!({"id": "123", "amount": 99.99}),
         );
 
-        let result = try_mapper.process(event);
+        let result = try_mapper
+            .process(event)
+            .expect("TryMap::process should succeed with valid input");
         assert_eq!(result.len(), 1);
 
         // Event should be successfully converted and back
@@ -355,7 +362,9 @@ mod tests {
             json!({"wrong_field": "value"}),
         );
 
-        let result = try_mapper.process(event);
+        let result = try_mapper
+            .process(event)
+            .expect("TryMap::process should convert into error event");
         assert_eq!(result.len(), 1);
 
         // Event should be marked with error status

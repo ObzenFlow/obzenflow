@@ -30,6 +30,7 @@ use obzenflow_core::{
 use obzenflow_dsl_infra::{flow, join, sink, source, stateful, transform, with_ref};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
+use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
 use obzenflow_runtime_services::stages::common::handlers::{
     FiniteSourceHandler, JoinHandler, SinkHandler, StatefulHandler, TransformHandler,
 };
@@ -297,7 +298,7 @@ impl FlightValidator {
 
 #[async_trait]
 impl TransformHandler for FlightValidator {
-    fn process(&self, event: ChainEvent) -> Vec<ChainEvent> {
+    fn process(&self, event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
         // ✨ FLOWIP-082a: Check event type using constant
         if FlightRecord::event_type_matches(&event.event_type()) {
             // Validate that all required fields are present
@@ -309,18 +310,18 @@ impl TransformHandler for FlightValidator {
                 // ✨ FLOWIP-082h: Mark invalid records with a structured validation error.
                 // The transform supervisor will route these to the stage's error_journal
                 // while keeping valid records on the main data path.
-                return vec![event.mark_as_validation_error(
+                return Ok(vec![event.mark_as_validation_error(
                     "flight_validation_failed: missing carrier, delay_minutes, or scheduled_duration",
-                )];
+                )]);
             }
 
-            vec![event]
+            Ok(vec![event])
         } else {
-            vec![]
+            Ok(vec![])
         }
     }
 
-    async fn drain(&mut self) -> obzenflow_core::Result<()> {
+    async fn drain(&mut self) -> Result<(), HandlerError> {
         Ok(())
     }
 }
@@ -341,7 +342,7 @@ impl DelayCalculator {
 
 #[async_trait]
 impl TransformHandler for DelayCalculator {
-    fn process(&self, event: ChainEvent) -> Vec<ChainEvent> {
+    fn process(&self, event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
         // ✨ FLOWIP-082a: Check event type using constant
         if FlightRecord::event_type_matches(&event.event_type()) {
             if let Some(delay) = event
@@ -364,18 +365,18 @@ impl TransformHandler for DelayCalculator {
                 payload["delay_category"] = json!(delay_category);
 
                 // ✨ FLOWIP-082a: Use EVENT_TYPE constant
-                return vec![ChainEventFactory::derived_data_event(
+                return Ok(vec![ChainEventFactory::derived_data_event(
                     event.writer_id.clone(),
                     &event,
                     &FlightRecord::versioned_event_type(),
                     payload,
-                )];
+                )]);
             }
         }
-        vec![event]
+        Ok(vec![event])
     }
 
-    async fn drain(&mut self) -> obzenflow_core::Result<()> {
+    async fn drain(&mut self) -> Result<(), HandlerError> {
         Ok(())
     }
 }
@@ -437,9 +438,12 @@ impl StatefulHandler for CarrierAggregator {
         CarrierStats::default()
     }
 
-    fn create_events(&self, state: &Self::State) -> Vec<ChainEvent> {
+    fn create_events(
+        &self,
+        state: &Self::State,
+    ) -> Result<Vec<ChainEvent>, HandlerError> {
         // ✨ FLOWIP-082a: Emit typed CarrierStatistics events
-        state
+        let events = state
             .stats
             .iter()
             .map(|(carrier, (total_delay, flight_count))| {
@@ -460,10 +464,13 @@ impl StatefulHandler for CarrierAggregator {
                 ChainEventFactory::data_event(
                     self.writer_id.clone(),
                     &CarrierStatistics::versioned_event_type(),
-                    serde_json::to_value(&stats).unwrap(),
+                    serde_json::to_value(&stats)
+                        .expect("CarrierStatistics should always serialize"),
                 )
             })
-            .collect()
+            .collect();
+
+        Ok(events)
     }
 }
 
@@ -487,7 +494,10 @@ impl StatisticsPrinter {
 
 #[async_trait]
 impl SinkHandler for StatisticsPrinter {
-    async fn consume(&mut self, event: ChainEvent) -> obzenflow_core::Result<DeliveryPayload> {
+    async fn consume(
+        &mut self,
+        event: ChainEvent,
+    ) -> Result<DeliveryPayload, HandlerError> {
         // ✨ FLOWIP-082a: Check event type using constant
         if CarrierStatistics::event_type_matches(&event.event_type()) {
             if !self.header_printed {

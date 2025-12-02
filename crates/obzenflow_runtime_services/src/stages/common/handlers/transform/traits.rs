@@ -4,7 +4,7 @@
 
 use async_trait::async_trait;
 use obzenflow_core::event::ChainEventContent;
-use obzenflow_core::{ChainEvent, Result};
+use obzenflow_core::ChainEvent;
 
 /// Handler for stateless transform stages
 ///
@@ -16,11 +16,14 @@ use obzenflow_core::{ChainEvent, Result};
 /// # Example
 /// ```ignore
 /// use obzenflow_runtime_services::stages::common::handlers::TransformHandler;
-/// use obzenflow_core::{ChainEvent, Result};
+/// use obzenflow_core::ChainEvent;
 /// use obzenflow_core::event::ChainEventContent;
+/// use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
 /// use std::collections::HashMap;
 /// use serde_json::{json, Value};
 /// use async_trait::async_trait;
+///
+/// type Result<T> = std::result::Result<T, HandlerError>;
 ///
 /// struct DataEnricher {
 ///     cache: HashMap<String, Value>,
@@ -28,14 +31,14 @@ use obzenflow_core::{ChainEvent, Result};
 ///
 /// #[async_trait]
 /// impl TransformHandler for DataEnricher {
-///     fn process(&self, mut event: ChainEvent) -> Vec<ChainEvent> {
+///     fn process(&self, mut event: ChainEvent) -> Result<Vec<ChainEvent>> {
 ///         // Enrich event with cached metadata
 ///         if let Some(metadata) = self.cache.get(&event.event_type()) {
 ///             if let ChainEventContent::Data { ref mut payload, .. } = event.content {
 ///                 payload["metadata"] = metadata.clone();
 ///             }
 ///         }
-///         vec![event]
+///         Ok(vec![event])
 ///     }
 ///     
 ///     // Stateless transform has no special drain logic
@@ -44,16 +47,30 @@ use obzenflow_core::{ChainEvent, Result};
 ///     }
 /// }
 /// ```
+use crate::stages::common::handler_error::HandlerError;
+
 #[async_trait]
 pub trait TransformHandler: Send + Sync {
     /// Process an event, potentially producing multiple outputs
     ///
-    /// This is a pure function - same input always produces same output
-    fn process(&self, event: ChainEvent) -> Vec<ChainEvent>;
+    /// This is a pure function - same input always produces same output.
+    ///
+    /// `Ok(outputs)` means the handler succeeded:
+    /// - `outputs.len() == 0` → no outputs / filter
+    /// - `outputs.len() >= 1` → emitted events
+    ///
+    /// `Err(HandlerError)` means a per-record failure occurred while
+    /// processing this event (e.g. remote timeout, decode failure). The
+    /// supervisor will convert this into an error-marked event and route
+    /// it using ErrorKind.
+    fn process(
+        &self,
+        event: ChainEvent,
+    ) -> std::result::Result<Vec<ChainEvent>, HandlerError>;
 
     /// Perform any cleanup during shutdown
     ///
     /// For stateless transforms, this is typically a no-op.
     /// For stateful transforms, this might flush caches or close connections.
-    async fn drain(&mut self) -> Result<()>;
+    async fn drain(&mut self) -> std::result::Result<(), HandlerError>;
 }

@@ -4,7 +4,8 @@
 //! (reference and stream) and emit enriched events.
 
 use async_trait::async_trait;
-use obzenflow_core::{ChainEvent, Result, StageId, WriterId};
+use crate::stages::common::handler_error::HandlerError;
+use obzenflow_core::{ChainEvent, StageId, WriterId};
 
 /// Handler trait for join stages - defines the enrichment logic
 ///
@@ -43,7 +44,7 @@ pub trait JoinHandler: Send + Sync + Clone {
         event: ChainEvent,
         source_id: StageId,
         writer_id: WriterId,
-    ) -> Vec<ChainEvent>;
+    ) -> std::result::Result<Vec<ChainEvent>, HandlerError>;
 
     /// Handle EOF from a specific upstream source
     ///
@@ -65,7 +66,7 @@ pub trait JoinHandler: Send + Sync + Clone {
         state: &mut Self::State,
         source_id: StageId,
         writer_id: WriterId,
-    ) -> Vec<ChainEvent>;
+    ) -> std::result::Result<Vec<ChainEvent>, HandlerError>;
 
     /// Final drain when all upstreams are EOF
     ///
@@ -77,7 +78,10 @@ pub trait JoinHandler: Send + Sync + Clone {
     ///
     /// # Returns
     /// Final events to emit (usually empty for joins)
-    async fn drain(&self, _state: &Self::State) -> Result<Vec<ChainEvent>> {
+    async fn drain(
+        &self,
+        _state: &Self::State,
+    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
         Ok(vec![])
     }
 }

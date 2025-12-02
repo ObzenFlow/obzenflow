@@ -18,6 +18,7 @@ use obzenflow_core::journal::journal::Journal;
 use obzenflow_core::{StageId, WriterId};
 use obzenflow_dsl_infra::{flow, sink, source, transform};
 use obzenflow_infra::journal::disk_journals;
+use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
 use obzenflow_runtime_services::stages::common::handlers::{
     FiniteSourceHandler, SinkHandler, TransformHandler,
 };
@@ -84,7 +85,10 @@ impl FailingTransform {
 
 #[async_trait]
 impl TransformHandler for FailingTransform {
-    fn process(&self, mut event: ChainEvent) -> Vec<ChainEvent> {
+    fn process(
+        &self,
+        mut event: ChainEvent,
+    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
         let current = self.seen.fetch_add(1, Ordering::Relaxed);
 
         if current >= self.max_successes {
@@ -95,15 +99,13 @@ impl TransformHandler for FailingTransform {
                 obzenflow_core::event::status::processing_status::ProcessingStatus::error(
                     "forced_failure",
                 );
-            vec![event]
+            Ok(vec![event])
         } else {
-            vec![event]
+            Ok(vec![event])
         }
     }
 
-    async fn drain(&mut self) -> obzenflow_core::Result<()> {
-        Ok(())
-    }
+    async fn drain(&mut self) -> std::result::Result<(), HandlerError> { Ok(()) }
 }
 
 /// Sink that simply counts successfully delivered events.
@@ -124,7 +126,7 @@ impl SinkHandler for CountingSink {
     async fn consume(
         &mut self,
         event: ChainEvent,
-    ) -> obzenflow_core::Result<DeliveryPayload> {
+    ) -> std::result::Result<DeliveryPayload, HandlerError> {
         if event.is_data() {
             self.count.fetch_add(1, Ordering::Relaxed);
         }

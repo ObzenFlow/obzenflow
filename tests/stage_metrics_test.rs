@@ -10,6 +10,7 @@ use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, Delivery
 use obzenflow_core::{StageId, WriterId};
 use obzenflow_dsl_infra::{flow, sink, source, transform};
 use obzenflow_infra::journal::disk_journals;
+use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
 use obzenflow_runtime_services::stages::common::handlers::{
     FiniteSourceHandler, SinkHandler, TransformHandler,
 };
@@ -70,15 +71,16 @@ struct UppercaseTransform;
 
 #[async_trait]
 impl TransformHandler for UppercaseTransform {
-    fn process(&self, event: ChainEvent) -> Vec<ChainEvent> {
+    fn process(
+        &self,
+        event: ChainEvent,
+    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
         // For metrics purposes we don't need to mutate payloads –
         // just ensure the transform runs and emits an event.
-        vec![event]
+        Ok(vec![event])
     }
 
-    async fn drain(&mut self) -> obzenflow_core::Result<()> {
-        Ok(())
-    }
+    async fn drain(&mut self) -> std::result::Result<(), HandlerError> { Ok(()) }
 }
 
 /// Sink that collects events
@@ -104,7 +106,7 @@ impl SinkHandler for CollectorSink {
     async fn consume(
         &mut self,
         event: ChainEvent,
-    ) -> obzenflow_core::Result<DeliveryPayload> {
+    ) -> std::result::Result<DeliveryPayload, HandlerError> {
         if let Ok(mut events) = self.events.lock() {
             if event.is_data() {
                 events.push(event);

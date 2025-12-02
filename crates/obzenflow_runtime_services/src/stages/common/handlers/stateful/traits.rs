@@ -4,7 +4,8 @@
 
 use async_trait::async_trait;
 use obzenflow_core::event::ChainEventContent;
-use obzenflow_core::{ChainEvent, Result};
+use crate::stages::common::handler_error::HandlerError;
+use obzenflow_core::ChainEvent;
 
 /// Handler for stateful processing stages
 ///
@@ -104,7 +105,15 @@ pub trait StatefulHandler: Send + Sync {
     ///
     /// Called when emission is triggered (by emission strategy or drain).
     /// Return the events you want to emit based on current state.
-    fn create_events(&self, state: &Self::State) -> Vec<ChainEvent>;
+    ///
+    /// `Ok(events)` means emission succeeded. `Err(HandlerError)` means a
+    /// per-record failure occurred while creating outputs (e.g. IO or
+    /// encoding problems); the supervisor will turn this into an
+    /// error-marked event and continue running the stage.
+    fn create_events(
+        &self,
+        state: &Self::State,
+    ) -> std::result::Result<Vec<ChainEvent>, HandlerError>;
 
     // --- Advanced methods with sensible defaults ---
 
@@ -120,7 +129,10 @@ pub trait StatefulHandler: Send + Sync {
     ///
     /// Default: Calls create_events()
     /// Override only if you need to modify state during emission
-    fn emit(&self, state: &mut Self::State) -> Vec<ChainEvent> {
+    fn emit(
+        &self,
+        state: &mut Self::State,
+    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
         self.create_events(state)
     }
 
@@ -128,7 +140,10 @@ pub trait StatefulHandler: Send + Sync {
     ///
     /// Default: Calls create_events()
     /// Override only if drain behavior differs from normal emission
-    async fn drain(&self, state: &Self::State) -> Result<Vec<ChainEvent>> {
-        Ok(self.create_events(state))
+    async fn drain(
+        &self,
+        state: &Self::State,
+    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
+        self.create_events(state)
     }
 }

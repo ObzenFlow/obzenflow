@@ -18,7 +18,8 @@
 use super::{Middleware, MiddlewareAction, MiddlewareContext};
 use async_trait::async_trait;
 use obzenflow_core::event::status::processing_status::ProcessingStatus;
-use obzenflow_core::{ChainEvent, Result, StageId, WriterId};
+use obzenflow_core::{ChainEvent, StageId, WriterId};
+use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
 use obzenflow_runtime_services::stages::common::handlers::JoinHandler;
 
 /// A JoinHandler wrapper that applies middleware to join operations
@@ -139,24 +140,24 @@ where
         event: ChainEvent,
         source_id: StageId,
         writer_id: WriterId,
-    ) -> Vec<ChainEvent> {
+    ) -> Result<Vec<ChainEvent>, HandlerError> {
         // Create ephemeral context for this processing
         let mut ctx = MiddlewareContext::new();
 
         // Apply pre-middleware (same for both reference and stream sides)
         if !self.apply_pre_middleware(&event, &mut ctx) {
-            return vec![];
+            return Ok(vec![]);
         }
 
         // Process with inner handler
         let mut results = self
             .inner
-            .process_event(state, event.clone(), source_id, writer_id);
+            .process_event(state, event.clone(), source_id, writer_id)?;
 
         // Apply post-middleware
         self.apply_post_middleware(&event, &mut results, &mut ctx);
 
-        results
+        Ok(results)
     }
 
     fn on_source_eof(
@@ -164,13 +165,13 @@ where
         state: &mut Self::State,
         source_id: StageId,
         writer_id: WriterId,
-    ) -> Vec<ChainEvent> {
+    ) -> Result<Vec<ChainEvent>, HandlerError> {
         // Create ephemeral context
         let ctx = MiddlewareContext::new();
 
         // EOF handling doesn't go through pre_handle (no event to check)
         // Just delegate to inner handler
-        let mut results = self.inner.on_source_eof(state, source_id, writer_id);
+        let mut results = self.inner.on_source_eof(state, source_id, writer_id)?;
 
         // Pre-write phase: allow middleware to enrich result events
         for result in &mut results {
@@ -179,10 +180,10 @@ where
             }
         }
 
-        results
+        Ok(results)
     }
 
-    async fn drain(&self, state: &Self::State) -> Result<Vec<ChainEvent>> {
+    async fn drain(&self, state: &Self::State) -> Result<Vec<ChainEvent>, HandlerError> {
         // Create ephemeral context
         let mut ctx = MiddlewareContext::new();
 
@@ -273,16 +274,16 @@ mod tests {
             event: ChainEvent,
             _source_id: StageId,
             writer_id: WriterId,
-        ) -> Vec<ChainEvent> {
+        ) -> Result<Vec<ChainEvent>, HandlerError> {
             self.process_count.fetch_add(1, Ordering::Relaxed);
             state.push(event.clone());
 
             // Emit a joined event
-            vec![ChainEventFactory::data_event(
+            Ok(vec![ChainEventFactory::data_event(
                 writer_id,
                 "joined",
                 json!({ "source_event": event.id.to_string() }),
-            )]
+            )])
         }
 
         fn on_source_eof(
@@ -290,8 +291,8 @@ mod tests {
             _state: &mut Self::State,
             _source_id: StageId,
             _writer_id: WriterId,
-        ) -> Vec<ChainEvent> {
-            vec![]
+        ) -> Result<Vec<ChainEvent>, HandlerError> {
+            Ok(vec![])
         }
     }
 
@@ -324,20 +325,26 @@ mod tests {
 
         // Normal event should be processed
         let event1 = ChainEventFactory::data_event(writer_id.clone(), "test", json!({"data": 1}));
-        let results1 = handler.process_event(&mut state, event1, source_id, writer_id.clone());
+        let results1 = handler
+            .process_event(&mut state, event1, source_id, writer_id.clone())
+            .expect("Join middleware should succeed for normal event");
         assert_eq!(process_count.load(Ordering::Relaxed), 1);
         assert_eq!(results1.len(), 1);
 
         // Event with "skip" should be skipped
         let event2 =
             ChainEventFactory::data_event(writer_id.clone(), "test", json!({"skip": true}));
-        let results2 = handler.process_event(&mut state, event2, source_id, writer_id.clone());
+        let results2 = handler
+            .process_event(&mut state, event2, source_id, writer_id.clone())
+            .expect("Join middleware should succeed for skipped event");
         assert_eq!(process_count.load(Ordering::Relaxed), 1); // Still 1
         assert_eq!(results2.len(), 0);
 
         // Another normal event from stream side (same middleware applies)
         let event3 = ChainEventFactory::data_event(writer_id.clone(), "test", json!({"data": 3}));
-        let results3 = handler.process_event(&mut state, event3, source_id, writer_id.clone());
+        let results3 = handler
+            .process_event(&mut state, event3, source_id, writer_id.clone())
+            .expect("Join middleware should succeed for second normal event");
         assert_eq!(process_count.load(Ordering::Relaxed), 2);
         assert_eq!(results3.len(), 1);
     }

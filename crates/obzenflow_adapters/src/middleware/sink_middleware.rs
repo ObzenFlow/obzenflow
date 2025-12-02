@@ -9,7 +9,8 @@ use obzenflow_core::event::payloads::delivery_payload::{
     DeliveryMethod, DeliveryPayload, DeliveryResult,
 };
 use obzenflow_core::time::MetricsDuration;
-use obzenflow_core::{ChainEvent, Result};
+use obzenflow_core::ChainEvent;
+use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
 use obzenflow_runtime_services::stages::common::handlers::SinkHandler;
 
 /// A SinkHandler wrapper that applies middleware
@@ -56,7 +57,7 @@ impl<H: SinkHandler> MiddlewareSink<H> {
     async fn apply_middleware_with_error_handling(
         &mut self,
         event: ChainEvent,
-    ) -> Result<DeliveryPayload> {
+    ) -> Result<DeliveryPayload, HandlerError> {
         // Create ephemeral context for this processing
         let mut ctx = MiddlewareContext::new();
 
@@ -148,16 +149,19 @@ impl<H: SinkHandler> MiddlewareSink<H> {
 
 #[async_trait]
 impl<H: SinkHandler> SinkHandler for MiddlewareSink<H> {
-    async fn consume(&mut self, event: ChainEvent) -> Result<DeliveryPayload> {
+    async fn consume(
+        &mut self,
+        event: ChainEvent,
+    ) -> Result<DeliveryPayload, HandlerError> {
         self.apply_middleware_with_error_handling(event).await
     }
 
-    async fn flush(&mut self) -> Result<Option<DeliveryPayload>> {
+    async fn flush(&mut self) -> Result<Option<DeliveryPayload>, HandlerError> {
         // Flush is not intercepted by middleware - it's an infrastructure concern
         self.inner.flush().await
     }
 
-    async fn drain(&mut self) -> Result<Option<DeliveryPayload>> {
+    async fn drain(&mut self) -> Result<Option<DeliveryPayload>, HandlerError> {
         // Drain is not intercepted by middleware - it's an infrastructure concern
         self.inner.drain().await
     }
@@ -222,11 +226,14 @@ mod tests {
 
     #[async_trait]
     impl SinkHandler for TestSink {
-        async fn consume(&mut self, event: ChainEvent) -> Result<DeliveryPayload> {
+        async fn consume(
+            &mut self,
+            event: ChainEvent,
+        ) -> Result<DeliveryPayload, HandlerError> {
             let mut fail_count = self.fail_count.lock().unwrap();
             if *fail_count > 0 {
                 *fail_count -= 1;
-                return Err(anyhow::anyhow!("Simulated failure").into());
+                return Err(HandlerError::other("Simulated failure"));
             }
 
             self.consumed.lock().unwrap().push(event);

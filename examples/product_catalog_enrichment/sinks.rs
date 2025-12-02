@@ -7,6 +7,7 @@ use obzenflow_core::{
     },
     TypedPayload,
 };
+use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
 use obzenflow_runtime_services::stages::common::handlers::SinkHandler;
 
 #[derive(Clone, Debug)]
@@ -30,7 +31,10 @@ impl DashboardSink {
 
 #[async_trait]
 impl SinkHandler for DashboardSink {
-    async fn consume(&mut self, event: ChainEvent) -> obzenflow_core::Result<DeliveryPayload> {
+    async fn consume(
+        &mut self,
+        event: ChainEvent,
+    ) -> Result<DeliveryPayload, HandlerError> {
         if let Some(order) = EnrichedOrderWithPromo::from_event(&event) {
             self.order_count += 1;
 
@@ -103,7 +107,7 @@ impl SinkHandler for DashboardSink {
     }
 
     /// Called during graceful shutdown - print final analytics summary
-    async fn drain(&mut self) -> obzenflow_core::Result<Option<DeliveryPayload>> {
+    async fn drain(&mut self) -> Result<Option<DeliveryPayload>, HandlerError> {
         println!("\n\n{}", "=".repeat(60));
         println!("🎯 FINAL ANALYTICS DASHBOARD");
         println!("{}", "=".repeat(60));

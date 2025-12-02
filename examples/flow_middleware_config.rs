@@ -35,6 +35,7 @@ use obzenflow_core::{
 use obzenflow_dsl_infra::{flow, sink, source, transform};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
+use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
 use obzenflow_runtime_services::stages::common::handlers::{
     FiniteSourceHandler, SinkHandler, TransformHandler,
 };
@@ -95,11 +96,11 @@ impl PassthroughTransform {
 
 #[async_trait]
 impl TransformHandler for PassthroughTransform {
-    fn process(&self, event: ChainEvent) -> Vec<ChainEvent> {
-        vec![event]
+    fn process(&self, event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
+        Ok(vec![event])
     }
 
-    async fn drain(&mut self) -> obzenflow_core::Result<()> {
+    async fn drain(&mut self) -> Result<(), HandlerError> {
         Ok(())
     }
 }
@@ -118,7 +119,10 @@ impl CountingSink {
 
 #[async_trait]
 impl SinkHandler for CountingSink {
-    async fn consume(&mut self, event: ChainEvent) -> obzenflow_core::Result<DeliveryPayload> {
+    async fn consume(
+        &mut self,
+        event: ChainEvent,
+    ) -> Result<DeliveryPayload, HandlerError> {
         self.received += 1;
 
         // Log progress every 20 events

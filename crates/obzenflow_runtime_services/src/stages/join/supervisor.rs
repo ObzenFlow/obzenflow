@@ -499,21 +499,35 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                         .ok_or_else(|| "No writer ID available")?
                                         .clone();
 
-                                    let events_produced = handler.process_event(
+                                    match handler.process_event(
                                         &mut ctx.handler_state,
                                         envelope.event,
                                         ctx.reference_stage_id,
                                         writer_id.clone(),
-                                    );
-
-                                    tracing::debug!(
-                                        stage_name = %ctx.stage_name,
-                                        events_count = events_produced.len(),
-                                        "Handler produced events during hydration (should be 0)"
-                                    );
-
-                                    // Continue hydrating
-                                    directive = Ok(EventLoopDirective::Continue);
+                                    ) {
+                                        Ok(events_produced) => {
+                                            tracing::debug!(
+                                                stage_name = %ctx.stage_name,
+                                                events_count = events_produced.len(),
+                                                "Handler produced events during hydration (should be 0)"
+                                            );
+                                            // Continue hydrating
+                                            directive = Ok(EventLoopDirective::Continue);
+                                        }
+                                        Err(err) => {
+                                            tracing::error!(
+                                                stage_name = %ctx.stage_name,
+                                                error = ?err,
+                                                "Join handler error during reference hydration"
+                                            );
+                                            directive = Ok(EventLoopDirective::Transition(
+                                                JoinEvent::Error(format!(
+                                                    "Join handler hydration error: {:?}",
+                                                    err
+                                                )),
+                                            ));
+                                        }
+                                    }
                                 }
                                 _ => {
                                     tracing::warn!(
@@ -727,27 +741,81 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                         .ok_or_else(|| "No writer ID available")?
                                         .clone();
 
-                                    let events = handler.process_event(
+                                    match handler.process_event(
                                         &mut ctx.handler_state,
-                                        envelope.event,
+                                        envelope.event.clone(),
                                         source_id,
                                         writer_id.clone(),
-                                    );
+                                    ) {
+                                        Ok(events) => {
+                                            // Write output events
+                                            for event in events {
+                                                // FLOWIP-080o-part-2: Only count data events for writer_seq.
+                                                // Lifecycle events (middleware metrics, etc.) are observability
+                                                // overhead and should not participate in transport contracts.
+                                                if event.is_data() {
+                                                    ctx.instrumentation.record_emitted(&event);
+                                                    // Track output for contract verification
+                                                    subscription.track_output_event();
+                                                }
+                                                self.data_journal.append(event, None).await?;
+                                            }
 
-                                    // Write output events
-                                    for event in events {
-                                        // FLOWIP-080o-part-2: Only count data events for writer_seq.
-                                        // Lifecycle events (middleware metrics, etc.) are observability
-                                        // overhead and should not participate in transport contracts.
-                                        if event.is_data() {
-                                            ctx.instrumentation.record_emitted(&event);
-                                            // Track output for contract verification
-                                            subscription.track_output_event();
+                                            directive = Ok(EventLoopDirective::Continue);
                                         }
-                                        self.data_journal.append(event, None).await?;
-                                    }
+                                        Err(err) => {
+                                            // Per-record join enrichment failure: turn input into an error-marked event
+                                            use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
 
-                                    directive = Ok(EventLoopDirective::Continue);
+                                            let reason =
+                                                format!("Join handler error during enrichment: {:?}", err);
+                                            let error_event = envelope
+                                                .event
+                                                .clone()
+                                                .mark_as_error(reason, err.kind());
+
+                                            let route_to_error_journal =
+                                                match &error_event.processing_info.status {
+                                                    ProcessingStatus::Error { kind, .. } => match kind {
+                                                        Some(ErrorKind::Timeout)
+                                                        | Some(ErrorKind::Remote)
+                                                        | Some(ErrorKind::Deserialization) => true,
+                                                        Some(ErrorKind::Validation)
+                                                        | Some(ErrorKind::Domain) => false,
+                                                        None | Some(ErrorKind::Unknown) => true,
+                                                    },
+                                                    _ => false,
+                                                };
+
+                                            if route_to_error_journal {
+                                                if error_event.is_data() {
+                                                    ctx.instrumentation
+                                                        .record_emitted(&error_event);
+                                                    subscription.track_output_event();
+                                                }
+                                                ctx.error_journal
+                                                    .append(error_event, None)
+                                                    .await
+                                                    .map_err(|e| {
+                                                        format!(
+                                                            "Failed to write join error event: {}",
+                                                            e
+                                                        )
+                                                    })?;
+                                            } else {
+                                                if error_event.is_data() {
+                                                    ctx.instrumentation
+                                                        .record_emitted(&error_event);
+                                                    subscription.track_output_event();
+                                                }
+                                                self.data_journal
+                                                    .append(error_event, None)
+                                                    .await?;
+                                            }
+
+                                            directive = Ok(EventLoopDirective::Continue);
+                                        }
+                                    }
                                 }
                                 _ => {
                                     // Other content types - log and continue
@@ -869,23 +937,38 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                     .ok_or_else(|| "No writer ID available")?
                                     .clone();
 
-                                let results = handler.process_event(
+                                match handler.process_event(
                                     &mut ctx.handler_state,
                                     envelope.event.clone(),
                                     ctx.reference_stage_id,
                                     writer_id.clone(),
-                                );
-
-                                for event in results {
-                                    // FLOWIP-080o-part-2: Only count data events for writer_seq.
-                                    // Lifecycle events (middleware metrics, etc.) are observability
-                                    // overhead and should not participate in transport contracts.
-                                    if event.is_data() {
-                                        ctx.instrumentation.record_emitted(&event);
-                                        // Track output for contract verification
-                                        subscription.track_output_event();
+                                ) {
+                                    Ok(results) => {
+                                        for event in results {
+                                            // FLOWIP-080o-part-2: Only count data events for writer_seq.
+                                            // Lifecycle events (middleware metrics, etc.) are observability
+                                            // overhead and should not participate in transport contracts.
+                                            if event.is_data() {
+                                                ctx.instrumentation.record_emitted(&event);
+                                                // Track output for contract verification
+                                                subscription.track_output_event();
+                                            }
+                                            self.data_journal.append(event, None).await?;
+                                        }
                                     }
-                                    self.data_journal.append(event, None).await?;
+                                    Err(err) => {
+                                        tracing::error!(
+                                            stage_name = %ctx.stage_name,
+                                            error = ?err,
+                                            "Join handler error during reference draining"
+                                        );
+                                        directive = Ok(EventLoopDirective::Transition(
+                                            JoinEvent::Error(format!(
+                                                "Join handler drain-side error: {:?}",
+                                                err
+                                            )),
+                                        ));
+                                    }
                                 }
                             } else if !envelope.event.is_eof() {
                                 // Forward non-EOF control events (CRITICAL FIX for FLOWIP-080o)
@@ -982,23 +1065,77 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                     writer_id.clone(),
                                 );
 
-                                for event in results {
-                                    // FLOWIP-080o-part-2: Only count data events for writer_seq.
-                                    // Lifecycle events (middleware metrics, etc.) are observability
-                                    // overhead and should not participate in transport contracts.
-                                    if event.is_data() {
-                                        ctx.instrumentation.record_emitted(&event);
-                                        // Track output for contract verification
-                                        subscription.track_output_event();
+                                match results {
+                                    Ok(events) => {
+                                        for event in events {
+                                            // FLOWIP-080o-part-2: Only count data events for writer_seq.
+                                            // Lifecycle events (middleware metrics, etc.) are observability
+                                            // overhead and should not participate in transport contracts.
+                                            if event.is_data() {
+                                                ctx.instrumentation.record_emitted(&event);
+                                                // Track output for contract verification
+                                                subscription.track_output_event();
+                                            }
+                                            self.data_journal.append(event, None).await?;
+                                        }
                                     }
-                                    self.data_journal.append(event, None).await?;
+                                    Err(err) => {
+                                        // Per-record join failure during draining: mark input as error.
+                                        use obzenflow_core::event::status::processing_status::{
+                                            ErrorKind, ProcessingStatus,
+                                        };
+
+                                        let reason = format!(
+                                            "Join handler error during draining: {:?}",
+                                            err
+                                        );
+                                        let error_event = envelope
+                                            .event
+                                            .clone()
+                                            .mark_as_error(reason, err.kind());
+
+                                        let route_to_error_journal =
+                                            match &error_event.processing_info.status {
+                                                ProcessingStatus::Error { kind, .. } => match kind {
+                                                    Some(ErrorKind::Timeout)
+                                                    | Some(ErrorKind::Remote)
+                                                    | Some(ErrorKind::Deserialization) => true,
+                                                    Some(ErrorKind::Validation)
+                                                    | Some(ErrorKind::Domain) => false,
+                                                    None | Some(ErrorKind::Unknown) => true,
+                                                },
+                                                _ => false,
+                                            };
+
+                                        if route_to_error_journal {
+                                            if error_event.is_data() {
+                                                ctx.instrumentation.record_emitted(&error_event);
+                                                subscription.track_output_event();
+                                            }
+                                            ctx.error_journal
+                                                .append(error_event, None)
+                                                .await
+                                                .map_err(|e| {
+                                                    format!(
+                                                        "Failed to write join drain error event: {}",
+                                                        e
+                                                    )
+                                                })?;
+                                        } else {
+                                            if error_event.is_data() {
+                                                ctx.instrumentation.record_emitted(&error_event);
+                                                subscription.track_output_event();
+                                            }
+                                            self.data_journal.append(error_event, None).await?;
+                                        }
+                                    }
                                 }
                             } else if !envelope.event.is_eof() {
                                 // Forward non-EOF control events (CRITICAL FIX for FLOWIP-080o)
                                 tracing::debug!(
                                     stage_name = %ctx.stage_name,
                                     event_type = envelope.event.event_type(),
-                                    "Forwarding stream control event during join draining"
+                                    forward_stream_control_during_join_draining = true
                                 );
                                 self.data_journal
                                     .append(envelope.event.clone(), None)
@@ -1018,17 +1155,16 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                             // Stream queue empty
                             tracing::debug!(
                                 stage_name = %ctx.stage_name,
-                                "Join stream subscription queue drained"
+                                join_stream_subscription_drained = true
                             );
                         }
                         PollResult::Error(e) => {
                             tracing::error!(
                                 stage_name = %ctx.stage_name,
                                 error = ?e,
-                                "Error draining stream subscription"
                             );
                             directive = Ok(EventLoopDirective::Transition(JoinEvent::Error(
-                                format!("Stream drain error: {}", e),
+                                e.to_string(),
                             )));
                             should_drain = false;
                         }
@@ -1046,14 +1182,14 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                 }
 
                 // Now call handler.drain() to emit any final joined state
-                tracing::info!(
-                    stage_name = %ctx.stage_name,
-                    "Join subscriptions drained, calling handler.drain()"
-                );
-
                 let handler = (*ctx.handler).clone();
                 let final_state = ctx.handler_state.clone();
-                let events = handler.drain(&final_state).await?;
+                let events = handler
+                    .drain(&final_state)
+                    .await
+                    .map_err(|err| {
+                        obzenflow_fsm::FsmError::HandlerError(err.to_string())
+                    })?;
 
                 // Write any final events
                 for event in events {

@@ -8,6 +8,7 @@
 
 use crate::stages::common::stage_handle::StageError;
 use obzenflow_core::event::status::processing_status::ErrorKind;
+use std::fmt;
 
 /// Error type for handler-level failures.
 #[derive(Debug, Clone)]
@@ -45,21 +46,25 @@ impl HandlerError {
     }
 }
 
+impl fmt::Display for HandlerError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            HandlerError::Timeout(msg) => write!(f, "Timeout: {}", msg),
+            HandlerError::Remote(msg) => write!(f, "Remote error: {}", msg),
+            HandlerError::Deserialization(msg) => {
+                write!(f, "Deserialization error: {}", msg)
+            }
+            HandlerError::Validation(msg) => write!(f, "Validation error: {}", msg),
+            HandlerError::Domain(msg) => write!(f, "Domain error: {}", msg),
+            HandlerError::Other(msg) => write!(f, "Handler error: {}", msg),
+        }
+    }
+}
+
+impl std::error::Error for HandlerError {}
+
 impl From<HandlerError> for StageError {
     fn from(err: HandlerError) -> Self {
-        match err {
-            HandlerError::Timeout(msg) => {
-                StageError::Other(format!("Timeout: {}", msg))
-            }
-            HandlerError::Remote(msg) => StageError::Other(format!("Remote error: {}", msg)),
-            HandlerError::Deserialization(msg) => {
-                StageError::Other(format!("Deserialization error: {}", msg))
-            }
-            HandlerError::Validation(msg) => {
-                StageError::Other(format!("Validation error: {}", msg))
-            }
-            HandlerError::Domain(msg) => StageError::Other(format!("Domain error: {}", msg)),
-            HandlerError::Other(msg) => StageError::Other(msg),
-        }
+        StageError::handler_failure(err)
     }
 }

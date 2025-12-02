@@ -4,6 +4,7 @@ use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, Delivery
 use obzenflow_core::{StageId, WriterId};
 use obzenflow_dsl_infra::{flow, sink, source, transform};
 use obzenflow_infra::journal::disk_journals;
+use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
 use obzenflow_runtime_services::stages::common::handlers::{
     FiniteSourceHandler, SinkHandler, TransformHandler,
 };
@@ -73,28 +74,29 @@ async fn test_dsl_pipeline() -> Result<()> {
 
     #[async_trait]
     impl TransformHandler for Doubler {
-        fn process(&self, event: ChainEvent) -> Vec<ChainEvent> {
+        fn process(
+            &self,
+            event: ChainEvent,
+        ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
             if let Some(value) = event
                 .payload()
                 .get("value")
                 .and_then(|v| v.as_u64())
             {
-                vec![ChainEventFactory::data_event(
+                Ok(vec![ChainEventFactory::data_event(
                     event.writer_id.clone(),
                     "Doubled",
                     json!({
                         "value": value,
                         "doubled": value * 2,
                     }),
-                )]
+                )])
             } else {
-                vec![event]
+                Ok(vec![event])
             }
         }
 
-        async fn drain(&mut self) -> obzenflow_core::Result<()> {
-            Ok(())
-        }
+        async fn drain(&mut self) -> std::result::Result<(), HandlerError> { Ok(()) }
     }
 
     #[derive(Clone, Debug)]
@@ -113,7 +115,7 @@ async fn test_dsl_pipeline() -> Result<()> {
         async fn consume(
             &mut self,
             event: ChainEvent,
-        ) -> obzenflow_core::Result<DeliveryPayload> {
+        ) -> std::result::Result<DeliveryPayload, HandlerError> {
             if let Some(doubled) = event
                 .payload()
                 .get("doubled")

@@ -17,6 +17,11 @@ pub enum StageError {
     InvalidState(String),
     /// Operation timed out
     Timeout,
+    /// Handler-level failure that the supervisor has deemed stage-fatal.
+    ///
+    /// This wraps a `HandlerError` from stage logic so the pipeline FSM can
+    /// distinguish handler failures from other coordination errors.
+    HandlerFailure(crate::stages::common::handler_error::HandlerError),
     /// Generic error
     Other(String),
 }
@@ -30,6 +35,9 @@ impl fmt::Display for StageError {
             StageError::EventSendFailed(msg) => write!(f, "Failed to send event to stage: {}", msg),
             StageError::InvalidState(msg) => write!(f, "Invalid stage state: {}", msg),
             StageError::Timeout => write!(f, "Stage operation timed out"),
+            StageError::HandlerFailure(err) => {
+                write!(f, "Stage handler failure: {:?}", err)
+            }
             StageError::Other(msg) => write!(f, "Stage error: {}", msg),
         }
     }
@@ -46,6 +54,15 @@ impl From<String> for StageError {
 impl From<&str> for StageError {
     fn from(s: &str) -> Self {
         StageError::Other(s.to_string())
+    }
+}
+
+impl StageError {
+    /// Helper to construct a handler failure variant from a HandlerError.
+    pub fn handler_failure(
+        err: crate::stages::common::handler_error::HandlerError,
+    ) -> Self {
+        StageError::HandlerFailure(err)
     }
 }
 

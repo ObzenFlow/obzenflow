@@ -9,6 +9,7 @@ use obzenflow_core::{
 use obzenflow_dsl_infra::{flow, sink, source, stateful};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
+use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
 use obzenflow_runtime_services::stages::common::handlers::{
     FiniteSourceHandler, SinkHandler, StatefulHandler,
 };
@@ -84,8 +85,9 @@ impl SinkHandler for CollectingSink {
     async fn consume(
         &mut self,
         event: ChainEvent,
-    ) -> obzenflow_core::Result<
+    ) -> std::result::Result<
         obzenflow_core::event::payloads::delivery_payload::DeliveryPayload,
+        HandlerError,
     > {
         self.events.lock().unwrap().push(event);
         Ok(
@@ -130,12 +132,15 @@ impl StatefulHandler for CounterHandler {
         CounterState::default()
     }
 
-    fn create_events(&self, state: &Self::State) -> Vec<ChainEvent> {
-        vec![ChainEventFactory::data_event(
+    fn create_events(
+        &self,
+        state: &Self::State,
+    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
+        Ok(vec![ChainEventFactory::data_event(
             self.writer_id.clone(),
             "count_result",
             json!({ "total_count": state.count }),
-        )]
+        )])
     }
 }
 
@@ -166,8 +171,11 @@ impl StatefulHandler for AccumulatorHandler {
         Vec::new()
     }
 
-    fn create_events(&self, state: &Self::State) -> Vec<ChainEvent> {
-        state
+    fn create_events(
+        &self,
+        state: &Self::State,
+    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
+        Ok(state
             .iter()
             .map(|&value| {
                 ChainEventFactory::data_event(
@@ -176,7 +184,7 @@ impl StatefulHandler for AccumulatorHandler {
                     json!({ "value": value }),
                 )
             })
-            .collect()
+            .collect())
     }
 }
 
@@ -206,12 +214,15 @@ impl StatefulHandler for SumHandler {
         0
     }
 
-    fn create_events(&self, state: &Self::State) -> Vec<ChainEvent> {
-        vec![ChainEventFactory::data_event(
+    fn create_events(
+        &self,
+        state: &Self::State,
+    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
+        Ok(vec![ChainEventFactory::data_event(
             self.writer_id.clone(),
             "sum_result",
             json!({ "total_sum": *state }),
-        )]
+        )])
     }
 }
 
@@ -240,20 +251,26 @@ impl StatefulHandler for ImmediateEmitter {
         true
     }
 
-    fn emit(&self, state: &mut Self::State) -> Vec<ChainEvent> {
-        vec![ChainEventFactory::data_event(
+    fn emit(
+        &self,
+        state: &mut Self::State,
+    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
+        Ok(vec![ChainEventFactory::data_event(
             self.writer_id.clone(),
             "progress_update",
             json!({ "current_count": *state }),
-        )]
+        )])
     }
 
     fn initial_state(&self) -> Self::State {
         0
     }
 
-    fn create_events(&self, _state: &Self::State) -> Vec<ChainEvent> {
-        vec![]
+    fn create_events(
+        &self,
+        _state: &Self::State,
+    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
+        Ok(vec![])
     }
 }
 

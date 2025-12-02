@@ -503,26 +503,44 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Hand
                                     }
                                 }
                                 obzenflow_core::event::ChainEventContent::Data { .. } => {
-                                    // Process data event with instrumentation
+                                    // Process data event (or pass through error-marked events)
                                     let handler = ctx.handler.clone();
-                                    let event_to_process = envelope.event.clone();
+                                    let envelope_clone = envelope.clone();
 
-                                    // Use run_if_not_error to handle error events
-                                    if matches!(event_to_process.processing_info.status, obzenflow_core::event::status::processing_status::ProcessingStatus::Error { .. }) {
-                                        tracing::info!(
-                                            "Transform supervisor {} received error event {}: {:?}",
-                                            ctx.stage_name,
-                                            event_to_process.id,
-                                            event_to_process.processing_info.status
-                                        );
-                                    }
-                                    let events_to_process = self
-                                        .run_if_not_error(event_to_process, |e| handler.process(e));
-
-                                    // Process with instrumentation
                                     let result = process_with_instrumentation(
                                         &ctx.instrumentation,
-                                        || async move { Ok(events_to_process) },
+                                        || async move {
+                                            use obzenflow_core::event::status::processing_status::ProcessingStatus;
+
+                                            let event = envelope_clone.event.clone();
+
+                                            // If this event is already marked as Error, pass it through unchanged.
+                                            if matches!(
+                                                event.processing_info.status,
+                                                ProcessingStatus::Error { .. }
+                                            ) {
+                                                tracing::info!(
+                                                    "Transform supervisor received pre-error-marked event {}: {:?}",
+                                                    event.id,
+                                                    event.processing_info.status
+                                                );
+                                                return Ok(vec![event]);
+                                            }
+
+                                            // Normal path: invoke handler and map per-record failures
+                                            match handler.process(event) {
+                                                Ok(outputs) => Ok(outputs),
+                                                Err(err) => {
+                                                    // Per-record handler failure: turn input into an error-marked event
+                                                    let reason = format!("Transform handler error: {:?}", err);
+                                                    let error_event = envelope_clone
+                                                        .event
+                                                        .clone()
+                                                        .mark_as_error(reason, err.kind());
+                                                    Ok(vec![error_event])
+                                                }
+                                            }
+                                        },
                                     )
                                     .await;
 
@@ -723,18 +741,37 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Hand
 
                             // Process remaining event based on type
                             if !envelope.event.is_control() {
-                                // Process data events
-                                let envelope_event = envelope.event.clone();
-
-                                // Use run_if_not_error to handle error events
-                                let events_to_process = self
-                                    .run_if_not_error(envelope_event, |e| {
-                                        ctx.handler.process(e)
-                                    });
+                                // Process data events (or pass through error-marked events)
+                                let handler = ctx.handler.clone();
+                                let envelope_clone = envelope.clone();
 
                                 let transformed_events = process_with_instrumentation(
                                     &ctx.instrumentation,
-                                    || async move { Ok(events_to_process) },
+                                    || async move {
+                                        use obzenflow_core::event::status::processing_status::ProcessingStatus;
+
+                                        let event = envelope_clone.event.clone();
+
+                                        // If this event is already marked as Error, pass it through unchanged.
+                                        if matches!(
+                                            event.processing_info.status,
+                                            ProcessingStatus::Error { .. }
+                                        ) {
+                                            return Ok(vec![event]);
+                                        }
+
+                                        match handler.process(event) {
+                                            Ok(outputs) => Ok(outputs),
+                                            Err(err) => {
+                                                let reason = format!("Transform handler error during drain: {:?}", err);
+                                                let error_event = envelope_clone
+                                                    .event
+                                                    .clone()
+                                                    .mark_as_error(reason, err.kind());
+                                                Ok(vec![error_event])
+                                            }
+                                        }
+                                    },
                                 )
                                 .await?;
 

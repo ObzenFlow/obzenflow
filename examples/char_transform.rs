@@ -26,6 +26,7 @@ use obzenflow_core::{
 use obzenflow_dsl_infra::{flow, sink, source, stateful, transform};
 use obzenflow_infra::application::{FlowApplication, LogLevel};
 use obzenflow_infra::journal::disk_journals;
+use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
 use obzenflow_runtime_services::stages::common::handlers::{FiniteSourceHandler, SinkHandler};
 // FLOWIP-080h: Typed transform helpers
 use obzenflow_runtime_services::stages::transform::MapTyped;
@@ -198,7 +199,10 @@ impl OutputSink {
 
 #[async_trait]
 impl SinkHandler for OutputSink {
-    async fn consume(&mut self, event: ChainEvent) -> obzenflow_core::Result<DeliveryPayload> {
+    async fn consume(
+        &mut self,
+        event: ChainEvent,
+    ) -> Result<DeliveryPayload, HandlerError> {
         // ✨ FLOWIP-082a: Check event type using constant (from ReduceTyped)
         if event.event_type() == TextAccumulator::EVENT_TYPE {
             let payload = event.payload();

@@ -334,13 +334,16 @@ mod tests {
         );
 
         // hit
-        let hit = handler.process_event(
-            &mut state,
-            StreamRow { key: "k1".into() }.to_event(writer.clone()),
-            StageId::new(),
-            writer.clone(),
-        );
-        let joined = Joined::from_event(&hit[0]).unwrap();
+        let hit = handler
+            .process_event(
+                &mut state,
+                StreamRow { key: "k1".into() }.to_event(writer.clone()),
+                StageId::new(),
+                writer.clone(),
+            )
+            .expect("process_event should succeed for inner join hit case");
+        let joined =
+            Joined::from_event(&hit[0]).expect("should deserialize joined row for inner join hit");
         assert_eq!(
             joined,
             Joined {
@@ -350,15 +353,17 @@ mod tests {
         );
 
         // miss drops
-        let miss = handler.process_event(
-            &mut state,
-            StreamRow {
-                key: "missing".into(),
-            }
-            .to_event(writer.clone()),
-            StageId::new(),
-            writer.clone(),
-        );
+        let miss = handler
+            .process_event(
+                &mut state,
+                StreamRow {
+                    key: "missing".into(),
+                }
+                .to_event(writer.clone()),
+                StageId::new(),
+                writer.clone(),
+            )
+            .expect("process_event should succeed for inner join miss case");
         assert!(miss.is_empty());
     }
 }

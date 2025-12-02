@@ -4,6 +4,7 @@ use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, Delivery
 use obzenflow_core::{StageId, WriterId};
 use obzenflow_dsl_infra::{flow, sink, source, transform};
 use obzenflow_infra::journal::disk_journals;
+use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
 use obzenflow_runtime_services::stages::common::handlers::{
     FiniteSourceHandler, SinkHandler, TransformHandler,
 };
@@ -38,7 +39,7 @@ impl SinkHandler for EventCounterSink {
     async fn consume(
         &mut self,
         _event: ChainEvent,
-    ) -> obzenflow_core::Result<DeliveryPayload> {
+    ) -> std::result::Result<DeliveryPayload, HandlerError> {
         if _event.is_data() {
             self.count.fetch_add(1, Ordering::Relaxed);
         }
@@ -138,14 +139,14 @@ impl Doubler {
 
 #[async_trait]
 impl TransformHandler for Doubler {
-    fn process(&self, event: ChainEvent) -> Vec<ChainEvent> {
-        // Return doubled events
-        vec![event.clone(), event]
+    fn process(
+        &self,
+        event: ChainEvent,
+    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
+        Ok(vec![event.clone(), event])
     }
 
-    async fn drain(&mut self) -> obzenflow_core::Result<()> {
-        Ok(())
-    }
+    async fn drain(&mut self) -> std::result::Result<(), HandlerError> { Ok(()) }
 }
 
 #[tokio::test]
@@ -237,25 +238,26 @@ impl NumberDoubler {
 
 #[async_trait]
 impl TransformHandler for NumberDoubler {
-    fn process(&self, event: ChainEvent) -> Vec<ChainEvent> {
+    fn process(
+        &self,
+        event: ChainEvent,
+    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
         if let Some(value) = event
             .payload()
             .get("value")
             .and_then(|v| v.as_u64())
         {
-            vec![ChainEventFactory::data_event(
+            Ok(vec![ChainEventFactory::data_event(
                 event.writer_id.clone(),
                 "DoubledNumber",
                 json!({ "value": value * 2 }),
-            )]
+            )])
         } else {
-            vec![]
+            Ok(vec![])
         }
     }
 
-    async fn drain(&mut self) -> obzenflow_core::Result<()> {
-        Ok(())
-    }
+    async fn drain(&mut self) -> std::result::Result<(), HandlerError> { Ok(()) }
 }
 
 /// A sink that sums all numbers it receives
@@ -276,7 +278,7 @@ impl SinkHandler for SumSink {
     async fn consume(
         &mut self,
         event: ChainEvent,
-    ) -> obzenflow_core::Result<DeliveryPayload> {
+    ) -> std::result::Result<DeliveryPayload, HandlerError> {
         if let Some(value) = event
             .payload()
             .get("value")

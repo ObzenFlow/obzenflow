@@ -30,6 +30,7 @@ use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime_services::prelude::FlowHandle;
 use obzenflow_runtime_services::stages::SourceError;
+use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
 use obzenflow_runtime_services::stages::common::handlers::TransformHandler;
 use serde_json::json;
 use std::num::NonZeroU32;
@@ -46,7 +47,7 @@ struct ValidationTransform;
 
 #[async_trait]
 impl TransformHandler for ValidationTransform {
-    fn process(&self, mut event: ChainEvent) -> Vec<ChainEvent> {
+    fn process(&self, mut event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
         let payload = event.payload();
 
         let cmd = match serde_json::from_value::<PaymentCommand>(payload.clone()) {
@@ -56,7 +57,7 @@ impl TransformHandler for ValidationTransform {
                     "failed_to_deserialize_payment_command",
                     ErrorKind::Deserialization,
                 );
-                return vec![event];
+                return Ok(vec![event]);
             }
         };
 
@@ -95,10 +96,10 @@ impl TransformHandler for ValidationTransform {
         out.runtime_context = event.runtime_context.clone();
         out.observability = event.observability.clone();
 
-        vec![out]
+        Ok(vec![out])
     }
 
-    async fn drain(&mut self) -> obzenflow_core::Result<()> {
+    async fn drain(&mut self) -> Result<(), HandlerError> {
         Ok(())
     }
 }
@@ -115,13 +116,13 @@ struct GatewayTransform;
 
 #[async_trait]
 impl TransformHandler for GatewayTransform {
-    fn process(&self, mut event: ChainEvent) -> Vec<ChainEvent> {
+    fn process(&self, mut event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
         // If validation has already failed we leave the event alone.
         if matches!(
             event.processing_info.status,
             ProcessingStatus::Error { .. }
         ) {
-            return vec![event];
+            return Ok(vec![event]);
         }
 
         let payload = event.payload();
@@ -132,7 +133,7 @@ impl TransformHandler for GatewayTransform {
                     event.processing_info.status = ProcessingStatus::error(
                         "failed_to_deserialize_validated_payment",
                     );
-                    return vec![event];
+                    return Ok(vec![event]);
                 }
             };
 
@@ -163,7 +164,7 @@ impl TransformHandler for GatewayTransform {
                 out.runtime_context = event.runtime_context.clone();
                 out.observability = event.observability.clone();
 
-                vec![out]
+                Ok(vec![out])
             }
             TrafficPhase::Outage => {
                 // Simulated remote outage: the gateway call "times out" and
@@ -172,12 +173,12 @@ impl TransformHandler for GatewayTransform {
                 // middleware now keys off ProcessingStatus::Error instead of
                 // container emptiness, which is both clearer and safer.
                 event = event.mark_as_error("gateway_timeout_simulated", ErrorKind::Timeout);
-                vec![event]
+                Ok(vec![event])
             }
         }
     }
 
-    async fn drain(&mut self) -> obzenflow_core::Result<()> {
+    async fn drain(&mut self) -> Result<(), HandlerError> {
         Ok(())
     }
 }

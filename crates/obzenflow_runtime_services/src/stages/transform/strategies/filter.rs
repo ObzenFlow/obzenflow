@@ -43,6 +43,7 @@
 //! });
 //! ```
 
+use crate::stages::common::handler_error::HandlerError;
 use crate::stages::common::handlers::TransformHandler;
 use async_trait::async_trait;
 use obzenflow_core::event::ChainEventFactory;
@@ -121,15 +122,18 @@ impl<F> TransformHandler for Filter<F>
 where
     F: Fn(&ChainEvent) -> bool + Send + Sync + Clone + 'static,
 {
-    fn process(&self, event: ChainEvent) -> Vec<ChainEvent> {
+    fn process(
+        &self,
+        event: ChainEvent,
+    ) -> Result<Vec<ChainEvent>, HandlerError> {
         if (self.predicate)(&event) {
-            vec![event]
+            Ok(vec![event])
         } else {
-            vec![]
+            Ok(vec![])
         }
     }
 
-    async fn drain(&mut self) -> obzenflow_core::Result<()> {
+    async fn drain(&mut self) -> Result<(), HandlerError> {
         Ok(())
     }
 }
@@ -227,25 +231,28 @@ where
     T: DeserializeOwned + Send + Sync + 'static,
     F: Fn(&T) -> bool + Send + Sync + Clone + 'static,
 {
-    fn process(&self, event: ChainEvent) -> Vec<ChainEvent> {
+    fn process(
+        &self,
+        event: ChainEvent,
+    ) -> Result<Vec<ChainEvent>, HandlerError> {
         // Step 1: Deserialize ChainEvent payload → T
         let input_value: T = match serde_json::from_value(event.payload().clone()) {
             Ok(v) => v,
             Err(_) => {
                 // Deserialization failed - event doesn't match type T, so drop it
-                return vec![];
+                return Ok(vec![]);
             }
         };
 
         // Step 2: Apply predicate
         if (self.predicate)(&input_value) {
-            vec![event]
+            Ok(vec![event])
         } else {
-            vec![]
+            Ok(vec![])
         }
     }
 
-    async fn drain(&mut self) -> obzenflow_core::Result<()> {
+    async fn drain(&mut self) -> Result<(), HandlerError> {
         Ok(())
     }
 }
@@ -299,7 +306,9 @@ mod tests {
             json!({"level": "error", "msg": "test"}),
         );
 
-        let result = filter.process(event);
+        let result = filter
+            .process(event)
+            .expect("Filter::process should succeed in test_filter_passes_matching_events");
         assert_eq!(result.len(), 1);
     }
 
@@ -313,7 +322,9 @@ mod tests {
             json!({"level": "info", "msg": "test"}),
         );
 
-        let result = filter.process(event);
+        let result = filter
+            .process(event)
+            .expect("Filter::process should succeed in test_filter_drops_non_matching_events");
         assert_eq!(result.len(), 0);
     }
 
@@ -326,14 +337,20 @@ mod tests {
             "order",
             json!({"amount": 150.0}),
         );
-        assert_eq!(filter.process(high).len(), 1);
+        let high_result = filter
+            .process(high)
+            .expect("Filter::process should succeed for high amount");
+        assert_eq!(high_result.len(), 1);
 
         let low = ChainEventFactory::data_event(
             WriterId::from(StageId::new()),
             "order",
             json!({"amount": 50.0}),
         );
-        assert_eq!(filter.process(low).len(), 0);
+        let low_result = filter
+            .process(low)
+            .expect("Filter::process should succeed for low amount");
+        assert_eq!(low_result.len(), 0);
     }
 
     #[tokio::test]

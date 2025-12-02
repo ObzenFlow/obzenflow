@@ -191,6 +191,7 @@ mod tests {
     #[tokio::test] // use Tokio or any async‑test runtime
     async fn test_logging_middleware_with_sink() {
         use crate::middleware::SinkHandlerExt;
+        use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
 
         /// Simple in‑memory sink for testing
         struct TestSink {
@@ -208,7 +209,7 @@ mod tests {
             async fn consume(
                 &mut self,
                 event: ChainEvent,
-            ) -> obzenflow_core::Result<DeliveryPayload> {
+            ) -> std::result::Result<DeliveryPayload, HandlerError> {
                 self.consumed.push(event);
                 Ok(DeliveryPayload::success(
                     "test_sink",          // destination

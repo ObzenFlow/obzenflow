@@ -42,6 +42,7 @@
 //! });
 //! ```
 
+use crate::stages::common::handler_error::HandlerError;
 use crate::stages::common::handlers::TransformHandler;
 use async_trait::async_trait;
 use obzenflow_core::event::ChainEventFactory;
@@ -125,11 +126,14 @@ impl<F> TransformHandler for Map<F>
 where
     F: Fn(ChainEvent) -> ChainEvent + Send + Sync + Clone + 'static,
 {
-    fn process(&self, event: ChainEvent) -> Vec<ChainEvent> {
-        vec![(self.mapper)(event)]
+    fn process(
+        &self,
+        event: ChainEvent,
+    ) -> Result<Vec<ChainEvent>, HandlerError> {
+        Ok(vec![(self.mapper)(event)])
     }
 
-    async fn drain(&mut self) -> obzenflow_core::Result<()> {
+    async fn drain(&mut self) -> Result<(), HandlerError> {
         Ok(())
     }
 }
@@ -249,7 +253,10 @@ where
     O: Serialize + Send + Sync + TypedPayload + 'static,
     F: Fn(T) -> O + Send + Sync + Clone + 'static,
 {
-    fn process(&self, event: ChainEvent) -> Vec<ChainEvent> {
+    fn process(
+        &self,
+        event: ChainEvent,
+    ) -> Result<Vec<ChainEvent>, HandlerError> {
         // Step 1: Deserialize ChainEvent payload → T
         let input_value: T = match serde_json::from_value(event.payload().clone()) {
             Ok(v) => v,
@@ -282,15 +289,15 @@ where
 
         // FLOWIP-082a: Use TypedPayload::EVENT_TYPE (compile-time constant)
         let event_type = O::versioned_event_type();
-        vec![ChainEventFactory::derived_data_event(
+        Ok(vec![ChainEventFactory::derived_data_event(
             event.writer_id.clone(),
             &event,
             &event_type,
             payload,
-        )]
+        )])
     }
 
-    async fn drain(&mut self) -> obzenflow_core::Result<()> {
+    async fn drain(&mut self) -> Result<(), HandlerError> {
         Ok(())
     }
 }
@@ -362,7 +369,9 @@ mod tests {
             json!({"value": 42}),
         );
 
-        let result = map.process(event);
+        let result = map
+            .process(event)
+            .expect("map.process should succeed in test_map_adds_field");
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].payload()["processed"], json!(true));
         assert_eq!(result[0].payload()["value"], json!(42));
@@ -385,7 +394,9 @@ mod tests {
             json!({"price": 10.0, "quantity": 5.0}),
         );
 
-        let result = map.process(event);
+        let result = map
+            .process(event)
+            .expect("map.process should succeed in test_map_computed_field");
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].payload()["total"], json!(50.0));
     }
@@ -399,7 +410,9 @@ mod tests {
         let event =
             ChainEventFactory::data_event(WriterId::from(StageId::new()), "original", json!({}));
 
-        let result = map.process(event);
+        let result = map
+            .process(event)
+            .expect("map.process should succeed in test_map_event_type_change");
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].event_type(), "processed");
     }
@@ -456,7 +469,9 @@ mod tests {
             json!({"value": 21, "name": "test"}),
         );
 
-        let result = mapper.process(event);
+        let result = mapper
+            .process(event)
+            .expect("MapTyped::process should succeed in test_map_typed_success");
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].event_type(), "test.output.v1");
         assert_eq!(result[0].payload()["value"], json!(21));
@@ -480,7 +495,9 @@ mod tests {
             json!({"value": 5, "name": "hello"}),
         );
 
-        let result = mapper.process(event);
+        let result = mapper
+            .process(event)
+            .expect("MapTyped::process should succeed in test_map_typed_transformation");
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].event_type(), "test.output.v1");
         assert_eq!(result[0].payload()["value"], json!(50));

@@ -1,5 +1,6 @@
 //! Common types and utilities for join handlers
 
+use crate::stages::common::handler_error::HandlerError;
 use crate::stages::common::handlers::JoinHandler;
 use obzenflow_core::event::schema::TypedPayload;
 use obzenflow_core::StageId;
@@ -161,7 +162,7 @@ where
         event: ChainEvent,
         _source_id: StageId,
         writer_id: WriterId,
-    ) -> Vec<ChainEvent> {
+    ) -> Result<Vec<ChainEvent>, HandlerError> {
         // Hydrating: catalog side
         if let Some(catalog_data) = S::CatalogType::from_event(&event) {
             let key = (self.catalog_key_fn)(&catalog_data);
@@ -171,21 +172,22 @@ where
                 "JoinWithStrategy: Added to catalog"
             );
             state.reference_catalog.insert(key, catalog_data);
-            return vec![];
+            return Ok(vec![]);
         }
 
         // Enriching: stream side
         if let Some(stream_data) = S::StreamType::from_event(&event) {
             let key = (self.stream_key_fn)(&stream_data);
-            return self.strategy.match_stream_event(
+            let events = self.strategy.match_stream_event(
                 &state.reference_catalog,
                 stream_data,
                 key,
                 writer_id,
             );
+            return Ok(events);
         }
 
-        vec![]
+        Ok(vec![])
     }
 
     fn on_source_eof(
@@ -193,13 +195,13 @@ where
         state: &mut Self::State,
         source_id: StageId,
         _writer_id: WriterId,
-    ) -> Vec<ChainEvent> {
+    ) -> Result<Vec<ChainEvent>, HandlerError> {
         if state.reference_eof_seen && state.stream_eof_seen {
             tracing::debug!(
                 strategy = %std::any::type_name::<S>(),
                 "JoinWithStrategy: duplicate EOF ignored"
             );
-            return vec![];
+            return Ok(vec![]);
         }
 
         // Heuristic: first EOF flips reference, second flips stream (order doesn’t matter here)
@@ -221,10 +223,13 @@ where
                 "JoinWithStrategy: stream EOF received"
             );
         }
-        vec![]
+        Ok(vec![])
     }
 
-    async fn drain(&self, _state: &Self::State) -> obzenflow_core::Result<Vec<ChainEvent>> {
+    async fn drain(
+        &self,
+        _state: &Self::State,
+    ) -> Result<Vec<ChainEvent>, HandlerError> {
         Ok(vec![])
     }
 }
@@ -315,7 +320,9 @@ mod tests {
         }
         .to_event(writer.clone());
 
-        let out = handler.process_event(&mut state, catalog_event, StageId::new(), writer);
+        let out = handler
+            .process_event(&mut state, catalog_event, StageId::new(), writer)
+            .expect("process_event should succeed in catalog_hydration_builds_reference_map");
         assert!(out.is_empty());
         assert_eq!(state.reference_catalog.len(), 1);
         assert!(state.reference_catalog.contains_key("k1"));
@@ -333,11 +340,16 @@ mod tests {
             value: "v1".into(),
         }
         .to_event(writer.clone());
-        handler.process_event(&mut state, catalog_event, StageId::new(), writer.clone());
+        handler
+            .process_event(&mut state, catalog_event, StageId::new(), writer.clone())
+            .expect("process_event should succeed while hydrating catalog");
 
         // enrich
-        let stream_event = StreamRow { key: "k1".into() }.to_event(WriterId::from(StageId::new()));
-        let out = handler.process_event(&mut state, stream_event, StageId::new(), writer.clone());
+        let stream_event =
+            StreamRow { key: "k1".into() }.to_event(WriterId::from(StageId::new()));
+        let out = handler
+            .process_event(&mut state, stream_event, StageId::new(), writer.clone())
+            .expect("process_event should succeed in stream_hit_emits_joined_row");
         assert_eq!(out.len(), 1);
 
         let joined = JoinedRow::from_event(&out[0]).expect("should deserialize joined row");
@@ -360,7 +372,9 @@ mod tests {
             key: "missing".into(),
         }
         .to_event(WriterId::from(StageId::new()));
-        let out = handler.process_event(&mut state, stream_event, StageId::new(), writer.clone());
+        let out = handler
+            .process_event(&mut state, stream_event, StageId::new(), writer.clone())
+            .expect("process_event should succeed in stream_miss_passes_none_catalog");
         assert_eq!(out.len(), 1);
         let joined = JoinedRow::from_event(&out[0]).expect("should deserialize joined row");
         assert_eq!(

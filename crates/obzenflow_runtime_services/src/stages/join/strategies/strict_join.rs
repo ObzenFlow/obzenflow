@@ -333,16 +333,17 @@ mod tests {
         let mut state = handler.initial_state();
         let w = WriterId::from(StageId::new());
 
-        let out = handler.process_event(
-            &mut state,
-            StreamRow {
-                key: "missing".into(),
-            }
-            .to_event(w.clone()),
-            StageId::new(),
-            w.clone(),
-        );
-
+        let out = handler
+            .process_event(
+                &mut state,
+                StreamRow {
+                    key: "missing".into(),
+                }
+                .to_event(w.clone()),
+                StageId::new(),
+                w.clone(),
+            )
+            .expect("process_event should succeed for strict join miss case");
         assert_eq!(out.len(), 1);
         match &out[0].content {
             ChainEventContent::FlowControl(FlowControlPayload::Eof { natural, .. }) => {
