@@ -12,7 +12,7 @@ doctest = false
 [dependencies]
 # Internal dependencies
 obzenflow_core = { path = "../obzenflow_core" }
-obzenflow-topology = { path = "../../../obzenflow-topology" }
+obzenflow-topology = { path = "../../../obzenflow-topology", version = "0.2" }
 obzenflow-fsm = { path = "../../../obzenflow-fsm", version = "0.3.0" }
 
 # Service layer dependencies

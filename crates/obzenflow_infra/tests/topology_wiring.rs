@@ -8,7 +8,7 @@ use obzenflow_core::{ChainEvent, FlowId, StageId, SystemId};
 use obzenflow_infra::journal::MemoryJournal;
 use obzenflow_runtime_services::id_conversions::StageIdExt;
 use obzenflow_runtime_services::stages::resources_builder::StageResourcesBuilder;
-use obzenflow_topology::TopologyBuilder;
+use obzenflow_topology::{TopologyBuilder, StageType as TopologyStageType};
 
 #[tokio::test]
 async fn sink_wires_to_reducer_in_simple_chain() {
@@ -21,13 +21,29 @@ async fn sink_wires_to_reducer_in_simple_chain() {
     let sink = StageId::new();
 
     let mut builder = TopologyBuilder::new();
-    builder.add_stage_with_id(src.to_topology_id(), Some("src".to_string()));
+    builder.add_stage_with_id(
+        src.to_topology_id(),
+        Some("src".to_string()),
+        TopologyStageType::FiniteSource,
+    );
     builder.reset_current();
-    builder.add_stage_with_id(mapper.to_topology_id(), Some("mapper".to_string()));
+    builder.add_stage_with_id(
+        mapper.to_topology_id(),
+        Some("mapper".to_string()),
+        TopologyStageType::Transform,
+    );
     builder.reset_current();
-    builder.add_stage_with_id(reducer.to_topology_id(), Some("reducer".to_string()));
+    builder.add_stage_with_id(
+        reducer.to_topology_id(),
+        Some("reducer".to_string()),
+        TopologyStageType::Transform,
+    );
     builder.reset_current();
-    builder.add_stage_with_id(sink.to_topology_id(), Some("sink".to_string()));
+    builder.add_stage_with_id(
+        sink.to_topology_id(),
+        Some("sink".to_string()),
+        TopologyStageType::Sink,
+    );
     builder.reset_current();
     builder.add_edge(src.to_topology_id(), mapper.to_topology_id());
     builder.add_edge(mapper.to_topology_id(), reducer.to_topology_id());

@@ -25,6 +25,12 @@ pub struct StageApiInfo {
     #[serde(rename = "type")]
     pub stage_type: String,
     pub status: String,
+    /// Semantic stage type from topology (finite_source, join, sink, ...)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub semantic_type: Option<String>,
+    /// Connection role derived from StageType (producer/processor/consumer)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
 }
 
 /// Edge information for API response
@@ -32,6 +38,8 @@ pub struct StageApiInfo {
 pub struct EdgeApiInfo {
     pub from: String,
     pub to: String,
+    /// Edge operator semantics (`|>` vs `<|`)
+    pub kind: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub events_per_sec: Option<f64>,
 }
@@ -123,15 +131,20 @@ impl TopologyHttpEndpoint {
                     status: metadata
                         .map(|m| m.status.as_str().to_string())
                         .unwrap_or_else(|| "pending".to_string()),
+                    semantic_type: Some(stage_info.stage_type.as_str().to_string()),
+                    role: Some(stage_info.stage_type.role().to_string()),
                 }
             })
             .collect();
         
-        let edges: Vec<EdgeApiInfo> = self.topology.edges()
-            .into_iter()
+        let edges: Vec<EdgeApiInfo> = self
+            .topology
+            .edges()
+            .iter()
             .map(|edge| EdgeApiInfo {
                 from: edge.from.to_string(),
                 to: edge.to.to_string(),
+                kind: edge.kind.to_string(),
                 events_per_sec: None, // Could be populated from metrics later
             })
             .collect();

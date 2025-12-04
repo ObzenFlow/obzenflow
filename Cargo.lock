@@ -1600,11 +1600,12 @@ dependencies = [
 
 [[package]]
 name = "obzenflow-topology"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "obzenflow-idkit",
  "once_cell",
  "serde",
+ "serde_json",
  "thiserror 1.0.69",
 ]
 
@@ -1683,6 +1684,7 @@ dependencies = [
  "obzenflow_core",
  "obzenflow_runtime_services",
  "serde",
+ "thiserror 1.0.69",
  "tokio",
  "tokio-test",
  "tracing",

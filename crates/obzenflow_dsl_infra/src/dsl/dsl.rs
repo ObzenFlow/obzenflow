@@ -15,11 +15,13 @@ macro_rules! parse_topology {
     ($connections:expr, ($reference:ident, $stream:ident) |> $join:ident; $($rest:tt)*) => {
         $connections.push((
             stringify!($reference).to_string(),
-            stringify!($join).to_string()
+            stringify!($join).to_string(),
+            obzenflow_topology::EdgeKind::Forward,
         ));
         $connections.push((
             stringify!($stream).to_string(),
-            stringify!($join).to_string()
+            stringify!($join).to_string(),
+            obzenflow_topology::EdgeKind::Forward,
         ));
         $crate::parse_topology!($connections, $($rest)*);
     };
@@ -28,7 +30,8 @@ macro_rules! parse_topology {
     ($connections:expr, $from:ident |> $to:ident; $($rest:tt)*) => {
         $connections.push((
             stringify!($from).to_string(),
-            stringify!($to).to_string()
+            stringify!($to).to_string(),
+            obzenflow_topology::EdgeKind::Forward,
         ));
         $crate::parse_topology!($connections, $($rest)*);
     };
@@ -37,7 +40,8 @@ macro_rules! parse_topology {
     ($connections:expr, $from:ident <| $to:ident; $($rest:tt)*) => {
         $connections.push((
             stringify!($to).to_string(),    // Note: reversed!
-            stringify!($from).to_string()
+            stringify!($from).to_string(),
+            obzenflow_topology::EdgeKind::Backward,
         ));
         $crate::parse_topology!($connections, $($rest)*);
     };
@@ -60,11 +64,13 @@ macro_rules! parse_topology_with_joins {
         ));
         $connections.push((
             stringify!($reference).to_string(),
-            stringify!($join).to_string()
+            stringify!($join).to_string(),
+            obzenflow_topology::EdgeKind::Forward,
         ));
         $connections.push((
             stringify!($stream).to_string(),
-            stringify!($join).to_string()
+            stringify!($join).to_string(),
+            obzenflow_topology::EdgeKind::Forward,
         ));
         $crate::parse_topology_with_joins!($connections, $join_connections, $($rest)*);
     };
@@ -73,7 +79,8 @@ macro_rules! parse_topology_with_joins {
     ($connections:expr, $join_connections:expr, $from:ident |> $to:ident; $($rest:tt)*) => {
         $connections.push((
             stringify!($from).to_string(),
-            stringify!($to).to_string()
+            stringify!($to).to_string(),
+            obzenflow_topology::EdgeKind::Forward,
         ));
         $crate::parse_topology_with_joins!($connections, $join_connections, $($rest)*);
     };
@@ -82,7 +89,8 @@ macro_rules! parse_topology_with_joins {
     ($connections:expr, $join_connections:expr, $from:ident <| $to:ident; $($rest:tt)*) => {
         $connections.push((
             stringify!($to).to_string(),    // Note: reversed!
-            stringify!($from).to_string()
+            stringify!($from).to_string(),
+            obzenflow_topology::EdgeKind::Backward,
         ));
         $crate::parse_topology_with_joins!($connections, $join_connections, $($rest)*);
     };
@@ -124,7 +132,7 @@ macro_rules! flow {
             )*
 
             // Create connections
-            let mut connections: Vec<(String, String)> = Vec::new();
+            let mut connections: Vec<(String, String, obzenflow_topology::EdgeKind)> = Vec::new();
 
             // Parse topology edges
             $crate::parse_topology!(connections, $($edge)*);
@@ -172,7 +180,7 @@ macro_rules! flow {
             )*
 
             // Create connections
-            let mut connections: Vec<(String, String)> = Vec::new();
+            let mut connections: Vec<(String, String, obzenflow_topology::EdgeKind)> = Vec::new();
 
             // Parse topology edges
             $crate::parse_topology!(connections, $($edge)*);
@@ -194,18 +202,39 @@ macro_rules! flow {
 macro_rules! build_typed_flow {
     ($flow_name:expr, $journals:expr, $stages:expr, $connections:expr, $create_flow_middleware:expr) => {{
         use $crate::prelude::*;
+        use $crate::dsl::FlowBuildError;
+        use obzenflow_topology::{StageInfo as TopologyStageInfo, DirectedEdge, EdgeKind};
         use std::sync::Arc;
         use std::collections::HashMap;
-
-        // Helper functions for clean ID conversions
-        fn to_core_id(topology_id: obzenflow_topology::StageId) -> StageId {
-            // Convert topology's idkit Id to standard ulid crate's Ulid
-            StageId::from_ulid(topology_id.ulid())
-        }
 
         fn to_topology_id(core_id: StageId) -> obzenflow_topology::StageId {
             // Convert standard ulid crate's Ulid to topology's idkit Id
             obzenflow_topology::StageId::from_ulid(core_id.as_ulid())
+        }
+
+        fn to_topology_stage_type(
+            core_stage_type: obzenflow_core::event::context::StageType,
+        ) -> obzenflow_topology::StageType {
+            match core_stage_type {
+                obzenflow_core::event::context::StageType::FiniteSource => {
+                    obzenflow_topology::StageType::FiniteSource
+                }
+                obzenflow_core::event::context::StageType::InfiniteSource => {
+                    obzenflow_topology::StageType::InfiniteSource
+                }
+                obzenflow_core::event::context::StageType::Transform => {
+                    obzenflow_topology::StageType::Transform
+                }
+                obzenflow_core::event::context::StageType::Sink => {
+                    obzenflow_topology::StageType::Sink
+                }
+                obzenflow_core::event::context::StageType::Stateful => {
+                    obzenflow_topology::StageType::Stateful
+                }
+                obzenflow_core::event::context::StageType::Join => {
+                    obzenflow_topology::StageType::Join
+                }
+            }
         }
 
         let journal_factory_provider = $journals;
@@ -215,9 +244,8 @@ macro_rules! build_typed_flow {
 
         // Build topology - Two-pass approach for join stages:
         // Pass 1: Create all stage IDs and build name_to_id mapping
-        // Pass 2: Resolve join reference names and update descriptors
+        // Pass 2: Resolve join reference names and build StageInfo + DirectedEdge sets
 
-        let mut builder = TopologyBuilder::new();
         let mut name_to_id = HashMap::new();
         let mut descriptors = HashMap::new();
 
@@ -228,44 +256,84 @@ macro_rules! build_typed_flow {
             name_to_id.insert(name.clone(), core_id);
         }
 
-        // Pass 2: Resolve join references and add to topology
-        for (name, mut descriptor) in stages {
-            let core_id = *name_to_id.get(&name).unwrap();
+        // Move descriptors into a mutable map we can reuse later
+        for (name, descriptor) in stages {
+            descriptors.insert(name, descriptor);
+        }
+
+        // Build StageInfo list
+        let mut topology_stages: Vec<TopologyStageInfo> = Vec::new();
+        let descriptor_names: Vec<String> = descriptors.keys().cloned().collect();
+        for name in &descriptor_names {
+            let descriptor = descriptors
+                .get(name)
+                .expect("descriptor map should contain all stage names");
+            let core_id = *name_to_id
+                .get(name)
+                .expect("name_to_id should contain all stage names");
+            let topology_id = to_topology_id(core_id);
+            let topology_stage_type = to_topology_stage_type(descriptor.stage_type());
+            topology_stages.push(TopologyStageInfo::new(
+                topology_id,
+                descriptor.name().to_string(),
+                topology_stage_type,
+            ));
+        }
+
+        // Build edges, including join reference edges and explicit topology edges
+        let mut topology_edges: Vec<DirectedEdge> = Vec::new();
+
+        // Pass 2: Resolve join references and add reference edges
+        for name in &descriptor_names {
+            let descriptor = descriptors
+                .get_mut(name)
+                .expect("descriptor map should contain all stage names");
+            let core_id = *name_to_id
+                .get(name)
+                .expect("name_to_id should contain all stage names");
             let topology_id = to_topology_id(core_id);
 
             // If this is a join stage with a DSL reference variable, resolve it
             if let Some(ref_var) = descriptor.reference_stage_name() {
-                let ref_id = name_to_id.get(ref_var)
+                let ref_id = name_to_id
+                    .get(ref_var)
                     .copied()
-                    .ok_or_else(|| format!("Join stage '{}' references unknown stage variable '{}'", name, ref_var))?;
+                    .ok_or_else(|| {
+                        FlowBuildError::StageResourcesFailed(format!(
+                            "Join stage '{}' references unknown stage variable '{}'",
+                            name, ref_var
+                        ))
+                    })?;
 
                 tracing::debug!("Join stage '{}' resolved reference variable '{}' to ID {:?}",
                                name, ref_var, ref_id);
                 descriptor.set_reference_stage_id(ref_id);
 
-                // Add topology edge from reference stage to join stage
-                builder.add_edge(to_topology_id(ref_id), topology_id);
+                // Add topology edge from reference stage to join stage (forward)
+                topology_edges.push(DirectedEdge::new(
+                    to_topology_id(ref_id),
+                    topology_id,
+                    EdgeKind::Forward,
+                ));
             }
-
-            // Use add_stage_with_id to provide the real ULID
-            builder.add_stage_with_id(topology_id, Some(descriptor.name().to_string()));
-
-            descriptors.insert(name, descriptor);
-            // Break auto-connection
-            builder.reset_current();
         }
 
-
-        // Add connections
-        for (from, to) in connections {
+        // Add connections from the DSL (|> and <|) with correct EdgeKind
+        for (from, to, kind) in connections {
             if let (Some(&from_id), Some(&to_id)) =
                 (name_to_id.get(&from), name_to_id.get(&to)) {
-                builder.add_edge(to_topology_id(from_id), to_topology_id(to_id));
+                topology_edges.push(DirectedEdge::new(
+                    to_topology_id(from_id),
+                    to_topology_id(to_id),
+                    kind,
+                ));
             }
         }
 
-        let topology = Arc::new(builder.build()
-            .map_err(|e| format!("Failed to build topology: {:?}", e))?);
+        let topology = Arc::new(
+            obzenflow_topology::Topology::new(topology_stages, topology_edges)
+                .map_err(FlowBuildError::TopologyValidationFailed)?,
+        );
 
         // Create services
         use obzenflow_runtime_services::pipeline::config::StageConfig;
@@ -279,43 +347,68 @@ macro_rules! build_typed_flow {
 
         // Get the journal factory for this specific flow
         let mut journal_factory = journal_factory_provider(flow_id.clone())
-            .map_err(|e| format!("Failed to create journal factory: {:?}", e))?;
+            .map_err(|e| FlowBuildError::JournalFactoryFailed(format!("{:?}", e)))?;
 
         // Create all journals upfront with proper ownership
         use obzenflow_core::journal::journal_name::JournalName;
         use obzenflow_core::journal::journal_owner::JournalOwner;
 
-        let control_journal = journal_factory.create_system_journal(
-            JournalName::System,
-            JournalOwner::system(pipeline_id.clone())
-        ).map_err(|e| format!("Failed to create system journal: {:?}", e))?;
+        let control_journal = journal_factory
+            .create_system_journal(
+                JournalName::System,
+                JournalOwner::system(pipeline_id.clone()),
+            )
+            .map_err(|e| {
+                FlowBuildError::JournalFactoryFailed(format!(
+                    "Failed to create system journal: {:?}",
+                    e
+                ))
+            })?;
 
         let mut stage_journals = HashMap::new();
         let mut error_journals = HashMap::new();
         for (name, &stage_id) in name_to_id.iter() {
             // Get the descriptor to access stage type and name
-            let descriptor = descriptors.get(name)
-                .ok_or_else(|| format!("Missing descriptor for stage {}", name))?;
+            let descriptor = descriptors.get(name).ok_or_else(|| {
+                FlowBuildError::StageResourcesFailed(format!(
+                    "Missing descriptor for stage {}",
+                    name
+                ))
+            })?;
 
-            let journal = journal_factory.create_chain_journal(
-                JournalName::Stage {
-                    id: stage_id,
-                    stage_type: descriptor.stage_type(),
-                    name: descriptor.name().to_string(),
-                },
-                JournalOwner::stage(stage_id)
-            ).map_err(|e| format!("Failed to create journal for stage {:?}: {:?}", stage_id, e))?;
+            let journal = journal_factory
+                .create_chain_journal(
+                    JournalName::Stage {
+                        id: stage_id,
+                        stage_type: descriptor.stage_type(),
+                        name: descriptor.name().to_string(),
+                    },
+                    JournalOwner::stage(stage_id),
+                )
+                .map_err(|e| {
+                    FlowBuildError::JournalFactoryFailed(format!(
+                        "Failed to create journal for stage {:?}: {:?}",
+                        stage_id, e
+                    ))
+                })?;
             stage_journals.insert(stage_id, journal);
 
             // Create error journal for this stage (FLOWIP-082e)
-            let error_journal = journal_factory.create_chain_journal(
-                JournalName::Stage {
-                    id: stage_id,
-                    stage_type: descriptor.stage_type(),
-                    name: format!("{}_error", descriptor.name()),
-                },
-                JournalOwner::stage(stage_id)
-            ).map_err(|e| format!("Failed to create error journal for stage {:?}: {:?}", stage_id, e))?;
+            let error_journal = journal_factory
+                .create_chain_journal(
+                    JournalName::Stage {
+                        id: stage_id,
+                        stage_type: descriptor.stage_type(),
+                        name: format!("{}_error", descriptor.name()),
+                    },
+                    JournalOwner::stage(stage_id),
+                )
+                .map_err(|e| {
+                    FlowBuildError::JournalFactoryFailed(format!(
+                        "Failed to create error journal for stage {:?}: {:?}",
+                        stage_id, e
+                    ))
+                })?;
             error_journals.insert(stage_id, error_journal);
         }
 
@@ -331,8 +424,15 @@ macro_rules! build_typed_flow {
             error_journals,
         );
 
-        let stage_resources_set = resources_builder.build().await
-            .map_err(|e| format!("Failed to build stage resources: {:?}", e))?;
+        let stage_resources_set = resources_builder
+            .build()
+            .await
+            .map_err(|e| {
+                FlowBuildError::StageResourcesFailed(format!(
+                    "Failed to build stage resources: {:?}",
+                    e
+                ))
+            })?;
 
         // Create metrics exporter using the builder pattern
         let metrics_exporter = if DefaultMetricsConfig::default().is_enabled() {
@@ -364,8 +464,12 @@ macro_rules! build_typed_flow {
                     stage_id = ?id,
                     "DSL: Removing resources for stage"
                 );
-                let mut resources = stage_resources.remove(id)
-                    .ok_or_else(|| format!("No resources found for stage {:?}", id))?;
+                let mut resources = stage_resources.remove(id).ok_or_else(|| {
+                    FlowBuildError::StageResourcesFailed(format!(
+                        "No resources found for stage {:?}",
+                        id
+                    ))
+                })?;
 
                 tracing::info!(
                     target: "flowip-080o",
@@ -380,10 +484,17 @@ macro_rules! build_typed_flow {
                 // Join descriptors store reference_stage_id from the builder
                 if let Some(ref_stage_id) = descriptor.reference_stage_id() {
                     // Find the reference journal
-                    let ref_journal = stage_resources_set.stage_journals.iter()
+                    let ref_journal = stage_resources_set
+                        .stage_journals
+                        .iter()
                         .find(|(sid, _)| sid == &ref_stage_id)
                         .map(|(_, j)| (ref_stage_id, j.clone()))
-                        .ok_or_else(|| format!("No journal found for reference stage {:?}", ref_stage_id))?;
+                        .ok_or_else(|| {
+                            FlowBuildError::StageResourcesFailed(format!(
+                                "No journal found for reference stage {:?}",
+                                ref_stage_id
+                            ))
+                        })?;
 
                     // Prepend reference journal to upstream_journals (reference must be first)
                     // Filter out any duplicate reference journals to prevent it appearing in stream_journals
@@ -428,12 +539,17 @@ macro_rules! build_typed_flow {
                 }
 
                 // Create handle with flow middleware (including CycleGuard if needed)
-                let handle = descriptor.create_handle_with_flow_middleware(
-                    config,
-                    resources,
-                    flow_middleware
-                ).await
-                    .map_err(|e| format!("Failed to create stage '{}': {}", name, e))?;
+                let handle = descriptor
+                    .create_handle_with_flow_middleware(
+                        config,
+                        resources,
+                        flow_middleware,
+                    )
+                    .await
+                    .map_err(|e| FlowBuildError::StageCreationFailed {
+                        stage_name: name.to_string(),
+                        message: e,
+                    })?;
 
                 if stage_type.is_source() {
                     sources.push(handle);
@@ -463,9 +579,11 @@ macro_rules! build_typed_flow {
             builder
         };
 
-        let handle = builder.build().await
-            .map_err(|e| format!("Failed to build pipeline: {:?}", e))?;
+        let handle = builder
+            .build()
+            .await
+            .map_err(|e| FlowBuildError::PipelineBuildFailed(format!("{:?}", e)))?;
 
-        Ok::<FlowHandle, Box<dyn std::error::Error + Send + Sync>>(handle)
+        Ok::<FlowHandle, FlowBuildError>(handle)
     }};
 }

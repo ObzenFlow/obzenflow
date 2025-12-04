@@ -20,7 +20,7 @@ use obzenflow_runtime_services::stages::resources_builder::StageResourcesBuilder
 use obzenflow_runtime_services::stages::stateful::{StatefulBuilder, StatefulConfig, StatefulHandleExt, StatefulState};
 use obzenflow_runtime_services::stages::join::handle::JoinHandleExt;
 use obzenflow_runtime_services::supervised_base::{SupervisorBuilder, SupervisorHandle};
-use obzenflow_topology::TopologyBuilder;
+use obzenflow_topology::{TopologyBuilder, StageType as TopologyStageType};
 use obzenflow_core::Ulid;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -330,15 +330,21 @@ async fn run_stateful_supervisor_once() -> Vec<serde_json::Value> {
 
     // Topology: src -> stateful
     let mut topo_builder = TopologyBuilder::new();
-    topo_builder.add_stage_with_id(src.to_topology_id(), Some("src".to_string()));
+    topo_builder.add_stage_with_id(
+        src.to_topology_id(),
+        Some("src".to_string()),
+        TopologyStageType::FiniteSource,
+    );
     topo_builder.reset_current();
     topo_builder.add_stage_with_id(
         stateful_stage.to_topology_id(),
         Some("stateful".to_string()),
+        TopologyStageType::Stateful,
     );
     topo_builder.reset_current();
     topo_builder.add_edge(src.to_topology_id(), stateful_stage.to_topology_id());
-    let topology = Arc::new(topo_builder.build().expect("topology should build"));
+    let topology =
+        Arc::new(topo_builder.build_unchecked().expect("topology should build structurally"));
 
     // Journals: one per stage (on-disk so subscriptions can obtain readers)
     let base = std::env::temp_dir().join(format!(
@@ -484,18 +490,25 @@ async fn run_join_supervisor_once() -> Vec<JoinedRow> {
     topo_builder.add_stage_with_id(
         reference_stage.to_topology_id(),
         Some("reference".to_string()),
+        TopologyStageType::FiniteSource,
     );
     topo_builder.reset_current();
     topo_builder.add_stage_with_id(
         stream_stage.to_topology_id(),
         Some("stream".to_string()),
+        TopologyStageType::FiniteSource,
     );
     topo_builder.reset_current();
-    topo_builder.add_stage_with_id(join_stage.to_topology_id(), Some("join".to_string()));
+    topo_builder.add_stage_with_id(
+        join_stage.to_topology_id(),
+        Some("join".to_string()),
+        TopologyStageType::Join,
+    );
     topo_builder.reset_current();
     topo_builder.add_edge(reference_stage.to_topology_id(), join_stage.to_topology_id());
     topo_builder.add_edge(stream_stage.to_topology_id(), join_stage.to_topology_id());
-    let topology = Arc::new(topo_builder.build().expect("topology should build"));
+    let topology =
+        Arc::new(topo_builder.build_unchecked().expect("topology should build structurally"));
 
     // Journals per stage (on-disk so subscriptions can obtain readers)
     let base = std::env::temp_dir().join(format!(

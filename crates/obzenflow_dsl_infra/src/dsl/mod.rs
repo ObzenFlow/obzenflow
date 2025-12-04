@@ -6,6 +6,7 @@
 mod dsl;
 pub mod stage_descriptor;
 mod stage_macros;
+pub mod error;
 
 #[cfg(test)]
 mod tests;
@@ -15,3 +16,4 @@ mod tests;
 pub use dsl::*;
 #[allow(unused_imports)]
 pub use stage_macros::*;
+pub use error::FlowBuildError;

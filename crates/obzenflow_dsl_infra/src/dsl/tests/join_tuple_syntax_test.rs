@@ -5,7 +5,7 @@ mod tests {
     #[test]
     fn test_parse_topology_macro_with_join_tuple() {
         // Direct test of the parse_topology! macro
-        let mut connections = Vec::new();
+        let mut connections: Vec<(String, String, obzenflow_topology::EdgeKind)> = Vec::new();
         let mut join_connections = Vec::new();
 
         // Test the macro expansion
@@ -22,14 +22,20 @@ mod tests {
 
         // Verify regular connections are also created
         assert_eq!(connections.len(), 3);
-        assert!(connections.contains(&("reference".to_string(), "joiner".to_string())));
-        assert!(connections.contains(&("stream".to_string(), "joiner".to_string())));
-        assert!(connections.contains(&("joiner".to_string(), "output".to_string())));
+        assert!(connections.iter().any(|(from, to, kind)| {
+            from == "reference" && to == "joiner" && matches!(kind, obzenflow_topology::EdgeKind::Forward)
+        }));
+        assert!(connections.iter().any(|(from, to, kind)| {
+            from == "stream" && to == "joiner" && matches!(kind, obzenflow_topology::EdgeKind::Forward)
+        }));
+        assert!(connections.iter().any(|(from, to, kind)| {
+            from == "joiner" && to == "output" && matches!(kind, obzenflow_topology::EdgeKind::Forward)
+        }));
     }
 
     #[test]
     fn test_parse_topology_multiple_joins() {
-        let mut connections = Vec::new();
+        let mut connections: Vec<(String, String, obzenflow_topology::EdgeKind)> = Vec::new();
         let mut join_connections = Vec::new();
 
         // Test multiple joins
@@ -55,17 +61,29 @@ mod tests {
 
         // Verify all connections
         assert_eq!(connections.len(), 6);
-        assert!(connections.contains(&("products".to_string(), "order_enricher".to_string())));
-        assert!(connections.contains(&("orders".to_string(), "order_enricher".to_string())));
-        assert!(connections.contains(&("users".to_string(), "user_enricher".to_string())));
-        assert!(connections.contains(&("orders".to_string(), "user_enricher".to_string())));
-        assert!(connections.contains(&("order_enricher".to_string(), "sink1".to_string())));
-        assert!(connections.contains(&("user_enricher".to_string(), "sink2".to_string())));
+        assert!(connections.iter().any(|(from, to, kind)| {
+            from == "products" && to == "order_enricher" && matches!(kind, obzenflow_topology::EdgeKind::Forward)
+        }));
+        assert!(connections.iter().any(|(from, to, kind)| {
+            from == "orders" && to == "order_enricher" && matches!(kind, obzenflow_topology::EdgeKind::Forward)
+        }));
+        assert!(connections.iter().any(|(from, to, kind)| {
+            from == "users" && to == "user_enricher" && matches!(kind, obzenflow_topology::EdgeKind::Forward)
+        }));
+        assert!(connections.iter().any(|(from, to, kind)| {
+            from == "orders" && to == "user_enricher" && matches!(kind, obzenflow_topology::EdgeKind::Forward)
+        }));
+        assert!(connections.iter().any(|(from, to, kind)| {
+            from == "order_enricher" && to == "sink1" && matches!(kind, obzenflow_topology::EdgeKind::Forward)
+        }));
+        assert!(connections.iter().any(|(from, to, kind)| {
+            from == "user_enricher" && to == "sink2" && matches!(kind, obzenflow_topology::EdgeKind::Forward)
+        }));
     }
 
     #[test]
     fn test_parse_topology_mixed_syntax() {
-        let mut connections = Vec::new();
+        let mut connections: Vec<(String, String, obzenflow_topology::EdgeKind)> = Vec::new();
         let mut join_connections = Vec::new();
 
         // Test mixing regular and join tuple syntax
@@ -84,10 +102,20 @@ mod tests {
 
         // Verify all connections
         assert_eq!(connections.len(), 5);
-        assert!(connections.contains(&("source".to_string(), "transform1".to_string())));
-        assert!(connections.contains(&("transform1".to_string(), "transform2".to_string())));
-        assert!(connections.contains(&("reference".to_string(), "joiner".to_string())));
-        assert!(connections.contains(&("transform2".to_string(), "joiner".to_string())));
-        assert!(connections.contains(&("joiner".to_string(), "sink".to_string())));
+        assert!(connections.iter().any(|(from, to, kind)| {
+            from == "source" && to == "transform1" && matches!(kind, obzenflow_topology::EdgeKind::Forward)
+        }));
+        assert!(connections.iter().any(|(from, to, kind)| {
+            from == "transform1" && to == "transform2" && matches!(kind, obzenflow_topology::EdgeKind::Forward)
+        }));
+        assert!(connections.iter().any(|(from, to, kind)| {
+            from == "reference" && to == "joiner" && matches!(kind, obzenflow_topology::EdgeKind::Forward)
+        }));
+        assert!(connections.iter().any(|(from, to, kind)| {
+            from == "transform2" && to == "joiner" && matches!(kind, obzenflow_topology::EdgeKind::Forward)
+        }));
+        assert!(connections.iter().any(|(from, to, kind)| {
+            from == "joiner" && to == "sink" && matches!(kind, obzenflow_topology::EdgeKind::Forward)
+        }));
     }
 }
