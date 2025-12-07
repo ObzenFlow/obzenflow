@@ -166,14 +166,6 @@ pub struct MetricsStore {
     pub last_event_time: Option<std::time::Instant>,
     pub total_events_processed: u64,
 
-    // Journey tracking
-    pub active_journeys: HashMap<CorrelationId, JourneyState>,
-    pub journeys_started: u64,
-    pub journeys_completed: u64,
-    pub journeys_errored: u64,
-    pub journeys_abandoned: u64,
-    pub journey_durations: hdrhistogram::Histogram<u64>,
-
     // Flow-level aggregates
     pub flow_events_in: u64,
     pub flow_events_out: u64,
@@ -185,13 +177,6 @@ pub struct MetricsStore {
     pub pipeline_state: String,
 }
 
-#[derive(Clone, Debug)]
-pub struct JourneyState {
-    pub start_time: Instant,
-    pub source_event_id: EventId,
-    pub source_stage: String,
-}
-
 #[derive(Clone)]
 pub struct StageMetrics {
     pub events_in: u64,
@@ -201,11 +186,20 @@ pub struct StageMetrics {
     pub total_processing_time: MetricsDuration,
     pub event_count: u64,
     pub processing_time_histogram: hdrhistogram::Histogram<u64>,
-    // Runtime context metrics (FLOWIP-056c)
+    // Runtime context metrics (FLOWIP-056c / FLOWIP-059 Phase 6)
     pub last_in_flight: Option<u32>,
     pub last_failures_total: Option<u64>,
+    // Wide-event snapshot counters (Phase 6)
+    pub latest_events_processed_total: Option<u64>,
+    pub latest_errors_total: Option<u64>,
     pub event_loops_total: u64,
     pub event_loops_with_work_total: u64,
+    // Wide-event snapshot percentiles (Phase 6) - pre-computed by stage, in milliseconds
+    pub snapshot_p50_ms: Option<u64>,
+    pub snapshot_p90_ms: Option<u64>,
+    pub snapshot_p95_ms: Option<u64>,
+    pub snapshot_p99_ms: Option<u64>,
+    pub snapshot_p999_ms: Option<u64>,
     // Stage-specific timing for accurate rate calculation
     pub first_event_time: Option<std::time::Instant>,
     pub last_event_time: Option<std::time::Instant>,
@@ -220,17 +214,6 @@ impl Default for MetricsStore {
             first_event_time: None,
             last_event_time: None,
             total_events_processed: 0,
-            active_journeys: HashMap::new(),
-            journeys_started: 0,
-            journeys_completed: 0,
-            journeys_errored: 0,
-            journeys_abandoned: 0,
-            journey_durations: hdrhistogram::Histogram::new_with_bounds(
-                HISTOGRAM_MIN_US,
-                HISTOGRAM_MAX_US,
-                HISTOGRAM_SIGFIGS,
-            )
-            .expect("Failed to create journey duration histogram"),
             flow_events_in: 0,
             flow_events_out: 0,
             flow_errors_total: 0,
@@ -258,8 +241,15 @@ impl Default for StageMetrics {
             .expect("Failed to create histogram"),
             last_in_flight: None,
             last_failures_total: None,
+            latest_events_processed_total: None,
+            latest_errors_total: None,
             event_loops_total: 0,
             event_loops_with_work_total: 0,
+            snapshot_p50_ms: None,
+            snapshot_p90_ms: None,
+            snapshot_p95_ms: None,
+            snapshot_p99_ms: None,
+            snapshot_p999_ms: None,
             first_event_time: None,
             last_event_time: None,
         }
@@ -275,6 +265,10 @@ impl MetricsAggregatorContext {
         system_id: SystemId,
         stage_metadata: HashMap<StageId, StageMetadata>,
     ) -> Result<Self, String> {
+        // Initialize in-memory metrics store so we can seed snapshot fields
+        // before constructing subscriptions (FLOWIP-059 Phase 6).
+        let mut metrics_store = MetricsStore::default();
+
         // Helper to attach stage names to journals for better diagnostics
         let with_names = |journals: &[(StageId, Arc<dyn Journal<ChainEvent>>)]| {
             journals
@@ -289,6 +283,70 @@ impl MetricsAggregatorContext {
                 .collect::<Vec<_>>()
         };
 
+        // Phase 6: wide-event snapshot seeding and tail-seek for data journals.
+        let data_with_names = with_names(&inputs.stage_data_journals);
+        let mut data_start_positions = Vec::with_capacity(data_with_names.len());
+
+        for (stage_id, stage_name, journal) in &data_with_names {
+            match journal.read_causally_ordered().await {
+                Ok(events) => {
+                    let position = events.len() as u64;
+
+                    if let Some(last_envelope) = events.last() {
+                        if let Some(runtime_ctx) = &last_envelope.event.runtime_context {
+                            let metrics = metrics_store
+                                .stage_metrics
+                                .entry(*stage_id)
+                                .or_insert_with(StageMetrics::default);
+
+                            // Seed wide-event snapshot fields from the latest event
+                            // Use max() for monotonic counters to handle out-of-order reads
+                            metrics.latest_events_processed_total = Some(
+                                metrics
+                                    .latest_events_processed_total
+                                    .unwrap_or(0)
+                                    .max(runtime_ctx.events_processed_total),
+                            );
+                            metrics.latest_errors_total = Some(
+                                metrics
+                                    .latest_errors_total
+                                    .unwrap_or(0)
+                                    .max(runtime_ctx.errors_total),
+                            );
+                            metrics.last_in_flight = Some(runtime_ctx.in_flight);
+                            metrics.last_failures_total = Some(runtime_ctx.failures_total);
+                            metrics.event_loops_total = metrics
+                                .event_loops_total
+                                .max(runtime_ctx.event_loops_total);
+                            metrics.event_loops_with_work_total = metrics
+                                .event_loops_with_work_total
+                                .max(runtime_ctx.event_loops_with_work_total);
+
+                            // Seed pre-computed percentiles from runtime_context
+                            metrics.snapshot_p50_ms = Some(runtime_ctx.recent_p50_ms);
+                            metrics.snapshot_p90_ms = Some(runtime_ctx.recent_p90_ms);
+                            metrics.snapshot_p95_ms = Some(runtime_ctx.recent_p95_ms);
+                            metrics.snapshot_p99_ms = Some(runtime_ctx.recent_p99_ms);
+                            metrics.snapshot_p999_ms = Some(runtime_ctx.recent_p999_ms);
+                        }
+                    }
+
+                    data_start_positions.push(position);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        target: "flowip-059",
+                        owner = "metrics_aggregator",
+                        stage_id = ?stage_id,
+                        stage_name = stage_name,
+                        error = ?e,
+                        "Failed to pre-scan data journal for tail snapshot; falling back to full replay"
+                    );
+                    data_start_positions.push(0);
+                }
+            }
+        }
+
         tracing::info!(
             upstream_count = inputs.stage_data_journals.len(),
             upstream_stages = tracing::field::debug(
@@ -301,13 +359,13 @@ impl MetricsAggregatorContext {
             "MetricsAggregator creating data subscription"
         );
         // Create subscription for data journals
-        let data_subscription =
-            crate::messaging::upstream_subscription::UpstreamSubscription::new_with_names(
-                "metrics_aggregator",
-                &with_names(&inputs.stage_data_journals),
-            )
-            .await
-            .map_err(|e| format!("Failed to create data subscription: {}", e))?;
+        let data_subscription = crate::messaging::upstream_subscription::UpstreamSubscription::new_with_names_from_positions(
+            "metrics_aggregator",
+            &data_with_names,
+            &data_start_positions,
+        )
+        .await
+        .map_err(|e| format!("Failed to create data subscription: {}", e))?;
 
         if !inputs.error_journals.is_empty() {
             tracing::info!(
@@ -356,7 +414,7 @@ impl MetricsAggregatorContext {
             system_subscription: Some(system_subscription),
             include_error_journals: true, // Default to true per FLOWIP-082g
             exporter,
-            metrics_store: MetricsStore::default(),
+            metrics_store,
             export_interval_secs,
             system_id,
             export_timer: None,
@@ -474,28 +532,6 @@ impl FsmAction for MetricsAggregatorAction {
                         // Update flow-level metrics for delivery events
                         store.flow_events_out += 1;
 
-                        // Journey tracking for delivery events
-                        if let Some(correlation_id) = &event.correlation_id {
-                            if let Some(journey) = store.active_journeys.remove(correlation_id) {
-                                // Journey completes successfully or errors at sink
-                                if has_error {
-                                    store.journeys_errored += 1;
-                                } else {
-                                    store.journeys_completed += 1;
-                                }
-
-                                let duration = journey.start_time.elapsed();
-                                let duration_us = duration.as_micros() as u64;
-
-                                // Record journey duration (for both success and error)
-                                let clamped_duration =
-                                    duration_us.max(HISTOGRAM_MIN_US).min(HISTOGRAM_MAX_US);
-                                if let Err(e) = store.journey_durations.record(clamped_duration) {
-                                    tracing::warn!("Failed to record journey duration: {:?}", e);
-                                }
-                            }
-                        }
-
                         // Now handle stage-level metrics
                         let metrics = store
                             .stage_metrics
@@ -546,8 +582,21 @@ impl FsmAction for MetricsAggregatorAction {
                             );
 
                             // Store latest runtime metrics for export
+                            // Use max() for monotonic counters to handle out-of-order reads
                             metrics.last_in_flight = Some(runtime_ctx.in_flight);
                             metrics.last_failures_total = Some(runtime_ctx.failures_total);
+                            metrics.latest_events_processed_total = Some(
+                                metrics
+                                    .latest_events_processed_total
+                                    .unwrap_or(0)
+                                    .max(runtime_ctx.events_processed_total),
+                            );
+                            metrics.latest_errors_total = Some(
+                                metrics
+                                    .latest_errors_total
+                                    .unwrap_or(0)
+                                    .max(runtime_ctx.errors_total),
+                            );
 
                             // Update cumulative event loop counters (take max to handle resets)
                             metrics.event_loops_total =
@@ -555,6 +604,13 @@ impl FsmAction for MetricsAggregatorAction {
                             metrics.event_loops_with_work_total = metrics
                                 .event_loops_with_work_total
                                 .max(runtime_ctx.event_loops_with_work_total);
+
+                            // Update pre-computed percentiles from runtime_context
+                            metrics.snapshot_p50_ms = Some(runtime_ctx.recent_p50_ms);
+                            metrics.snapshot_p90_ms = Some(runtime_ctx.recent_p90_ms);
+                            metrics.snapshot_p95_ms = Some(runtime_ctx.recent_p95_ms);
+                            metrics.snapshot_p99_ms = Some(runtime_ctx.recent_p99_ms);
+                            metrics.snapshot_p999_ms = Some(runtime_ctx.recent_p999_ms);
                         }
 
                         tracing::debug!(
@@ -622,8 +678,21 @@ impl FsmAction for MetricsAggregatorAction {
                         );
 
                         // Store latest runtime metrics for export
+                        // Use max() for monotonic counters to handle out-of-order reads
                         metrics.last_in_flight = Some(runtime_ctx.in_flight);
                         metrics.last_failures_total = Some(runtime_ctx.failures_total);
+                        metrics.latest_events_processed_total = Some(
+                            metrics
+                                .latest_events_processed_total
+                                .unwrap_or(0)
+                                .max(runtime_ctx.events_processed_total),
+                        );
+                        metrics.latest_errors_total = Some(
+                            metrics
+                                .latest_errors_total
+                                .unwrap_or(0)
+                                .max(runtime_ctx.errors_total),
+                        );
 
                         // Update cumulative event loop counters (take max to handle resets)
                         metrics.event_loops_total =
@@ -631,6 +700,13 @@ impl FsmAction for MetricsAggregatorAction {
                         metrics.event_loops_with_work_total = metrics
                             .event_loops_with_work_total
                             .max(runtime_ctx.event_loops_with_work_total);
+
+                        // Update pre-computed percentiles from runtime_context
+                        metrics.snapshot_p50_ms = Some(runtime_ctx.recent_p50_ms);
+                        metrics.snapshot_p90_ms = Some(runtime_ctx.recent_p90_ms);
+                        metrics.snapshot_p95_ms = Some(runtime_ctx.recent_p95_ms);
+                        metrics.snapshot_p99_ms = Some(runtime_ctx.recent_p99_ms);
+                        metrics.snapshot_p999_ms = Some(runtime_ctx.recent_p999_ms);
                     }
 
                     tracing::debug!(
@@ -661,69 +737,6 @@ impl FsmAction for MetricsAggregatorAction {
                     }
                     _ => {} // Transforms don't count for flow in/out
                 }
-
-                // Journey tracking - only if correlation ID present
-                if let Some(correlation_id) = &event.correlation_id {
-                    match stage_type {
-                        StageType::FiniteSource | StageType::InfiniteSource => {
-                            // Journey starts at source
-                            store.journeys_started += 1;
-                            store.active_journeys.insert(
-                                correlation_id.clone(),
-                                JourneyState {
-                                    start_time: Instant::now(),
-                                    source_event_id: event.id.clone(),
-                                    source_stage: event.flow_context.stage_name.clone(),
-                                },
-                            );
-                        }
-                        StageType::Sink => {
-                            // Journey completes at sink
-                            if let Some(journey) = store.active_journeys.remove(correlation_id) {
-                                store.journeys_completed += 1;
-                                let duration = journey.start_time.elapsed();
-                                let duration_us = duration.as_micros() as u64;
-
-                                // Record journey duration
-                                let clamped_duration =
-                                    duration_us.max(HISTOGRAM_MIN_US).min(HISTOGRAM_MAX_US);
-                                if let Err(e) = store.journey_durations.record(clamped_duration) {
-                                    tracing::warn!("Failed to record journey duration: {:?}", e);
-                                }
-                            }
-                        }
-                        _ => {} // Transforms don't affect journey state
-                    }
-                }
-
-                // Aggregate flow-level metrics
-                if matches!(event.processing_info.status, ProcessingStatus::Error { .. }) {
-                    store.flow_errors_total += 1;
-
-                    // Handle errored journeys (FLOWIP-082g)
-                    if let Some(correlation_id) = &event.correlation_id {
-                        // Journey errors on first error for this correlation_id
-                        if let Some(journey) = store.active_journeys.remove(correlation_id) {
-                            store.journeys_errored += 1;
-                            let duration = journey.start_time.elapsed();
-                            let duration_us = duration.as_micros() as u64;
-
-                            // Record journey duration at error time
-                            let clamped_duration =
-                                duration_us.max(HISTOGRAM_MIN_US).min(HISTOGRAM_MAX_US);
-                            if let Err(e) = store.journey_durations.record(clamped_duration) {
-                                tracing::warn!(
-                                    "Failed to record errored journey duration: {:?}",
-                                    e
-                                );
-                            }
-                        }
-                    }
-                }
-
-                // Note: Event loop aggregation happens during export, not here
-                // This avoids the delta calculation issues with concurrent updates
-
                 Ok(())
             }
 
@@ -738,10 +751,21 @@ impl FsmAction for MetricsAggregatorAction {
                         store.stage_metrics.len()
                     );
 
+                    // Flow-level aggregates derived from per-stage snapshots
+                    let mut flow_events_in_total: u64 = 0;
+                    let mut flow_events_out_total: u64 = 0;
+                    let mut flow_errors_total_snapshot: u64 = 0;
+                    let mut total_events_processed_snapshot: u64 = 0;
+                    let mut total_event_loops: u64 = 0;
+                    let mut total_event_loops_with_work: u64 = 0;
+
                     // Convert stage metrics to snapshot format
                     for (stage_id, metrics) in &store.stage_metrics {
-                        // Use events_in as the event count
-                        snapshot.event_counts.insert(*stage_id, metrics.events_in);
+                        // Prefer wide-event snapshot counters when available
+                        let events_count = metrics
+                            .latest_events_processed_total
+                            .unwrap_or(metrics.events_in);
+                        snapshot.event_counts.insert(*stage_id, events_count);
 
                         snapshot.error_counts.insert(*stage_id, metrics.errors);
                         if !metrics.errors_by_kind.is_empty() {
@@ -750,11 +774,49 @@ impl FsmAction for MetricsAggregatorAction {
                                 .insert(*stage_id, metrics.errors_by_kind.clone());
                         }
 
-                        // Add processing time histogram with real percentiles
-                        if metrics.event_count > 0 {
+                        // Add processing time histogram - prefer wide-event snapshot percentiles
+                        // Phase 6: Use pre-computed percentiles from runtime_context when available
+                        if metrics.snapshot_p50_ms.is_some() {
+                            // Use snapshot percentiles from runtime_context (authoritative)
+                            let mut percentiles = std::collections::HashMap::new();
+                            // Convert milliseconds from runtime_context to nanoseconds for export
+                            if let Some(p50) = metrics.snapshot_p50_ms {
+                                percentiles.insert(Percentile::P50, (p50 * 1_000_000) as f64);
+                            }
+                            if let Some(p90) = metrics.snapshot_p90_ms {
+                                percentiles.insert(Percentile::P90, (p90 * 1_000_000) as f64);
+                            }
+                            if let Some(p95) = metrics.snapshot_p95_ms {
+                                percentiles.insert(Percentile::P95, (p95 * 1_000_000) as f64);
+                            }
+                            if let Some(p99) = metrics.snapshot_p99_ms {
+                                percentiles.insert(Percentile::P99, (p99 * 1_000_000) as f64);
+                            }
+                            if let Some(p999) = metrics.snapshot_p999_ms {
+                                percentiles.insert(Percentile::P999, (p999 * 1_000_000) as f64);
+                            }
+
+                            let hist_snapshot = obzenflow_core::metrics::HistogramSnapshot {
+                                // Use authoritative count from runtime_context
+                                count: events_count,
+                                // Sum not available from snapshot - use incremental if available, else estimate
+                                sum: if metrics.event_count > 0 {
+                                    metrics.total_processing_time.as_nanos() as f64
+                                } else {
+                                    // Estimate from p50 * count (rough approximation)
+                                    (metrics.snapshot_p50_ms.unwrap_or(0) * 1_000_000 * events_count) as f64
+                                },
+                                // Min/max not in runtime_context - use p50 as floor, p999 as ceiling
+                                min: (metrics.snapshot_p50_ms.unwrap_or(0) * 1_000_000) as f64,
+                                max: (metrics.snapshot_p999_ms.unwrap_or(0) * 1_000_000) as f64,
+                                percentiles,
+                            };
+
+                            snapshot.processing_times.insert(*stage_id, hist_snapshot);
+                        } else if metrics.event_count > 0 {
+                            // Fallback: Use incrementally-built histogram (no runtime_context available)
                             let histogram = &metrics.processing_time_histogram;
 
-                            // Extract real percentiles from HdrHistogram and export as nanoseconds
                             let mut percentiles = std::collections::HashMap::new();
                             // Convert microseconds from histogram to nanoseconds for export
                             for p in Percentile::all() {
@@ -764,9 +826,9 @@ impl FsmAction for MetricsAggregatorAction {
 
                             let hist_snapshot = obzenflow_core::metrics::HistogramSnapshot {
                                 count: histogram.len(),
-                                sum: metrics.total_processing_time.as_nanos() as f64, // Export as nanoseconds
-                                min: (histogram.min() * 1_000) as f64, // Convert from microseconds to nanoseconds
-                                max: (histogram.max() * 1_000) as f64, // Convert from microseconds to nanoseconds
+                                sum: metrics.total_processing_time.as_nanos() as f64,
+                                min: (histogram.min() * 1_000) as f64,
+                                max: (histogram.max() * 1_000) as f64,
                                 percentiles,
                             };
 
@@ -790,6 +852,38 @@ impl FsmAction for MetricsAggregatorAction {
                             .event_loops_with_work_total
                             .insert(*stage_id, metrics.event_loops_with_work_total);
 
+                        // Aggregate flow-level metrics from snapshots
+                        total_events_processed_snapshot =
+                            total_events_processed_snapshot.saturating_add(events_count);
+
+                        // Prefer wide-event snapshot for errors, but never under-count
+                        // relative to the aggregator's own per-stage error counter.
+                        let snapshot_errors =
+                            metrics.latest_errors_total.unwrap_or(metrics.errors);
+                        let errors_count = snapshot_errors.max(metrics.errors);
+                        flow_errors_total_snapshot =
+                            flow_errors_total_snapshot.saturating_add(errors_count);
+
+                        total_event_loops =
+                            total_event_loops.saturating_add(metrics.event_loops_total);
+                        total_event_loops_with_work = total_event_loops_with_work
+                            .saturating_add(metrics.event_loops_with_work_total);
+
+                        if let Some(metadata) = ctx.stage_metadata.get(stage_id) {
+                            use obzenflow_core::event::context::StageType;
+                            match metadata.stage_type {
+                                StageType::FiniteSource | StageType::InfiniteSource => {
+                                    flow_events_in_total =
+                                        flow_events_in_total.saturating_add(events_count);
+                                }
+                                StageType::Sink => {
+                                    flow_events_out_total =
+                                        flow_events_out_total.saturating_add(events_count);
+                                }
+                                _ => {}
+                            }
+                        }
+
                         tracing::debug!(
                             "Exported metrics for {:?}: events={}, errors={}, avg_time={}",
                             stage_id,
@@ -810,67 +904,14 @@ impl FsmAction for MetricsAggregatorAction {
                         (store.first_event_time, store.last_event_time)
                     {
                         let flow_duration = last_time.duration_since(first_time);
-                        // Convert journey duration histogram to snapshot
-                        let journey_histogram = &store.journey_durations;
-                        let mut journey_percentiles = std::collections::HashMap::new();
-                        if journey_histogram.len() > 0 {
-                            for p in Percentile::all() {
-                                let value = journey_histogram.value_at_quantile(p.quantile());
-                                journey_percentiles.insert(*p, (value * 1_000) as f64);
-                                // Convert µs to ns
-                            }
-                        }
-
-                        let e2e_latency = obzenflow_core::metrics::HistogramSnapshot {
-                            count: journey_histogram.len(),
-                            sum: journey_histogram
-                                .iter_recorded()
-                                .map(|v| v.value_iterated_to() * 1_000)
-                                .sum::<u64>() as f64,
-                            min: if journey_histogram.len() > 0 {
-                                (journey_histogram.min() * 1_000) as f64
-                            } else {
-                                0.0
-                            },
-                            max: if journey_histogram.len() > 0 {
-                                (journey_histogram.max() * 1_000) as f64
-                            } else {
-                                0.0
-                            },
-                            percentiles: journey_percentiles,
-                        };
-
-                        // Calculate abandoned journeys per FLOWIP-082g formula
-                        // abandoned = started - completed - errored - active
-                        let journeys_abandoned = store
-                            .journeys_started
-                            .saturating_sub(store.journeys_completed)
-                            .saturating_sub(store.journeys_errored)
-                            .saturating_sub(store.active_journeys.len() as u64);
-
-                        // Aggregate event loops from all stages
-                        let mut total_event_loops = 0u64;
-                        let mut total_event_loops_with_work = 0u64;
-                        for (_, stage_metrics) in &store.stage_metrics {
-                            total_event_loops += stage_metrics.event_loops_total;
-                            total_event_loops_with_work +=
-                                stage_metrics.event_loops_with_work_total;
-                        }
-
                         let flow_metrics = obzenflow_core::metrics::FlowMetricsSnapshot {
-                            journeys_opened: store.journeys_started,
-                            journeys_sealed: store.journeys_completed,
-                            journeys_errored: store.journeys_errored,
-                            journeys_abandoned,
-                            e2e_latency,
                             flow_duration: MetricsDuration::from(flow_duration),
-                            total_events_processed: store.total_events_processed,
-                            events_in: store.flow_events_in,
-                            events_out: store.flow_events_out,
-                            errors_total: store.flow_errors_total,
+                            total_events_processed: total_events_processed_snapshot,
+                            events_in: flow_events_in_total,
+                            events_out: flow_events_out_total,
+                            errors_total: flow_errors_total_snapshot,
                             event_loops_total: total_event_loops,
                             event_loops_with_work_total: total_event_loops_with_work,
-                            saturation_journeys: store.active_journeys.len() as u64,
                         };
                         snapshot.flow_metrics = Some(flow_metrics);
                     }
@@ -1091,13 +1132,17 @@ pub fn build_metrics_aggregator_fsm() -> MetricsAggregatorFsm {
                     match event {
                         MetricsAggregatorEvent::DrainComplete { last_event_id } => {
                             let last_event_id = last_event_id.clone();
+                            let publish_last_event_id = last_event_id.clone();
                             Ok(Transition {
                                 next_state: MetricsAggregatorState::Drained {
-                                    last_event_id: last_event_id.clone(),
-                                },
-                                actions: vec![MetricsAggregatorAction::PublishDrainComplete {
                                     last_event_id,
-                                }],
+                                },
+                                actions: vec![
+                                    MetricsAggregatorAction::ExportMetrics,
+                                    MetricsAggregatorAction::PublishDrainComplete {
+                                        last_event_id: publish_last_event_id,
+                                    },
+                                ],
                             })
                         }
                         _ => Err(obzenflow_fsm::FsmError::HandlerError(
@@ -1213,56 +1258,5 @@ mod tests {
                 .entry_stage,
             "test_source"
         );
-    }
-
-    #[tokio::test]
-    async fn test_journey_tracking_with_correlation() {
-        let mut store = MetricsStore::default();
-        let stage_id = StageId::new();
-        let correlation_id = CorrelationId::new();
-
-        // Simulate source event starting a journey
-        let source_event = {
-            let mut event = ChainEventFactory::data_event(
-                WriterId::from(stage_id),
-                "test.source",
-                serde_json::json!({"id": 1}),
-            );
-            event.correlation_id = Some(correlation_id.clone());
-            event.flow_context.stage_type = StageType::InfiniteSource;
-            event
-        };
-
-        // Track journey start
-        store.journeys_started += 1;
-        store.active_journeys.insert(
-            correlation_id.clone(),
-            JourneyState {
-                start_time: std::time::Instant::now(),
-                source_event_id: source_event.id.clone(),
-                source_stage: "test_source".to_string(),
-            },
-        );
-
-        // Simulate delivery event at sink
-        let delivery_event = {
-            let mut event = ChainEventFactory::delivery_event(
-                WriterId::from(stage_id),
-                DeliveryPayload::success("test_sink", DeliveryMethod::Noop, Some(1)),
-            );
-            event.correlation_id = Some(correlation_id.clone());
-            event.flow_context.stage_type = StageType::Sink;
-            event
-        };
-
-        // Complete journey
-        if let Some(_journey) = store.active_journeys.remove(&correlation_id) {
-            store.journeys_completed += 1;
-        }
-
-        // Verify journey completed
-        assert_eq!(store.journeys_started, 1);
-        assert_eq!(store.journeys_completed, 1);
-        assert_eq!(store.active_journeys.len(), 0);
     }
 }

@@ -297,6 +297,32 @@ where
         owner_label: &str,
         upstream_journals: &[(StageId, String, Arc<dyn Journal<T>>)],
     ) -> Result<Self> {
+        // Delegate to the position-aware constructor with all starting
+        // positions at 0 (from-beginning semantics).
+        let start_positions = vec![0u64; upstream_journals.len()];
+        Self::new_with_names_from_positions(owner_label, upstream_journals, &start_positions).await
+    }
+
+    /// Create a new subscription from upstream journals, starting each reader
+    /// from an explicit position.
+    ///
+    /// This is used by the metrics aggregator (FLOWIP-059 Phase 6) to
+    /// fast-forward readers to the tail while still seeding snapshot metrics
+    /// from wide events. Other callers should generally prefer `new_with_names`.
+    pub async fn new_with_names_from_positions(
+        owner_label: &str,
+        upstream_journals: &[(StageId, String, Arc<dyn Journal<T>>)],
+        start_positions: &[u64],
+    ) -> Result<Self> {
+        if upstream_journals.len() != start_positions.len() {
+            return Err(format!(
+                "start_positions length {} does not match upstream_journals length {}",
+                start_positions.len(),
+                upstream_journals.len()
+            )
+            .into());
+        }
+
         let mut readers = Vec::new();
 
         tracing::info!(
@@ -314,7 +340,9 @@ where
             "UpstreamSubscription::new_with_names binding readers"
         );
 
-        for (stage_id, stage_name, journal) in upstream_journals {
+        for ((stage_id, stage_name, journal), position) in
+            upstream_journals.iter().zip(start_positions.iter())
+        {
             // Get journal ID for debugging
             let journal_id = journal.id();
             tracing::info!(
@@ -324,7 +352,13 @@ where
                 journal_id = ?journal_id,
                 "Creating reader for upstream journal"
             );
-            let reader = match journal.reader().await {
+            let reader_result = if *position == 0 {
+                journal.reader().await
+            } else {
+                journal.reader_from(*position).await
+            };
+
+            let reader: Box<dyn JournalReader<T>> = match reader_result {
                 Ok(reader) => reader,
                 Err(JournalError::Implementation { .. }) => {
                     // Best-effort: log the failure and use an empty reader so the

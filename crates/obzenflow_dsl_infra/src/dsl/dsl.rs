@@ -203,9 +203,9 @@ macro_rules! build_typed_flow {
     ($flow_name:expr, $journals:expr, $stages:expr, $connections:expr, $create_flow_middleware:expr) => {{
         use $crate::prelude::*;
         use $crate::dsl::FlowBuildError;
+        use std::collections::HashMap;
         use obzenflow_topology::{StageInfo as TopologyStageInfo, DirectedEdge, EdgeKind};
         use std::sync::Arc;
-        use std::collections::HashMap;
 
         fn to_topology_id(core_id: StageId) -> obzenflow_topology::StageId {
             // Convert standard ulid crate's Ulid to topology's idkit Id
@@ -446,6 +446,10 @@ macro_rules! build_typed_flow {
         let mut sources = Vec::new();
         let mut stage_resources = stage_resources_set.stage_resources;
 
+        // Structural: track final middleware stack config per stage (core StageId) - FLOWIP-059
+        use obzenflow_runtime_services::pipeline::MiddlewareStackConfig;
+        let mut middleware_stacks: HashMap<StageId, MiddlewareStackConfig> = HashMap::new();
+
         // We need to create wrapped descriptors that will merge middleware
         // This is done by wrapping the existing descriptors
         for (name, id) in &name_to_id {
@@ -538,6 +542,56 @@ macro_rules! build_typed_flow {
                     flow_middleware.push(cycle_guard(10));
                 }
 
+                // Structural: compute final middleware stack config for this stage (FLOWIP-059)
+                let flow_names: Vec<String> = flow_middleware
+                    .iter()
+                    .map(|f| f.name().to_string())
+                    .collect();
+                let stage_names = descriptor.stage_middleware_names();
+                // Merge roughly like resolve_middleware (flow first, then stage overrides/extends).
+                let mut merged_names: Vec<String> = Vec::new();
+                for mw_name in flow_names.into_iter().chain(stage_names.into_iter()) {
+                    if !merged_names.iter().any(|n| n == &mw_name) {
+                        merged_names.push(mw_name);
+                    }
+                }
+
+                // Extract config snapshots from all factories (FLOWIP-059)
+                let mut circuit_breaker_config: Option<serde_json::Value> = None;
+                let mut rate_limiter_config: Option<serde_json::Value> = None;
+                let mut retry_config: Option<serde_json::Value> = None;
+
+                // Check flow-level middleware
+                for factory in &flow_middleware {
+                    if let Some(snapshot) = factory.config_snapshot() {
+                        match factory.name() {
+                            "circuit_breaker" => circuit_breaker_config = Some(snapshot),
+                            "rate_limiter" => rate_limiter_config = Some(snapshot),
+                            "retry" => retry_config = Some(snapshot),
+                            _ => {}
+                        }
+                    }
+                }
+
+                // Check stage-level middleware (overrides flow-level)
+                for factory in descriptor.stage_middleware_factories() {
+                    if let Some(snapshot) = factory.config_snapshot() {
+                        match factory.name() {
+                            "circuit_breaker" => circuit_breaker_config = Some(snapshot),
+                            "rate_limiter" => rate_limiter_config = Some(snapshot),
+                            "retry" => retry_config = Some(snapshot),
+                            _ => {}
+                        }
+                    }
+                }
+
+                middleware_stacks.insert(*id, MiddlewareStackConfig {
+                    stack: merged_names,
+                    circuit_breaker: circuit_breaker_config,
+                    rate_limiter: rate_limiter_config,
+                    retry: retry_config,
+                });
+
                 // Create handle with flow middleware (including CycleGuard if needed)
                 let handle = descriptor
                     .create_handle_with_flow_middleware(
@@ -571,7 +625,8 @@ macro_rules! build_typed_flow {
             .with_stages(stages)
             .with_sources(sources)
             .with_stage_journals(stage_resources_set.stage_journals.clone())
-            .with_error_journals(stage_resources_set.error_journals.clone());
+            .with_error_journals(stage_resources_set.error_journals.clone())
+            .with_middleware_stacks(middleware_stacks);
 
         let builder = if let Some(exporter) = metrics_exporter {
             builder.with_metrics(exporter)

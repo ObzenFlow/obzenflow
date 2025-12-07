@@ -1430,6 +1430,21 @@ impl MiddlewareFactory for CircuitBreakerFactory {
     fn name(&self) -> &str {
         "circuit_breaker"
     }
+
+    fn config_snapshot(&self) -> Option<serde_json::Value> {
+        let open_policy = match self.open_policy.as_ref().unwrap_or(&OpenPolicy::EmitFallback) {
+            OpenPolicy::EmitFallback => "emit_fallback",
+            OpenPolicy::FailFast => "fail_fast",
+            OpenPolicy::Skip => "skip",
+        };
+
+        Some(json!({
+            "threshold": self.threshold,
+            "cooldown_ms": self.cooldown.as_millis() as u64,
+            "open_policy": open_policy,
+            "has_fallback": self.fallback.is_some(),
+        }))
+    }
 }
 
 /// Create a circuit breaker factory with default settings

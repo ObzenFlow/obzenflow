@@ -11,4 +11,4 @@ pub mod supervisor;
 pub use builder::PipelineBuilder;
 pub use config::{ObserverConfig, StageConfig as PipelineStageConfig, StageHandlerType};
 pub use fsm::{PipelineAction, PipelineEvent, PipelineState};
-pub use handle::FlowHandle;
+pub use handle::{FlowHandle, MiddlewareStackConfig};

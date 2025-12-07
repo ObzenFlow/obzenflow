@@ -5,7 +5,7 @@
 
 use super::{
     fsm::{PipelineAction, PipelineContext, PipelineEvent, PipelineState},
-    handle::FlowHandle,
+    handle::{FlowHandle, MiddlewareStackConfig},
     supervisor::PipelineSupervisor,
 };
 use crate::{
@@ -39,6 +39,8 @@ pub struct PipelineBuilder {
     stage_journals: Option<Vec<(StageId, Arc<dyn Journal<ChainEvent>>)>>,
     error_journals: Option<Vec<(StageId, Arc<dyn Journal<ChainEvent>>)>>,
     flow_name: Option<String>,
+    middleware_stacks: Option<HashMap<StageId, MiddlewareStackConfig>>,
+    contract_attachments: Option<HashMap<(StageId, StageId), Vec<String>>>,
 }
 
 impl PipelineBuilder {
@@ -53,6 +55,8 @@ impl PipelineBuilder {
             stage_journals: None,
             error_journals: None,
             flow_name: None,
+            middleware_stacks: None,
+            contract_attachments: None,
         }
     }
 
@@ -95,6 +99,24 @@ impl PipelineBuilder {
     /// Set the user-specified flow name from the flow! macro
     pub fn with_flow_name(mut self, name: impl Into<String>) -> Self {
         self.flow_name = Some(name.into());
+        self
+    }
+
+    /// Attach structural middleware stacks per stage (for topology observability, FLOWIP-059)
+    pub fn with_middleware_stacks(
+        mut self,
+        stacks: HashMap<StageId, MiddlewareStackConfig>,
+    ) -> Self {
+        self.middleware_stacks = Some(stacks);
+        self
+    }
+
+    /// Attach structural contract names per edge (for topology observability)
+    pub fn with_contract_attachments(
+        mut self,
+        attachments: HashMap<(StageId, StageId), Vec<String>>,
+    ) -> Self {
+        self.contract_attachments = Some(attachments);
         self
     }
 }
@@ -169,6 +191,25 @@ impl SupervisorBuilder for PipelineBuilder {
                 )
             })
             .collect();
+
+        // Structural contract attachments for topology observability:
+        // - Every edge gets TransportContract.
+        // - Edges whose upstream is a source stage also get SourceContract.
+        let mut contract_attachments_map: HashMap<(StageId, StageId), Vec<String>> =
+            self.contract_attachments.unwrap_or_default();
+        for (upstream, downstream) in &expected_contract_pairs {
+            let entry = contract_attachments_map
+                .entry((*upstream, *downstream))
+                .or_default();
+            if !entry.iter().any(|n| n == "TransportContract") {
+                entry.push("TransportContract".to_string());
+            }
+            if expected_sources.contains(upstream) {
+                if !entry.iter().any(|n| n == "SourceContract") {
+                    entry.push("SourceContract".to_string());
+                }
+            }
+        }
 
         let pipeline_context = PipelineContext {
             system_id,
@@ -268,11 +309,18 @@ impl SupervisorBuilder for PipelineBuilder {
         // Clone topology for the handle (topology is Arc, so this is cheap)
         let topology = Some(self.topology.clone());
         let flow_name = self.flow_name.unwrap_or_else(|| "unnamed_flow".to_string());
+        let middleware_stacks = self
+            .middleware_stacks
+            .map(|stacks| Arc::new(stacks) as Arc<HashMap<StageId, MiddlewareStackConfig>>);
+        let contract_attachments =
+            Some(Arc::new(contract_attachments_map) as Arc<HashMap<(StageId, StageId), Vec<String>>>);
         Ok(FlowHandle::new(
             standard_handle,
             metrics_exporter,
             topology,
             flow_name,
+            middleware_stacks,
+            contract_attachments,
         ))
     }
 }

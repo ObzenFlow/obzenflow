@@ -475,6 +475,13 @@ impl MiddlewareFactory for RateLimiterFactory {
         // Rate limiting on sinks can cause backpressure
         MiddlewareSafety::Advanced
     }
+
+    fn config_snapshot(&self) -> Option<serde_json::Value> {
+        Some(serde_json::json!({
+            "tokens_per_sec": self.events_per_second,
+            "burst_capacity": self.burst_capacity.unwrap_or(self.events_per_second),
+        }))
+    }
 }
 
 /// Helper function for common module

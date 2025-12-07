@@ -118,6 +118,14 @@ pub trait StageHandle: Send + Sync {
 
     /// Force shutdown
     async fn force_shutdown(&self) -> Result<(), StageError>;
+
+    /// Wait for the stage to complete its work and reach a terminal state.
+    ///
+    /// Implementations should typically:
+    /// - Observe the underlying supervisor state
+    /// - Treat terminal states (e.g., Drained/Failed) as completion
+    /// - Respect the same shutdown timeout used by the pipeline cleanup path
+    async fn wait_for_completion(&self) -> Result<(), StageError>;
 }
 
 /// Type-erased stage handle for pipeline storage

@@ -394,8 +394,96 @@ impl FsmAction for PipelineAction {
             }
 
             PipelineAction::Cleanup => {
-                // Cleanup will be handled by supervisor drop
-                tracing::info!("Pipeline cleanup action");
+                tracing::info!("Pipeline cleanup: signaling stages to shut down");
+
+                // Signal all non-source stages to shut down
+                for (stage_id, handle) in context.stage_supervisors.iter() {
+                    if let Err(e) = handle.force_shutdown().await {
+                        tracing::warn!(
+                            stage_id = %stage_id,
+                            error = ?e,
+                            "Failed to send force_shutdown to stage"
+                        );
+                    }
+                }
+
+                // Signal all source stages to shut down
+                for (stage_id, handle) in context.source_supervisors.iter() {
+                    if let Err(e) = handle.force_shutdown().await {
+                        tracing::warn!(
+                            stage_id = %stage_id,
+                            error = ?e,
+                            "Failed to send force_shutdown to source"
+                        );
+                    }
+                }
+
+                tracing::info!("Pipeline cleanup: waiting for stages to complete");
+
+                // Wait for all stages to complete (with timeout)
+                //
+                // Timeout is configurable via OBZENFLOW_SHUTDOWN_TIMEOUT_SECS
+                // (default: 30 seconds) so operators can tune shutdown behavior
+                // without code changes.
+                use std::time::{Duration, Instant};
+
+                let timeout = std::env::var("OBZENFLOW_SHUTDOWN_TIMEOUT_SECS")
+                    .ok()
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .map(Duration::from_secs)
+                    .unwrap_or_else(|| Duration::from_secs(30));
+
+                let start = Instant::now();
+
+                // Helper closure to wait on a single handle with the remaining time budget
+                async fn wait_handle_with_budget(
+                    stage_id: StageId,
+                    handle: &crate::stages::common::stage_handle::BoxedStageHandle,
+                    timeout: Duration,
+                    start: Instant,
+                ) {
+                    let elapsed = start.elapsed();
+                    if elapsed >= timeout {
+                        tracing::warn!(
+                            stage_id = %stage_id,
+                            "Pipeline cleanup: timeout budget exhausted before waiting on stage"
+                        );
+                        return;
+                    }
+
+                    let remaining = timeout.saturating_sub(elapsed);
+
+                    match tokio::time::timeout(remaining, handle.wait_for_completion()).await {
+                        Ok(Ok(())) => {
+                            tracing::debug!(stage_id = %stage_id, "Stage completed during cleanup");
+                        }
+                        Ok(Err(e)) => {
+                            tracing::warn!(
+                                stage_id = %stage_id,
+                                error = ?e,
+                                "Stage failed during shutdown cleanup"
+                            );
+                        }
+                        Err(_) => {
+                            tracing::warn!(
+                                stage_id = %stage_id,
+                                "Timeout waiting for stage during cleanup"
+                            );
+                        }
+                    }
+                }
+
+                // Wait for non-source stages
+                for (stage_id, handle) in context.stage_supervisors.iter() {
+                    wait_handle_with_budget(*stage_id, handle, timeout, start).await;
+                }
+
+                // Wait for source stages
+                for (stage_id, handle) in context.source_supervisors.iter() {
+                    wait_handle_with_budget(*stage_id, handle, timeout, start).await;
+                }
+
+                tracing::info!("Pipeline cleanup complete");
             }
 
             PipelineAction::StartMetricsAggregator => {

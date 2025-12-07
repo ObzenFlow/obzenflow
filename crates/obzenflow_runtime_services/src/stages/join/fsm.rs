@@ -310,6 +310,10 @@ pub struct JoinContext<H: JoinHandler> {
     /// Bound factories for reference and stream subscriptions
     pub reference_subscription_factory: BoundSubscriptionFactory,
     pub stream_subscription_factory: BoundSubscriptionFactory,
+
+    /// Counter of reference-side events processed since the last heartbeat
+    /// (used during Hydrating for observability snapshots).
+    pub events_since_last_heartbeat: u64,
 }
 
 impl<H: JoinHandler> JoinContext<H> {
@@ -353,6 +357,7 @@ impl<H: JoinHandler> JoinContext<H> {
             instrumentation,
             reference_subscription_factory,
             stream_subscription_factory,
+            events_since_last_heartbeat: 0,
         }
     }
 }

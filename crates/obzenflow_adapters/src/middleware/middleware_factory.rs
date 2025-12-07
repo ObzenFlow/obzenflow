@@ -78,6 +78,17 @@ pub trait MiddlewareFactory: Send + Sync {
     fn hints(&self) -> MiddlewareHints {
         MiddlewareHints::default()
     }
+
+    /// Return static configuration for topology observability (FLOWIP-059).
+    ///
+    /// Middleware factories override this to expose their structural configuration
+    /// (thresholds, policies, capacities, etc.) for the `/api/topology` endpoint.
+    /// This is purely structural data - no runtime state.
+    ///
+    /// Default returns None for middleware that doesn't need config exposure.
+    fn config_snapshot(&self) -> Option<serde_json::Value> {
+        None
+    }
 }
 
 // Implementation for Box<dyn MiddlewareFactory> to allow boxed factories
@@ -104,5 +115,9 @@ impl<F: MiddlewareFactory + ?Sized> MiddlewareFactory for Box<F> {
 
     fn hints(&self) -> MiddlewareHints {
         (**self).hints()
+    }
+
+    fn config_snapshot(&self) -> Option<serde_json::Value> {
+        (**self).config_snapshot()
     }
 }

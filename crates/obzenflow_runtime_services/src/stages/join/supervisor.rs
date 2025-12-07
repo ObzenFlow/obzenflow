@@ -2,6 +2,7 @@
 
 use crate::messaging::upstream_subscription::ContractConfig;
 use crate::messaging::{PollResult, UpstreamSubscription};
+use crate::metrics::instrumentation::{heartbeat_interval, process_with_instrumentation};
 use crate::stages::common::control_strategies::{ControlEventAction, ProcessingContext};
 use crate::stages::common::handlers::JoinHandler;
 use crate::supervised_base::base::Supervisor;
@@ -135,6 +136,21 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
                     let event = event.clone();
                     Box::pin(async move {
                         if let JoinEvent::ReceivedEOF = event {
+                            // Flush any pending reference-side heartbeat before
+                            // transitioning to Enriching so metrics snapshots
+                            // include all hydrating activity.
+                            if ctx.events_since_last_heartbeat > 0 {
+                                if let Err(e) =
+                                    emit_join_heartbeat_if_due_impl(ctx, ctx.stage_id).await
+                                {
+                                    tracing::warn!(
+                                        stage_name = %ctx.stage_name,
+                                        error = ?e,
+                                        "Failed to emit final join hydration heartbeat"
+                                    );
+                                }
+                            }
+
                             ctx.instrumentation.transition_to_state("Enriching");
                             Ok(Transition {
                                 next_state: JoinState::Enriching,
@@ -354,8 +370,14 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                 // Hydrating state ONLY processes reference events
                 // Stream events queue in journal/subscription (natural backpressure)
 
+                let loop_count = ctx
+                    .instrumentation
+                    .event_loops_total
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
                 tracing::trace!(
                     stage_name = %ctx.stage_name,
+                    loop_iteration = loop_count + 1,
                     "Hydrating - checking reference subscription"
                 );
 
@@ -388,6 +410,12 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                 event_type = envelope.event.event_type(),
                                 "Received event from reference"
                             );
+
+                            // We have work this iteration.
+                            ctx.instrumentation.record_consumed(&envelope);
+                            ctx.instrumentation
+                                .event_loops_with_work_total
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
                             match &envelope.event.content {
                                 obzenflow_core::event::ChainEventContent::FlowControl(signal) => {
@@ -490,7 +518,11 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                         stage_name = %ctx.stage_name,
                                         "Processing reference event to build catalog"
                                     );
+
                                     let handler = (*ctx.handler).clone();
+                                    let state = ctx.handler_state.clone();
+                                    let event = envelope.event.clone();
+                                    let reference_stage_id = ctx.reference_stage_id;
 
                                     // Get writer ID for the handler
                                     let writer_id = ctx
@@ -499,22 +531,50 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                         .ok_or_else(|| "No writer ID available")?
                                         .clone();
 
-                                    match handler.process_event(
-                                        &mut ctx.handler_state,
-                                        envelope.event,
-                                        ctx.reference_stage_id,
-                                        writer_id.clone(),
-                                    ) {
-                                        Ok(events_produced) => {
+                                    let result = process_with_instrumentation(
+                                        &ctx.instrumentation,
+                                        || async move {
+                                            let mut state = state;
+                                            let res = handler.process_event(
+                                                &mut state,
+                                                event,
+                                                reference_stage_id,
+                                                writer_id,
+                                            );
+                                            Ok((res, state))
+                                        },
+                                    )
+                                    .await;
+
+                                    match result {
+                                        Ok((Ok(events_produced), new_state)) => {
+                                            // Update handler state and continue hydrating.
+                                            ctx.handler_state = new_state;
+
                                             tracing::debug!(
                                                 stage_name = %ctx.stage_name,
                                                 events_count = events_produced.len(),
                                                 "Handler produced events during hydration (should be 0)"
                                             );
-                                            // Continue hydrating
+
+                                            // Track reference events for heartbeat snapshots.
+                                            ctx.events_since_last_heartbeat =
+                                                ctx.events_since_last_heartbeat
+                                                    .saturating_add(1);
+                                            if let Err(e) =
+                                                self.emit_join_heartbeat_if_due(ctx).await
+                                            {
+                                                tracing::warn!(
+                                                    stage_name = %ctx.stage_name,
+                                                    error = ?e,
+                                                    "Failed to emit join hydration heartbeat"
+                                                );
+                                            }
+
                                             directive = Ok(EventLoopDirective::Continue);
                                         }
-                                        Err(err) => {
+                                        Ok((Err(err), new_state)) => {
+                                            ctx.handler_state = new_state;
                                             tracing::error!(
                                                 stage_name = %ctx.stage_name,
                                                 error = ?err,
@@ -524,6 +584,19 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                                 JoinEvent::Error(format!(
                                                     "Join handler hydration error: {:?}",
                                                     err
+                                                )),
+                                            ));
+                                        }
+                                        Err(e) => {
+                                            tracing::error!(
+                                                stage_name = %ctx.stage_name,
+                                                error = ?e,
+                                                "Join handler instrumentation error during reference hydration"
+                                            );
+                                            directive = Ok(EventLoopDirective::Transition(
+                                                JoinEvent::Error(format!(
+                                                    "Join handler hydration error: {}",
+                                                    e
                                                 )),
                                             ));
                                         }
@@ -607,6 +680,10 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                 // Process stream events (reference is already complete)
                 // Following the robust pattern from Transform's Running state
 
+                ctx.instrumentation
+                    .event_loops_total
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
                 // Take ownership of subscription + contract state so no borrow of ctx lives across .await
                 let mut stream_subscription = ctx.stream_subscription.take();
                 let mut stream_contract_state =
@@ -626,6 +703,12 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                         .await
                     {
                         PollResult::Event(envelope) => {
+                            // We have work on this loop iteration.
+                            ctx.instrumentation.record_consumed(&envelope);
+                            ctx.instrumentation
+                                .event_loops_with_work_total
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
                             // Match on event content type like Transform does
                             match &envelope.event.content {
                                 obzenflow_core::event::ChainEventContent::FlowControl(signal) => {
@@ -731,8 +814,10 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                         .copied()
                                         .ok_or_else(|| "Event writer is not a stage")?;
 
-                                    // Process data event through handler
+                                    // Process data event through handler, instrumented for metrics
                                     let handler = (*ctx.handler).clone();
+                                    let state = ctx.handler_state.clone();
+                                    let event = envelope.event.clone();
 
                                     // Get writer ID for the handler
                                     let writer_id = ctx
@@ -741,13 +826,25 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                         .ok_or_else(|| "No writer ID available")?
                                         .clone();
 
-                                    match handler.process_event(
-                                        &mut ctx.handler_state,
-                                        envelope.event.clone(),
-                                        source_id,
-                                        writer_id.clone(),
-                                    ) {
-                                        Ok(events) => {
+                                    let result = process_with_instrumentation(
+                                        &ctx.instrumentation,
+                                        || async move {
+                                            let mut state = state;
+                                            let res = handler.process_event(
+                                                &mut state,
+                                                event,
+                                                source_id,
+                                                writer_id,
+                                            );
+                                            Ok((res, state))
+                                        },
+                                    )
+                                    .await;
+
+                                    match result {
+                                        Ok((Ok(events), new_state)) => {
+                                            ctx.handler_state = new_state;
+
                                             // Write output events
                                             for event in events {
                                                 // FLOWIP-080o-part-2: Only count data events for writer_seq.
@@ -763,12 +860,18 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
 
                                             directive = Ok(EventLoopDirective::Continue);
                                         }
-                                        Err(err) => {
-                                            // Per-record join enrichment failure: turn input into an error-marked event
-                                            use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
+                                        Ok((Err(err), new_state)) => {
+                                            ctx.handler_state = new_state;
 
-                                            let reason =
-                                                format!("Join handler error during enrichment: {:?}", err);
+                                            // Per-record join enrichment failure: turn input into an error-marked event
+                                            use obzenflow_core::event::status::processing_status::{
+                                                ErrorKind, ProcessingStatus,
+                                            };
+
+                                            let reason = format!(
+                                                "Join handler error during enrichment: {:?}",
+                                                err
+                                            );
                                             let error_event = envelope
                                                 .event
                                                 .clone()
@@ -776,14 +879,18 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
 
                                             let route_to_error_journal =
                                                 match &error_event.processing_info.status {
-                                                    ProcessingStatus::Error { kind, .. } => match kind {
-                                                        Some(ErrorKind::Timeout)
-                                                        | Some(ErrorKind::Remote)
-                                                        | Some(ErrorKind::Deserialization) => true,
-                                                        Some(ErrorKind::Validation)
-                                                        | Some(ErrorKind::Domain) => false,
-                                                        None | Some(ErrorKind::Unknown) => true,
-                                                    },
+                                                    ProcessingStatus::Error { kind, .. } => {
+                                                        match kind {
+                                                            Some(ErrorKind::Timeout)
+                                                            | Some(ErrorKind::Remote)
+                                                            | Some(ErrorKind::Deserialization) => {
+                                                                true
+                                                            }
+                                                            Some(ErrorKind::Validation)
+                                                            | Some(ErrorKind::Domain) => false,
+                                                            None | Some(ErrorKind::Unknown) => true,
+                                                        }
+                                                    }
                                                     _ => false,
                                                 };
 
@@ -814,6 +921,19 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                             }
 
                                             directive = Ok(EventLoopDirective::Continue);
+                                        }
+                                        Err(e) => {
+                                            tracing::error!(
+                                                stage_name = %ctx.stage_name,
+                                                error = ?e,
+                                                "Join handler instrumentation error during enrichment"
+                                            );
+                                            directive = Ok(EventLoopDirective::Transition(
+                                                JoinEvent::Error(format!(
+                                                    "Join handler enrichment error: {}",
+                                                    e
+                                                )),
+                                            ));
                                         }
                                     }
                                 }
@@ -893,6 +1013,10 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                 // First, drain any remaining events from both subscriptions
                 // This is critical for contract events (FLOWIP-080o fix)
 
+                ctx.instrumentation
+                    .event_loops_total
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
                 // Take ownership of reference subscription and contract state
                 let mut ref_subscription = ctx.reference_subscription.take();
                 let mut ref_contract_state =
@@ -925,10 +1049,18 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                 "Join draining reference subscription event"
                             );
 
+                            ctx.instrumentation.record_consumed(&envelope);
+                            ctx.instrumentation
+                                .event_loops_with_work_total
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
                             // Process based on event type
                             if !envelope.event.is_control() {
-                                // Process data event through join handler
+                                // Process data event through join handler (instrumented)
                                 let handler = (*ctx.handler).clone();
+                                let state = ctx.handler_state.clone();
+                                let event = envelope.event.clone();
+                                let reference_stage_id = ctx.reference_stage_id;
 
                                 // Get writer ID for the handler
                                 let writer_id = ctx
@@ -937,13 +1069,20 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                     .ok_or_else(|| "No writer ID available")?
                                     .clone();
 
-                                match handler.process_event(
-                                    &mut ctx.handler_state,
-                                    envelope.event.clone(),
-                                    ctx.reference_stage_id,
-                                    writer_id.clone(),
-                                ) {
-                                    Ok(results) => {
+                                let result = process_with_instrumentation(
+                                    &ctx.instrumentation,
+                                    || async move {
+                                        let mut state = state;
+                                        let res =
+                                            handler.process_event(&mut state, event, reference_stage_id, writer_id);
+                                        Ok((res, state))
+                                    },
+                                )
+                                .await;
+
+                                match result {
+                                    Ok((Ok(results), new_state)) => {
+                                        ctx.handler_state = new_state;
                                         for event in results {
                                             // FLOWIP-080o-part-2: Only count data events for writer_seq.
                                             // Lifecycle events (middleware metrics, etc.) are observability
@@ -956,7 +1095,8 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                             self.data_journal.append(event, None).await?;
                                         }
                                     }
-                                    Err(err) => {
+                                    Ok((Err(err), new_state)) => {
+                                        ctx.handler_state = new_state;
                                         tracing::error!(
                                             stage_name = %ctx.stage_name,
                                             error = ?err,
@@ -966,6 +1106,19 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                             JoinEvent::Error(format!(
                                                 "Join handler drain-side error: {:?}",
                                                 err
+                                            )),
+                                        ));
+                                    }
+                                    Err(e) => {
+                                        tracing::error!(
+                                            stage_name = %ctx.stage_name,
+                                            error = ?e,
+                                            "Join handler instrumentation error during reference draining"
+                                        );
+                                        directive = Ok(EventLoopDirective::Transition(
+                                            JoinEvent::Error(format!(
+                                                "Join handler drain-side error: {}",
+                                                e
                                             )),
                                         ));
                                     }
@@ -1038,10 +1191,17 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                 "Join draining stream subscription event"
                             );
 
+                            ctx.instrumentation.record_consumed(&envelope);
+                            ctx.instrumentation
+                                .event_loops_with_work_total
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
                             // Process based on event type
                             if !envelope.event.is_control() {
                                 // Process data event through join handler
                                 let handler = (*ctx.handler).clone();
+                                let state = ctx.handler_state.clone();
+                                let event = envelope.event.clone();
 
                                 // Get writer ID for the handler
                                 let writer_id = ctx
@@ -1058,15 +1218,24 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                     .copied()
                                     .unwrap_or(ctx.reference_stage_id);
 
-                                let results = handler.process_event(
-                                    &mut ctx.handler_state,
-                                    envelope.event.clone(),
-                                    source_stage_id,
-                                    writer_id.clone(),
-                                );
+                                let result = process_with_instrumentation(
+                                    &ctx.instrumentation,
+                                    || async move {
+                                        let mut state = state;
+                                        let res = handler.process_event(
+                                            &mut state,
+                                            event,
+                                            source_stage_id,
+                                            writer_id,
+                                        );
+                                        Ok((res, state))
+                                    },
+                                )
+                                .await;
 
-                                match results {
-                                    Ok(events) => {
+                                match result {
+                                    Ok((Ok(events), new_state)) => {
+                                        ctx.handler_state = new_state;
                                         for event in events {
                                             // FLOWIP-080o-part-2: Only count data events for writer_seq.
                                             // Lifecycle events (middleware metrics, etc.) are observability
@@ -1079,7 +1248,9 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                             self.data_journal.append(event, None).await?;
                                         }
                                     }
-                                    Err(err) => {
+                                    Ok((Err(err), new_state)) => {
+                                        ctx.handler_state = new_state;
+
                                         // Per-record join failure during draining: mark input as error.
                                         use obzenflow_core::event::status::processing_status::{
                                             ErrorKind, ProcessingStatus,
@@ -1128,6 +1299,19 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                             }
                                             self.data_journal.append(error_event, None).await?;
                                         }
+                                    }
+                                    Err(e) => {
+                                        tracing::error!(
+                                            stage_name = %ctx.stage_name,
+                                            error = ?e,
+                                            "Join handler instrumentation error during draining"
+                                        );
+                                        directive = Ok(EventLoopDirective::Transition(
+                                            JoinEvent::Error(format!(
+                                                "Join handler drain-side error: {}",
+                                                e
+                                            )),
+                                        ));
                                     }
                                 }
                             } else if !envelope.event.is_eof() {
@@ -1218,6 +1402,78 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
             _ => Ok(EventLoopDirective::Continue),
         }
     }
+}
+
+impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> JoinSupervisor<H> {
+    /// Emit a join heartbeat when hydrating if enough reference events have
+    /// been processed since the last snapshot.
+    async fn emit_join_heartbeat_if_due(
+        &self,
+        ctx: &mut JoinContext<H>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        emit_join_heartbeat_if_due_impl(ctx, self.stage_id).await
+    }
+}
+
+async fn emit_join_heartbeat_if_due_impl<H: JoinHandler + Send + Sync + 'static>(
+    ctx: &mut JoinContext<H>,
+    stage_id: StageId,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let interval = heartbeat_interval();
+    if interval == 0 || ctx.events_since_last_heartbeat < interval {
+        return Ok(());
+    }
+
+    let writer_id = match ctx.writer_id.as_ref() {
+        Some(id) => id.clone(),
+        None => {
+            // Writer not initialized yet; skip heartbeat rather than failing.
+            return Ok(());
+        }
+    };
+
+    let events_since_last = ctx.events_since_last_heartbeat;
+    if events_since_last == 0 {
+        return Ok(());
+    }
+
+    // Capture the latest runtime context snapshot for this join stage.
+    let runtime_context = ctx.instrumentation.snapshot();
+
+    use obzenflow_core::event::context::{FlowContext, StageType};
+    use obzenflow_core::event::payloads::observability_payload::{
+        MetricsLifecycle, ObservabilityPayload,
+    };
+    use obzenflow_core::event::ChainEventFactory;
+    use serde_json::json;
+
+    let flow_context = FlowContext {
+        flow_name: ctx.flow_name.clone(),
+        flow_id: ctx.flow_id.to_string(),
+        stage_name: ctx.stage_name.clone(),
+        stage_id,
+        stage_type: StageType::Join,
+    };
+
+    let payload = ObservabilityPayload::Metrics(MetricsLifecycle::Custom {
+        name: "join_reference_heartbeat".to_string(),
+        value: json!({
+            "events_since_last_heartbeat": events_since_last,
+            "events_processed_total": runtime_context.events_processed_total,
+        }),
+        tags: None,
+    });
+
+    let heartbeat = ChainEventFactory::observability_event(writer_id, payload)
+        .with_flow_context(flow_context)
+        .with_runtime_context(runtime_context);
+
+    ctx.instrumentation.record_emitted(&heartbeat);
+    ctx.data_journal.append(heartbeat, None).await?;
+
+    ctx.events_since_last_heartbeat = 0;
+
+    Ok(())
 }
 
 // Background task methods removed - join stage now follows the pattern

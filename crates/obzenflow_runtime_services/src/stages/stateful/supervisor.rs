@@ -1,7 +1,7 @@
 //! Stateful supervisor implementation using HandlerSupervised pattern
 
 use crate::messaging::PollResult;
-use crate::metrics::instrumentation::process_with_instrumentation;
+use crate::metrics::instrumentation::{heartbeat_interval, process_with_instrumentation};
 use crate::stages::common::control_strategies::{ControlEventAction, ProcessingContext};
 use crate::stages::common::handlers::StatefulHandler;
 use crate::supervised_base::base::Supervisor;
@@ -534,16 +534,35 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                                 }
                                 obzenflow_core::event::ChainEventContent::Data { .. } => {
                                     // ✨ KEY DIFFERENCE: Accumulate without writing to journal
-                                    let current_state = &mut ctx.current_state;
+                                    let mut should_emit = false;
+                                    {
+                                        // Limit the mutable borrow of ctx.current_state to this block
+                                        let current_state = &mut ctx.current_state;
 
-                                    // Clone handler to make it mutable
-                                    let mut handler = (*ctx.handler).clone();
+                                        // Clone handler to make it mutable
+                                        let mut handler = (*ctx.handler).clone();
 
-                                    // Just accumulate - no instrumentation needed, we're just updating state!
-                                    handler.accumulate(current_state, envelope.event.clone());
+                                        // Accumulate into state without emitting domain events yet.
+                                        handler.accumulate(current_state, envelope.event.clone());
+
+                                        // Check if we should emit based on updated state
+                                        should_emit = handler.should_emit(current_state);
+                                    }
+
+                                    // Track accumulated events for observability heartbeats.
+                                    ctx.events_since_last_heartbeat =
+                                        ctx.events_since_last_heartbeat.saturating_add(1);
+                                    if let Err(e) = self.emit_stateful_heartbeat_if_due(ctx).await
+                                    {
+                                        tracing::warn!(
+                                            stage_name = %ctx.stage_name,
+                                            error = ?e,
+                                            "Failed to emit stateful accumulator heartbeat"
+                                        );
+                                    }
 
                                     // Check if we should emit
-                                    if handler.should_emit(current_state) {
+                                    if should_emit {
                                         // Transition to Emitting state
                                         directive = Ok(EventLoopDirective::Transition(
                                             StatefulEvent::ShouldEmit,
@@ -760,6 +779,17 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                                 let mut handler = (*ctx.handler).clone();
                                 handler.accumulate(&mut ctx.current_state, event);
 
+                                // Track accumulated events during drain for heartbeat visibility.
+                                ctx.events_since_last_heartbeat =
+                                    ctx.events_since_last_heartbeat.saturating_add(1);
+                                if let Err(e) = self.emit_stateful_heartbeat_if_due(ctx).await {
+                                    tracing::warn!(
+                                        stage_name = %ctx.stage_name,
+                                        error = ?e,
+                                        "Failed to emit stateful accumulator heartbeat during draining"
+                                    );
+                                }
+
                                 // After accumulation, mirror Accumulating semantics:
                                 // if the handler says we should emit, do so inline.
                                 if handler.should_emit(&ctx.current_state) {
@@ -968,6 +998,18 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                 ctx.subscription = maybe_subscription;
 
                 if should_drain {
+                    // Flush any remaining accumulated events into a final heartbeat snapshot
+                    // before emitting drain results.
+                    if ctx.events_since_last_heartbeat > 0 {
+                        if let Err(e) = self.emit_stateful_heartbeat_if_due(ctx).await {
+                            tracing::warn!(
+                                stage_name = %ctx.stage_name,
+                                error = ?e,
+                                "Failed to emit final stateful accumulator heartbeat before drain"
+                            );
+                        }
+                    }
+
                     // Now call handler.drain() to emit final accumulated state
                     let final_state = ctx.current_state.clone();
                     let handler = (*ctx.handler).clone();
@@ -1078,6 +1120,83 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> State
             .append(forward_event, Some(envelope))
             .await
             .map_err(|e| format!("Failed to forward control event: {}", e))?;
+        Ok(())
+    }
+
+    /// Emit an observability heartbeat when enough events have been accumulated.
+    ///
+    /// This increments the instrumentation counters in batches (instead of per
+    /// event) and writes a lightweight `Observability` event carrying the latest
+    /// `runtime_context` snapshot for the accumulator.
+    async fn emit_stateful_heartbeat_if_due(
+        &self,
+        ctx: &mut StatefulContext<H>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let interval = heartbeat_interval();
+        if interval == 0 {
+            return Ok(());
+        }
+
+        if ctx.events_since_last_heartbeat < interval {
+            return Ok(());
+        }
+
+        let delta = ctx.events_since_last_heartbeat;
+        if delta == 0 {
+            return Ok(());
+        }
+
+        let writer_id = match ctx.writer_id.as_ref() {
+            Some(id) => id.clone(),
+            None => {
+                // Writer not initialized yet; skip heartbeat rather than failing.
+                return Ok(());
+            }
+        };
+
+        // Batch-update events_processed_total so the snapshot reflects all
+        // accumulated records without per-event instrumentation overhead.
+        ctx.instrumentation
+            .events_processed_total
+            .fetch_add(delta as u64, std::sync::atomic::Ordering::Relaxed);
+
+        // Capture a fresh runtime context snapshot for the heartbeat.
+        let runtime_context = ctx.instrumentation.snapshot();
+
+        use obzenflow_core::event::context::StageType;
+        use obzenflow_core::event::payloads::observability_payload::{
+            MetricsLifecycle, ObservabilityPayload,
+        };
+        use obzenflow_core::event::ChainEventFactory;
+        use serde_json::json;
+
+        let flow_context = FlowContext {
+            flow_name: ctx.flow_name.clone(),
+            flow_id: ctx.flow_id.to_string(),
+            stage_name: ctx.stage_name.clone(),
+            stage_id: self.stage_id,
+            stage_type: StageType::Stateful,
+        };
+
+        let payload = ObservabilityPayload::Metrics(MetricsLifecycle::Custom {
+            name: "accumulator_heartbeat".to_string(),
+            value: json!({
+                "events_accumulated_since_last_heartbeat": delta,
+                "events_processed_total": runtime_context.events_processed_total,
+            }),
+            tags: None,
+        });
+
+        let heartbeat = ChainEventFactory::observability_event(writer_id, payload)
+            .with_flow_context(flow_context)
+            .with_runtime_context(runtime_context);
+
+        ctx.instrumentation.record_emitted(&heartbeat);
+        ctx.data_journal.append(heartbeat, None).await?;
+
+        // Reset counter now that we've published a snapshot.
+        ctx.events_since_last_heartbeat = 0;
+
         Ok(())
     }
 }

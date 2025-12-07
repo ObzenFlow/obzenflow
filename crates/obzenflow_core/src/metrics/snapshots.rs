@@ -129,24 +129,9 @@ pub struct HistogramSnapshot {
     pub percentiles: HashMap<Percentile, f64>,
 }
 
-/// Flow-level metrics (for future journey events)
+/// Flow-level metrics
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FlowMetricsSnapshot {
-    /// Number of opened journeys
-    pub journeys_opened: u64,
-
-    /// Number of sealed journeys
-    pub journeys_sealed: u64,
-
-    /// Number of errored journeys
-    pub journeys_errored: u64,
-
-    /// Number of abandoned journeys (timed out)
-    pub journeys_abandoned: u64,
-
-    /// End-to-end latency histogram
-    pub e2e_latency: HistogramSnapshot,
-
     /// Total duration of the flow (wall clock time)
     pub flow_duration: MetricsDuration,
 
@@ -167,9 +152,6 @@ pub struct FlowMetricsSnapshot {
 
     /// Event loops with work across all stages
     pub event_loops_with_work_total: u64,
-
-    /// Active journeys count (saturation metric)
-    pub saturation_journeys: u64,
 }
 
 /// Journal performance metrics

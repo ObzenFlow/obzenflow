@@ -136,4 +136,37 @@ where
             .await
             .map_err(|e| StageError::EventSendFailed(format!("Failed to force shutdown: {:?}", e)))
     }
+
+    async fn wait_for_completion(&self) -> Result<(), StageError> {
+        use std::time::{Duration, Instant};
+
+        // Use the same env var as the pipeline cleanup path so operators
+        // can tune shutdown behavior without code changes.
+        let timeout = std::env::var("OBZENFLOW_SHUTDOWN_TIMEOUT_SECS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .map(Duration::from_secs)
+            .unwrap_or_else(|| Duration::from_secs(30));
+
+        let start = Instant::now();
+
+        loop {
+            let status = (self.state_checker)(&self.inner.current_state());
+            match status {
+                StageStatus::Drained | StageStatus::Failed => {
+                    return Ok(());
+                }
+                _ => {
+                    if start.elapsed() >= timeout {
+                        return Err(StageError::Other(format!(
+                            "Timeout waiting for stage {} to complete during shutdown",
+                            self.stage_name
+                        )));
+                    }
+                    // Small backoff to avoid busy-waiting
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            }
+        }
+    }
 }

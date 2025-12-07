@@ -8,9 +8,11 @@
 //! - Graceful shutdown handling
 
 use super::{ApplicationError, FlowConfig};
+use crate::application::config::StartupMode;
 use clap::Parser;
 use obzenflow_runtime_services::prelude::FlowHandle;
 use std::future::Future;
+use std::sync::Arc;
 use tokio::task::JoinHandle;
 
 /// Configuration for log level filtering
@@ -338,14 +340,30 @@ impl FlowApplication {
         // Parse CLI arguments automatically (like Spring Boot)
         let config = FlowConfig::parse();
 
+        // Export startup mode to environment so lower layers (runtime_services)
+        // can adjust behaviour (e.g. disable auto-Run in manual mode).
+        // This is primarily used by the pipeline supervisor (FLOWIP-059).
+        if config.server {
+            match config.startup_mode {
+                StartupMode::Auto => {
+                    std::env::set_var("OBZENFLOW_STARTUP_MODE", "auto");
+                }
+                StartupMode::Manual => {
+                    std::env::set_var("OBZENFLOW_STARTUP_MODE", "manual");
+                }
+            }
+        }
+
         // Note: Logging/console-subscriber should be initialized in main() before
         // the tokio runtime is created for console_subscriber to work properly
 
         tracing::info!("🚀 Starting FlowApplication");
         
         // Build the flow (this executes the flow! macro)
-        let flow_handle = flow_future.await
+        let flow_handle = flow_future
+            .await
             .map_err(|e| ApplicationError::FlowBuildFailed(e.to_string()))?;
+        let flow_handle = Arc::new(flow_handle);
         
         // Start server if --server flag present
         let server_handle = if config.server {
@@ -353,33 +371,51 @@ impl FlowApplication {
         } else {
             None
         };
-        
-        // Run the flow to completion
-        tracing::info!("▶️  Starting flow execution");
-        flow_handle.run().await
-            .map_err(|e| ApplicationError::FlowExecutionFailed(e.to_string()))?;
-        
-        // Flow completed - handle post-completion
-        if let Some(_handle) = server_handle {
-            // Server was started, keep it running
-            tracing::info!("✅ Flow completed successfully");
-            tracing::info!("📊 Server still running on port {}", config.server_port);
-            tracing::info!("⏸️  Press Ctrl+C to stop server...");
-            
-            // Wait for Ctrl+C
-            tokio::signal::ctrl_c().await?;
-            tracing::info!("👋 Shutting down server");
+
+        if config.server {
+            // Server mode: lifecycle is controlled via HTTP (and optionally startup_mode).
+            match config.startup_mode {
+                StartupMode::Auto => {
+                    tracing::info!("▶️  Starting flow execution (startup_mode=auto)");
+                    flow_handle
+                        .start()
+                        .await
+                        .map_err(|e| ApplicationError::FlowExecutionFailed(e.to_string()))?;
+                }
+                StartupMode::Manual => {
+                    tracing::info!("⏸️  startup_mode=manual; waiting for Play via /api/flow/control");
+                }
+            }
+
+            if let Some(_handle) = server_handle {
+                tracing::info!("📊 Server running on port {}", config.server_port);
+                tracing::info!("⏸️  Press Ctrl+C to stop server...");
+
+                // Wait for Ctrl+C
+                tokio::signal::ctrl_c().await?;
+                tracing::info!("👋 Shutting down server");
+            }
+
+            Ok(())
         } else {
-            // No server, just exit
-            tracing::info!("✅ Flow completed successfully");
+            // Non-server mode: preserve existing behavior (run to completion, no HTTP server)
+            tracing::info!("▶️  Starting flow execution (no server)");
+            let handle =
+                Arc::try_unwrap(flow_handle).map_err(|_| {
+                    ApplicationError::FlowExecutionFailed(
+                        "Failed to unwrap FlowHandle for non-server execution".to_string(),
+                    )
+                })?;
+            handle
+                .run()
+                .await
+                .map_err(|e| ApplicationError::FlowExecutionFailed(e.to_string()))
         }
-        
-        Ok(())
     }
     
-    /// Internal: Start the web server with all endpoints
+            /// Internal: Start the web server with all endpoints
     async fn start_server(
-        flow_handle: &FlowHandle, 
+        flow_handle: &Arc<FlowHandle>,
         port: u16
     ) -> Result<Option<JoinHandle<()>>, ApplicationError> {
         #[cfg(feature = "warp-server")]
@@ -394,9 +430,20 @@ impl FlowApplication {
             let metrics = flow_handle.metrics_exporter();
             let has_metrics = metrics.is_some();
 
-            let flow_name = flow_handle.flow_name().to_string();
-
-            let handle = start_web_server(topology, flow_name, metrics, port).await
+	            let flow_name = flow_handle.flow_name().to_string();
+	            let middleware_stacks = flow_handle.middleware_stacks();
+	            let contract_attachments = flow_handle.contract_attachments();
+	
+	            let handle = start_web_server(
+	                topology,
+	                flow_name,
+	                middleware_stacks,
+	                contract_attachments,
+	                metrics,
+	                Some(flow_handle.clone()),
+	                port,
+	            )
+            .await
                 .map_err(|e| ApplicationError::ServerStartFailed(e.to_string()))?;
             
             tracing::info!("📊 Web server started on http://localhost:{}", port);

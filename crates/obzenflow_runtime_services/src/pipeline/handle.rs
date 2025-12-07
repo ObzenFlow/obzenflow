@@ -1,9 +1,43 @@
 use super::fsm::{PipelineEvent, PipelineState};
 use crate::errors::FlowError;
 use crate::supervised_base::{HandleError, StandardHandle, SupervisorHandle};
+use obzenflow_core::StageId;
 use obzenflow_topology::Topology;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::io;
 use std::sync::Arc;
+
+/// Structural middleware configuration for a stage (FLOWIP-059).
+///
+/// Contains both the ordered list of middleware names and their static configuration
+/// snapshots for the topology observability API.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MiddlewareStackConfig {
+    /// Ordered list of middleware names in the stack
+    pub stack: Vec<String>,
+    /// Circuit breaker static config (if present)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub circuit_breaker: Option<serde_json::Value>,
+    /// Rate limiter static config (if present)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rate_limiter: Option<serde_json::Value>,
+    /// Retry policy static config (if present)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retry: Option<serde_json::Value>,
+}
+
+impl MiddlewareStackConfig {
+    /// Create a new middleware stack config with just names (no detailed config)
+    pub fn names_only(stack: Vec<String>) -> Self {
+        Self {
+            stack,
+            circuit_breaker: None,
+            rate_limiter: None,
+            retry: None,
+        }
+    }
+}
 
 /// Flow handle for external control - the public API returned by the DSL
 ///
@@ -25,6 +59,12 @@ pub struct FlowHandle {
 
     /// User-specified flow name from flow! macro
     flow_name: String,
+
+    /// Structural middleware stacks per stage (for topology observability, FLOWIP-059)
+    middleware_stacks: Option<Arc<HashMap<StageId, MiddlewareStackConfig>>>,
+
+    /// Structural contract names per edge (for topology observability)
+    contract_attachments: Option<Arc<HashMap<(StageId, StageId), Vec<String>>>>,
 }
 
 impl FlowHandle {
@@ -34,13 +74,33 @@ impl FlowHandle {
         metrics_exporter: Option<Arc<dyn obzenflow_core::metrics::MetricsExporter>>,
         topology: Option<Arc<Topology>>,
         flow_name: String,
+        middleware_stacks: Option<Arc<HashMap<StageId, MiddlewareStackConfig>>>,
+        contract_attachments: Option<Arc<HashMap<(StageId, StageId), Vec<String>>>>,
     ) -> Self {
         Self {
             handle,
             metrics_exporter,
             topology,
             flow_name,
+            middleware_stacks,
+            contract_attachments,
         }
+    }
+
+    /// Start the pipeline without waiting for completion.
+    ///
+    /// This sends the `Run` event into the FSM and returns immediately.
+    /// Intended for long-running/server flows where lifecycle is driven
+    /// externally (e.g. via HTTP control API) rather than by awaiting
+    /// `run()` to completion.
+    pub async fn start(&self) -> Result<(), FlowError> {
+        let current_state = self.current_state();
+        tracing::debug!(
+            "FlowHandle::start() - Current pipeline state: {:?}",
+            current_state
+        );
+        tracing::info!("FlowHandle::start() - Sending PipelineEvent::Run to start flow");
+        self.send_event(PipelineEvent::Run).await
     }
 
     /// Run the pipeline and wait for completion
@@ -144,6 +204,18 @@ impl FlowHandle {
     /// The topology is immutable and thread-safe.
     pub fn topology(&self) -> Option<Arc<Topology>> {
         self.topology.clone()
+    }
+
+    /// Get structural middleware stacks per stage (for topology endpoint, FLOWIP-059)
+    pub fn middleware_stacks(&self) -> Option<Arc<HashMap<StageId, MiddlewareStackConfig>>> {
+        self.middleware_stacks.clone()
+    }
+
+    /// Get structural contract names per edge (for topology endpoint)
+    pub fn contract_attachments(
+        &self,
+    ) -> Option<Arc<HashMap<(StageId, StageId), Vec<String>>>> {
+        self.contract_attachments.clone()
     }
 
     /// Get the user-specified flow name from the flow! macro

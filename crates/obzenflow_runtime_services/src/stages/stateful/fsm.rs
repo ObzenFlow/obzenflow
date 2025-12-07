@@ -329,6 +329,10 @@ pub struct StatefulContext<H: StatefulHandler> {
 
     /// Bound subscription factory for this stage's upstream journals
     pub upstream_subscription_factory: BoundSubscriptionFactory,
+
+    /// Counter of accumulated events since the last observability heartbeat
+    /// (FLOWIP-059 Phase 6.4 - accumulator heartbeats).
+    pub events_since_last_heartbeat: u64,
 }
 
 impl<H: StatefulHandler> StatefulContext<H> {
@@ -366,6 +370,7 @@ impl<H: StatefulHandler> StatefulContext<H> {
             buffered_eof: None,
             instrumentation,
             upstream_subscription_factory,
+            events_since_last_heartbeat: 0,
         }
     }
 }

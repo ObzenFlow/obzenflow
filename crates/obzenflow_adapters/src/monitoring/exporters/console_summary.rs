@@ -123,60 +123,6 @@ impl ConsoleSummaryExporter {
                     }
                 ));
 
-                // Journey metrics
-                summary.push_str("\nJourney Tracking:\n");
-                summary.push_str(&format!(
-                    "  Started:           {}\n",
-                    flow_metrics.journeys_opened
-                ));
-                summary.push_str(&format!(
-                    "  Completed:         {}\n",
-                    flow_metrics.journeys_sealed
-                ));
-                summary.push_str(&format!(
-                    "  Errored:           {}\n",
-                    flow_metrics.journeys_errored
-                ));
-                summary.push_str(&format!(
-                    "  Abandoned:         {} ({:.1}%)\n",
-                    flow_metrics.journeys_abandoned,
-                    if flow_metrics.journeys_opened > 0 {
-                        (flow_metrics.journeys_abandoned as f64
-                            / flow_metrics.journeys_opened as f64)
-                            * 100.0
-                    } else {
-                        0.0
-                    }
-                ));
-                summary.push_str(&format!(
-                    "  Active:            {} (saturation)\n",
-                    flow_metrics.saturation_journeys
-                ));
-
-                // E2E latency percentiles
-                if flow_metrics.e2e_latency.count > 0 {
-                    summary.push_str("\nE2E Latency:\n");
-                    let p50 = flow_metrics
-                        .e2e_latency
-                        .percentiles
-                        .get(&Percentile::P50)
-                        .map(|&v| format_duration(v / 1_000_000.0))
-                        .unwrap_or_else(|| "N/A".to_string());
-                    let p90 = flow_metrics
-                        .e2e_latency
-                        .percentiles
-                        .get(&Percentile::P90)
-                        .map(|&v| format_duration(v / 1_000_000.0))
-                        .unwrap_or_else(|| "N/A".to_string());
-                    let p99 = flow_metrics
-                        .e2e_latency
-                        .percentiles
-                        .get(&Percentile::P99)
-                        .map(|&v| format_duration(v / 1_000_000.0))
-                        .unwrap_or_else(|| "N/A".to_string());
-                    summary.push_str(&format!("  p50: {}, p90: {}, p99: {}\n", p50, p90, p99));
-                }
-
                 // Utilization
                 let utilization = if flow_metrics.event_loops_total > 0 {
                     flow_metrics.event_loops_with_work_total as f64

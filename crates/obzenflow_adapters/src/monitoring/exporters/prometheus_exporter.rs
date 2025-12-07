@@ -577,64 +577,6 @@ impl PrometheusExporter {
                 .map(|m| m.flow_name.as_str())
                 .unwrap_or("unknown");
 
-            // Journey tracking counters
-            writeln!(
-                output,
-                "# HELP obzenflow_flow_journeys_started_total Number of event journeys started"
-            )?;
-            writeln!(
-                output,
-                "# TYPE obzenflow_flow_journeys_started_total counter"
-            )?;
-            writeln!(
-                output,
-                "obzenflow_flow_journeys_started_total{{flow=\"{}\"}} {}",
-                flow_name, flow_metrics.journeys_opened
-            )?;
-            writeln!(output)?;
-
-            writeln!(
-                output,
-                "# HELP obzenflow_flow_journeys_completed_total Number of event journeys completed"
-            )?;
-            writeln!(
-                output,
-                "# TYPE obzenflow_flow_journeys_completed_total counter"
-            )?;
-            writeln!(
-                output,
-                "obzenflow_flow_journeys_completed_total{{flow=\"{}\"}} {}",
-                flow_name, flow_metrics.journeys_sealed
-            )?;
-            writeln!(output)?;
-
-            writeln!(output, "# HELP obzenflow_flow_journeys_errored_total Number of event journeys that encountered errors")?;
-            writeln!(
-                output,
-                "# TYPE obzenflow_flow_journeys_errored_total counter"
-            )?;
-            writeln!(
-                output,
-                "obzenflow_flow_journeys_errored_total{{flow=\"{}\"}} {}",
-                flow_name, flow_metrics.journeys_errored
-            )?;
-            writeln!(output)?;
-
-            writeln!(
-                output,
-                "# HELP obzenflow_flow_journeys_abandoned_total Number of event journeys abandoned"
-            )?;
-            writeln!(
-                output,
-                "# TYPE obzenflow_flow_journeys_abandoned_total counter"
-            )?;
-            writeln!(
-                output,
-                "obzenflow_flow_journeys_abandoned_total{{flow=\"{}\"}} {}",
-                flow_name, flow_metrics.journeys_abandoned
-            )?;
-            writeln!(output)?;
-
             // Event counts
             writeln!(
                 output,
@@ -713,33 +655,6 @@ impl PrometheusExporter {
                 output,
                 "obzenflow_flow_utilization{{flow=\"{}\"}} {}",
                 flow_name, utilization
-            )?;
-            writeln!(output)?;
-
-            writeln!(output, "# HELP obzenflow_flow_saturation_journeys Active journeys (backpressure indicator)")?;
-            writeln!(output, "# TYPE obzenflow_flow_saturation_journeys gauge")?;
-            writeln!(
-                output,
-                "obzenflow_flow_saturation_journeys{{flow=\"{}\"}} {}",
-                flow_name, flow_metrics.saturation_journeys
-            )?;
-            writeln!(output)?;
-
-            // Journey duration histogram
-            writeln!(
-                output,
-                "# HELP obzenflow_flow_journey_duration_seconds End-to-end journey duration"
-            )?;
-            writeln!(
-                output,
-                "# TYPE obzenflow_flow_journey_duration_seconds histogram"
-            )?;
-            self.render_histogram(
-                output,
-                "obzenflow_flow_journey_duration_seconds",
-                &[("flow", flow_name)],
-                &flow_metrics.e2e_latency,
-                1_000_000_000.0, // Convert nanoseconds to seconds
             )?;
             writeln!(output)?;
         }

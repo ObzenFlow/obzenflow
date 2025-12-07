@@ -142,6 +142,22 @@ pub trait StageDescriptor: Send + Sync {
         flow_middleware: Vec<Box<dyn MiddlewareFactory>>,
     ) -> Result<BoxedStageHandle, String>;
 
+    /// Structural: return configured stage-level middleware names (for topology)
+    ///
+    /// Default implementation returns an empty list; concrete descriptors that
+    /// carry middleware should override this.
+    fn stage_middleware_names(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// Structural: return configured stage-level middleware factories (for topology config extraction)
+    ///
+    /// Default implementation returns an empty slice; concrete descriptors that
+    /// carry middleware should override this to expose their factories for `config_snapshot()`.
+    fn stage_middleware_factories(&self) -> &[Box<dyn MiddlewareFactory>] {
+        &[]
+    }
+
     /// Get a debug representation
     fn debug_info(&self) -> String {
         format!("Stage[{}]", self.name())
@@ -352,6 +368,17 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> S
         StageType::FiniteSource
     }
 
+    fn stage_middleware_names(&self) -> Vec<String> {
+        self.middleware
+            .iter()
+            .map(|f| f.name().to_string())
+            .collect()
+    }
+
+    fn stage_middleware_factories(&self) -> &[Box<dyn MiddlewareFactory>] {
+        &self.middleware
+    }
+
     async fn create_handle_with_flow_middleware(
         self: Box<Self>,
         config: StageConfig,
@@ -459,6 +486,17 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
         StageType::InfiniteSource
     }
 
+    fn stage_middleware_names(&self) -> Vec<String> {
+        self.middleware
+            .iter()
+            .map(|f| f.name().to_string())
+            .collect()
+    }
+
+    fn stage_middleware_factories(&self) -> &[Box<dyn MiddlewareFactory>] {
+        &self.middleware
+    }
+
     async fn create_handle_with_flow_middleware(
         self: Box<Self>,
         config: StageConfig,
@@ -560,6 +598,17 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stag
 
     fn stage_type(&self) -> StageType {
         StageType::Transform
+    }
+
+    fn stage_middleware_names(&self) -> Vec<String> {
+        self.middleware
+            .iter()
+            .map(|f| f.name().to_string())
+            .collect()
+    }
+
+    fn stage_middleware_factories(&self) -> &[Box<dyn MiddlewareFactory>] {
+        &self.middleware
     }
 
     async fn create_handle_with_flow_middleware(
@@ -671,6 +720,17 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
 
     fn stage_type(&self) -> StageType {
         StageType::Sink
+    }
+
+    fn stage_middleware_names(&self) -> Vec<String> {
+        self.middleware
+            .iter()
+            .map(|f| f.name().to_string())
+            .collect()
+    }
+
+    fn stage_middleware_factories(&self) -> &[Box<dyn MiddlewareFactory>] {
+        &self.middleware
     }
 
     async fn create_handle_with_flow_middleware(
@@ -909,6 +969,17 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stage
         StageType::Stateful
     }
 
+    fn stage_middleware_names(&self) -> Vec<String> {
+        self.middleware
+            .iter()
+            .map(|f| f.name().to_string())
+            .collect()
+    }
+
+    fn stage_middleware_factories(&self) -> &[Box<dyn MiddlewareFactory>] {
+        &self.middleware
+    }
+
     async fn create_handle_with_flow_middleware(
         self: Box<Self>,
         config: StageConfig,
@@ -1047,6 +1118,17 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
 
     fn stage_type(&self) -> StageType {
         StageType::Join
+    }
+
+    fn stage_middleware_names(&self) -> Vec<String> {
+        self.middleware
+            .iter()
+            .map(|f| f.name().to_string())
+            .collect()
+    }
+
+    fn stage_middleware_factories(&self) -> &[Box<dyn MiddlewareFactory>] {
+        &self.middleware
     }
 
     fn reference_stage_id(&self) -> Option<StageId> {

@@ -8,6 +8,7 @@ use obzenflow_core::StageId;
 use obzenflow_topology::Topology;
 use std::sync::Arc;
 use std::collections::HashMap;
+use obzenflow_runtime_services::pipeline::FlowHandle;
 
 /// Start a web server with all flow endpoints
 /// 
@@ -32,11 +33,14 @@ use std::collections::HashMap;
 pub async fn start_web_server(
     topology: Arc<Topology>,
     flow_name: String,
+    middleware_stacks: Option<Arc<HashMap<StageId, obzenflow_runtime_services::pipeline::MiddlewareStackConfig>>>,
+    contract_attachments: Option<Arc<HashMap<(StageId, StageId), Vec<String>>>>,
     metrics_exporter: Option<Arc<dyn MetricsExporter>>,
+    flow_handle: Option<Arc<FlowHandle>>,
     port: u16,
 ) -> Result<tokio::task::JoinHandle<()>, WebError> {
     use super::endpoints::topology::{StageMetadata, StageType, StageStatus};
-    use super::endpoints::{TopologyHttpEndpoint, MetricsHttpEndpoint};
+    use super::endpoints::{TopologyHttpEndpoint, MetricsHttpEndpoint, FlowControlEndpoint};
     
     let mut server = super::warp::WarpServer::new();
     
@@ -65,11 +69,18 @@ pub async fn start_web_server(
         topology.clone(),
         Arc::new(stages_metadata),
         flow_name,
+        middleware_stacks,
+        contract_attachments,
     )))?;
     
     // Add metrics endpoint if exporter available
     if let Some(ref metrics) = metrics_exporter {
         server.register_endpoint(Box::new(MetricsHttpEndpoint::new(metrics.clone())))?;
+    }
+
+    // Add flow control endpoint if a handle is available
+    if let Some(handle) = flow_handle {
+        server.register_endpoint(Box::new(FlowControlEndpoint::new(handle)))?;
     }
     
     // Add health and ready endpoints (reuse from metrics_server)
