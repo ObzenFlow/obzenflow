@@ -16,6 +16,7 @@ use obzenflow_core::event::{
 };
 use obzenflow_core::id::SystemId;
 use obzenflow_core::journal::journal::Journal;
+use obzenflow_core::metrics::{FlowLifecycleMetricsSnapshot, StageMetricsSnapshot};
 use obzenflow_core::StageId;
 use obzenflow_fsm::{
     fsm, EventVariant, FsmAction, FsmContext, StateMachine, StateVariant, Transition,
@@ -103,7 +104,6 @@ pub enum PipelineAction {
     NotifySourceReady,
     NotifySourceStart,
     BeginDrain,
-    WritePipelineCompleted,
     Cleanup,
     StartMetricsAggregator,
     DrainMetrics,
@@ -176,9 +176,65 @@ pub struct PipelineContext {
     pub expected_sources: Vec<StageId>,
     // TODO: Add metrics handle once MetricsAggregatorBuilder is implemented
     // pub metrics_handle: Option<MetricsHandle>,
+
+    /// Last known per-stage lifecycle metrics (for flow rollup)
+    pub stage_lifecycle_metrics: HashMap<StageId, StageMetricsSnapshot>,
+
+    /// Flow start time for duration calculation
+    pub flow_start_time: Option<std::time::Instant>,
 }
 
 impl FsmContext for PipelineContext {}
+
+/// Compute flow-level lifecycle metrics from per-stage snapshots in the context.
+pub(crate) fn compute_flow_lifecycle_metrics(
+    context: &PipelineContext,
+) -> FlowLifecycleMetricsSnapshot {
+    use obzenflow_core::event::context::StageType as CoreStageType;
+
+    let mut events_in_total: u64 = 0;
+    let mut events_out_total: u64 = 0;
+    let mut errors_total: u64 = 0;
+
+    for (stage_id, snapshot) in &context.stage_lifecycle_metrics {
+        // Map core StageId to topology StageId
+        let topo_stage_id = stage_id.to_topology_id();
+
+        // Look up stage info to determine semantic type
+        if let Some(stage_info) = context.topology.stages().find(|s| s.id == topo_stage_id) {
+            // Map topology StageType to core StageType (they share the same shape)
+            let core_type = match stage_info.stage_type {
+                obzenflow_topology::StageType::FiniteSource => CoreStageType::FiniteSource,
+                obzenflow_topology::StageType::InfiniteSource => CoreStageType::InfiniteSource,
+                obzenflow_topology::StageType::Transform => CoreStageType::Transform,
+                obzenflow_topology::StageType::Sink => CoreStageType::Sink,
+                obzenflow_topology::StageType::Stateful => CoreStageType::Stateful,
+                obzenflow_topology::StageType::Join => CoreStageType::Join,
+            };
+
+            match core_type {
+                CoreStageType::FiniteSource | CoreStageType::InfiniteSource => {
+                    events_in_total = events_in_total
+                        .saturating_add(snapshot.events_processed_total);
+                }
+                CoreStageType::Sink => {
+                    events_out_total = events_out_total
+                        .saturating_add(snapshot.events_processed_total);
+                }
+                _ => {}
+            }
+        }
+
+        // Always include errors for all stages
+        errors_total = errors_total.saturating_add(snapshot.errors_total);
+    }
+
+    FlowLifecycleMetricsSnapshot {
+        events_in_total,
+        events_out_total,
+        errors_total,
+    }
+}
 
 // Implement FsmAction for PipelineAction
 #[async_trait::async_trait]
@@ -308,6 +364,12 @@ impl FsmAction for PipelineAction {
             PipelineAction::NotifySourceStart => {
                 let supervisors = &mut context.source_supervisors;
                 tracing::info!("Starting {} source stages", supervisors.len());
+
+                // Record flow start time on first source start
+                if context.flow_start_time.is_none() {
+                    context.flow_start_time = Some(std::time::Instant::now());
+                }
+
                 for (source_id, source) in supervisors.iter_mut() {
                     tracing::info!(
                         "Starting source stage: {:?} ({})",
@@ -369,28 +431,6 @@ impl FsmAction for PipelineAction {
                 tracing::info!(
                     "Published drain event to system journal and all stage data journals"
                 );
-            }
-
-            PipelineAction::WritePipelineCompleted => {
-                // Get flow name from context or use default
-                let flow_name = "default"; // TODO: Get from first completed stage event
-
-                // Create SystemEventFactory locally to create consistent pipeline lifecycle event
-                let system_event_factory = SystemEventFactory::new(context.system_id);
-                let pipeline_completed = system_event_factory.pipeline_completed();
-
-                context
-                    .system_journal
-                    .append(pipeline_completed, None)
-                    .await
-                    .map_err(|e| {
-                        obzenflow_fsm::FsmError::HandlerError(format!(
-                            "Failed to write pipeline completed event: {}",
-                            e
-                        ))
-                    })?;
-
-                tracing::info!("Pipeline completion event written");
             }
 
             PipelineAction::Cleanup => {
@@ -763,7 +803,7 @@ impl FsmAction for PipelineAction {
                 // Extract stage_id from the SystemEvent structure
                 if let obzenflow_core::event::SystemEventType::StageLifecycle {
                     stage_id,
-                    event: obzenflow_core::event::StageLifecycleEvent::Completed,
+                    event: obzenflow_core::event::StageLifecycleEvent::Completed { .. },
                 } = &event.event
                 {
                     let stage_id = *stage_id;
@@ -1037,7 +1077,6 @@ pub fn build_pipeline_fsm() -> PipelineFsm {
                         next_state: PipelineState::Drained,
                         actions: vec![
                             PipelineAction::DrainMetrics, // Drain metrics AFTER all stages complete
-                            PipelineAction::WritePipelineCompleted,
                             PipelineAction::Cleanup,
                         ],
                     })

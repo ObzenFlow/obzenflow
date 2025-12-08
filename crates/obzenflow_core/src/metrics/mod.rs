@@ -13,6 +13,7 @@ pub use exporter::{MetricsExporter, NoOpMetricsExporter};
 pub use percentile::{Percentile, PercentileExt};
 pub use primitives::{Counter, Gauge, Histogram};
 pub use snapshots::{
-    AppMetricsSnapshot, FlowMetricsSnapshot, HistogramSnapshot, InfraMetricsSnapshot,
-    JournalMetricsSnapshot, StageInfraMetrics, StageMetadata,
+    AppMetricsSnapshot, FlowLifecycleMetricsSnapshot, FlowMetricsSnapshot, HistogramSnapshot,
+    InfraMetricsSnapshot, JournalMetricsSnapshot, StageInfraMetrics, StageMetadata,
+    StageMetricsSnapshot,
 };

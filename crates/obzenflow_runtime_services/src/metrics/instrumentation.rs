@@ -7,6 +7,7 @@ use obzenflow_core::event::vector_clock::VectorClock;
 use obzenflow_core::event::JournalEvent;
 use obzenflow_core::EventId;
 use obzenflow_core::WriterId;
+use obzenflow_core::metrics::StageMetricsSnapshot;
 use serde::{Deserialize, Serialize}; // <‑‑ canonical path
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{OnceLock, RwLock};
@@ -290,6 +291,23 @@ where
     }
 
     result
+}
+
+/// Create a UI-oriented stage metrics snapshot for lifecycle events
+pub fn snapshot_stage_metrics(instrumentation: &StageInstrumentation) -> StageMetricsSnapshot {
+    let ctx = instrumentation.snapshot();
+    StageMetricsSnapshot {
+        events_processed_total: ctx.events_processed_total,
+        errors_total: ctx.errors_total,
+        in_flight: ctx.in_flight,
+        recent_p50_ms: ctx.recent_p50_ms,
+        recent_p90_ms: ctx.recent_p90_ms,
+        recent_p95_ms: ctx.recent_p95_ms,
+        recent_p99_ms: ctx.recent_p99_ms,
+        recent_p999_ms: ctx.recent_p999_ms,
+        event_loops_total: ctx.event_loops_total,
+        event_loops_with_work_total: ctx.event_loops_with_work_total,
+    }
 }
 
 /// Heartbeat interval for stateful/join observability events.

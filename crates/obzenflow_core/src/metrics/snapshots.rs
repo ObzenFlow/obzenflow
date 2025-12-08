@@ -95,6 +95,11 @@ pub struct AppMetricsSnapshot {
 
     /// Pipeline state (FLOWIP-059b)
     pub pipeline_state: String,
+
+    /// Per-stage vector clock watermark (FLOWIP-059c).
+    /// This mirrors MetricsStore.stage_vector_clocks and is used by exporters
+    /// to expose obzenflow_stage_vector_clock metrics.
+    pub stage_vector_clocks: HashMap<StageId, u64>,
 }
 
 /// Snapshot of infrastructure-level metrics from direct observation
@@ -152,6 +157,52 @@ pub struct FlowMetricsSnapshot {
 
     /// Event loops with work across all stages
     pub event_loops_with_work_total: u64,
+}
+
+/// Stage-level metrics snapshot for lifecycle events (UI-focused)
+///
+/// This is a narrow, UI-oriented view of stage metrics derived from
+/// `RuntimeContext` / `StageInstrumentation`. It intentionally exposes only
+/// the fields needed to render topology cards and lifecycle transitions,
+/// not the full Prometheus schema.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StageMetricsSnapshot {
+    /// Total events processed by this stage
+    pub events_processed_total: u64,
+
+    /// Total errors observed at this stage
+    pub errors_total: u64,
+
+    /// Number of in-flight events at snapshot time
+    pub in_flight: u32,
+
+    /// Recent latency percentiles in milliseconds
+    pub recent_p50_ms: u64,
+    pub recent_p90_ms: u64,
+    pub recent_p95_ms: u64,
+    pub recent_p99_ms: u64,
+    pub recent_p999_ms: u64,
+
+    /// Event loop utilization counters for this stage
+    pub event_loops_total: u64,
+    pub event_loops_with_work_total: u64,
+}
+
+/// Flow-level lifecycle metrics snapshot for UI events
+///
+/// This complements `FlowMetricsSnapshot` by providing a minimal view that
+/// is cheap to serialize on every lifecycle event and sufficient to drive
+/// the Flow Summary panel in the UI.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FlowLifecycleMetricsSnapshot {
+    /// Events entering the flow from all sources
+    pub events_in_total: u64,
+
+    /// Events exiting the flow through all sinks
+    pub events_out_total: u64,
+
+    /// Total errors across all stages in the flow
+    pub errors_total: u64,
 }
 
 /// Journal performance metrics
@@ -220,6 +271,7 @@ impl Default for AppMetricsSnapshot {
             stage_last_event_time: HashMap::new(),
             stage_lifecycle_states: HashMap::new(),
             pipeline_state: String::new(),
+            stage_vector_clocks: HashMap::new(),
         }
     }
 }

@@ -1,6 +1,8 @@
 use super::fsm::{PipelineEvent, PipelineState};
 use crate::errors::FlowError;
 use crate::supervised_base::{HandleError, StandardHandle, SupervisorHandle};
+use obzenflow_core::event::SystemEvent;
+use obzenflow_core::journal::journal::Journal;
 use obzenflow_core::StageId;
 use obzenflow_topology::Topology;
 use serde::{Deserialize, Serialize};
@@ -65,6 +67,9 @@ pub struct FlowHandle {
 
     /// Structural contract names per edge (for topology observability)
     contract_attachments: Option<Arc<HashMap<(StageId, StageId), Vec<String>>>>,
+
+    /// System journal for lifecycle events (for SSE / observability)
+    system_journal: Option<Arc<dyn Journal<SystemEvent>>>,
 }
 
 impl FlowHandle {
@@ -76,6 +81,7 @@ impl FlowHandle {
         flow_name: String,
         middleware_stacks: Option<Arc<HashMap<StageId, MiddlewareStackConfig>>>,
         contract_attachments: Option<Arc<HashMap<(StageId, StageId), Vec<String>>>>,
+        system_journal: Option<Arc<dyn Journal<SystemEvent>>>,
     ) -> Self {
         Self {
             handle,
@@ -84,6 +90,7 @@ impl FlowHandle {
             flow_name,
             middleware_stacks,
             contract_attachments,
+            system_journal,
         }
     }
 
@@ -216,6 +223,11 @@ impl FlowHandle {
         &self,
     ) -> Option<Arc<HashMap<(StageId, StageId), Vec<String>>>> {
         self.contract_attachments.clone()
+    }
+
+    /// Get the system journal for lifecycle events (if available)
+    pub fn system_journal(&self) -> Option<Arc<dyn Journal<SystemEvent>>> {
+        self.system_journal.clone()
     }
 
     /// Get the user-specified flow name from the flow! macro

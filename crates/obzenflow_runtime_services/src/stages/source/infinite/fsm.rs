@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use std::marker::PhantomData;
 use std::sync::Arc;
 
-use crate::metrics::instrumentation::StageInstrumentation;
+use crate::metrics::instrumentation::{snapshot_stage_metrics, StageInstrumentation};
 use crate::stages::common::handlers::InfiniteSourceHandler;
 use crate::stages::source::strategies::{SourceControlContext, SourceControlStrategy};
 
@@ -394,10 +394,12 @@ impl<H: InfiniteSourceHandler + Send + Sync + 'static> FsmAction for InfiniteSou
             }
 
             InfiniteSourceAction::SendError { message } => {
-                let error_event = obzenflow_core::event::SystemEvent::stage_failed(
+                let metrics = snapshot_stage_metrics(&ctx.instrumentation);
+                let error_event = obzenflow_core::event::SystemEvent::stage_failed_with_metrics(
                     ctx.stage_id,
                     message.clone(),
                     false, // not recoverable
+                    metrics,
                 );
 
                 match ctx.system_journal.append(error_event, None).await {
@@ -440,8 +442,10 @@ impl<H: InfiniteSourceHandler + Send + Sync + 'static> FsmAction for InfiniteSou
             }
 
             InfiniteSourceAction::WriteStageCompleted => {
-                // Write completion event to system journal
-                let completion_event = SystemEvent::stage_completed(ctx.stage_id);
+                // Write completion event to system journal with final metrics
+                let metrics = snapshot_stage_metrics(&ctx.instrumentation);
+                let completion_event =
+                    SystemEvent::stage_completed_with_metrics(ctx.stage_id, metrics);
 
                 if let Err(e) = ctx.system_journal.append(completion_event, None).await {
                     tracing::error!(

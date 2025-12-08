@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use crate::messaging::upstream_subscription::{ContractConfig, ReaderProgress};
 use crate::messaging::UpstreamSubscription;
-use crate::metrics::instrumentation::StageInstrumentation;
+use crate::metrics::instrumentation::{snapshot_stage_metrics, StageInstrumentation};
 use crate::stages::common::handlers::JoinHandler;
 use crate::stages::resources_builder::BoundSubscriptionFactory;
 
@@ -587,8 +587,10 @@ impl<H: JoinHandler + Send + Sync + 'static> FsmAction for JoinAction<H> {
             }
 
             JoinAction::SendCompletion => {
-                // Write completion event to system journal
-                let completion_event = SystemEvent::stage_completed(ctx.stage_id);
+                // Write completion event to system journal with final metrics
+                let metrics = snapshot_stage_metrics(&ctx.instrumentation);
+                let completion_event =
+                    SystemEvent::stage_completed_with_metrics(ctx.stage_id, metrics);
 
                 if let Err(e) = ctx.system_journal.append(completion_event, None).await {
                     tracing::error!(

@@ -40,7 +40,7 @@ pub async fn start_web_server(
     port: u16,
 ) -> Result<tokio::task::JoinHandle<()>, WebError> {
     use super::endpoints::topology::{StageMetadata, StageType, StageStatus};
-    use super::endpoints::{TopologyHttpEndpoint, MetricsHttpEndpoint, FlowControlEndpoint};
+    use super::endpoints::{FlowControlEndpoint, MetricsHttpEndpoint, TopologyHttpEndpoint};
     
     let mut server = super::warp::WarpServer::new();
     
@@ -80,6 +80,10 @@ pub async fn start_web_server(
 
     // Add flow control endpoint if a handle is available
     if let Some(handle) = flow_handle {
+        // Configure SSE system journal if available
+        if let Some(journal) = handle.system_journal() {
+            server.with_system_journal(journal);
+        }
         server.register_endpoint(Box::new(FlowControlEndpoint::new(handle)))?;
     }
     

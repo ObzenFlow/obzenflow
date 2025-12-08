@@ -552,7 +552,8 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                                     // Track accumulated events for observability heartbeats.
                                     ctx.events_since_last_heartbeat =
                                         ctx.events_since_last_heartbeat.saturating_add(1);
-                                    if let Err(e) = self.emit_stateful_heartbeat_if_due(ctx).await
+                                    if let Err(e) =
+                                        self.emit_stateful_heartbeat_if_due(ctx, false).await
                                     {
                                         tracing::warn!(
                                             stage_name = %ctx.stage_name,
@@ -782,7 +783,9 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                                 // Track accumulated events during drain for heartbeat visibility.
                                 ctx.events_since_last_heartbeat =
                                     ctx.events_since_last_heartbeat.saturating_add(1);
-                                if let Err(e) = self.emit_stateful_heartbeat_if_due(ctx).await {
+                                if let Err(e) =
+                                    self.emit_stateful_heartbeat_if_due(ctx, false).await
+                                {
                                     tracing::warn!(
                                         stage_name = %ctx.stage_name,
                                         error = ?e,
@@ -999,9 +1002,10 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
 
                 if should_drain {
                     // Flush any remaining accumulated events into a final heartbeat snapshot
-                    // before emitting drain results.
+                    // before emitting drain results. For the final heartbeat we bypass the normal
+                    // heartbeat interval threshold so short finite flows still emit a snapshot.
                     if ctx.events_since_last_heartbeat > 0 {
-                        if let Err(e) = self.emit_stateful_heartbeat_if_due(ctx).await {
+                        if let Err(e) = self.emit_stateful_heartbeat_if_due(ctx, true).await {
                             tracing::warn!(
                                 stage_name = %ctx.stage_name,
                                 error = ?e,
@@ -1131,18 +1135,22 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> State
     async fn emit_stateful_heartbeat_if_due(
         &self,
         ctx: &mut StatefulContext<H>,
+        force: bool,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let interval = heartbeat_interval();
         if interval == 0 {
             return Ok(());
         }
 
-        if ctx.events_since_last_heartbeat < interval {
+        let delta = ctx.events_since_last_heartbeat;
+        if delta == 0 {
             return Ok(());
         }
 
-        let delta = ctx.events_since_last_heartbeat;
-        if delta == 0 {
+        // In normal operation we require `delta >= interval` before emitting.
+        // When `force` is true (drain path), we bypass this threshold so that
+        // short finite flows still publish a final heartbeat snapshot.
+        if !force && delta < interval {
             return Ok(());
         }
 

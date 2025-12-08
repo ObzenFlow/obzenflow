@@ -696,6 +696,28 @@ impl PrometheusExporter {
             writeln!(output)?;
         }
 
+        // Stage vector clock watermarks (FLOWIP-059c)
+        if !snapshot.stage_vector_clocks.is_empty() {
+            writeln!(
+                output,
+                "# HELP obzenflow_stage_vector_clock Last vector clock sequence observed for this stage"
+            )?;
+            writeln!(output, "# TYPE obzenflow_stage_vector_clock gauge")?;
+
+            for (stage_id, seq) in &snapshot.stage_vector_clocks {
+                if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
+                    writeln!(
+                        output,
+                        "obzenflow_stage_vector_clock{{flow=\"{}\",stage=\"{}\"}} {}",
+                        escape_label(&metadata.flow_name),
+                        escape_label(&metadata.name),
+                        seq
+                    )?;
+                }
+            }
+            writeln!(output)?;
+        }
+
         Ok(())
     }
 
@@ -983,6 +1005,7 @@ mod tests {
             stage_last_event_time: HashMap::new(),
             stage_lifecycle_states: HashMap::new(),
             pipeline_state: "Created".to_string(),
+            stage_vector_clocks: HashMap::new(),
         };
 
         // Update and render

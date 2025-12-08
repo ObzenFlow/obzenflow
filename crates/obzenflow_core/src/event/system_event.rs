@@ -2,6 +2,7 @@
 
 use crate::event::types::{EventId, WriterId};
 use crate::id::{StageId, SystemId};
+use crate::metrics::{FlowLifecycleMetricsSnapshot, StageMetricsSnapshot};
 use serde::{Deserialize, Serialize};
 
 /// System orchestration event with metadata (written to control journal)
@@ -69,13 +70,21 @@ pub enum SystemEventType {
 #[serde(tag = "lifecycle_event", rename_all = "snake_case")]
 pub enum StageLifecycleEvent {
     Running,
-    Draining,
+    Draining {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        metrics: Option<StageMetricsSnapshot>,
+    },
     Drained,
-    Completed,
+    Completed {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        metrics: Option<StageMetricsSnapshot>,
+    },
     Failed {
         error: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         recoverable: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        metrics: Option<StageMetricsSnapshot>,
     },
 }
 
@@ -83,12 +92,29 @@ pub enum StageLifecycleEvent {
 #[serde(tag = "pipeline_event", rename_all = "snake_case")]
 pub enum PipelineLifecycleEvent {
     Starting,
-    Running,
-    AllStagesCompleted,
-    Draining,
+    Running {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        stage_count: Option<usize>,
+    },
+    Draining {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        metrics: Option<FlowLifecycleMetricsSnapshot>,
+    },
+    AllStagesCompleted {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        metrics: Option<FlowLifecycleMetricsSnapshot>,
+    },
     Drained,
-    Completed,
-    Failed { reason: String },
+    Completed {
+        duration_ms: u64,
+        metrics: FlowLifecycleMetricsSnapshot,
+    },
+    Failed {
+        reason: String,
+        duration_ms: u64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        metrics: Option<FlowLifecycleMetricsSnapshot>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -128,7 +154,7 @@ impl SystemEvent {
             WriterId::from(stage_id),
             SystemEventType::StageLifecycle {
                 stage_id,
-                event: StageLifecycleEvent::Completed,
+                event: StageLifecycleEvent::Completed { metrics: None },
             },
         )
     }
@@ -142,6 +168,56 @@ impl SystemEvent {
                 event: StageLifecycleEvent::Failed {
                     error,
                     recoverable: Some(recoverable),
+                    metrics: None,
+                },
+            },
+        )
+    }
+
+    /// Helper for stages to create draining events with metrics
+    pub fn stage_draining_with_metrics(stage_id: StageId, metrics: StageMetricsSnapshot) -> Self {
+        Self::new(
+            WriterId::from(stage_id),
+            SystemEventType::StageLifecycle {
+                stage_id,
+                event: StageLifecycleEvent::Draining {
+                    metrics: Some(metrics),
+                },
+            },
+        )
+    }
+
+    /// Helper for stages to create completed events with metrics
+    pub fn stage_completed_with_metrics(
+        stage_id: StageId,
+        metrics: StageMetricsSnapshot,
+    ) -> Self {
+        Self::new(
+            WriterId::from(stage_id),
+            SystemEventType::StageLifecycle {
+                stage_id,
+                event: StageLifecycleEvent::Completed {
+                    metrics: Some(metrics),
+                },
+            },
+        )
+    }
+
+    /// Helper for stages to create failed events with metrics
+    pub fn stage_failed_with_metrics(
+        stage_id: StageId,
+        error: String,
+        recoverable: bool,
+        metrics: StageMetricsSnapshot,
+    ) -> Self {
+        Self::new(
+            WriterId::from(stage_id),
+            SystemEventType::StageLifecycle {
+                stage_id,
+                event: StageLifecycleEvent::Failed {
+                    error,
+                    recoverable: Some(recoverable),
+                    metrics: Some(metrics),
                 },
             },
         )
@@ -186,7 +262,7 @@ impl SystemEventFactory {
             self.writer_id,
             SystemEventType::StageLifecycle {
                 stage_id,
-                event: StageLifecycleEvent::Draining,
+                event: StageLifecycleEvent::Draining { metrics: None },
             },
         )
     }
@@ -206,7 +282,7 @@ impl SystemEventFactory {
             self.writer_id,
             SystemEventType::StageLifecycle {
                 stage_id,
-                event: StageLifecycleEvent::Completed,
+                event: StageLifecycleEvent::Completed { metrics: None },
             },
         )
     }
@@ -219,6 +295,7 @@ impl SystemEventFactory {
                 event: StageLifecycleEvent::Failed {
                     error,
                     recoverable: Some(recoverable),
+                    metrics: None,
                 },
             },
         )
@@ -259,21 +336,25 @@ impl SystemEventFactory {
     pub fn pipeline_running(&self) -> SystemEvent {
         SystemEvent::new(
             self.writer_id,
-            SystemEventType::PipelineLifecycle(PipelineLifecycleEvent::Running),
+            SystemEventType::PipelineLifecycle(PipelineLifecycleEvent::Running {
+                stage_count: None,
+            }),
         )
     }
 
     pub fn pipeline_all_stages_completed(&self) -> SystemEvent {
         SystemEvent::new(
             self.writer_id,
-            SystemEventType::PipelineLifecycle(PipelineLifecycleEvent::AllStagesCompleted),
+            SystemEventType::PipelineLifecycle(PipelineLifecycleEvent::AllStagesCompleted {
+                metrics: None,
+            }),
         )
     }
 
     pub fn pipeline_draining(&self) -> SystemEvent {
         SystemEvent::new(
             self.writer_id,
-            SystemEventType::PipelineLifecycle(PipelineLifecycleEvent::Draining),
+            SystemEventType::PipelineLifecycle(PipelineLifecycleEvent::Draining { metrics: None }),
         )
     }
 
@@ -284,17 +365,33 @@ impl SystemEventFactory {
         )
     }
 
-    pub fn pipeline_completed(&self) -> SystemEvent {
+    pub fn pipeline_completed(
+        &self,
+        duration_ms: u64,
+        metrics: FlowLifecycleMetricsSnapshot,
+    ) -> SystemEvent {
         SystemEvent::new(
             self.writer_id,
-            SystemEventType::PipelineLifecycle(PipelineLifecycleEvent::Completed),
+            SystemEventType::PipelineLifecycle(PipelineLifecycleEvent::Completed {
+                duration_ms,
+                metrics,
+            }),
         )
     }
 
-    pub fn pipeline_failed(&self, reason: String) -> SystemEvent {
+    pub fn pipeline_failed(
+        &self,
+        reason: String,
+        duration_ms: u64,
+        metrics: Option<FlowLifecycleMetricsSnapshot>,
+    ) -> SystemEvent {
         SystemEvent::new(
             self.writer_id,
-            SystemEventType::PipelineLifecycle(PipelineLifecycleEvent::Failed { reason }),
+            SystemEventType::PipelineLifecycle(PipelineLifecycleEvent::Failed {
+                reason,
+                duration_ms,
+                metrics,
+            }),
         )
     }
 
@@ -348,20 +445,20 @@ impl JournalEvent for SystemEvent {
         match &self.event {
             SystemEventType::StageLifecycle { event, .. } => match event {
                 StageLifecycleEvent::Running => "system.stage.running",
-                StageLifecycleEvent::Draining => "system.stage.draining",
+                StageLifecycleEvent::Draining { .. } => "system.stage.draining",
                 StageLifecycleEvent::Drained => "system.stage.drained",
-                StageLifecycleEvent::Completed => "system.stage.completed",
+                StageLifecycleEvent::Completed { .. } => "system.stage.completed",
                 StageLifecycleEvent::Failed { .. } => "system.stage.failed",
             },
             SystemEventType::PipelineLifecycle(event) => match event {
                 PipelineLifecycleEvent::Starting => "system.pipeline.starting",
-                PipelineLifecycleEvent::Running => "system.pipeline.running",
-                PipelineLifecycleEvent::AllStagesCompleted => {
+                PipelineLifecycleEvent::Running { .. } => "system.pipeline.running",
+                PipelineLifecycleEvent::AllStagesCompleted { .. } => {
                     "system.pipeline.all_stages_completed"
                 }
-                PipelineLifecycleEvent::Draining => "system.pipeline.draining",
+                PipelineLifecycleEvent::Draining { .. } => "system.pipeline.draining",
                 PipelineLifecycleEvent::Drained => "system.pipeline.drained",
-                PipelineLifecycleEvent::Completed => "system.pipeline.completed",
+                PipelineLifecycleEvent::Completed { .. } => "system.pipeline.completed",
                 PipelineLifecycleEvent::Failed { .. } => "system.pipeline.failed",
             },
             SystemEventType::MetricsCoordination(event) => match event {

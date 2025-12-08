@@ -36,7 +36,7 @@ pub enum MetricsAggregatorState {
     Running,
 
     /// Processing final events before shutdown
-    Draining { consecutive_empty_batches: usize },
+    Draining,
 
     /// Terminal state - all events processed
     Drained { last_event_id: Option<EventId> },
@@ -50,7 +50,7 @@ impl StateVariant for MetricsAggregatorState {
         match self {
             MetricsAggregatorState::Initializing => "Initializing",
             MetricsAggregatorState::Running => "Running",
-            MetricsAggregatorState::Draining { .. } => "Draining",
+            MetricsAggregatorState::Draining => "Draining",
             MetricsAggregatorState::Drained { .. } => "Drained",
             MetricsAggregatorState::Failed { .. } => "Failed",
         }
@@ -79,11 +79,8 @@ pub enum MetricsAggregatorEvent {
     /// Start draining process (from journal control event)
     StartDraining,
 
-    /// Empty batch received during drain
-    DrainEmptyBatch,
-
-    /// No more events available during drain
-    DrainComplete { last_event_id: Option<EventId> },
+    /// Flow + stages have reached terminal lifecycle; perform final export and shutdown
+    FlowTerminal,
 
     /// Error occurred (e.g., journal corruption)
     Error(String),
@@ -97,8 +94,7 @@ impl EventVariant for MetricsAggregatorEvent {
             MetricsAggregatorEvent::ProcessSystemEvent { .. } => "ProcessSystemEvent",
             MetricsAggregatorEvent::ExportMetrics => "ExportMetrics",
             MetricsAggregatorEvent::StartDraining => "StartDraining",
-            MetricsAggregatorEvent::DrainEmptyBatch => "DrainEmptyBatch",
-            MetricsAggregatorEvent::DrainComplete { .. } => "DrainComplete",
+            MetricsAggregatorEvent::FlowTerminal => "FlowTerminal",
             MetricsAggregatorEvent::Error(_) => "Error",
         }
     }
@@ -171,6 +167,10 @@ pub struct MetricsStore {
     pub flow_events_out: u64,
     pub flow_errors_total: u64,
 
+    /// Per-stage vector clock watermark (FLOWIP-059c)
+    /// Tracks the highest writer sequence observed for each stage's journal writer.
+    pub stage_vector_clocks: HashMap<StageId, u64>,
+
     // System event tracking (FLOWIP-059b - essential events only)
     // Track all states each stage has been in: (StageId, state_name) -> true
     pub stage_lifecycle_states: HashMap<(StageId, String), bool>,
@@ -217,6 +217,7 @@ impl Default for MetricsStore {
             flow_events_in: 0,
             flow_events_out: 0,
             flow_errors_total: 0,
+            stage_vector_clocks: HashMap::new(),
             stage_lifecycle_states: HashMap::new(),
             pipeline_state: String::new(),
         }
@@ -329,6 +330,16 @@ impl MetricsAggregatorContext {
                             metrics.snapshot_p99_ms = Some(runtime_ctx.recent_p99_ms);
                             metrics.snapshot_p999_ms = Some(runtime_ctx.recent_p999_ms);
                         }
+
+                        // Seed per-stage vector clock watermark from the last envelope
+                        let writer_id = last_envelope.event.writer_id().clone();
+                        let writer_key = writer_id.to_string();
+                        let seq = last_envelope.vector_clock.get(&writer_key);
+                        let entry = metrics_store
+                            .stage_vector_clocks
+                            .entry(*stage_id)
+                            .or_insert(0);
+                        *entry = (*entry).max(seq);
                     }
 
                     data_start_positions.push(position);
@@ -425,6 +436,32 @@ impl MetricsAggregatorContext {
 
 impl FsmContext for MetricsAggregatorContext {}
 
+impl MetricsStore {
+    /// Returns true when every known stage has reached a terminal lifecycle
+    /// state (completed or failed) according to system.events.
+    pub fn all_stages_terminal(&self, stage_metadata: &HashMap<StageId, StageMetadata>) -> bool {
+        stage_metadata.keys().all(|stage_id| {
+            self.stage_lifecycle_states
+                .get(&(*stage_id, "completed".to_string()))
+                .copied()
+                .unwrap_or(false)
+                || self
+                    .stage_lifecycle_states
+                    .get(&(*stage_id, "failed".to_string()))
+                    .copied()
+                    .unwrap_or(false)
+        })
+    }
+
+    /// Returns true when the pipeline has reached a terminal lifecycle state.
+    pub fn pipeline_terminal(&self) -> bool {
+        matches!(
+            self.pipeline_state.as_str(),
+            "completed" | "failed" | "drained"
+        )
+    }
+}
+
 #[async_trait::async_trait]
 impl FsmAction for MetricsAggregatorAction {
     type Context = MetricsAggregatorContext;
@@ -455,7 +492,7 @@ impl FsmAction for MetricsAggregatorAction {
                                     .insert((*stage_id, "running".to_string()), true);
                                 tracing::debug!("Stage {:?} transitioned to running", stage_id);
                             }
-                            obzenflow_core::event::StageLifecycleEvent::Completed => {
+                            obzenflow_core::event::StageLifecycleEvent::Completed { .. } => {
                                 store
                                     .stage_lifecycle_states
                                     .insert((*stage_id, "completed".to_string()), true);
@@ -473,13 +510,22 @@ impl FsmAction for MetricsAggregatorAction {
                     obzenflow_core::event::SystemEventType::PipelineLifecycle(event) => {
                         // Track only essential pipeline events
                         match event {
-                            obzenflow_core::event::PipelineLifecycleEvent::AllStagesCompleted => {
+                            obzenflow_core::event::PipelineLifecycleEvent::AllStagesCompleted { .. } => {
                                 store.pipeline_state = "all_stages_completed".to_string();
                                 tracing::info!("Pipeline: all stages completed");
                             }
-                            obzenflow_core::event::PipelineLifecycleEvent::Completed => {
+                            obzenflow_core::event::PipelineLifecycleEvent::Completed { .. } => {
                                 store.pipeline_state = "completed".to_string();
                                 tracing::info!("Pipeline: completed");
+                            }
+                            obzenflow_core::event::PipelineLifecycleEvent::Failed { .. } => {
+                                store.pipeline_state = "failed".to_string();
+                                tracing::info!("Pipeline: failed");
+                            }
+                            obzenflow_core::event::PipelineLifecycleEvent::Drained => {
+                                // Drained is considered terminal from the metrics perspective.
+                                store.pipeline_state = "drained".to_string();
+                                tracing::info!("Pipeline: drained");
                             }
                             _ => {} // Skip other pipeline events
                         }
@@ -502,6 +548,15 @@ impl FsmAction for MetricsAggregatorAction {
                 store.last_event_id = Some(envelope.event.id.clone());
 
                 let event = &envelope.event;
+
+                 // Update per-stage vector clock watermark (FLOWIP-059c).
+                 // We use the event writer_id component from the envelope's vector clock.
+                 let stage_id = event.flow_context.stage_id;
+                 let writer_id = event.writer_id().clone();
+                 let writer_key = writer_id.to_string();
+                 let seq = envelope.vector_clock.get(&writer_key);
+                 let entry = store.stage_vector_clocks.entry(stage_id).or_insert(0);
+                 *entry = (*entry).max(seq);
 
                 // Skip control events that start with "control." or "system."
                 if event.is_control() || event.is_system() {
@@ -947,6 +1002,11 @@ impl FsmAction for MetricsAggregatorAction {
                                 .stage_last_event_time
                                 .insert(*stage_id, last_datetime);
                         }
+
+                        // Stage vector clock watermark (FLOWIP-059c)
+                        if let Some(seq) = store.stage_vector_clocks.get(stage_id) {
+                            snapshot.stage_vector_clocks.insert(*stage_id, *seq);
+                        }
                     }
 
                     tracing::info!("Pushing metrics snapshot to exporter");
@@ -1051,9 +1111,7 @@ pub fn build_metrics_aggregator_fsm() -> MetricsAggregatorFsm {
             on MetricsAggregatorEvent::StartDraining => |_state: &MetricsAggregatorState, _event: &MetricsAggregatorEvent, _ctx: &mut MetricsAggregatorContext| {
                 Box::pin(async move {
                     Ok(Transition {
-                        next_state: MetricsAggregatorState::Draining {
-                            consecutive_empty_batches: 0,
-                        },
+                        next_state: MetricsAggregatorState::Draining,
                         actions: vec![],
                     })
                 })
@@ -1126,27 +1184,34 @@ pub fn build_metrics_aggregator_fsm() -> MetricsAggregatorFsm {
         }
 
         state MetricsAggregatorState::Draining {
-            on MetricsAggregatorEvent::DrainComplete => |_state: &MetricsAggregatorState, event: &MetricsAggregatorEvent, _ctx: &mut MetricsAggregatorContext| {
+            on MetricsAggregatorEvent::FlowTerminal => |_state: &MetricsAggregatorState, _event: &MetricsAggregatorEvent, ctx: &mut MetricsAggregatorContext| {
+                Box::pin(async move {
+                    let last_event_id = ctx.metrics_store.last_event_id.clone();
+                    let publish_last_event_id = last_event_id.clone();
+                    Ok(Transition {
+                        next_state: MetricsAggregatorState::Drained { last_event_id },
+                        actions: vec![
+                            MetricsAggregatorAction::ExportMetrics,
+                            MetricsAggregatorAction::PublishDrainComplete {
+                                last_event_id: publish_last_event_id,
+                            },
+                        ],
+                    })
+                })
+            };
+
+            on MetricsAggregatorEvent::ProcessSystemEvent => |_state: &MetricsAggregatorState, event: &MetricsAggregatorEvent, _ctx: &mut MetricsAggregatorContext| {
                 let event = event.clone();
                 Box::pin(async move {
                     match event {
-                        MetricsAggregatorEvent::DrainComplete { last_event_id } => {
-                            let last_event_id = last_event_id.clone();
-                            let publish_last_event_id = last_event_id.clone();
-                            Ok(Transition {
-                                next_state: MetricsAggregatorState::Drained {
-                                    last_event_id,
-                                },
-                                actions: vec![
-                                    MetricsAggregatorAction::ExportMetrics,
-                                    MetricsAggregatorAction::PublishDrainComplete {
-                                        last_event_id: publish_last_event_id,
-                                    },
-                                ],
-                            })
-                        }
+                        MetricsAggregatorEvent::ProcessSystemEvent { envelope } => Ok(Transition {
+                            next_state: MetricsAggregatorState::Draining,
+                            actions: vec![MetricsAggregatorAction::ProcessSystemEvent {
+                                envelope: envelope.clone(),
+                            }],
+                        }),
                         _ => Err(obzenflow_fsm::FsmError::HandlerError(
-                            "Invalid event for DrainComplete handler".to_string(),
+                            "Invalid event for ProcessSystemEvent handler in Draining".to_string(),
                         )),
                     }
                 })
@@ -1163,9 +1228,7 @@ pub fn build_metrics_aggregator_fsm() -> MetricsAggregatorFsm {
                                 .map(|envelope| MetricsAggregatorAction::UpdateMetrics { envelope })
                                 .collect::<Vec<_>>();
                             Ok(Transition {
-                                next_state: MetricsAggregatorState::Draining {
-                                    consecutive_empty_batches: 0,
-                                },
+                                next_state: MetricsAggregatorState::Draining,
                                 actions,
                             })
                         }
@@ -1173,24 +1236,6 @@ pub fn build_metrics_aggregator_fsm() -> MetricsAggregatorFsm {
                             "Invalid event for ProcessBatch handler in Draining".to_string(),
                         )),
                     }
-                })
-            };
-
-            on MetricsAggregatorEvent::DrainEmptyBatch => |state: &MetricsAggregatorState, _event: &MetricsAggregatorEvent, _ctx: &mut MetricsAggregatorContext| {
-                let state = state.clone();
-                Box::pin(async move {
-                    let next_count = match state {
-                        MetricsAggregatorState::Draining {
-                            consecutive_empty_batches,
-                        } => consecutive_empty_batches + 1,
-                        _ => 0,
-                    };
-                    Ok(Transition {
-                        next_state: MetricsAggregatorState::Draining {
-                            consecutive_empty_batches: next_count,
-                        },
-                        actions: vec![],
-                    })
                 })
             };
 

@@ -232,6 +232,8 @@ impl SupervisorBuilder for PipelineBuilder {
             contract_pairs: HashMap::new(),
             expected_contract_pairs,
             expected_sources,
+            stage_lifecycle_metrics: HashMap::new(),
+            flow_start_time: None,
         };
 
         // Create channels using the common infrastructure
@@ -321,6 +323,7 @@ impl SupervisorBuilder for PipelineBuilder {
             flow_name,
             middleware_stacks,
             contract_attachments,
+            Some(self.system_journal.clone()),
         ))
     }
 }

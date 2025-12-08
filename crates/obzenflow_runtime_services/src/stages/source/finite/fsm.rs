@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use std::marker::PhantomData;
 use std::sync::Arc;
 
-use crate::metrics::instrumentation::StageInstrumentation;
+use crate::metrics::instrumentation::{snapshot_stage_metrics, StageInstrumentation};
 use crate::stages::common::handlers::FiniteSourceHandler;
 use crate::stages::source::strategies::{SourceControlContext, SourceControlStrategy};
 
@@ -424,10 +424,12 @@ impl<H: FiniteSourceHandler + Send + Sync + 'static> FsmAction for FiniteSourceA
             }
 
             FiniteSourceAction::SendError { message } => {
-                let error_event = SystemEvent::stage_failed(
+                let metrics = snapshot_stage_metrics(&ctx.instrumentation);
+                let error_event = SystemEvent::stage_failed_with_metrics(
                     ctx.stage_id,
                     message.clone(),
                     false, // not recoverable
+                    metrics,
                 );
 
                 // Best-effort: log journal failures but don't fail the FSM
@@ -500,8 +502,10 @@ impl<H: FiniteSourceHandler + Send + Sync + 'static> FsmAction for FiniteSourceA
             }
 
             FiniteSourceAction::WriteStageCompleted => {
-                // Write completion event to system journal
-                let completion_event = SystemEvent::stage_completed(ctx.stage_id);
+                // Write completion event to system journal with final metrics
+                let metrics = snapshot_stage_metrics(&ctx.instrumentation);
+                let completion_event =
+                    SystemEvent::stage_completed_with_metrics(ctx.stage_id, metrics);
 
                 if let Err(e) = ctx.system_journal.append(completion_event, None).await {
                     tracing::error!(

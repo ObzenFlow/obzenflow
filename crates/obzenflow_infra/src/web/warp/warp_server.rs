@@ -1,19 +1,29 @@
 //! Warp implementation of the WebServer trait
 
 use std::collections::HashMap;
+use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use warp::{Filter, Rejection, Reply, filters::BoxedFilter};
+use tokio_stream::wrappers::UnboundedReceiverStream;
+use warp::{filters::BoxedFilter, Filter, Rejection, Reply};
+use warp::sse::Event as SseEvent;
+
+use obzenflow_core::event::SystemEvent;
+use obzenflow_core::event::event_envelope::SystemEventEnvelope;
+use obzenflow_core::journal::journal::Journal;
+use obzenflow_core::EventId;
 use obzenflow_core::web::{
-    HttpEndpoint, HttpMethod, Request, ServerConfig, WebError, WebServer,
-    server::ServerShutdownHandle,
+    server::ServerShutdownHandle, HttpEndpoint, HttpMethod, Request, ServerConfig, WebError,
+    WebServer,
 };
 
 /// Warp-based web server implementation
 pub struct WarpServer {
     endpoints: Vec<Arc<dyn HttpEndpoint>>,
+    /// Optional system journal for SSE lifecycle events
+    system_journal: Option<Arc<dyn Journal<SystemEvent>>>,
 }
 
 impl WarpServer {
@@ -21,7 +31,16 @@ impl WarpServer {
     pub fn new() -> Self {
         Self {
             endpoints: Vec::new(),
+            system_journal: None,
         }
+    }
+
+    /// Attach a system journal to enable SSE lifecycle streaming
+    pub fn with_system_journal(
+        &mut self,
+        journal: Arc<dyn Journal<SystemEvent>>,
+    ) {
+        self.system_journal = Some(journal);
     }
     
     /// Build path filter from string path
@@ -56,6 +75,15 @@ impl WarpServer {
             combined_route = match combined_route {
                 Some(existing) => Some(existing.or(route).unify().boxed()),
                 None => Some(route.boxed()),
+            };
+        }
+
+        // Add SSE /api/flow/events route if a system journal is available
+        if let Some(journal) = &self.system_journal {
+            let sse_route = self.build_flow_events_route(journal.clone());
+            combined_route = match combined_route {
+                Some(existing) => Some(existing.or(sse_route).unify().boxed()),
+                None => Some(sse_route.boxed()),
             };
         }
         
@@ -233,6 +261,115 @@ impl WarpServer {
             .or(head_route)
             .unify()
     }
+
+    /// Build SSE route for `/api/flow/events`
+    fn build_flow_events_route(
+        &self,
+        system_journal: Arc<dyn Journal<SystemEvent>>,
+    ) -> impl Filter<Extract = (Box<dyn Reply>,), Error = Rejection> + Clone {
+        let journal_filter = warp::any().map(move || system_journal.clone());
+
+        warp::path!("api" / "flow" / "events")
+            .and(warp::get())
+            .and(warp::header::optional::<String>("Last-Event-ID"))
+            .and(journal_filter)
+            .and_then(
+                |last_event_id: Option<String>,
+                 journal: Arc<dyn Journal<SystemEvent>>| async move {
+                    let (tx, rx) =
+                        tokio::sync::mpsc::unbounded_channel::<Result<SseEvent, Infallible>>();
+
+                    // Spawn a background task to stream system events into the channel
+                    tokio::spawn(async move {
+                        use tokio::time::{sleep, Duration};
+
+                        // Step 1: best-effort replay of events after Last-Event-ID (if provided)
+                        if let Some(id_str) = last_event_id {
+                            match EventId::from_string(&id_str) {
+                                Ok(event_id) => match journal.read_causally_after(&event_id).await {
+                                    Ok(events) => {
+                                        for envelope in events {
+                                            let ev = map_system_event_to_sse(&envelope);
+                                            if tx.send(Ok(ev)).is_err() {
+                                                return;
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        let payload = serde_json::json!({
+                                            "error_type": "journal_resume_error",
+                                            "message": e.to_string(),
+                                            "recoverable": false,
+                                        });
+                                        let err_ev = SseEvent::default()
+                                            .event("error")
+                                            .data(payload.to_string());
+                                        let _ = tx.send(Ok(err_ev));
+                                        // On resume failure, fall through to live tail from current end.
+                                    }
+                                },
+                                Err(e) => {
+                                    let payload = serde_json::json!({
+                                        "error_type": "invalid_last_event_id",
+                                        "message": e.to_string(),
+                                        "recoverable": false,
+                                    });
+                                    let err_ev = SseEvent::default()
+                                        .event("error")
+                                        .data(payload.to_string());
+                                    let _ = tx.send(Ok(err_ev));
+                                }
+                            }
+                        }
+
+                        // Step 2: live tail from the journal using a reader
+                        match journal.reader().await {
+                            Ok(mut reader) => loop {
+                                match reader.next().await {
+                                    Ok(Some(envelope)) => {
+                                        let ev = map_system_event_to_sse(&envelope);
+                                        if tx.send(Ok(ev)).is_err() {
+                                            break;
+                                        }
+                                    }
+                                    Ok(None) => {
+                                        // No new events; back off briefly
+                                        sleep(Duration::from_millis(100)).await;
+                                    }
+                                    Err(e) => {
+                                        let payload = serde_json::json!({
+                                            "error_type": "journal_read_error",
+                                            "message": e.to_string(),
+                                            "recoverable": false,
+                                        });
+                                        let err_ev = SseEvent::default()
+                                            .event("error")
+                                            .data(payload.to_string());
+                                        let _ = tx.send(Ok(err_ev));
+                                        break;
+                                    }
+                                }
+                            },
+                            Err(e) => {
+                                let payload = serde_json::json!({
+                                    "error_type": "journal_open_error",
+                                    "message": e.to_string(),
+                                    "recoverable": false,
+                                });
+                                let err_ev =
+                                    SseEvent::default().event("error").data(payload.to_string());
+                                let _ = tx.send(Ok(err_ev));
+                            }
+                        }
+                    });
+
+                    let stream = UnboundedReceiverStream::new(rx);
+                    let reply =
+                        warp::sse::reply(warp::sse::keep_alive().stream(stream));
+                    Ok::<Box<dyn Reply>, Rejection>(Box::new(reply) as Box<dyn Reply>)
+                },
+            )
+    }
 }
 
 impl Default for WarpServer {
@@ -380,5 +517,323 @@ impl WebServer for WarpServer {
         // Warp doesn't provide easy shutdown handles in this simple implementation
         // For production, we'd need to use warp::Server::bind_with_graceful_shutdown
         None
+    }
+}
+
+/// Map a SystemEvent into an SSE event with JSON payload
+fn map_system_event_to_sse(envelope: &SystemEventEnvelope) -> SseEvent {
+    use obzenflow_core::event::system_event::StageLifecycleEvent;
+    use obzenflow_core::event::SystemEventType;
+    use serde_json::json;
+
+    let event: &SystemEvent = &envelope.event;
+    let id_str = event.id.to_string();
+    let vector_clock_value = serde_json::to_value(&envelope.vector_clock).ok();
+
+    match &event.event {
+        SystemEventType::StageLifecycle { stage_id, event: lifecycle } => {
+            let (event_type, metrics_value, error, recoverable) = match lifecycle {
+                StageLifecycleEvent::Running => ("stage_running", None, None, None),
+                StageLifecycleEvent::Draining { metrics } => (
+                    "stage_draining",
+                    metrics
+                        .as_ref()
+                        .and_then(|m| serde_json::to_value(m).ok()),
+                    None,
+                    None,
+                ),
+                StageLifecycleEvent::Drained => ("stage_drained", None, None, None),
+                StageLifecycleEvent::Completed { metrics } => (
+                    "stage_completed",
+                    metrics
+                        .as_ref()
+                        .and_then(|m| serde_json::to_value(m).ok()),
+                    None,
+                    None,
+                ),
+                StageLifecycleEvent::Failed {
+                    error,
+                    recoverable,
+                    metrics,
+                } => (
+                    "stage_failed",
+                    metrics
+                        .as_ref()
+                        .and_then(|m| serde_json::to_value(m).ok()),
+                    Some(error.clone()),
+                    *recoverable,
+                ),
+            };
+
+            let mut data = json!({
+                "system_event_type": "stage_lifecycle",
+                "event_type": event_type,
+                "stage_id": stage_id.to_string(),
+                "timestamp_ms": event.timestamp,
+            });
+
+            if let Some(vc) = &vector_clock_value {
+                data["vector_clock"] = vc.clone();
+            }
+
+            // Skip supervisor-only completion events without metrics to avoid
+            // duplicate stage_completed events in the SSE stream.
+            if event_type == "stage_completed" && metrics_value.is_none() {
+                return SseEvent::default()
+                    .comment("stage_completed_without_metrics_skipped");
+            }
+
+            if let Some(m) = metrics_value {
+                data["metrics"] = m;
+            }
+            if let Some(err) = error {
+                data["error"] = serde_json::Value::String(err);
+            }
+            if let Some(rec) = recoverable {
+                data["recoverable"] = serde_json::Value::Bool(rec);
+            }
+
+            SseEvent::default()
+                .id(id_str)
+                .event("stage_lifecycle")
+                .data(data.to_string())
+        }
+        SystemEventType::PipelineLifecycle(pipeline_event) => {
+            match pipeline_event {
+                obzenflow_core::event::system_event::PipelineLifecycleEvent::Starting => {
+                    let mut data = json!({
+                        "system_event_type": "pipeline_lifecycle",
+                        "event_type": "flow_starting",
+                        "timestamp_ms": event.timestamp,
+                    });
+                    if let Some(vc) = &vector_clock_value {
+                        data["vector_clock"] = vc.clone();
+                    }
+                    SseEvent::default()
+                        .id(id_str)
+                        .event("flow_lifecycle")
+                        .data(data.to_string())
+                }
+                obzenflow_core::event::system_event::PipelineLifecycleEvent::Running {
+                    stage_count,
+                } => {
+                    let mut data = json!({
+                        "system_event_type": "pipeline_lifecycle",
+                        "event_type": "flow_running",
+                        "timestamp_ms": event.timestamp,
+                    });
+                    if let Some(count) = stage_count {
+                        data["stage_count"] = json!(count);
+                    }
+                    if let Some(vc) = &vector_clock_value {
+                        data["vector_clock"] = vc.clone();
+                    }
+                    SseEvent::default()
+                        .id(id_str)
+                        .event("flow_lifecycle")
+                        .data(data.to_string())
+                }
+                obzenflow_core::event::system_event::PipelineLifecycleEvent::Draining {
+                    metrics,
+                } => {
+                    let mut data = json!({
+                        "system_event_type": "pipeline_lifecycle",
+                        "event_type": "flow_draining",
+                        "timestamp_ms": event.timestamp,
+                    });
+                    if let Some(m) = metrics
+                        .as_ref()
+                        .and_then(|m| serde_json::to_value(m).ok())
+                    {
+                        data["metrics"] = m;
+                    }
+                    if let Some(vc) = &vector_clock_value {
+                        data["vector_clock"] = vc.clone();
+                    }
+                    SseEvent::default()
+                        .id(id_str)
+                        .event("flow_lifecycle")
+                        .data(data.to_string())
+                }
+                obzenflow_core::event::system_event::PipelineLifecycleEvent::AllStagesCompleted {
+                    metrics,
+                } => {
+                    let mut data = json!({
+                        "system_event_type": "pipeline_lifecycle",
+                        "event_type": "flow_stages_completed",
+                        "timestamp_ms": event.timestamp,
+                    });
+                    if let Some(m) = metrics
+                        .as_ref()
+                        .and_then(|m| serde_json::to_value(m).ok())
+                    {
+                        data["metrics"] = m;
+                    }
+                    if let Some(vc) = &vector_clock_value {
+                        data["vector_clock"] = vc.clone();
+                    }
+                    SseEvent::default()
+                        .id(id_str)
+                        .event("flow_lifecycle")
+                        .data(data.to_string())
+                }
+                obzenflow_core::event::system_event::PipelineLifecycleEvent::Drained => {
+                    let mut data = json!({
+                        "system_event_type": "pipeline_lifecycle",
+                        "event_type": "flow_drained",
+                        "timestamp_ms": event.timestamp,
+                    });
+                    if let Some(vc) = &vector_clock_value {
+                        data["vector_clock"] = vc.clone();
+                    }
+                    SseEvent::default()
+                        .id(id_str)
+                        .event("flow_lifecycle")
+                        .data(data.to_string())
+                }
+                obzenflow_core::event::system_event::PipelineLifecycleEvent::Completed {
+                    duration_ms,
+                    metrics,
+                } => {
+                    let metrics_value = serde_json::to_value(metrics).ok();
+                    let mut data = json!({
+                        "system_event_type": "pipeline_lifecycle",
+                        "event_type": "flow_completed",
+                        "timestamp_ms": event.timestamp,
+                        "duration_ms": duration_ms,
+                    });
+                    if let Some(m) = metrics_value {
+                        data["metrics"] = m;
+                    }
+                    if let Some(vc) = &vector_clock_value {
+                        data["vector_clock"] = vc.clone();
+                    }
+                    SseEvent::default()
+                        .id(id_str)
+                        .event("flow_lifecycle")
+                        .data(data.to_string())
+                }
+                obzenflow_core::event::system_event::PipelineLifecycleEvent::Failed {
+                    reason,
+                    duration_ms,
+                    metrics,
+                } => {
+                    let metrics_value = metrics
+                        .as_ref()
+                        .and_then(|m| serde_json::to_value(m).ok());
+                    let mut data = json!({
+                        "system_event_type": "pipeline_lifecycle",
+                        "event_type": "flow_failed",
+                        "timestamp_ms": event.timestamp,
+                        "reason": reason,
+                        "duration_ms": duration_ms,
+                    });
+                    if let Some(m) = metrics_value {
+                        data["metrics"] = m;
+                    }
+                    if let Some(vc) = &vector_clock_value {
+                        data["vector_clock"] = vc.clone();
+                    }
+                    SseEvent::default()
+                        .id(id_str)
+                        .event("flow_lifecycle")
+                        .data(data.to_string())
+                }
+            }
+        }
+        SystemEventType::ContractStatus {
+            upstream,
+            reader,
+            pass,
+            reader_seq,
+            advertised_writer_seq,
+            reason,
+        } => {
+            let mut data = json!({
+                "system_event_type": "contract_status",
+                "upstream_stage_id": upstream.to_string(),
+                "reader_stage_id": reader.to_string(),
+                "pass": pass,
+                "timestamp_ms": event.timestamp,
+            });
+
+            if let Some(seq) = reader_seq {
+                data["reader_seq"] = serde_json::json!(seq);
+            }
+            if let Some(seq) = advertised_writer_seq {
+                data["advertised_writer_seq"] = serde_json::json!(seq);
+            }
+            if let Some(cause) = reason {
+                data["reason"] = serde_json::json!(cause);
+            }
+            if let Some(vc) = &vector_clock_value {
+                data["vector_clock"] = vc.clone();
+            }
+
+            let sse_event_name = if *pass {
+                "contract_status"
+            } else {
+                "contract_violation"
+            };
+
+            SseEvent::default()
+                .id(id_str)
+                .event(sse_event_name)
+                .data(data.to_string())
+        }
+        SystemEventType::MetricsCoordination(metrics_event) => {
+            let event_type = match metrics_event {
+                obzenflow_core::event::system_event::MetricsCoordinationEvent::Ready => {
+                    "metrics_ready"
+                }
+                obzenflow_core::event::system_event::MetricsCoordinationEvent::DrainRequested => {
+                    "metrics_drain_requested"
+                }
+                obzenflow_core::event::system_event::MetricsCoordinationEvent::Drained => {
+                    "metrics_drained"
+                }
+                obzenflow_core::event::system_event::MetricsCoordinationEvent::Shutdown => {
+                    "metrics_shutdown"
+                }
+            };
+
+            let data = json!({
+                "system_event_type": "metrics_coordination",
+                "event_type": event_type,
+                "timestamp_ms": event.timestamp,
+            });
+            let mut data = data;
+            if let Some(vc) = &vector_clock_value {
+                data["vector_clock"] = vc.clone();
+            }
+
+            SseEvent::default()
+                .id(id_str)
+                .event("metrics_coordination")
+                .data(data.to_string())
+        }
+        SystemEventType::ContractOverrideByPolicy {
+            upstream,
+            reader,
+            original_cause,
+            policy,
+        } => {
+            let mut data = json!({
+                "system_event_type": "contract_override_by_policy",
+                "upstream_stage_id": upstream.to_string(),
+                "reader_stage_id": reader.to_string(),
+                "original_cause": original_cause,
+                "policy": policy,
+                "timestamp_ms": event.timestamp,
+            });
+            if let Some(vc) = &vector_clock_value {
+                data["vector_clock"] = vc.clone();
+            }
+
+            SseEvent::default()
+                .id(id_str)
+                .event("contract_override_by_policy")
+                .data(data.to_string())
+        }
     }
 }

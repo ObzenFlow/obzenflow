@@ -179,7 +179,10 @@ impl crate::supervised_base::base::Supervisor for PipelineSupervisor {
                         if let PipelineEvent::Error { message } = event {
                             Ok(Transition {
                                 next_state: PipelineState::Failed { reason: message },
-                                actions: vec![PipelineAction::Cleanup],
+                                actions: vec![
+                                    PipelineAction::DrainMetrics,
+                                    PipelineAction::Cleanup,
+                                ],
                             })
                         } else {
                             Err(obzenflow_fsm::FsmError::HandlerError(
@@ -260,7 +263,10 @@ impl crate::supervised_base::base::Supervisor for PipelineSupervisor {
                         if let PipelineEvent::Error { message } = event {
                             Ok(Transition {
                                 next_state: PipelineState::Failed { reason: message },
-                                actions: vec![PipelineAction::Cleanup],
+                                actions: vec![
+                                    PipelineAction::DrainMetrics,
+                                    PipelineAction::Cleanup,
+                                ],
                             })
                         } else {
                             Err(obzenflow_fsm::FsmError::HandlerError(
@@ -276,7 +282,6 @@ impl crate::supervised_base::base::Supervisor for PipelineSupervisor {
                             next_state: PipelineState::Drained,
                             actions: vec![
                                 PipelineAction::DrainMetrics,
-                                PipelineAction::WritePipelineCompleted,
                                 PipelineAction::Cleanup,
                             ],
                         })
@@ -344,7 +349,6 @@ impl crate::supervised_base::base::Supervisor for PipelineSupervisor {
                             next_state: PipelineState::Drained,
                             actions: vec![
                                 PipelineAction::DrainMetrics,
-                                PipelineAction::WritePipelineCompleted,
                                 PipelineAction::Cleanup,
                             ],
                         })
@@ -375,7 +379,10 @@ impl crate::supervised_base::base::Supervisor for PipelineSupervisor {
                         if let PipelineEvent::Error { message } = event {
                             Ok(Transition {
                                 next_state: PipelineState::Failed { reason: message },
-                                actions: vec![PipelineAction::Cleanup],
+                                actions: vec![
+                                    PipelineAction::DrainMetrics,
+                                    PipelineAction::Cleanup,
+                                ],
                             })
                         } else {
                             Err(obzenflow_fsm::FsmError::HandlerError(
@@ -420,17 +427,19 @@ impl SelfSupervised for PipelineSupervisor {
     }
 
     async fn write_completion_event(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let event = SystemEvent::new(
+        // Terminal completion event is written by the FSM via PipelineAction::WritePipelineCompleted.
+        // Here we emit a lightweight "drained" lifecycle marker for observability.
+        let drained = SystemEvent::new(
             self.writer_id(),
             obzenflow_core::event::SystemEventType::PipelineLifecycle(
-                obzenflow_core::event::PipelineLifecycleEvent::Completed,
+                obzenflow_core::event::PipelineLifecycleEvent::Drained,
             ),
         );
-        if let Err(e) = self.system_journal.append(event, None).await {
+        if let Err(e) = self.system_journal.append(drained, None).await {
             tracing::error!(
                 pipeline = %self.name,
                 journal_error = %e,
-                "Failed to write pipeline completion event; continuing without system journal entry"
+                "Failed to write pipeline drained event; continuing without system journal entry"
             );
         }
         Ok(())
@@ -640,7 +649,12 @@ impl SelfSupervised for PipelineSupervisor {
                                         tracing::info!("Stage '{}' is now running", stage_name);
                                         Ok(EventLoopDirective::Continue)
                                     }
-                                    obzenflow_core::event::StageLifecycleEvent::Draining => {
+                                    obzenflow_core::event::StageLifecycleEvent::Draining { metrics } => {
+                                        if let Some(m) = metrics {
+                                            context
+                                                .stage_lifecycle_metrics
+                                                .insert(*stage_id, m.clone());
+                                        }
                                         let stage_info = context.topology
                                             .stages()
                                             .find(|s| s.id == stage_id.to_topology_id());
@@ -660,13 +674,23 @@ impl SelfSupervised for PipelineSupervisor {
                                         tracing::info!("Stage '{}' is drained", stage_name);
                                         Ok(EventLoopDirective::Continue)
                                     }
-                                    obzenflow_core::event::StageLifecycleEvent::Completed => {
+                                    obzenflow_core::event::StageLifecycleEvent::Completed { metrics } => {
+                                        if let Some(m) = metrics {
+                                            context
+                                                .stage_lifecycle_metrics
+                                                .insert(*stage_id, m.clone());
+                                        }
                                         // Stage has fully completed
                                         Ok(EventLoopDirective::Transition(
                                             PipelineEvent::StageCompleted { envelope },
                                         ))
                                     }
-                                    obzenflow_core::event::StageLifecycleEvent::Failed { error, .. } => {
+                                    obzenflow_core::event::StageLifecycleEvent::Failed { error, metrics, .. } => {
+                                        if let Some(m) = metrics {
+                                            context
+                                                .stage_lifecycle_metrics
+                                                .insert(*stage_id, m.clone());
+                                        }
                                         let stage_info = context.topology
                                             .stages()
                                             .find(|s| s.id == stage_id.to_topology_id());
@@ -682,7 +706,7 @@ impl SelfSupervised for PipelineSupervisor {
                             }
                             obzenflow_core::event::SystemEventType::PipelineLifecycle(event) => {
                                 match event {
-                                    obzenflow_core::event::PipelineLifecycleEvent::AllStagesCompleted => {
+                                    obzenflow_core::event::PipelineLifecycleEvent::AllStagesCompleted { .. } => {
                                         tracing::info!("Received AllStagesCompleted event!");
                                         if let Some(abort_directive) = self
                                             .missing_contract_abort(context)
@@ -817,9 +841,17 @@ impl SelfSupervised for PipelineSupervisor {
 
                         return match &event.event {
                             obzenflow_core::event::SystemEventType::StageLifecycle {
-                                stage_id: _,
-                                event: obzenflow_core::event::StageLifecycleEvent::Completed,
+                                stage_id,
+                                event:
+                                    obzenflow_core::event::StageLifecycleEvent::Completed {
+                                        metrics,
+                                    },
                             } => {
+                                if let Some(m) = metrics {
+                                    context
+                                        .stage_lifecycle_metrics
+                                        .insert(*stage_id, m.clone());
+                                }
                                 // Process stage completion immediately
                                 Ok(EventLoopDirective::Transition(
                                     PipelineEvent::StageCompleted { envelope },
@@ -892,7 +924,9 @@ impl SelfSupervised for PipelineSupervisor {
                                 Ok(EventLoopDirective::Continue)
                             }
                             obzenflow_core::event::SystemEventType::PipelineLifecycle(
-                                obzenflow_core::event::PipelineLifecycleEvent::AllStagesCompleted,
+                                obzenflow_core::event::PipelineLifecycleEvent::AllStagesCompleted {
+                                    ..
+                                },
                             ) => {
                                 tracing::info!(
                                     "All stages have completed - transitioning to drained"
@@ -968,12 +1002,81 @@ impl SelfSupervised for PipelineSupervisor {
             }
 
             PipelineState::Drained => {
-                // Terminal state
+                // Terminal success: write flow_completed with duration + rollup metrics,
+                // then terminate. We also keep the lighter-weight "drained" marker
+                // in write_completion_event().
+                if context.flow_start_time.is_some() {
+                    // Compute flow duration (best-effort)
+                    let duration_ms = context
+                        .flow_start_time
+                        .map(|start| start.elapsed().as_millis() as u64)
+                        .unwrap_or(0);
+
+                    // Compute flow-level lifecycle metrics from per-stage snapshots
+                    let metrics =
+                        crate::pipeline::fsm::compute_flow_lifecycle_metrics(context);
+
+                    let system_event_factory = obzenflow_core::event::system_event::SystemEventFactory::new(self.system_id);
+                    let completed =
+                        system_event_factory.pipeline_completed(duration_ms, metrics);
+
+                    if let Err(e) = self.system_journal.append(completed, None).await {
+                        tracing::error!(
+                            pipeline = %self.name,
+                            journal_error = %e,
+                            "Failed to write pipeline completed event"
+                        );
+                    } else {
+                        tracing::info!(
+                            pipeline = %self.name,
+                            "Pipeline completed event written (success path)"
+                        );
+                    }
+                }
+
                 tracing::info!("Pipeline drained, terminating");
                 Ok(EventLoopDirective::Terminate)
             }
 
             PipelineState::Failed { reason } => {
+                // Terminal failure: write flow_failed with duration + best-effort rollup metrics.
+                let duration_ms = context
+                    .flow_start_time
+                    .map(|start| start.elapsed().as_millis() as u64)
+                    .unwrap_or(0);
+
+                let metrics = if context.stage_lifecycle_metrics.is_empty() {
+                    None
+                } else {
+                    Some(crate::pipeline::fsm::compute_flow_lifecycle_metrics(
+                        context,
+                    ))
+                };
+
+                let system_event_factory =
+                    obzenflow_core::event::system_event::SystemEventFactory::new(
+                        self.system_id,
+                    );
+                let failed = system_event_factory.pipeline_failed(
+                    reason.clone(),
+                    duration_ms,
+                    metrics,
+                );
+
+                if let Err(e) = self.system_journal.append(failed, None).await {
+                    tracing::error!(
+                        pipeline = %self.name,
+                        journal_error = %e,
+                        "Failed to write pipeline failed event"
+                    );
+                } else {
+                    tracing::error!(
+                        pipeline = %self.name,
+                        error = %reason,
+                        "Pipeline failed event written (failure path)"
+                    );
+                }
+
                 // Terminal state
                 tracing::error!("Pipeline failed: {}", reason);
                 Ok(EventLoopDirective::Terminate)
@@ -1075,7 +1178,7 @@ impl PipelineSupervisor {
         let event = SystemEvent::new(
             WriterId::from(self.system_id),
             obzenflow_core::event::SystemEventType::PipelineLifecycle(
-                obzenflow_core::event::PipelineLifecycleEvent::AllStagesCompleted,
+                obzenflow_core::event::PipelineLifecycleEvent::AllStagesCompleted { metrics: None },
             ),
         );
         self.system_journal
