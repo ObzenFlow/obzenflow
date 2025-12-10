@@ -398,15 +398,28 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
             MetricsAggregatorState::Draining => {
                 tracing::debug!("Metrics aggregator state=Draining");
 
-                // If the pipeline and all stages are terminal, we can perform a final export
-                // and shut down deterministically rather than waiting for journal quietness.
-                if ctx
-                    .metrics_store
-                    .all_stages_terminal(&ctx.stage_metadata)
+                // Before doing any work, check if we've reached terminal lifecycle state
+                // AND all upstream readers have drained to EOF (or are logically at EOF
+                // when started from tail for observers like the metrics aggregator).
+                // Only then can we emit FlowTerminal and perform the final export.
+                let data_eof = ctx
+                    .data_subscription
+                    .as_ref()
+                    .map(|sub| sub.all_readers_logically_eof())
+                    .unwrap_or(true);
+                let error_eof = ctx
+                    .error_subscription
+                    .as_ref()
+                    .map(|sub| sub.all_readers_logically_eof())
+                    .unwrap_or(true);
+
+                if data_eof
+                    && error_eof
+                    && ctx.metrics_store.all_stages_terminal(&ctx.stage_metadata)
                     && ctx.metrics_store.pipeline_terminal()
                 {
                     tracing::info!(
-                        "Metrics aggregator: all stages and pipeline terminal; emitting FlowTerminal"
+                        "Metrics aggregator: all readers EOF and lifecycle terminal; emitting FlowTerminal"
                     );
                     return Ok(EventLoopDirective::Transition(
                         MetricsAggregatorEvent::FlowTerminal,

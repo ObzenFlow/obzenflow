@@ -4,6 +4,7 @@
 //! They have a unique "WaitingForGun" state that ensures they don't
 //! start emitting events until the pipeline is ready.
 
+use obzenflow_core::event::context::{FlowContext, StageType};
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::types::{Count, JournalIndex, JournalPath, SeqNo};
 use obzenflow_core::event::{ChainEventContent, ChainEventFactory, SystemEvent};
@@ -373,6 +374,9 @@ impl<H: FiniteSourceHandler + Send + Sync + 'static> FsmAction for FiniteSourceA
                     _ => true,
                 };
 
+                // Take a final runtime snapshot for wide-event semantics
+                let runtime_context = ctx.instrumentation.snapshot();
+
                 // Emit EOF with writer positions populated
                 let mut eof_event = ChainEventFactory::eof_event(writer_id.clone(), natural);
                 if let ChainEventContent::FlowControl(FlowControlPayload::Eof {
@@ -385,8 +389,18 @@ impl<H: FiniteSourceHandler + Send + Sync + 'static> FsmAction for FiniteSourceA
                     *writer_seq = Some(SeqNo(emitted));
                 }
 
+                // Attach flow/runtime context for downstream consumers
+                eof_event.flow_context = FlowContext {
+                    flow_name: ctx.flow_name.clone(),
+                    flow_id: ctx.flow_id.to_string(),
+                    stage_name: ctx.stage_name.clone(),
+                    stage_id: ctx.stage_id,
+                    stage_type: StageType::FiniteSource,
+                };
+                eof_event.runtime_context = Some(runtime_context.clone());
+
                 // Emit consumption_final for the source itself (writer-side contract)
-                let final_event = ChainEventFactory::consumption_final_event(
+                let mut final_event = ChainEventFactory::consumption_final_event(
                     writer_id.clone(),
                     true, // pass because sources are authoritative on what they wrote
                     Count(emitted),
@@ -398,6 +412,15 @@ impl<H: FiniteSourceHandler + Send + Sync + 'static> FsmAction for FiniteSourceA
                     None,                 // vector clock unavailable here
                     None,                 // no failure reason
                 );
+
+                final_event.flow_context = FlowContext {
+                    flow_name: ctx.flow_name.clone(),
+                    flow_id: ctx.flow_id.to_string(),
+                    stage_name: ctx.stage_name.clone(),
+                    stage_id: ctx.stage_id,
+                    stage_type: StageType::FiniteSource,
+                };
+                final_event.runtime_context = Some(runtime_context);
 
                 ctx.data_journal
                     .append(eof_event, None)

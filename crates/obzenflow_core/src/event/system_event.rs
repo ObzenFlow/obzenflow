@@ -114,6 +114,8 @@ pub enum PipelineLifecycleEvent {
         duration_ms: u64,
         #[serde(skip_serializing_if = "Option::is_none")]
         metrics: Option<FlowLifecycleMetricsSnapshot>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        failure_cause: Option<crate::event::types::ViolationCause>,
     },
 }
 
@@ -384,6 +386,7 @@ impl SystemEventFactory {
         reason: String,
         duration_ms: u64,
         metrics: Option<FlowLifecycleMetricsSnapshot>,
+        failure_cause: Option<crate::event::types::ViolationCause>,
     ) -> SystemEvent {
         SystemEvent::new(
             self.writer_id,
@@ -391,6 +394,7 @@ impl SystemEventFactory {
                 reason,
                 duration_ms,
                 metrics,
+                failure_cause,
             }),
         )
     }

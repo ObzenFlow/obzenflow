@@ -647,6 +647,12 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                             if delivery_event.is_data()
                                                 || delivery_event.is_delivery()
                                             {
+                                                // Track emitted deliveries for writer_seq and observability,
+                                                // but DO NOT bump events_processed_total here. For sinks,
+                                                // process_with_instrumentation already increments that counter
+                                                // once per successfully processed input event. Bumping it again
+                                                // here would double-count and produce inflated events_out_total
+                                                // in flow lifecycle snapshots. See FLOWIP-059d postmortem.
                                                 ctx.instrumentation
                                                     .record_emitted(&delivery_event);
                                             }
@@ -657,6 +663,15 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                             // If the handler returned a per-record error, surface it
                                             // as an error-marked event routed by ErrorKind policy.
                                             if let Some(handler_err) = maybe_err {
+                                                // Per-record handler failures should be reflected
+                                                // in errors_total for lifecycle / flow snapshots,
+                                                // even though they are not stage-fatal.
+                                                ctx.instrumentation
+                                                    .errors_total
+                                                    .fetch_add(
+                                                        1,
+                                                        std::sync::atomic::Ordering::Relaxed,
+                                                    );
                                                 let reason = format!(
                                                     "Sink handler error: {:?}",
                                                     handler_err

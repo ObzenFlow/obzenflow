@@ -69,4 +69,14 @@ where
     /// The position is journal-specific (e.g., line number for disk, index for memory).
     /// This is useful for resuming from a checkpoint.
     async fn reader_from(&self, position: u64) -> Result<Box<dyn JournalReader<T>>, JournalError>;
+
+    /// Read the last N events from the journal by scanning backwards from EOF.
+    ///
+    /// This is useful for efficiently getting recent events without loading the entire journal.
+    /// Events are returned in reverse order (most recent first).
+    ///
+    /// Returns an empty vec if the journal is empty.
+    /// This method should be O(n) where n is the requested count,
+    /// not O(total_events) in the journal.
+    async fn read_last_n(&self, count: usize) -> Result<Vec<EventEnvelope<T>>, JournalError>;
 }

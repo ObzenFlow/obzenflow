@@ -548,18 +548,40 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Hand
                                         Ok(transformed_events) => {
                                             // Write transformed events
                                             for event in transformed_events {
-                                                use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
-
-                                                let route_to_error_journal = match &event.processing_info.status {
-                                                    ProcessingStatus::Error { kind, .. } => match kind {
-                                                        Some(ErrorKind::Timeout)
-                                                        | Some(ErrorKind::Remote)
-                                                        | Some(ErrorKind::Deserialization) => true,
-                                                        Some(ErrorKind::Validation) | Some(ErrorKind::Domain) => false,
-                                                        None | Some(ErrorKind::Unknown) => true,
-                                                    },
-                                                    _ => false,
+                                                use obzenflow_core::event::status::processing_status::{
+                                                    ErrorKind, ProcessingStatus,
                                                 };
+
+                                                // Count all error-marked events for lifecycle / flow rollups,
+                                                // even when they are not stage-fatal.
+                                                if let ProcessingStatus::Error { .. } =
+                                                    &event.processing_info.status
+                                                {
+                                                    ctx.instrumentation.errors_total.fetch_add(
+                                                        1,
+                                                        std::sync::atomic::Ordering::Relaxed,
+                                                    );
+                                                }
+
+                                                let route_to_error_journal =
+                                                    match &event.processing_info.status {
+                                                        ProcessingStatus::Error { kind, .. } => {
+                                                            match kind {
+                                                                Some(ErrorKind::Timeout)
+                                                                | Some(ErrorKind::Remote)
+                                                                | Some(
+                                                                    ErrorKind::Deserialization,
+                                                                ) => true,
+                                                                Some(ErrorKind::Validation)
+                                                                | Some(ErrorKind::Domain) => false,
+                                                                None
+                                                                | Some(ErrorKind::Unknown) => {
+                                                                    true
+                                                                }
+                                                            }
+                                                        }
+                                                        _ => false,
+                                                    };
 
                                                 if route_to_error_journal {
                                                     tracing::info!(
@@ -777,18 +799,33 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Hand
 
                                 // Write transformed events using new journal.write() API
                                 for event in transformed_events {
-                                    use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
-
-                                    let route_to_error_journal = match &event.processing_info.status {
-                                        ProcessingStatus::Error { kind, .. } => match kind {
-                                            Some(ErrorKind::Timeout)
-                                            | Some(ErrorKind::Remote)
-                                            | Some(ErrorKind::Deserialization) => true,
-                                            Some(ErrorKind::Validation) | Some(ErrorKind::Domain) => false,
-                                            None | Some(ErrorKind::Unknown) => true,
-                                        },
-                                        _ => false,
+                                    use obzenflow_core::event::status::processing_status::{
+                                        ErrorKind, ProcessingStatus,
                                     };
+
+                                    // Count all error-marked events for lifecycle / flow rollups,
+                                    // even when they are not stage-fatal.
+                                    if let ProcessingStatus::Error { .. } =
+                                        &event.processing_info.status
+                                    {
+                                        ctx.instrumentation.errors_total.fetch_add(
+                                            1,
+                                            std::sync::atomic::Ordering::Relaxed,
+                                        );
+                                    }
+
+                                    let route_to_error_journal =
+                                        match &event.processing_info.status {
+                                            ProcessingStatus::Error { kind, .. } => match kind {
+                                                Some(ErrorKind::Timeout)
+                                                | Some(ErrorKind::Remote)
+                                                | Some(ErrorKind::Deserialization) => true,
+                                                Some(ErrorKind::Validation)
+                                                | Some(ErrorKind::Domain) => false,
+                                                None | Some(ErrorKind::Unknown) => true,
+                                            },
+                                            _ => false,
+                                        };
 
                                     if route_to_error_journal {
                                         tracing::info!(

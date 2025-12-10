@@ -23,6 +23,7 @@ use async_trait::async_trait;
 use obzenflow_adapters::middleware::rate_limit;
 use obzenflow_core::{
     event::chain_event::{ChainEvent, ChainEventFactory},
+    event::status::processing_status::ErrorKind,
     id::StageId,
     TypedPayload, WriterId,
 };
@@ -145,32 +146,30 @@ impl TypedPayload for ErrorEvent {
 /// Replaces 38-line ErrorProneTransform struct with a Map helper
 fn error_prone_transform() -> Map<impl Fn(ChainEvent) -> ChainEvent + Send + Sync + Clone> {
     Map::new(|event| {
-        let payload = event.payload();
+        let mut payload = event.payload();
 
         // Check if this event should fail
         if payload["should_fail"].as_bool().unwrap_or(false) {
             // ✨ FLOWIP-082a: Return typed error event
-            let mut error_payload = payload;
-            error_payload["error"] = json!("Simulated processing error");
-            error_payload["error_code"] = json!(500);
+            payload["error"] = json!("Simulated processing error");
+            payload["error_code"] = json!(500);
 
-            ChainEventFactory::derived_data_event(
-                event.writer_id.clone(),
-                &event,
+            event.derive_error_event(
                 &ErrorEvent::versioned_event_type(),
-                error_payload,
+                payload,
+                "Simulated processing error",
+                ErrorKind::Domain,
             )
         } else {
             // ✨ FLOWIP-082a: Successful processing with typed event
-            let mut result_payload = payload;
-            result_payload["processed"] = json!(true);
-            result_payload["processing_stage"] = json!("error_prone_transform");
+            payload["processed"] = json!(true);
+            payload["processing_stage"] = json!("error_prone_transform");
 
             ChainEventFactory::derived_data_event(
                 event.writer_id.clone(),
                 &event,
                 &ProcessedEvent::versioned_event_type(),
-                result_payload,
+                payload,
             )
         }
     })

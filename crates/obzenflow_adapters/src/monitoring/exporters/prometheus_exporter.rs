@@ -136,9 +136,10 @@ impl PrometheusExporter {
                 if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
                     writeln!(
                         output,
-                        "obzenflow_events_total{{flow=\"{}\",stage=\"{}\"}} {}",
+                        "obzenflow_events_total{{flow=\"{}\",stage=\"{}\",stage_id=\"{}\"}} {}",
                         escape_label(&metadata.flow_name),
                         escape_label(&metadata.name),
+                        escape_label(&stage_id.to_string()),
                         count
                     )?;
                 }
@@ -167,9 +168,10 @@ impl PrometheusExporter {
                         };
                         writeln!(
                             output,
-                            "obzenflow_errors_total{{flow=\"{}\",stage=\"{}\",error_kind=\"{}\"}} {}",
+                            "obzenflow_errors_total{{flow=\"{}\",stage=\"{}\",stage_id=\"{}\",error_kind=\"{}\"}} {}",
                             escape_label(&metadata.flow_name),
                             escape_label(&metadata.name),
+                            escape_label(&stage_id.to_string()),
                             kind_label,
                             count
                         )?;
@@ -189,9 +191,10 @@ impl PrometheusExporter {
                 if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
                     writeln!(
                         output,
-                        "obzenflow_errors_total{{flow=\"{}\",stage=\"{}\"}} {}",
+                        "obzenflow_errors_total{{flow=\"{}\",stage=\"{}\",stage_id=\"{}\"}} {}",
                         escape_label(&metadata.flow_name),
                         escape_label(&metadata.name),
+                        escape_label(&stage_id.to_string()),
                         count
                     )?;
                 }
@@ -209,10 +212,15 @@ impl PrometheusExporter {
 
             for (stage_id, hist) in &snapshot.processing_times {
                 if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
+                    let stage_id_str = stage_id.to_string();
                     self.render_histogram(
                         output,
                         "obzenflow_processing_time_seconds",
-                        &[("flow", &metadata.flow_name), ("stage", &metadata.name)],
+                        &[
+                            ("flow", &metadata.flow_name),
+                            ("stage", &metadata.name),
+                            ("stage_id", &stage_id_str),
+                        ],
                         hist,
                         1_000_000_000.0, // Convert nanoseconds to seconds
                     )?;
@@ -233,9 +241,10 @@ impl PrometheusExporter {
                 if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
                     writeln!(
                         output,
-                        "obzenflow_in_flight_events{{flow=\"{}\",stage=\"{}\"}} {}",
+                        "obzenflow_in_flight_events{{flow=\"{}\",stage=\"{}\",stage_id=\"{}\"}} {}",
                         escape_label(&metadata.flow_name),
                         escape_label(&metadata.name),
+                        escape_label(&stage_id.to_string()),
                         value
                     )?;
                 }
@@ -255,9 +264,10 @@ impl PrometheusExporter {
                 if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
                     writeln!(
                         output,
-                        "obzenflow_cpu_usage_ratio{{flow=\"{}\",stage=\"{}\"}} {}",
+                        "obzenflow_cpu_usage_ratio{{flow=\"{}\",stage=\"{}\",stage_id=\"{}\"}} {}",
                         escape_label(&metadata.flow_name),
                         escape_label(&metadata.name),
+                        escape_label(&stage_id.to_string()),
                         value
                     )?;
                 }
@@ -277,9 +287,10 @@ impl PrometheusExporter {
                 if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
                     writeln!(
                         output,
-                        "obzenflow_memory_bytes{{flow=\"{}\",stage=\"{}\"}} {}",
+                        "obzenflow_memory_bytes{{flow=\"{}\",stage=\"{}\",stage_id=\"{}\"}} {}",
                         escape_label(&metadata.flow_name),
                         escape_label(&metadata.name),
+                        escape_label(&stage_id.to_string()),
                         value
                     )?;
                 }
@@ -299,9 +310,10 @@ impl PrometheusExporter {
                 if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
                     writeln!(
                         output,
-                        "obzenflow_anomalies_total{{flow=\"{}\",stage=\"{}\"}} {}",
+                        "obzenflow_anomalies_total{{flow=\"{}\",stage=\"{}\",stage_id=\"{}\"}} {}",
                         escape_label(&metadata.flow_name),
                         escape_label(&metadata.name),
+                        escape_label(&stage_id.to_string()),
                         count
                     )?;
                 }
@@ -321,9 +333,10 @@ impl PrometheusExporter {
                 if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
                     writeln!(
                         output,
-                        "obzenflow_amendments_total{{flow=\"{}\",stage=\"{}\"}} {}",
+                        "obzenflow_amendments_total{{flow=\"{}\",stage=\"{}\",stage_id=\"{}\"}} {}",
                         escape_label(&metadata.flow_name),
                         escape_label(&metadata.name),
+                        escape_label(&stage_id.to_string()),
                         count
                     )?;
                 }
@@ -343,9 +356,10 @@ impl PrometheusExporter {
                 if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
                     writeln!(
                         output,
-                        "obzenflow_saturation_ratio{{flow=\"{}\",stage=\"{}\"}} {}",
+                        "obzenflow_saturation_ratio{{flow=\"{}\",stage=\"{}\",stage_id=\"{}\"}} {}",
                         escape_label(&metadata.flow_name),
                         escape_label(&metadata.name),
+                        escape_label(&stage_id.to_string()),
                         value
                     )?;
                 }
@@ -365,9 +379,10 @@ impl PrometheusExporter {
                 if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
                     writeln!(
                         output,
-                        "obzenflow_failures_total{{flow=\"{}\",stage=\"{}\"}} {}",
+                        "obzenflow_failures_total{{flow=\"{}\",stage=\"{}\",stage_id=\"{}\"}} {}",
                         escape_label(&metadata.flow_name),
                         escape_label(&metadata.name),
+                        escape_label(&stage_id.to_string()),
                         count
                     )?;
                 }
@@ -387,9 +402,10 @@ impl PrometheusExporter {
                 if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
                     writeln!(
                         output,
-                        "obzenflow_event_loops_total{{flow=\"{}\",stage=\"{}\"}} {}",
+                        "obzenflow_event_loops_total{{flow=\"{}\",stage=\"{}\",stage_id=\"{}\"}} {}",
                         escape_label(&metadata.flow_name),
                         escape_label(&metadata.name),
+                        escape_label(&stage_id.to_string()),
                         count
                     )?;
                 }
@@ -412,9 +428,10 @@ impl PrometheusExporter {
                 if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
                     writeln!(
                         output,
-                        "obzenflow_event_loops_with_work_total{{flow=\"{}\",stage=\"{}\"}} {}",
+                        "obzenflow_event_loops_with_work_total{{flow=\"{}\",stage=\"{}\",stage_id=\"{}\"}} {}",
                         escape_label(&metadata.flow_name),
                         escape_label(&metadata.name),
+                        escape_label(&stage_id.to_string()),
                         count
                     )?;
                 }
@@ -432,10 +449,14 @@ impl PrometheusExporter {
 
             for (stage_id, histogram) in &snapshot.flow_latency_seconds {
                 if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
+                    let stage_id_str = stage_id.to_string();
                     self.render_histogram(
                         output,
                         "obzenflow_flow_latency_seconds",
-                        &[("flow", &metadata.flow_name)],
+                        &[
+                            ("flow", &metadata.flow_name),
+                            ("stage_id", &stage_id_str),
+                        ],
                         histogram,
                         1.0, // Already in seconds
                     )?;
@@ -456,8 +477,9 @@ impl PrometheusExporter {
                 if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
                     writeln!(
                         output,
-                        "obzenflow_dropped_events{{flow=\"{}\"}} {}",
+                        "obzenflow_dropped_events{{flow=\"{}\",stage_id=\"{}\"}} {}",
                         escape_label(&metadata.flow_name),
+                        escape_label(&stage_id.to_string()),
                         value
                     )?;
                 }
@@ -474,9 +496,10 @@ impl PrometheusExporter {
                 if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
                     writeln!(
                         output,
-                        "obzenflow_circuit_breaker_state{{flow=\"{}\",stage=\"{}\"}} {}",
+                        "obzenflow_circuit_breaker_state{{flow=\"{}\",stage=\"{}\",stage_id=\"{}\"}} {}",
                         escape_label(&metadata.flow_name),
                         escape_label(&metadata.name),
+                        escape_label(&stage_id.to_string()),
                         value
                     )?;
                 }
@@ -496,9 +519,10 @@ impl PrometheusExporter {
                 if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
                     writeln!(
                         output,
-                        "obzenflow_circuit_breaker_rejection_rate{{flow=\"{}\",stage=\"{}\"}} {}",
+                        "obzenflow_circuit_breaker_rejection_rate{{flow=\"{}\",stage=\"{}\",stage_id=\"{}\"}} {}",
                         escape_label(&metadata.flow_name),
                         escape_label(&metadata.name),
+                        escape_label(&stage_id.to_string()),
                         value
                     )?;
                 }
@@ -516,8 +540,14 @@ impl PrometheusExporter {
 
             for (stage_id, value) in &snapshot.circuit_breaker_consecutive_failures {
                 if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
-                    writeln!(output, "obzenflow_circuit_breaker_consecutive_failures{{flow=\"{}\",stage=\"{}\"}} {}", 
-                        escape_label(&metadata.flow_name), escape_label(&metadata.name), value)?;
+                    writeln!(
+                        output,
+                        "obzenflow_circuit_breaker_consecutive_failures{{flow=\"{}\",stage=\"{}\",stage_id=\"{}\"}} {}",
+                        escape_label(&metadata.flow_name),
+                        escape_label(&metadata.name),
+                        escape_label(&stage_id.to_string()),
+                        value
+                    )?;
                 }
             }
             writeln!(output)?;
@@ -576,6 +606,15 @@ impl PrometheusExporter {
                 .next()
                 .map(|m| m.flow_name.as_str())
                 .unwrap_or("unknown");
+            // Use the pipeline-wide stage metadata key (when present) as a stable flow_id hint.
+            // The canonical ID is the ULID; stage_id and any future flow_id labels may be
+            // prefixed (e.g., "stage_<ULID>") and UIs should strip the prefix.
+            let flow_id_label = snapshot
+                .stage_metadata
+                .keys()
+                .next()
+                .map(|id| id.to_string())
+                .unwrap_or_else(|| "unknown".to_string());
 
             // Event counts
             writeln!(
@@ -585,8 +624,8 @@ impl PrometheusExporter {
             writeln!(output, "# TYPE obzenflow_flow_events_in_total counter")?;
             writeln!(
                 output,
-                "obzenflow_flow_events_in_total{{flow=\"{}\"}} {}",
-                flow_name, flow_metrics.events_in
+                "obzenflow_flow_events_in_total{{flow=\"{}\",flow_id=\"{}\"}} {}",
+                flow_name, escape_label(&flow_id_label), flow_metrics.events_in
             )?;
             writeln!(output)?;
 
@@ -597,8 +636,8 @@ impl PrometheusExporter {
             writeln!(output, "# TYPE obzenflow_flow_events_out_total counter")?;
             writeln!(
                 output,
-                "obzenflow_flow_events_out_total{{flow=\"{}\"}} {}",
-                flow_name, flow_metrics.events_out
+                "obzenflow_flow_events_out_total{{flow=\"{}\",flow_id=\"{}\"}} {}",
+                flow_name, escape_label(&flow_id_label), flow_metrics.events_out
             )?;
             writeln!(output)?;
 
@@ -609,8 +648,8 @@ impl PrometheusExporter {
             writeln!(output, "# TYPE obzenflow_flow_errors_total counter")?;
             writeln!(
                 output,
-                "obzenflow_flow_errors_total{{flow=\"{}\"}} {}",
-                flow_name, flow_metrics.errors_total
+                "obzenflow_flow_errors_total{{flow=\"{}\",flow_id=\"{}\"}} {}",
+                flow_name, escape_label(&flow_id_label), flow_metrics.errors_total
             )?;
             writeln!(output)?;
 
@@ -622,8 +661,8 @@ impl PrometheusExporter {
             writeln!(output, "# TYPE obzenflow_flow_event_loops_total counter")?;
             writeln!(
                 output,
-                "obzenflow_flow_event_loops_total{{flow=\"{}\"}} {}",
-                flow_name, flow_metrics.event_loops_total
+                "obzenflow_flow_event_loops_total{{flow=\"{}\",flow_id=\"{}\"}} {}",
+                flow_name, escape_label(&flow_id_label), flow_metrics.event_loops_total
             )?;
             writeln!(output)?;
 
@@ -634,8 +673,8 @@ impl PrometheusExporter {
             )?;
             writeln!(
                 output,
-                "obzenflow_flow_event_loops_with_work_total{{flow=\"{}\"}} {}",
-                flow_name, flow_metrics.event_loops_with_work_total
+                "obzenflow_flow_event_loops_with_work_total{{flow=\"{}\",flow_id=\"{}\"}} {}",
+                flow_name, escape_label(&flow_id_label), flow_metrics.event_loops_with_work_total
             )?;
             writeln!(output)?;
 
@@ -653,8 +692,8 @@ impl PrometheusExporter {
             writeln!(output, "# TYPE obzenflow_flow_utilization gauge")?;
             writeln!(
                 output,
-                "obzenflow_flow_utilization{{flow=\"{}\"}} {}",
-                flow_name, utilization
+                "obzenflow_flow_utilization{{flow=\"{}\",flow_id=\"{}\"}} {}",
+                flow_name, escape_label(&flow_id_label), utilization
             )?;
             writeln!(output)?;
         }
@@ -670,9 +709,10 @@ impl PrometheusExporter {
                     if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
                         writeln!(
                             output,
-                            "obzenflow_stage_lifecycle_state{{flow=\"{}\",stage=\"{}\",state=\"{}\"}} 1",
+                            "obzenflow_stage_lifecycle_state{{flow=\"{}\",stage=\"{}\",stage_id=\"{}\",state=\"{}\"}} 1",
                             escape_label(&metadata.flow_name),
                             escape_label(&metadata.name),
+                            escape_label(&stage_id.to_string()),
                             escape_label(state)
                         )?;
                     }
@@ -708,9 +748,10 @@ impl PrometheusExporter {
                 if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
                     writeln!(
                         output,
-                        "obzenflow_stage_vector_clock{{flow=\"{}\",stage=\"{}\"}} {}",
+                        "obzenflow_stage_vector_clock{{flow=\"{}\",stage=\"{}\",stage_id=\"{}\"}} {}",
                         escape_label(&metadata.flow_name),
                         escape_label(&metadata.name),
+                        escape_label(&stage_id.to_string()),
                         seq
                     )?;
                 }
@@ -1014,8 +1055,10 @@ mod tests {
 
         // Check output
         assert!(output.contains("# TYPE obzenflow_events_total counter"));
-        assert!(
-            output.contains("obzenflow_events_total{flow=\"order_flow\",stage=\"validation\"} 100")
+        let expected = format!(
+            "obzenflow_events_total{{flow=\"order_flow\",stage=\"validation\",stage_id=\"{}\"}} 100",
+            escape_label(&stage_id.to_string())
         );
+        assert!(output.contains(&expected));
     }
 }

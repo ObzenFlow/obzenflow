@@ -866,6 +866,15 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                                                 .clone()
                                                 .mark_as_error(reason, err.kind());
 
+                                            // Count all error-marked events for lifecycle / flow rollups,
+                                            // even when they are not stage-fatal.
+                                            ctx.instrumentation
+                                                .errors_total
+                                                .fetch_add(
+                                                    1,
+                                                    std::sync::atomic::Ordering::Relaxed,
+                                                );
+
                                             let route_to_error_journal =
                                                 match &error_event.processing_info.status {
                                                     ProcessingStatus::Error { kind, .. } => {
@@ -1199,7 +1208,6 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> State
             .with_flow_context(flow_context)
             .with_runtime_context(runtime_context);
 
-        ctx.instrumentation.record_emitted(&heartbeat);
         ctx.data_journal.append(heartbeat, None).await?;
 
         // Reset counter now that we've published a snapshot.

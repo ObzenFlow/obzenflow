@@ -71,6 +71,9 @@ pub struct DiskJournal<T: JournalEvent> {
     _phantom: std::marker::PhantomData<T>,
 }
 
+/// Buffer size for backwards reading (64KB)
+const BACKWARD_READ_BUFFER_SIZE: usize = 64 * 1024;
+
 impl<T: JournalEvent> DiskJournal<T> {
     /// Create a new flow event log
     pub fn new(base_path: PathBuf, flow_id: &str) -> Result<Self, JournalError> {
@@ -628,6 +631,114 @@ impl<T: JournalEvent + 'static> Journal<T> for DiskJournal<T> {
             )
             .await?,
         ))
+    }
+
+    async fn read_last_n(&self, count: usize) -> Result<Vec<EventEnvelope<T>>, JournalError> {
+        use tokio::io::AsyncSeekExt;
+
+        if count == 0 || !self.path.exists() {
+            return Ok(Vec::new());
+        }
+
+        // Acquire read lock to prevent torn reads
+        let _read_guard = self.read_write_lock.read().await;
+
+        let mut file = File::open(&self.path)
+            .await
+            .map_err(|e| JournalError::Implementation {
+                message: "Failed to open file for backwards read".to_string(),
+                source: Box::new(e),
+            })?;
+
+        // Get file size
+        let file_len = file
+            .seek(SeekFrom::End(0))
+            .await
+            .map_err(|e| JournalError::Implementation {
+                message: "Failed to seek to end".to_string(),
+                source: Box::new(e),
+            })?;
+
+        if file_len == 0 {
+            return Ok(Vec::new());
+        }
+
+        let mut results = Vec::with_capacity(count);
+        let mut pos = file_len;
+
+        // Read backwards chunk by chunk
+        while pos > 0 && results.len() < count {
+            let chunk_start = pos.saturating_sub(BACKWARD_READ_BUFFER_SIZE as u64);
+            let chunk_size = (pos - chunk_start) as usize;
+
+            file.seek(SeekFrom::Start(chunk_start))
+                .await
+                .map_err(|e| JournalError::Implementation {
+                    message: "Failed to seek backwards".to_string(),
+                    source: Box::new(e),
+                })?;
+
+            let mut buffer = vec![0u8; chunk_size];
+            use tokio::io::AsyncReadExt;
+            let bytes_read = file
+                .read(&mut buffer)
+                .await
+                .map_err(|e| JournalError::Implementation {
+                    message: "Failed to read chunk".to_string(),
+                    source: Box::new(e),
+                })?;
+            buffer.truncate(bytes_read);
+
+            // Process lines in this chunk from end to start
+            let chunk_str = String::from_utf8_lossy(&buffer);
+            let lines: Vec<&str> = chunk_str.lines().collect();
+
+            for line in lines.iter().rev() {
+                if results.len() >= count {
+                    break;
+                }
+
+                if line.trim().is_empty() {
+                    continue;
+                }
+
+                match parse_framed_record::<T>(line) {
+                    ParseOutcome::Complete(record) => {
+                        let envelope = EventEnvelope {
+                            journal_writer_id: JournalWriterId::from(self.journal_id),
+                            vector_clock: record.vector_clock,
+                            timestamp: record.timestamp,
+                            event: record.event,
+                        };
+                        results.push(envelope);
+                    }
+                    ParseOutcome::Partial => {
+                        // Skip partial records - they might be at chunk boundary
+                        continue;
+                    }
+                    ParseOutcome::Corrupt(e) => {
+                        tracing::warn!(
+                            path = %self.path.display(),
+                            parse_error = %e,
+                            "Skipping corrupt record during backwards read"
+                        );
+                        continue;
+                    }
+                }
+            }
+
+            // Move to next chunk
+            pos = chunk_start;
+        }
+
+        tracing::debug!(
+            path = %self.path.display(),
+            requested = count,
+            returned = results.len(),
+            "read_last_n completed"
+        );
+
+        Ok(results)
     }
 }
 

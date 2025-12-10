@@ -4,6 +4,7 @@
 //! They have a unique "WaitingForGun" state that ensures they don't
 //! start emitting events until the pipeline is ready.
 
+use obzenflow_core::event::context::{FlowContext, StageType};
 use obzenflow_core::event::{ChainEventFactory, SystemEvent};
 use obzenflow_core::journal::journal::Journal;
 use obzenflow_core::{ChainEvent, EventId, FlowId, StageId, WriterId};
@@ -374,10 +375,23 @@ impl<H: InfiniteSourceHandler + Send + Sync + 'static> FsmAction for InfiniteSou
                     crate::stages::source::strategies::SourceShutdownDecision::PoisonEof
                 );
 
-                let eof_event = ChainEventFactory::eof_event(
+                // Take a final runtime snapshot for wide-event semantics
+                let runtime_context = ctx.instrumentation.snapshot();
+
+                let mut eof_event = ChainEventFactory::eof_event(
                     writer_id.clone(),
                     false, // not natural for shutdown
                 );
+
+                // Attach flow/runtime context so the final journal record is a wide snapshot
+                eof_event.flow_context = FlowContext {
+                    flow_name: ctx.flow_name.clone(),
+                    flow_id: ctx.flow_id.to_string(),
+                    stage_name: ctx.stage_name.clone(),
+                    stage_id: ctx.stage_id,
+                    stage_type: StageType::InfiniteSource,
+                };
+                eof_event.runtime_context = Some(runtime_context);
 
                 ctx.data_journal
                     .append(eof_event, None)

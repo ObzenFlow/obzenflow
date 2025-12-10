@@ -162,11 +162,6 @@ pub struct MetricsStore {
     pub last_event_time: Option<std::time::Instant>,
     pub total_events_processed: u64,
 
-    // Flow-level aggregates
-    pub flow_events_in: u64,
-    pub flow_events_out: u64,
-    pub flow_errors_total: u64,
-
     /// Per-stage vector clock watermark (FLOWIP-059c)
     /// Tracks the highest writer sequence observed for each stage's journal writer.
     pub stage_vector_clocks: HashMap<StageId, u64>,
@@ -179,13 +174,7 @@ pub struct MetricsStore {
 
 #[derive(Clone)]
 pub struct StageMetrics {
-    pub events_in: u64,
-    pub events_out: u64,
-    pub errors: u64,
     pub errors_by_kind: HashMap<ErrorKind, u64>,
-    pub total_processing_time: MetricsDuration,
-    pub event_count: u64,
-    pub processing_time_histogram: hdrhistogram::Histogram<u64>,
     // Runtime context metrics (FLOWIP-056c / FLOWIP-059 Phase 6)
     pub last_in_flight: Option<u32>,
     pub last_failures_total: Option<u64>,
@@ -214,9 +203,6 @@ impl Default for MetricsStore {
             first_event_time: None,
             last_event_time: None,
             total_events_processed: 0,
-            flow_events_in: 0,
-            flow_events_out: 0,
-            flow_errors_total: 0,
             stage_vector_clocks: HashMap::new(),
             stage_lifecycle_states: HashMap::new(),
             pipeline_state: String::new(),
@@ -227,19 +213,7 @@ impl Default for MetricsStore {
 impl Default for StageMetrics {
     fn default() -> Self {
         Self {
-            events_in: 0,
-            events_out: 0,
-            errors: 0,
             errors_by_kind: HashMap::new(),
-            total_processing_time: MetricsDuration::ZERO,
-            event_count: 0,
-            // Create histogram with configured bounds
-            processing_time_histogram: hdrhistogram::Histogram::new_with_bounds(
-                HISTOGRAM_MIN_US,
-                HISTOGRAM_MAX_US,
-                HISTOGRAM_SIGFIGS,
-            )
-            .expect("Failed to create histogram"),
             last_in_flight: None,
             last_failures_total: None,
             latest_events_processed_total: None,
@@ -284,65 +258,104 @@ impl MetricsAggregatorContext {
                 .collect::<Vec<_>>()
         };
 
-        // Phase 6: wide-event snapshot seeding and tail-seek for data journals.
+        // Phase 6/059d: wide-event snapshot seeding and tail-aware start for data journals.
         let data_with_names = with_names(&inputs.stage_data_journals);
         let mut data_start_positions = Vec::with_capacity(data_with_names.len());
 
         for (stage_id, stage_name, journal) in &data_with_names {
-            match journal.read_causally_ordered().await {
-                Ok(events) => {
-                    let position = events.len() as u64;
+            // Tail-read last event with runtime_context, if any.
+            let tail_snapshot = match journal.read_last_n(1).await {
+                Ok(mut events) => events
+                    .drain(..)
+                    .find(|env| env.event.runtime_context.is_some()),
+                Err(e) => {
+                    tracing::warn!(
+                        target: "flowip-059",
+                        owner = "metrics_aggregator",
+                        stage_id = ?stage_id,
+                        stage_name = stage_name,
+                        error = ?e,
+                        "Failed to tail-read data journal for snapshot; seeding skipped for this stage"
+                    );
+                    None
+                }
+            };
 
-                    if let Some(last_envelope) = events.last() {
-                        if let Some(runtime_ctx) = &last_envelope.event.runtime_context {
-                            let metrics = metrics_store
-                                .stage_metrics
-                                .entry(*stage_id)
-                                .or_insert_with(StageMetrics::default);
+            if let Some(envelope) = &tail_snapshot {
+                if let Some(runtime_ctx) = &envelope.event.runtime_context {
+                    let metrics = metrics_store
+                        .stage_metrics
+                        .entry(*stage_id)
+                        .or_insert_with(StageMetrics::default);
 
-                            // Seed wide-event snapshot fields from the latest event
-                            // Use max() for monotonic counters to handle out-of-order reads
-                            metrics.latest_events_processed_total = Some(
-                                metrics
-                                    .latest_events_processed_total
-                                    .unwrap_or(0)
-                                    .max(runtime_ctx.events_processed_total),
-                            );
-                            metrics.latest_errors_total = Some(
-                                metrics
-                                    .latest_errors_total
-                                    .unwrap_or(0)
-                                    .max(runtime_ctx.errors_total),
-                            );
-                            metrics.last_in_flight = Some(runtime_ctx.in_flight);
-                            metrics.last_failures_total = Some(runtime_ctx.failures_total);
-                            metrics.event_loops_total = metrics
-                                .event_loops_total
-                                .max(runtime_ctx.event_loops_total);
-                            metrics.event_loops_with_work_total = metrics
-                                .event_loops_with_work_total
-                                .max(runtime_ctx.event_loops_with_work_total);
+                    // Seed wide-event snapshot fields from the latest event
+                    // Use max() for monotonic counters to handle out-of-order reads
+                    metrics.latest_events_processed_total = Some(
+                        metrics
+                            .latest_events_processed_total
+                            .unwrap_or(0)
+                            .max(runtime_ctx.events_processed_total),
+                    );
+                    metrics.latest_errors_total = Some(
+                        metrics
+                            .latest_errors_total
+                            .unwrap_or(0)
+                            .max(runtime_ctx.errors_total),
+                    );
+                    metrics.last_in_flight = Some(runtime_ctx.in_flight);
+                    metrics.last_failures_total = Some(runtime_ctx.failures_total);
+                    metrics.event_loops_total = metrics
+                        .event_loops_total
+                        .max(runtime_ctx.event_loops_total);
+                    metrics.event_loops_with_work_total = metrics
+                        .event_loops_with_work_total
+                        .max(runtime_ctx.event_loops_with_work_total);
 
-                            // Seed pre-computed percentiles from runtime_context
-                            metrics.snapshot_p50_ms = Some(runtime_ctx.recent_p50_ms);
-                            metrics.snapshot_p90_ms = Some(runtime_ctx.recent_p90_ms);
-                            metrics.snapshot_p95_ms = Some(runtime_ctx.recent_p95_ms);
-                            metrics.snapshot_p99_ms = Some(runtime_ctx.recent_p99_ms);
-                            metrics.snapshot_p999_ms = Some(runtime_ctx.recent_p999_ms);
+                    // Seed pre-computed percentiles from runtime_context
+                    metrics.snapshot_p50_ms = Some(runtime_ctx.recent_p50_ms);
+                    metrics.snapshot_p90_ms = Some(runtime_ctx.recent_p90_ms);
+                    metrics.snapshot_p95_ms = Some(runtime_ctx.recent_p95_ms);
+                    metrics.snapshot_p99_ms = Some(runtime_ctx.recent_p99_ms);
+                    metrics.snapshot_p999_ms = Some(runtime_ctx.recent_p999_ms);
+                }
+
+                // Seed per-stage vector clock watermark from the last envelope
+                let writer_id = envelope.event.writer_id().clone();
+                let writer_key = writer_id.to_string();
+                let seq = envelope.vector_clock.get(&writer_key);
+                let entry = metrics_store
+                    .stage_vector_clocks
+                    .entry(*stage_id)
+                    .or_insert(0);
+                *entry = (*entry).max(seq);
+            }
+
+            // Determine starting position for data subscription by streaming to EOF.
+            // This is O(n) in time but O(1) in memory and keeps semantics simple.
+            let start_position = match journal.reader().await {
+                Ok(mut reader) => {
+                    let mut pos: u64 = 0;
+                    loop {
+                        match reader.next().await {
+                            Ok(Some(_)) => {
+                                pos += 1;
+                            }
+                            Ok(None) => break,
+                            Err(e) => {
+                                tracing::warn!(
+                                    target: "flowip-059",
+                                    owner = "metrics_aggregator",
+                                    stage_id = ?stage_id,
+                                    stage_name = stage_name,
+                                    error = ?e,
+                                    "Failed while streaming data journal to determine tail position; starting from 0"
+                                );
+                                pos = 0;
+                                break;
+                            }
                         }
-
-                        // Seed per-stage vector clock watermark from the last envelope
-                        let writer_id = last_envelope.event.writer_id().clone();
-                        let writer_key = writer_id.to_string();
-                        let seq = last_envelope.vector_clock.get(&writer_key);
-                        let entry = metrics_store
-                            .stage_vector_clocks
-                            .entry(*stage_id)
-                            .or_insert(0);
-                        *entry = (*entry).max(seq);
                     }
-
-                    data_start_positions.push(position);
+                    pos
                 }
                 Err(e) => {
                     tracing::warn!(
@@ -351,11 +364,13 @@ impl MetricsAggregatorContext {
                         stage_id = ?stage_id,
                         stage_name = stage_name,
                         error = ?e,
-                        "Failed to pre-scan data journal for tail snapshot; falling back to full replay"
+                        "Failed to create reader for data journal; starting from 0"
                     );
-                    data_start_positions.push(0);
+                    0
                 }
-            }
+            };
+
+            data_start_positions.push(start_position);
         }
 
         tracing::info!(
@@ -367,16 +382,133 @@ impl MetricsAggregatorContext {
                     .map(|(id, _)| *id)
                     .collect::<Vec<_>>(),
             ),
-            "MetricsAggregator creating data subscription"
+            "MetricsAggregator creating data subscription (tail-start)"
         );
-        // Create subscription for data journals
-        let data_subscription = crate::messaging::upstream_subscription::UpstreamSubscription::new_with_names_from_positions(
-            "metrics_aggregator",
-            &data_with_names,
-            &data_start_positions,
-        )
-        .await
-        .map_err(|e| format!("Failed to create data subscription: {}", e))?;
+        // Create subscription for data journals starting at tail positions.
+        // Readers are treated as logically at EOF for historical data
+        // (baseline_at_tail = true) while still observing any new events
+        // appended after subscription creation (FLOWIP-059d).
+        let data_subscription =
+            crate::messaging::upstream_subscription::UpstreamSubscription::new_at_tail(
+                "metrics_aggregator",
+                &data_with_names,
+                &data_start_positions,
+            )
+            .await
+            .map_err(|e| format!("Failed to create data subscription: {}", e))?;
+
+        // Also seed wide-event snapshots from error journals (late error snapshots),
+        // using the same tail-aware helper. This keeps StageMetrics consistent even
+        // when the last wide event for a stage is written to an error journal.
+        let error_with_names = with_names(&inputs.error_journals);
+        for (stage_id, stage_name, journal) in &error_with_names {
+            match journal.read_last_n(1).await {
+                Ok(mut events) => {
+                    if let Some(envelope) =
+                        events.drain(..).find(|env| env.event.runtime_context.is_some())
+                    {
+                        if let Some(runtime_ctx) = &envelope.event.runtime_context {
+                            let metrics = metrics_store
+                                .stage_metrics
+                            .entry(*stage_id)
+                            .or_insert_with(StageMetrics::default);
+
+                        metrics.latest_events_processed_total = Some(
+                            metrics
+                                .latest_events_processed_total
+                                .unwrap_or(0)
+                                .max(runtime_ctx.events_processed_total),
+                        );
+                        metrics.latest_errors_total = Some(
+                            metrics
+                                .latest_errors_total
+                                .unwrap_or(0)
+                                .max(runtime_ctx.errors_total),
+                        );
+                        metrics.last_in_flight = Some(runtime_ctx.in_flight);
+                        metrics.last_failures_total = Some(runtime_ctx.failures_total);
+                        metrics.event_loops_total =
+                            metrics.event_loops_total.max(runtime_ctx.event_loops_total);
+                        metrics.event_loops_with_work_total = metrics
+                            .event_loops_with_work_total
+                            .max(runtime_ctx.event_loops_with_work_total);
+
+                        metrics.snapshot_p50_ms = Some(runtime_ctx.recent_p50_ms);
+                        metrics.snapshot_p90_ms = Some(runtime_ctx.recent_p90_ms);
+                        metrics.snapshot_p95_ms = Some(runtime_ctx.recent_p95_ms);
+                        metrics.snapshot_p99_ms = Some(runtime_ctx.recent_p99_ms);
+                        metrics.snapshot_p999_ms = Some(runtime_ctx.recent_p999_ms);
+                    }
+
+                    let writer_id = envelope.event.writer_id().clone();
+                    let writer_key = writer_id.to_string();
+                    let seq = envelope.vector_clock.get(&writer_key);
+                    let entry = metrics_store
+                        .stage_vector_clocks
+                        .entry(*stage_id)
+                        .or_insert(0);
+                    *entry = (*entry).max(seq);
+                }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        target: "flowip-059",
+                        owner = "metrics_aggregator",
+                        stage_id = ?stage_id,
+                        stage_name = stage_name,
+                        error = ?e,
+                        "Failed to tail-read error journal for snapshot; seeding skipped for this stage"
+                    );
+                }
+            }
+        }
+
+        // Determine starting positions for error subscriptions by streaming to EOF.
+        // This mirrors the data journal behavior and ensures error subscriptions
+        // can start from tail while still observing any new events appended after
+        // the metrics aggregator is created.
+        let mut error_start_positions = Vec::with_capacity(error_with_names.len());
+        for (stage_id, stage_name, journal) in &error_with_names {
+            let start_position = match journal.reader().await {
+                Ok(mut reader) => {
+                    let mut pos: u64 = 0;
+                    loop {
+                        match reader.next().await {
+                            Ok(Some(_)) => {
+                                pos += 1;
+                            }
+                            Ok(None) => break,
+                            Err(e) => {
+                                tracing::warn!(
+                                    target: "flowip-059",
+                                    owner = "metrics_aggregator",
+                                    stage_id = ?stage_id,
+                                    stage_name = stage_name,
+                                    error = ?e,
+                                    "Failed while streaming error journal to determine tail position; starting from 0"
+                                );
+                                pos = 0;
+                                break;
+                            }
+                        }
+                    }
+                    pos
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        target: "flowip-059",
+                        owner = "metrics_aggregator",
+                        stage_id = ?stage_id,
+                        stage_name = stage_name,
+                        error = ?e,
+                        "Failed to create reader for error journal; starting from 0"
+                    );
+                    0
+                }
+            };
+
+            error_start_positions.push(start_position);
+        }
 
         if !inputs.error_journals.is_empty() {
             tracing::info!(
@@ -388,16 +520,20 @@ impl MetricsAggregatorContext {
                         .map(|(id, _)| *id)
                         .collect::<Vec<_>>(),
                 ),
-                "MetricsAggregator creating error subscription"
+                "MetricsAggregator creating error subscription (tail-start)"
             );
         }
 
-        // Create subscription for error journals (FLOWIP-082g)
+        // Create subscription for error journals (FLOWIP-082g), starting at
+        // computed tail positions so they are treated as logically at EOF for
+        // historical data while still observing any new events appended after
+        // subscription creation.
         let error_subscription = if !inputs.error_journals.is_empty() {
             Some(
-                crate::messaging::upstream_subscription::UpstreamSubscription::new_with_names(
+                crate::messaging::upstream_subscription::UpstreamSubscription::new_at_tail(
                     "metrics_aggregator",
-                    &with_names(&inputs.error_journals),
+                    &error_with_names,
+                    &error_start_positions,
                 )
                 .await
                 .map_err(|e| format!("Failed to create error subscription: {}", e))?,
@@ -508,24 +644,51 @@ impl FsmAction for MetricsAggregatorAction {
                         }
                     }
                     obzenflow_core::event::SystemEventType::PipelineLifecycle(event) => {
-                        // Track only essential pipeline events
+                        // Track only essential pipeline events, with monotonic semantics:
+                        // - "failed" is sticky and never regresses.
+                        // - "completed" never regresses to "drained".
+                        // - "drained" is only used when no explicit outcome was ever observed.
                         match event {
                             obzenflow_core::event::PipelineLifecycleEvent::AllStagesCompleted { .. } => {
-                                store.pipeline_state = "all_stages_completed".to_string();
-                                tracing::info!("Pipeline: all stages completed");
+                                if store.pipeline_state.is_empty() {
+                                    store.pipeline_state = "all_stages_completed".to_string();
+                                }
+                                tracing::info!("Pipeline: all stages completed (metrics view)");
                             }
                             obzenflow_core::event::PipelineLifecycleEvent::Completed { .. } => {
-                                store.pipeline_state = "completed".to_string();
-                                tracing::info!("Pipeline: completed");
+                                if store.pipeline_state != "failed" {
+                                    store.pipeline_state = "completed".to_string();
+                                    tracing::info!("Pipeline: completed (metrics view)");
+                                } else {
+                                    tracing::info!(
+                                        "Pipeline: completed event observed after failed; \
+                                         keeping failed as terminal state (metrics view)"
+                                    );
+                                }
                             }
                             obzenflow_core::event::PipelineLifecycleEvent::Failed { .. } => {
-                                store.pipeline_state = "failed".to_string();
-                                tracing::info!("Pipeline: failed");
+                                // Failure is always terminal and sticky.
+                                if store.pipeline_state != "failed" {
+                                    store.pipeline_state = "failed".to_string();
+                                    tracing::info!("Pipeline: failed (metrics view)");
+                                }
                             }
                             obzenflow_core::event::PipelineLifecycleEvent::Drained => {
-                                // Drained is considered terminal from the metrics perspective.
-                                store.pipeline_state = "drained".to_string();
-                                tracing::info!("Pipeline: drained");
+                                // Drained is a termination marker only; do not override an
+                                // explicit completed/failed outcome.
+                                match store.pipeline_state.as_str() {
+                                    "failed" | "completed" => {
+                                        tracing::info!(
+                                            "Pipeline: drained event observed after terminal outcome; \
+                                             keeping {} as terminal state (metrics view)",
+                                            store.pipeline_state
+                                        );
+                                    }
+                                    _ => {
+                                        store.pipeline_state = "drained".to_string();
+                                        tracing::info!("Pipeline: drained (metrics view)");
+                                    }
+                                }
                             }
                             _ => {} // Skip other pipeline events
                         }
@@ -549,149 +712,44 @@ impl FsmAction for MetricsAggregatorAction {
 
                 let event = &envelope.event;
 
-                 // Update per-stage vector clock watermark (FLOWIP-059c).
-                 // We use the event writer_id component from the envelope's vector clock.
-                 let stage_id = event.flow_context.stage_id;
-                 let writer_id = event.writer_id().clone();
-                 let writer_key = writer_id.to_string();
-                 let seq = envelope.vector_clock.get(&writer_key);
-                 let entry = store.stage_vector_clocks.entry(stage_id).or_insert(0);
-                 *entry = (*entry).max(seq);
+                // Update per-stage vector clock watermark (FLOWIP-059c).
+                // We use the event writer_id component from the envelope's vector clock.
+                let stage_id = event.flow_context.stage_id;
+                let writer_id = event.writer_id().clone();
+                let writer_key = writer_id.to_string();
+                let seq = envelope.vector_clock.get(&writer_key);
+                let entry = store.stage_vector_clocks.entry(stage_id).or_insert(0);
+                *entry = (*entry).max(seq);
 
-                // Skip control events that start with "control." or "system."
-                if event.is_control() || event.is_system() {
+                // Skip system events entirely; they are not part of per-stage wide metrics.
+                if event.is_system() {
                     return Ok(());
                 }
 
-                // Track flow timing for rate calculation
+                // Track flow timing for rate calculation based on any non-system event.
                 let now = std::time::Instant::now();
                 if store.first_event_time.is_none() {
                     store.first_event_time = Some(now);
                     store.flow_start_time = Some(now);
                 }
                 store.last_event_time = Some(now);
-                store.total_events_processed += 1;
 
-                // Handle delivery events separately
-                if event.is_delivery() {
-                    if let ChainEventContent::Delivery(payload) = &event.content {
-                        // Process delivery event from sink
-                        let stage_id = event.flow_context.stage_id;
-
-                        // Check for delivery errors first (before borrowing metrics)
-                        let has_error = matches!(&payload.result, obzenflow_core::event::payloads::delivery_payload::DeliveryResult::Failed { .. });
-                        if has_error {
-                            store.flow_errors_total += 1;
-                        }
-
-                        // Update flow-level metrics for delivery events
-                        store.flow_events_out += 1;
-
-                        // Now handle stage-level metrics
-                        let metrics = store
-                            .stage_metrics
-                            .entry(stage_id)
-                            .or_insert_with(StageMetrics::default);
-
-                        // Count delivery event
-                        metrics.events_in += 1;
-                        metrics.events_out += 1;
-
-                        // Track stage timing
-                        let now = std::time::Instant::now();
-                        if metrics.first_event_time.is_none() {
-                            metrics.first_event_time = Some(now);
-                        }
-                        metrics.last_event_time = Some(now);
-
-                        // Update error count if needed
-                        if has_error {
-                            metrics.errors += 1;
-                        }
-
-                        // Record delivery processing time
-                        let duration = payload.processing_duration;
-                        let duration_us = duration.as_micros();
-
-                        metrics.total_processing_time =
-                            metrics.total_processing_time.saturating_add(duration);
-                        metrics.event_count += 1;
-
-                        // Record in histogram
-                        let clamped_duration =
-                            duration_us.max(HISTOGRAM_MIN_US).min(HISTOGRAM_MAX_US);
-                        if let Err(e) = metrics.processing_time_histogram.record(clamped_duration) {
-                            tracing::warn!(
-                                "Failed to record delivery duration in histogram: {:?}",
-                                e
-                            );
-                        }
-
-                        // Extract runtime context metrics if available (same as regular events)
-                        if let Some(runtime_ctx) = &event.runtime_context {
-                            tracing::trace!(
-                                "Runtime context for delivery {:?}: in_flight={}, fsm_state={}",
-                                stage_id,
-                                runtime_ctx.in_flight,
-                                runtime_ctx.fsm_state
-                            );
-
-                            // Store latest runtime metrics for export
-                            // Use max() for monotonic counters to handle out-of-order reads
-                            metrics.last_in_flight = Some(runtime_ctx.in_flight);
-                            metrics.last_failures_total = Some(runtime_ctx.failures_total);
-                            metrics.latest_events_processed_total = Some(
-                                metrics
-                                    .latest_events_processed_total
-                                    .unwrap_or(0)
-                                    .max(runtime_ctx.events_processed_total),
-                            );
-                            metrics.latest_errors_total = Some(
-                                metrics
-                                    .latest_errors_total
-                                    .unwrap_or(0)
-                                    .max(runtime_ctx.errors_total),
-                            );
-
-                            // Update cumulative event loop counters (take max to handle resets)
-                            metrics.event_loops_total =
-                                metrics.event_loops_total.max(runtime_ctx.event_loops_total);
-                            metrics.event_loops_with_work_total = metrics
-                                .event_loops_with_work_total
-                                .max(runtime_ctx.event_loops_with_work_total);
-
-                            // Update pre-computed percentiles from runtime_context
-                            metrics.snapshot_p50_ms = Some(runtime_ctx.recent_p50_ms);
-                            metrics.snapshot_p90_ms = Some(runtime_ctx.recent_p90_ms);
-                            metrics.snapshot_p95_ms = Some(runtime_ctx.recent_p95_ms);
-                            metrics.snapshot_p99_ms = Some(runtime_ctx.recent_p99_ms);
-                            metrics.snapshot_p999_ms = Some(runtime_ctx.recent_p999_ms);
-                        }
-
-                        tracing::debug!(
-                            "Updated metrics for delivery {:?}: events={}, errors={}, processing_time={}",
-                            stage_id,
-                            metrics.events_in,
-                            metrics.errors,
-                            duration
-                        );
-                    }
-                    return Ok(());
+                // Only count data/delivery events towards total_events_processed; control
+                // events (EOF, consumption_final, etc.) carry snapshots but must not bump
+                // the processed count. This keeps totals aligned with stage-wide metrics.
+                if event.is_data() || event.is_delivery() {
+                    store.total_events_processed += 1;
                 }
 
-                // Process regular data events - extract metrics from flow context
+                // Process data and delivery events using runtime_context snapshots only
                 let stage_id = event.flow_context.stage_id;
 
-                // First handle stage metrics
+                // First handle stage metrics (data + control wide events)
                 {
                     let metrics = store
                         .stage_metrics
                         .entry(stage_id)
                         .or_insert_with(StageMetrics::default);
-
-                    // Count the event
-                    metrics.events_in += 1;
-                    metrics.events_out += 1; // For now, treat as both in and out
 
                     // Track stage timing
                     let now = std::time::Instant::now();
@@ -700,31 +758,8 @@ impl FsmAction for MetricsAggregatorAction {
                     }
                     metrics.last_event_time = Some(now);
 
-                    // Check for errors from processing outcome and classify by ErrorKind
-                    if let ProcessingStatus::Error { kind, .. } = &event.processing_info.status {
-                        metrics.errors += 1;
-                        let key = kind.clone().unwrap_or(ErrorKind::Unknown);
-                        *metrics.errors_by_kind.entry(key).or_insert(0) += 1;
-                    }
-
-                    // Record processing time
-                    let duration = event.processing_info.processing_time;
-                    let duration_us = duration.as_micros(); // Convert to microseconds for histogram
-
-                    metrics.total_processing_time =
-                        metrics.total_processing_time.saturating_add(duration);
-                    metrics.event_count += 1;
-
-                    // Record in histogram as microseconds for precision
-                    let clamped_duration = duration_us.max(HISTOGRAM_MIN_US).min(HISTOGRAM_MAX_US);
-                    if let Err(e) = metrics.processing_time_histogram.record(clamped_duration) {
-                        tracing::warn!("Failed to record duration in histogram: {:?}", e);
-                    }
-
-                    // Extract runtime context metrics if available (FLOWIP-056c)
+                    // Extract runtime context metrics if available (FLOWIP-056c / FLOWIP-059d)
                     if let Some(runtime_ctx) = &event.runtime_context {
-                        // These are point-in-time snapshots from the FSM instrumentation
-                        // We could store them for trend analysis or immediate export
                         tracing::trace!(
                             "Runtime context for {:?}: in_flight={}, fsm_state={}",
                             stage_id,
@@ -764,34 +799,12 @@ impl FsmAction for MetricsAggregatorAction {
                         metrics.snapshot_p999_ms = Some(runtime_ctx.recent_p999_ms);
                     }
 
-                    tracing::debug!(
-                        "Updated metrics for {:?}: events={}, errors={}, avg_time={}",
-                        stage_id,
-                        metrics.events_in,
-                        metrics.errors,
-                        if metrics.event_count > 0 {
-                            MetricsDuration::from_nanos(
-                                metrics.total_processing_time.as_nanos() / metrics.event_count,
-                            )
-                        } else {
-                            MetricsDuration::ZERO
-                        }
-                    );
+                    // Track error kinds for breakdown (total bounded later by snapshot errors_total)
+                    if let ProcessingStatus::Error { kind, .. } = &event.processing_info.status {
+                        let key = kind.clone().unwrap_or(ErrorKind::Unknown);
+                        *metrics.errors_by_kind.entry(key).or_insert(0) += 1;
+                    }
                 } // metrics reference dropped here
-
-                // Flow-level event counting by stage type
-                use obzenflow_core::event::context::StageType;
-                let stage_type = event.flow_context.stage_type;
-
-                match stage_type {
-                    StageType::FiniteSource | StageType::InfiniteSource => {
-                        store.flow_events_in += 1;
-                    }
-                    StageType::Sink => {
-                        store.flow_events_out += 1;
-                    }
-                    _ => {} // Transforms don't count for flow in/out
-                }
                 Ok(())
             }
 
@@ -814,27 +827,58 @@ impl FsmAction for MetricsAggregatorAction {
                     let mut total_event_loops: u64 = 0;
                     let mut total_event_loops_with_work: u64 = 0;
 
+                    // Helper to reconcile error_by_kind counts against snapshot total
+                    fn reconcile_error_kinds(
+                        latest_errors_total: Option<u64>,
+                        errors_by_kind: &HashMap<ErrorKind, u64>,
+                    ) -> HashMap<ErrorKind, u64> {
+                        let mut reconciled = errors_by_kind.clone();
+                        let snapshot_total = latest_errors_total.unwrap_or(0);
+                        let kind_sum: u64 = reconciled.values().sum();
+
+                        if snapshot_total == 0 {
+                            // No authoritative snapshot errors; treat as zeroed breakdown.
+                            return HashMap::new();
+                        }
+
+                        if kind_sum < snapshot_total {
+                            let residual = snapshot_total - kind_sum;
+                            *reconciled.entry(ErrorKind::Unknown).or_insert(0) += residual;
+                        } else if kind_sum > snapshot_total && kind_sum > 0 {
+                            let scale = snapshot_total as f64 / kind_sum as f64;
+                            for v in reconciled.values_mut() {
+                                *v = (*v as f64 * scale).round() as u64;
+                            }
+                        }
+
+                        reconciled
+                    }
+
                     // Convert stage metrics to snapshot format
                     for (stage_id, metrics) in &store.stage_metrics {
                         // Prefer wide-event snapshot counters when available
                         let events_count = metrics
                             .latest_events_processed_total
-                            .unwrap_or(metrics.events_in);
+                            .unwrap_or(0);
                         snapshot.event_counts.insert(*stage_id, events_count);
 
-                        snapshot.error_counts.insert(*stage_id, metrics.errors);
-                        if !metrics.errors_by_kind.is_empty() {
-                            snapshot
-                                .error_counts_by_kind
-                                .insert(*stage_id, metrics.errors_by_kind.clone());
+                        // Use wide-event snapshot errors_total as authoritative.
+                        let stage_errors_total = metrics.latest_errors_total.unwrap_or(0);
+                        snapshot.error_counts.insert(*stage_id, stage_errors_total);
+
+                        if !metrics.errors_by_kind.is_empty() && stage_errors_total > 0 {
+                            let reconciled =
+                                reconcile_error_kinds(metrics.latest_errors_total, &metrics.errors_by_kind);
+                            if !reconciled.is_empty() {
+                                snapshot
+                                    .error_counts_by_kind
+                                    .insert(*stage_id, reconciled);
+                            }
                         }
 
-                        // Add processing time histogram - prefer wide-event snapshot percentiles
-                        // Phase 6: Use pre-computed percentiles from runtime_context when available
-                        if metrics.snapshot_p50_ms.is_some() {
-                            // Use snapshot percentiles from runtime_context (authoritative)
+                        // Add processing time histogram reconstructed from runtime_context percentiles.
+                        if events_count > 0 && metrics.snapshot_p50_ms.is_some() {
                             let mut percentiles = std::collections::HashMap::new();
-                            // Convert milliseconds from runtime_context to nanoseconds for export
                             if let Some(p50) = metrics.snapshot_p50_ms {
                                 percentiles.insert(Percentile::P50, (p50 * 1_000_000) as f64);
                             }
@@ -851,39 +895,15 @@ impl FsmAction for MetricsAggregatorAction {
                                 percentiles.insert(Percentile::P999, (p999 * 1_000_000) as f64);
                             }
 
+                            // Approximate sum using median; see FLOWIP-059d histogram section.
+                            let p50_ms = metrics.snapshot_p50_ms.unwrap_or(0);
+                            let sum_nanos = (p50_ms * 1_000_000) as u64 * events_count;
+
                             let hist_snapshot = obzenflow_core::metrics::HistogramSnapshot {
-                                // Use authoritative count from runtime_context
                                 count: events_count,
-                                // Sum not available from snapshot - use incremental if available, else estimate
-                                sum: if metrics.event_count > 0 {
-                                    metrics.total_processing_time.as_nanos() as f64
-                                } else {
-                                    // Estimate from p50 * count (rough approximation)
-                                    (metrics.snapshot_p50_ms.unwrap_or(0) * 1_000_000 * events_count) as f64
-                                },
-                                // Min/max not in runtime_context - use p50 as floor, p999 as ceiling
+                                sum: sum_nanos as f64,
                                 min: (metrics.snapshot_p50_ms.unwrap_or(0) * 1_000_000) as f64,
                                 max: (metrics.snapshot_p999_ms.unwrap_or(0) * 1_000_000) as f64,
-                                percentiles,
-                            };
-
-                            snapshot.processing_times.insert(*stage_id, hist_snapshot);
-                        } else if metrics.event_count > 0 {
-                            // Fallback: Use incrementally-built histogram (no runtime_context available)
-                            let histogram = &metrics.processing_time_histogram;
-
-                            let mut percentiles = std::collections::HashMap::new();
-                            // Convert microseconds from histogram to nanoseconds for export
-                            for p in Percentile::all() {
-                                let value = histogram.value_at_quantile(p.quantile());
-                                percentiles.insert(*p, (value * 1_000) as f64);
-                            }
-
-                            let hist_snapshot = obzenflow_core::metrics::HistogramSnapshot {
-                                count: histogram.len(),
-                                sum: metrics.total_processing_time.as_nanos() as f64,
-                                min: (histogram.min() * 1_000) as f64,
-                                max: (histogram.max() * 1_000) as f64,
                                 percentiles,
                             };
 
@@ -911,13 +931,9 @@ impl FsmAction for MetricsAggregatorAction {
                         total_events_processed_snapshot =
                             total_events_processed_snapshot.saturating_add(events_count);
 
-                        // Prefer wide-event snapshot for errors, but never under-count
-                        // relative to the aggregator's own per-stage error counter.
-                        let snapshot_errors =
-                            metrics.latest_errors_total.unwrap_or(metrics.errors);
-                        let errors_count = snapshot_errors.max(metrics.errors);
+                        let stage_errors_total = metrics.latest_errors_total.unwrap_or(0);
                         flow_errors_total_snapshot =
-                            flow_errors_total_snapshot.saturating_add(errors_count);
+                            flow_errors_total_snapshot.saturating_add(stage_errors_total);
 
                         total_event_loops =
                             total_event_loops.saturating_add(metrics.event_loops_total);
@@ -940,17 +956,10 @@ impl FsmAction for MetricsAggregatorAction {
                         }
 
                         tracing::debug!(
-                            "Exported metrics for {:?}: events={}, errors={}, avg_time={}",
+                            "Exported metrics for {:?}: events={}, errors_total_snapshot={}",
                             stage_id,
-                            metrics.events_in,
-                            metrics.errors,
-                            if metrics.event_count > 0 {
-                                MetricsDuration::from_nanos(
-                                    metrics.total_processing_time.as_nanos() / metrics.event_count,
-                                )
-                            } else {
-                                MetricsDuration::ZERO
-                            }
+                            events_count,
+                            stage_errors_total
                         );
                     }
 

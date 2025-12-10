@@ -189,6 +189,21 @@ impl<T: JournalEvent + 'static> Journal<T> for MemoryJournal<T> {
         let events = self.read_causally_ordered().await?;
         Ok(Box::new(MemoryJournalReader::new(events, _position)))
     }
+
+    async fn read_last_n(&self, count: usize) -> Result<Vec<EventEnvelope<T>>, JournalError> {
+        if count == 0 {
+            return Ok(Vec::new());
+        }
+
+        let events = self.events.lock().unwrap();
+        let len = events.len();
+        let start = len.saturating_sub(count);
+
+        // Return events in reverse order (most recent first)
+        let mut result: Vec<_> = events[start..].iter().cloned().collect();
+        result.reverse();
+        Ok(result)
+    }
 }
 
 #[async_trait]

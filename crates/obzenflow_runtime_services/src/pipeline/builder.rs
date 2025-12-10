@@ -216,10 +216,10 @@ impl SupervisorBuilder for PipelineBuilder {
             bus: message_bus.clone(),
             topology: self.topology.clone(),
             system_journal: self.system_journal.clone(),
-            completed_stages: Vec::new(),
-            running_stages: std::collections::HashSet::new(),
             stage_supervisors: stage_map,
             source_supervisors: source_map,
+            completed_stages: Vec::new(),
+            running_stages: std::collections::HashSet::new(),
             stage_data_journals: self
                 .stage_journals
                 .unwrap_or_else(|| Vec::<(StageId, Arc<dyn Journal<ChainEvent>>)>::new()),
@@ -234,6 +234,7 @@ impl SupervisorBuilder for PipelineBuilder {
             expected_sources,
             stage_lifecycle_metrics: HashMap::new(),
             flow_start_time: None,
+            last_system_event_id_seen: None,
         };
 
         // Create channels using the common infrastructure

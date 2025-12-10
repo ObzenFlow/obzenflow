@@ -143,7 +143,7 @@ impl FlowHandle {
         // Inspect final state to fail fast on pipeline aborts
         let final_state = state_rx.borrow().clone();
         match final_state {
-            PipelineState::Failed { reason } => Err(FlowError::ExecutionFailed(Box::new(
+            PipelineState::Failed { reason, .. } => Err(FlowError::ExecutionFailed(Box::new(
                 io::Error::new(io::ErrorKind::Other, reason),
             ))),
             PipelineState::AbortRequested { reason, .. } => Err(FlowError::ExecutionFailed(

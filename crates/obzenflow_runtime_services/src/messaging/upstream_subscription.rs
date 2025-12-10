@@ -103,8 +103,15 @@ pub struct SubscriptionState {
     /// Round-robin fairness state
     current_reader_index: usize,
 
-    /// EOF tracking per reader
+    /// EOF tracking per reader (true terminal EOF observed via FlowControl::Eof)
     eof_received: Vec<bool>,
+
+    /// True when a reader was created at the journal tail position.
+    /// This is used for "logical EOF" checks where starting at tail
+    /// should count as having no historical data to consume, while
+    /// still allowing new events appended after subscription creation
+    /// to be observed.
+    baseline_at_tail: Vec<bool>,
 
     /// Buffering for events that need to be returned later
     /// (Currently unused but available for future ordering requirements)
@@ -116,6 +123,7 @@ impl SubscriptionState {
         Self {
             current_reader_index: 0,
             eof_received: vec![false; reader_count],
+            baseline_at_tail: vec![false; reader_count],
             pending_events: VecDeque::new(),
         }
     }
@@ -135,6 +143,29 @@ impl SubscriptionState {
         if let Some(eof) = self.eof_received.get_mut(index) {
             *eof = true;
         }
+    }
+
+    /// Mark a reader as having started at tail (logical EOF baseline).
+    pub fn mark_reader_baseline_at_tail(&mut self, index: usize) {
+        if let Some(flag) = self.baseline_at_tail.get_mut(index) {
+            *flag = true;
+        }
+    }
+
+    /// Returns true if a reader is logically at EOF: either it has
+    /// observed a true EOF event, or it was created at the journal
+    /// tail and has no historical data to consume.
+    pub fn is_reader_logically_eof(&self, index: usize) -> bool {
+        let eof = self.eof_received.get(index).copied().unwrap_or(false);
+        let baseline = self.baseline_at_tail.get(index).copied().unwrap_or(false);
+        eof || baseline
+    }
+
+    /// Count of readers that are logically at EOF.
+    pub fn logical_eof_count(&self) -> usize {
+        (0..self.eof_received.len())
+            .filter(|&i| self.is_reader_logically_eof(i))
+            .count()
     }
 
     /// Get the next reader index in round-robin order
@@ -394,6 +425,37 @@ where
             contract_policies: Vec::new(),
             last_eof_outcome: None,
         })
+    }
+
+    /// Create a subscription starting from explicit tail positions.
+    ///
+    /// Readers are treated as logically at EOF for historical data
+    /// (baseline_at_tail = true) but will still observe any new
+    /// events appended after subscription creation. This is used by
+    /// tail-first observers like the metrics aggregator which seed
+    /// from tail snapshots and do not need to re-observe historical
+    /// EOF control events.
+    pub async fn new_at_tail(
+        owner_label: &str,
+        upstream_journals: &[(StageId, String, Arc<dyn Journal<T>>)],
+        tail_positions: &[u64],
+    ) -> Result<Self> {
+        let mut sub =
+            Self::new_with_names_from_positions(owner_label, upstream_journals, tail_positions)
+                .await?;
+
+        for i in 0..sub.readers.len() {
+            sub.state.mark_reader_baseline_at_tail(i);
+        }
+
+        tracing::info!(
+            target: "flowip-059d",
+            owner = owner_label,
+            reader_count = sub.readers.len(),
+            "Created tail-start upstream subscription with baseline_at_tail=true"
+        );
+
+        Ok(sub)
     }
 
     /// Backwards-compatible constructor using stage IDs as names
@@ -1220,6 +1282,21 @@ where
     /// Get the number of upstream readers
     pub fn upstream_count(&self) -> usize {
         self.readers.len()
+    }
+
+    /// Returns true when all upstream readers have reached terminal EOF.
+    pub fn all_readers_eof(&self) -> bool {
+        self.state.eof_count() == self.readers.len()
+    }
+
+    /// Returns true when all upstream readers are logically at EOF
+    /// (either they have observed a terminal EOF event, or they were
+    /// created at the journal tail position with no historical data
+    /// to consume). This is used by tail-first observers like the
+    /// metrics aggregator that seed from tail snapshots and do not
+    /// need to re-observe historical EOF events.
+    pub fn all_readers_logically_eof(&self) -> bool {
+        self.state.logical_eof_count() == self.readers.len()
     }
 
     /// Check if there are any upstream journals

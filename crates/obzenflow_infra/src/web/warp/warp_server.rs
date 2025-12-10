@@ -717,6 +717,7 @@ fn map_system_event_to_sse(envelope: &SystemEventEnvelope) -> SseEvent {
                     reason,
                     duration_ms,
                     metrics,
+                    failure_cause,
                 } => {
                     let metrics_value = metrics
                         .as_ref()
@@ -728,6 +729,11 @@ fn map_system_event_to_sse(envelope: &SystemEventEnvelope) -> SseEvent {
                         "reason": reason,
                         "duration_ms": duration_ms,
                     });
+                    if let Some(cause) = failure_cause {
+                        if let Ok(cause_value) = serde_json::to_value(cause) {
+                            data["failure_cause"] = cause_value;
+                        }
+                    }
                     if let Some(m) = metrics_value {
                         data["metrics"] = m;
                     }

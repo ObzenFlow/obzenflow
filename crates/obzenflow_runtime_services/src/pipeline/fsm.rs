@@ -40,6 +40,7 @@ pub enum PipelineState {
     Drained,
     Failed {
         reason: String,
+        failure_cause: Option<obzenflow_core::event::types::ViolationCause>,
     },
 }
 
@@ -182,6 +183,9 @@ pub struct PipelineContext {
 
     /// Flow start time for duration calculation
     pub flow_start_time: Option<std::time::Instant>,
+
+    /// Last system event ID observed via completion_subscription (for tail reconciliation)
+    pub last_system_event_id_seen: Option<obzenflow_core::EventId>,
 }
 
 impl FsmContext for PipelineContext {}
@@ -364,6 +368,47 @@ impl FsmAction for PipelineAction {
             PipelineAction::NotifySourceStart => {
                 let supervisors = &mut context.source_supervisors;
                 tracing::info!("Starting {} source stages", supervisors.len());
+
+                // Publish initial pipeline lifecycle events so that downstream
+                // consumers (SSE, UI, metrics) can reliably observe that the
+                // flow has started and is running.
+                //
+                // We emit:
+                // - pipeline_starting
+                // - pipeline_running (with optional stage_count via topology)
+                let system_event_factory = SystemEventFactory::new(context.system_id);
+                let starting_event = system_event_factory.pipeline_starting();
+                context
+                    .system_journal
+                    .append(starting_event, None)
+                    .await
+                    .map_err(|e| {
+                        obzenflow_fsm::FsmError::HandlerError(format!(
+                            "Failed to publish pipeline starting event: {}",
+                            e
+                        ))
+                    })?;
+
+                // Use the topology to derive an optional stage_count for the running event.
+                let stage_count = context.topology.stages().count();
+                let running_event = obzenflow_core::event::SystemEvent::new(
+                    obzenflow_core::event::WriterId::from(context.system_id),
+                    obzenflow_core::event::SystemEventType::PipelineLifecycle(
+                        obzenflow_core::event::PipelineLifecycleEvent::Running {
+                            stage_count: Some(stage_count),
+                        },
+                    ),
+                );
+                context
+                    .system_journal
+                    .append(running_event, None)
+                    .await
+                    .map_err(|e| {
+                        obzenflow_fsm::FsmError::HandlerError(format!(
+                            "Failed to publish pipeline running event: {}",
+                            e
+                        ))
+                    })?;
 
                 // Record flow start time on first source start
                 if context.flow_start_time.is_none() {
@@ -913,7 +958,10 @@ pub fn build_pipeline_fsm() -> PipelineFsm {
                 Box::pin(async move {
                     if let PipelineEvent::Error { message } = event {
                         Ok(Transition {
-                            next_state: PipelineState::Failed { reason: message },
+                            next_state: PipelineState::Failed {
+                                reason: message,
+                                failure_cause: None,
+                            },
                             actions: vec![PipelineAction::Cleanup],
                         })
                     } else {
@@ -996,7 +1044,10 @@ pub fn build_pipeline_fsm() -> PipelineFsm {
                 Box::pin(async move {
                     if let PipelineEvent::Error { message } = event {
                         Ok(Transition {
-                            next_state: PipelineState::Failed { reason: message },
+                            next_state: PipelineState::Failed {
+                                reason: message,
+                                failure_cause: None,
+                            },
                             actions: vec![PipelineAction::Cleanup],
                         })
                     } else {
@@ -1088,7 +1139,10 @@ pub fn build_pipeline_fsm() -> PipelineFsm {
                 Box::pin(async move {
                     if let PipelineEvent::Error { message } = event {
                         Ok(Transition {
-                            next_state: PipelineState::Failed { reason: message },
+                            next_state: PipelineState::Failed {
+                                reason: message,
+                                failure_cause: None,
+                            },
                             actions: vec![PipelineAction::Cleanup],
                         })
                     } else {
@@ -1101,18 +1155,26 @@ pub fn build_pipeline_fsm() -> PipelineFsm {
         }
 
         state PipelineState::AbortRequested {
-            on PipelineEvent::Error => |_state: &PipelineState, event: &PipelineEvent, _ctx: &mut PipelineContext| {
+            on PipelineEvent::Error => |state: &PipelineState, event: &PipelineEvent, _ctx: &mut PipelineContext| {
                 let event = event.clone();
+                let state = state.clone();
                 Box::pin(async move {
-                    if let PipelineEvent::Error { message } = event {
-                        Ok(Transition {
-                            next_state: PipelineState::Failed { reason: message },
-                            actions: vec![PipelineAction::Cleanup],
-                        })
-                    } else {
-                        Err(obzenflow_fsm::FsmError::HandlerError(
+                    match (state, event) {
+                        (
+                            PipelineState::AbortRequested { reason: abort_reason, .. },
+                            PipelineEvent::Error { message },
+                        ) => {
+                            Ok(Transition {
+                                next_state: PipelineState::Failed {
+                                    reason: message,
+                                    failure_cause: Some(abort_reason),
+                                },
+                                actions: vec![PipelineAction::Cleanup],
+                            })
+                        }
+                        _ => Err(obzenflow_fsm::FsmError::HandlerError(
                             "Invalid event".to_string(),
-                        ))
+                        )),
                     }
                 })
             };

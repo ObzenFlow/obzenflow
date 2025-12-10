@@ -220,6 +220,23 @@ impl ChainEvent {
         self.mark_as_error(reason, ErrorKind::Remote)
     }
 
+    /// Create a derived error event from this event.
+    ///
+    /// This helper combines `ChainEventFactory::derived_data_event` with
+    /// `mark_as_error`, preserving causality/correlation while marking the
+    /// new event as an error with the provided `ErrorKind`.
+    pub fn derive_error_event(
+        &self,
+        event_type: impl Into<String>,
+        payload: Value,
+        reason: impl Into<String>,
+        kind: ErrorKind,
+    ) -> ChainEvent {
+        let reason_str = reason.into();
+        ChainEventFactory::derived_data_event(self.writer_id.clone(), self, event_type, payload)
+            .mark_as_error(reason_str, kind)
+    }
+
     /// Return a concise “category.kind” string for logging & metrics.
     pub fn event_type(&self) -> String {
         match &self.content {

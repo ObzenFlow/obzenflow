@@ -178,7 +178,7 @@ impl crate::supervised_base::base::Supervisor for PipelineSupervisor {
                     Box::pin(async move {
                         if let PipelineEvent::Error { message } = event {
                             Ok(Transition {
-                                next_state: PipelineState::Failed { reason: message },
+                                next_state: PipelineState::Failed { reason: message, failure_cause: None },
                                 actions: vec![
                                     PipelineAction::DrainMetrics,
                                     PipelineAction::Cleanup,
@@ -262,7 +262,10 @@ impl crate::supervised_base::base::Supervisor for PipelineSupervisor {
                     Box::pin(async move {
                         if let PipelineEvent::Error { message } = event {
                             Ok(Transition {
-                                next_state: PipelineState::Failed { reason: message },
+                                next_state: PipelineState::Failed {
+                                    reason: message,
+                                    failure_cause: None,
+                                },
                                 actions: vec![
                                     PipelineAction::DrainMetrics,
                                     PipelineAction::Cleanup,
@@ -360,7 +363,10 @@ impl crate::supervised_base::base::Supervisor for PipelineSupervisor {
                     Box::pin(async move {
                         if let PipelineEvent::Error { message } = event {
                             Ok(Transition {
-                                next_state: PipelineState::Failed { reason: message },
+                                next_state: PipelineState::Failed {
+                                    reason: message,
+                                    failure_cause: None,
+                                },
                                 actions: vec![PipelineAction::Cleanup],
                             })
                         } else {
@@ -373,21 +379,29 @@ impl crate::supervised_base::base::Supervisor for PipelineSupervisor {
             }
 
             state PipelineState::AbortRequested {
-                on PipelineEvent::Error => |_state: &PipelineState, event: &PipelineEvent, _ctx: &mut PipelineContext| {
+                on PipelineEvent::Error => |state: &PipelineState, event: &PipelineEvent, _ctx: &mut PipelineContext| {
                     let event = event.clone();
+                    let state = state.clone();
                     Box::pin(async move {
-                        if let PipelineEvent::Error { message } = event {
-                            Ok(Transition {
-                                next_state: PipelineState::Failed { reason: message },
-                                actions: vec![
-                                    PipelineAction::DrainMetrics,
-                                    PipelineAction::Cleanup,
-                                ],
-                            })
-                        } else {
-                            Err(obzenflow_fsm::FsmError::HandlerError(
+                        match (state, event) {
+                            (
+                                PipelineState::AbortRequested { reason: abort_reason, .. },
+                                PipelineEvent::Error { message },
+                            ) => {
+                                Ok(Transition {
+                                    next_state: PipelineState::Failed {
+                                        reason: message,
+                                        failure_cause: Some(abort_reason),
+                                    },
+                                    actions: vec![
+                                        PipelineAction::DrainMetrics,
+                                        PipelineAction::Cleanup,
+                                    ],
+                                })
+                            }
+                            _ => Err(obzenflow_fsm::FsmError::HandlerError(
                                 "Invalid event".to_string(),
-                            ))
+                            )),
                         }
                     })
                 };
@@ -529,6 +543,8 @@ impl SelfSupervised for PipelineSupervisor {
                     PollResult::Event(envelope) => {
                         // Process stage running event
                         let event = &envelope.event;
+                        // Track last system event ID for tail reconciliation.
+                        context.last_system_event_id_seen = Some(event.id.clone());
                         if let obzenflow_core::event::SystemEventType::StageLifecycle {
                             stage_id,
                             event: obzenflow_core::event::StageLifecycleEvent::Running,
@@ -634,6 +650,9 @@ impl SelfSupervised for PipelineSupervisor {
                 match subscription.poll_next().await {
                     PollResult::Event(envelope) => {
                         let event = &envelope.event;
+
+                        // Track last system event ID for tail reconciliation.
+                        context.last_system_event_id_seen = Some(event.id.clone());
 
                         return match &event.event {
                             obzenflow_core::event::SystemEventType::StageLifecycle { stage_id, event: lifecycle_event } => {
@@ -839,6 +858,9 @@ impl SelfSupervised for PipelineSupervisor {
                     PollResult::Event(envelope) => {
                         let event = &envelope.event;
 
+                        // Track last system event ID for tail reconciliation.
+                        context.last_system_event_id_seen = Some(event.id.clone());
+
                         return match &event.event {
                             obzenflow_core::event::SystemEventType::StageLifecycle {
                                 stage_id,
@@ -1006,6 +1028,16 @@ impl SelfSupervised for PipelineSupervisor {
                 // then terminate. We also keep the lighter-weight "drained" marker
                 // in write_completion_event().
                 if context.flow_start_time.is_some() {
+                    // Best-effort reconciliation with tail system events to ensure we have
+                    // the latest wide lifecycle snapshots before computing flow rollup.
+                    if let Err(e) = self.reconcile_stage_metrics_from_tail(context).await {
+                        tracing::warn!(
+                            pipeline = %self.name,
+                            error = %e,
+                            "Failed to reconcile stage lifecycle metrics from tail before completion"
+                        );
+                    }
+
                     // Compute flow duration (best-effort)
                     let duration_ms = context
                         .flow_start_time
@@ -1038,20 +1070,27 @@ impl SelfSupervised for PipelineSupervisor {
                 Ok(EventLoopDirective::Terminate)
             }
 
-            PipelineState::Failed { reason } => {
+            PipelineState::Failed { reason, failure_cause } => {
                 // Terminal failure: write flow_failed with duration + best-effort rollup metrics.
+                // This snapshot is derived from per-stage lifecycle snapshots
+                // (`stage_lifecycle_metrics`) via `compute_flow_lifecycle_metrics`, after a
+                // best-effort reconciliation of wide lifecycle events from the system
+                // journal tail to capture any completions written after we stopped polling.
+                if let Err(e) = self.reconcile_stage_metrics_from_tail(context).await {
+                    tracing::warn!(
+                        pipeline = %self.name,
+                        error = %e,
+                        "Failed to reconcile stage lifecycle metrics from tail before failure"
+                    );
+                }
+
                 let duration_ms = context
                     .flow_start_time
                     .map(|start| start.elapsed().as_millis() as u64)
                     .unwrap_or(0);
 
-                let metrics = if context.stage_lifecycle_metrics.is_empty() {
-                    None
-                } else {
-                    Some(crate::pipeline::fsm::compute_flow_lifecycle_metrics(
-                        context,
-                    ))
-                };
+                let metrics =
+                    Some(crate::pipeline::fsm::compute_flow_lifecycle_metrics(context));
 
                 let system_event_factory =
                     obzenflow_core::event::system_event::SystemEventFactory::new(
@@ -1061,6 +1100,7 @@ impl SelfSupervised for PipelineSupervisor {
                     reason.clone(),
                     duration_ms,
                     metrics,
+                    failure_cause.clone(),
                 );
 
                 if let Err(e) = self.system_journal.append(failed, None).await {
@@ -1096,6 +1136,66 @@ impl SelfSupervised for PipelineSupervisor {
 }
 
 impl PipelineSupervisor {
+    /// Best-effort reconciliation of per-stage lifecycle metrics using tail system events.
+    ///
+    /// Reads only system events that causally follow the last system event observed via
+    /// the completion subscription and updates `stage_lifecycle_metrics` with any
+    /// terminal wide lifecycle snapshots found there.
+    async fn reconcile_stage_metrics_from_tail(
+        &self,
+        context: &mut PipelineContext,
+    ) -> Result<(), String> {
+        let last_id = match &context.last_system_event_id_seen {
+            Some(id) => id.clone(),
+            None => {
+                // No prior system events recorded; nothing to reconcile.
+                return Ok(());
+            }
+        };
+
+        let tail_events = self
+            .system_journal
+            .read_causally_after(&last_id)
+            .await
+            .map_err(|e| format!("Failed to read tail system events: {}", e))?;
+
+        if tail_events.is_empty() {
+            return Ok(());
+        }
+
+        for envelope in tail_events.iter() {
+            if let obzenflow_core::event::SystemEventType::StageLifecycle { stage_id, event } =
+                &envelope.event.event
+            {
+                match event {
+                    obzenflow_core::event::StageLifecycleEvent::Completed {
+                        metrics: Some(m),
+                    }
+                    | obzenflow_core::event::StageLifecycleEvent::Failed {
+                        metrics: Some(m), ..
+                    } => {
+                        context
+                            .stage_lifecycle_metrics
+                            .insert(*stage_id, m.clone());
+                    }
+                    obzenflow_core::event::StageLifecycleEvent::Draining { metrics: Some(m) } => {
+                        context
+                            .stage_lifecycle_metrics
+                            .entry(*stage_id)
+                            .or_insert_with(|| m.clone());
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        if let Some(last_envelope) = tail_events.last() {
+            context.last_system_event_id_seen = Some(last_envelope.event.id.clone());
+        }
+
+        Ok(())
+    }
+
     /// If any contract edge has an explicit failure recorded, return an abort directive
     fn missing_contract_abort(
         &self,
