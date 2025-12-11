@@ -173,6 +173,12 @@ pub struct StageMetricsSnapshot {
     /// Total errors observed at this stage
     pub errors_total: u64,
 
+    /// Error breakdown by kind (authoritative, journal-backed)
+    pub errors_by_kind: std::collections::HashMap<
+        crate::event::status::processing_status::ErrorKind,
+        u64,
+    >,
+
     /// Number of in-flight events at snapshot time
     pub in_flight: u32,
 

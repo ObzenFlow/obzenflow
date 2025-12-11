@@ -362,6 +362,10 @@ impl crate::supervised_base::SelfSupervised for SupervisorWithExternalEvents {
         self.supervisor.writer_id()
     }
 
+    fn event_for_action_error(&self, msg: String) -> PipelineEvent {
+        self.supervisor.event_for_action_error(msg)
+    }
+
     async fn write_completion_event(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         self.supervisor.write_completion_event().await
     }

@@ -14,6 +14,7 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 
 use crate::metrics::instrumentation::{snapshot_stage_metrics, StageInstrumentation};
+use crate::metrics::tail_read;
 use crate::stages::common::handlers::InfiniteSourceHandler;
 use crate::stages::source::strategies::{SourceControlContext, SourceControlStrategy};
 
@@ -408,7 +409,18 @@ impl<H: InfiniteSourceHandler + Send + Sync + 'static> FsmAction for InfiniteSou
             }
 
             InfiniteSourceAction::SendError { message } => {
-                let metrics = snapshot_stage_metrics(&ctx.instrumentation);
+                // Tail-read metrics for failure; if no runtime_context is present
+                // in the journals, fall back to a best-effort snapshot from
+                // instrumentation rather than failing the failure path.
+                let metrics = match tail_read::read_stage_metrics_from_tail(
+                    &ctx.data_journal,
+                    Some(&ctx.error_journal),
+                )
+                .await
+                {
+                    Some(metrics) => metrics,
+                    None => snapshot_stage_metrics(ctx.instrumentation.as_ref()),
+                };
                 let error_event = obzenflow_core::event::SystemEvent::stage_failed_with_metrics(
                     ctx.stage_id,
                     message.clone(),
@@ -456,8 +468,21 @@ impl<H: InfiniteSourceHandler + Send + Sync + 'static> FsmAction for InfiniteSou
             }
 
             InfiniteSourceAction::WriteStageCompleted => {
-                // Write completion event to system journal with final metrics
-                let metrics = snapshot_stage_metrics(&ctx.instrumentation);
+                // Write completion event to system journal with tail-read metrics.
+                // If no runtime_context is available in the journals at completion
+                // time, treat this as a hard error instead of fabricating metrics.
+                let metrics = tail_read::read_stage_metrics_from_tail(
+                    &ctx.data_journal,
+                    Some(&ctx.error_journal),
+                )
+                .await
+                .ok_or_else(|| {
+                    obzenflow_fsm::FsmError::HandlerError(format!(
+                        "no runtime_context in journal tail for stage {} completion (data_journal={})",
+                        ctx.stage_id,
+                        ctx.data_journal.id(),
+                    ))
+                })?;
                 let completion_event =
                     SystemEvent::stage_completed_with_metrics(ctx.stage_id, metrics);
 

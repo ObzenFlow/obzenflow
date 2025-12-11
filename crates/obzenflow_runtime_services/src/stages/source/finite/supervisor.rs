@@ -298,6 +298,10 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> H
         self.stage_id
     }
 
+    fn event_for_action_error(&self, msg: String) -> FiniteSourceEvent<H> {
+        FiniteSourceEvent::Error(msg)
+    }
+
     async fn write_completion_event(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let event = SystemEvent::stage_completed(self.stage_id);
         if let Err(e) = self.system_journal.append(event, None).await {

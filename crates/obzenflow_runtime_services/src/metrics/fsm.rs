@@ -19,6 +19,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
+use crate::metrics::tail_read;
+
 // Histogram configuration constants (in microseconds for precision)
 const HISTOGRAM_MIN_US: u64 = 1; // 1 microsecond minimum
 const HISTOGRAM_MAX_US: u64 = 60_000_000; // 60 seconds maximum
@@ -127,6 +129,12 @@ pub enum MetricsAggregatorAction {
 pub struct MetricsAggregatorContext {
     /// System journal for reporting
     pub system_journal: Arc<dyn Journal<obzenflow_core::event::SystemEvent>>,
+
+    /// Mapping of stage IDs to their data journals for tail reads.
+    pub stage_data_journals: HashMap<StageId, Arc<dyn Journal<ChainEvent>>>,
+
+    /// Mapping of stage IDs to their error journals for tail reads.
+    pub stage_error_journals: HashMap<StageId, Arc<dyn Journal<ChainEvent>>>,
 
     /// Subscription to read from all stage data journals
     pub data_subscription:
@@ -554,8 +562,22 @@ impl MetricsAggregatorContext {
             "metrics_aggregator".to_string(),
         );
 
+        // Build maps of journals for tail-read helpers used during export.
+        let stage_data_journals: HashMap<StageId, Arc<dyn Journal<ChainEvent>>> = inputs
+            .stage_data_journals
+            .iter()
+            .map(|(id, journal)| (*id, journal.clone()))
+            .collect();
+        let stage_error_journals: HashMap<StageId, Arc<dyn Journal<ChainEvent>>> = inputs
+            .error_journals
+            .iter()
+            .map(|(id, journal)| (*id, journal.clone()))
+            .collect();
+
         Ok(Self {
             system_journal,
+            stage_data_journals,
+            stage_error_journals,
             data_subscription: Some(data_subscription),
             error_subscription,
             system_subscription: Some(system_subscription),
@@ -571,6 +593,187 @@ impl MetricsAggregatorContext {
 }
 
 impl FsmContext for MetricsAggregatorContext {}
+
+impl MetricsAggregatorContext {
+    /// Build an `AppMetricsSnapshot` from the current in-memory `metrics_store`.
+    ///
+    /// This logic was originally inlined in the `ExportMetrics` action and has
+    /// been refactored for reuse. It assumes that any tail-read refresh has
+    /// already been applied to `metrics_store`.
+    fn build_app_metrics_snapshot(&self) -> obzenflow_core::metrics::AppMetricsSnapshot {
+        let store = &self.metrics_store;
+        let mut snapshot = obzenflow_core::metrics::AppMetricsSnapshot::default();
+
+        tracing::info!(
+            "Exporting metrics: {} stage entries",
+            store.stage_metrics.len()
+        );
+
+        // Flow-level aggregates derived from per-stage snapshots
+        let mut flow_events_in_total: u64 = 0;
+        let mut flow_events_out_total: u64 = 0;
+        let mut flow_errors_total_snapshot: u64 = 0;
+        let mut total_events_processed_snapshot: u64 = 0;
+        let mut total_event_loops: u64 = 0;
+        let mut total_event_loops_with_work: u64 = 0;
+
+        // Convert stage metrics to snapshot format
+        for (stage_id, metrics) in &store.stage_metrics {
+            // Prefer wide-event snapshot counters when available
+            let events_count = metrics.latest_events_processed_total.unwrap_or(0);
+            snapshot.event_counts.insert(*stage_id, events_count);
+
+            // Use wide-event snapshot errors_total as authoritative.
+            let stage_errors_total = metrics.latest_errors_total.unwrap_or(0);
+            snapshot.error_counts.insert(*stage_id, stage_errors_total);
+
+            if !metrics.errors_by_kind.is_empty() && stage_errors_total > 0 {
+                snapshot
+                    .error_counts_by_kind
+                    .insert(*stage_id, metrics.errors_by_kind.clone());
+            }
+
+            // Add processing time histogram reconstructed from runtime_context percentiles.
+            if events_count > 0 && metrics.snapshot_p50_ms.is_some() {
+                let mut percentiles = std::collections::HashMap::new();
+                if let Some(p50) = metrics.snapshot_p50_ms {
+                    percentiles.insert(Percentile::P50, (p50 * 1_000_000) as f64);
+                }
+                if let Some(p90) = metrics.snapshot_p90_ms {
+                    percentiles.insert(Percentile::P90, (p90 * 1_000_000) as f64);
+                }
+                if let Some(p95) = metrics.snapshot_p95_ms {
+                    percentiles.insert(Percentile::P95, (p95 * 1_000_000) as f64);
+                }
+                if let Some(p99) = metrics.snapshot_p99_ms {
+                    percentiles.insert(Percentile::P99, (p99 * 1_000_000) as f64);
+                }
+                if let Some(p999) = metrics.snapshot_p999_ms {
+                    percentiles.insert(Percentile::P999, (p999 * 1_000_000) as f64);
+                }
+
+                // Approximate sum using median; see FLOWIP-059d histogram section.
+                let p50_ms = metrics.snapshot_p50_ms.unwrap_or(0);
+                let sum_nanos = (p50_ms * 1_000_000) as u64 * events_count;
+
+                let hist_snapshot = obzenflow_core::metrics::HistogramSnapshot {
+                    count: events_count,
+                    sum: sum_nanos as f64,
+                    min: (metrics.snapshot_p50_ms.unwrap_or(0) * 1_000_000) as f64,
+                    max: (metrics.snapshot_p999_ms.unwrap_or(0) * 1_000_000) as f64,
+                    percentiles,
+                };
+
+                snapshot.processing_times.insert(*stage_id, hist_snapshot);
+            }
+
+            // Add runtime context metrics if available (FLOWIP-056c)
+            if let Some(in_flight) = metrics.last_in_flight {
+                snapshot.in_flight.insert(*stage_id, in_flight as f64);
+            }
+
+            if let Some(failures_total) = metrics.last_failures_total {
+                snapshot.failures_total.insert(*stage_id, failures_total);
+            }
+
+            // Event loop metrics are cumulative counters
+            snapshot
+                .event_loops_total
+                .insert(*stage_id, metrics.event_loops_total);
+            snapshot
+                .event_loops_with_work_total
+                .insert(*stage_id, metrics.event_loops_with_work_total);
+
+            // Aggregate flow-level metrics from snapshots
+            total_events_processed_snapshot =
+                total_events_processed_snapshot.saturating_add(events_count);
+
+            flow_errors_total_snapshot =
+                flow_errors_total_snapshot.saturating_add(stage_errors_total);
+
+            total_event_loops = total_event_loops.saturating_add(metrics.event_loops_total);
+            total_event_loops_with_work = total_event_loops_with_work
+                .saturating_add(metrics.event_loops_with_work_total);
+
+            if let Some(metadata) = self.stage_metadata.get(stage_id) {
+                match metadata.stage_type {
+                    obzenflow_core::event::context::StageType::FiniteSource
+                    | obzenflow_core::event::context::StageType::InfiniteSource => {
+                        flow_events_in_total =
+                            flow_events_in_total.saturating_add(events_count);
+                    }
+                    obzenflow_core::event::context::StageType::Sink => {
+                        flow_events_out_total =
+                            flow_events_out_total.saturating_add(events_count);
+                    }
+                    _ => {}
+                }
+            }
+
+            tracing::debug!(
+                "Exported metrics for {:?}: events={}, errors_total_snapshot={}",
+                stage_id,
+                events_count,
+                stage_errors_total
+            );
+        }
+
+        // Add flow-level metrics
+        if let (Some(first_time), Some(last_time)) =
+            (store.first_event_time, store.last_event_time)
+        {
+            let flow_duration = last_time.duration_since(first_time);
+            let flow_metrics = obzenflow_core::metrics::FlowMetricsSnapshot {
+                flow_duration: MetricsDuration::from(flow_duration),
+                total_events_processed: total_events_processed_snapshot,
+                events_in: flow_events_in_total,
+                events_out: flow_events_out_total,
+                errors_total: flow_errors_total_snapshot,
+                event_loops_total: total_event_loops,
+                event_loops_with_work_total: total_event_loops_with_work,
+            };
+            snapshot.flow_metrics = Some(flow_metrics);
+        }
+
+        // Add stage metadata
+        snapshot.stage_metadata = self.stage_metadata.clone();
+
+        // FLOWIP-059b: Add lifecycle states
+        snapshot.stage_lifecycle_states = store.stage_lifecycle_states.clone();
+        snapshot.pipeline_state = store.pipeline_state.clone();
+
+        // Add stage timestamps for rate calculation
+        let now = std::time::Instant::now();
+        let now_utc = chrono::Utc::now();
+
+        for (stage_id, metrics) in &store.stage_metrics {
+            if let Some(first_time) = metrics.first_event_time {
+                let elapsed_since_first = now.duration_since(first_time);
+                let first_datetime = now_utc
+                    - chrono::Duration::from_std(elapsed_since_first)
+                        .unwrap_or_default();
+                snapshot
+                    .stage_first_event_time
+                    .insert(*stage_id, first_datetime);
+            }
+            if let Some(last_time) = metrics.last_event_time {
+                let elapsed_since_last = now.duration_since(last_time);
+                let last_datetime = now_utc
+                    - chrono::Duration::from_std(elapsed_since_last)
+                        .unwrap_or_default();
+                snapshot
+                    .stage_last_event_time
+                    .insert(*stage_id, last_datetime);
+            }
+
+            if let Some(seq) = store.stage_vector_clocks.get(stage_id) {
+                snapshot.stage_vector_clocks.insert(*stage_id, *seq);
+            }
+        }
+
+        snapshot
+    }
+}
 
 impl MetricsStore {
     /// Returns true when every known stage has reached a terminal lifecycle
@@ -810,214 +1013,45 @@ impl FsmAction for MetricsAggregatorAction {
 
             MetricsAggregatorAction::ExportMetrics => {
                 tracing::info!("ExportMetrics action triggered");
-                if let Some(exporter) = &ctx.exporter {
-                    let store = &ctx.metrics_store;
-                    let mut snapshot = obzenflow_core::metrics::AppMetricsSnapshot::default();
-
-                    tracing::info!(
-                        "Exporting metrics: {} stage entries",
-                        store.stage_metrics.len()
-                    );
-
-                    // Flow-level aggregates derived from per-stage snapshots
-                    let mut flow_events_in_total: u64 = 0;
-                    let mut flow_events_out_total: u64 = 0;
-                    let mut flow_errors_total_snapshot: u64 = 0;
-                    let mut total_events_processed_snapshot: u64 = 0;
-                    let mut total_event_loops: u64 = 0;
-                    let mut total_event_loops_with_work: u64 = 0;
-
-                    // Helper to reconcile error_by_kind counts against snapshot total
-                    fn reconcile_error_kinds(
-                        latest_errors_total: Option<u64>,
-                        errors_by_kind: &HashMap<ErrorKind, u64>,
-                    ) -> HashMap<ErrorKind, u64> {
-                        let mut reconciled = errors_by_kind.clone();
-                        let snapshot_total = latest_errors_total.unwrap_or(0);
-                        let kind_sum: u64 = reconciled.values().sum();
-
-                        if snapshot_total == 0 {
-                            // No authoritative snapshot errors; treat as zeroed breakdown.
-                            return HashMap::new();
-                        }
-
-                        if kind_sum < snapshot_total {
-                            let residual = snapshot_total - kind_sum;
-                            *reconciled.entry(ErrorKind::Unknown).or_insert(0) += residual;
-                        } else if kind_sum > snapshot_total && kind_sum > 0 {
-                            let scale = snapshot_total as f64 / kind_sum as f64;
-                            for v in reconciled.values_mut() {
-                                *v = (*v as f64 * scale).round() as u64;
-                            }
-                        }
-
-                        reconciled
-                    }
-
-                    // Convert stage metrics to snapshot format
-                    for (stage_id, metrics) in &store.stage_metrics {
-                        // Prefer wide-event snapshot counters when available
-                        let events_count = metrics
-                            .latest_events_processed_total
-                            .unwrap_or(0);
-                        snapshot.event_counts.insert(*stage_id, events_count);
-
-                        // Use wide-event snapshot errors_total as authoritative.
-                        let stage_errors_total = metrics.latest_errors_total.unwrap_or(0);
-                        snapshot.error_counts.insert(*stage_id, stage_errors_total);
-
-                        if !metrics.errors_by_kind.is_empty() && stage_errors_total > 0 {
-                            let reconciled =
-                                reconcile_error_kinds(metrics.latest_errors_total, &metrics.errors_by_kind);
-                            if !reconciled.is_empty() {
-                                snapshot
-                                    .error_counts_by_kind
-                                    .insert(*stage_id, reconciled);
-                            }
-                        }
-
-                        // Add processing time histogram reconstructed from runtime_context percentiles.
-                        if events_count > 0 && metrics.snapshot_p50_ms.is_some() {
-                            let mut percentiles = std::collections::HashMap::new();
-                            if let Some(p50) = metrics.snapshot_p50_ms {
-                                percentiles.insert(Percentile::P50, (p50 * 1_000_000) as f64);
-                            }
-                            if let Some(p90) = metrics.snapshot_p90_ms {
-                                percentiles.insert(Percentile::P90, (p90 * 1_000_000) as f64);
-                            }
-                            if let Some(p95) = metrics.snapshot_p95_ms {
-                                percentiles.insert(Percentile::P95, (p95 * 1_000_000) as f64);
-                            }
-                            if let Some(p99) = metrics.snapshot_p99_ms {
-                                percentiles.insert(Percentile::P99, (p99 * 1_000_000) as f64);
-                            }
-                            if let Some(p999) = metrics.snapshot_p999_ms {
-                                percentiles.insert(Percentile::P999, (p999 * 1_000_000) as f64);
-                            }
-
-                            // Approximate sum using median; see FLOWIP-059d histogram section.
-                            let p50_ms = metrics.snapshot_p50_ms.unwrap_or(0);
-                            let sum_nanos = (p50_ms * 1_000_000) as u64 * events_count;
-
-                            let hist_snapshot = obzenflow_core::metrics::HistogramSnapshot {
-                                count: events_count,
-                                sum: sum_nanos as f64,
-                                min: (metrics.snapshot_p50_ms.unwrap_or(0) * 1_000_000) as f64,
-                                max: (metrics.snapshot_p999_ms.unwrap_or(0) * 1_000_000) as f64,
-                                percentiles,
-                            };
-
-                            snapshot.processing_times.insert(*stage_id, hist_snapshot);
-                        }
-
-                        // Add runtime context metrics if available (FLOWIP-056c)
-                        if let Some(in_flight) = metrics.last_in_flight {
-                            snapshot.in_flight.insert(*stage_id, in_flight as f64);
-                        }
-                        // events_behind removed - calculate in PromQL instead
-
-                        if let Some(failures_total) = metrics.last_failures_total {
-                            snapshot.failures_total.insert(*stage_id, failures_total);
-                        }
-                        // Event loop metrics are cumulative counters
-                        snapshot
-                            .event_loops_total
-                            .insert(*stage_id, metrics.event_loops_total);
-                        snapshot
-                            .event_loops_with_work_total
-                            .insert(*stage_id, metrics.event_loops_with_work_total);
-
-                        // Aggregate flow-level metrics from snapshots
-                        total_events_processed_snapshot =
-                            total_events_processed_snapshot.saturating_add(events_count);
-
-                        let stage_errors_total = metrics.latest_errors_total.unwrap_or(0);
-                        flow_errors_total_snapshot =
-                            flow_errors_total_snapshot.saturating_add(stage_errors_total);
-
-                        total_event_loops =
-                            total_event_loops.saturating_add(metrics.event_loops_total);
-                        total_event_loops_with_work = total_event_loops_with_work
-                            .saturating_add(metrics.event_loops_with_work_total);
-
-                        if let Some(metadata) = ctx.stage_metadata.get(stage_id) {
-                            use obzenflow_core::event::context::StageType;
-                            match metadata.stage_type {
-                                StageType::FiniteSource | StageType::InfiniteSource => {
-                                    flow_events_in_total =
-                                        flow_events_in_total.saturating_add(events_count);
-                                }
-                                StageType::Sink => {
-                                    flow_events_out_total =
-                                        flow_events_out_total.saturating_add(events_count);
-                                }
-                                _ => {}
-                            }
-                        }
-
-                        tracing::debug!(
-                            "Exported metrics for {:?}: events={}, errors_total_snapshot={}",
-                            stage_id,
-                            events_count,
-                            stage_errors_total
-                        );
-                    }
-
-                    // Add flow-level metrics
-                    if let (Some(first_time), Some(last_time)) =
-                        (store.first_event_time, store.last_event_time)
+                // Refresh in-memory stage metrics from journal tails before export so
+                // `/metrics` reflects delivery truth even if subscriptions lag.
+                for (stage_id, data_journal) in &ctx.stage_data_journals {
+                    let error_journal = ctx.stage_error_journals.get(stage_id);
+                    if let Some(snapshot) =
+                        tail_read::read_stage_metrics_from_tail(data_journal, error_journal).await
                     {
-                        let flow_duration = last_time.duration_since(first_time);
-                        let flow_metrics = obzenflow_core::metrics::FlowMetricsSnapshot {
-                            flow_duration: MetricsDuration::from(flow_duration),
-                            total_events_processed: total_events_processed_snapshot,
-                            events_in: flow_events_in_total,
-                            events_out: flow_events_out_total,
-                            errors_total: flow_errors_total_snapshot,
-                            event_loops_total: total_event_loops,
-                            event_loops_with_work_total: total_event_loops_with_work,
-                        };
-                        snapshot.flow_metrics = Some(flow_metrics);
+                        let metrics = ctx
+                            .metrics_store
+                            .stage_metrics
+                            .entry(*stage_id)
+                            .or_insert_with(StageMetrics::default);
+
+                        metrics.latest_events_processed_total = Some(
+                            metrics
+                                .latest_events_processed_total
+                                .unwrap_or(0)
+                                .max(snapshot.events_processed_total),
+                        );
+                        metrics.latest_errors_total = Some(
+                            metrics
+                                .latest_errors_total
+                                .unwrap_or(0)
+                                .max(snapshot.errors_total),
+                        );
+
+                        // Use tail-read error breakdown as authoritative for this stage.
+                        metrics.errors_by_kind = snapshot.errors_by_kind.clone();
+                        metrics.last_in_flight = Some(snapshot.in_flight);
+                        metrics.snapshot_p50_ms = Some(snapshot.recent_p50_ms);
+                        metrics.snapshot_p90_ms = Some(snapshot.recent_p90_ms);
+                        metrics.snapshot_p95_ms = Some(snapshot.recent_p95_ms);
+                        metrics.snapshot_p99_ms = Some(snapshot.recent_p99_ms);
+                        metrics.snapshot_p999_ms = Some(snapshot.recent_p999_ms);
                     }
+                }
 
-                    // Add stage metadata
-                    snapshot.stage_metadata = ctx.stage_metadata.clone();
-
-                    // FLOWIP-059b: Add lifecycle states
-                    snapshot.stage_lifecycle_states = store.stage_lifecycle_states.clone();
-                    snapshot.pipeline_state = store.pipeline_state.clone();
-
-                    // Add stage timestamps for rate calculation
-                    // Convert from Instant to DateTime by calculating offset from snapshot time
-                    let now = std::time::Instant::now();
-                    let now_utc = chrono::Utc::now();
-
-                    for (stage_id, metrics) in &store.stage_metrics {
-                        if let Some(first_time) = metrics.first_event_time {
-                            let elapsed_since_first = now.duration_since(first_time);
-                            let first_datetime = now_utc
-                                - chrono::Duration::from_std(elapsed_since_first)
-                                    .unwrap_or_default();
-                            snapshot
-                                .stage_first_event_time
-                                .insert(*stage_id, first_datetime);
-                        }
-                        if let Some(last_time) = metrics.last_event_time {
-                            let elapsed_since_last = now.duration_since(last_time);
-                            let last_datetime = now_utc
-                                - chrono::Duration::from_std(elapsed_since_last)
-                                    .unwrap_or_default();
-                            snapshot
-                                .stage_last_event_time
-                                .insert(*stage_id, last_datetime);
-                        }
-
-                        // Stage vector clock watermark (FLOWIP-059c)
-                        if let Some(seq) = store.stage_vector_clocks.get(stage_id) {
-                            snapshot.stage_vector_clocks.insert(*stage_id, *seq);
-                        }
-                    }
-
+                if let Some(exporter) = &ctx.exporter {
+                    let snapshot = ctx.build_app_metrics_snapshot();
                     tracing::info!("Pushing metrics snapshot to exporter");
 
                     if let Err(e) = exporter.update_app_metrics(snapshot) {
@@ -1277,11 +1311,20 @@ pub fn build_metrics_aggregator_fsm() -> MetricsAggregatorFsm {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
     use obzenflow_core::event::context::StageType;
     use obzenflow_core::event::payloads::correlation_payload::CorrelationPayload;
     use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
     use obzenflow_core::event::ChainEventFactory;
     use obzenflow_core::event::CorrelationId;
+    use obzenflow_core::event::status::processing_status::ErrorKind;
+    use obzenflow_core::journal::journal::Journal;
+    use obzenflow_core::journal::journal_error::JournalError;
+    use obzenflow_core::journal::journal_owner::JournalOwner;
+    use obzenflow_core::journal::journal_reader::JournalReader;
+    use obzenflow_core::metrics::StageMetadata;
+    use obzenflow_core::event::JournalEvent;
+    use std::marker::PhantomData;
 
     #[tokio::test]
     async fn test_delivery_event_preserves_correlation() {
@@ -1312,5 +1355,174 @@ mod tests {
                 .entry_stage,
             "test_source"
         );
+    }
+
+    #[test]
+    fn build_app_metrics_snapshot_uses_errors_by_kind_from_store() {
+        let stage_id = StageId::new();
+
+        // Seed MetricsStore with a single stage entry.
+        let mut store = MetricsStore::default();
+        let mut stage_metrics = StageMetrics::default();
+        stage_metrics.latest_events_processed_total = Some(42);
+        stage_metrics.latest_errors_total = Some(3);
+        stage_metrics
+            .errors_by_kind
+            .insert(ErrorKind::Domain, 2);
+        stage_metrics
+            .errors_by_kind
+            .insert(ErrorKind::Remote, 1);
+        stage_metrics.event_loops_total = 10;
+        stage_metrics.event_loops_with_work_total = 7;
+        store.stage_metrics.insert(stage_id, stage_metrics);
+
+        // Minimal stage metadata so flow aggregation can classify the stage.
+        let mut stage_metadata = std::collections::HashMap::new();
+        stage_metadata.insert(
+            stage_id,
+            StageMetadata {
+                name: "test_stage".to_string(),
+                stage_type: StageType::Sink,
+                flow_name: "test_flow".to_string(),
+            },
+        );
+
+        // Local NoopJournal implementation for the system_journal field; it is never used
+        // by build_app_metrics_snapshot but satisfies the context type.
+        struct NoopJournal<T: JournalEvent> {
+            id: obzenflow_core::id::JournalId,
+            owner: Option<JournalOwner>,
+            _marker: PhantomData<T>,
+        }
+
+        impl<T: JournalEvent> NoopJournal<T> {
+            fn new(owner: JournalOwner) -> Self {
+                Self {
+                    id: obzenflow_core::id::JournalId::new(),
+                    owner: Some(owner),
+                    _marker: PhantomData,
+                }
+            }
+        }
+
+        struct NoopReader;
+
+        #[async_trait]
+        impl<T: JournalEvent + 'static> Journal<T> for NoopJournal<T> {
+            fn id(&self) -> &obzenflow_core::id::JournalId {
+                &self.id
+            }
+
+            fn owner(&self) -> Option<&JournalOwner> {
+                self.owner.as_ref()
+            }
+
+            async fn append(
+                &self,
+                _event: T,
+                _parent: Option<&obzenflow_core::EventEnvelope<T>>,
+            ) -> Result<obzenflow_core::EventEnvelope<T>, JournalError> {
+                Err(JournalError::Implementation {
+                    message: "noop journal".to_string(),
+                    source: "noop".into(),
+                })
+            }
+
+            async fn read_causally_ordered(
+                &self,
+            ) -> Result<Vec<obzenflow_core::EventEnvelope<T>>, JournalError> {
+                Ok(Vec::new())
+            }
+
+            async fn read_causally_after(
+                &self,
+                _after_event_id: &obzenflow_core::EventId,
+            ) -> Result<Vec<obzenflow_core::EventEnvelope<T>>, JournalError> {
+                Ok(Vec::new())
+            }
+
+            async fn read_event(
+                &self,
+                _event_id: &obzenflow_core::EventId,
+            ) -> Result<Option<obzenflow_core::EventEnvelope<T>>, JournalError> {
+                Ok(None)
+            }
+
+            async fn reader(
+                &self,
+            ) -> Result<Box<dyn JournalReader<T>>, JournalError> {
+                Ok(Box::new(NoopReader))
+            }
+
+            async fn reader_from(
+                &self,
+                _position: u64,
+            ) -> Result<Box<dyn JournalReader<T>>, JournalError> {
+                Ok(Box::new(NoopReader))
+            }
+
+            async fn read_last_n(
+                &self,
+                _count: usize,
+            ) -> Result<Vec<obzenflow_core::EventEnvelope<T>>, JournalError> {
+                Ok(Vec::new())
+            }
+        }
+
+        #[async_trait]
+        impl<T: JournalEvent + 'static> JournalReader<T> for NoopReader {
+            async fn next(
+                &mut self,
+            ) -> Result<Option<obzenflow_core::EventEnvelope<T>>, JournalError> {
+                Ok(None)
+            }
+
+            async fn skip(&mut self, _n: u64) -> Result<u64, JournalError> {
+                Ok(0)
+            }
+
+            fn position(&self) -> u64 {
+                0
+            }
+
+            fn is_at_end(&self) -> bool {
+                true
+            }
+        }
+
+        // Build a context with only the fields required by build_app_metrics_snapshot.
+        let ctx = MetricsAggregatorContext {
+            system_journal: Arc::new(
+                NoopJournal::<obzenflow_core::event::SystemEvent>::new(
+                    JournalOwner::system(obzenflow_core::SystemId::new()),
+                ),
+            ),
+            stage_data_journals: HashMap::new(),
+            stage_error_journals: HashMap::new(),
+            data_subscription: None,
+            error_subscription: None,
+            system_subscription: None,
+            include_error_journals: true,
+            exporter: None,
+            metrics_store: store,
+            export_interval_secs: 10,
+            system_id: obzenflow_core::SystemId::new(),
+            export_timer: None,
+            stage_metadata,
+        };
+
+        let snapshot = ctx.build_app_metrics_snapshot();
+
+        // Stage-level totals should reflect the seeded store.
+        assert_eq!(snapshot.error_counts.get(&stage_id), Some(&3));
+        let by_kind = snapshot
+            .error_counts_by_kind
+            .get(&stage_id)
+            .expect("per-kind breakdown should be present");
+        assert_eq!(by_kind.get(&ErrorKind::Domain), Some(&2));
+        assert_eq!(by_kind.get(&ErrorKind::Remote), Some(&1));
+
+        // Stage metadata should be carried through.
+        assert!(snapshot.stage_metadata.get(&stage_id).is_some());
     }
 }

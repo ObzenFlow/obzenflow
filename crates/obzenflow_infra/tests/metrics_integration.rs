@@ -68,6 +68,9 @@ fn make_empty_context(
 ) -> MetricsAggregatorContext {
     MetricsAggregatorContext {
         system_journal,
+        // No upstream journals in this test; tail-read will simply see None.
+        stage_data_journals: std::collections::HashMap::new(),
+        stage_error_journals: std::collections::HashMap::new(),
         data_subscription: None,
         error_subscription: None,
         system_subscription: None,
@@ -92,9 +95,9 @@ async fn export_snapshot_sanity_from_metrics_store() {
 
     // Pre-populate the metrics store as if UpdateMetrics had run.
     let mut stage_metrics = StageMetrics::default();
-    stage_metrics.events_in = 10;
-    stage_metrics.events_out = 10;
-    stage_metrics.errors = 2;
+    // Wide-event snapshot counters that ExportMetrics and build_app_metrics_snapshot use.
+    stage_metrics.latest_events_processed_total = Some(10);
+    stage_metrics.latest_errors_total = Some(2);
     stage_metrics.event_loops_total = 5;
     stage_metrics.event_loops_with_work_total = 5;
     ctx.metrics_store.stage_metrics.insert(stage_id, stage_metrics);

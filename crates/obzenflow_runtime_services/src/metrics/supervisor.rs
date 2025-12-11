@@ -62,6 +62,10 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
         WriterId::from(self.system_id)
     }
 
+    fn event_for_action_error(&self, msg: String) -> MetricsAggregatorEvent {
+        MetricsAggregatorEvent::Error(msg)
+    }
+
     async fn write_completion_event(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let event = obzenflow_core::event::SystemEvent::new(
             self.writer_id(),

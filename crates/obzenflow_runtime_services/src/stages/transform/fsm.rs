@@ -20,6 +20,7 @@ use tokio::sync::RwLock;
 use crate::messaging::upstream_subscription::{ContractConfig, ReaderProgress};
 use crate::messaging::UpstreamSubscription;
 use crate::metrics::instrumentation::{snapshot_stage_metrics, StageInstrumentation};
+use crate::metrics::tail_read;
 use crate::stages::common::control_strategies::ControlEventStrategy;
 use crate::stages::common::handlers::TransformHandler;
 use crate::stages::resources_builder::BoundSubscriptionFactory;
@@ -199,6 +200,9 @@ pub enum TransformAction<H> {
     /// Send completion event to journal
     SendCompletion,
 
+    /// Send failure event to journal with metrics
+    SendFailure { message: String },
+
     /// Clean up all resources
     Cleanup,
 
@@ -214,6 +218,9 @@ impl<H> Clone for TransformAction<H> {
             Self::PublishRunning => Self::PublishRunning,
             Self::ForwardEOF => Self::ForwardEOF,
             Self::SendCompletion => Self::SendCompletion,
+             Self::SendFailure { message } => Self::SendFailure {
+                 message: message.clone(),
+             },
             Self::Cleanup => Self::Cleanup,
             Self::_Phantom(_) => Self::_Phantom(PhantomData),
         }
@@ -227,6 +234,7 @@ impl<H> std::fmt::Debug for TransformAction<H> {
             Self::PublishRunning => write!(f, "PublishRunning"),
             Self::ForwardEOF => write!(f, "ForwardEOF"),
             Self::SendCompletion => write!(f, "SendCompletion"),
+            Self::SendFailure { message } => write!(f, "SendFailure({:?})", message),
             Self::Cleanup => write!(f, "Cleanup"),
             Self::_Phantom(_) => write!(f, "_Phantom"),
         }
@@ -477,8 +485,22 @@ impl<H: TransformHandler + Send + Sync + 'static> FsmAction for TransformAction<
             }
 
             TransformAction::SendCompletion => {
-                // Write completion event to system journal with final metrics
-                let metrics = snapshot_stage_metrics(&ctx.instrumentation);
+                // Write completion event to system journal with tail-read metrics.
+                // If no runtime_context is available in the journals at completion
+                // time, treat this as a hard error instead of fabricating metrics
+                // from instrumentation.
+                let metrics = tail_read::read_stage_metrics_from_tail(
+                    &ctx.data_journal,
+                    Some(&ctx.error_journal),
+                )
+                .await
+                .ok_or_else(|| {
+                    obzenflow_fsm::FsmError::HandlerError(format!(
+                        "no runtime_context in journal tail for stage {} completion (data_journal={})",
+                        ctx.stage_id,
+                        ctx.data_journal.id(),
+                    ))
+                })?;
                 let completion_event =
                     SystemEvent::stage_completed_with_metrics(ctx.stage_id, metrics);
 
@@ -494,6 +516,49 @@ impl<H: TransformHandler + Send + Sync + 'static> FsmAction for TransformAction<
                     stage_name = %ctx.stage_name,
                     "Transform sent completion event"
                 );
+                Ok(())
+            }
+
+            TransformAction::SendFailure { message } => {
+                // Write failure event to system journal with tail-read metrics.
+                // If no runtime_context is available in the journals at failure
+                // time, fall back to a best-effort snapshot from instrumentation
+                // rather than failing the failure path and emitting nothing.
+                let metrics = match tail_read::read_stage_metrics_from_tail(
+                    &ctx.data_journal,
+                    Some(&ctx.error_journal),
+                )
+                .await
+                {
+                    Some(metrics) => metrics,
+                    None => snapshot_stage_metrics(ctx.instrumentation.as_ref()),
+                };
+
+                let error_event = SystemEvent::stage_failed_with_metrics(
+                    ctx.stage_id,
+                    message.clone(),
+                    false, // not recoverable
+                    metrics,
+                );
+
+                match ctx.system_journal.append(error_event, None).await {
+                    Ok(_) => {
+                        tracing::error!(
+                            stage_name = %ctx.stage_name,
+                            error = %message,
+                            "Transform stage encountered error"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            stage_name = %ctx.stage_name,
+                            error = %message,
+                            journal_error = %e,
+                            "Transform stage encountered error but failed to write error event"
+                        );
+                    }
+                }
+
                 Ok(())
             }
 

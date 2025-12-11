@@ -78,9 +78,13 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Super
                     let event = event.clone();
                     Box::pin(async move {
                         if let StatefulEvent::Error(msg) = event {
+                            let failure_msg = msg.clone();
                             Ok(Transition {
-                                next_state: StatefulState::Failed(msg),
-                                actions: vec![StatefulAction::Cleanup],
+                                next_state: StatefulState::Failed(failure_msg),
+                                actions: vec![
+                                    StatefulAction::SendFailure { message: msg },
+                                    StatefulAction::Cleanup,
+                                ],
                             })
                         } else {
                             unreachable!()
@@ -105,9 +109,13 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Super
                     let event = event.clone();
                     Box::pin(async move {
                         if let StatefulEvent::Error(msg) = event {
+                            let failure_msg = msg.clone();
                             Ok(Transition {
-                                next_state: StatefulState::Failed(msg),
-                                actions: vec![StatefulAction::Cleanup],
+                                next_state: StatefulState::Failed(failure_msg),
+                                actions: vec![
+                                    StatefulAction::SendFailure { message: msg },
+                                    StatefulAction::Cleanup,
+                                ],
                             })
                         } else {
                             unreachable!()
@@ -154,9 +162,13 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Super
                             ctx.instrumentation
                                 .failures_total
                                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            let failure_msg = msg.clone();
                             Ok(Transition {
-                                next_state: StatefulState::Failed(msg),
-                                actions: vec![StatefulAction::Cleanup],
+                                next_state: StatefulState::Failed(failure_msg),
+                                actions: vec![
+                                    StatefulAction::SendFailure { message: msg },
+                                    StatefulAction::Cleanup,
+                                ],
                             })
                         } else {
                             unreachable!()
@@ -190,9 +202,13 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Super
                     let event = event.clone();
                     Box::pin(async move {
                         if let StatefulEvent::Error(msg) = event {
+                            let failure_msg = msg.clone();
                             Ok(Transition {
-                                next_state: StatefulState::Failed(msg),
-                                actions: vec![StatefulAction::Cleanup],
+                                next_state: StatefulState::Failed(failure_msg),
+                                actions: vec![
+                                    StatefulAction::SendFailure { message: msg },
+                                    StatefulAction::Cleanup,
+                                ],
                             })
                         } else {
                             unreachable!()
@@ -224,9 +240,13 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Super
                             ctx.instrumentation
                                 .failures_total
                                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            let failure_msg = msg.clone();
                             Ok(Transition {
-                                next_state: StatefulState::Failed(msg),
-                                actions: vec![StatefulAction::Cleanup],
+                                next_state: StatefulState::Failed(failure_msg),
+                                actions: vec![
+                                    StatefulAction::SendFailure { message: msg },
+                                    StatefulAction::Cleanup,
+                                ],
                             })
                         } else {
                             unreachable!()
@@ -241,9 +261,13 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Super
                     let event = event.clone();
                     Box::pin(async move {
                         if let StatefulEvent::Error(msg) = event {
+                            let failure_msg = msg.clone();
                             Ok(Transition {
-                                next_state: StatefulState::Failed(msg),
-                                actions: vec![StatefulAction::Cleanup],
+                                next_state: StatefulState::Failed(failure_msg),
+                                actions: vec![
+                                    StatefulAction::SendFailure { message: msg },
+                                    StatefulAction::Cleanup,
+                                ],
                             })
                         } else {
                             unreachable!()
@@ -307,6 +331,10 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
 
     fn stage_id(&self) -> StageId {
         self.stage_id
+    }
+
+    fn event_for_action_error(&self, msg: String) -> StatefulEvent<H> {
+        StatefulEvent::Error(msg)
     }
 
     async fn write_completion_event(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -668,12 +696,16 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                 // with `mark_as_error` when appropriate.
                 let mut current_state = &mut ctx.current_state;
                 let mut handler = (*ctx.handler).clone();
+                let instrumentation = ctx.instrumentation.clone();
 
                 let emit_result =
                     process_with_instrumentation(&ctx.instrumentation, || async move {
                         handler
                             .emit(&mut *current_state)
                             .map_err(|err| -> Box<dyn std::error::Error + Send + Sync> {
+                                // Stage-fatal handler error in emit: record it in error metrics
+                                // before type erasure.
+                                instrumentation.record_error(err.kind());
                                 err.into()
                             })
                     })
@@ -869,11 +901,7 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                                             // Count all error-marked events for lifecycle / flow rollups,
                                             // even when they are not stage-fatal.
                                             ctx.instrumentation
-                                                .errors_total
-                                                .fetch_add(
-                                                    1,
-                                                    std::sync::atomic::Ordering::Relaxed,
-                                                );
+                                                .record_error(err.kind());
 
                                             let route_to_error_journal =
                                                 match &error_event.processing_info.status {
@@ -1026,6 +1054,7 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                     // Now call handler.drain() to emit final accumulated state
                     let final_state = ctx.current_state.clone();
                     let handler = (*ctx.handler).clone();
+                    let instrumentation = ctx.instrumentation.clone();
 
                     // Call handler.drain() with instrumentation; treat failures as stage-fatal.
                     let drain_result =
@@ -1034,6 +1063,9 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                                 .drain(&final_state)
                                 .await
                                 .map_err(|err| -> Box<dyn std::error::Error + Send + Sync> {
+                                    // Stage-fatal handler error in drain: record it in error metrics
+                                    // before type erasure.
+                                    instrumentation.record_error(err.kind());
                                     err.into()
                                 })
                         })

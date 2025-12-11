@@ -84,9 +84,13 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Supe
                                     actions: vec![],
                                 })
                             } else {
+                                let failure_msg = msg.clone();
                                 Ok(Transition {
-                                    next_state: TransformState::Failed(msg),
-                                    actions: vec![TransformAction::Cleanup],
+                                    next_state: TransformState::Failed(failure_msg),
+                                    actions: vec![
+                                        TransformAction::SendFailure { message: msg },
+                                        TransformAction::Cleanup,
+                                    ],
                                 })
                             }
                         } else {
@@ -118,9 +122,13 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Supe
                                     actions: vec![],
                                 })
                             } else {
+                                let failure_msg = msg.clone();
                                 Ok(Transition {
-                                    next_state: TransformState::Failed(msg),
-                                    actions: vec![TransformAction::Cleanup],
+                                    next_state: TransformState::Failed(failure_msg),
+                                    actions: vec![
+                                        TransformAction::SendFailure { message: msg },
+                                        TransformAction::Cleanup,
+                                    ],
                                 })
                             }
                         } else {
@@ -159,9 +167,13 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Supe
                             ctx.instrumentation
                                 .failures_total
                                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            let failure_msg = msg.clone();
                             Ok(Transition {
-                                next_state: TransformState::Failed(msg),
-                                actions: vec![TransformAction::Cleanup],
+                                next_state: TransformState::Failed(failure_msg),
+                                actions: vec![
+                                    TransformAction::SendFailure { message: msg },
+                                    TransformAction::Cleanup,
+                                ],
                             })
                         } else {
                             unreachable!()
@@ -193,9 +205,13 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Supe
                             ctx.instrumentation
                                 .failures_total
                                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            let failure_msg = msg.clone();
                             Ok(Transition {
-                                next_state: TransformState::Failed(msg),
-                                actions: vec![TransformAction::Cleanup],
+                                next_state: TransformState::Failed(failure_msg),
+                                actions: vec![
+                                    TransformAction::SendFailure { message: msg },
+                                    TransformAction::Cleanup,
+                                ],
                             })
                         } else {
                             unreachable!()
@@ -216,9 +232,13 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Supe
                                     actions: vec![],
                                 })
                             } else {
+                                let failure_msg = msg.clone();
                                 Ok(Transition {
-                                    next_state: TransformState::Failed(msg),
-                                    actions: vec![TransformAction::Cleanup],
+                                    next_state: TransformState::Failed(failure_msg),
+                                    actions: vec![
+                                        TransformAction::SendFailure { message: msg },
+                                        TransformAction::Cleanup,
+                                    ],
                                 })
                             }
                         } else {
@@ -288,6 +308,10 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Hand
 
     fn stage_id(&self) -> StageId {
         self.stage_id
+    }
+
+    fn event_for_action_error(&self, msg: String) -> TransformEvent<H> {
+        TransformEvent::Error(msg)
     }
 
     async fn write_completion_event(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -554,13 +578,13 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Hand
 
                                                 // Count all error-marked events for lifecycle / flow rollups,
                                                 // even when they are not stage-fatal.
-                                                if let ProcessingStatus::Error { .. } =
+                                                if let ProcessingStatus::Error { kind, .. } =
                                                     &event.processing_info.status
                                                 {
-                                                    ctx.instrumentation.errors_total.fetch_add(
-                                                        1,
-                                                        std::sync::atomic::Ordering::Relaxed,
-                                                    );
+                                                    let k = kind
+                                                        .clone()
+                                                        .unwrap_or(ErrorKind::Unknown);
+                                                    ctx.instrumentation.record_error(k);
                                                 }
 
                                                 let route_to_error_journal =
@@ -805,13 +829,13 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Hand
 
                                     // Count all error-marked events for lifecycle / flow rollups,
                                     // even when they are not stage-fatal.
-                                    if let ProcessingStatus::Error { .. } =
+                                    if let ProcessingStatus::Error { kind, .. } =
                                         &event.processing_info.status
                                     {
-                                        ctx.instrumentation.errors_total.fetch_add(
-                                            1,
-                                            std::sync::atomic::Ordering::Relaxed,
-                                        );
+                                        let k = kind
+                                            .clone()
+                                            .unwrap_or(ErrorKind::Unknown);
+                                        ctx.instrumentation.record_error(k);
                                     }
 
                                     let route_to_error_journal =

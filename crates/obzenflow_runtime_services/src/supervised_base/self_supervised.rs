@@ -30,6 +30,13 @@ pub trait SelfSupervised: Supervisor {
 
     /// Write a completion event when the component terminates
     async fn write_completion_event(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
+
+    /// Map an action error into a supervisor-specific failure event.
+    ///
+    /// This is used by the supervision loop to ensure that any action
+    /// failure drives the FSM through an explicit failure path instead
+    /// of terminating the task with an opaque error.
+    fn event_for_action_error(&self, msg: String) -> Self::Event;
 }
 
 /// Extension trait to add run functionality to any SelfSupervised type
@@ -126,10 +133,57 @@ pub trait SelfSupervisedExt: SelfSupervised {
                             actions.len(),
                             action
                         );
-                        action
-                            .execute(&mut context)
-                            .await
-                            .map_err(|e| format!("Action error: {e}"))?;
+                        if let Err(e) = action.execute(&mut context).await {
+                            tracing::error!(
+                                supervisor = %supervisor_name,
+                                writer_id = ?supervisor_writer,
+                                iteration,
+                                action_index = i,
+                                error = %e,
+                                "SelfSupervised action failed; emitting failure event"
+                            );
+
+                            // Drive the FSM with a supervisor-specific failure event so
+                            // that it can transition into a Failed state and emit the
+                            // appropriate lifecycle / coordination events.
+                            let failure_event = self.event_for_action_error(format!("{e}"));
+                            let failure_actions = machine
+                                .handle(failure_event, &mut context)
+                                .await
+                                .map_err(|fe| format!("FSM error after action failure: {fe}"))?;
+
+                            tracing::debug!(
+                                supervisor = %supervisor_name,
+                                writer_id = ?supervisor_writer,
+                                iteration,
+                                failure_action_count = failure_actions.len(),
+                                "Loop iteration {}: Executing {} failure-handling actions",
+                                iteration,
+                                failure_actions.len()
+                            );
+                            for (j, failure_action) in failure_actions.iter().enumerate() {
+                                tracing::debug!(
+                                    supervisor = %supervisor_name,
+                                    writer_id = ?supervisor_writer,
+                                    iteration,
+                                    failure_action_index = j,
+                                    action = ?failure_action,
+                                    "Executing failure-handling action"
+                                );
+                                failure_action
+                                    .execute(&mut context)
+                                    .await
+                                    .map_err(|e2| format!(
+                                        "Action error during failure handling: {e2}"
+                                    ))?;
+                            }
+
+                            // After executing failure-handling actions, break out of the
+                            // current action sequence. The next loop iteration will see
+                            // the new FSM state (typically Failed/Drained) and perform
+                            // the appropriate terminal behaviour.
+                            break;
+                        }
                         tracing::debug!(
                             supervisor = %supervisor_name,
                             writer_id = ?supervisor_writer,

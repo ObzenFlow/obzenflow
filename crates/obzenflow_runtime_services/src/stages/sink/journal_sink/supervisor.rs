@@ -99,9 +99,13 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
                     let event = event.clone();
                     Box::pin(async move {
                         if let JournalSinkEvent::Error(msg) = event {
+                            let failure_msg = msg.clone();
                             Ok(Transition {
-                                next_state: JournalSinkState::Failed(msg),
-                                actions: vec![JournalSinkAction::Cleanup],
+                                next_state: JournalSinkState::Failed(failure_msg),
+                                actions: vec![
+                                    JournalSinkAction::SendFailure { message: msg },
+                                    JournalSinkAction::Cleanup,
+                                ],
                             })
                         } else {
                             unreachable!()
@@ -124,9 +128,13 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
                     let event = event.clone();
                     Box::pin(async move {
                         if let JournalSinkEvent::Error(msg) = event {
+                            let failure_msg = msg.clone();
                             Ok(Transition {
-                                next_state: JournalSinkState::Failed(msg),
-                                actions: vec![JournalSinkAction::Cleanup],
+                                next_state: JournalSinkState::Failed(failure_msg),
+                                actions: vec![
+                                    JournalSinkAction::SendFailure { message: msg },
+                                    JournalSinkAction::Cleanup,
+                                ],
                             })
                         } else {
                             unreachable!()
@@ -176,9 +184,13 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
                     let event = event.clone();
                     Box::pin(async move {
                         if let JournalSinkEvent::Error(msg) = event {
+                            let failure_msg = msg.clone();
                             Ok(Transition {
-                                next_state: JournalSinkState::Failed(msg),
-                                actions: vec![JournalSinkAction::Cleanup],
+                                next_state: JournalSinkState::Failed(failure_msg),
+                                actions: vec![
+                                    JournalSinkAction::SendFailure { message: msg },
+                                    JournalSinkAction::Cleanup,
+                                ],
                             })
                         } else {
                             unreachable!()
@@ -215,9 +227,13 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
                     let event = event.clone();
                     Box::pin(async move {
                         if let JournalSinkEvent::Error(msg) = event {
+                            let failure_msg = msg.clone();
                             Ok(Transition {
-                                next_state: JournalSinkState::Failed(msg),
-                                actions: vec![JournalSinkAction::Cleanup],
+                                next_state: JournalSinkState::Failed(failure_msg),
+                                actions: vec![
+                                    JournalSinkAction::SendFailure { message: msg },
+                                    JournalSinkAction::Cleanup,
+                                ],
                             })
                         } else {
                             unreachable!()
@@ -254,9 +270,13 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
                     let event = event.clone();
                     Box::pin(async move {
                         if let JournalSinkEvent::Error(msg) = event {
+                            let failure_msg = msg.clone();
                             Ok(Transition {
-                                next_state: JournalSinkState::Failed(msg),
-                                actions: vec![JournalSinkAction::Cleanup],
+                                next_state: JournalSinkState::Failed(failure_msg),
+                                actions: vec![
+                                    JournalSinkAction::SendFailure { message: msg },
+                                    JournalSinkAction::Cleanup,
+                                ],
                             })
                         } else {
                             unreachable!()
@@ -270,9 +290,13 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
                     let event = event.clone();
                     Box::pin(async move {
                         if let JournalSinkEvent::Error(msg) = event {
+                            let failure_msg = msg.clone();
                             Ok(Transition {
-                                next_state: JournalSinkState::Failed(msg),
-                                actions: vec![JournalSinkAction::Cleanup],
+                                next_state: JournalSinkState::Failed(failure_msg),
+                                actions: vec![
+                                    JournalSinkAction::SendFailure { message: msg },
+                                    JournalSinkAction::Cleanup,
+                                ],
                             })
                         } else {
                             unreachable!()
@@ -334,6 +358,10 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
 
     fn stage_id(&self) -> StageId {
         self.stage_id
+    }
+
+    fn event_for_action_error(&self, msg: String) -> JournalSinkEvent<H> {
+        JournalSinkEvent::Error(msg)
     }
 
     async fn write_completion_event(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -666,12 +694,9 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                                 // Per-record handler failures should be reflected
                                                 // in errors_total for lifecycle / flow snapshots,
                                                 // even though they are not stage-fatal.
-                                                ctx.instrumentation
-                                                    .errors_total
-                                                    .fetch_add(
-                                                        1,
-                                                        std::sync::atomic::Ordering::Relaxed,
-                                                    );
+                                                ctx
+                                                    .instrumentation
+                                                    .record_error(handler_err.kind());
                                                 let reason = format!(
                                                     "Sink handler error: {:?}",
                                                     handler_err

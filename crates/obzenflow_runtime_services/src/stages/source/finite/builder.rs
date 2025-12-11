@@ -192,6 +192,10 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> H
         self.supervisor.stage_id()
     }
 
+    fn event_for_action_error(&self, msg: String) -> FiniteSourceEvent<H> {
+        self.supervisor.event_for_action_error(msg)
+    }
+
     async fn write_completion_event(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         self.supervisor.write_completion_event().await
     }

@@ -78,10 +78,16 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
                     Box::pin(async move {
                         if let JoinEvent::Error(msg) = event {
                             ctx.instrumentation.transition_to_state("Failed");
-                            ctx.instrumentation.failures_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            ctx.instrumentation
+                                .failures_total
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            let failure_msg = msg.clone();
                             Ok(Transition {
-                                next_state: JoinState::Failed(msg),
-                                actions: vec![JoinAction::Cleanup],
+                                next_state: JoinState::Failed(failure_msg),
+                                actions: vec![
+                                    JoinAction::SendFailure { message: msg },
+                                    JoinAction::Cleanup,
+                                ],
                             })
                         } else {
                             unreachable!()
@@ -109,10 +115,16 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
                     Box::pin(async move {
                         if let JoinEvent::Error(msg) = event {
                             ctx.instrumentation.transition_to_state("Failed");
-                            ctx.instrumentation.failures_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            ctx.instrumentation
+                                .failures_total
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            let failure_msg = msg.clone();
                             Ok(Transition {
-                                next_state: JoinState::Failed(msg),
-                                actions: vec![JoinAction::Cleanup],
+                                next_state: JoinState::Failed(failure_msg),
+                                actions: vec![
+                                    JoinAction::SendFailure { message: msg },
+                                    JoinAction::Cleanup,
+                                ],
                             })
                         } else {
                             unreachable!()
@@ -167,10 +179,16 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
                     Box::pin(async move {
                         if let JoinEvent::Error(msg) = event {
                             ctx.instrumentation.transition_to_state("Failed");
-                            ctx.instrumentation.failures_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            ctx.instrumentation
+                                .failures_total
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            let failure_msg = msg.clone();
                             Ok(Transition {
-                                next_state: JoinState::Failed(msg),
-                                actions: vec![JoinAction::Cleanup],
+                                next_state: JoinState::Failed(failure_msg),
+                                actions: vec![
+                                    JoinAction::SendFailure { message: msg },
+                                    JoinAction::Cleanup,
+                                ],
                             })
                         } else {
                             unreachable!()
@@ -247,10 +265,16 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
                     Box::pin(async move {
                         if let JoinEvent::Error(msg) = event {
                             ctx.instrumentation.transition_to_state("Failed");
-                            ctx.instrumentation.failures_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            ctx.instrumentation
+                                .failures_total
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            let failure_msg = msg.clone();
                             Ok(Transition {
-                                next_state: JoinState::Failed(msg),
-                                actions: vec![JoinAction::Cleanup],
+                                next_state: JoinState::Failed(failure_msg),
+                                actions: vec![
+                                    JoinAction::SendFailure { message: msg },
+                                    JoinAction::Cleanup,
+                                ],
                             })
                         } else {
                             unreachable!()
@@ -265,10 +289,16 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
                     Box::pin(async move {
                         if let JoinEvent::Error(msg) = event {
                             ctx.instrumentation.transition_to_state("Failed");
-                            ctx.instrumentation.failures_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            ctx.instrumentation
+                                .failures_total
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            let failure_msg = msg.clone();
                             Ok(Transition {
-                                next_state: JoinState::Failed(msg),
-                                actions: vec![JoinAction::Cleanup],
+                                next_state: JoinState::Failed(failure_msg),
+                                actions: vec![
+                                    JoinAction::SendFailure { message: msg },
+                                    JoinAction::Cleanup,
+                                ],
                             })
                         } else {
                             unreachable!()
@@ -331,6 +361,10 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
 
     fn stage_id(&self) -> StageId {
         self.stage_id
+    }
+
+    fn event_for_action_error(&self, msg: String) -> JoinEvent<H> {
+        JoinEvent::Error(msg)
     }
 
     async fn write_completion_event(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -580,6 +614,8 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                                 error = ?err,
                                                 "Join handler error during reference hydration"
                                             );
+                                            // Stage-fatal handler error: record it in error metrics.
+                                            ctx.instrumentation.record_error(err.kind());
                                             directive = Ok(EventLoopDirective::Transition(
                                                 JoinEvent::Error(format!(
                                                     "Join handler hydration error: {:?}",
@@ -880,11 +916,7 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                             // Count all error-marked events for lifecycle / flow rollups,
                                             // even when they are not stage-fatal.
                                             ctx.instrumentation
-                                                .errors_total
-                                                .fetch_add(
-                                                    1,
-                                                    std::sync::atomic::Ordering::Relaxed,
-                                                );
+                                                .record_error(err.kind());
 
                                             let route_to_error_journal =
                                                 match &error_event.processing_info.status {
@@ -1111,6 +1143,8 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                             error = ?err,
                                             "Join handler error during reference draining"
                                         );
+                                        // Stage-fatal handler error: record it in error metrics.
+                                        ctx.instrumentation.record_error(err.kind());
                                         directive = Ok(EventLoopDirective::Transition(
                                             JoinEvent::Error(format!(
                                                 "Join handler drain-side error: {:?}",
@@ -1269,10 +1303,10 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                             "Join handler error during draining: {:?}",
                                             err
                                         );
-                                        let error_event = envelope
-                                            .event
-                                            .clone()
-                                            .mark_as_error(reason, err.kind());
+                                            let error_event = envelope
+                                                .event
+                                                .clone()
+                                                .mark_as_error(reason, err.kind());
 
                                         let route_to_error_journal =
                                             match &error_event.processing_info.status {

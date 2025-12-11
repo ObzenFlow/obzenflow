@@ -66,6 +66,14 @@ pub struct StageInstrumentation {
     pub last_emitted_event_id: RwLock<Option<EventId>>,
     pub last_emitted_writer: RwLock<Option<WriterId>>,
 
+    /// Error breakdown by kind
+    pub errors_by_kind: RwLock<
+        std::collections::HashMap<
+            obzenflow_core::event::status::processing_status::ErrorKind,
+            AtomicU64,
+        >,
+    >,
+
     // Configuration
     config: InstrumentationConfig,
 }
@@ -107,6 +115,8 @@ impl StageInstrumentation {
             last_consumed_vector_clock: RwLock::new(None),
             last_emitted_event_id: RwLock::new(None),
             last_emitted_writer: RwLock::new(None),
+
+            errors_by_kind: RwLock::new(std::collections::HashMap::new()),
 
             config,
         }
@@ -168,6 +178,13 @@ impl StageInstrumentation {
             last_consumed_vector_clock: self.last_consumed_vector_clock.read().unwrap().clone(),
             last_emitted_event_id: self.last_emitted_event_id.read().unwrap().clone(),
             last_emitted_writer: self.last_emitted_writer.read().unwrap().clone(),
+            errors_by_kind: self
+                .errors_by_kind
+                .read()
+                .unwrap()
+                .iter()
+                .map(|(k, v)| (k.clone(), v.load(Ordering::Relaxed)))
+                .collect(),
         }
     }
 
@@ -237,6 +254,19 @@ impl StageInstrumentation {
             (loops_with_work as f64 / total_loops as f64) * 100.0
         }
     }
+
+    /// Record an error occurrence with a specific ErrorKind.
+    pub fn record_error(
+        &self,
+        kind: obzenflow_core::event::status::processing_status::ErrorKind,
+    ) {
+        self.errors_total.fetch_add(1, Ordering::Relaxed);
+        let mut by_kind = self.errors_by_kind.write().unwrap();
+        by_kind
+            .entry(kind)
+            .or_insert_with(|| AtomicU64::new(0))
+            .fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 use obzenflow_core::runtime_context::RuntimeContext;
@@ -285,9 +315,7 @@ where
                 .events_processed_total
                 .fetch_add(1, Ordering::Relaxed);
         }
-        Err(_) => {
-            instrumentation.errors_total.fetch_add(1, Ordering::Relaxed);
-        }
+        Err(_) => {}
     }
 
     result
@@ -299,6 +327,7 @@ pub fn snapshot_stage_metrics(instrumentation: &StageInstrumentation) -> StageMe
     StageMetricsSnapshot {
         events_processed_total: ctx.events_processed_total,
         errors_total: ctx.errors_total,
+        errors_by_kind: ctx.errors_by_kind,
         in_flight: ctx.in_flight,
         recent_p50_ms: ctx.recent_p50_ms,
         recent_p90_ms: ctx.recent_p90_ms,
@@ -323,4 +352,30 @@ pub fn heartbeat_interval() -> u64 {
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or(1000)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::StageInstrumentation;
+    use obzenflow_core::event::status::processing_status::ErrorKind;
+
+    #[test]
+    fn record_error_updates_totals_and_by_kind() {
+        let instrumentation = StageInstrumentation::new();
+
+        // No errors initially
+        let initial = instrumentation.snapshot();
+        assert_eq!(initial.errors_total, 0);
+        assert!(initial.errors_by_kind.is_empty());
+
+        // Record one Domain error and two Timeout errors
+        instrumentation.record_error(ErrorKind::Domain);
+        instrumentation.record_error(ErrorKind::Timeout);
+        instrumentation.record_error(ErrorKind::Timeout);
+
+        let snapshot = instrumentation.snapshot();
+        assert_eq!(snapshot.errors_total, 3);
+        assert_eq!(snapshot.errors_by_kind.get(&ErrorKind::Domain), Some(&1));
+        assert_eq!(snapshot.errors_by_kind.get(&ErrorKind::Timeout), Some(&2));
+    }
 }

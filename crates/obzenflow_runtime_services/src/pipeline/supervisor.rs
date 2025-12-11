@@ -440,6 +440,10 @@ impl SelfSupervised for PipelineSupervisor {
         WriterId::from(self.system_id)
     }
 
+    fn event_for_action_error(&self, msg: String) -> PipelineEvent {
+        PipelineEvent::Error { message: msg }
+    }
+
     async fn write_completion_event(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // Terminal completion event is written by the FSM via PipelineAction::WritePipelineCompleted.
         // Here we emit a lightweight "drained" lifecycle marker for observability.

@@ -16,6 +16,7 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 
 use crate::metrics::instrumentation::{snapshot_stage_metrics, StageInstrumentation};
+use crate::metrics::tail_read;
 use crate::stages::common::handlers::FiniteSourceHandler;
 use crate::stages::source::strategies::{SourceControlContext, SourceControlStrategy};
 
@@ -447,7 +448,18 @@ impl<H: FiniteSourceHandler + Send + Sync + 'static> FsmAction for FiniteSourceA
             }
 
             FiniteSourceAction::SendError { message } => {
-                let metrics = snapshot_stage_metrics(&ctx.instrumentation);
+                // Tail-read metrics for failure; if no runtime_context is present
+                // in the journals, fall back to a best-effort snapshot from
+                // instrumentation rather than failing the failure path.
+                let metrics = match tail_read::read_stage_metrics_from_tail(
+                    &ctx.data_journal,
+                    Some(&ctx.error_journal),
+                )
+                .await
+                {
+                    Some(metrics) => metrics,
+                    None => snapshot_stage_metrics(ctx.instrumentation.as_ref()),
+                };
                 let error_event = SystemEvent::stage_failed_with_metrics(
                     ctx.stage_id,
                     message.clone(),
@@ -525,8 +537,21 @@ impl<H: FiniteSourceHandler + Send + Sync + 'static> FsmAction for FiniteSourceA
             }
 
             FiniteSourceAction::WriteStageCompleted => {
-                // Write completion event to system journal with final metrics
-                let metrics = snapshot_stage_metrics(&ctx.instrumentation);
+                // Write completion event to system journal with tail-read metrics.
+                // If no runtime_context is available in the journals at completion
+                // time, treat this as a hard error instead of fabricating metrics.
+                let metrics = tail_read::read_stage_metrics_from_tail(
+                    &ctx.data_journal,
+                    Some(&ctx.error_journal),
+                )
+                .await
+                .ok_or_else(|| {
+                    obzenflow_fsm::FsmError::HandlerError(format!(
+                        "no runtime_context in journal tail for stage {} completion (data_journal={})",
+                        ctx.stage_id,
+                        ctx.data_journal.id(),
+                    ))
+                })?;
                 let completion_event =
                     SystemEvent::stage_completed_with_metrics(ctx.stage_id, metrics);
 
@@ -665,6 +690,21 @@ mod tests {
                 events: guard.clone(),
                 pos: position as usize,
             }))
+        }
+
+        async fn read_last_n(
+            &self,
+            count: usize,
+        ) -> Result<Vec<EventEnvelope<T>>, JournalError> {
+            let guard = self.events.lock().unwrap();
+            let len = guard.len();
+            let start = len.saturating_sub(count);
+            // Return most recent first to match Journal contract.
+            Ok(guard[start..]
+                .iter()
+                .rev()
+                .cloned()
+                .collect())
         }
     }
 

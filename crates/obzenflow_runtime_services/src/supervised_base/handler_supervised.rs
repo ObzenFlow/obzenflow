@@ -34,6 +34,13 @@ pub trait HandlerSupervised: Supervisor {
     /// Write a completion event when the stage terminates
     async fn write_completion_event(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
 
+    /// Map an action error into a stage-specific failure event.
+    ///
+    /// This is used by the supervision loop to ensure that any action
+    /// failure drives the FSM through an explicit failure path instead
+    /// of terminating the task with an opaque error.
+    fn event_for_action_error(&self, msg: String) -> Self::Event;
+
     /// Helper method to run a processing function only if the event doesn't have Error status
     /// If the event has Error status, it's passed through unchanged
     fn run_if_not_error<F>(&self, event: ChainEvent, next: F) -> Vec<ChainEvent>
@@ -126,10 +133,56 @@ pub trait HandlerSupervisedExt: HandlerSupervised {
                             action = ?action,
                             "HandlerSupervised: executing action"
                         );
-                        action
-                            .execute(&mut context)
-                            .await
-                            .map_err(|e| format!("Action error: {e}"))?;
+                        if let Err(e) = action.execute(&mut context).await {
+                            tracing::error!(
+                                target: "flowip-080o",
+                                iteration = loop_iteration,
+                                action_index = i,
+                                error = %e,
+                                "HandlerSupervised action failed; emitting failure event"
+                            );
+
+                            // Drive the FSM with a stage-specific failure event so that
+                            // it can transition into a Failed state and emit the
+                            // appropriate lifecycle events.
+                            let failure_event = self.event_for_action_error(format!("{e}"));
+                            let failure_actions = machine
+                                .handle(failure_event, &mut context)
+                                .await
+                                .map_err(|fe| {
+                                    format!("FSM error after action failure: {fe}")
+                                })?;
+
+                            tracing::info!(
+                                target: "flowip-080o",
+                                iteration = loop_iteration,
+                                action_count = failure_actions.len(),
+                                "HandlerSupervised: executing failure-handling actions"
+                            );
+                            for (j, failure_action) in failure_actions.into_iter().enumerate() {
+                                tracing::info!(
+                                    target: "flowip-080o",
+                                    iteration = loop_iteration,
+                                    action_index = j,
+                                    action = ?failure_action,
+                                    "HandlerSupervised: executing failure-handling action"
+                                );
+                                failure_action
+                                    .execute(&mut context)
+                                    .await
+                                    .map_err(|e2| {
+                                        format!(
+                                            "Action error during failure handling: {e2}"
+                                        )
+                                    })?;
+                            }
+
+                            // After executing failure-handling actions, break out of the
+                            // current action sequence. The next loop iteration will see
+                            // the new FSM state (typically Failed/Drained) and perform
+                            // the appropriate terminal behaviour.
+                            break;
+                        }
                         tracing::info!(
                             target: "flowip-080o",
                             iteration = loop_iteration,

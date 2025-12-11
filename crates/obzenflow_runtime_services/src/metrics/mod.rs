@@ -7,6 +7,7 @@ pub mod fsm;
 pub mod handle;
 pub mod inputs;
 pub mod instrumentation;
+pub mod tail_read;
 pub mod supervisor;
 
 // Re-export commonly used types

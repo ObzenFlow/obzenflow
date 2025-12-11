@@ -1,9 +1,11 @@
 //! Runtime context for FSM instrumentation (FLOWIP-056c)
 
 use crate::event::identity::journal_writer_id::JournalWriterId;
+use crate::event::status::processing_status::ErrorKind;
 use crate::event::vector_clock::VectorClock;
 use crate::{EventId, WriterId};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 /// Runtime context snapshot injected into events by supervisors
 /// Following Honeycomb's wide events philosophy - contains accurate point-in-time metrics
@@ -25,6 +27,9 @@ pub struct RuntimeContext {
     pub failures_total: u64,
     pub event_loops_total: u64,
     pub event_loops_with_work_total: u64,
+
+    /// Error breakdown by kind at snapshot time
+    pub errors_by_kind: HashMap<ErrorKind, u64>,
 
     // FSM state
     pub fsm_state: String,

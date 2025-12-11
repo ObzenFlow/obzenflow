@@ -1445,6 +1445,21 @@ mod tests {
                 pos: position as usize,
             }))
         }
+
+        async fn read_last_n(
+            &self,
+            count: usize,
+        ) -> std::result::Result<Vec<EventEnvelope<T>>, JournalError> {
+            let guard = self.events.lock().unwrap();
+            let len = guard.len();
+            let start = len.saturating_sub(count);
+            // Return most recent first, matching Journal contract.
+            Ok(guard[start..]
+                .iter()
+                .rev()
+                .cloned()
+                .collect())
+        }
     }
 
     #[async_trait]

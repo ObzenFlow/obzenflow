@@ -271,6 +271,14 @@ mod tests {
             ) -> Result<Box<dyn JournalReader<T>>, JournalError> {
                 Ok(Box::new(NoopReader))
             }
+
+            async fn read_last_n(
+                &self,
+                _count: usize,
+            ) -> Result<Vec<EventEnvelope<T>>, JournalError> {
+                // NoopJournal never stores events; always return empty.
+                Ok(Vec::new())
+            }
         }
 
         #[async_trait]
