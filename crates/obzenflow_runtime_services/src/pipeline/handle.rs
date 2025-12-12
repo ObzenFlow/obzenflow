@@ -68,6 +68,9 @@ pub struct FlowHandle {
     /// Structural contract names per edge (for topology observability)
     contract_attachments: Option<Arc<HashMap<(StageId, StageId), Vec<String>>>>,
 
+    /// Join metadata per stage (catalog vs stream sources) for topology export (FLOWIP-082a)
+    join_metadata: Option<Arc<HashMap<StageId, crate::pipeline::JoinMetadata>>>,
+
     /// System journal for lifecycle events (for SSE / observability)
     system_journal: Option<Arc<dyn Journal<SystemEvent>>>,
 }
@@ -82,6 +85,7 @@ impl FlowHandle {
         middleware_stacks: Option<Arc<HashMap<StageId, MiddlewareStackConfig>>>,
         contract_attachments: Option<Arc<HashMap<(StageId, StageId), Vec<String>>>>,
         system_journal: Option<Arc<dyn Journal<SystemEvent>>>,
+        join_metadata: Option<Arc<HashMap<StageId, crate::pipeline::JoinMetadata>>>,
     ) -> Self {
         Self {
             handle,
@@ -91,6 +95,7 @@ impl FlowHandle {
             middleware_stacks,
             contract_attachments,
             system_journal,
+            join_metadata,
         }
     }
 
@@ -223,6 +228,13 @@ impl FlowHandle {
         &self,
     ) -> Option<Arc<HashMap<(StageId, StageId), Vec<String>>>> {
         self.contract_attachments.clone()
+    }
+
+    /// Get join metadata per stage (for topology endpoint, FLOWIP-082a)
+    pub fn join_metadata(
+        &self,
+    ) -> Option<Arc<HashMap<StageId, crate::pipeline::JoinMetadata>>> {
+        self.join_metadata.clone()
     }
 
     /// Get the system journal for lifecycle events (if available)

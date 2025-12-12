@@ -331,9 +331,57 @@ macro_rules! build_typed_flow {
         }
 
         let topology = Arc::new(
-            obzenflow_topology::Topology::new(topology_stages, topology_edges)
+            obzenflow_topology::Topology::new(topology_stages.clone(), topology_edges.clone())
                 .map_err(FlowBuildError::TopologyValidationFailed)?,
         );
+
+        // Collect join metadata per stage (FLOWIP-082a)
+        use obzenflow_runtime_services::pipeline::JoinMetadata;
+        let mut join_metadata_map: HashMap<StageId, JoinMetadata> = HashMap::new();
+        for stage in topology.stages() {
+            if matches!(stage.stage_type, obzenflow_topology::StageType::Join) {
+                let join_topology_id = stage.id;
+                let join_core_id = StageId::from_ulid(join_topology_id.ulid());
+
+                // Look up descriptor so we can get the reference_stage_id set earlier
+                if let Some(descriptor_name) = descriptor_names
+                    .iter()
+                    .find(|name| {
+                        let id = name_to_id.get(*name).copied();
+                        id.map(|core_id| {
+                            let topo_id = to_topology_id(core_id);
+                            topo_id == join_topology_id
+                        })
+                        .unwrap_or(false)
+                    })
+                {
+                    if let Some(descriptor) = descriptors.get(descriptor_name) {
+                        // Reference stage id is stored on join descriptors after resolution
+                        if let Some(ref_stage_id) = descriptor.reference_stage_id() {
+                            // Upstream stages of join in topology; convert to core IDs and
+                            // treat all except the reference as stream sources.
+                            let mut catalog_sources = vec![ref_stage_id];
+                            let mut stream_sources = Vec::new();
+                            for upstream in topology.upstream_stages(join_topology_id) {
+                                let core_upstream = StageId::from_ulid(upstream.ulid());
+                                if core_upstream == ref_stage_id {
+                                    continue;
+                                }
+                                stream_sources.push(core_upstream);
+                            }
+
+                            join_metadata_map.insert(
+                                join_core_id,
+                                JoinMetadata {
+                                    catalog_source_ids: catalog_sources,
+                                    stream_source_ids: stream_sources,
+                                },
+                            );
+                        }
+                    }
+                }
+            }
+        }
 
         // Create services
         use obzenflow_runtime_services::pipeline::config::StageConfig;
@@ -617,7 +665,7 @@ macro_rules! build_typed_flow {
         use $crate::prelude::{PipelineBuilder, FlowHandle};
         use obzenflow_runtime_services::supervised_base::SupervisorBuilder;
 
-        let builder = PipelineBuilder::new(
+        let mut builder = PipelineBuilder::new(
                 topology.clone(),
                 stage_resources_set.system_journal.clone(),
             )
@@ -627,6 +675,10 @@ macro_rules! build_typed_flow {
             .with_stage_journals(stage_resources_set.stage_journals.clone())
             .with_error_journals(stage_resources_set.error_journals.clone())
             .with_middleware_stacks(middleware_stacks);
+
+        if !join_metadata_map.is_empty() {
+            builder = builder.with_join_metadata(join_metadata_map);
+        }
 
         let builder = if let Some(exporter) = metrics_exporter {
             builder.with_metrics(exporter)

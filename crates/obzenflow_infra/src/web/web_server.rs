@@ -35,6 +35,7 @@ pub async fn start_web_server(
     flow_name: String,
     middleware_stacks: Option<Arc<HashMap<StageId, obzenflow_runtime_services::pipeline::MiddlewareStackConfig>>>,
     contract_attachments: Option<Arc<HashMap<(StageId, StageId), Vec<String>>>>,
+    join_metadata: Option<Arc<HashMap<StageId, obzenflow_runtime_services::pipeline::JoinMetadata>>>,
     metrics_exporter: Option<Arc<dyn MetricsExporter>>,
     flow_handle: Option<Arc<FlowHandle>>,
     port: u16,
@@ -71,6 +72,7 @@ pub async fn start_web_server(
         flow_name,
         middleware_stacks,
         contract_attachments,
+        join_metadata,
     )))?;
     
     // Add metrics endpoint if exporter available

@@ -430,19 +430,21 @@ impl FlowApplication {
             let metrics = flow_handle.metrics_exporter();
             let has_metrics = metrics.is_some();
 
-	            let flow_name = flow_handle.flow_name().to_string();
-	            let middleware_stacks = flow_handle.middleware_stacks();
-	            let contract_attachments = flow_handle.contract_attachments();
-	
-	            let handle = start_web_server(
-	                topology,
-	                flow_name,
-	                middleware_stacks,
-	                contract_attachments,
-	                metrics,
-	                Some(flow_handle.clone()),
-	                port,
-	            )
+            let flow_name = flow_handle.flow_name().to_string();
+            let middleware_stacks = flow_handle.middleware_stacks();
+            let contract_attachments = flow_handle.contract_attachments();
+            let join_metadata = flow_handle.join_metadata();
+
+            let handle = start_web_server(
+                topology,
+                flow_name,
+                middleware_stacks,
+                contract_attachments,
+                join_metadata,
+                metrics,
+                Some(flow_handle.clone()),
+                port,
+            )
             .await
                 .map_err(|e| ApplicationError::ServerStartFailed(e.to_string()))?;
             

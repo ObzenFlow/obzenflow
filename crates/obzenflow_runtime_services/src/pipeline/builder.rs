@@ -41,6 +41,7 @@ pub struct PipelineBuilder {
     flow_name: Option<String>,
     middleware_stacks: Option<HashMap<StageId, MiddlewareStackConfig>>,
     contract_attachments: Option<HashMap<(StageId, StageId), Vec<String>>>,
+    join_metadata: Option<HashMap<StageId, crate::pipeline::JoinMetadata>>,
 }
 
 impl PipelineBuilder {
@@ -57,6 +58,7 @@ impl PipelineBuilder {
             flow_name: None,
             middleware_stacks: None,
             contract_attachments: None,
+            join_metadata: None,
         }
     }
 
@@ -117,6 +119,15 @@ impl PipelineBuilder {
         attachments: HashMap<(StageId, StageId), Vec<String>>,
     ) -> Self {
         self.contract_attachments = Some(attachments);
+        self
+    }
+
+    /// Attach join metadata per stage (for topology observability, FLOWIP-082a)
+    pub fn with_join_metadata(
+        mut self,
+        join_metadata: HashMap<StageId, crate::pipeline::JoinMetadata>,
+    ) -> Self {
+        self.join_metadata = Some(join_metadata);
         self
     }
 }
@@ -317,6 +328,10 @@ impl SupervisorBuilder for PipelineBuilder {
             .map(|stacks| Arc::new(stacks) as Arc<HashMap<StageId, MiddlewareStackConfig>>);
         let contract_attachments =
             Some(Arc::new(contract_attachments_map) as Arc<HashMap<(StageId, StageId), Vec<String>>>);
+
+        let join_metadata = self
+            .join_metadata
+            .map(|map| Arc::new(map) as Arc<HashMap<StageId, crate::pipeline::JoinMetadata>>);
         Ok(FlowHandle::new(
             standard_handle,
             metrics_exporter,
@@ -325,6 +340,7 @@ impl SupervisorBuilder for PipelineBuilder {
             middleware_stacks,
             contract_attachments,
             Some(self.system_journal.clone()),
+            join_metadata,
         ))
     }
 }

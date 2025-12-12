@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use obzenflow_core::StageId;
 use obzenflow_topology::EdgeKind;
+use obzenflow_runtime_services::id_conversions::StageIdExt;
 
 /// JSON representation of flow topology for the API
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -46,6 +47,19 @@ pub struct StageApiInfo {
     /// Currently a placeholder; populated once middleware introspection is wired.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub middleware: Option<MiddlewareApiInfo>,
+
+    /// Join-specific metadata (only present when semantic_type == "join")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub join_metadata: Option<JoinMetadataApiInfo>,
+}
+
+/// Join-specific metadata for a stage (FLOWIP-082a).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JoinMetadataApiInfo {
+    /// Stage IDs (base32 ULID strings) whose outputs are catalog/reference inputs.
+    pub catalog_sources: Vec<String>,
+    /// Stage IDs (base32 ULID strings) whose outputs are stream inputs.
+    pub stream_sources: Vec<String>,
 }
 
 /// Middleware information for a stage
@@ -154,6 +168,10 @@ pub struct TopologyHttpEndpoint {
     contract_attachments: Option<
         Arc<std::collections::HashMap<(StageId, StageId), Vec<String>>>,
     >,
+    /// Join metadata per stage (FLOWIP-082a)
+    join_metadata: Option<
+        Arc<std::collections::HashMap<StageId, obzenflow_runtime_services::pipeline::JoinMetadata>>,
+    >,
 }
 
 /// Additional metadata about stages (type and status)
@@ -238,6 +256,12 @@ impl TopologyHttpEndpoint {
         contract_attachments: Option<
             Arc<std::collections::HashMap<(StageId, StageId), Vec<String>>>,
         >,
+        join_metadata: Option<
+            Arc<std::collections::HashMap<
+                StageId,
+                obzenflow_runtime_services::pipeline::JoinMetadata,
+            >>,
+        >,
     ) -> Self {
         Self {
             topology,
@@ -245,12 +269,15 @@ impl TopologyHttpEndpoint {
             flow_name,
             middleware_stacks,
             contract_attachments,
+            join_metadata,
         }
     }
     
     /// Convert internal topology to API response format
     fn build_response(&self, include: IncludeFlags) -> FlowTopologyResponse {
-        let stages: Vec<StageApiInfo> = self.topology.stages()
+        let stages: Vec<StageApiInfo> = self
+            .topology
+            .stages()
             .map(|stage_info| {
                 // Convert topology StageId to core StageId for HashMap lookup
                 let core_stage_id = StageId::from_ulid(stage_info.id.ulid());
@@ -283,6 +310,29 @@ impl TopologyHttpEndpoint {
                         }
                     });
 
+                let semantic_type_str = stage_info.stage_type.as_str().to_string();
+                let join_metadata = if semantic_type_str == "join" {
+                    self.join_metadata
+                        .as_ref()
+                        .and_then(|map| map.get(&core_stage_id))
+                        .map(|meta| JoinMetadataApiInfo {
+                            // Use topology StageId formatting so these
+                            // strings match the stage_id / edge ids.
+                            catalog_sources: meta
+                                .catalog_source_ids
+                                .iter()
+                                .map(|id| id.to_topology_id().to_string())
+                                .collect(),
+                            stream_sources: meta
+                                .stream_source_ids
+                                .iter()
+                                .map(|id| id.to_topology_id().to_string())
+                                .collect(),
+                        })
+                } else {
+                    None
+                };
+
                 StageApiInfo {
                     stage_id: stage_info.id.to_string(),
                     name: stage_info.name.clone(),
@@ -292,10 +342,11 @@ impl TopologyHttpEndpoint {
                     status: metadata
                         .map(|m| m.status.as_str().to_string())
                         .unwrap_or_else(|| "pending".to_string()),
-                    semantic_type: Some(stage_info.stage_type.as_str().to_string()),
+                    semantic_type: Some(semantic_type_str),
                     role: Some(stage_info.stage_type.role().to_string()),
                     is_cycle_member: Some(self.topology.is_in_cycle(stage_info.id)),
                     middleware,
+                    join_metadata,
                 }
             })
             .collect();
@@ -340,7 +391,8 @@ impl TopologyHttpEndpoint {
         
         FlowTopologyResponse {
             flow_name: self.flow_name.clone(),
-            version: "0.2".to_string(),
+            // FLOWIP-082a: Topology API schema version 0.3 includes join_metadata.
+            version: "0.3".to_string(),
             stages,
             edges,
         }
