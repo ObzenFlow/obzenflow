@@ -6,7 +6,7 @@ use crate::stages::common::control_strategies::{ControlEventAction, ProcessingCo
 use crate::stages::common::handlers::StatefulHandler;
 use crate::supervised_base::base::Supervisor;
 use crate::supervised_base::{EventLoopDirective, HandlerSupervised};
-use obzenflow_core::event::context::FlowContext;
+use obzenflow_core::event::context::{FlowContext, StageType};
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::SystemEvent;
 use obzenflow_core::journal::journal::Journal;
@@ -1160,7 +1160,21 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> State
         ctx: &StatefulContext<H>,
         envelope: &EventEnvelope<ChainEvent>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let forward_event = envelope.event.clone();
+        // Re-stamp flow and runtime context so metrics remain local to this
+        // stateful stage even when forwarding control events.
+        let mut forward_event = envelope.event.clone();
+
+        forward_event = forward_event.with_flow_context(FlowContext {
+            flow_name: ctx.flow_name.clone(),
+            flow_id: ctx.flow_id.to_string(),
+            stage_name: ctx.stage_name.clone(),
+            stage_id: ctx.stage_id,
+            stage_type: StageType::Stateful,
+        });
+
+        // Drop upstream runtime_context; this stage will publish its own
+        // snapshots via observability events.
+        forward_event.runtime_context = None;
         ctx.data_journal
             .append(forward_event, Some(envelope))
             .await

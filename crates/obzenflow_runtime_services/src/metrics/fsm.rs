@@ -1018,7 +1018,12 @@ impl FsmAction for MetricsAggregatorAction {
                 for (stage_id, data_journal) in &ctx.stage_data_journals {
                     let error_journal = ctx.stage_error_journals.get(stage_id);
                     if let Some(snapshot) =
-                        tail_read::read_stage_metrics_from_tail(data_journal, error_journal).await
+                        tail_read::read_stage_metrics_from_tail(
+                            data_journal,
+                            error_journal,
+                            *stage_id,
+                        )
+                        .await
                     {
                         let metrics = ctx
                             .metrics_store

@@ -45,6 +45,42 @@ pub async fn read_latest_runtime_context(
     None
 }
 
+/// Read the most recent `RuntimeContext` from a journal's tail for a specific
+/// stage, filtering by `flow_context.stage_id`.
+///
+/// This stricter variant is used by metrics code to ensure that only runtime
+/// snapshots authored by the stage associated with a journal are considered
+/// when deriving per-stage metrics. Forwarded control events that still carry
+/// an upstream `flow_context` are ignored.
+pub async fn read_latest_runtime_context_for_stage(
+    journal: &Arc<dyn Journal<ChainEvent>>,
+    stage_id: StageId,
+) -> Option<RuntimeContext> {
+    for n in [1, 5, 20] {
+        match journal.read_last_n(n).await {
+            Ok(events) => {
+                for env in events.into_iter() {
+                    if let Some(ctx) = env.event.runtime_context.clone() {
+                        if env.event.flow_context.stage_id == stage_id {
+                            return Some(ctx);
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::debug!(
+                    "Failed to read last {} from journal for stage {:?}: {}",
+                    n,
+                    stage_id,
+                    e
+                );
+                continue;
+            }
+        }
+    }
+    None
+}
+
 /// Read stage metrics from journal tails.
 ///
 /// Checks both data and error journals (if provided):
@@ -56,6 +92,7 @@ pub async fn read_latest_runtime_context(
 pub async fn read_stage_metrics_from_tail(
     data_journal: &Arc<dyn Journal<ChainEvent>>,
     error_journal: Option<&Arc<dyn Journal<ChainEvent>>>,
+    stage_id: StageId,
 ) -> Option<StageMetricsSnapshot> {
     let mut events_processed_total: Option<u64> = None;
     let mut errors_total: Option<u64> = None;
@@ -77,7 +114,7 @@ pub async fn read_stage_metrics_from_tail(
     }
 
     // Read from data journal first.
-    if let Some(ctx) = read_latest_runtime_context(data_journal).await {
+    if let Some(ctx) = read_latest_runtime_context_for_stage(data_journal, stage_id).await {
         update_max(&mut events_processed_total, ctx.events_processed_total);
         update_max(&mut errors_total, ctx.errors_total);
         in_flight = Some(ctx.in_flight);
@@ -99,7 +136,7 @@ pub async fn read_stage_metrics_from_tail(
 
     // Then consult error journal if provided: counters via max, gauges override.
     if let Some(error_journal) = error_journal {
-        if let Some(ctx) = read_latest_runtime_context(error_journal).await {
+        if let Some(ctx) = read_latest_runtime_context_for_stage(error_journal, stage_id).await {
             update_max(&mut events_processed_total, ctx.events_processed_total);
             update_max(&mut errors_total, ctx.errors_total);
             update_max(&mut event_loops_total, ctx.event_loops_total);
@@ -154,7 +191,7 @@ pub async fn read_flow_metrics_from_tails(
 
     for (stage_id, data_journal, error_journal) in stage_journals {
         if let Some(snapshot) =
-            read_stage_metrics_from_tail(data_journal, error_journal.as_ref()).await
+            read_stage_metrics_from_tail(data_journal, error_journal.as_ref(), *stage_id).await
         {
             if let Some(metadata) = stage_metadata.get(stage_id) {
                 match metadata.stage_type {
@@ -377,12 +414,13 @@ mod tests {
             2,
             &[(ErrorKind::Domain, 2)],
         );
-        let data_event = ChainEventFactory::data_event(
+        let mut data_event = ChainEventFactory::data_event(
             WriterId::from(stage_id),
             "test.data",
             serde_json::json!({"k": "v"}),
-        )
-        .with_runtime_context(data_ctx);
+        );
+        data_event.flow_context.stage_id = stage_id;
+        data_event = data_event.with_runtime_context(data_ctx);
         data_journal_raw.append_raw(data_event);
 
         // Error journal snapshot: 10 events, 5 total errors, all remote.
@@ -391,15 +429,16 @@ mod tests {
             5,
             &[(ErrorKind::Remote, 3)],
         );
-        let error_event = ChainEventFactory::data_event(
+        let mut error_event = ChainEventFactory::data_event(
             WriterId::from(stage_id),
             "test.error",
             serde_json::json!({"k": "v2"}),
-        )
-        .with_runtime_context(error_ctx);
+        );
+        error_event.flow_context.stage_id = stage_id;
+        error_event = error_event.with_runtime_context(error_ctx);
         error_journal_raw.append_raw(error_event);
 
-        let snapshot = read_stage_metrics_from_tail(&data_journal, Some(&error_journal))
+        let snapshot = read_stage_metrics_from_tail(&data_journal, Some(&error_journal), stage_id)
             .await
             .expect("snapshot should be present");
 
@@ -410,5 +449,49 @@ mod tests {
         // errors_by_kind merges contributions from both journals.
         assert_eq!(snapshot.errors_by_kind.get(&ErrorKind::Domain), Some(&2));
         assert_eq!(snapshot.errors_by_kind.get(&ErrorKind::Remote), Some(&3));
+    }
+
+    #[tokio::test]
+    async fn read_latest_runtime_context_for_stage_ignores_mismatched_stage_ids() {
+        use obzenflow_core::event::ChainEventFactory;
+        use obzenflow_core::StageId;
+
+        let local_stage_id = StageId::new();
+        let upstream_stage_id = StageId::new();
+        let owner = JournalOwner::stage(local_stage_id);
+
+        let journal_raw = Arc::new(InMemoryChainJournal::new(owner));
+        let journal: Arc<dyn Journal<ChainEvent>> = journal_raw.clone();
+
+        // Upstream event with non-zero errors_total but wrong stage_id.
+        let upstream_ctx = runtime_context_with_errors(100, 10, &[]);
+        let mut upstream_event = ChainEventFactory::data_event(
+            WriterId::from(upstream_stage_id),
+            "upstream.data",
+            serde_json::json!({"k": "v_upstream"}),
+        );
+        upstream_event.flow_context.stage_id = upstream_stage_id;
+        upstream_event = upstream_event.with_runtime_context(upstream_ctx);
+        journal_raw.append_raw(upstream_event);
+
+        // Local event with zero errors_total and matching stage_id.
+        let local_ctx = runtime_context_with_errors(50, 0, &[]);
+        let mut local_event = ChainEventFactory::data_event(
+            WriterId::from(local_stage_id),
+            "local.data",
+            serde_json::json!({"k": "v_local"}),
+        );
+        local_event.flow_context.stage_id = local_stage_id;
+        local_event = local_event.with_runtime_context(local_ctx);
+        journal_raw.append_raw(local_event);
+
+        // Generic helper may see either; the stage-aware helper must only see the local snapshot.
+        let generic_ctx = read_latest_runtime_context(&journal).await.expect("ctx");
+        assert_eq!(generic_ctx.events_processed_total, 50);
+
+        let filtered_ctx =
+            read_latest_runtime_context_for_stage(&journal, local_stage_id).await.expect("ctx");
+        assert_eq!(filtered_ctx.events_processed_total, 50);
+        assert_eq!(filtered_ctx.errors_total, 0);
     }
 }

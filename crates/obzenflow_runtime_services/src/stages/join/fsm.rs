@@ -599,6 +599,7 @@ impl<H: JoinHandler + Send + Sync + 'static> FsmAction for JoinAction<H> {
                 let metrics = tail_read::read_stage_metrics_from_tail(
                     &ctx.data_journal,
                     Some(&ctx.error_journal),
+                    ctx.stage_id,
                 )
                 .await
                 .ok_or_else(|| {
@@ -633,6 +634,7 @@ impl<H: JoinHandler + Send + Sync + 'static> FsmAction for JoinAction<H> {
                 let metrics = match tail_read::read_stage_metrics_from_tail(
                     &ctx.data_journal,
                     Some(&ctx.error_journal),
+                    ctx.stage_id,
                 )
                 .await
                 {

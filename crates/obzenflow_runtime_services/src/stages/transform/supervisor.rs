@@ -976,7 +976,24 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Tran
         &self,
         envelope: &EventEnvelope<ChainEvent>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let forward_event = envelope.event.clone();
+        // Re-stamp flow and runtime context so metrics remain local to this
+        // transform stage even when forwarding control events.
+        let mut forward_event = envelope.event.clone();
+
+        let flow_name = forward_event.flow_context.flow_name.clone();
+        let flow_id = forward_event.flow_context.flow_id.clone();
+        forward_event = forward_event.with_flow_context(FlowContext {
+            flow_name,
+            flow_id,
+            stage_name: format!("{}", self.stage_id),
+            stage_id: self.stage_id,
+            stage_type: obzenflow_core::event::context::StageType::Transform,
+        });
+
+        // RuntimeContext will be refreshed by instrumentation when this stage
+        // emits observability events; forwarded control events themselves may
+        // omit runtime_context to avoid leaking upstream snapshots.
+        forward_event.runtime_context = None;
         self.data_journal
             .append(forward_event, Some(envelope))
             .await

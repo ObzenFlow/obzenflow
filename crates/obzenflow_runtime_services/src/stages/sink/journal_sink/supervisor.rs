@@ -51,7 +51,22 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> JournalSi
         &self,
         envelope: &EventEnvelope<ChainEvent>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let forward_event = envelope.event.clone();
+        // Re-stamp flow context so that control events written to this sink's
+        // data journal are always attributed to this stage.
+        let mut forward_event = envelope.event.clone();
+        let flow_name = forward_event.flow_context.flow_name.clone();
+        let flow_id = forward_event.flow_context.flow_id.clone();
+        forward_event = forward_event.with_flow_context(FlowContext {
+            flow_name,
+            flow_id,
+            stage_name: self.stage_name.clone(),
+            stage_id: self.stage_id,
+            stage_type: StageType::Sink,
+        });
+
+        // Drop upstream runtime_context; the sink will publish its own
+        // snapshots via observability events.
+        forward_event.runtime_context = None;
         self.data_journal
             .append(forward_event, Some(envelope))
             .await

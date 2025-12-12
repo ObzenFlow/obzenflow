@@ -7,6 +7,7 @@ use crate::stages::common::control_strategies::{ControlEventAction, ProcessingCo
 use crate::stages::common::handlers::JoinHandler;
 use crate::supervised_base::base::Supervisor;
 use crate::supervised_base::{EventLoopDirective, HandlerSupervised};
+use obzenflow_core::event::context::{FlowContext, StageType};
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::SystemEvent;
 use obzenflow_core::journal::journal::Journal;
@@ -1358,15 +1359,28 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                     }
                                 }
                             } else if !envelope.event.is_eof() {
-                                // Forward non-EOF control events (CRITICAL FIX for FLOWIP-080o)
+                                // Forward non-EOF control events (CRITICAL FIX for FLOWIP-080o).
+                                // Re-stamp flow and runtime context so metrics remain local to
+                                // this join stage even when forwarding.
                                 tracing::debug!(
                                     stage_name = %ctx.stage_name,
                                     event_type = envelope.event.event_type(),
                                     forward_stream_control_during_join_draining = true
                                 );
-                                self.data_journal
-                                    .append(envelope.event.clone(), None)
-                                    .await?;
+
+                                let mut forward_event = envelope.event.clone();
+                                let flow_name = forward_event.flow_context.flow_name.clone();
+                                let flow_id = forward_event.flow_context.flow_id.clone();
+                                forward_event = forward_event.with_flow_context(FlowContext {
+                                    flow_name,
+                                    flow_id,
+                                    stage_name: ctx.stage_name.clone(),
+                                    stage_id: ctx.stage_id,
+                                    stage_type: StageType::Join,
+                                });
+                                forward_event.runtime_context = None;
+
+                                self.data_journal.append(forward_event, None).await?;
                             }
 
                             // Continue draining on next iteration; don't call handler.drain yet
