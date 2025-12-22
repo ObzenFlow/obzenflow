@@ -55,14 +55,13 @@ struct PassthroughTransform;
 
 #[async_trait]
 impl TransformHandler for PassthroughTransform {
-    fn process(
-        &self,
-        event: ChainEvent,
-    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
+    fn process(&self, event: ChainEvent) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
         Ok(vec![event])
     }
 
-    async fn drain(&mut self) -> std::result::Result<(), HandlerError> { Ok(()) }
+    async fn drain(&mut self) -> std::result::Result<(), HandlerError> {
+        Ok(())
+    }
 }
 
 #[test]
@@ -116,7 +115,9 @@ fn test_circuit_breaker_emits_control_events() {
         json!({"id": 1}),
     );
 
-    let results1 = wrapped.process(event1);
+    let results1 = wrapped
+        .process(event1)
+        .expect("PassthroughTransform should not fail in control-events flow test");
     println!("First event produced {} results", results1.len());
 
     // Process some failures to trigger state change

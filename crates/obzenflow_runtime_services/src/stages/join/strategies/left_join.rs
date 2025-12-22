@@ -333,7 +333,8 @@ mod tests {
             )
             .expect("process_event should succeed for left join miss case");
 
-        let typed = OutputRow::from_event(&out[0]).expect("should deserialize left join output row");
+        let typed =
+            OutputRow::from_event(&out[0]).expect("should deserialize left join output row");
         assert_eq!(
             typed,
             OutputRow {

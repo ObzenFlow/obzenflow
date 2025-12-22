@@ -59,9 +59,7 @@ impl From<&str> for StageError {
 
 impl StageError {
     /// Helper to construct a handler failure variant from a HandlerError.
-    pub fn handler_failure(
-        err: crate::stages::common::handler_error::HandlerError,
-    ) -> Self {
+    pub fn handler_failure(err: crate::stages::common::handler_error::HandlerError) -> Self {
         StageError::HandlerFailure(err)
     }
 }

@@ -19,6 +19,7 @@ use obzenflow_core::event::{ChainEvent, ChainEventContent, ChainEventFactory, Jo
 use obzenflow_core::journal::journal::Journal;
 use obzenflow_core::journal::journal_error::JournalError;
 use obzenflow_core::journal::journal_reader::JournalReader;
+use obzenflow_core::control_middleware::{ControlMiddlewareProvider, NoControlMiddleware};
 use obzenflow_core::ContractResult;
 use obzenflow_core::EventEnvelope;
 use obzenflow_core::Result;
@@ -32,12 +33,12 @@ use std::io;
 use std::sync::Arc;
 use tokio::time::Instant;
 
-use async_trait::async_trait;
 use crate::contracts::ContractChain;
 use crate::messaging::upstream_subscription_policy::{
     build_policy_stack_for_upstream, ContractPolicyStack, EdgeContext, EdgeContractDecision,
     PolicyHints,
 };
+use async_trait::async_trait;
 
 // Import PollResult from the trait module
 pub use super::subscription_poller::{PollResult, SubscriptionPoller};
@@ -149,6 +150,13 @@ impl SubscriptionState {
     pub fn mark_reader_baseline_at_tail(&mut self, index: usize) {
         if let Some(flag) = self.baseline_at_tail.get_mut(index) {
             *flag = true;
+        }
+    }
+
+    /// Clear the "started at tail" baseline once a reader has observed any new events.
+    pub fn clear_reader_baseline_at_tail(&mut self, index: usize) {
+        if let Some(flag) = self.baseline_at_tail.get_mut(index) {
+            *flag = false;
         }
     }
 
@@ -315,6 +323,9 @@ where
     /// and each entry holds the policy stack for the corresponding edge.
     contract_policies: Vec<Option<ContractPolicyStack>>,
 
+    /// Flow-scoped control middleware provider (breaker-aware contract hints).
+    control_middleware: Arc<dyn ControlMiddlewareProvider>,
+
     /// Last EOF accounting outcome (set when an EOF is observed)
     last_eof_outcome: Option<EofOutcome>,
 }
@@ -404,11 +415,9 @@ where
                     Box::new(EmptyJournalReader::<T>::new()) as Box<dyn JournalReader<T>>
                 }
                 Err(e) => {
-                    return Err(format!(
-                        "Failed to create reader for stage {:?}: {}",
-                        stage_id, e
-                    )
-                    .into());
+                    return Err(
+                        format!("Failed to create reader for stage {:?}: {}", stage_id, e).into(),
+                    );
                 }
             };
             readers.push((*stage_id, stage_name.clone(), reader));
@@ -423,6 +432,7 @@ where
             contract_tracker: None,
             contract_chains: Vec::new(),
             contract_policies: Vec::new(),
+            control_middleware: Arc::new(NoControlMiddleware),
             last_eof_outcome: None,
         })
     }
@@ -444,15 +454,24 @@ where
             Self::new_with_names_from_positions(owner_label, upstream_journals, tail_positions)
                 .await?;
 
-        for i in 0..sub.readers.len() {
-            sub.state.mark_reader_baseline_at_tail(i);
+        // Only mark a reader as baseline-at-tail if we're actually skipping historical
+        // events (i.e., the computed tail position is non-zero). For fresh/empty
+        // journals, setting this baseline would incorrectly allow "logical EOF"
+        // termination before new events are observed.
+        let mut baseline_count = 0usize;
+        for i in 0..sub.readers.len().min(tail_positions.len()) {
+            if tail_positions[i] > 0 {
+                sub.state.mark_reader_baseline_at_tail(i);
+                baseline_count += 1;
+            }
         }
 
         tracing::info!(
             target: "flowip-059d",
             owner = owner_label,
             reader_count = sub.readers.len(),
-            "Created tail-start upstream subscription with baseline_at_tail=true"
+            baseline_count = baseline_count,
+            "Created tail-start upstream subscription"
         );
 
         Ok(sub)
@@ -480,7 +499,10 @@ where
         config: ContractConfig,
         system_journal: Option<Arc<dyn Journal<SystemEvent>>>,
         reader_stage: Option<StageId>,
+        control_middleware: Arc<dyn ControlMiddlewareProvider>,
     ) -> Self {
+        self.control_middleware = control_middleware.clone();
+
         self.contract_tracker = Some(ContractTracker {
             config,
             writer_id,
@@ -509,7 +531,8 @@ where
                 .readers
                 .iter()
                 .map(|(upstream_stage, _, _)| {
-                    let stack = build_policy_stack_for_upstream(*upstream_stage);
+                    let stack =
+                        build_policy_stack_for_upstream(*upstream_stage, &control_middleware);
                     Some(stack)
                 })
                 .collect();
@@ -604,12 +627,16 @@ where
                 "subscription: calling reader.next()"
             );
 
-            match reader.next().await {
-                Ok(Some(envelope)) => {
-                    tracing::debug!(
-                        target: "flowip-080o",
-                        owner = %self.owner_label,
-                        stage_id = ?stage_id,
+                match reader.next().await {
+                    Ok(Some(envelope)) => {
+                        // This reader has observed post-baseline data; it is no longer
+                        // logically at EOF due to a tail-start baseline.
+                        self.state.clear_reader_baseline_at_tail(current_index);
+
+                        tracing::debug!(
+                            target: "flowip-080o",
+                            owner = %self.owner_label,
+                            stage_id = ?stage_id,
                         stage_name = %stage_name,
                         current_index = current_index,
                         fsm_state = fsm_state,
@@ -713,9 +740,7 @@ where
                     // Feed the event into the ContractChain for this edge, if configured.
                     if let (Some(chain_event), Some(reader_stage)) = (
                         (&envelope.event as &dyn Any).downcast_ref::<ChainEvent>(),
-                        self.contract_tracker
-                            .as_ref()
-                            .and_then(|t| t.reader_stage),
+                        self.contract_tracker.as_ref().and_then(|t| t.reader_stage),
                     ) {
                         if let Some(chain_slot) = self.contract_chains.get_mut(current_index) {
                             if let Some(chain) = chain_slot.as_mut() {
@@ -965,6 +990,58 @@ where
                         self.contract_chains.get(index).and_then(|c| c.as_ref()),
                     ) {
                         let results = chain_slot.verify_all(progress.stage_id, reader_stage);
+                        let results_only: Vec<ContractResult> =
+                            results.iter().map(|(_, r)| r.clone()).collect();
+
+                        // Emit per-contract verification results to the system journal so that
+                        // MetricsAggregator can derive contract metrics without interfering with
+                        // pipeline gating (which uses ContractStatus + policies).
+                        if let Some(system_journal) = &tracker.system_journal {
+                            for (contract_name, result) in &results {
+                                let (status_label, cause_label) = match result {
+                                    ContractResult::Passed(_) => ("passed".to_string(), None),
+                                    ContractResult::Failed(v) => {
+                                        let cause = match &v.cause {
+                                            ViolationCause::SeqDivergence { .. } => {
+                                                "seq_divergence"
+                                            }
+                                            ViolationCause::ContentMismatch { .. } => {
+                                                "content_mismatch"
+                                            }
+                                            ViolationCause::DeliveryMismatch { .. } => {
+                                                "delivery_mismatch"
+                                            }
+                                            ViolationCause::AccountingMismatch { .. } => {
+                                                "accounting_mismatch"
+                                            }
+                                            ViolationCause::Other(_) => "other",
+                                        }
+                                        .to_string();
+                                        ("failed".to_string(), Some(cause))
+                                    }
+                                    ContractResult::Pending => ("pending".to_string(), None),
+                                };
+
+                                let result_event = SystemEvent::new(
+                                    tracker.writer_id,
+                                    SystemEventType::ContractResult {
+                                        upstream: progress.stage_id,
+                                        reader: reader_stage,
+                                        contract_name: contract_name.clone(),
+                                        status: status_label,
+                                        cause: cause_label,
+                                        reader_seq: Some(progress.reader_seq),
+                                        advertised_writer_seq: progress.advertised_writer_seq,
+                                    },
+                                );
+                                system_journal
+                                    .append(result_event, None)
+                                    .await
+                                    .map_err(|e| {
+                                        format!("Failed to append contract result event: {}", e)
+                                    })?;
+                            }
+                        }
 
                         let edge = EdgeContext {
                             upstream_stage: progress.stage_id,
@@ -973,18 +1050,15 @@ where
                             reader_seq: progress.reader_seq,
                         };
 
-                        let cb_info =
-                            obzenflow_core::circuit_breaker_contract_registry::get_stage_info(
-                                &progress.stage_id,
-                            );
+                        let cb_info = self
+                            .control_middleware
+                            .circuit_breaker_contract_info(&progress.stage_id);
                         let hints = PolicyHints {
-                            breaker_mode: cb_info.as_ref().map(|i| i.mode),
+                            breaker_mode: cb_info.map(|i| i.mode),
                             has_opened_since_registration: cb_info
-                                .as_ref()
                                 .map(|i| i.has_opened_since_registration)
                                 .unwrap_or(false),
                             has_fallback_configured: cb_info
-                                .as_ref()
                                 .map(|i| i.has_fallback_configured)
                                 .unwrap_or(false),
                         };
@@ -992,14 +1066,15 @@ where
                         if let Some(policy_stack) =
                             self.contract_policies.get(index).and_then(|p| p.as_ref())
                         {
-                            let raw_failure_cause: Option<ViolationCause> = results
-                                .iter()
-                                .find_map(|r| match r {
-                                    ContractResult::Failed(v) => Some(v.cause.clone()),
+                            let raw_failure: Option<(String, ViolationCause)> =
+                                results.iter().find_map(|(name, r)| match r {
+                                    ContractResult::Failed(v) => {
+                                        Some((name.clone(), v.cause.clone()))
+                                    }
                                     _ => None,
                                 });
 
-                            let decision = policy_stack.decide(&results, &edge, &hints);
+                            let decision = policy_stack.decide(&results_only, &edge, &hints);
 
                             match decision {
                                 EdgeContractDecision::Pass => {
@@ -1008,29 +1083,31 @@ where
 
                                     // If raw contracts reported a failure but policies
                                     // overrode it to Pass, emit an override system event.
-                                    if let (Some(system_journal), Some(reader_stage), Some(cause)) =
-                                        (&tracker.system_journal,
-                                         tracker.reader_stage,
-                                         raw_failure_cause)
+                                    if let (
+                                        Some(system_journal),
+                                        Some(reader_stage),
+                                        Some((contract_name, cause)),
+                                    ) =
+                                        (&tracker.system_journal, tracker.reader_stage, raw_failure)
                                     {
                                         let override_event = SystemEvent::new(
                                             tracker.writer_id,
                                             SystemEventType::ContractOverrideByPolicy {
                                                 upstream: progress.stage_id,
                                                 reader: reader_stage,
+                                                contract_name,
                                                 original_cause: cause,
                                                 policy: "breaker_aware".to_string(),
                                             },
                                         );
-                                        system_journal
-                                            .append(override_event, None)
-                                            .await
-                                            .map_err(|e| {
+                                        system_journal.append(override_event, None).await.map_err(
+                                            |e| {
                                                 format!(
                                                     "Failed to append contract override event: {}",
                                                     e
                                                 )
-                                            })?;
+                                            },
+                                        )?;
                                     }
                                 }
                                 EdgeContractDecision::Fail(cause) => {
@@ -1056,16 +1133,9 @@ where
                                                     advertised,
                                                     progress.stage_id,
                                                 );
-                                            tracker
-                                                .journal
-                                                .append(gap_event, None)
-                                                .await
-                                                .map_err(|e| {
-                                                    format!(
-                                                        "Failed to append gap event: {}",
-                                                        e
-                                                    )
-                                                })?;
+                                            tracker.journal.append(gap_event, None).await.map_err(
+                                                |e| format!("Failed to append gap event: {}", e),
+                                            )?;
                                         }
                                     }
                                 }
@@ -1093,9 +1163,7 @@ where
                                     .journal
                                     .append(gap_event, None)
                                     .await
-                                    .map_err(|e| {
-                                        format!("Failed to append gap event: {}", e)
-                                    })?;
+                                    .map_err(|e| format!("Failed to append gap event: {}", e))?;
                             }
 
                             status = ContractStatus::Violated {
@@ -1113,32 +1181,23 @@ where
                     // generic ContractStatus system event and makes at-least-once
                     // violations first-class in the data journal for observability.
                     if !pass {
-                        if let Some(EventViolationCause::SeqDivergence {
-                            advertised,
-                            reader,
-                        }) = failure_reason.clone()
+                        if let Some(EventViolationCause::SeqDivergence { advertised, reader }) =
+                            failure_reason.clone()
                         {
-                            let violation_event =
-                                ChainEventFactory::at_least_once_violation_event(
-                                    tracker.writer_id.clone(),
-                                    progress.stage_id,
-                                    EventViolationCause::SeqDivergence {
-                                        advertised,
-                                        reader,
-                                    },
-                                    progress.reader_seq,
-                                    progress.advertised_writer_seq,
-                                );
+                            let violation_event = ChainEventFactory::at_least_once_violation_event(
+                                tracker.writer_id.clone(),
+                                progress.stage_id,
+                                EventViolationCause::SeqDivergence { advertised, reader },
+                                progress.reader_seq,
+                                progress.advertised_writer_seq,
+                            );
 
                             tracker
                                 .journal
                                 .append(violation_event, None)
                                 .await
                                 .map_err(|e| {
-                                    format!(
-                                        "Failed to append at_least_once_violation event: {}",
-                                        e
-                                    )
+                                    format!("Failed to append at_least_once_violation event: {}", e)
                                 })?;
                         }
                     }
@@ -1348,18 +1407,90 @@ where
 mod tests {
     use super::*;
     use async_trait::async_trait;
+    use obzenflow_core::control_middleware::{CircuitBreakerSnapshotter, RateLimiterSnapshotter};
     use obzenflow_core::event::event_envelope::EventEnvelope;
     use obzenflow_core::event::identity::JournalWriterId;
     use obzenflow_core::event::journal_event::JournalEvent;
     use obzenflow_core::event::system_event::SystemEvent;
+    use obzenflow_core::id::JournalId;
     use obzenflow_core::journal::journal::Journal;
     use obzenflow_core::journal::journal_error::JournalError;
     use obzenflow_core::journal::journal_owner::JournalOwner;
     use obzenflow_core::journal::journal_reader::JournalReader;
-    use obzenflow_core::id::JournalId;
-    use obzenflow_core::CircuitBreakerContractMode;
+    use obzenflow_core::{CircuitBreakerContractInfo, CircuitBreakerContractMode};
     use serde_json::json;
-    use std::sync::{Arc, Mutex};
+    use std::collections::HashMap;
+    use std::sync::atomic::AtomicU8;
+    use std::sync::{Arc, Mutex, RwLock};
+
+    #[derive(Debug, Default)]
+    struct TestControlMiddlewareProvider {
+        breaker_contracts: RwLock<HashMap<StageId, CircuitBreakerContractInfo>>,
+    }
+
+    impl TestControlMiddlewareProvider {
+        fn new() -> Self {
+            Self::default()
+        }
+
+        fn register_stage_mode(
+            &self,
+            stage_id: StageId,
+            mode: CircuitBreakerContractMode,
+            has_fallback: bool,
+        ) {
+            let mut reg = self
+                .breaker_contracts
+                .write()
+                .expect("TestControlMiddlewareProvider: poisoned lock");
+            reg.insert(
+                stage_id,
+                CircuitBreakerContractInfo {
+                    mode,
+                    has_opened_since_registration: false,
+                    has_fallback_configured: has_fallback,
+                },
+            );
+        }
+    }
+
+    impl ControlMiddlewareProvider for TestControlMiddlewareProvider {
+        fn circuit_breaker_snapshotter(
+            &self,
+            _: &StageId,
+        ) -> Option<Arc<CircuitBreakerSnapshotter>> {
+            None
+        }
+
+        fn rate_limiter_snapshotter(&self, _: &StageId) -> Option<Arc<RateLimiterSnapshotter>> {
+            None
+        }
+
+        fn circuit_breaker_state(&self, _: &StageId) -> Option<Arc<AtomicU8>> {
+            None
+        }
+
+        fn circuit_breaker_contract_info(
+            &self,
+            stage_id: &StageId,
+        ) -> Option<CircuitBreakerContractInfo> {
+            self.breaker_contracts
+                .read()
+                .expect("TestControlMiddlewareProvider: poisoned lock")
+                .get(stage_id)
+                .copied()
+        }
+
+        fn mark_circuit_breaker_opened(&self, stage_id: &StageId) {
+            let mut reg = self
+                .breaker_contracts
+                .write()
+                .expect("TestControlMiddlewareProvider: poisoned lock");
+            if let Some(info) = reg.get_mut(stage_id) {
+                info.has_opened_since_registration = true;
+            }
+        }
+    }
 
     /// Minimal in-memory journal implementation for tests.
     struct TestJournal<T: JournalEvent> {
@@ -1425,9 +1556,7 @@ mod tests {
             Ok(None)
         }
 
-        async fn reader(
-            &self,
-        ) -> std::result::Result<Box<dyn JournalReader<T>>, JournalError> {
+        async fn reader(&self) -> std::result::Result<Box<dyn JournalReader<T>>, JournalError> {
             let guard = self.events.lock().unwrap();
             Ok(Box::new(TestJournalReader {
                 events: guard.clone(),
@@ -1454,19 +1583,13 @@ mod tests {
             let len = guard.len();
             let start = len.saturating_sub(count);
             // Return most recent first, matching Journal contract.
-            Ok(guard[start..]
-                .iter()
-                .rev()
-                .cloned()
-                .collect())
+            Ok(guard[start..].iter().rev().cloned().collect())
         }
     }
 
     #[async_trait]
     impl<T: JournalEvent + 'static> JournalReader<T> for TestJournalReader<T> {
-        async fn next(
-            &mut self,
-        ) -> std::result::Result<Option<EventEnvelope<T>>, JournalError> {
+        async fn next(&mut self) -> std::result::Result<Option<EventEnvelope<T>>, JournalError> {
             if self.pos >= self.events.len() {
                 Ok(None)
             } else {
@@ -1476,10 +1599,7 @@ mod tests {
             }
         }
 
-        async fn skip(
-            &mut self,
-            n: u64,
-        ) -> std::result::Result<u64, JournalError> {
+        async fn skip(&mut self, n: u64) -> std::result::Result<u64, JournalError> {
             let start = self.pos as u64;
             self.pos = (self.pos as u64 + n) as usize;
             Ok(self.pos as u64 - start)
@@ -1495,8 +1615,14 @@ mod tests {
     }
 
     async fn build_upstream_with_seq_divergence(
-    ) -> (UpstreamSubscription<ChainEvent>, Arc<dyn Journal<ChainEvent>>, Arc<dyn Journal<SystemEvent>>, StageId, StageId)
-    {
+        control_middleware: Arc<dyn ControlMiddlewareProvider>,
+    ) -> (
+        UpstreamSubscription<ChainEvent>,
+        Arc<dyn Journal<ChainEvent>>,
+        Arc<dyn Journal<SystemEvent>>,
+        StageId,
+        StageId,
+    ) {
         let upstream_stage = StageId::new();
         let reader_stage = StageId::new();
 
@@ -1527,13 +1653,15 @@ mod tests {
         }
         upstream_journal.append(eof_event, None).await.unwrap();
 
-        let upstreams: Vec<(StageId, String, Arc<dyn Journal<ChainEvent>>)> =
-            vec![(upstream_stage, "upstream".to_string(), upstream_journal.clone())];
+        let upstreams: Vec<(StageId, String, Arc<dyn Journal<ChainEvent>>)> = vec![(
+            upstream_stage,
+            "upstream".to_string(),
+            upstream_journal.clone(),
+        )];
 
-        let mut subscription =
-            UpstreamSubscription::new_with_names("test_owner", &upstreams)
-                .await
-                .unwrap();
+        let mut subscription = UpstreamSubscription::new_with_names("test_owner", &upstreams)
+            .await
+            .unwrap();
 
         let contract_config = ContractConfig::default();
         let writer_id_for_contracts = WriterId::from(reader_stage);
@@ -1543,6 +1671,7 @@ mod tests {
             contract_config,
             Some(system_journal.clone()),
             Some(reader_stage),
+            control_middleware,
         );
 
         (
@@ -1554,7 +1683,10 @@ mod tests {
         )
     }
 
-    async fn drive_subscription_to_eof(subscription: &mut UpstreamSubscription<ChainEvent>, reader_progress: &mut [ReaderProgress]) {
+    async fn drive_subscription_to_eof(
+        subscription: &mut UpstreamSubscription<ChainEvent>,
+        reader_progress: &mut [ReaderProgress],
+    ) {
         loop {
             match subscription
                 .poll_next_with_state("test_fsm", Some(reader_progress))
@@ -1571,13 +1703,8 @@ mod tests {
 
     #[tokio::test]
     async fn strict_mode_produces_seq_divergence_and_gap_event() {
-        let (
-            mut subscription,
-            contract_journal,
-            system_journal,
-            upstream_stage,
-            reader_stage,
-        ) = build_upstream_with_seq_divergence().await;
+        let (mut subscription, contract_journal, system_journal, upstream_stage, reader_stage) =
+            build_upstream_with_seq_divergence(Arc::new(NoControlMiddleware)).await;
 
         let mut reader_progress = vec![ReaderProgress::new(upstream_stage)];
         drive_subscription_to_eof(&mut subscription, &mut reader_progress[..]).await;
@@ -1625,10 +1752,7 @@ mod tests {
                             assert_eq!(*advertised, Some(SeqNo(3)));
                             assert_eq!(*reader, SeqNo(1));
                         }
-                        other => panic!(
-                            "expected SeqDivergence failure_reason, got {:?}",
-                            other
-                        ),
+                        other => panic!("expected SeqDivergence failure_reason, got {:?}", other),
                     }
                 }
                 ChainEventContent::FlowControl(FlowControlPayload::ConsumptionGap {
@@ -1714,30 +1838,27 @@ mod tests {
 
     #[tokio::test]
     async fn breaker_aware_mode_overrides_seq_divergence_and_emits_override_event() {
-        let (
-            mut subscription,
-            contract_journal,
-            system_journal,
-            upstream_stage,
-            reader_stage,
-        ) = build_upstream_with_seq_divergence().await;
+        let control_middleware = Arc::new(TestControlMiddlewareProvider::new());
+        let (mut subscription, contract_journal, system_journal, upstream_stage, reader_stage) =
+            build_upstream_with_seq_divergence(control_middleware.clone()).await;
 
         // Register breaker-aware contract mode with fallback configured and mark
         // that the breaker has opened at least once. This makes the policy
         // layer eligible to override pure SeqDivergence failures.
-        obzenflow_core::circuit_breaker_contract_registry::register_stage_mode(
+        control_middleware.register_stage_mode(
             upstream_stage,
             CircuitBreakerContractMode::BreakerAware,
             true,
         );
-        obzenflow_core::circuit_breaker_contract_registry::mark_stage_opened(upstream_stage);
+        control_middleware.mark_circuit_breaker_opened(&upstream_stage);
 
         // Rebuild the policy stack so that it includes BreakerAwarePolicy.
+        let control_provider: Arc<dyn ControlMiddlewareProvider> = control_middleware.clone();
         subscription.contract_policies = subscription
             .readers
             .iter()
             .map(|(upstream, _name, _reader)| {
-                let stack = build_policy_stack_for_upstream(*upstream);
+                let stack = build_policy_stack_for_upstream(*upstream, &control_provider);
                 Some(stack)
             })
             .collect();

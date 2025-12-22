@@ -218,9 +218,9 @@ impl<H> Clone for TransformAction<H> {
             Self::PublishRunning => Self::PublishRunning,
             Self::ForwardEOF => Self::ForwardEOF,
             Self::SendCompletion => Self::SendCompletion,
-             Self::SendFailure { message } => Self::SendFailure {
-                 message: message.clone(),
-             },
+            Self::SendFailure { message } => Self::SendFailure {
+                message: message.clone(),
+            },
             Self::Cleanup => Self::Cleanup,
             Self::_Phantom(_) => Self::_Phantom(PhantomData),
         }
@@ -352,10 +352,7 @@ impl<H: TransformHandler + Send + Sync + 'static> FsmAction for TransformAction<
 
                 // Initialize FSM-owned contract state for each upstream reader
                 let upstream_ids = ctx.upstream_subscription_factory.upstream_stage_ids();
-                ctx.contract_state = upstream_ids
-                    .into_iter()
-                    .map(ReaderProgress::new)
-                    .collect();
+                ctx.contract_state = upstream_ids.into_iter().map(ReaderProgress::new).collect();
 
                 // Build subscription from bound factory (with contracts)
                 let subscription = ctx
@@ -366,6 +363,7 @@ impl<H: TransformHandler + Send + Sync + 'static> FsmAction for TransformAction<
                         ContractConfig::default(),
                         Some(ctx.system_journal.clone()),
                         Some(ctx.stage_id),
+                        ctx.instrumentation.control_middleware().clone(),
                     )
                     .await
                     .map_err(|e| {
@@ -416,7 +414,7 @@ impl<H: TransformHandler + Send + Sync + 'static> FsmAction for TransformAction<
                 let mut natural = true;
                 let mut upstream_vector_clock = None;
                 let mut upstream_last_event = None;
-                let runtime_context = ctx.instrumentation.snapshot();
+                let runtime_context = ctx.instrumentation.snapshot_with_control();
 
                 if let Some(buffered_event) = buffered {
                     if let obzenflow_core::event::ChainEventContent::FlowControl(

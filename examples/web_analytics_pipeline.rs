@@ -165,7 +165,12 @@ impl UserEventSource {
 }
 
 impl FiniteSourceHandler for UserEventSource {
-    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, obzenflow_runtime_services::stages::common::handlers::source::traits::SourceError> {
+    fn next(
+        &mut self,
+    ) -> Result<
+        Option<Vec<ChainEvent>>,
+        obzenflow_runtime_services::stages::common::handlers::source::traits::SourceError,
+    > {
         if self.event_count >= self.max_events {
             return Ok(None);
         }
@@ -306,10 +311,7 @@ impl AnalyticsSink {
 
 #[async_trait]
 impl SinkHandler for AnalyticsSink {
-    async fn consume(
-        &mut self,
-        event: ChainEvent,
-    ) -> Result<DeliveryPayload, HandlerError> {
+    async fn consume(&mut self, event: ChainEvent) -> Result<DeliveryPayload, HandlerError> {
         let payload = event.payload();
 
         // ✨ FLOWIP-082a: GroupByTyped emits with state's EVENT_TYPE

@@ -139,14 +139,13 @@ impl Doubler {
 
 #[async_trait]
 impl TransformHandler for Doubler {
-    fn process(
-        &self,
-        event: ChainEvent,
-    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
+    fn process(&self, event: ChainEvent) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
         Ok(vec![event.clone(), event])
     }
 
-    async fn drain(&mut self) -> std::result::Result<(), HandlerError> { Ok(()) }
+    async fn drain(&mut self) -> std::result::Result<(), HandlerError> {
+        Ok(())
+    }
 }
 
 #[tokio::test]
@@ -238,15 +237,8 @@ impl NumberDoubler {
 
 #[async_trait]
 impl TransformHandler for NumberDoubler {
-    fn process(
-        &self,
-        event: ChainEvent,
-    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
-        if let Some(value) = event
-            .payload()
-            .get("value")
-            .and_then(|v| v.as_u64())
-        {
+    fn process(&self, event: ChainEvent) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
+        if let Some(value) = event.payload().get("value").and_then(|v| v.as_u64()) {
             Ok(vec![ChainEventFactory::data_event(
                 event.writer_id.clone(),
                 "DoubledNumber",
@@ -257,7 +249,9 @@ impl TransformHandler for NumberDoubler {
         }
     }
 
-    async fn drain(&mut self) -> std::result::Result<(), HandlerError> { Ok(()) }
+    async fn drain(&mut self) -> std::result::Result<(), HandlerError> {
+        Ok(())
+    }
 }
 
 /// A sink that sums all numbers it receives
@@ -279,11 +273,7 @@ impl SinkHandler for SumSink {
         &mut self,
         event: ChainEvent,
     ) -> std::result::Result<DeliveryPayload, HandlerError> {
-        if let Some(value) = event
-            .payload()
-            .get("value")
-            .and_then(|v| v.as_u64())
-        {
+        if let Some(value) = event.payload().get("value").and_then(|v| v.as_u64()) {
             self.sum.fetch_add(value, Ordering::Relaxed);
         }
         Ok(DeliveryPayload::success(

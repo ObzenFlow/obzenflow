@@ -495,9 +495,7 @@ where
         }
     }
 
-    async fn drain(
-        &mut self,
-    ) -> Result<(), crate::stages::common::handler_error::HandlerError> {
+    async fn drain(&mut self) -> Result<(), crate::stages::common::handler_error::HandlerError> {
         Ok(())
     }
 }

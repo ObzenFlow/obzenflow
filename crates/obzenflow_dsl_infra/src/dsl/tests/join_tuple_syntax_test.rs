@@ -23,13 +23,19 @@ mod tests {
         // Verify regular connections are also created
         assert_eq!(connections.len(), 3);
         assert!(connections.iter().any(|(from, to, kind)| {
-            from == "reference" && to == "joiner" && matches!(kind, obzenflow_topology::EdgeKind::Forward)
+            from == "reference"
+                && to == "joiner"
+                && matches!(kind, obzenflow_topology::EdgeKind::Forward)
         }));
         assert!(connections.iter().any(|(from, to, kind)| {
-            from == "stream" && to == "joiner" && matches!(kind, obzenflow_topology::EdgeKind::Forward)
+            from == "stream"
+                && to == "joiner"
+                && matches!(kind, obzenflow_topology::EdgeKind::Forward)
         }));
         assert!(connections.iter().any(|(from, to, kind)| {
-            from == "joiner" && to == "output" && matches!(kind, obzenflow_topology::EdgeKind::Forward)
+            from == "joiner"
+                && to == "output"
+                && matches!(kind, obzenflow_topology::EdgeKind::Forward)
         }));
     }
 
@@ -62,22 +68,34 @@ mod tests {
         // Verify all connections
         assert_eq!(connections.len(), 6);
         assert!(connections.iter().any(|(from, to, kind)| {
-            from == "products" && to == "order_enricher" && matches!(kind, obzenflow_topology::EdgeKind::Forward)
+            from == "products"
+                && to == "order_enricher"
+                && matches!(kind, obzenflow_topology::EdgeKind::Forward)
         }));
         assert!(connections.iter().any(|(from, to, kind)| {
-            from == "orders" && to == "order_enricher" && matches!(kind, obzenflow_topology::EdgeKind::Forward)
+            from == "orders"
+                && to == "order_enricher"
+                && matches!(kind, obzenflow_topology::EdgeKind::Forward)
         }));
         assert!(connections.iter().any(|(from, to, kind)| {
-            from == "users" && to == "user_enricher" && matches!(kind, obzenflow_topology::EdgeKind::Forward)
+            from == "users"
+                && to == "user_enricher"
+                && matches!(kind, obzenflow_topology::EdgeKind::Forward)
         }));
         assert!(connections.iter().any(|(from, to, kind)| {
-            from == "orders" && to == "user_enricher" && matches!(kind, obzenflow_topology::EdgeKind::Forward)
+            from == "orders"
+                && to == "user_enricher"
+                && matches!(kind, obzenflow_topology::EdgeKind::Forward)
         }));
         assert!(connections.iter().any(|(from, to, kind)| {
-            from == "order_enricher" && to == "sink1" && matches!(kind, obzenflow_topology::EdgeKind::Forward)
+            from == "order_enricher"
+                && to == "sink1"
+                && matches!(kind, obzenflow_topology::EdgeKind::Forward)
         }));
         assert!(connections.iter().any(|(from, to, kind)| {
-            from == "user_enricher" && to == "sink2" && matches!(kind, obzenflow_topology::EdgeKind::Forward)
+            from == "user_enricher"
+                && to == "sink2"
+                && matches!(kind, obzenflow_topology::EdgeKind::Forward)
         }));
     }
 
@@ -103,19 +121,29 @@ mod tests {
         // Verify all connections
         assert_eq!(connections.len(), 5);
         assert!(connections.iter().any(|(from, to, kind)| {
-            from == "source" && to == "transform1" && matches!(kind, obzenflow_topology::EdgeKind::Forward)
+            from == "source"
+                && to == "transform1"
+                && matches!(kind, obzenflow_topology::EdgeKind::Forward)
         }));
         assert!(connections.iter().any(|(from, to, kind)| {
-            from == "transform1" && to == "transform2" && matches!(kind, obzenflow_topology::EdgeKind::Forward)
+            from == "transform1"
+                && to == "transform2"
+                && matches!(kind, obzenflow_topology::EdgeKind::Forward)
         }));
         assert!(connections.iter().any(|(from, to, kind)| {
-            from == "reference" && to == "joiner" && matches!(kind, obzenflow_topology::EdgeKind::Forward)
+            from == "reference"
+                && to == "joiner"
+                && matches!(kind, obzenflow_topology::EdgeKind::Forward)
         }));
         assert!(connections.iter().any(|(from, to, kind)| {
-            from == "transform2" && to == "joiner" && matches!(kind, obzenflow_topology::EdgeKind::Forward)
+            from == "transform2"
+                && to == "joiner"
+                && matches!(kind, obzenflow_topology::EdgeKind::Forward)
         }));
         assert!(connections.iter().any(|(from, to, kind)| {
-            from == "joiner" && to == "sink" && matches!(kind, obzenflow_topology::EdgeKind::Forward)
+            from == "joiner"
+                && to == "sink"
+                && matches!(kind, obzenflow_topology::EdgeKind::Forward)
         }));
     }
 }

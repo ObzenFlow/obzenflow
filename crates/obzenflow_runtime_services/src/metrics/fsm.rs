@@ -5,10 +5,13 @@
 //! Event processing happens directly without FSM state tracking
 
 use obzenflow_core::event::chain_event::ChainEventContent;
+use obzenflow_core::event::payloads::observability_payload::{
+    CircuitBreakerEvent, MiddlewareLifecycle, ObservabilityPayload,
+};
 use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
 use obzenflow_core::event::{CorrelationId, JournalEvent, WriterId};
-use obzenflow_core::id::{StageId, SystemId};
-use obzenflow_core::metrics::{Percentile, StageMetadata};
+use obzenflow_core::id::{FlowId, StageId, SystemId};
+use obzenflow_core::metrics::{ContractMetricsSnapshot, Percentile, StageMetadata};
 use obzenflow_core::time::MetricsDuration;
 use obzenflow_core::{ChainEvent, EventId, Journal};
 use obzenflow_fsm::{
@@ -16,6 +19,7 @@ use obzenflow_fsm::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -145,10 +149,11 @@ pub struct MetricsAggregatorContext {
         Option<crate::messaging::upstream_subscription::UpstreamSubscription<ChainEvent>>,
 
     /// Subscription to read from system journal for lifecycle events (FLOWIP-059b)
-    pub system_subscription:
-        Option<crate::messaging::system_subscription::SystemSubscription<
+    pub system_subscription: Option<
+        crate::messaging::system_subscription::SystemSubscription<
             obzenflow_core::event::SystemEvent,
-        >>,
+        >,
+    >,
 
     /// Whether to include error journals in metrics collection
     pub include_error_journals: bool,
@@ -174,6 +179,30 @@ pub struct MetricsStore {
     /// Tracks the highest writer sequence observed for each stage's journal writer.
     pub stage_vector_clocks: HashMap<StageId, u64>,
 
+    // Middleware observability accumulation (FLOWIP-059a)
+    pub circuit_breaker_state: HashMap<StageId, f64>,
+    pub circuit_breaker_rejection_rate: HashMap<StageId, f64>,
+    pub circuit_breaker_consecutive_failures: HashMap<StageId, f64>,
+    pub circuit_breaker_requests_total: HashMap<StageId, u64>,
+    pub circuit_breaker_rejections_total: HashMap<StageId, u64>,
+    pub circuit_breaker_opened_total: HashMap<StageId, u64>,
+    pub circuit_breaker_successes_total: HashMap<StageId, u64>,
+    pub circuit_breaker_failures_total: HashMap<StageId, u64>,
+    pub circuit_breaker_time_in_state_seconds_total: HashMap<(StageId, String), f64>,
+    pub circuit_breaker_state_transitions_total: HashMap<(StageId, String, String), u64>,
+    circuit_breaker_last_state: HashMap<StageId, String>,
+
+    pub rate_limiter_events_total: HashMap<StageId, u64>,
+    pub rate_limiter_delayed_total: HashMap<StageId, u64>,
+    pub rate_limiter_tokens_consumed_total: HashMap<StageId, f64>,
+    pub rate_limiter_delay_seconds_total: HashMap<StageId, f64>,
+    // Bucket state for gauge metrics (FLOWIP-059a-3 Issue 3)
+    pub rate_limiter_bucket_tokens: HashMap<StageId, f64>,
+    pub rate_limiter_bucket_capacity: HashMap<StageId, f64>,
+
+    // Contract metrics accumulation (FLOWIP-059a)
+    pub contract_metrics: ContractMetricsSnapshot,
+
     // System event tracking (FLOWIP-059b - essential events only)
     // Track all states each stage has been in: (StageId, state_name) -> true
     pub stage_lifecycle_states: HashMap<(StageId, String), bool>,
@@ -197,6 +226,8 @@ pub struct StageMetrics {
     pub snapshot_p95_ms: Option<u64>,
     pub snapshot_p99_ms: Option<u64>,
     pub snapshot_p999_ms: Option<u64>,
+    // Actual sum of processing times (nanoseconds) - never reconstructed from percentiles
+    pub processing_time_sum_nanos: Option<u64>,
     // Stage-specific timing for accurate rate calculation
     pub first_event_time: Option<std::time::Instant>,
     pub last_event_time: Option<std::time::Instant>,
@@ -212,6 +243,24 @@ impl Default for MetricsStore {
             last_event_time: None,
             total_events_processed: 0,
             stage_vector_clocks: HashMap::new(),
+            circuit_breaker_state: HashMap::new(),
+            circuit_breaker_rejection_rate: HashMap::new(),
+            circuit_breaker_consecutive_failures: HashMap::new(),
+            circuit_breaker_requests_total: HashMap::new(),
+            circuit_breaker_rejections_total: HashMap::new(),
+            circuit_breaker_opened_total: HashMap::new(),
+            circuit_breaker_successes_total: HashMap::new(),
+            circuit_breaker_failures_total: HashMap::new(),
+            circuit_breaker_time_in_state_seconds_total: HashMap::new(),
+            circuit_breaker_state_transitions_total: HashMap::new(),
+            circuit_breaker_last_state: HashMap::new(),
+            rate_limiter_events_total: HashMap::new(),
+            rate_limiter_delayed_total: HashMap::new(),
+            rate_limiter_tokens_consumed_total: HashMap::new(),
+            rate_limiter_delay_seconds_total: HashMap::new(),
+            rate_limiter_bucket_tokens: HashMap::new(),
+            rate_limiter_bucket_capacity: HashMap::new(),
+            contract_metrics: ContractMetricsSnapshot::default(),
             stage_lifecycle_states: HashMap::new(),
             pipeline_state: String::new(),
         }
@@ -233,6 +282,7 @@ impl Default for StageMetrics {
             snapshot_p95_ms: None,
             snapshot_p99_ms: None,
             snapshot_p999_ms: None,
+            processing_time_sum_nanos: None,
             first_event_time: None,
             last_event_time: None,
         }
@@ -291,40 +341,47 @@ impl MetricsAggregatorContext {
 
             if let Some(envelope) = &tail_snapshot {
                 if let Some(runtime_ctx) = &envelope.event.runtime_context {
-                    let metrics = metrics_store
-                        .stage_metrics
-                        .entry(*stage_id)
-                        .or_insert_with(StageMetrics::default);
+                    {
+                        let metrics = metrics_store
+                            .stage_metrics
+                            .entry(*stage_id)
+                            .or_insert_with(StageMetrics::default);
 
-                    // Seed wide-event snapshot fields from the latest event
-                    // Use max() for monotonic counters to handle out-of-order reads
-                    metrics.latest_events_processed_total = Some(
-                        metrics
-                            .latest_events_processed_total
-                            .unwrap_or(0)
-                            .max(runtime_ctx.events_processed_total),
-                    );
-                    metrics.latest_errors_total = Some(
-                        metrics
-                            .latest_errors_total
-                            .unwrap_or(0)
-                            .max(runtime_ctx.errors_total),
-                    );
-                    metrics.last_in_flight = Some(runtime_ctx.in_flight);
-                    metrics.last_failures_total = Some(runtime_ctx.failures_total);
-                    metrics.event_loops_total = metrics
-                        .event_loops_total
-                        .max(runtime_ctx.event_loops_total);
-                    metrics.event_loops_with_work_total = metrics
-                        .event_loops_with_work_total
-                        .max(runtime_ctx.event_loops_with_work_total);
+                        // Seed wide-event snapshot fields from the latest event
+                        // Use max() for monotonic counters to handle out-of-order reads
+                        metrics.latest_events_processed_total = Some(
+                            metrics
+                                .latest_events_processed_total
+                                .unwrap_or(0)
+                                .max(runtime_ctx.events_processed_total),
+                        );
+                        metrics.latest_errors_total = Some(
+                            metrics
+                                .latest_errors_total
+                                .unwrap_or(0)
+                                .max(runtime_ctx.errors_total),
+                        );
+                        metrics.last_in_flight = Some(runtime_ctx.in_flight);
+                        metrics.last_failures_total = Some(runtime_ctx.failures_total);
+                        metrics.event_loops_total =
+                            metrics.event_loops_total.max(runtime_ctx.event_loops_total);
+                        metrics.event_loops_with_work_total = metrics
+                            .event_loops_with_work_total
+                            .max(runtime_ctx.event_loops_with_work_total);
 
-                    // Seed pre-computed percentiles from runtime_context
-                    metrics.snapshot_p50_ms = Some(runtime_ctx.recent_p50_ms);
-                    metrics.snapshot_p90_ms = Some(runtime_ctx.recent_p90_ms);
-                    metrics.snapshot_p95_ms = Some(runtime_ctx.recent_p95_ms);
-                    metrics.snapshot_p99_ms = Some(runtime_ctx.recent_p99_ms);
-                    metrics.snapshot_p999_ms = Some(runtime_ctx.recent_p999_ms);
+                        // Seed pre-computed percentiles from runtime_context
+                        metrics.snapshot_p50_ms = Some(runtime_ctx.recent_p50_ms);
+                        metrics.snapshot_p90_ms = Some(runtime_ctx.recent_p90_ms);
+                        metrics.snapshot_p95_ms = Some(runtime_ctx.recent_p95_ms);
+                        metrics.snapshot_p99_ms = Some(runtime_ctx.recent_p99_ms);
+                        metrics.snapshot_p999_ms = Some(runtime_ctx.recent_p999_ms);
+
+                        // Actual sum - never reconstructed from percentiles
+                        metrics.processing_time_sum_nanos =
+                            Some(runtime_ctx.processing_time_sum_nanos);
+                    }
+
+                    metrics_store.update_control_metrics_from_runtime_context(*stage_id, runtime_ctx);
                 }
 
                 // Seed per-stage vector clock watermark from the last envelope
@@ -412,51 +469,61 @@ impl MetricsAggregatorContext {
         for (stage_id, stage_name, journal) in &error_with_names {
             match journal.read_last_n(1).await {
                 Ok(mut events) => {
-                    if let Some(envelope) =
-                        events.drain(..).find(|env| env.event.runtime_context.is_some())
+                    if let Some(envelope) = events
+                        .drain(..)
+                        .find(|env| env.event.runtime_context.is_some())
                     {
                         if let Some(runtime_ctx) = &envelope.event.runtime_context {
-                            let metrics = metrics_store
-                                .stage_metrics
+                            {
+                                let metrics = metrics_store
+                                    .stage_metrics
+                                    .entry(*stage_id)
+                                    .or_insert_with(StageMetrics::default);
+
+                                metrics.latest_events_processed_total = Some(
+                                    metrics
+                                        .latest_events_processed_total
+                                        .unwrap_or(0)
+                                        .max(runtime_ctx.events_processed_total),
+                                );
+                                metrics.latest_errors_total = Some(
+                                    metrics
+                                        .latest_errors_total
+                                        .unwrap_or(0)
+                                        .max(runtime_ctx.errors_total),
+                                );
+                                metrics.last_in_flight = Some(runtime_ctx.in_flight);
+                                metrics.last_failures_total = Some(runtime_ctx.failures_total);
+                                metrics.event_loops_total =
+                                    metrics.event_loops_total.max(runtime_ctx.event_loops_total);
+                                metrics.event_loops_with_work_total = metrics
+                                    .event_loops_with_work_total
+                                    .max(runtime_ctx.event_loops_with_work_total);
+
+                                metrics.snapshot_p50_ms = Some(runtime_ctx.recent_p50_ms);
+                                metrics.snapshot_p90_ms = Some(runtime_ctx.recent_p90_ms);
+                                metrics.snapshot_p95_ms = Some(runtime_ctx.recent_p95_ms);
+                                metrics.snapshot_p99_ms = Some(runtime_ctx.recent_p99_ms);
+                                metrics.snapshot_p999_ms = Some(runtime_ctx.recent_p999_ms);
+
+                                // Actual sum - never reconstructed from percentiles
+                                metrics.processing_time_sum_nanos =
+                                    Some(runtime_ctx.processing_time_sum_nanos);
+                            }
+
+                            metrics_store
+                                .update_control_metrics_from_runtime_context(*stage_id, runtime_ctx);
+                        }
+
+                        let writer_id = envelope.event.writer_id().clone();
+                        let writer_key = writer_id.to_string();
+                        let seq = envelope.vector_clock.get(&writer_key);
+                        let entry = metrics_store
+                            .stage_vector_clocks
                             .entry(*stage_id)
-                            .or_insert_with(StageMetrics::default);
-
-                        metrics.latest_events_processed_total = Some(
-                            metrics
-                                .latest_events_processed_total
-                                .unwrap_or(0)
-                                .max(runtime_ctx.events_processed_total),
-                        );
-                        metrics.latest_errors_total = Some(
-                            metrics
-                                .latest_errors_total
-                                .unwrap_or(0)
-                                .max(runtime_ctx.errors_total),
-                        );
-                        metrics.last_in_flight = Some(runtime_ctx.in_flight);
-                        metrics.last_failures_total = Some(runtime_ctx.failures_total);
-                        metrics.event_loops_total =
-                            metrics.event_loops_total.max(runtime_ctx.event_loops_total);
-                        metrics.event_loops_with_work_total = metrics
-                            .event_loops_with_work_total
-                            .max(runtime_ctx.event_loops_with_work_total);
-
-                        metrics.snapshot_p50_ms = Some(runtime_ctx.recent_p50_ms);
-                        metrics.snapshot_p90_ms = Some(runtime_ctx.recent_p90_ms);
-                        metrics.snapshot_p95_ms = Some(runtime_ctx.recent_p95_ms);
-                        metrics.snapshot_p99_ms = Some(runtime_ctx.recent_p99_ms);
-                        metrics.snapshot_p999_ms = Some(runtime_ctx.recent_p999_ms);
+                            .or_insert(0);
+                        *entry = (*entry).max(seq);
                     }
-
-                    let writer_id = envelope.event.writer_id().clone();
-                    let writer_key = writer_id.to_string();
-                    let seq = envelope.vector_clock.get(&writer_key);
-                    let entry = metrics_store
-                        .stage_vector_clocks
-                        .entry(*stage_id)
-                        .or_insert(0);
-                    *entry = (*entry).max(seq);
-                }
                 }
                 Err(e) => {
                     tracing::warn!(
@@ -652,9 +719,8 @@ impl MetricsAggregatorContext {
                     percentiles.insert(Percentile::P999, (p999 * 1_000_000) as f64);
                 }
 
-                // Approximate sum using median; see FLOWIP-059d histogram section.
-                let p50_ms = metrics.snapshot_p50_ms.unwrap_or(0);
-                let sum_nanos = (p50_ms * 1_000_000) as u64 * events_count;
+                // Use actual sum - never reconstructed from percentiles (FLOWIP-059a-3)
+                let sum_nanos = metrics.processing_time_sum_nanos.unwrap_or(0);
 
                 let hist_snapshot = obzenflow_core::metrics::HistogramSnapshot {
                     count: events_count,
@@ -692,19 +758,17 @@ impl MetricsAggregatorContext {
                 flow_errors_total_snapshot.saturating_add(stage_errors_total);
 
             total_event_loops = total_event_loops.saturating_add(metrics.event_loops_total);
-            total_event_loops_with_work = total_event_loops_with_work
-                .saturating_add(metrics.event_loops_with_work_total);
+            total_event_loops_with_work =
+                total_event_loops_with_work.saturating_add(metrics.event_loops_with_work_total);
 
             if let Some(metadata) = self.stage_metadata.get(stage_id) {
                 match metadata.stage_type {
                     obzenflow_core::event::context::StageType::FiniteSource
                     | obzenflow_core::event::context::StageType::InfiniteSource => {
-                        flow_events_in_total =
-                            flow_events_in_total.saturating_add(events_count);
+                        flow_events_in_total = flow_events_in_total.saturating_add(events_count);
                     }
                     obzenflow_core::event::context::StageType::Sink => {
-                        flow_events_out_total =
-                            flow_events_out_total.saturating_add(events_count);
+                        flow_events_out_total = flow_events_out_total.saturating_add(events_count);
                     }
                     _ => {}
                 }
@@ -719,8 +783,7 @@ impl MetricsAggregatorContext {
         }
 
         // Add flow-level metrics
-        if let (Some(first_time), Some(last_time)) =
-            (store.first_event_time, store.last_event_time)
+        if let (Some(first_time), Some(last_time)) = (store.first_event_time, store.last_event_time)
         {
             let flow_duration = last_time.duration_since(first_time);
             let flow_metrics = obzenflow_core::metrics::FlowMetricsSnapshot {
@@ -738,6 +801,44 @@ impl MetricsAggregatorContext {
         // Add stage metadata
         snapshot.stage_metadata = self.stage_metadata.clone();
 
+        // FLOWIP-059a: Middleware metrics
+        snapshot.circuit_breaker_state = store.circuit_breaker_state.clone();
+        snapshot.circuit_breaker_rejection_rate = store.circuit_breaker_rejection_rate.clone();
+        snapshot.circuit_breaker_consecutive_failures =
+            store.circuit_breaker_consecutive_failures.clone();
+        snapshot.circuit_breaker_requests_total = store.circuit_breaker_requests_total.clone();
+        snapshot.circuit_breaker_rejections_total = store.circuit_breaker_rejections_total.clone();
+        snapshot.circuit_breaker_opened_total = store.circuit_breaker_opened_total.clone();
+        snapshot.circuit_breaker_successes_total = store.circuit_breaker_successes_total.clone();
+        snapshot.circuit_breaker_failures_total = store.circuit_breaker_failures_total.clone();
+        snapshot.circuit_breaker_time_in_state_seconds_total =
+            store.circuit_breaker_time_in_state_seconds_total.clone();
+        snapshot.circuit_breaker_state_transitions_total =
+            store.circuit_breaker_state_transitions_total.clone();
+
+        snapshot.rate_limiter_utilization = store
+            .rate_limiter_bucket_capacity
+            .iter()
+            .filter_map(|(stage_id, capacity)| {
+                if *capacity <= 0.0 {
+                    return None;
+                }
+                let tokens = store.rate_limiter_bucket_tokens.get(stage_id)?;
+                let utilization = 1.0 - (*tokens / *capacity);
+                Some((*stage_id, utilization.clamp(0.0, 1.0)))
+            })
+            .collect();
+        snapshot.rate_limiter_events_total = store.rate_limiter_events_total.clone();
+        snapshot.rate_limiter_delayed_total = store.rate_limiter_delayed_total.clone();
+        snapshot.rate_limiter_tokens_consumed_total =
+            store.rate_limiter_tokens_consumed_total.clone();
+        snapshot.rate_limiter_delay_seconds_total = store.rate_limiter_delay_seconds_total.clone();
+        snapshot.rate_limiter_bucket_tokens = store.rate_limiter_bucket_tokens.clone();
+        snapshot.rate_limiter_bucket_capacity = store.rate_limiter_bucket_capacity.clone();
+
+        // FLOWIP-059a: Contract metrics
+        snapshot.contract_metrics = store.contract_metrics.clone();
+
         // FLOWIP-059b: Add lifecycle states
         snapshot.stage_lifecycle_states = store.stage_lifecycle_states.clone();
         snapshot.pipeline_state = store.pipeline_state.clone();
@@ -749,18 +850,16 @@ impl MetricsAggregatorContext {
         for (stage_id, metrics) in &store.stage_metrics {
             if let Some(first_time) = metrics.first_event_time {
                 let elapsed_since_first = now.duration_since(first_time);
-                let first_datetime = now_utc
-                    - chrono::Duration::from_std(elapsed_since_first)
-                        .unwrap_or_default();
+                let first_datetime =
+                    now_utc - chrono::Duration::from_std(elapsed_since_first).unwrap_or_default();
                 snapshot
                     .stage_first_event_time
                     .insert(*stage_id, first_datetime);
             }
             if let Some(last_time) = metrics.last_event_time {
                 let elapsed_since_last = now.duration_since(last_time);
-                let last_datetime = now_utc
-                    - chrono::Duration::from_std(elapsed_since_last)
-                        .unwrap_or_default();
+                let last_datetime =
+                    now_utc - chrono::Duration::from_std(elapsed_since_last).unwrap_or_default();
                 snapshot
                     .stage_last_event_time
                     .insert(*stage_id, last_datetime);
@@ -798,6 +897,155 @@ impl MetricsStore {
             self.pipeline_state.as_str(),
             "completed" | "failed" | "drained"
         )
+    }
+
+    fn record_circuit_breaker_transition(&mut self, stage_id: StageId, state: &str) {
+        let Some(next_state) = normalize_circuit_breaker_state_label(state) else {
+            return;
+        };
+
+        let from_state = self
+            .circuit_breaker_last_state
+            .get(&stage_id)
+            .map(String::as_str)
+            .unwrap_or("closed");
+
+        if from_state != next_state {
+            let transition_key = (
+                stage_id,
+                from_state.to_string(),
+                next_state.to_string(),
+            );
+            let count = self
+                .circuit_breaker_state_transitions_total
+                .entry(transition_key)
+                .or_insert(0);
+            *count = (*count).saturating_add(1);
+        }
+
+        self.circuit_breaker_last_state
+            .insert(stage_id, next_state.to_string());
+    }
+
+    fn set_circuit_breaker_last_state(&mut self, stage_id: StageId, state: &str) {
+        let Some(state) = normalize_circuit_breaker_state_label(state) else {
+            return;
+        };
+
+        self.circuit_breaker_last_state
+            .insert(stage_id, state.to_string());
+    }
+
+    fn update_control_metrics_from_runtime_context(
+        &mut self,
+        stage_id: StageId,
+        runtime_ctx: &obzenflow_core::event::context::RuntimeContext,
+    ) {
+        let cb_present = runtime_ctx.cb_requests_total > 0
+            || runtime_ctx.cb_rejections_total > 0
+            || runtime_ctx.cb_opened_total > 0
+            || runtime_ctx.cb_successes_total > 0
+            || runtime_ctx.cb_failures_total > 0
+            || runtime_ctx.cb_time_closed_seconds > 0.0
+            || runtime_ctx.cb_time_open_seconds > 0.0
+            || runtime_ctx.cb_time_half_open_seconds > 0.0;
+
+        if cb_present {
+            let total = self.circuit_breaker_requests_total.entry(stage_id).or_insert(0);
+            *total = (*total).max(runtime_ctx.cb_requests_total);
+
+            let rejected = self
+                .circuit_breaker_rejections_total
+                .entry(stage_id)
+                .or_insert(0);
+            *rejected = (*rejected).max(runtime_ctx.cb_rejections_total);
+
+            let opened = self.circuit_breaker_opened_total.entry(stage_id).or_insert(0);
+            *opened = (*opened).max(runtime_ctx.cb_opened_total);
+
+            let successes = self
+                .circuit_breaker_successes_total
+                .entry(stage_id)
+                .or_insert(0);
+            *successes = (*successes).max(runtime_ctx.cb_successes_total);
+
+            let failures = self
+                .circuit_breaker_failures_total
+                .entry(stage_id)
+                .or_insert(0);
+            *failures = (*failures).max(runtime_ctx.cb_failures_total);
+
+            self.circuit_breaker_state
+                .insert(stage_id, runtime_ctx.cb_state);
+
+            self.circuit_breaker_time_in_state_seconds_total
+                .entry((stage_id, "closed".to_string()))
+                .and_modify(|v| *v = (*v).max(runtime_ctx.cb_time_closed_seconds))
+                .or_insert(runtime_ctx.cb_time_closed_seconds);
+            self.circuit_breaker_time_in_state_seconds_total
+                .entry((stage_id, "open".to_string()))
+                .and_modify(|v| *v = (*v).max(runtime_ctx.cb_time_open_seconds))
+                .or_insert(runtime_ctx.cb_time_open_seconds);
+            self.circuit_breaker_time_in_state_seconds_total
+                .entry((stage_id, "half_open".to_string()))
+                .and_modify(|v| *v = (*v).max(runtime_ctx.cb_time_half_open_seconds))
+                .or_insert(runtime_ctx.cb_time_half_open_seconds);
+
+            let state_label = if (runtime_ctx.cb_state - 0.5).abs() < f64::EPSILON {
+                "half_open"
+            } else if (runtime_ctx.cb_state - 1.0).abs() < f64::EPSILON {
+                "open"
+            } else {
+                "closed"
+            };
+            self.set_circuit_breaker_last_state(stage_id, state_label);
+        }
+
+        let rl_present = runtime_ctx.rl_events_total > 0
+            || runtime_ctx.rl_delayed_total > 0
+            || runtime_ctx.rl_tokens_consumed_total > 0.0
+            || runtime_ctx.rl_delay_seconds_total > 0.0;
+
+        if rl_present {
+            let events_total = self.rate_limiter_events_total.entry(stage_id).or_insert(0);
+            *events_total = (*events_total).max(runtime_ctx.rl_events_total);
+
+            let delayed_total = self.rate_limiter_delayed_total.entry(stage_id).or_insert(0);
+            *delayed_total = (*delayed_total).max(runtime_ctx.rl_delayed_total);
+
+            let tokens_consumed = self
+                .rate_limiter_tokens_consumed_total
+                .entry(stage_id)
+                .or_insert(0.0);
+            *tokens_consumed = (*tokens_consumed).max(runtime_ctx.rl_tokens_consumed_total);
+
+            let delay_seconds = self
+                .rate_limiter_delay_seconds_total
+                .entry(stage_id)
+                .or_insert(0.0);
+            *delay_seconds = (*delay_seconds).max(runtime_ctx.rl_delay_seconds_total);
+
+            // Bucket state is a gauge, not a counter - just overwrite with latest value
+            self.rate_limiter_bucket_tokens
+                .insert(stage_id, runtime_ctx.rl_bucket_tokens);
+            self.rate_limiter_bucket_capacity
+                .insert(stage_id, runtime_ctx.rl_bucket_capacity);
+        }
+    }
+}
+
+fn normalize_circuit_breaker_state_label(state: &str) -> Option<&'static str> {
+    let state = state.trim();
+    if state.eq_ignore_ascii_case("closed") {
+        Some("closed")
+    } else if state.eq_ignore_ascii_case("open") {
+        Some("open")
+    } else {
+        let normalized = state.to_ascii_lowercase();
+        match normalized.as_str() {
+            "halfopen" | "half_open" | "half-open" => Some("half_open"),
+            _ => None,
+        }
     }
 }
 
@@ -852,7 +1100,9 @@ impl FsmAction for MetricsAggregatorAction {
                         // - "completed" never regresses to "drained".
                         // - "drained" is only used when no explicit outcome was ever observed.
                         match event {
-                            obzenflow_core::event::PipelineLifecycleEvent::AllStagesCompleted { .. } => {
+                            obzenflow_core::event::PipelineLifecycleEvent::AllStagesCompleted {
+                                ..
+                            } => {
                                 if store.pipeline_state.is_empty() {
                                     store.pipeline_state = "all_stages_completed".to_string();
                                 }
@@ -896,6 +1146,62 @@ impl FsmAction for MetricsAggregatorAction {
                             _ => {} // Skip other pipeline events
                         }
                     }
+                    obzenflow_core::event::SystemEventType::ContractResult {
+                        upstream,
+                        reader,
+                        contract_name,
+                        status,
+                        cause,
+                        reader_seq,
+                        advertised_writer_seq,
+                    } => {
+                        let key = (*upstream, *reader, contract_name.clone(), status.clone());
+                        let counter = store.contract_metrics.results_total.entry(key).or_insert(0);
+                        *counter = (*counter).saturating_add(1);
+
+                        if let Some(cause) = cause {
+                            let key = (*upstream, *reader, contract_name.clone(), cause.clone());
+                            let counter = store
+                                .contract_metrics
+                                .violations_total
+                                .entry(key)
+                                .or_insert(0);
+                            *counter = (*counter).saturating_add(1);
+                        }
+
+                        let edge_key = (*upstream, *reader, contract_name.clone());
+                        if let Some(seq) = reader_seq {
+                            let gauge = store
+                                .contract_metrics
+                                .reader_seq
+                                .entry(edge_key.clone())
+                                .or_insert(0);
+                            *gauge = (*gauge).max(seq.0);
+                        }
+                        if let Some(seq) = advertised_writer_seq {
+                            let gauge = store
+                                .contract_metrics
+                                .advertised_writer_seq
+                                .entry(edge_key)
+                                .or_insert(0);
+                            *gauge = (*gauge).max(seq.0);
+                        }
+                    }
+                    obzenflow_core::event::SystemEventType::ContractOverrideByPolicy {
+                        upstream,
+                        reader,
+                        contract_name,
+                        policy,
+                        ..
+                    } => {
+                        let key = (*upstream, *reader, contract_name.clone(), policy.clone());
+                        let counter = store
+                            .contract_metrics
+                            .overrides_total
+                            .entry(key)
+                            .or_insert(0);
+                        *counter = (*counter).saturating_add(1);
+                    }
                     _ => {} // Skip MetricsCoordination and other event types
                 }
 
@@ -915,18 +1221,134 @@ impl FsmAction for MetricsAggregatorAction {
 
                 let event = &envelope.event;
 
-                // Update per-stage vector clock watermark (FLOWIP-059c).
-                // We use the event writer_id component from the envelope's vector clock.
-                let stage_id = event.flow_context.stage_id;
-                let writer_id = event.writer_id().clone();
-                let writer_key = writer_id.to_string();
-                let seq = envelope.vector_clock.get(&writer_key);
-                let entry = store.stage_vector_clocks.entry(stage_id).or_insert(0);
-                *entry = (*entry).max(seq);
+	                // Update per-stage vector clock watermark (FLOWIP-059c).
+	                // We use the event writer_id component from the envelope's vector clock.
+	                let stage_id = event.flow_context.stage_id;
+	                let writer_id = event.writer_id().clone();
+	                let writer_key = writer_id.to_string();
+	                let seq = envelope.vector_clock.get(&writer_key);
+	                let entry = store.stage_vector_clocks.entry(stage_id).or_insert(0);
+	                *entry = (*entry).max(seq);
+
+                // Capture flow_id for joinability (FLOWIP-059a) when it becomes available.
+                if let Some(meta) = ctx.stage_metadata.get_mut(&stage_id) {
+                    if meta.flow_id.is_none() {
+                        if let Ok(flow_id) = FlowId::from_str(event.flow_context.flow_id.as_str()) {
+                            meta.flow_id = Some(flow_id);
+                        }
+                    }
+                }
 
                 // Skip system events entirely; they are not part of per-stage wide metrics.
                 if event.is_system() {
                     return Ok(());
+                }
+
+                // Consume middleware observability events (FLOWIP-059a).
+                if let ChainEventContent::Observability(ObservabilityPayload::Middleware(
+                    middleware_event,
+                )) = &event.content
+                {
+	                    match middleware_event {
+	                        MiddlewareLifecycle::CircuitBreaker(cb) => match cb {
+	                            CircuitBreakerEvent::Opened {
+	                                error_rate: _,
+	                                failure_count,
+	                                ..
+	                            } => {
+	                                store.record_circuit_breaker_transition(stage_id, "open");
+	                                store.circuit_breaker_state.insert(stage_id, 1.0);
+	                                store
+	                                    .circuit_breaker_consecutive_failures
+	                                    .insert(stage_id, *failure_count as f64);
+	                            }
+	                            CircuitBreakerEvent::Closed { .. } => {
+	                                store.record_circuit_breaker_transition(stage_id, "closed");
+	                                store.circuit_breaker_state.insert(stage_id, 0.0);
+	                                store
+	                                    .circuit_breaker_consecutive_failures
+	                                    .insert(stage_id, 0.0);
+	                            }
+	                            CircuitBreakerEvent::HalfOpen { .. } => {
+	                                store.record_circuit_breaker_transition(stage_id, "half_open");
+	                                store.circuit_breaker_state.insert(stage_id, 0.5);
+	                            }
+	                            CircuitBreakerEvent::Summary {
+	                                requests_processed: _,
+	                                requests_rejected: _,
+	                                state,
+	                                consecutive_failures,
+	                                rejection_rate,
+	                                successes_total,
+	                                failures_total,
+	                                opened_total,
+	                                time_in_closed_seconds,
+	                                time_in_open_seconds,
+	                                time_in_half_open_seconds,
+	                                ..
+	                            } => {
+	                                store.set_circuit_breaker_last_state(stage_id, state);
+
+	                                store
+	                                    .circuit_breaker_rejection_rate
+	                                    .insert(stage_id, *rejection_rate);
+	                                store
+	                                    .circuit_breaker_consecutive_failures
+	                                    .insert(stage_id, *consecutive_failures as f64);
+
+	                                // Cumulative breaker stats (FLOWIP-059a-2). These are emitted
+	                                // as monotonic totals in the Summary wide event.
+	                                let opened = store
+	                                    .circuit_breaker_opened_total
+	                                    .entry(stage_id)
+	                                    .or_insert(0);
+	                                *opened = (*opened).max(*opened_total);
+
+	                                let successes = store
+	                                    .circuit_breaker_successes_total
+	                                    .entry(stage_id)
+	                                    .or_insert(0);
+	                                *successes = (*successes).max(*successes_total);
+
+	                                let failures = store
+	                                    .circuit_breaker_failures_total
+	                                    .entry(stage_id)
+	                                    .or_insert(0);
+	                                *failures = (*failures).max(*failures_total);
+
+	                                store
+	                                    .circuit_breaker_time_in_state_seconds_total
+	                                    .entry((stage_id, "closed".to_string()))
+	                                    .and_modify(|v| *v = (*v).max(*time_in_closed_seconds))
+	                                    .or_insert(*time_in_closed_seconds);
+	                                store
+	                                    .circuit_breaker_time_in_state_seconds_total
+	                                    .entry((stage_id, "open".to_string()))
+	                                    .and_modify(|v| *v = (*v).max(*time_in_open_seconds))
+	                                    .or_insert(*time_in_open_seconds);
+	                                store
+	                                    .circuit_breaker_time_in_state_seconds_total
+	                                    .entry((stage_id, "half_open".to_string()))
+	                                    .and_modify(|v| *v = (*v).max(*time_in_half_open_seconds))
+	                                    .or_insert(*time_in_half_open_seconds);
+
+	                                // State string is Debug-formatted in the middleware
+	                                // (e.g. "Closed", "Open", "HalfOpen"); be liberal in parsing.
+	                                let state_norm = state.to_ascii_lowercase();
+	                                let state_value = match state_norm.as_str() {
+	                                    "closed" => Some(0.0),
+	                                    "open" => Some(1.0),
+	                                    "halfopen" | "half_open" | "half-open" => Some(0.5),
+	                                    _ => None,
+	                                };
+	                                if let Some(val) = state_value {
+	                                    store.circuit_breaker_state.insert(stage_id, val);
+	                                }
+	                            }
+	                            _ => {}
+	                        },
+                        _ => {}
+                    }
                 }
 
                 // Track flow timing for rate calculation based on any non-system event.
@@ -1000,6 +1422,10 @@ impl FsmAction for MetricsAggregatorAction {
                         metrics.snapshot_p95_ms = Some(runtime_ctx.recent_p95_ms);
                         metrics.snapshot_p99_ms = Some(runtime_ctx.recent_p99_ms);
                         metrics.snapshot_p999_ms = Some(runtime_ctx.recent_p999_ms);
+
+                        // Actual sum - never reconstructed from percentiles
+                        metrics.processing_time_sum_nanos =
+                            Some(runtime_ctx.processing_time_sum_nanos);
                     }
 
                     // Track error kinds for breakdown (total bounded later by snapshot errors_total)
@@ -1008,6 +1434,10 @@ impl FsmAction for MetricsAggregatorAction {
                         *metrics.errors_by_kind.entry(key).or_insert(0) += 1;
                     }
                 } // metrics reference dropped here
+
+                if let Some(runtime_ctx) = &event.runtime_context {
+                    store.update_control_metrics_from_runtime_context(stage_id, runtime_ctx);
+                }
                 Ok(())
             }
 
@@ -1017,13 +1447,12 @@ impl FsmAction for MetricsAggregatorAction {
                 // `/metrics` reflects delivery truth even if subscriptions lag.
                 for (stage_id, data_journal) in &ctx.stage_data_journals {
                     let error_journal = ctx.stage_error_journals.get(stage_id);
-                    if let Some(snapshot) =
-                        tail_read::read_stage_metrics_from_tail(
-                            data_journal,
-                            error_journal,
-                            *stage_id,
-                        )
-                        .await
+                    if let Some(snapshot) = tail_read::read_stage_metrics_from_tail(
+                        data_journal,
+                        error_journal,
+                        *stage_id,
+                    )
+                    .await
                     {
                         let metrics = ctx
                             .metrics_store
@@ -1052,6 +1481,32 @@ impl FsmAction for MetricsAggregatorAction {
                         metrics.snapshot_p95_ms = Some(snapshot.recent_p95_ms);
                         metrics.snapshot_p99_ms = Some(snapshot.recent_p99_ms);
                         metrics.snapshot_p999_ms = Some(snapshot.recent_p999_ms);
+
+                        // Actual sum - never reconstructed from percentiles
+                        metrics.processing_time_sum_nanos =
+                            Some(snapshot.processing_time_sum_nanos);
+                    }
+
+                    // Refresh control middleware cumulative metrics from the latest runtime_context.
+                    if let Some(runtime_ctx) =
+                        tail_read::read_latest_runtime_context_for_stage(data_journal, *stage_id)
+                            .await
+                    {
+                        ctx.metrics_store
+                            .update_control_metrics_from_runtime_context(*stage_id, &runtime_ctx);
+                    }
+                    if let Some(error_journal) = error_journal {
+                        if let Some(runtime_ctx) = tail_read::read_latest_runtime_context_for_stage(
+                            error_journal,
+                            *stage_id,
+                        )
+                        .await
+                        {
+                            ctx.metrics_store.update_control_metrics_from_runtime_context(
+                                *stage_id,
+                                &runtime_ctx,
+                            );
+                        }
                     }
                 }
 
@@ -1320,15 +1775,15 @@ mod tests {
     use obzenflow_core::event::context::StageType;
     use obzenflow_core::event::payloads::correlation_payload::CorrelationPayload;
     use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
+    use obzenflow_core::event::status::processing_status::ErrorKind;
     use obzenflow_core::event::ChainEventFactory;
     use obzenflow_core::event::CorrelationId;
-    use obzenflow_core::event::status::processing_status::ErrorKind;
+    use obzenflow_core::event::JournalEvent;
     use obzenflow_core::journal::journal::Journal;
     use obzenflow_core::journal::journal_error::JournalError;
     use obzenflow_core::journal::journal_owner::JournalOwner;
     use obzenflow_core::journal::journal_reader::JournalReader;
     use obzenflow_core::metrics::StageMetadata;
-    use obzenflow_core::event::JournalEvent;
     use std::marker::PhantomData;
 
     #[tokio::test]
@@ -1371,12 +1826,8 @@ mod tests {
         let mut stage_metrics = StageMetrics::default();
         stage_metrics.latest_events_processed_total = Some(42);
         stage_metrics.latest_errors_total = Some(3);
-        stage_metrics
-            .errors_by_kind
-            .insert(ErrorKind::Domain, 2);
-        stage_metrics
-            .errors_by_kind
-            .insert(ErrorKind::Remote, 1);
+        stage_metrics.errors_by_kind.insert(ErrorKind::Domain, 2);
+        stage_metrics.errors_by_kind.insert(ErrorKind::Remote, 1);
         stage_metrics.event_loops_total = 10;
         stage_metrics.event_loops_with_work_total = 7;
         store.stage_metrics.insert(stage_id, stage_metrics);
@@ -1389,6 +1840,7 @@ mod tests {
                 name: "test_stage".to_string(),
                 stage_type: StageType::Sink,
                 flow_name: "test_flow".to_string(),
+                flow_id: None,
             },
         );
 
@@ -1453,9 +1905,7 @@ mod tests {
                 Ok(None)
             }
 
-            async fn reader(
-                &self,
-            ) -> Result<Box<dyn JournalReader<T>>, JournalError> {
+            async fn reader(&self) -> Result<Box<dyn JournalReader<T>>, JournalError> {
                 Ok(Box::new(NoopReader))
             }
 
@@ -1497,11 +1947,9 @@ mod tests {
 
         // Build a context with only the fields required by build_app_metrics_snapshot.
         let ctx = MetricsAggregatorContext {
-            system_journal: Arc::new(
-                NoopJournal::<obzenflow_core::event::SystemEvent>::new(
-                    JournalOwner::system(obzenflow_core::SystemId::new()),
-                ),
-            ),
+            system_journal: Arc::new(NoopJournal::<obzenflow_core::event::SystemEvent>::new(
+                JournalOwner::system(obzenflow_core::SystemId::new()),
+            )),
             stage_data_journals: HashMap::new(),
             stage_error_journals: HashMap::new(),
             data_subscription: None,

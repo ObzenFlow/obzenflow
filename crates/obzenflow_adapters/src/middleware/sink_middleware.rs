@@ -149,10 +149,7 @@ impl<H: SinkHandler> MiddlewareSink<H> {
 
 #[async_trait]
 impl<H: SinkHandler> SinkHandler for MiddlewareSink<H> {
-    async fn consume(
-        &mut self,
-        event: ChainEvent,
-    ) -> Result<DeliveryPayload, HandlerError> {
+    async fn consume(&mut self, event: ChainEvent) -> Result<DeliveryPayload, HandlerError> {
         self.apply_middleware_with_error_handling(event).await
     }
 
@@ -226,10 +223,7 @@ mod tests {
 
     #[async_trait]
     impl SinkHandler for TestSink {
-        async fn consume(
-            &mut self,
-            event: ChainEvent,
-        ) -> Result<DeliveryPayload, HandlerError> {
+        async fn consume(&mut self, event: ChainEvent) -> Result<DeliveryPayload, HandlerError> {
             let mut fail_count = self.fail_count.lock().unwrap();
             if *fail_count > 0 {
                 *fail_count -= 1;

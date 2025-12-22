@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use std::str::FromStr;
 use ulid::Ulid;
 
 /// Unique identifier for a flow execution
@@ -51,6 +52,17 @@ impl From<Ulid> for FlowId {
 impl From<FlowId> for Ulid {
     fn from(id: FlowId) -> Self {
         id.0
+    }
+}
+
+impl FromStr for FlowId {
+    type Err = ulid::DecodeError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        // Handle both "flow_ULID" format and raw ULID
+        let ulid_str = s.strip_prefix("flow_").unwrap_or(s);
+        let ulid = Ulid::from_str(ulid_str)?;
+        Ok(FlowId(ulid))
     }
 }
 

@@ -12,7 +12,7 @@ use crate::supervised_base::{EventLoopDirective, SelfSupervised};
 use obzenflow_core::event::types::{SeqNo, ViolationCause};
 use obzenflow_core::event::{SystemEvent, WriterId};
 use obzenflow_core::journal::journal::Journal;
-use obzenflow_core::{StageId, id::SystemId};
+use obzenflow_core::{id::SystemId, StageId};
 use obzenflow_fsm::{fsm, EventVariant, StateVariant, Transition};
 use std::{
     sync::Arc,
@@ -85,21 +85,16 @@ fn startup_mode_manual() -> bool {
 
     static MANUAL: OnceLock<bool> = OnceLock::new();
 
-    *MANUAL.get_or_init(|| {
-        match std::env::var("OBZENFLOW_STARTUP_MODE") {
-            Ok(val) => val.eq_ignore_ascii_case("manual"),
-            Err(_) => false,
-        }
+    *MANUAL.get_or_init(|| match std::env::var("OBZENFLOW_STARTUP_MODE") {
+        Ok(val) => val.eq_ignore_ascii_case("manual"),
+        Err(_) => false,
     })
 }
 
 /// Helper used to decide whether a given edge should be treated as
 /// gating for the purposes of contract-driven pipeline aborts.
 #[inline]
-fn is_gating_edge_for_contract(
-    is_source: bool,
-    mode: SourceContractStrictMode,
-) -> bool {
+fn is_gating_edge_for_contract(is_source: bool, mode: SourceContractStrictMode) -> bool {
     // Non-source edges are always gating; source edges are gating
     // only when strict mode is configured to Abort.
     !is_source || matches!(mode, SourceContractStrictMode::Abort)
@@ -869,14 +864,10 @@ impl SelfSupervised for PipelineSupervisor {
                             obzenflow_core::event::SystemEventType::StageLifecycle {
                                 stage_id,
                                 event:
-                                    obzenflow_core::event::StageLifecycleEvent::Completed {
-                                        metrics,
-                                    },
+                                    obzenflow_core::event::StageLifecycleEvent::Completed { metrics },
                             } => {
                                 if let Some(m) = metrics {
-                                    context
-                                        .stage_lifecycle_metrics
-                                        .insert(*stage_id, m.clone());
+                                    context.stage_lifecycle_metrics.insert(*stage_id, m.clone());
                                 }
                                 // Process stage completion immediately
                                 Ok(EventLoopDirective::Transition(
@@ -1049,12 +1040,13 @@ impl SelfSupervised for PipelineSupervisor {
                         .unwrap_or(0);
 
                     // Compute flow-level lifecycle metrics from per-stage snapshots
-                    let metrics =
-                        crate::pipeline::fsm::compute_flow_lifecycle_metrics(context);
+                    let metrics = crate::pipeline::fsm::compute_flow_lifecycle_metrics(context);
 
-                    let system_event_factory = obzenflow_core::event::system_event::SystemEventFactory::new(self.system_id);
-                    let completed =
-                        system_event_factory.pipeline_completed(duration_ms, metrics);
+                    let system_event_factory =
+                        obzenflow_core::event::system_event::SystemEventFactory::new(
+                            self.system_id,
+                        );
+                    let completed = system_event_factory.pipeline_completed(duration_ms, metrics);
 
                     if let Err(e) = self.system_journal.append(completed, None).await {
                         tracing::error!(
@@ -1074,7 +1066,10 @@ impl SelfSupervised for PipelineSupervisor {
                 Ok(EventLoopDirective::Terminate)
             }
 
-            PipelineState::Failed { reason, failure_cause } => {
+            PipelineState::Failed {
+                reason,
+                failure_cause,
+            } => {
                 // Terminal failure: write flow_failed with duration + best-effort rollup metrics.
                 // This snapshot is derived from per-stage lifecycle snapshots
                 // (`stage_lifecycle_metrics`) via `compute_flow_lifecycle_metrics`, after a
@@ -1093,13 +1088,12 @@ impl SelfSupervised for PipelineSupervisor {
                     .map(|start| start.elapsed().as_millis() as u64)
                     .unwrap_or(0);
 
-                let metrics =
-                    Some(crate::pipeline::fsm::compute_flow_lifecycle_metrics(context));
+                let metrics = Some(crate::pipeline::fsm::compute_flow_lifecycle_metrics(
+                    context,
+                ));
 
                 let system_event_factory =
-                    obzenflow_core::event::system_event::SystemEventFactory::new(
-                        self.system_id,
-                    );
+                    obzenflow_core::event::system_event::SystemEventFactory::new(self.system_id);
                 let failed = system_event_factory.pipeline_failed(
                     reason.clone(),
                     duration_ms,
@@ -1172,15 +1166,11 @@ impl PipelineSupervisor {
                 &envelope.event.event
             {
                 match event {
-                    obzenflow_core::event::StageLifecycleEvent::Completed {
-                        metrics: Some(m),
-                    }
+                    obzenflow_core::event::StageLifecycleEvent::Completed { metrics: Some(m) }
                     | obzenflow_core::event::StageLifecycleEvent::Failed {
                         metrics: Some(m), ..
                     } => {
-                        context
-                            .stage_lifecycle_metrics
-                            .insert(*stage_id, m.clone());
+                        context.stage_lifecycle_metrics.insert(*stage_id, m.clone());
                     }
                     obzenflow_core::event::StageLifecycleEvent::Draining { metrics: Some(m) } => {
                         context
@@ -1208,9 +1198,8 @@ impl PipelineSupervisor {
         let seen = &context.contract_pairs;
 
         // Find any edge with an explicit failure (contract violated)
-        if let Some(((upstream, reader), status)) = seen
-            .iter()
-            .find(|((upstream, _reader), status)| {
+        if let Some(((upstream, reader), status)) =
+            seen.iter().find(|((upstream, _reader), status)| {
                 let is_source = context.expected_sources.contains(upstream);
                 let mode = source_contract_mode();
                 let is_gating = is_gating_edge_for_contract(is_source, mode);
@@ -1275,10 +1264,7 @@ impl PipelineSupervisor {
     }
 
     /// Synthesize and write AllStagesCompleted when we know we’re done
-    async fn write_all_stages_completed(
-        &self,
-        context: &PipelineContext,
-    ) -> Result<(), String> {
+    async fn write_all_stages_completed(&self, context: &PipelineContext) -> Result<(), String> {
         let event = SystemEvent::new(
             WriterId::from(self.system_id),
             obzenflow_core::event::SystemEventType::PipelineLifecycle(

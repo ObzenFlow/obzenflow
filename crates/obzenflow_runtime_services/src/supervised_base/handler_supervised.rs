@@ -149,9 +149,7 @@ pub trait HandlerSupervisedExt: HandlerSupervised {
                             let failure_actions = machine
                                 .handle(failure_event, &mut context)
                                 .await
-                                .map_err(|fe| {
-                                    format!("FSM error after action failure: {fe}")
-                                })?;
+                                .map_err(|fe| format!("FSM error after action failure: {fe}"))?;
 
                             tracing::info!(
                                 target: "flowip-080o",
@@ -167,14 +165,9 @@ pub trait HandlerSupervisedExt: HandlerSupervised {
                                     action = ?failure_action,
                                     "HandlerSupervised: executing failure-handling action"
                                 );
-                                failure_action
-                                    .execute(&mut context)
-                                    .await
-                                    .map_err(|e2| {
-                                        format!(
-                                            "Action error during failure handling: {e2}"
-                                        )
-                                    })?;
+                                failure_action.execute(&mut context).await.map_err(|e2| {
+                                    format!("Action error during failure handling: {e2}")
+                                })?;
                             }
 
                             // After executing failure-handling actions, break out of the

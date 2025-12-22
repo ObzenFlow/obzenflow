@@ -56,11 +56,33 @@ pub enum SystemEventType {
         reason: Option<crate::event::types::ViolationCause>,
     },
 
+    /// Raw contract verification result for a single contract on an edge.
+    ///
+    /// This is emitted by readers/subscribers when `ContractChain::verify_all`
+    /// runs (typically at EOF) and is intended for metrics/observability rather
+    /// than pipeline gating.
+    #[serde(rename = "contract_result")]
+    ContractResult {
+        upstream: StageId,
+        reader: StageId,
+        contract_name: String,
+        /// "passed", "failed", or "pending"
+        status: String,
+        /// Stable category label (e.g. "seq_divergence", "content_mismatch", "other")
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cause: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reader_seq: Option<crate::event::types::SeqNo>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        advertised_writer_seq: Option<crate::event::types::SeqNo>,
+    },
+
     /// Contract decision overridden by a policy layer (e.g., breaker-aware).
     #[serde(rename = "contract_override_by_policy")]
     ContractOverrideByPolicy {
         upstream: StageId,
         reader: StageId,
+        contract_name: String,
         original_cause: crate::contracts::ViolationCause,
         policy: String,
     },
@@ -190,10 +212,7 @@ impl SystemEvent {
     }
 
     /// Helper for stages to create completed events with metrics
-    pub fn stage_completed_with_metrics(
-        stage_id: StageId,
-        metrics: StageMetricsSnapshot,
-    ) -> Self {
+    pub fn stage_completed_with_metrics(stage_id: StageId, metrics: StageMetricsSnapshot) -> Self {
         Self::new(
             WriterId::from(stage_id),
             SystemEventType::StageLifecycle {
@@ -478,6 +497,12 @@ impl JournalEvent for SystemEvent {
                     "system.contract.fail"
                 }
             }
+            SystemEventType::ContractResult { status, .. } => match status.as_str() {
+                "passed" => "system.contract.result.passed",
+                "failed" => "system.contract.result.failed",
+                "pending" => "system.contract.result.pending",
+                _ => "system.contract.result",
+            },
             SystemEventType::ContractOverrideByPolicy { .. } => {
                 "system.contract.override_by_policy"
             }

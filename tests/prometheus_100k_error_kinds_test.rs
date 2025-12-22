@@ -169,8 +169,7 @@ impl SinkHandler for CompletionSink {
 #[tokio::test]
 async fn prometheus_100k_error_processor_error_kinds_are_domain_only() -> Result<()> {
     // Use a dedicated journal directory for this test run.
-    let journal_root =
-        std::path::PathBuf::from("target/prometheus_100k_error_kinds_test_journal");
+    let journal_root = std::path::PathBuf::from("target/prometheus_100k_error_kinds_test_journal");
 
     // Build a minimal flow that mirrors the prometheus_100k_demo core path:
     // high_volume_source -> error_processor -> completion_sink.
@@ -180,7 +179,7 @@ async fn prometheus_100k_error_processor_error_kinds_are_domain_only() -> Result
 
     let flow_handle = flow! {
         name: "prometheus_100k_demo",
-        journals: disk_journals(journal_root),
+        journals: disk_journals(journal_root.clone()),
         middleware: [],
 
         stages: {
@@ -257,4 +256,3 @@ async fn prometheus_100k_error_processor_error_kinds_are_domain_only() -> Result
 
     Ok(())
 }
-

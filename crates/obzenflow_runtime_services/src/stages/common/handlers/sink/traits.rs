@@ -44,8 +44,8 @@
 //! }
 //! ```
 
-use async_trait::async_trait;
 use crate::stages::common::handler_error::HandlerError;
+use async_trait::async_trait;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryPayload;
 use obzenflow_core::ChainEvent;
 
@@ -59,10 +59,7 @@ pub trait SinkHandler: Send + Sync {
     /// while processing this event (e.g., remote timeout, decode failure).
     /// The supervisor will turn this into an error-marked event using
     /// ErrorKind, route it appropriately, and keep the sink running.
-    async fn consume(
-        &mut self,
-        event: ChainEvent,
-    ) -> Result<DeliveryPayload, HandlerError>;
+    async fn consume(&mut self, event: ChainEvent) -> Result<DeliveryPayload, HandlerError>;
 
     /// Flush in‑memory buffers **and optionally** emit a `DeliveryPayload`
     /// capturing the flush action (e.g., `DeliveryResult::Success` for a batch

@@ -14,7 +14,7 @@ use obzenflow_core::event::{
     constants, context::StageType, ChainEvent, ChainEventContent, ChainEventFactory, SystemEvent,
     SystemEventFactory, WriterId,
 };
-use obzenflow_core::id::SystemId;
+use obzenflow_core::id::{FlowId, SystemId};
 use obzenflow_core::journal::journal::Journal;
 use obzenflow_core::metrics::{FlowLifecycleMetricsSnapshot, StageMetricsSnapshot};
 use obzenflow_core::StageId;
@@ -134,16 +134,20 @@ pub struct PipelineContext {
     /// Topology for structure queries
     pub topology: Arc<obzenflow_topology::Topology>,
 
+    /// User-specified flow name (from `flow!`)
+    pub flow_name: String,
+
+    /// Flow execution ID (for metrics/observability joinability)
+    pub flow_id: FlowId,
+
     /// System journal for pipeline orchestration events
     pub system_journal: Arc<dyn Journal<SystemEvent>>,
 
     /// Stage supervisors by ID (non-sources only)
-    pub stage_supervisors:
-        HashMap<StageId, crate::stages::common::stage_handle::BoxedStageHandle>,
+    pub stage_supervisors: HashMap<StageId, crate::stages::common::stage_handle::BoxedStageHandle>,
 
     /// Source supervisors by ID (sources only)
-    pub source_supervisors:
-        HashMap<StageId, crate::stages::common::stage_handle::BoxedStageHandle>,
+    pub source_supervisors: HashMap<StageId, crate::stages::common::stage_handle::BoxedStageHandle>,
 
     /// Completed stages tracking
     pub completed_stages: Vec<StageId>,
@@ -177,7 +181,6 @@ pub struct PipelineContext {
     pub expected_sources: Vec<StageId>,
     // TODO: Add metrics handle once MetricsAggregatorBuilder is implemented
     // pub metrics_handle: Option<MetricsHandle>,
-
     /// Last known per-stage lifecycle metrics (for flow rollup)
     pub stage_lifecycle_metrics: HashMap<StageId, StageMetricsSnapshot>,
 
@@ -218,12 +221,12 @@ pub(crate) fn compute_flow_lifecycle_metrics(
 
             match core_type {
                 CoreStageType::FiniteSource | CoreStageType::InfiniteSource => {
-                    events_in_total = events_in_total
-                        .saturating_add(snapshot.events_processed_total);
+                    events_in_total =
+                        events_in_total.saturating_add(snapshot.events_processed_total);
                 }
                 CoreStageType::Sink => {
-                    events_out_total = events_out_total
-                        .saturating_add(snapshot.events_processed_total);
+                    events_out_total =
+                        events_out_total.saturating_add(snapshot.events_processed_total);
                 }
                 _ => {}
             }
@@ -604,7 +607,8 @@ impl FsmAction for PipelineAction {
                             let metadata = obzenflow_core::metrics::StageMetadata {
                                 name: stage_info.name.clone(),
                                 stage_type: stage_handle.stage_type(),
-                                flow_name: context.topology.flow_name(),
+                                flow_name: context.flow_name.clone(),
+                                flow_id: Some(context.flow_id.clone()),
                             };
                             stage_metadata.insert(*stage_id, metadata);
                         }
@@ -619,7 +623,8 @@ impl FsmAction for PipelineAction {
                             let metadata = obzenflow_core::metrics::StageMetadata {
                                 name: stage_info.name.clone(),
                                 stage_type: stage_handle.stage_type(),
-                                flow_name: context.topology.flow_name(),
+                                flow_name: context.flow_name.clone(),
+                                flow_id: Some(context.flow_id.clone()),
                             };
                             stage_metadata.insert(*stage_id, metadata);
                         }

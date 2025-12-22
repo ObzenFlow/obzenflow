@@ -418,8 +418,7 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
 
                 // Take ownership of subscription + contract state so no borrow of ctx lives across .await
                 let mut ref_subscription = ctx.reference_subscription.take();
-                let mut ref_contract_state =
-                    std::mem::take(&mut ctx.reference_contract_state);
+                let mut ref_contract_state = std::mem::take(&mut ctx.reference_contract_state);
 
                 let mut directive: Result<
                     EventLoopDirective<Self::Event>,
@@ -506,11 +505,10 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
 
                                                     if outcome.is_final {
                                                         // Reference EOF is final -> transition to Enriching
-                                                        directive = Ok(
-                                                            EventLoopDirective::Transition(
+                                                        directive =
+                                                            Ok(EventLoopDirective::Transition(
                                                                 JoinEvent::ReceivedEOF,
-                                                            ),
-                                                        );
+                                                            ));
                                                     } else {
                                                         // Non-final EOF: continue hydrating.
                                                         directive =
@@ -518,8 +516,7 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                                     }
                                                 } else {
                                                     // No outcome yet; keep hydrating.
-                                                    directive =
-                                                        Ok(EventLoopDirective::Continue);
+                                                    directive = Ok(EventLoopDirective::Continue);
                                                 }
                                             } else {
                                                 // Non-EOF control event, just continue.
@@ -594,8 +591,7 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
 
                                             // Track reference events for heartbeat snapshots.
                                             ctx.events_since_last_heartbeat =
-                                                ctx.events_since_last_heartbeat
-                                                    .saturating_add(1);
+                                                ctx.events_since_last_heartbeat.saturating_add(1);
                                             if let Err(e) =
                                                 self.emit_join_heartbeat_if_due(ctx).await
                                             {
@@ -723,8 +719,7 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
 
                 // Take ownership of subscription + contract state so no borrow of ctx lives across .await
                 let mut stream_subscription = ctx.stream_subscription.take();
-                let mut stream_contract_state =
-                    std::mem::take(&mut ctx.stream_contract_state);
+                let mut stream_contract_state = std::mem::take(&mut ctx.stream_contract_state);
 
                 let mut directive: Result<
                     EventLoopDirective<Self::Event>,
@@ -802,11 +797,10 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                                     );
 
                                                     if outcome.is_final {
-                                                        directive = Ok(
-                                                            EventLoopDirective::Transition(
+                                                        directive =
+                                                            Ok(EventLoopDirective::Transition(
                                                                 JoinEvent::ReceivedEOF,
-                                                            ),
-                                                        );
+                                                            ));
                                                     } else {
                                                         // Non-final EOF: keep enriching.
                                                         directive =
@@ -814,8 +808,7 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                                     }
                                                 } else {
                                                     // No outcome yet; keep enriching.
-                                                    directive =
-                                                        Ok(EventLoopDirective::Continue);
+                                                    directive = Ok(EventLoopDirective::Continue);
                                                 }
                                             } else {
                                                 // Non-EOF control event; just continue.
@@ -868,10 +861,7 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                         || async move {
                                             let mut state = state;
                                             let res = handler.process_event(
-                                                &mut state,
-                                                event,
-                                                source_id,
-                                                writer_id,
+                                                &mut state, event, source_id, writer_id,
                                             );
                                             Ok((res, state))
                                         },
@@ -916,25 +906,24 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
 
                                             // Count all error-marked events for lifecycle / flow rollups,
                                             // even when they are not stage-fatal.
-                                            ctx.instrumentation
-                                                .record_error(err.kind());
+                                            ctx.instrumentation.record_error(err.kind());
 
-                                            let route_to_error_journal =
-                                                match &error_event.processing_info.status {
-                                                    ProcessingStatus::Error { kind, .. } => {
-                                                        match kind {
-                                                            Some(ErrorKind::Timeout)
-                                                            | Some(ErrorKind::Remote)
-                                                            | Some(ErrorKind::Deserialization) => {
-                                                                true
-                                                            }
-                                                            Some(ErrorKind::Validation)
-                                                            | Some(ErrorKind::Domain) => false,
-                                                            None | Some(ErrorKind::Unknown) => true,
-                                                        }
+                                            let route_to_error_journal = match &error_event
+                                                .processing_info
+                                                .status
+                                            {
+                                                ProcessingStatus::Error { kind, .. } => {
+                                                    match kind {
+                                                        Some(ErrorKind::Timeout)
+                                                        | Some(ErrorKind::Remote)
+                                                        | Some(ErrorKind::Deserialization) => true,
+                                                        Some(ErrorKind::Validation)
+                                                        | Some(ErrorKind::Domain) => false,
+                                                        None | Some(ErrorKind::Unknown) => true,
                                                     }
-                                                    _ => false,
-                                                };
+                                                }
+                                                _ => false,
+                                            };
 
                                             if route_to_error_journal {
                                                 if error_event.is_data() {
@@ -946,20 +935,18 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                                     .append(error_event, None)
                                                     .await
                                                     .map_err(|e| {
-                                                        format!(
-                                                            "Failed to write join error event: {}",
-                                                            e
-                                                        )
-                                                    })?;
+                                                    format!(
+                                                        "Failed to write join error event: {}",
+                                                        e
+                                                    )
+                                                })?;
                                             } else {
-                                                    if error_event.is_data() {
-                                                        ctx.instrumentation
-                                                            .record_emitted(&error_event);
-                                                        subscription.track_output_event();
-                                                    }
-                                                    self.data_journal
-                                                        .append(error_event, None)
-                                                        .await?;
+                                                if error_event.is_data() {
+                                                    ctx.instrumentation
+                                                        .record_emitted(&error_event);
+                                                    subscription.track_output_event();
+                                                }
+                                                self.data_journal.append(error_event, None).await?;
                                             }
 
                                             directive = Ok(EventLoopDirective::Continue);
@@ -1061,13 +1048,11 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
 
                 // Take ownership of reference subscription and contract state
                 let mut ref_subscription = ctx.reference_subscription.take();
-                let mut ref_contract_state =
-                    std::mem::take(&mut ctx.reference_contract_state);
+                let mut ref_contract_state = std::mem::take(&mut ctx.reference_contract_state);
 
                 // Take ownership of stream subscription and contract state
                 let mut stream_subscription = ctx.stream_subscription.take();
-                let mut stream_contract_state =
-                    std::mem::take(&mut ctx.stream_contract_state);
+                let mut stream_contract_state = std::mem::take(&mut ctx.stream_contract_state);
 
                 let mut directive: Result<
                     EventLoopDirective<Self::Event>,
@@ -1115,8 +1100,12 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                     &ctx.instrumentation,
                                     || async move {
                                         let mut state = state;
-                                        let res =
-                                            handler.process_event(&mut state, event, reference_stage_id, writer_id);
+                                        let res = handler.process_event(
+                                            &mut state,
+                                            event,
+                                            reference_stage_id,
+                                            writer_id,
+                                        );
                                         Ok((res, state))
                                     },
                                 )
@@ -1146,12 +1135,10 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                         );
                                         // Stage-fatal handler error: record it in error metrics.
                                         ctx.instrumentation.record_error(err.kind());
-                                        directive = Ok(EventLoopDirective::Transition(
-                                            JoinEvent::Error(format!(
-                                                "Join handler drain-side error: {:?}",
-                                                err
-                                            )),
-                                        ));
+                                        directive =
+                                            Ok(EventLoopDirective::Transition(JoinEvent::Error(
+                                                format!("Join handler drain-side error: {:?}", err),
+                                            )));
                                     }
                                     Err(e) => {
                                         tracing::error!(
@@ -1159,12 +1146,10 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                             error = ?e,
                                             "Join handler instrumentation error during reference draining"
                                         );
-                                        directive = Ok(EventLoopDirective::Transition(
-                                            JoinEvent::Error(format!(
-                                                "Join handler drain-side error: {}",
-                                                e
-                                            )),
-                                        ));
+                                        directive =
+                                            Ok(EventLoopDirective::Transition(JoinEvent::Error(
+                                                format!("Join handler drain-side error: {}", e),
+                                            )));
                                     }
                                 }
                             } else if !envelope.event.is_eof() {
@@ -1304,23 +1289,25 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                             "Join handler error during draining: {:?}",
                                             err
                                         );
-                                            let error_event = envelope
-                                                .event
-                                                .clone()
-                                                .mark_as_error(reason, err.kind());
+                                        let error_event = envelope
+                                            .event
+                                            .clone()
+                                            .mark_as_error(reason, err.kind());
 
-                                        let route_to_error_journal =
-                                            match &error_event.processing_info.status {
-                                                ProcessingStatus::Error { kind, .. } => match kind {
-                                                    Some(ErrorKind::Timeout)
-                                                    | Some(ErrorKind::Remote)
-                                                    | Some(ErrorKind::Deserialization) => true,
-                                                    Some(ErrorKind::Validation)
-                                                    | Some(ErrorKind::Domain) => false,
-                                                    None | Some(ErrorKind::Unknown) => true,
-                                                },
-                                                _ => false,
-                                            };
+                                        let route_to_error_journal = match &error_event
+                                            .processing_info
+                                            .status
+                                        {
+                                            ProcessingStatus::Error { kind, .. } => match kind {
+                                                Some(ErrorKind::Timeout)
+                                                | Some(ErrorKind::Remote)
+                                                | Some(ErrorKind::Deserialization) => true,
+                                                Some(ErrorKind::Validation)
+                                                | Some(ErrorKind::Domain) => false,
+                                                None | Some(ErrorKind::Unknown) => true,
+                                            },
+                                            _ => false,
+                                        };
 
                                         if route_to_error_journal {
                                             if error_event.is_data() {
@@ -1350,12 +1337,10 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                             error = ?e,
                                             "Join handler instrumentation error during draining"
                                         );
-                                        directive = Ok(EventLoopDirective::Transition(
-                                            JoinEvent::Error(format!(
-                                                "Join handler drain-side error: {}",
-                                                e
-                                            )),
-                                        ));
+                                        directive =
+                                            Ok(EventLoopDirective::Transition(JoinEvent::Error(
+                                                format!("Join handler drain-side error: {}", e),
+                                            )));
                                     }
                                 }
                             } else if !envelope.event.is_eof() {
@@ -1428,9 +1413,7 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                 let events = handler
                     .drain(&final_state)
                     .await
-                    .map_err(|err| {
-                        obzenflow_fsm::FsmError::HandlerError(err.to_string())
-                    })?;
+                    .map_err(|err| obzenflow_fsm::FsmError::HandlerError(err.to_string()))?;
 
                 // Write any final events
                 for event in events {
@@ -1495,7 +1478,7 @@ async fn emit_join_heartbeat_if_due_impl<H: JoinHandler + Send + Sync + 'static>
     }
 
     // Capture the latest runtime context snapshot for this join stage.
-    let runtime_context = ctx.instrumentation.snapshot();
+    let runtime_context = ctx.instrumentation.snapshot_with_control();
 
     use obzenflow_core::event::context::{FlowContext, StageType};
     use obzenflow_core::event::payloads::observability_payload::{

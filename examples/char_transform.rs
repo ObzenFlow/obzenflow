@@ -59,7 +59,12 @@ impl TextCharSource {
 }
 
 impl FiniteSourceHandler for TextCharSource {
-    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, obzenflow_runtime_services::stages::common::handlers::source::traits::SourceError> {
+    fn next(
+        &mut self,
+    ) -> Result<
+        Option<Vec<ChainEvent>>,
+        obzenflow_runtime_services::stages::common::handlers::source::traits::SourceError,
+    > {
         // Check if we've processed all sentences
         if self.current_sentence >= self.sentences.len() {
             return Ok(None);
@@ -199,10 +204,7 @@ impl OutputSink {
 
 #[async_trait]
 impl SinkHandler for OutputSink {
-    async fn consume(
-        &mut self,
-        event: ChainEvent,
-    ) -> Result<DeliveryPayload, HandlerError> {
+    async fn consume(&mut self, event: ChainEvent) -> Result<DeliveryPayload, HandlerError> {
         // ✨ FLOWIP-082a: Check event type using constant (from ReduceTyped)
         if event.event_type() == TextAccumulator::EVENT_TYPE {
             let payload = event.payload();

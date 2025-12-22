@@ -35,8 +35,10 @@ impl ContractChain {
         let placeholder_stage = obzenflow_core::StageId::new();
         self.write_contexts
             .push(ContractWriteContext::new(placeholder_stage));
-        self.read_contexts
-            .push(ContractReadContext::new(placeholder_stage, placeholder_stage));
+        self.read_contexts.push(ContractReadContext::new(
+            placeholder_stage,
+            placeholder_stage,
+        ));
         self.contracts.push(Box::new(contract));
         self
     }
@@ -87,7 +89,7 @@ impl ContractChain {
         &self,
         upstream_stage: obzenflow_core::StageId,
         downstream_stage: obzenflow_core::StageId,
-    ) -> Vec<ContractResult> {
+    ) -> Vec<(String, ContractResult)> {
         self.contracts
             .iter()
             .zip(self.write_contexts.iter())
@@ -99,9 +101,8 @@ impl ContractChain {
                     write_state: &write_ctx.state,
                     read_state: &read_ctx.state,
                 };
-                contract.verify(&ctx)
+                (contract.name().to_string(), contract.verify(&ctx))
             })
             .collect()
     }
 }
-

@@ -5,10 +5,12 @@ use crate::supervised_base::base::Supervisor;
 use crate::supervised_base::{EventLoopDirective, HandlerSupervised};
 use obzenflow_core::event::context::FlowContext;
 use obzenflow_core::event::SystemEvent;
+use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
 use obzenflow_core::journal::journal::Journal;
 use obzenflow_core::{ChainEvent, StageId, WriterId};
 use obzenflow_fsm::{fsm, EventVariant, StateVariant, Transition};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use super::fsm::{FiniteSourceAction, FiniteSourceContext, FiniteSourceEvent, FiniteSourceState};
 
@@ -344,71 +346,94 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> H
 
                 // Get next batch of events from handler (synchronous, no locks needed).
                 // 051b: handler now returns Result<Option<Vec<ChainEvent>>, SourceError>
+                let tick_started_at = Instant::now();
                 let next_result = self.handler.next();
+                let tick_duration = tick_started_at.elapsed();
 
                 match next_result {
                     Ok(Some(events)) if !events.is_empty() => {
-                    // We have work - increment loops with work
-                    self.context
-                        .instrumentation
-                        .event_loops_with_work_total
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        // We have work - increment loops with work
+                        self.context
+                            .instrumentation
+                            .event_loops_with_work_total
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-                    // Track whether this tick produced any data events.
-                    // Control/observability-only batches should still be written
-                    // but treated as "no data" for completion semantics (051b/081a).
-                    let mut had_data = false;
-
-                    for event in events {
-                        // Enrich with runtime context
-                        let flow_context = FlowContext {
-                            flow_name: self.context.flow_name.clone(),
-                            flow_id: self.context.flow_id.to_string(),
-                            stage_name: self.context.stage_name.clone(),
-                            stage_id: self.stage_id.clone(),
-                            stage_type: obzenflow_core::event::context::StageType::FiniteSource,
+                        // Track whether this tick produced any data events.
+                        // Control/observability-only batches should still be written
+                        // but treated as "no data" for completion semantics (051b/081a).
+                        let mut had_data = false;
+                        let data_events_in_tick = events.iter().filter(|event| event.is_data()).count();
+                        let per_data_event_duration = if data_events_in_tick > 0 {
+                            let nanos = (tick_duration.as_nanos()
+                                / data_events_in_tick as u128)
+                                .min(u64::MAX as u128) as u64;
+                            Duration::from_nanos(nanos)
+                        } else {
+                            Duration::from_nanos(0)
                         };
 
-                        let enriched_event = event
-                            .with_flow_context(flow_context)
-                            .with_runtime_context(self.context.instrumentation.snapshot());
+                        for event in events {
+                            // Enrich with runtime context
+                            let flow_context = FlowContext {
+                                flow_name: self.context.flow_name.clone(),
+                                flow_id: self.context.flow_id.to_string(),
+                                stage_name: self.context.stage_name.clone(),
+                                stage_id: self.stage_id.clone(),
+                                stage_type: obzenflow_core::event::context::StageType::FiniteSource,
+                            };
 
-                        // Apply run_if_not_error pattern (FLOWIP-082g)
-                        let events_to_write =
-                            self.run_if_not_error(enriched_event.clone(), |e| vec![e]);
+                            let staged_event = event.with_flow_context(flow_context);
 
-                        // Write events based on their status
-                        for event_to_write in events_to_write {
-                            let journal = if matches!(event_to_write.processing_info.status, obzenflow_core::event::status::processing_status::ProcessingStatus::Error { .. }) {
+                            // Track error-marked events for lifecycle/flow rollups.
+                            // Record before snapshot so the error event carries updated totals.
+                            if let ProcessingStatus::Error { kind, .. } =
+                                &staged_event.processing_info.status
+                            {
+                                let k = kind.clone().unwrap_or(ErrorKind::Unknown);
+                                self.context.instrumentation.record_error(k);
+                            }
+
+                            // Apply run_if_not_error pattern (FLOWIP-082g)
+                            let events_to_write = self.run_if_not_error(staged_event, |e| vec![e]);
+
+                            // Write events based on their status
+                            for event_to_write in events_to_write {
+                                let journal = if matches!(event_to_write.processing_info.status, obzenflow_core::event::status::processing_status::ProcessingStatus::Error { .. }) {
                                 &self.context.error_journal
                             } else {
                                 &self.context.data_journal
                             };
-                            // FLOWIP-080o-part-2: Only count data events for writer_seq.
-                            // Lifecycle/control events are observability overhead and
-                            // should not participate in transport contracts.
-                            if event_to_write.is_data() {
-                                had_data = true;
-                                self.context.instrumentation.record_emitted(&event_to_write);
-                                self.context
-                                    .instrumentation
-                                    .events_processed_total
-                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                // FLOWIP-080o-part-2: Only count data events for writer_seq.
+                                // Lifecycle/control events are observability overhead and
+                                // should not participate in transport contracts.
+                                if event_to_write.is_data() {
+                                    had_data = true;
+                                    self.context.instrumentation.record_emitted(&event_to_write);
+                                    self.context
+                                        .instrumentation
+                                        .events_processed_total
+                                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                    self.context
+                                        .instrumentation
+                                        .record_processing_time(per_data_event_duration);
+                                }
+                                let enriched_event_to_write = event_to_write.with_runtime_context(
+                                    self.context.instrumentation.snapshot_with_control(),
+                                );
+                                journal
+                                    .append(enriched_event_to_write, None)
+                                    .await
+                                    .map_err(|e| format!("Failed to write event: {}", e))?;
                             }
-                            journal
-                                .append(event_to_write, None)
-                                .await
-                                .map_err(|e| format!("Failed to write event: {}", e))?;
                         }
+
+                        tracing::trace!(
+                            stage_name = %self.context.stage_name,
+                            "Finite source emitted batch of events"
+                        );
+
+                        Ok(EventLoopDirective::Continue)
                     }
-
-                    tracing::trace!(
-                        stage_name = %self.context.stage_name,
-                        "Finite source emitted batch of events"
-                    );
-
-                    Ok(EventLoopDirective::Continue)
-                }
                     Ok(Some(_events)) => {
                         // Handler advanced but produced only control/observability events.
                         // Treat as "no data" for completion semantics.

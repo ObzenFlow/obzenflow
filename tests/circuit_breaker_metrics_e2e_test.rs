@@ -9,8 +9,7 @@ use obzenflow_adapters::middleware::circuit_breaker;
 use obzenflow_core::{
     event::chain_event::{ChainEvent, ChainEventFactory},
     event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload},
-    StageId,
-    WriterId,
+    StageId, WriterId,
 };
 use obzenflow_dsl_infra::{flow, sink, source, transform};
 use obzenflow_infra::journal::disk_journals;
@@ -41,10 +40,7 @@ impl ControlledFailureTransform {
 
 #[async_trait]
 impl TransformHandler for ControlledFailureTransform {
-    fn process(
-        &self,
-        mut event: ChainEvent,
-    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
+    fn process(&self, mut event: ChainEvent) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
         let count = {
             let mut c = self.success_count.lock().unwrap();
             *c += 1;
@@ -64,17 +60,16 @@ impl TransformHandler for ControlledFailureTransform {
             let mut payload = event.payload().clone();
             payload["processed"] = json!(true);
             payload["count"] = json!(count);
-            event = ChainEventFactory::data_event(
-                event.writer_id.clone(),
-                event.event_type(),
-                payload,
-            );
+            event =
+                ChainEventFactory::data_event(event.writer_id.clone(), event.event_type(), payload);
         }
 
         Ok(vec![event])
     }
 
-    async fn drain(&mut self) -> std::result::Result<(), HandlerError> { Ok(()) }
+    async fn drain(&mut self) -> std::result::Result<(), HandlerError> {
+        Ok(())
+    }
 }
 
 /// Source that generates a stream of events with delays
@@ -370,14 +365,13 @@ async fn test_circuit_breaker_summary_events() -> Result<()> {
 
     #[async_trait]
     impl TransformHandler for PassthroughTransform {
-        fn process(
-            &self,
-            event: ChainEvent,
-        ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
+        fn process(&self, event: ChainEvent) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
             Ok(vec![event])
         }
 
-        async fn drain(&mut self) -> std::result::Result<(), HandlerError> { Ok(()) }
+        async fn drain(&mut self) -> std::result::Result<(), HandlerError> {
+            Ok(())
+        }
     }
 
     let flow_handle = flow! {

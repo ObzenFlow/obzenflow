@@ -71,16 +71,15 @@ struct UppercaseTransform;
 
 #[async_trait]
 impl TransformHandler for UppercaseTransform {
-    fn process(
-        &self,
-        event: ChainEvent,
-    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
+    fn process(&self, event: ChainEvent) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
         // For metrics purposes we don't need to mutate payloads –
         // just ensure the transform runs and emits an event.
         Ok(vec![event])
     }
 
-    async fn drain(&mut self) -> std::result::Result<(), HandlerError> { Ok(()) }
+    async fn drain(&mut self) -> std::result::Result<(), HandlerError> {
+        Ok(())
+    }
 }
 
 /// Sink that collects events

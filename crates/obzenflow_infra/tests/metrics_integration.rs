@@ -2,22 +2,20 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use obzenflow_core::event::context::StageType;
+use obzenflow_core::event::JournalWriterId;
 use obzenflow_core::event::{ChainEventFactory, SystemEvent, SystemEventType, WriterId};
 use obzenflow_core::id::{StageId, SystemId};
 use obzenflow_core::journal::journal::Journal;
 use obzenflow_core::journal::journal_owner::JournalOwner;
-use obzenflow_core::metrics::{
-    AppMetricsSnapshot, MetricsExporter, StageMetadata,
-};
+use obzenflow_core::metrics::{AppMetricsSnapshot, MetricsExporter, StageMetadata};
+use obzenflow_core::EventEnvelope;
+use obzenflow_fsm::FsmAction;
 use obzenflow_infra::journal::MemoryJournal;
+use obzenflow_runtime_services::metrics::fsm::build_metrics_aggregator_fsm;
 use obzenflow_runtime_services::metrics::{
     MetricsAggregatorAction, MetricsAggregatorContext, MetricsAggregatorEvent,
     MetricsAggregatorState, MetricsStore, StageMetrics,
 };
-use obzenflow_runtime_services::metrics::fsm::build_metrics_aggregator_fsm;
-use obzenflow_fsm::FsmAction;
-use obzenflow_core::event::JournalWriterId;
-use obzenflow_core::EventEnvelope;
 
 /// Simple in-memory exporter that records AppMetricsSnapshot values.
 #[derive(Default)]
@@ -55,6 +53,7 @@ fn single_stage_metadata(stage_id: StageId) -> HashMap<StageId, StageMetadata> {
             name: "test_stage".to_string(),
             stage_type: StageType::Transform,
             flow_name: "test_flow".to_string(),
+            flow_id: None,
         },
     );
     map
@@ -100,7 +99,9 @@ async fn export_snapshot_sanity_from_metrics_store() {
     stage_metrics.latest_errors_total = Some(2);
     stage_metrics.event_loops_total = 5;
     stage_metrics.event_loops_with_work_total = 5;
-    ctx.metrics_store.stage_metrics.insert(stage_id, stage_metrics);
+    ctx.metrics_store
+        .stage_metrics
+        .insert(stage_id, stage_metrics);
 
     // Manually execute the ExportMetrics action.
     MetricsAggregatorAction::ExportMetrics
@@ -116,14 +117,8 @@ async fn export_snapshot_sanity_from_metrics_store() {
     let last = snapshots.last().unwrap();
 
     // Basic sanity: counts and processing metadata made it into the snapshot.
-    assert_eq!(
-        last.event_counts.get(&stage_id).copied().unwrap_or(0),
-        10
-    );
-    assert_eq!(
-        last.error_counts.get(&stage_id).copied().unwrap_or(0),
-        2
-    );
+    assert_eq!(last.event_counts.get(&stage_id).copied().unwrap_or(0), 10);
+    assert_eq!(last.error_counts.get(&stage_id).copied().unwrap_or(0), 2);
     assert!(
         last.stage_metadata.get(&stage_id).is_some(),
         "expected stage metadata for stage"
@@ -187,27 +182,18 @@ async fn running_state_process_batch_transitions() {
 
     // Move FSM to Running.
     let actions = fsm
-        .handle(
-            MetricsAggregatorEvent::StartRunning,
-            &mut ctx,
-        )
+        .handle(MetricsAggregatorEvent::StartRunning, &mut ctx)
         .await
         .unwrap();
     for action in actions {
         action.execute(&mut ctx).await.unwrap();
     }
-    assert!(matches!(
-        fsm.state(),
-        MetricsAggregatorState::Running
-    ));
+    assert!(matches!(fsm.state(), MetricsAggregatorState::Running));
 
     // Build a synthetic data event; ProcessBatch should keep us in Running.
     let writer = WriterId::from(stage_id);
-    let event = ChainEventFactory::data_event(
-        writer,
-        "test.event",
-        serde_json::json!({"value": 1}),
-    );
+    let event =
+        ChainEventFactory::data_event(writer, "test.event", serde_json::json!({"value": 1}));
     let envelope = EventEnvelope::new(JournalWriterId::new(), event);
 
     let actions = fsm

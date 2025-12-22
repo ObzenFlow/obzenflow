@@ -101,10 +101,7 @@ where
         self.inner.initial_state()
     }
 
-    fn create_events(
-        &self,
-        state: &Self::State,
-    ) -> Result<Vec<ChainEvent>, HandlerError> {
+    fn create_events(&self, state: &Self::State) -> Result<Vec<ChainEvent>, HandlerError> {
         // Create ephemeral context for emission
         let ctx = MiddlewareContext::new();
 
@@ -126,10 +123,7 @@ where
         self.inner.should_emit(state)
     }
 
-    fn emit(
-        &self,
-        state: &mut Self::State,
-    ) -> Result<Vec<ChainEvent>, HandlerError> {
+    fn emit(&self, state: &mut Self::State) -> Result<Vec<ChainEvent>, HandlerError> {
         // Create ephemeral context for emission
         let ctx = MiddlewareContext::new();
 
@@ -146,10 +140,7 @@ where
         Ok(results)
     }
 
-    async fn drain(
-        &self,
-        state: &Self::State,
-    ) -> Result<Vec<ChainEvent>, HandlerError> {
+    async fn drain(&self, state: &Self::State) -> Result<Vec<ChainEvent>, HandlerError> {
         // Create ephemeral context for drain
         let mut ctx = MiddlewareContext::new();
 
@@ -246,10 +237,7 @@ mod tests {
             Vec::new()
         }
 
-        fn create_events(
-            &self,
-            state: &Self::State,
-        ) -> Result<Vec<ChainEvent>, HandlerError> {
+        fn create_events(&self, state: &Self::State) -> Result<Vec<ChainEvent>, HandlerError> {
             let writer_id = WriterId::from(StageId::new());
             Ok(vec![ChainEventFactory::data_event(
                 writer_id,
@@ -262,19 +250,13 @@ mod tests {
             state.len() >= 3
         }
 
-        fn emit(
-            &self,
-            state: &mut Self::State,
-        ) -> Result<Vec<ChainEvent>, HandlerError> {
+        fn emit(&self, state: &mut Self::State) -> Result<Vec<ChainEvent>, HandlerError> {
             let events = self.create_events(state)?;
             state.clear();
             Ok(events)
         }
 
-        async fn drain(
-            &self,
-            state: &Self::State,
-        ) -> Result<Vec<ChainEvent>, HandlerError> {
+        async fn drain(&self, state: &Self::State) -> Result<Vec<ChainEvent>, HandlerError> {
             self.create_events(state)
         }
     }

@@ -224,10 +224,7 @@ where
     T: TryFrom<ChainEvent> + Into<ChainEvent> + Send + Sync + 'static,
     <T as TryFrom<ChainEvent>>::Error: std::fmt::Display,
 {
-    fn process(
-        &self,
-        event: ChainEvent,
-    ) -> Result<Vec<ChainEvent>, HandlerError> {
+    fn process(&self, event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
         match T::try_from(event.clone()) {
             Ok(typed_value) => {
                 // Successful conversion - convert back to ChainEvent

@@ -47,9 +47,7 @@ pub enum ViolationCause {
         reader: SeqNo,
     },
     /// Per-event content hashes do not match.
-    ContentMismatch {
-        mismatches: Vec<HashMismatch>,
-    },
+    ContentMismatch { mismatches: Vec<HashMismatch> },
     /// Delivery records and consumed events do not agree.
     DeliveryMismatch {
         missing_deliveries: usize,
@@ -95,8 +93,10 @@ impl ContractState {
 
     /// Insert or replace a typed value.
     pub fn insert<T: 'static + Send + Sync>(&mut self, value: T) {
-        self.inner
-            .insert(TypeId::of::<T>(), Box::new(value) as Box<dyn Any + Send + Sync>);
+        self.inner.insert(
+            TypeId::of::<T>(),
+            Box::new(value) as Box<dyn Any + Send + Sync>,
+        );
     }
 
     /// Get a mutable reference to a typed value, inserting `default` if missing.
@@ -204,7 +204,7 @@ impl TransportContract {
 
 impl Contract for TransportContract {
     fn name(&self) -> &str {
-        "transport"
+        "TransportContract"
     }
 
     fn on_write(&self, event: &ChainEvent, ctx: &mut ContractWriteContext) {
@@ -217,7 +217,8 @@ impl Contract for TransportContract {
         // as the final writer count for the edge.
         if let crate::event::ChainEventContent::FlowControl(
             crate::event::payloads::flow_control_payload::FlowControlPayload::Eof {
-                writer_seq, ..
+                writer_seq,
+                ..
             },
         ) = &event.content
         {
@@ -321,7 +322,7 @@ impl SourceContract {
 
 impl Contract for SourceContract {
     fn name(&self) -> &str {
-        "source"
+        "SourceContract"
     }
 
     fn on_write(&self, event: &ChainEvent, ctx: &mut ContractWriteContext) {

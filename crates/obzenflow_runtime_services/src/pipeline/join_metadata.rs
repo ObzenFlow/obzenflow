@@ -20,4 +20,3 @@ pub struct JoinMetadata {
     /// Stage IDs whose outputs are stream inputs.
     pub stream_source_ids: Vec<StageId>,
 }
-

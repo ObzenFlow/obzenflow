@@ -123,9 +123,9 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                         "Creating export timer with interval {}s",
                         ctx.export_interval_secs
                     );
-                    let mut export_timer = tokio::time::interval(
-                        tokio::time::Duration::from_secs(ctx.export_interval_secs),
-                    );
+                    let mut export_timer = tokio::time::interval(tokio::time::Duration::from_secs(
+                        ctx.export_interval_secs,
+                    ));
                     export_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                     // First tick happens immediately, so consume it
                     export_timer.tick().await;
@@ -166,20 +166,16 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
 
                 let error_recv = async {
                     if let Some(sub) = error_subscription.as_mut() {
-                        match sub
-                            .poll_next_with_state(state.variant_name(), None)
-                            .await
-                        {
+                        match sub.poll_next_with_state(state.variant_name(), None).await {
                             PollResult::Event(envelope) => Ok(Some(envelope)),
                             PollResult::NoEvents => Ok(None),
                             PollResult::Error(e) => Err(format!("Error: {}", e)),
                         }
                     } else {
                         // If no error subscription, wait forever
-                        std::future::pending::<Result<
-                            Option<obzenflow_core::EventEnvelope<ChainEvent>>,
-                            String,
-                        >>()
+                        std::future::pending::<
+                            Result<Option<obzenflow_core::EventEnvelope<ChainEvent>>, String>,
+                        >()
                         .await
                     }
                 };
@@ -196,10 +192,9 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                         }
                     } else {
                         // If no system subscription, wait forever
-                        std::future::pending::<Result<
-                            Option<obzenflow_core::EventEnvelope<SystemEvent>>,
-                            String,
-                        >>()
+                        std::future::pending::<
+                            Result<Option<obzenflow_core::EventEnvelope<SystemEvent>>, String>,
+                        >()
                         .await
                     }
                 };
@@ -402,233 +397,184 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
             MetricsAggregatorState::Draining => {
                 tracing::debug!("Metrics aggregator state=Draining");
 
-                // Before doing any work, check if we've reached terminal lifecycle state
-                // AND all upstream readers have drained to EOF (or are logically at EOF
-                // when started from tail for observers like the metrics aggregator).
-                // Only then can we emit FlowTerminal and perform the final export.
-                let data_eof = ctx
-                    .data_subscription
-                    .as_ref()
-                    .map(|sub| sub.all_readers_logically_eof())
-                    .unwrap_or(true);
-                let error_eof = ctx
-                    .error_subscription
-                    .as_ref()
-                    .map(|sub| sub.all_readers_logically_eof())
-                    .unwrap_or(true);
+                // Process draining state - keep consuming until:
+                // 1) A full poll round yields no events across system/data/error subscriptions, AND
+                // 2) Lifecycle signals show the pipeline + all stages are terminal.
+                //
+                // We intentionally do NOT depend on journal EOF control events here because some
+                // stage journals (notably sinks) may not emit explicit EOF markers.
+                let mut data_subscription = ctx.data_subscription.take();
+                let mut error_subscription = ctx.error_subscription.take();
+                let mut system_subscription = ctx.system_subscription.take();
 
-                if data_eof
-                    && error_eof
-                    && ctx.metrics_store.all_stages_terminal(&ctx.stage_metadata)
+                // 1) Poll system events first so lifecycle terminal flags are up-to-date.
+                if let Some(sub) = system_subscription.as_mut() {
+                    match sub.poll_next().await {
+                        PollResult::Event(envelope) => {
+                            tracing::info!(
+                                event_id = %envelope.event.id(),
+                                event_type = envelope.event.event_type_name(),
+                                "Metrics aggregator draining received system event"
+                            );
+                            ctx.data_subscription = data_subscription;
+                            ctx.error_subscription = error_subscription;
+                            ctx.system_subscription = system_subscription;
+                            return Ok(EventLoopDirective::Transition(
+                                MetricsAggregatorEvent::ProcessSystemEvent { envelope },
+                            ));
+                        }
+                        PollResult::NoEvents => {}
+                        PollResult::Error(e) => {
+                            let err_msg = format!("Error reading system events during draining: {}", e);
+                            tracing::error!(error = %err_msg, "Metrics aggregator draining system subscription errored");
+                            ctx.data_subscription = data_subscription;
+                            ctx.error_subscription = error_subscription;
+                            ctx.system_subscription = system_subscription;
+                            return Ok(EventLoopDirective::Transition(MetricsAggregatorEvent::Error(
+                                err_msg,
+                            )));
+                        }
+                    }
+                }
+
+                // 2) Drain data journals.
+                if let Some(sub) = data_subscription.as_mut() {
+                    match sub.poll_next_with_state(state.variant_name(), None).await {
+                        PollResult::Event(envelope) => {
+                            let kind = if envelope.event.is_control() {
+                                "control"
+                            } else if envelope.event.is_system() {
+                                "system"
+                            } else {
+                                "data"
+                            };
+                            tracing::debug!(
+                                event_id = %envelope.event.id(),
+                                event_type = envelope.event.event_type(),
+                                event_kind = kind,
+                                writer_id = ?envelope.event.writer_id,
+                                "Metrics aggregator draining received journal event"
+                            );
+
+                            ctx.data_subscription = data_subscription;
+                            ctx.error_subscription = error_subscription;
+                            ctx.system_subscription = system_subscription;
+
+                            if envelope.event.is_control() || envelope.event.is_system() {
+                                tracing::debug!(
+                                    "Metrics aggregator draining: skipped control/system event id={} writer={:?}",
+                                    envelope.event.id,
+                                    envelope.event.writer_id
+                                );
+                                return Ok(EventLoopDirective::Continue);
+                            }
+
+                            return Ok(EventLoopDirective::Transition(
+                                MetricsAggregatorEvent::ProcessBatch {
+                                    events: vec![envelope],
+                                },
+                            ));
+                        }
+                        PollResult::NoEvents => {}
+                        PollResult::Error(e) => {
+                            let err_msg = format!("Data journal read error during draining: {}", e);
+                            ctx.data_subscription = data_subscription;
+                            ctx.error_subscription = error_subscription;
+                            ctx.system_subscription = system_subscription;
+                            if err_msg.contains("Partial read retries exceeded") {
+                                tracing::warn!(
+                                    error = %err_msg,
+                                    "Metrics aggregator draining dropping partial read after retries"
+                                );
+                                return Ok(EventLoopDirective::Continue);
+                            }
+                            tracing::error!(
+                                error = %err_msg,
+                                "Metrics aggregator draining emitting Error event"
+                            );
+                            return Ok(EventLoopDirective::Transition(MetricsAggregatorEvent::Error(
+                                err_msg,
+                            )));
+                        }
+                    }
+                }
+
+                // 3) Drain error journals (FLOWIP-082g).
+                if let Some(sub) = error_subscription.as_mut() {
+                    match sub.poll_next_with_state(state.variant_name(), None).await {
+                        PollResult::Event(envelope) => {
+                            tracing::info!(
+                                event_id = %envelope.event.id(),
+                                event_type = envelope.event.event_type(),
+                                "Metrics aggregator draining received error event"
+                            );
+
+                            ctx.data_subscription = data_subscription;
+                            ctx.error_subscription = error_subscription;
+                            ctx.system_subscription = system_subscription;
+
+                            if envelope.event.is_control() || envelope.event.is_system() {
+                                tracing::debug!(
+                                    "Metrics aggregator draining: skipped control/system error event id={} writer={:?}",
+                                    envelope.event.id,
+                                    envelope.event.writer_id
+                                );
+                                return Ok(EventLoopDirective::Continue);
+                            }
+
+                            return Ok(EventLoopDirective::Transition(
+                                MetricsAggregatorEvent::ProcessBatch {
+                                    events: vec![envelope],
+                                },
+                            ));
+                        }
+                        PollResult::NoEvents => {}
+                        PollResult::Error(e) => {
+                            let err_msg = format!("Error journal read error during draining: {}", e);
+                            ctx.data_subscription = data_subscription;
+                            ctx.error_subscription = error_subscription;
+                            ctx.system_subscription = system_subscription;
+                            if err_msg.contains("Partial read retries exceeded") {
+                                tracing::warn!(
+                                    error = %err_msg,
+                                    "Metrics aggregator draining dropping partial error journal read after retries"
+                                );
+                                return Ok(EventLoopDirective::Continue);
+                            }
+                            tracing::error!(
+                                error = %err_msg,
+                                "Metrics aggregator draining emitting Error event"
+                            );
+                            return Ok(EventLoopDirective::Transition(MetricsAggregatorEvent::Error(
+                                err_msg,
+                            )));
+                        }
+                    }
+                }
+
+                // 4) No events available right now. If lifecycle is terminal, perform final export.
+                if ctx.metrics_store.all_stages_terminal(&ctx.stage_metadata)
                     && ctx.metrics_store.pipeline_terminal()
                 {
                     tracing::info!(
-                        "Metrics aggregator: all readers EOF and lifecycle terminal; emitting FlowTerminal"
+                        "Metrics aggregator: drained journals and lifecycle terminal; emitting FlowTerminal"
                     );
+                    ctx.data_subscription = data_subscription;
+                    ctx.error_subscription = error_subscription;
+                    ctx.system_subscription = system_subscription;
                     return Ok(EventLoopDirective::Transition(
                         MetricsAggregatorEvent::FlowTerminal,
                     ));
                 }
 
-                // Process draining state - need to drain both data and error journals,
-                // and continue to observe system events for late lifecycle transitions.
-                let mut data_subscription = ctx.data_subscription.take();
-                let mut error_subscription = ctx.error_subscription.take();
-                let mut system_subscription = ctx.system_subscription.take();
-
-                let data_recv = async {
-                    if let Some(sub) = data_subscription.as_mut() {
-                        sub.poll_next_with_state(state.variant_name(), None).await
-                    } else {
-                        std::future::pending::<PollResult<ChainEvent>>().await
-                    }
-                };
-
-                let error_recv = async {
-                    if let Some(sub) = error_subscription.as_mut() {
-                        match sub
-                            .poll_next_with_state(state.variant_name(), None)
-                            .await
-                        {
-                            PollResult::Event(envelope) => Ok(Some(envelope)),
-                            PollResult::NoEvents => Ok(None),
-                            PollResult::Error(e) => Err(format!("Error: {}", e)),
-                        }
-                    } else {
-                        std::future::pending::<Result<
-                            Option<obzenflow_core::EventEnvelope<ChainEvent>>,
-                            String,
-                        >>()
-                        .await
-                    }
-                };
-
-                let system_recv = async {
-                    if let Some(sub) = system_subscription.as_mut() {
-                        match sub.poll_next().await {
-                            PollResult::Event(envelope) => Ok(Some(envelope)),
-                            PollResult::NoEvents => Ok(None),
-                            PollResult::Error(e) => {
-                                Err(format!("Error reading system events: {}", e))
-                            }
-                        }
-                    } else {
-                        std::future::pending::<Result<
-                            Option<obzenflow_core::EventEnvelope<SystemEvent>>,
-                            String,
-                        >>()
-                        .await
-                    }
-                };
-
-                let mut directive: Result<
-                    EventLoopDirective<Self::Event>,
-                    Box<dyn std::error::Error + Send + Sync>,
-                > = Ok(EventLoopDirective::Continue);
-
-                tokio::select! {
-                    result = system_recv => {
-                        match result {
-                            Ok(Some(envelope)) => {
-                                tracing::info!(
-                                    event_id = %envelope.event.id(),
-                                    event_type = envelope.event.event_type_name(),
-                                    "Metrics aggregator draining received system event"
-                                );
-                                directive = Ok(EventLoopDirective::Transition(
-                                    MetricsAggregatorEvent::ProcessSystemEvent { envelope }
-                                ));
-                            }
-                            Ok(None) => {
-                                // No system events; just continue.
-                                idle_backoff().await;
-                                directive = Ok(EventLoopDirective::Continue);
-                            }
-                            Err(e) => {
-                                tracing::error!(
-                                    error = %e,
-                                    "Metrics aggregator draining system subscription errored"
-                                );
-                                directive = Ok(EventLoopDirective::Transition(
-                                    MetricsAggregatorEvent::Error(format!(
-                                        "system subscription error during draining: {}",
-                                        e
-                                    )),
-                                ));
-                            }
-                        }
-                    }
-
-                    result = data_recv => {
-                        match result {
-                            PollResult::Event(envelope) => {
-                                let kind = if envelope.event.is_control() {
-                                    "control"
-                                } else if envelope.event.is_system() {
-                                    "system"
-                                } else {
-                                    "data"
-                                };
-                                tracing::debug!(
-                                    event_id = %envelope.event.id(),
-                                    event_type = envelope.event.event_type(),
-                                    event_kind = kind,
-                                    writer_id = ?envelope.event.writer_id,
-                                    "Metrics aggregator draining received journal event"
-                                );
-                                if envelope.event.is_control() || envelope.event.is_system() {
-                                    tracing::debug!(
-                                        "Metrics aggregator draining: skipped control/system event \
-                                         id={} writer={:?}",
-                                        envelope.event.id,
-                                        envelope.event.writer_id
-                                    );
-                                    directive = Ok(EventLoopDirective::Continue);
-                                } else {
-                                    directive = Ok(EventLoopDirective::Transition(
-                                        MetricsAggregatorEvent::ProcessBatch { events: vec![envelope] },
-                                    ));
-                                }
-                            }
-                            PollResult::NoEvents => {
-                                idle_backoff().await;
-                                directive = Ok(EventLoopDirective::Continue);
-                            }
-                            PollResult::Error(e) => {
-                                let err_msg = format!("Data journal read error during draining: {}", e);
-                                if err_msg.contains("Partial read retries exceeded") {
-                                    tracing::warn!(
-                                        error = %err_msg,
-                                        "Metrics aggregator draining dropping partial read after retries"
-                                    );
-                                    directive = Ok(EventLoopDirective::Continue);
-                                } else {
-                                    tracing::error!(
-                                        error = %err_msg,
-                                        "Metrics aggregator draining emitting Error event"
-                                    );
-                                    directive = Ok(EventLoopDirective::Transition(
-                                        MetricsAggregatorEvent::Error(err_msg),
-                                    ));
-                                }
-                            }
-                        }
-                    }
-
-                    result = error_recv => {
-                        match result {
-                            Ok(Some(envelope)) => {
-                                tracing::info!(
-                                    event_id = %envelope.event.id(),
-                                    event_type = envelope.event.event_type(),
-                                    "Metrics aggregator draining received error event"
-                                );
-                                if envelope.event.is_control() || envelope.event.is_system() {
-                                    tracing::debug!(
-                                        "Metrics aggregator draining: skipped control/system error event \
-                                         id={} writer={:?}",
-                                        envelope.event.id,
-                                        envelope.event.writer_id
-                                    );
-                                    directive = Ok(EventLoopDirective::Continue);
-                                } else {
-                                    directive = Ok(EventLoopDirective::Transition(
-                                        MetricsAggregatorEvent::ProcessBatch { events: vec![envelope] },
-                                    ));
-                                }
-                            }
-                            Ok(None) => {
-                                idle_backoff().await;
-                                directive = Ok(EventLoopDirective::Continue);
-                            }
-                            Err(e) => {
-                                let err_msg = format!("Error journal read error during draining: {}", e);
-                                if err_msg.contains("Partial read retries exceeded") {
-                                    tracing::warn!(
-                                        error = %err_msg,
-                                        "Metrics aggregator draining dropping partial error journal read after retries"
-                                    );
-                                    directive = Ok(EventLoopDirective::Continue);
-                                } else {
-                                    tracing::error!(
-                                        error = %err_msg,
-                                        "Metrics aggregator draining emitting Error event"
-                                    );
-                                    directive = Ok(EventLoopDirective::Transition(
-                                        MetricsAggregatorEvent::Error(err_msg),
-                                    ));
-                                }
-                            }
-                        }
-                    }
-                }
+                idle_backoff().await;
 
                 // Restore subscriptions back into the context
                 ctx.data_subscription = data_subscription;
                 ctx.error_subscription = error_subscription;
                 ctx.system_subscription = system_subscription;
 
-                directive
+                Ok(EventLoopDirective::Continue)
             }
 
             MetricsAggregatorState::Drained { .. } => {

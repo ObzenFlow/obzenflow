@@ -63,10 +63,7 @@ pub trait TransformHandler: Send + Sync {
     /// processing this event (e.g. remote timeout, decode failure). The
     /// supervisor will convert this into an error-marked event and route
     /// it using ErrorKind.
-    fn process(
-        &self,
-        event: ChainEvent,
-    ) -> std::result::Result<Vec<ChainEvent>, HandlerError>;
+    fn process(&self, event: ChainEvent) -> std::result::Result<Vec<ChainEvent>, HandlerError>;
 
     /// Perform any cleanup during shutdown
     ///

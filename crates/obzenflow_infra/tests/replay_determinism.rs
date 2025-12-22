@@ -2,26 +2,30 @@ use std::sync::Arc;
 
 use obzenflow_core::event::chain_event::ChainEventFactory;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
-use obzenflow_core::event::{ChainEvent, ChainEventContent};
 use obzenflow_core::event::types::SeqNo;
+use obzenflow_core::event::SystemEvent;
+use obzenflow_core::event::{ChainEvent, ChainEventContent};
 use obzenflow_core::journal::journal::Journal;
 use obzenflow_core::journal::journal_owner::JournalOwner;
-use obzenflow_core::{FlowId, StageId, SystemId, WriterId, TypedPayload};
-use obzenflow_core::event::SystemEvent;
-use obzenflow_infra::journal::MemoryJournal;
+use obzenflow_core::Ulid;
+use obzenflow_core::{FlowId, StageId, SystemId, TypedPayload, WriterId};
 use obzenflow_infra::journal::disk::disk_journal::DiskJournal;
+use obzenflow_infra::journal::MemoryJournal;
 use obzenflow_runtime_services::id_conversions::StageIdExt;
-use obzenflow_runtime_services::stages::JoinHandler;
+use obzenflow_runtime_services::stages::common::control_strategies::JonestownStrategy;
 use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
 use obzenflow_runtime_services::stages::common::handlers::StatefulHandler;
-use obzenflow_runtime_services::stages::common::control_strategies::JonestownStrategy;
-use obzenflow_runtime_services::stages::join::{JoinBuilder, JoinConfig, StrictJoinBuilder, TypedJoinState};
-use obzenflow_runtime_services::stages::resources_builder::StageResourcesBuilder;
-use obzenflow_runtime_services::stages::stateful::{StatefulBuilder, StatefulConfig, StatefulHandleExt, StatefulState};
 use obzenflow_runtime_services::stages::join::handle::JoinHandleExt;
+use obzenflow_runtime_services::stages::join::{
+    JoinBuilder, JoinConfig, StrictJoinBuilder, TypedJoinState,
+};
+use obzenflow_runtime_services::stages::resources_builder::StageResourcesBuilder;
+use obzenflow_runtime_services::stages::stateful::{
+    StatefulBuilder, StatefulConfig, StatefulHandleExt, StatefulState,
+};
+use obzenflow_runtime_services::stages::JoinHandler;
 use obzenflow_runtime_services::supervised_base::{SupervisorBuilder, SupervisorHandle};
-use obzenflow_topology::{TopologyBuilder, StageType as TopologyStageType};
-use obzenflow_core::Ulid;
+use obzenflow_topology::{StageType as TopologyStageType, TopologyBuilder};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -129,8 +133,9 @@ async fn stateful_replay_produces_identical_aggregates() {
     let upstream_stage = StageId::new();
     let upstream_writer = WriterId::from(upstream_stage);
 
-    let upstream_journal: Arc<MemoryJournal<ChainEvent>> =
-        Arc::new(MemoryJournal::with_owner(JournalOwner::stage(upstream_stage)));
+    let upstream_journal: Arc<MemoryJournal<ChainEvent>> = Arc::new(MemoryJournal::with_owner(
+        JournalOwner::stage(upstream_stage),
+    ));
 
     // Write a small deterministic input stream: 3 data events + EOF.
     for i in 0..3 {
@@ -234,7 +239,9 @@ async fn run_strict_join_once() -> Vec<JoinedRow> {
     // Stream side: one hit, one miss.
     let stream_rows = vec![
         StreamRow { key: "k1".into() },
-        StreamRow { key: "missing".into() },
+        StreamRow {
+            key: "missing".into(),
+        },
     ];
 
     let mut joined = Vec::new();
@@ -343,14 +350,14 @@ async fn run_stateful_supervisor_once() -> Vec<serde_json::Value> {
     );
     topo_builder.reset_current();
     topo_builder.add_edge(src.to_topology_id(), stateful_stage.to_topology_id());
-    let topology =
-        Arc::new(topo_builder.build_unchecked().expect("topology should build structurally"));
+    let topology = Arc::new(
+        topo_builder
+            .build_unchecked()
+            .expect("topology should build structurally"),
+    );
 
     // Journals: one per stage (on-disk so subscriptions can obtain readers)
-    let base = std::env::temp_dir().join(format!(
-        "stateful_supervisor_replay_{}",
-        Ulid::new()
-    ));
+    let base = std::env::temp_dir().join(format!("stateful_supervisor_replay_{}", Ulid::new()));
     std::fs::create_dir_all(&base).expect("create temp dir for stateful supervisor replay");
     let src_path = base.join("src.log");
     let stateful_path = base.join("stateful.log");
@@ -394,10 +401,7 @@ async fn run_stateful_supervisor_once() -> Vec<serde_json::Value> {
             "test.input",
             json!({ "seq": i }),
         );
-        src_journal
-            .append(event, None)
-            .await
-            .expect("append data");
+        src_journal.append(event, None).await.expect("append data");
     }
     src_journal
         .append(make_eof_event(upstream_writer.clone(), 3), None)
@@ -505,16 +509,19 @@ async fn run_join_supervisor_once() -> Vec<JoinedRow> {
         TopologyStageType::Join,
     );
     topo_builder.reset_current();
-    topo_builder.add_edge(reference_stage.to_topology_id(), join_stage.to_topology_id());
+    topo_builder.add_edge(
+        reference_stage.to_topology_id(),
+        join_stage.to_topology_id(),
+    );
     topo_builder.add_edge(stream_stage.to_topology_id(), join_stage.to_topology_id());
-    let topology =
-        Arc::new(topo_builder.build_unchecked().expect("topology should build structurally"));
+    let topology = Arc::new(
+        topo_builder
+            .build_unchecked()
+            .expect("topology should build structurally"),
+    );
 
     // Journals per stage (on-disk so subscriptions can obtain readers)
-    let base = std::env::temp_dir().join(format!(
-        "join_supervisor_replay_{}",
-        Ulid::new()
-    ));
+    let base = std::env::temp_dir().join(format!("join_supervisor_replay_{}", Ulid::new()));
     std::fs::create_dir_all(&base).expect("create temp dir for join supervisor replay");
     let reference_path = base.join("reference.log");
     let stream_path = base.join("stream.log");
@@ -543,7 +550,10 @@ async fn run_join_supervisor_once() -> Vec<JoinedRow> {
         stream_stage,
         stream_journal.clone() as Arc<dyn Journal<ChainEvent>>,
     );
-    stage_journals.insert(join_stage, join_journal.clone() as Arc<dyn Journal<ChainEvent>>);
+    stage_journals.insert(
+        join_stage,
+        join_journal.clone() as Arc<dyn Journal<ChainEvent>>,
+    );
 
     let mut error_journals: std::collections::HashMap<StageId, Arc<dyn Journal<ChainEvent>>> =
         std::collections::HashMap::new();
@@ -578,7 +588,10 @@ async fn run_join_supervisor_once() -> Vec<JoinedRow> {
             .expect("append reference");
     }
     reference_journal
-        .append(make_eof_event(reference_writer.clone(), ref_rows.len() as u64), None)
+        .append(
+            make_eof_event(reference_writer.clone(), ref_rows.len() as u64),
+            None,
+        )
         .await
         .expect("append reference eof");
 
@@ -586,7 +599,9 @@ async fn run_join_supervisor_once() -> Vec<JoinedRow> {
     let stream_writer = WriterId::from(stream_stage);
     let stream_rows = vec![
         StreamRow { key: "k1".into() },
-        StreamRow { key: "missing".into() },
+        StreamRow {
+            key: "missing".into(),
+        },
     ];
     for row in &stream_rows {
         stream_journal
@@ -595,7 +610,10 @@ async fn run_join_supervisor_once() -> Vec<JoinedRow> {
             .expect("append stream");
     }
     stream_journal
-        .append(make_eof_event(stream_writer.clone(), stream_rows.len() as u64), None)
+        .append(
+            make_eof_event(stream_writer.clone(), stream_rows.len() as u64),
+            None,
+        )
         .await
         .expect("append stream eof");
 
@@ -639,7 +657,10 @@ async fn run_join_supervisor_once() -> Vec<JoinedRow> {
         join_config,
         join_resources,
         reference_journal.clone() as Arc<dyn Journal<ChainEvent>>,
-        vec![(stream_stage, stream_journal.clone() as Arc<dyn Journal<ChainEvent>>)],
+        vec![(
+            stream_stage,
+            stream_journal.clone() as Arc<dyn Journal<ChainEvent>>,
+        )],
         Arc::new(JonestownStrategy),
     )
     .expect("build join builder")

@@ -144,12 +144,8 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
                 };
 
                 // Run with the wrapper
-                HandlerSupervisedExt::run(
-                    supervisor_with_events,
-                    JoinState::<H>::Created,
-                    context,
-                )
-                .await
+                HandlerSupervisedExt::run(supervisor_with_events, JoinState::<H>::Created, context)
+                    .await
             },
         );
 

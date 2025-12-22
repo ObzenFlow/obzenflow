@@ -60,7 +60,12 @@ impl EventCounter {
 }
 
 impl FiniteSourceHandler for EventCounter {
-    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, obzenflow_runtime_services::stages::common::handlers::source::traits::SourceError> {
+    fn next(
+        &mut self,
+    ) -> Result<
+        Option<Vec<ChainEvent>>,
+        obzenflow_runtime_services::stages::common::handlers::source::traits::SourceError,
+    > {
         if self.count >= self.max_count {
             return Ok(None);
         }
@@ -119,10 +124,7 @@ impl CountingSink {
 
 #[async_trait]
 impl SinkHandler for CountingSink {
-    async fn consume(
-        &mut self,
-        event: ChainEvent,
-    ) -> Result<DeliveryPayload, HandlerError> {
+    async fn consume(&mut self, event: ChainEvent) -> Result<DeliveryPayload, HandlerError> {
         self.received += 1;
 
         // Log progress every 20 events

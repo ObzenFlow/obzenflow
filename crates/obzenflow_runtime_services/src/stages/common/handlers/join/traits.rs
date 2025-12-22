@@ -3,8 +3,8 @@
 //! Defines the interface for join handlers that process events from two upstream sources
 //! (reference and stream) and emit enriched events.
 
-use async_trait::async_trait;
 use crate::stages::common::handler_error::HandlerError;
+use async_trait::async_trait;
 use obzenflow_core::{ChainEvent, StageId, WriterId};
 
 /// Handler trait for join stages - defines the enrichment logic

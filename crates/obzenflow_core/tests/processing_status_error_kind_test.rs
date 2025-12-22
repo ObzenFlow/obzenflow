@@ -64,9 +64,14 @@ fn chain_event_mark_as_error_sets_status_and_hop_budget() {
     let base: ChainEvent =
         ChainEventFactory::data_event(writer_id, "test.event", json!({ "key": "value" }));
 
-    let err = base.clone().mark_as_error("deser failed", ErrorKind::Deserialization);
+    let err = base
+        .clone()
+        .mark_as_error("deser failed", ErrorKind::Deserialization);
     match err.processing_info.status {
-        ProcessingStatus::Error { ref message, ref kind } => {
+        ProcessingStatus::Error {
+            ref message,
+            ref kind,
+        } => {
             assert_eq!(message, "deser failed");
             assert!(matches!(kind, Some(ErrorKind::Deserialization)));
         }
@@ -83,7 +88,10 @@ fn chain_event_validation_and_infra_helpers_set_expected_kinds() {
 
     let validation = base.clone().mark_as_validation_error("bad input");
     match validation.processing_info.status {
-        ProcessingStatus::Error { ref message, ref kind } => {
+        ProcessingStatus::Error {
+            ref message,
+            ref kind,
+        } => {
             assert_eq!(message, "bad input");
             assert!(matches!(kind, Some(ErrorKind::Validation)));
         }
@@ -93,7 +101,10 @@ fn chain_event_validation_and_infra_helpers_set_expected_kinds() {
 
     let infra = base.mark_as_infra_error("remote timeout");
     match infra.processing_info.status {
-        ProcessingStatus::Error { ref message, ref kind } => {
+        ProcessingStatus::Error {
+            ref message,
+            ref kind,
+        } => {
             assert_eq!(message, "remote timeout");
             assert!(matches!(kind, Some(ErrorKind::Remote)));
         }
@@ -101,4 +112,3 @@ fn chain_event_validation_and_infra_helpers_set_expected_kinds() {
     }
     assert_eq!(infra.processing_info.error_hops_remaining, Some(1));
 }
-

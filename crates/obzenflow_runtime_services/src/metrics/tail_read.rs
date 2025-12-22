@@ -8,7 +8,7 @@
 use obzenflow_core::event::context::{RuntimeContext, StageType};
 use obzenflow_core::event::ChainEvent;
 use obzenflow_core::id::StageId;
-use obzenflow_core::metrics::{FlowLifecycleMetricsSnapshot, StageMetricsSnapshot, StageMetadata};
+use obzenflow_core::metrics::{FlowLifecycleMetricsSnapshot, StageMetadata, StageMetricsSnapshot};
 use obzenflow_core::Journal;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -102,6 +102,7 @@ pub async fn read_stage_metrics_from_tail(
     let mut p95_ms: Option<u64> = None;
     let mut p99_ms: Option<u64> = None;
     let mut p999_ms: Option<u64> = None;
+    let mut processing_time_sum_nanos: Option<u64> = None;
     let mut event_loops_total: Option<u64> = None;
     let mut event_loops_with_work_total: Option<u64> = None;
     let mut errors_by_kind: std::collections::HashMap<
@@ -111,6 +112,19 @@ pub async fn read_stage_metrics_from_tail(
 
     fn update_max<T: Ord + Copy>(current: &mut Option<T>, new: T) {
         *current = Some(current.map_or(new, |c| c.max(new)));
+    }
+
+    fn update_kind_max(
+        map: &mut std::collections::HashMap<
+            obzenflow_core::event::status::processing_status::ErrorKind,
+            u64,
+        >,
+        kind: &obzenflow_core::event::status::processing_status::ErrorKind,
+        new: u64,
+    ) {
+        map.entry(kind.clone())
+            .and_modify(|current| *current = (*current).max(new))
+            .or_insert(new);
     }
 
     // Read from data journal first.
@@ -123,6 +137,7 @@ pub async fn read_stage_metrics_from_tail(
         p95_ms = Some(ctx.recent_p95_ms);
         p99_ms = Some(ctx.recent_p99_ms);
         p999_ms = Some(ctx.recent_p999_ms);
+        update_max(&mut processing_time_sum_nanos, ctx.processing_time_sum_nanos);
         update_max(&mut event_loops_total, ctx.event_loops_total);
         update_max(
             &mut event_loops_with_work_total,
@@ -130,7 +145,7 @@ pub async fn read_stage_metrics_from_tail(
         );
 
         for (kind, count) in ctx.errors_by_kind.iter() {
-            *errors_by_kind.entry(kind.clone()).or_insert(0) += *count;
+            update_kind_max(&mut errors_by_kind, kind, *count);
         }
     }
 
@@ -139,6 +154,7 @@ pub async fn read_stage_metrics_from_tail(
         if let Some(ctx) = read_latest_runtime_context_for_stage(error_journal, stage_id).await {
             update_max(&mut events_processed_total, ctx.events_processed_total);
             update_max(&mut errors_total, ctx.errors_total);
+            update_max(&mut processing_time_sum_nanos, ctx.processing_time_sum_nanos);
             update_max(&mut event_loops_total, ctx.event_loops_total);
             update_max(
                 &mut event_loops_with_work_total,
@@ -153,7 +169,7 @@ pub async fn read_stage_metrics_from_tail(
             p999_ms = Some(ctx.recent_p999_ms);
 
             for (kind, count) in ctx.errors_by_kind.iter() {
-                *errors_by_kind.entry(kind.clone()).or_insert(0) += *count;
+                update_kind_max(&mut errors_by_kind, kind, *count);
             }
         }
     }
@@ -169,6 +185,7 @@ pub async fn read_stage_metrics_from_tail(
         recent_p95_ms: p95_ms.unwrap_or(0),
         recent_p99_ms: p99_ms.unwrap_or(0),
         recent_p999_ms: p999_ms.unwrap_or(0),
+        processing_time_sum_nanos: processing_time_sum_nanos.unwrap_or(0),
         event_loops_total: event_loops_total.unwrap_or(0),
         event_loops_with_work_total: event_loops_with_work_total.unwrap_or(0),
     })
@@ -182,7 +199,11 @@ pub async fn read_stage_metrics_from_tail(
 /// - FlowLifecycleMetricsSnapshot: minimal view for lifecycle events.
 /// - FlowMetricsSnapshot: full view for Prometheus export.
 pub async fn read_flow_metrics_from_tails(
-    stage_journals: &[(StageId, Arc<dyn Journal<ChainEvent>>, Option<Arc<dyn Journal<ChainEvent>>>)],
+    stage_journals: &[(
+        StageId,
+        Arc<dyn Journal<ChainEvent>>,
+        Option<Arc<dyn Journal<ChainEvent>>>,
+    )],
     stage_metadata: &HashMap<StageId, StageMetadata>,
 ) -> FlowLifecycleMetricsSnapshot {
     let mut events_in_total: u64 = 0;
@@ -338,9 +359,7 @@ mod tests {
 
     #[async_trait]
     impl JournalReader<ChainEvent> for InMemoryReader {
-        async fn next(
-            &mut self,
-        ) -> Result<Option<EventEnvelope<ChainEvent>>, JournalError> {
+        async fn next(&mut self) -> Result<Option<EventEnvelope<ChainEvent>>, JournalError> {
             if self.pos >= self.events.len() {
                 Ok(None)
             } else {
@@ -377,6 +396,7 @@ mod tests {
             recent_p95_ms: 0,
             recent_p99_ms: 0,
             recent_p999_ms: 0,
+            processing_time_sum_nanos: 0,
             events_processed_total,
             errors_total,
             failures_total: 0,
@@ -392,11 +412,26 @@ mod tests {
             last_consumed_vector_clock: None,
             last_emitted_event_id: None,
             last_emitted_writer: None,
+            cb_requests_total: 0,
+            cb_successes_total: 0,
+            cb_failures_total: 0,
+            cb_rejections_total: 0,
+            cb_opened_total: 0,
+            cb_time_closed_seconds: 0.0,
+            cb_time_open_seconds: 0.0,
+            cb_time_half_open_seconds: 0.0,
+            cb_state: 0.0,
+            rl_events_total: 0,
+            rl_delayed_total: 0,
+            rl_tokens_consumed_total: 0.0,
+            rl_delay_seconds_total: 0.0,
+            rl_bucket_tokens: 0.0,
+            rl_bucket_capacity: 0.0,
         }
     }
 
     #[tokio::test]
-    async fn read_stage_metrics_from_tail_merges_errors_by_kind_across_journals() {
+    async fn read_stage_metrics_from_tail_uses_max_semantics_for_errors_by_kind() {
         use obzenflow_core::event::ChainEventFactory;
         use obzenflow_core::StageId;
 
@@ -409,11 +444,7 @@ mod tests {
         let error_journal: Arc<dyn Journal<ChainEvent>> = error_journal_raw.clone();
 
         // Data journal snapshot: 10 events, 2 domain errors.
-        let data_ctx = runtime_context_with_errors(
-            10,
-            2,
-            &[(ErrorKind::Domain, 2)],
-        );
+        let data_ctx = runtime_context_with_errors(10, 2, &[(ErrorKind::Domain, 2)]);
         let mut data_event = ChainEventFactory::data_event(
             WriterId::from(stage_id),
             "test.data",
@@ -423,11 +454,12 @@ mod tests {
         data_event = data_event.with_runtime_context(data_ctx);
         data_journal_raw.append_raw(data_event);
 
-        // Error journal snapshot: 10 events, 5 total errors, all remote.
+        // Error journal snapshot: later snapshot with 5 total errors, including the same
+        // domain errors plus additional remote errors.
         let error_ctx = runtime_context_with_errors(
             10,
             5,
-            &[(ErrorKind::Remote, 3)],
+            &[(ErrorKind::Domain, 2), (ErrorKind::Remote, 3)],
         );
         let mut error_event = ChainEventFactory::data_event(
             WriterId::from(stage_id),
@@ -446,7 +478,7 @@ mod tests {
         assert_eq!(snapshot.events_processed_total, 10);
         assert_eq!(snapshot.errors_total, 5);
 
-        // errors_by_kind merges contributions from both journals.
+        // errors_by_kind uses monotonic max semantics (avoid double-counting across journals).
         assert_eq!(snapshot.errors_by_kind.get(&ErrorKind::Domain), Some(&2));
         assert_eq!(snapshot.errors_by_kind.get(&ErrorKind::Remote), Some(&3));
     }
@@ -489,8 +521,9 @@ mod tests {
         let generic_ctx = read_latest_runtime_context(&journal).await.expect("ctx");
         assert_eq!(generic_ctx.events_processed_total, 50);
 
-        let filtered_ctx =
-            read_latest_runtime_context_for_stage(&journal, local_stage_id).await.expect("ctx");
+        let filtered_ctx = read_latest_runtime_context_for_stage(&journal, local_stage_id)
+            .await
+            .expect("ctx");
         assert_eq!(filtered_ctx.events_processed_total, 50);
         assert_eq!(filtered_ctx.errors_total, 0);
     }

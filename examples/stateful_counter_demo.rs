@@ -56,7 +56,12 @@ impl NumberSource {
 }
 
 impl FiniteSourceHandler for NumberSource {
-    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, obzenflow_runtime_services::stages::common::handlers::source::traits::SourceError> {
+    fn next(
+        &mut self,
+    ) -> Result<
+        Option<Vec<ChainEvent>>,
+        obzenflow_runtime_services::stages::common::handlers::source::traits::SourceError,
+    > {
         if self.current <= self.max {
             let num = self.current;
             self.current += 1;
@@ -145,10 +150,7 @@ impl StatefulHandler for CounterHandler {
         CounterState::default()
     }
 
-    fn create_events(
-        &self,
-        state: &Self::State,
-    ) -> Result<Vec<ChainEvent>, HandlerError> {
+    fn create_events(&self, state: &Self::State) -> Result<Vec<ChainEvent>, HandlerError> {
         println!("\n    💧 Stateful DRAINING final state:");
         println!("       Total events: {}", state.count);
         println!("       Total sum: {}", state.sum);
@@ -190,10 +192,7 @@ impl PrintSink {
 
 #[async_trait]
 impl SinkHandler for PrintSink {
-    async fn consume(
-        &mut self,
-        event: ChainEvent,
-    ) -> Result<DeliveryPayload, HandlerError> {
+    async fn consume(&mut self, event: ChainEvent) -> Result<DeliveryPayload, HandlerError> {
         if event.event_type() == "aggregation" {
             println!("\n✨ FINAL RESULT:");
             println!("   Count: {}", event.payload()["count"]);

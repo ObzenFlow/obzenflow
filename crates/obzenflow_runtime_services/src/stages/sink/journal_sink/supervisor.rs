@@ -458,10 +458,7 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                     );
 
                     let poll_result = subscription
-                        .poll_next_with_state(
-                            state.variant_name(),
-                            Some(&mut contract_state[..]),
-                        )
+                        .poll_next_with_state(state.variant_name(), Some(&mut contract_state[..]))
                         .await;
 
                     match poll_result {
@@ -513,7 +510,7 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                         _ => ControlEventAction::Forward,
                                     };
 
-                                            match action {
+                                    match action {
                                         ControlEventAction::Forward => {
                                             match signal {
                                                 // Treat only EOF as terminal; drain propagates but is non-terminal
@@ -521,9 +518,7 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                                     let eof_outcome =
                                                         subscription.take_last_eof_outcome();
                                                     let _ = subscription
-                                                        .check_contracts(
-                                                            &mut contract_state[..],
-                                                        )
+                                                        .check_contracts(&mut contract_state[..])
                                                         .await;
 
                                                     // Capture upstream reader count for logging before
@@ -589,11 +584,12 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                                     // Forward other control/control-like events to downstream journal
                                                     self.forward_control_event(&envelope).await?;
 
-                                                // For non-EOF control events, let handler consume if needed
-                                                let envelope_event = envelope.event.clone();
-                                                let handler = &mut ctx.handler;
+                                                    // For non-EOF control events, let handler consume if needed
+                                                    let envelope_event = envelope.event.clone();
+                                                    let handler = &mut ctx.handler;
 
-                                                if let Err(e) = handler.consume(envelope_event).await
+                                                    if let Err(e) =
+                                                        handler.consume(envelope_event).await
                                                     {
                                                         tracing::error!(
                                                             stage_name = %ctx.stage_name,
@@ -676,7 +672,8 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                             )
                                             .with_flow_context(flow_context)
                                             .with_runtime_context(
-                                                ctx.instrumentation.snapshot(),
+                                                ctx.instrumentation
+                                                    .snapshot_with_control(),
                                             )
                                             .with_causality(CausalityContext::with_parent(
                                                 envelope.event.id,
@@ -696,8 +693,7 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                                 // once per successfully processed input event. Bumping it again
                                                 // here would double-count and produce inflated events_out_total
                                                 // in flow lifecycle snapshots. See FLOWIP-059d postmortem.
-                                                ctx.instrumentation
-                                                    .record_emitted(&delivery_event);
+                                                ctx.instrumentation.record_emitted(&delivery_event);
                                             }
                                             ctx.data_journal
                                                 .append(delivery_event, Some(&envelope))
@@ -709,8 +705,7 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                                 // Per-record handler failures should be reflected
                                                 // in errors_total for lifecycle / flow snapshots,
                                                 // even though they are not stage-fatal.
-                                                ctx
-                                                    .instrumentation
+                                                ctx.instrumentation
                                                     .record_error(handler_err.kind());
                                                 let reason = format!(
                                                     "Sink handler error: {:?}",
@@ -719,28 +714,22 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                                 let mut error_event = envelope
                                                     .event
                                                     .clone()
-                                                    .mark_as_error(
-                                                        reason,
-                                                        handler_err.kind(),
-                                                    );
+                                                    .mark_as_error(reason, handler_err.kind());
 
                                                 let route_to_error_journal =
                                                     match &error_event.processing_info.status {
-                                                        ProcessingStatus::Error { kind, .. } => {
-                                                            match kind {
-                                                                Some(ErrorKind::Timeout)
-                                                                | Some(ErrorKind::Remote)
-                                                                | Some(
-                                                                    ErrorKind::Deserialization,
-                                                                ) => true,
-                                                                Some(ErrorKind::Validation)
-                                                                | Some(ErrorKind::Domain) => false,
-                                                                None
-                                                                | Some(ErrorKind::Unknown) => {
-                                                                    true
-                                                                }
+                                                        ProcessingStatus::Error {
+                                                            kind, ..
+                                                        } => match kind {
+                                                            Some(ErrorKind::Timeout)
+                                                            | Some(ErrorKind::Remote)
+                                                            | Some(ErrorKind::Deserialization) => {
+                                                                true
                                                             }
-                                                        }
+                                                            Some(ErrorKind::Validation)
+                                                            | Some(ErrorKind::Domain) => false,
+                                                            None | Some(ErrorKind::Unknown) => true,
+                                                        },
                                                         _ => false,
                                                     };
 
@@ -778,7 +767,8 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                                     let enriched_error = error_event
                                                         .with_flow_context(flow_ctx)
                                                         .with_runtime_context(
-                                                            ctx.instrumentation.snapshot(),
+                                                            ctx.instrumentation
+                                                                .snapshot_with_control(),
                                                         );
 
                                                     if enriched_error.is_data() {
@@ -824,7 +814,8 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                             )
                                             .with_flow_context(flow_ctx)
                                             .with_runtime_context(
-                                                ctx.instrumentation.snapshot(),
+                                                ctx.instrumentation
+                                                    .snapshot_with_control(),
                                             )
                                             .with_causality(CausalityContext::with_parent(
                                                 envelope.event.id,
@@ -841,9 +832,8 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                                     format!("Failed to journal sink failure: {je}")
                                                 })?;
 
-                                            directive = Err(
-                                                format!("Sink consume failed: {e}").into(),
-                                            );
+                                            directive =
+                                                Err(format!("Sink consume failed: {e}").into());
                                         }
                                     }
                                 }
@@ -866,9 +856,7 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                         PollResult::NoEvents => {
                             // Check contracts periodically while idle to emit progress/final/stall as needed
                             if subscription.should_check_contracts(&contract_state[..]) {
-                                let _ = subscription
-                                    .check_contracts(&mut contract_state[..])
-                                    .await;
+                                let _ = subscription.check_contracts(&mut contract_state[..]).await;
                             }
 
                             // No events available right now, sleep briefly

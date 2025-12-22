@@ -15,9 +15,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use obzenflow_core::circuit_breaker_registry;
+use crate::metrics::instrumentation::ControlBindError;
+use obzenflow_core::control_middleware::{cb_state, ControlMiddlewareProvider};
 use obzenflow_core::StageId;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU8, Ordering};
 
 /// High-level decision a source control strategy can make
 ///
@@ -91,10 +92,7 @@ pub trait SourceControlStrategy: Send + Sync + std::fmt::Debug {
     ///
     /// Called when a finite source's handler reports completion via
     /// `is_complete() == true` and the supervisor is ready to shut down.
-    fn on_natural_completion(
-        &self,
-        _ctx: &mut SourceControlContext,
-    ) -> SourceShutdownDecision {
+    fn on_natural_completion(&self, _ctx: &mut SourceControlContext) -> SourceShutdownDecision {
         SourceShutdownDecision::DefaultEof
     }
 
@@ -122,35 +120,41 @@ impl SourceControlStrategy for JonestownSourceStrategy {}
 
 /// Circuit breaker-aware source strategy
 ///
-/// This strategy consults the global circuit breaker registry to decide
-/// whether to emit a natural EOF (normal operation) or a "poison" EOF /
-/// drain when the breaker is open for this stage.
+/// This strategy consults breaker state (injected via the flow-scoped
+/// `ControlMiddlewareProvider`) to decide whether to emit a natural EOF
+/// (normal operation) or a "poison" EOF / drain when the breaker is open
+/// for this stage.
 #[derive(Debug)]
 pub struct CircuitBreakerSourceStrategy {
-    stage_id: StageId,
+    cb_state: Arc<AtomicU8>,
 }
 
 impl CircuitBreakerSourceStrategy {
-    pub fn new(stage_id: StageId) -> Self {
-        Self { stage_id }
+    pub fn new(cb_state: Arc<AtomicU8>) -> Self {
+        Self { cb_state }
+    }
+
+    /// Construct a breaker-aware source strategy using the control middleware provider.
+    ///
+    /// Fails fast if the breaker state isn't registered; this indicates a wiring
+    /// bug since this strategy is only created when circuit breaker middleware is configured.
+    pub fn try_new(
+        stage_id: StageId,
+        provider: &Arc<dyn ControlMiddlewareProvider>,
+    ) -> Result<Self, ControlBindError> {
+        let cb_state = provider.circuit_breaker_state(&stage_id).ok_or(
+            ControlBindError::MissingCircuitBreaker { stage_id },
+        )?;
+        Ok(Self { cb_state })
     }
 
     fn is_breaker_open(&self) -> bool {
-        if let Some(state) = circuit_breaker_registry::get_stage_state(&self.stage_id) {
-            let raw = state.load(Ordering::SeqCst);
-            // Mirror CircuitState::Open = 1 from the circuit breaker middleware.
-            raw == 1
-        } else {
-            false
-        }
+        self.cb_state.load(Ordering::SeqCst) == cb_state::OPEN
     }
 }
 
 impl SourceControlStrategy for CircuitBreakerSourceStrategy {
-    fn on_natural_completion(
-        &self,
-        _ctx: &mut SourceControlContext,
-    ) -> SourceShutdownDecision {
+    fn on_natural_completion(&self, _ctx: &mut SourceControlContext) -> SourceShutdownDecision {
         if self.is_breaker_open() {
             SourceShutdownDecision::PoisonEof
         } else {

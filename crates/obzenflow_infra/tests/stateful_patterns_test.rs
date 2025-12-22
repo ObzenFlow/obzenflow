@@ -76,7 +76,12 @@ struct CollectingSink {
 impl CollectingSink {
     fn new() -> (Self, Arc<Mutex<Vec<ChainEvent>>>) {
         let events = Arc::new(Mutex::new(Vec::new()));
-        (Self { events: events.clone() }, events)
+        (
+            Self {
+                events: events.clone(),
+            },
+            events,
+        )
     }
 }
 
@@ -251,10 +256,7 @@ impl StatefulHandler for ImmediateEmitter {
         true
     }
 
-    fn emit(
-        &self,
-        state: &mut Self::State,
-    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
+    fn emit(&self, state: &mut Self::State) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
         Ok(vec![ChainEventFactory::data_event(
             self.writer_id.clone(),
             "progress_update",

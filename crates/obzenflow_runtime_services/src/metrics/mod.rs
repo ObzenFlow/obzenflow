@@ -7,8 +7,8 @@ pub mod fsm;
 pub mod handle;
 pub mod inputs;
 pub mod instrumentation;
-pub mod tail_read;
 pub mod supervisor;
+pub mod tail_read;
 
 // Re-export commonly used types
 // Note: MetricsAggregatorSupervisor is intentionally NOT exported - use MetricsAggregatorBuilder

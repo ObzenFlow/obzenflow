@@ -204,8 +204,7 @@ impl ChainEvent {
     /// the provided message and kind, and primes `error_hops_remaining` so
     /// stage supervisors can route the event according to FLOWIP-082e/082g.
     pub fn mark_as_error(mut self, reason: impl Into<String>, kind: ErrorKind) -> Self {
-        self.processing_info.status =
-            ProcessingStatus::error_with_kind(reason.into(), Some(kind));
+        self.processing_info.status = ProcessingStatus::error_with_kind(reason.into(), Some(kind));
         self.processing_info.error_hops_remaining = Some(1);
         self
     }
@@ -780,6 +779,12 @@ impl ChainEventFactory {
         state: String,
         consecutive_failures: usize,
         rejection_rate: f64,
+        successes_total: u64,
+        failures_total: u64,
+        opened_total: u64,
+        time_in_closed_seconds: f64,
+        time_in_open_seconds: f64,
+        time_in_half_open_seconds: f64,
     ) -> ChainEvent {
         Self::observability_event(
             writer_id,
@@ -791,6 +796,12 @@ impl ChainEventFactory {
                     state,
                     consecutive_failures,
                     rejection_rate,
+                    successes_total,
+                    failures_total,
+                    opened_total,
+                    time_in_closed_seconds,
+                    time_in_open_seconds,
+                    time_in_half_open_seconds,
                 },
             )),
         )

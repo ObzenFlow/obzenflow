@@ -15,10 +15,7 @@ pub enum FlowBuildError {
     StageResourcesFailed(String),
 
     #[error("Failed to create stage '{stage_name}': {message}")]
-    StageCreationFailed {
-        stage_name: String,
-        message: String,
-    },
+    StageCreationFailed { stage_name: String, message: String },
 
     #[error("Pipeline build failed: {0}")]
     PipelineBuildFailed(String),

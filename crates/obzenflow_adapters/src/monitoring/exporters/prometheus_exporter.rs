@@ -136,10 +136,8 @@ impl PrometheusExporter {
                 if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
                     writeln!(
                         output,
-                        "obzenflow_events_total{{flow=\"{}\",stage=\"{}\",stage_id=\"{}\"}} {}",
-                        escape_label(&metadata.flow_name),
-                        escape_label(&metadata.name),
-                        escape_label(&stage_id.to_string()),
+                        "obzenflow_events_total{{{}}} {}",
+                        format_stage_labels(stage_id, metadata),
                         count
                     )?;
                 }
@@ -168,10 +166,8 @@ impl PrometheusExporter {
                         };
                         writeln!(
                             output,
-                            "obzenflow_errors_total{{flow=\"{}\",stage=\"{}\",stage_id=\"{}\",error_kind=\"{}\"}} {}",
-                            escape_label(&metadata.flow_name),
-                            escape_label(&metadata.name),
-                            escape_label(&stage_id.to_string()),
+                            "obzenflow_errors_total{{{},error_kind=\"{}\"}} {}",
+                            format_stage_labels(stage_id, metadata),
                             kind_label,
                             count
                         )?;
@@ -191,10 +187,8 @@ impl PrometheusExporter {
                 if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
                     writeln!(
                         output,
-                        "obzenflow_errors_total{{flow=\"{}\",stage=\"{}\",stage_id=\"{}\"}} {}",
-                        escape_label(&metadata.flow_name),
-                        escape_label(&metadata.name),
-                        escape_label(&stage_id.to_string()),
+                        "obzenflow_errors_total{{{}}} {}",
+                        format_stage_labels(stage_id, metadata),
                         count
                     )?;
                 }
@@ -213,14 +207,19 @@ impl PrometheusExporter {
             for (stage_id, hist) in &snapshot.processing_times {
                 if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
                     let stage_id_str = stage_id.to_string();
+                    let flow_id_str = metadata.flow_id.map(|id| id.to_string());
+                    let mut labels: Vec<(&str, &str)> = vec![
+                        ("flow", &metadata.flow_name),
+                        ("stage", &metadata.name),
+                        ("stage_id", &stage_id_str),
+                    ];
+                    if let Some(flow_id) = flow_id_str.as_deref() {
+                        labels.insert(1, ("flow_id", flow_id));
+                    }
                     self.render_histogram(
                         output,
                         "obzenflow_processing_time_seconds",
-                        &[
-                            ("flow", &metadata.flow_name),
-                            ("stage", &metadata.name),
-                            ("stage_id", &stage_id_str),
-                        ],
+                        &labels,
                         hist,
                         1_000_000_000.0, // Convert nanoseconds to seconds
                     )?;
@@ -241,10 +240,8 @@ impl PrometheusExporter {
                 if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
                     writeln!(
                         output,
-                        "obzenflow_in_flight_events{{flow=\"{}\",stage=\"{}\",stage_id=\"{}\"}} {}",
-                        escape_label(&metadata.flow_name),
-                        escape_label(&metadata.name),
-                        escape_label(&stage_id.to_string()),
+                        "obzenflow_in_flight_events{{{}}} {}",
+                        format_stage_labels(stage_id, metadata),
                         value
                     )?;
                 }
@@ -264,10 +261,8 @@ impl PrometheusExporter {
                 if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
                     writeln!(
                         output,
-                        "obzenflow_cpu_usage_ratio{{flow=\"{}\",stage=\"{}\",stage_id=\"{}\"}} {}",
-                        escape_label(&metadata.flow_name),
-                        escape_label(&metadata.name),
-                        escape_label(&stage_id.to_string()),
+                        "obzenflow_cpu_usage_ratio{{{}}} {}",
+                        format_stage_labels(stage_id, metadata),
                         value
                     )?;
                 }
@@ -287,10 +282,8 @@ impl PrometheusExporter {
                 if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
                     writeln!(
                         output,
-                        "obzenflow_memory_bytes{{flow=\"{}\",stage=\"{}\",stage_id=\"{}\"}} {}",
-                        escape_label(&metadata.flow_name),
-                        escape_label(&metadata.name),
-                        escape_label(&stage_id.to_string()),
+                        "obzenflow_memory_bytes{{{}}} {}",
+                        format_stage_labels(stage_id, metadata),
                         value
                     )?;
                 }
@@ -310,10 +303,8 @@ impl PrometheusExporter {
                 if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
                     writeln!(
                         output,
-                        "obzenflow_anomalies_total{{flow=\"{}\",stage=\"{}\",stage_id=\"{}\"}} {}",
-                        escape_label(&metadata.flow_name),
-                        escape_label(&metadata.name),
-                        escape_label(&stage_id.to_string()),
+                        "obzenflow_anomalies_total{{{}}} {}",
+                        format_stage_labels(stage_id, metadata),
                         count
                     )?;
                 }
@@ -333,10 +324,8 @@ impl PrometheusExporter {
                 if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
                     writeln!(
                         output,
-                        "obzenflow_amendments_total{{flow=\"{}\",stage=\"{}\",stage_id=\"{}\"}} {}",
-                        escape_label(&metadata.flow_name),
-                        escape_label(&metadata.name),
-                        escape_label(&stage_id.to_string()),
+                        "obzenflow_amendments_total{{{}}} {}",
+                        format_stage_labels(stage_id, metadata),
                         count
                     )?;
                 }
@@ -356,10 +345,8 @@ impl PrometheusExporter {
                 if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
                     writeln!(
                         output,
-                        "obzenflow_saturation_ratio{{flow=\"{}\",stage=\"{}\",stage_id=\"{}\"}} {}",
-                        escape_label(&metadata.flow_name),
-                        escape_label(&metadata.name),
-                        escape_label(&stage_id.to_string()),
+                        "obzenflow_saturation_ratio{{{}}} {}",
+                        format_stage_labels(stage_id, metadata),
                         value
                     )?;
                 }
@@ -379,10 +366,8 @@ impl PrometheusExporter {
                 if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
                     writeln!(
                         output,
-                        "obzenflow_failures_total{{flow=\"{}\",stage=\"{}\",stage_id=\"{}\"}} {}",
-                        escape_label(&metadata.flow_name),
-                        escape_label(&metadata.name),
-                        escape_label(&stage_id.to_string()),
+                        "obzenflow_failures_total{{{}}} {}",
+                        format_stage_labels(stage_id, metadata),
                         count
                     )?;
                 }
@@ -402,10 +387,8 @@ impl PrometheusExporter {
                 if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
                     writeln!(
                         output,
-                        "obzenflow_event_loops_total{{flow=\"{}\",stage=\"{}\",stage_id=\"{}\"}} {}",
-                        escape_label(&metadata.flow_name),
-                        escape_label(&metadata.name),
-                        escape_label(&stage_id.to_string()),
+                        "obzenflow_event_loops_total{{{}}} {}",
+                        format_stage_labels(stage_id, metadata),
                         count
                     )?;
                 }
@@ -428,10 +411,8 @@ impl PrometheusExporter {
                 if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
                     writeln!(
                         output,
-                        "obzenflow_event_loops_with_work_total{{flow=\"{}\",stage=\"{}\",stage_id=\"{}\"}} {}",
-                        escape_label(&metadata.flow_name),
-                        escape_label(&metadata.name),
-                        escape_label(&stage_id.to_string()),
+                        "obzenflow_event_loops_with_work_total{{{}}} {}",
+                        format_stage_labels(stage_id, metadata),
                         count
                     )?;
                 }
@@ -453,10 +434,7 @@ impl PrometheusExporter {
                     self.render_histogram(
                         output,
                         "obzenflow_flow_latency_seconds",
-                        &[
-                            ("flow", &metadata.flow_name),
-                            ("stage_id", &stage_id_str),
-                        ],
+                        &[("flow", &metadata.flow_name), ("stage_id", &stage_id_str)],
                         histogram,
                         1.0, // Already in seconds
                     )?;
@@ -496,10 +474,8 @@ impl PrometheusExporter {
                 if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
                     writeln!(
                         output,
-                        "obzenflow_circuit_breaker_state{{flow=\"{}\",stage=\"{}\",stage_id=\"{}\"}} {}",
-                        escape_label(&metadata.flow_name),
-                        escape_label(&metadata.name),
-                        escape_label(&stage_id.to_string()),
+                        "obzenflow_circuit_breaker_state{{{}}} {}",
+                        format_stage_labels(stage_id, metadata),
                         value
                     )?;
                 }
@@ -519,10 +495,8 @@ impl PrometheusExporter {
                 if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
                     writeln!(
                         output,
-                        "obzenflow_circuit_breaker_rejection_rate{{flow=\"{}\",stage=\"{}\",stage_id=\"{}\"}} {}",
-                        escape_label(&metadata.flow_name),
-                        escape_label(&metadata.name),
-                        escape_label(&stage_id.to_string()),
+                        "obzenflow_circuit_breaker_rejection_rate{{{}}} {}",
+                        format_stage_labels(stage_id, metadata),
                         value
                     )?;
                 }
@@ -542,10 +516,8 @@ impl PrometheusExporter {
                 if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
                     writeln!(
                         output,
-                        "obzenflow_circuit_breaker_consecutive_failures{{flow=\"{}\",stage=\"{}\",stage_id=\"{}\"}} {}",
-                        escape_label(&metadata.flow_name),
-                        escape_label(&metadata.name),
-                        escape_label(&stage_id.to_string()),
+                        "obzenflow_circuit_breaker_consecutive_failures{{{}}} {}",
+                        format_stage_labels(stage_id, metadata),
                         value
                     )?;
                 }
@@ -553,22 +525,181 @@ impl PrometheusExporter {
             writeln!(output)?;
         }
 
-        // Rate limiter delay rate
-        if !snapshot.rate_limiter_delay_rate.is_empty() {
+        // Circuit breaker requests total
+        if !snapshot.circuit_breaker_requests_total.is_empty() {
             writeln!(
                 output,
-                "# HELP obzenflow_rate_limiter_delay_rate Rate limiter delay rate (0.0-1.0)"
+                "# HELP obzenflow_circuit_breaker_requests_total Total requests processed by the circuit breaker"
             )?;
-            writeln!(output, "# TYPE obzenflow_rate_limiter_delay_rate gauge")?;
+            writeln!(
+                output,
+                "# TYPE obzenflow_circuit_breaker_requests_total counter"
+            )?;
 
-            for (stage_id, value) in &snapshot.rate_limiter_delay_rate {
+            for (stage_id, count) in &snapshot.circuit_breaker_requests_total {
                 if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
                     writeln!(
                         output,
-                        "obzenflow_rate_limiter_delay_rate{{flow=\"{}\",stage=\"{}\"}} {}",
-                        escape_label(&metadata.flow_name),
-                        escape_label(&metadata.name),
-                        value
+                        "obzenflow_circuit_breaker_requests_total{{{}}} {}",
+                        format_stage_labels(stage_id, metadata),
+                        count
+                    )?;
+                }
+            }
+            writeln!(output)?;
+        }
+
+        // Circuit breaker rejections total
+        if !snapshot.circuit_breaker_rejections_total.is_empty() {
+            writeln!(
+                output,
+                "# HELP obzenflow_circuit_breaker_rejections_total Total requests rejected by the circuit breaker"
+            )?;
+            writeln!(
+                output,
+                "# TYPE obzenflow_circuit_breaker_rejections_total counter"
+            )?;
+
+            for (stage_id, count) in &snapshot.circuit_breaker_rejections_total {
+                if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
+                    writeln!(
+                        output,
+                        "obzenflow_circuit_breaker_rejections_total{{{}}} {}",
+                        format_stage_labels(stage_id, metadata),
+                        count
+                    )?;
+                }
+            }
+            writeln!(output)?;
+        }
+
+        // Circuit breaker opened total
+        if !snapshot.circuit_breaker_opened_total.is_empty() {
+            writeln!(
+                output,
+                "# HELP obzenflow_circuit_breaker_opened_total Total times circuit breaker has opened"
+            )?;
+            writeln!(
+                output,
+                "# TYPE obzenflow_circuit_breaker_opened_total counter"
+            )?;
+
+            for (stage_id, count) in &snapshot.circuit_breaker_opened_total {
+                if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
+                    writeln!(
+                        output,
+                        "obzenflow_circuit_breaker_opened_total{{{}}} {}",
+                        format_stage_labels(stage_id, metadata),
+                        count
+                    )?;
+                }
+            }
+            writeln!(output)?;
+        }
+
+        // Circuit breaker successes total
+        if !snapshot.circuit_breaker_successes_total.is_empty() {
+            writeln!(
+                output,
+                "# HELP obzenflow_circuit_breaker_successes_total Total calls allowed by the breaker that did not count as failures"
+            )?;
+            writeln!(
+                output,
+                "# TYPE obzenflow_circuit_breaker_successes_total counter"
+            )?;
+
+            for (stage_id, count) in &snapshot.circuit_breaker_successes_total {
+                if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
+                    writeln!(
+                        output,
+                        "obzenflow_circuit_breaker_successes_total{{{}}} {}",
+                        format_stage_labels(stage_id, metadata),
+                        count
+                    )?;
+                }
+            }
+            writeln!(output)?;
+        }
+
+        // Circuit breaker failures total
+        if !snapshot.circuit_breaker_failures_total.is_empty() {
+            writeln!(
+                output,
+                "# HELP obzenflow_circuit_breaker_failures_total Total calls allowed by the breaker that counted as failures"
+            )?;
+            writeln!(
+                output,
+                "# TYPE obzenflow_circuit_breaker_failures_total counter"
+            )?;
+
+            for (stage_id, count) in &snapshot.circuit_breaker_failures_total {
+                if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
+                    writeln!(
+                        output,
+                        "obzenflow_circuit_breaker_failures_total{{{}}} {}",
+                        format_stage_labels(stage_id, metadata),
+                        count
+                    )?;
+                }
+            }
+            writeln!(output)?;
+        }
+
+        // Circuit breaker time in each state (monotonic)
+        if !snapshot
+            .circuit_breaker_time_in_state_seconds_total
+            .is_empty()
+        {
+            writeln!(
+                output,
+                "# HELP obzenflow_circuit_breaker_time_in_state_seconds_total Total time spent in each circuit breaker state"
+            )?;
+            writeln!(
+                output,
+                "# TYPE obzenflow_circuit_breaker_time_in_state_seconds_total counter"
+            )?;
+
+            for ((stage_id, state), seconds_total) in
+                &snapshot.circuit_breaker_time_in_state_seconds_total
+            {
+                if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
+                    writeln!(
+                        output,
+                        "obzenflow_circuit_breaker_time_in_state_seconds_total{{{},state=\"{}\"}} {}",
+                        format_stage_labels(stage_id, metadata),
+                        escape_label(state),
+                        seconds_total
+                    )?;
+                }
+            }
+            writeln!(output)?;
+        }
+
+        // Circuit breaker state transitions (monotonic)
+        if !snapshot
+            .circuit_breaker_state_transitions_total
+            .is_empty()
+        {
+            writeln!(
+                output,
+                "# HELP obzenflow_circuit_breaker_state_transitions_total Total circuit breaker state transitions"
+            )?;
+            writeln!(
+                output,
+                "# TYPE obzenflow_circuit_breaker_state_transitions_total counter"
+            )?;
+
+            for ((stage_id, from_state, to_state), count) in
+                &snapshot.circuit_breaker_state_transitions_total
+            {
+                if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
+                    writeln!(
+                        output,
+                        "obzenflow_circuit_breaker_state_transitions_total{{{},from_state=\"{}\",to_state=\"{}\"}} {}",
+                        format_stage_labels(stage_id, metadata),
+                        escape_label(from_state),
+                        escape_label(to_state),
+                        count
                     )?;
                 }
             }
@@ -587,10 +718,150 @@ impl PrometheusExporter {
                 if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
                     writeln!(
                         output,
-                        "obzenflow_rate_limiter_utilization{{flow=\"{}\",stage=\"{}\"}} {}",
-                        escape_label(&metadata.flow_name),
-                        escape_label(&metadata.name),
+                        "obzenflow_rate_limiter_utilization{{{}}} {}",
+                        format_stage_labels(stage_id, metadata),
                         value
+                    )?;
+                }
+            }
+            writeln!(output)?;
+        }
+
+        // Rate limiter events total
+        if !snapshot.rate_limiter_events_total.is_empty() {
+            writeln!(
+                output,
+                "# HELP obzenflow_rate_limiter_events_total Total events processed by the rate limiter"
+            )?;
+            writeln!(output, "# TYPE obzenflow_rate_limiter_events_total counter")?;
+
+            for (stage_id, count) in &snapshot.rate_limiter_events_total {
+                if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
+                    writeln!(
+                        output,
+                        "obzenflow_rate_limiter_events_total{{{}}} {}",
+                        format_stage_labels(stage_id, metadata),
+                        count
+                    )?;
+                }
+            }
+            writeln!(output)?;
+        }
+
+        // Rate limiter delayed total
+        if !snapshot.rate_limiter_delayed_total.is_empty() {
+            writeln!(
+                output,
+                "# HELP obzenflow_rate_limiter_delayed_total Total events delayed by the rate limiter"
+            )?;
+            writeln!(
+                output,
+                "# TYPE obzenflow_rate_limiter_delayed_total counter"
+            )?;
+
+            for (stage_id, count) in &snapshot.rate_limiter_delayed_total {
+                if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
+                    writeln!(
+                        output,
+                        "obzenflow_rate_limiter_delayed_total{{{}}} {}",
+                        format_stage_labels(stage_id, metadata),
+                        count
+                    )?;
+                }
+            }
+            writeln!(output)?;
+        }
+
+        // Rate limiter tokens consumed total (monotonic)
+        if !snapshot.rate_limiter_tokens_consumed_total.is_empty() {
+            writeln!(
+                output,
+                "# HELP obzenflow_rate_limiter_tokens_consumed_total Total tokens consumed by the rate limiter"
+            )?;
+            writeln!(
+                output,
+                "# TYPE obzenflow_rate_limiter_tokens_consumed_total counter"
+            )?;
+
+            for (stage_id, tokens) in &snapshot.rate_limiter_tokens_consumed_total {
+                if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
+                    writeln!(
+                        output,
+                        "obzenflow_rate_limiter_tokens_consumed_total{{{}}} {}",
+                        format_stage_labels(stage_id, metadata),
+                        tokens
+                    )?;
+                }
+            }
+            writeln!(output)?;
+        }
+
+        // Rate limiter delay seconds total (monotonic)
+        if !snapshot.rate_limiter_delay_seconds_total.is_empty() {
+            writeln!(
+                output,
+                "# HELP obzenflow_rate_limiter_delay_seconds_total Total time spent blocked waiting for tokens"
+            )?;
+            writeln!(
+                output,
+                "# TYPE obzenflow_rate_limiter_delay_seconds_total counter"
+            )?;
+
+            for (stage_id, seconds) in &snapshot.rate_limiter_delay_seconds_total {
+                if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
+                    writeln!(
+                        output,
+                        "obzenflow_rate_limiter_delay_seconds_total{{{}}} {}",
+                        format_stage_labels(stage_id, metadata),
+                        seconds
+                    )?;
+                }
+            }
+            writeln!(output)?;
+        }
+
+        // Rate limiter bucket tokens (FLOWIP-059a-3 Issue 3)
+        if !snapshot.rate_limiter_bucket_tokens.is_empty() {
+            writeln!(
+                output,
+                "# HELP obzenflow_rate_limiter_bucket_tokens Current tokens available in the rate limiter bucket"
+            )?;
+            writeln!(
+                output,
+                "# TYPE obzenflow_rate_limiter_bucket_tokens gauge"
+            )?;
+
+            for (stage_id, tokens) in &snapshot.rate_limiter_bucket_tokens {
+                if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
+                    writeln!(
+                        output,
+                        "obzenflow_rate_limiter_bucket_tokens{{{}}} {}",
+                        format_stage_labels(stage_id, metadata),
+                        tokens
+                    )?;
+                }
+            }
+            writeln!(output)?;
+        }
+
+        // Rate limiter bucket capacity (FLOWIP-059a-3 Issue 3)
+        if !snapshot.rate_limiter_bucket_capacity.is_empty() {
+            writeln!(
+                output,
+                "# HELP obzenflow_rate_limiter_bucket_capacity Maximum capacity of the rate limiter bucket"
+            )?;
+            writeln!(
+                output,
+                "# TYPE obzenflow_rate_limiter_bucket_capacity gauge"
+            )?;
+
+            for (stage_id, capacity) in &snapshot.rate_limiter_bucket_capacity {
+                if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
+                    writeln!(
+                        output,
+                        "obzenflow_rate_limiter_bucket_capacity{{{}}} {}",
+                        format_stage_labels(stage_id, metadata),
+                        capacity
                     )?;
                 }
             }
@@ -606,14 +877,20 @@ impl PrometheusExporter {
                 .next()
                 .map(|m| m.flow_name.as_str())
                 .unwrap_or("unknown");
-            // Use the pipeline-wide stage metadata key (when present) as a stable flow_id hint.
-            // The canonical ID is the ULID; stage_id and any future flow_id labels may be
-            // prefixed (e.g., "stage_<ULID>") and UIs should strip the prefix.
+            // Prefer an explicit flow_id observed in stage metadata; fall back to the legacy
+            // heuristic of using an arbitrary stage_id when flow_id is not yet available.
             let flow_id_label = snapshot
                 .stage_metadata
-                .keys()
-                .next()
+                .values()
+                .find_map(|m| m.flow_id)
                 .map(|id| id.to_string())
+                .or_else(|| {
+                    snapshot
+                        .stage_metadata
+                        .keys()
+                        .next()
+                        .map(|id| id.to_string())
+                })
                 .unwrap_or_else(|| "unknown".to_string());
 
             // Event counts
@@ -625,7 +902,9 @@ impl PrometheusExporter {
             writeln!(
                 output,
                 "obzenflow_flow_events_in_total{{flow=\"{}\",flow_id=\"{}\"}} {}",
-                flow_name, escape_label(&flow_id_label), flow_metrics.events_in
+                flow_name,
+                escape_label(&flow_id_label),
+                flow_metrics.events_in
             )?;
             writeln!(output)?;
 
@@ -637,7 +916,9 @@ impl PrometheusExporter {
             writeln!(
                 output,
                 "obzenflow_flow_events_out_total{{flow=\"{}\",flow_id=\"{}\"}} {}",
-                flow_name, escape_label(&flow_id_label), flow_metrics.events_out
+                flow_name,
+                escape_label(&flow_id_label),
+                flow_metrics.events_out
             )?;
             writeln!(output)?;
 
@@ -649,7 +930,9 @@ impl PrometheusExporter {
             writeln!(
                 output,
                 "obzenflow_flow_errors_total{{flow=\"{}\",flow_id=\"{}\"}} {}",
-                flow_name, escape_label(&flow_id_label), flow_metrics.errors_total
+                flow_name,
+                escape_label(&flow_id_label),
+                flow_metrics.errors_total
             )?;
             writeln!(output)?;
 
@@ -662,7 +945,9 @@ impl PrometheusExporter {
             writeln!(
                 output,
                 "obzenflow_flow_event_loops_total{{flow=\"{}\",flow_id=\"{}\"}} {}",
-                flow_name, escape_label(&flow_id_label), flow_metrics.event_loops_total
+                flow_name,
+                escape_label(&flow_id_label),
+                flow_metrics.event_loops_total
             )?;
             writeln!(output)?;
 
@@ -674,7 +959,9 @@ impl PrometheusExporter {
             writeln!(
                 output,
                 "obzenflow_flow_event_loops_with_work_total{{flow=\"{}\",flow_id=\"{}\"}} {}",
-                flow_name, escape_label(&flow_id_label), flow_metrics.event_loops_with_work_total
+                flow_name,
+                escape_label(&flow_id_label),
+                flow_metrics.event_loops_with_work_total
             )?;
             writeln!(output)?;
 
@@ -693,8 +980,356 @@ impl PrometheusExporter {
             writeln!(
                 output,
                 "obzenflow_flow_utilization{{flow=\"{}\",flow_id=\"{}\"}} {}",
-                flow_name, escape_label(&flow_id_label), utilization
+                flow_name,
+                escape_label(&flow_id_label),
+                utilization
             )?;
+            writeln!(output)?;
+        }
+
+        // Contract metrics (FLOWIP-059a)
+        if !snapshot.contract_metrics.results_total.is_empty() {
+            writeln!(
+                output,
+                "# HELP obzenflow_contract_results_total Contract verification results per edge"
+            )?;
+            writeln!(output, "# TYPE obzenflow_contract_results_total counter")?;
+
+            for ((upstream, downstream, contract, status), count) in
+                &snapshot.contract_metrics.results_total
+            {
+                let upstream_id = upstream.to_string();
+                let downstream_id = downstream.to_string();
+
+                let upstream_meta = snapshot.stage_metadata.get(upstream);
+                let downstream_meta = snapshot.stage_metadata.get(downstream);
+
+                let flow_name = upstream_meta
+                    .map(|m| m.flow_name.as_str())
+                    .or_else(|| downstream_meta.map(|m| m.flow_name.as_str()))
+                    .unwrap_or("unknown");
+                let flow_id = upstream_meta
+                    .and_then(|m| m.flow_id)
+                    .or_else(|| downstream_meta.and_then(|m| m.flow_id));
+
+                let upstream_name = upstream_meta.map(|m| m.name.as_str()).unwrap_or("unknown");
+                let downstream_name = downstream_meta
+                    .map(|m| m.name.as_str())
+                    .unwrap_or("unknown");
+
+                if let Some(flow_id) = flow_id {
+                    writeln!(
+                        output,
+                        "obzenflow_contract_results_total{{flow=\"{}\",flow_id=\"{}\",upstream_stage_id=\"{}\",downstream_stage_id=\"{}\",upstream=\"{}\",downstream=\"{}\",contract=\"{}\",status=\"{}\"}} {}",
+                        escape_label(flow_name),
+                        escape_label(&flow_id.to_string()),
+                        escape_label(&upstream_id),
+                        escape_label(&downstream_id),
+                        escape_label(upstream_name),
+                        escape_label(downstream_name),
+                        escape_label(contract),
+                        escape_label(status),
+                        count
+                    )?;
+                } else {
+                    writeln!(
+                        output,
+                        "obzenflow_contract_results_total{{flow=\"{}\",upstream_stage_id=\"{}\",downstream_stage_id=\"{}\",upstream=\"{}\",downstream=\"{}\",contract=\"{}\",status=\"{}\"}} {}",
+                        escape_label(flow_name),
+                        escape_label(&upstream_id),
+                        escape_label(&downstream_id),
+                        escape_label(upstream_name),
+                        escape_label(downstream_name),
+                        escape_label(contract),
+                        escape_label(status),
+                        count
+                    )?;
+                }
+            }
+            writeln!(output)?;
+        }
+
+        if !snapshot.contract_metrics.violations_total.is_empty() {
+            writeln!(
+                output,
+                "# HELP obzenflow_contract_violations_total Contract violations per edge"
+            )?;
+            writeln!(output, "# TYPE obzenflow_contract_violations_total counter")?;
+
+            for ((upstream, downstream, contract, cause), count) in
+                &snapshot.contract_metrics.violations_total
+            {
+                let upstream_id = upstream.to_string();
+                let downstream_id = downstream.to_string();
+
+                let upstream_meta = snapshot.stage_metadata.get(upstream);
+                let downstream_meta = snapshot.stage_metadata.get(downstream);
+
+                let flow_name = upstream_meta
+                    .map(|m| m.flow_name.as_str())
+                    .or_else(|| downstream_meta.map(|m| m.flow_name.as_str()))
+                    .unwrap_or("unknown");
+                let flow_id = upstream_meta
+                    .and_then(|m| m.flow_id)
+                    .or_else(|| downstream_meta.and_then(|m| m.flow_id));
+
+                let upstream_name = upstream_meta.map(|m| m.name.as_str()).unwrap_or("unknown");
+                let downstream_name = downstream_meta
+                    .map(|m| m.name.as_str())
+                    .unwrap_or("unknown");
+
+                if let Some(flow_id) = flow_id {
+                    writeln!(
+                        output,
+                        "obzenflow_contract_violations_total{{flow=\"{}\",flow_id=\"{}\",upstream_stage_id=\"{}\",downstream_stage_id=\"{}\",upstream=\"{}\",downstream=\"{}\",contract=\"{}\",cause=\"{}\"}} {}",
+                        escape_label(flow_name),
+                        escape_label(&flow_id.to_string()),
+                        escape_label(&upstream_id),
+                        escape_label(&downstream_id),
+                        escape_label(upstream_name),
+                        escape_label(downstream_name),
+                        escape_label(contract),
+                        escape_label(cause),
+                        count
+                    )?;
+                } else {
+                    writeln!(
+                        output,
+                        "obzenflow_contract_violations_total{{flow=\"{}\",upstream_stage_id=\"{}\",downstream_stage_id=\"{}\",upstream=\"{}\",downstream=\"{}\",contract=\"{}\",cause=\"{}\"}} {}",
+                        escape_label(flow_name),
+                        escape_label(&upstream_id),
+                        escape_label(&downstream_id),
+                        escape_label(upstream_name),
+                        escape_label(downstream_name),
+                        escape_label(contract),
+                        escape_label(cause),
+                        count
+                    )?;
+                }
+            }
+            writeln!(output)?;
+        }
+
+        if !snapshot.contract_metrics.overrides_total.is_empty() {
+            writeln!(
+                output,
+                "# HELP obzenflow_contract_overrides_total Contract decisions overridden by policy"
+            )?;
+            writeln!(output, "# TYPE obzenflow_contract_overrides_total counter")?;
+
+            for ((upstream, downstream, contract, policy), count) in
+                &snapshot.contract_metrics.overrides_total
+            {
+                let upstream_id = upstream.to_string();
+                let downstream_id = downstream.to_string();
+
+                let upstream_meta = snapshot.stage_metadata.get(upstream);
+                let downstream_meta = snapshot.stage_metadata.get(downstream);
+
+                let flow_name = upstream_meta
+                    .map(|m| m.flow_name.as_str())
+                    .or_else(|| downstream_meta.map(|m| m.flow_name.as_str()))
+                    .unwrap_or("unknown");
+                let flow_id = upstream_meta
+                    .and_then(|m| m.flow_id)
+                    .or_else(|| downstream_meta.and_then(|m| m.flow_id));
+
+                let upstream_name = upstream_meta.map(|m| m.name.as_str()).unwrap_or("unknown");
+                let downstream_name = downstream_meta
+                    .map(|m| m.name.as_str())
+                    .unwrap_or("unknown");
+
+                if let Some(flow_id) = flow_id {
+                    writeln!(
+                        output,
+                        "obzenflow_contract_overrides_total{{flow=\"{}\",flow_id=\"{}\",upstream_stage_id=\"{}\",downstream_stage_id=\"{}\",upstream=\"{}\",downstream=\"{}\",contract=\"{}\",policy=\"{}\"}} {}",
+                        escape_label(flow_name),
+                        escape_label(&flow_id.to_string()),
+                        escape_label(&upstream_id),
+                        escape_label(&downstream_id),
+                        escape_label(upstream_name),
+                        escape_label(downstream_name),
+                        escape_label(contract),
+                        escape_label(policy),
+                        count
+                    )?;
+                } else {
+                    writeln!(
+                        output,
+                        "obzenflow_contract_overrides_total{{flow=\"{}\",upstream_stage_id=\"{}\",downstream_stage_id=\"{}\",upstream=\"{}\",downstream=\"{}\",contract=\"{}\",policy=\"{}\"}} {}",
+                        escape_label(flow_name),
+                        escape_label(&upstream_id),
+                        escape_label(&downstream_id),
+                        escape_label(upstream_name),
+                        escape_label(downstream_name),
+                        escape_label(contract),
+                        escape_label(policy),
+                        count
+                    )?;
+                }
+            }
+            writeln!(output)?;
+        }
+
+        if !snapshot.contract_metrics.reader_seq.is_empty() {
+            writeln!(
+                output,
+                "# HELP obzenflow_contract_reader_seq Latest reader sequence per contract edge"
+            )?;
+            writeln!(output, "# TYPE obzenflow_contract_reader_seq gauge")?;
+
+            for ((upstream, downstream, contract), seq) in &snapshot.contract_metrics.reader_seq {
+                let upstream_id = upstream.to_string();
+                let downstream_id = downstream.to_string();
+
+                let upstream_meta = snapshot.stage_metadata.get(upstream);
+                let downstream_meta = snapshot.stage_metadata.get(downstream);
+
+                let flow_name = upstream_meta
+                    .map(|m| m.flow_name.as_str())
+                    .or_else(|| downstream_meta.map(|m| m.flow_name.as_str()))
+                    .unwrap_or("unknown");
+                let flow_id = upstream_meta
+                    .and_then(|m| m.flow_id)
+                    .or_else(|| downstream_meta.and_then(|m| m.flow_id));
+
+                if let Some(flow_id) = flow_id {
+                    writeln!(
+                        output,
+                        "obzenflow_contract_reader_seq{{flow=\"{}\",flow_id=\"{}\",upstream_stage_id=\"{}\",downstream_stage_id=\"{}\",contract=\"{}\"}} {}",
+                        escape_label(flow_name),
+                        escape_label(&flow_id.to_string()),
+                        escape_label(&upstream_id),
+                        escape_label(&downstream_id),
+                        escape_label(contract),
+                        seq
+                    )?;
+                } else {
+                    writeln!(
+                        output,
+                        "obzenflow_contract_reader_seq{{flow=\"{}\",upstream_stage_id=\"{}\",downstream_stage_id=\"{}\",contract=\"{}\"}} {}",
+                        escape_label(flow_name),
+                        escape_label(&upstream_id),
+                        escape_label(&downstream_id),
+                        escape_label(contract),
+                        seq
+                    )?;
+                }
+            }
+            writeln!(output)?;
+        }
+
+        if !snapshot.contract_metrics.advertised_writer_seq.is_empty() {
+            writeln!(
+                output,
+                "# HELP obzenflow_contract_advertised_writer_seq Latest advertised writer sequence per contract edge"
+            )?;
+            writeln!(
+                output,
+                "# TYPE obzenflow_contract_advertised_writer_seq gauge"
+            )?;
+
+            for ((upstream, downstream, contract), seq) in
+                &snapshot.contract_metrics.advertised_writer_seq
+            {
+                let upstream_id = upstream.to_string();
+                let downstream_id = downstream.to_string();
+
+                let upstream_meta = snapshot.stage_metadata.get(upstream);
+                let downstream_meta = snapshot.stage_metadata.get(downstream);
+
+                let flow_name = upstream_meta
+                    .map(|m| m.flow_name.as_str())
+                    .or_else(|| downstream_meta.map(|m| m.flow_name.as_str()))
+                    .unwrap_or("unknown");
+                let flow_id = upstream_meta
+                    .and_then(|m| m.flow_id)
+                    .or_else(|| downstream_meta.and_then(|m| m.flow_id));
+
+                if let Some(flow_id) = flow_id {
+                    writeln!(
+                        output,
+                        "obzenflow_contract_advertised_writer_seq{{flow=\"{}\",flow_id=\"{}\",upstream_stage_id=\"{}\",downstream_stage_id=\"{}\",contract=\"{}\"}} {}",
+                        escape_label(flow_name),
+                        escape_label(&flow_id.to_string()),
+                        escape_label(&upstream_id),
+                        escape_label(&downstream_id),
+                        escape_label(contract),
+                        seq
+                    )?;
+                } else {
+                    writeln!(
+                        output,
+                        "obzenflow_contract_advertised_writer_seq{{flow=\"{}\",upstream_stage_id=\"{}\",downstream_stage_id=\"{}\",contract=\"{}\"}} {}",
+                        escape_label(flow_name),
+                        escape_label(&upstream_id),
+                        escape_label(&downstream_id),
+                        escape_label(contract),
+                        seq
+                    )?;
+                }
+            }
+            writeln!(output)?;
+        }
+
+        // Lag in events per contract edge (best-effort; only when advertised is present).
+        if !snapshot.contract_metrics.reader_seq.is_empty()
+            && !snapshot.contract_metrics.advertised_writer_seq.is_empty()
+        {
+            writeln!(
+                output,
+                "# HELP obzenflow_contract_lag_events Latest observed lag in events per contract edge"
+            )?;
+            writeln!(output, "# TYPE obzenflow_contract_lag_events gauge")?;
+
+            for ((upstream, downstream, contract), reader_seq) in
+                &snapshot.contract_metrics.reader_seq
+            {
+                if let Some(advertised) = snapshot.contract_metrics.advertised_writer_seq.get(&(
+                    *upstream,
+                    *downstream,
+                    contract.clone(),
+                )) {
+                    let lag = advertised.saturating_sub(*reader_seq);
+
+                    let upstream_id = upstream.to_string();
+                    let downstream_id = downstream.to_string();
+
+                    let upstream_meta = snapshot.stage_metadata.get(upstream);
+                    let downstream_meta = snapshot.stage_metadata.get(downstream);
+
+                    let flow_name = upstream_meta
+                        .map(|m| m.flow_name.as_str())
+                        .or_else(|| downstream_meta.map(|m| m.flow_name.as_str()))
+                        .unwrap_or("unknown");
+                    let flow_id = upstream_meta
+                        .and_then(|m| m.flow_id)
+                        .or_else(|| downstream_meta.and_then(|m| m.flow_id));
+
+                    if let Some(flow_id) = flow_id {
+                        writeln!(
+                            output,
+                            "obzenflow_contract_lag_events{{flow=\"{}\",flow_id=\"{}\",upstream_stage_id=\"{}\",downstream_stage_id=\"{}\",contract=\"{}\"}} {}",
+                            escape_label(flow_name),
+                            escape_label(&flow_id.to_string()),
+                            escape_label(&upstream_id),
+                            escape_label(&downstream_id),
+                            escape_label(contract),
+                            lag
+                        )?;
+                    } else {
+                        writeln!(
+                            output,
+                            "obzenflow_contract_lag_events{{flow=\"{}\",upstream_stage_id=\"{}\",downstream_stage_id=\"{}\",contract=\"{}\"}} {}",
+                            escape_label(flow_name),
+                            escape_label(&upstream_id),
+                            escape_label(&downstream_id),
+                            escape_label(contract),
+                            lag
+                        )?;
+                    }
+                }
+            }
             writeln!(output)?;
         }
 
@@ -709,10 +1344,8 @@ impl PrometheusExporter {
                     if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
                         writeln!(
                             output,
-                            "obzenflow_stage_lifecycle_state{{flow=\"{}\",stage=\"{}\",stage_id=\"{}\",state=\"{}\"}} 1",
-                            escape_label(&metadata.flow_name),
-                            escape_label(&metadata.name),
-                            escape_label(&stage_id.to_string()),
+                            "obzenflow_stage_lifecycle_state{{{},state=\"{}\"}} 1",
+                            format_stage_labels(stage_id, metadata),
                             escape_label(state)
                         )?;
                     }
@@ -748,10 +1381,8 @@ impl PrometheusExporter {
                 if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
                     writeln!(
                         output,
-                        "obzenflow_stage_vector_clock{{flow=\"{}\",stage=\"{}\",stage_id=\"{}\"}} {}",
-                        escape_label(&metadata.flow_name),
-                        escape_label(&metadata.name),
-                        escape_label(&stage_id.to_string()),
+                        "obzenflow_stage_vector_clock{{{}}} {}",
+                        format_stage_labels(stage_id, metadata),
                         seq
                     )?;
                 }
@@ -925,6 +1556,31 @@ fn escape_label(value: &str) -> String {
         .replace('\n', "\\n")
 }
 
+/// Centralized stage label formatting (FLOWIP-059a-3 Issue 2)
+///
+/// All stage-scoped metrics MUST use this function to ensure consistent labeling.
+/// Returns the standard label set: flow, flow_id (when available), stage, stage_id
+fn format_stage_labels(stage_id: &StageId, metadata: &StageMetadata) -> String {
+    let stage_id_str = stage_id.to_string();
+
+    if let Some(flow_id) = &metadata.flow_id {
+        format!(
+            "flow=\"{}\",flow_id=\"{}\",stage=\"{}\",stage_id=\"{}\"",
+            escape_label(&metadata.flow_name),
+            escape_label(&flow_id.to_string()),
+            escape_label(&metadata.name),
+            escape_label(&stage_id_str),
+        )
+    } else {
+        format!(
+            "flow=\"{}\",stage=\"{}\",stage_id=\"{}\"",
+            escape_label(&metadata.flow_name),
+            escape_label(&metadata.name),
+            escape_label(&stage_id_str),
+        )
+    }
+}
+
 /// Format label pairs for Prometheus
 fn format_labels(labels: &[(&str, &str)]) -> String {
     labels
@@ -1015,39 +1671,14 @@ mod tests {
                 name: "validation".to_string(),
                 flow_name: "order_flow".to_string(),
                 stage_type: obzenflow_core::event::context::StageType::Transform,
+                flow_id: None,
             },
         );
 
-        let snapshot = AppMetricsSnapshot {
-            timestamp: chrono::Utc::now(),
-            event_counts,
-            error_counts: HashMap::new(),
-            error_counts_by_kind: HashMap::new(),
-            processing_times: HashMap::new(),
-            in_flight: HashMap::new(),
-            cpu_usage_ratio: HashMap::new(),
-            memory_bytes: HashMap::new(),
-            anomalies_total: HashMap::new(),
-            amendments_total: HashMap::new(),
-            saturation_ratio: HashMap::new(),
-            failures_total: HashMap::new(),
-            event_loops_total: HashMap::new(),
-            event_loops_with_work_total: HashMap::new(),
-            flow_latency_seconds: HashMap::new(),
-            dropped_events: HashMap::new(),
-            circuit_breaker_state: HashMap::new(),
-            circuit_breaker_rejection_rate: HashMap::new(),
-            circuit_breaker_consecutive_failures: HashMap::new(),
-            rate_limiter_delay_rate: HashMap::new(),
-            rate_limiter_utilization: HashMap::new(),
-            flow_metrics: None,
-            stage_metadata,
-            stage_first_event_time: HashMap::new(),
-            stage_last_event_time: HashMap::new(),
-            stage_lifecycle_states: HashMap::new(),
-            pipeline_state: "Created".to_string(),
-            stage_vector_clocks: HashMap::new(),
-        };
+        let mut snapshot = AppMetricsSnapshot::default();
+        snapshot.event_counts = event_counts;
+        snapshot.stage_metadata = stage_metadata;
+        snapshot.pipeline_state = "Created".to_string();
 
         // Update and render
         exporter.update_app_metrics(snapshot).unwrap();

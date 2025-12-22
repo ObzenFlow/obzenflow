@@ -8,6 +8,9 @@ use super::{Middleware, MiddlewareHints, MiddlewareSafety};
 use obzenflow_core::event::context::StageType;
 use obzenflow_runtime_services::pipeline::config::StageConfig;
 use obzenflow_runtime_services::stages::common::control_strategies::ControlEventStrategy;
+use std::sync::Arc;
+
+use super::control::ControlMiddlewareAggregator;
 
 /// Factory that creates middleware with stage context.
 ///
@@ -18,12 +21,18 @@ use obzenflow_runtime_services::stages::common::control_strategies::ControlEvent
 ///
 /// ```rust
 /// use obzenflow_adapters::middleware::{MiddlewareFactory, Middleware, LoggingMiddleware};
+/// use obzenflow_adapters::middleware::control::ControlMiddlewareAggregator;
 /// use obzenflow_runtime_services::pipeline::config::StageConfig;
+/// use std::sync::Arc;
 ///
 /// struct LoggingFactory;
 ///
 /// impl MiddlewareFactory for LoggingFactory {
-///     fn create(&self, config: &StageConfig) -> Box<dyn Middleware> {
+///     fn create(
+///         &self,
+///         _config: &StageConfig,
+///         _control_middleware: Arc<ControlMiddlewareAggregator>,
+///     ) -> Box<dyn Middleware> {
 ///         // LoggingMiddleware::new() takes no arguments
 ///         Box::new(LoggingMiddleware::new())
 ///     }
@@ -35,7 +44,11 @@ use obzenflow_runtime_services::stages::common::control_strategies::ControlEvent
 /// ```
 pub trait MiddlewareFactory: Send + Sync {
     /// Create middleware instance with full stage context
-    fn create(&self, config: &StageConfig) -> Box<dyn Middleware>;
+    fn create(
+        &self,
+        config: &StageConfig,
+        control_middleware: Arc<ControlMiddlewareAggregator>,
+    ) -> Box<dyn Middleware>;
 
     /// Get a descriptive name for this middleware type
     fn name(&self) -> &str;
@@ -93,8 +106,12 @@ pub trait MiddlewareFactory: Send + Sync {
 
 // Implementation for Box<dyn MiddlewareFactory> to allow boxed factories
 impl<F: MiddlewareFactory + ?Sized> MiddlewareFactory for Box<F> {
-    fn create(&self, config: &StageConfig) -> Box<dyn Middleware> {
-        (**self).create(config)
+    fn create(
+        &self,
+        config: &StageConfig,
+        control_middleware: Arc<ControlMiddlewareAggregator>,
+    ) -> Box<dyn Middleware> {
+        (**self).create(config, control_middleware)
     }
 
     fn name(&self) -> &str {

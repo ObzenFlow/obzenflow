@@ -33,6 +33,14 @@ use obzenflow_core::event::chain_event::ChainEvent;
 /// }
 /// ```
 pub trait Middleware: Send + Sync {
+    /// Stable identifier for this middleware implementation.
+    ///
+    /// This is used for selective orchestration in adapter wrappers (e.g. sources)
+    /// without relying on `Any` downcasting or factory availability at runtime.
+    fn middleware_name(&self) -> &'static str {
+        "unknown"
+    }
+
     /// Called before the inner step processes the event.
     ///
     /// Use this to:
@@ -113,6 +121,10 @@ pub enum ErrorAction {
 
 // Implementation for Box<dyn Middleware> to allow boxed middleware
 impl<M: Middleware + ?Sized> Middleware for Box<M> {
+    fn middleware_name(&self) -> &'static str {
+        (**self).middleware_name()
+    }
+
     fn pre_handle(&self, event: &ChainEvent, ctx: &mut MiddlewareContext) -> MiddlewareAction {
         (**self).pre_handle(event, ctx)
     }

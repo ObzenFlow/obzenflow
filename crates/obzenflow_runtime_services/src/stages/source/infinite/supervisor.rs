@@ -5,10 +5,12 @@ use crate::supervised_base::base::Supervisor;
 use crate::supervised_base::{EventLoopDirective, HandlerSupervised};
 use obzenflow_core::event::context::FlowContext;
 use obzenflow_core::event::SystemEvent;
+use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
 use obzenflow_core::journal::journal::Journal;
 use obzenflow_core::{ChainEvent, StageId, WriterId};
 use obzenflow_fsm::{fsm, EventVariant, StateVariant, Transition};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use super::fsm::{
     InfiniteSourceAction, InfiniteSourceContext, InfiniteSourceEvent, InfiniteSourceState,
@@ -353,7 +355,9 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
 
                 // Get next batch of events from handler.
                 // 051b: handler now returns Result<Vec<ChainEvent>, SourceError>.
+                let tick_started_at = Instant::now();
                 let next_result = self.handler.next();
+                let tick_duration = tick_started_at.elapsed();
 
                 match next_result {
                     Ok(events) if !events.is_empty() => {
@@ -362,6 +366,16 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
                             .instrumentation
                             .event_loops_with_work_total
                             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+                        let data_events_in_tick = events.iter().filter(|event| event.is_data()).count();
+                        let per_data_event_duration = if data_events_in_tick > 0 {
+                            let nanos = (tick_duration.as_nanos()
+                                / data_events_in_tick as u128)
+                                .min(u64::MAX as u128) as u64;
+                            Duration::from_nanos(nanos)
+                        } else {
+                            Duration::from_nanos(0)
+                        };
 
                         for event in events {
                             // Enrich with runtime context
@@ -374,13 +388,20 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
                                     obzenflow_core::event::context::StageType::InfiniteSource,
                             };
 
-                            let enriched_event = event
-                                .with_flow_context(flow_context)
-                                .with_runtime_context(self.context.instrumentation.snapshot());
+                            let staged_event = event.with_flow_context(flow_context);
+
+                            // Track error-marked events for lifecycle/flow rollups.
+                            // Record before snapshot so the error event carries updated totals.
+                            if let ProcessingStatus::Error { kind, .. } =
+                                &staged_event.processing_info.status
+                            {
+                                let k = kind.clone().unwrap_or(ErrorKind::Unknown);
+                                self.context.instrumentation.record_error(k);
+                            }
 
                             // Apply run_if_not_error pattern (FLOWIP-082g)
                             let events_to_write =
-                                self.run_if_not_error(enriched_event.clone(), |e| vec![e]);
+                                self.run_if_not_error(staged_event, |e| vec![e]);
 
                             // Write events based on their status
                             for event_to_write in events_to_write {
@@ -394,16 +415,20 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
                                 // Lifecycle events (middleware metrics, etc.) are observability
                                 // overhead and should not participate in transport contracts.
                                 if event_to_write.is_data() {
-                                    self.context
-                                        .instrumentation
-                                        .record_emitted(&event_to_write);
+                                    self.context.instrumentation.record_emitted(&event_to_write);
                                     self.context
                                         .instrumentation
                                         .events_processed_total
                                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                    self.context
+                                        .instrumentation
+                                        .record_processing_time(per_data_event_duration);
                                 }
+                                let enriched_event_to_write = event_to_write.with_runtime_context(
+                                    self.context.instrumentation.snapshot_with_control(),
+                                );
                                 journal
-                                    .append(event_to_write, None)
+                                    .append(enriched_event_to_write, None)
                                     .await
                                     .map_err(|e| format!("Failed to write event: {}", e))?;
                             }

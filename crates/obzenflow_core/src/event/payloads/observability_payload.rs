@@ -139,6 +139,23 @@ pub enum CircuitBreakerEvent {
         state: String,
         consecutive_failures: usize,
         rejection_rate: f64,
+        // ---- Cumulative circuit breaker metrics (FLOWIP-059a-2) ----
+        //
+        // These fields are monotonic totals captured as wide-event snapshots so
+        // downstream metrics exports remain scrape-resilient. They default to 0
+        // for backwards compatibility with older journal entries.
+        #[serde(default)]
+        successes_total: u64,
+        #[serde(default)]
+        failures_total: u64,
+        #[serde(default)]
+        opened_total: u64,
+        #[serde(default)]
+        time_in_closed_seconds: f64,
+        #[serde(default)]
+        time_in_open_seconds: f64,
+        #[serde(default)]
+        time_in_half_open_seconds: f64,
     },
 }
 

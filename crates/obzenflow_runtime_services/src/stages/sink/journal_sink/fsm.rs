@@ -360,10 +360,7 @@ impl<H: SinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAction<H> 
 
                 // Initialize FSM-owned contract state for each upstream reader
                 let upstream_ids = ctx.upstream_subscription_factory.upstream_stage_ids();
-                ctx.contract_state = upstream_ids
-                    .into_iter()
-                    .map(ReaderProgress::new)
-                    .collect();
+                ctx.contract_state = upstream_ids.into_iter().map(ReaderProgress::new).collect();
 
                 // Build subscription using bound factory with contracts
                 let subscription = ctx
@@ -374,6 +371,7 @@ impl<H: SinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAction<H> 
                         ContractConfig::default(),
                         Some(ctx.system_journal.clone()),
                         Some(ctx.stage_id),
+                        ctx.instrumentation.control_middleware().clone(),
                     )
                     .await
                     .map_err(|e| {
@@ -554,7 +552,9 @@ impl<H: SinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAction<H> 
 
                         let evt = ChainEventFactory::delivery_event(writer_id, payload)
                             .with_flow_context(flow_ctx)
-                            .with_runtime_context(ctx.instrumentation.snapshot());
+                            .with_runtime_context(
+                                ctx.instrumentation.snapshot_with_control(),
+                            );
 
                         ctx.data_journal.append(evt, None).await.map_err(|e| {
                             obzenflow_fsm::FsmError::HandlerError(format!(

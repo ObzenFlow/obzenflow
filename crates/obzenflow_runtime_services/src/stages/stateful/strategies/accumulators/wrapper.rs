@@ -116,10 +116,7 @@ where
         emission.should_emit(state.events_seen, state.last_emit)
     }
 
-    fn emit(
-        &self,
-        state: &mut Self::State,
-    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
+    fn emit(&self, state: &mut Self::State) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
         // Get the aggregated events from accumulator
         let events = self.accumulator.emit(&state.inner);
 

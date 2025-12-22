@@ -170,12 +170,9 @@ pub trait SelfSupervisedExt: SelfSupervised {
                                     action = ?failure_action,
                                     "Executing failure-handling action"
                                 );
-                                failure_action
-                                    .execute(&mut context)
-                                    .await
-                                    .map_err(|e2| format!(
-                                        "Action error during failure handling: {e2}"
-                                    ))?;
+                                failure_action.execute(&mut context).await.map_err(|e2| {
+                                    format!("Action error during failure handling: {e2}")
+                                })?;
                             }
 
                             // After executing failure-handling actions, break out of the

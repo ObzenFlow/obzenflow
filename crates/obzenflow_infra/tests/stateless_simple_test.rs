@@ -3,16 +3,15 @@ use obzenflow_core::{
     event::chain_event::{ChainEvent, ChainEventFactory},
     event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload},
     id::StageId,
-    Result as CoreResult,
-    WriterId,
+    Result as CoreResult, WriterId,
 };
 use obzenflow_dsl_infra::{flow, sink, source, transform};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
 use obzenflow_runtime_services::stages::common::handlers::{FiniteSourceHandler, SinkHandler};
-use obzenflow_runtime_services::stages::SourceError;
 use obzenflow_runtime_services::stages::transform::Map;
+use obzenflow_runtime_services::stages::SourceError;
 use serde_json::json;
 
 #[derive(Clone, Debug)]

@@ -18,11 +18,11 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use obzenflow_core::{
+    event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload},
     event::{
         chain_event::{ChainEvent, ChainEventFactory},
         status::processing_status::ErrorKind,
     },
-    event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload},
     id::StageId,
     TypedPayload, // ✨ FLOWIP-082a
     WriterId,
@@ -129,7 +129,12 @@ impl CarrierDataSource {
 }
 
 impl FiniteSourceHandler for CarrierDataSource {
-    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, obzenflow_runtime_services::stages::common::handlers::source::traits::SourceError> {
+    fn next(
+        &mut self,
+    ) -> Result<
+        Option<Vec<ChainEvent>>,
+        obzenflow_runtime_services::stages::common::handlers::source::traits::SourceError,
+    > {
         // Static carrier reference data
         let carriers = vec![
             ("AA", "American Airlines", "USA", 950),
@@ -253,7 +258,12 @@ impl FlightDataSource {
 }
 
 impl FiniteSourceHandler for FlightDataSource {
-    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, obzenflow_runtime_services::stages::common::handlers::source::traits::SourceError> {
+    fn next(
+        &mut self,
+    ) -> Result<
+        Option<Vec<ChainEvent>>,
+        obzenflow_runtime_services::stages::common::handlers::source::traits::SourceError,
+    > {
         if self.current_index < self.flights.len() {
             let (carrier, date, origin, dest, duration, delay) = &self.flights[self.current_index];
             self.current_index += 1;
@@ -438,10 +448,7 @@ impl StatefulHandler for CarrierAggregator {
         CarrierStats::default()
     }
 
-    fn create_events(
-        &self,
-        state: &Self::State,
-    ) -> Result<Vec<ChainEvent>, HandlerError> {
+    fn create_events(&self, state: &Self::State) -> Result<Vec<ChainEvent>, HandlerError> {
         // ✨ FLOWIP-082a: Emit typed CarrierStatistics events
         let events = state
             .stats
@@ -494,10 +501,7 @@ impl StatisticsPrinter {
 
 #[async_trait]
 impl SinkHandler for StatisticsPrinter {
-    async fn consume(
-        &mut self,
-        event: ChainEvent,
-    ) -> Result<DeliveryPayload, HandlerError> {
+    async fn consume(&mut self, event: ChainEvent) -> Result<DeliveryPayload, HandlerError> {
         // ✨ FLOWIP-082a: Check event type using constant
         if CarrierStatistics::event_type_matches(&event.event_type()) {
             if !self.header_printed {

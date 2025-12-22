@@ -118,10 +118,7 @@ struct TextSink;
 
 #[async_trait]
 impl SinkHandler for TextSink {
-    async fn consume(
-        &mut self,
-        event: ChainEvent,
-    ) -> obzenflow_core::Result<DeliveryPayload> {
+    async fn consume(&mut self, event: ChainEvent) -> obzenflow_core::Result<DeliveryPayload> {
         // In the current delivery model, the accumulated state would be encoded
         // directly in the delivery payload, so for this harness we simply log
         // that we received a delivery and return a success receipt.

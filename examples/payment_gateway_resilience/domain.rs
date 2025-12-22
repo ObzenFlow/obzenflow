@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 /// - Outage: dependency starts failing, circuit breaker opens.
 /// - Recovery: dependency is healthy again, but circuit may still
 ///   be open depending on cooldown / probe behaviour.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub enum TrafficPhase {
     Warmup,
     Outage,
@@ -78,8 +78,12 @@ pub struct AuthorizedPayment {
     pub authorization_id: String,
 }
 
+impl AuthorizedPayment {
+    pub const AUTHORIZATION_ID_DEMO: &'static str = "AUTH-DEMO-1234";
+    pub const AUTHORIZATION_ID_FALLBACK_CB_OPEN: &'static str = "AUTH-FALLBACK-CB-OPEN";
+}
+
 impl TypedPayload for AuthorizedPayment {
     const EVENT_TYPE: &'static str = "payment.authorized";
     const SCHEMA_VERSION: u32 = 1;
 }
-

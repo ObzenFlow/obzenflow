@@ -482,6 +482,11 @@ macro_rules! build_typed_flow {
                 ))
             })?;
 
+        // Flow-scoped control middleware aggregator (FLOWIP-059a-3).
+        let control_middleware = std::sync::Arc::new(
+            obzenflow_adapters::middleware::control::ControlMiddlewareAggregator::new(),
+        );
+
         // Create metrics exporter using the builder pattern
         let metrics_exporter = if DefaultMetricsConfig::default().is_enabled() {
             Some(MetricsExporterBuilder::from_env().build())
@@ -646,6 +651,7 @@ macro_rules! build_typed_flow {
                         config,
                         resources,
                         flow_middleware,
+                        control_middleware.clone(),
                     )
                     .await
                     .map_err(|e| FlowBuildError::StageCreationFailed {
@@ -668,6 +674,7 @@ macro_rules! build_typed_flow {
         let mut builder = PipelineBuilder::new(
                 topology.clone(),
                 stage_resources_set.system_journal.clone(),
+                stage_resources_set.flow_id.clone(),
             )
             .with_flow_name($flow_name)
             .with_stages(stages)

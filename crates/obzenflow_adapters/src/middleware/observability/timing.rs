@@ -173,7 +173,11 @@ impl TimingMiddlewareFactory {
 }
 
 impl MiddlewareFactory for TimingMiddlewareFactory {
-    fn create(&self, config: &StageConfig) -> Box<dyn Middleware> {
+    fn create(
+        &self,
+        config: &StageConfig,
+        _control_middleware: std::sync::Arc<crate::middleware::control::ControlMiddlewareAggregator>,
+    ) -> Box<dyn Middleware> {
         Box::new(TimingMiddleware::new(&config.name))
     }
 

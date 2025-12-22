@@ -19,7 +19,7 @@ use crate::{
 };
 use obzenflow_core::event::WriterId;
 use obzenflow_core::event::{ChainEvent, SystemEvent};
-use obzenflow_core::id::SystemId;
+use obzenflow_core::id::{FlowId, SystemId};
 use obzenflow_core::journal::journal::Journal;
 use obzenflow_core::metrics::MetricsExporter;
 use obzenflow_core::StageId;
@@ -33,6 +33,7 @@ use std::{
 pub struct PipelineBuilder {
     topology: Arc<Topology>,
     system_journal: Arc<dyn Journal<SystemEvent>>,
+    flow_id: FlowId,
     stages: Vec<BoxedStageHandle>,
     sources: Vec<BoxedStageHandle>,
     metrics_exporter: Option<Arc<dyn MetricsExporter>>,
@@ -46,10 +47,15 @@ pub struct PipelineBuilder {
 
 impl PipelineBuilder {
     /// Create a new pipeline builder
-    pub fn new(topology: Arc<Topology>, system_journal: Arc<dyn Journal<SystemEvent>>) -> Self {
+    pub fn new(
+        topology: Arc<Topology>,
+        system_journal: Arc<dyn Journal<SystemEvent>>,
+        flow_id: FlowId,
+    ) -> Self {
         Self {
             topology,
             system_journal,
+            flow_id,
             stages: Vec::new(),
             sources: Vec::new(),
             metrics_exporter: None,
@@ -222,10 +228,18 @@ impl SupervisorBuilder for PipelineBuilder {
             }
         }
 
+        // Prefer the user-provided flow name (from `flow!`); fall back to a stable default.
+        let flow_name = self
+            .flow_name
+            .clone()
+            .unwrap_or_else(|| "unnamed_flow".to_string());
+
         let pipeline_context = PipelineContext {
             system_id,
             bus: message_bus.clone(),
             topology: self.topology.clone(),
+            flow_name: flow_name.clone(),
+            flow_id: self.flow_id.clone(),
             system_journal: self.system_journal.clone(),
             stage_supervisors: stage_map,
             source_supervisors: source_map,
@@ -322,12 +336,12 @@ impl SupervisorBuilder for PipelineBuilder {
         // Wrap it in FlowHandle with pipeline-specific extras
         // Clone topology for the handle (topology is Arc, so this is cheap)
         let topology = Some(self.topology.clone());
-        let flow_name = self.flow_name.unwrap_or_else(|| "unnamed_flow".to_string());
         let middleware_stacks = self
             .middleware_stacks
             .map(|stacks| Arc::new(stacks) as Arc<HashMap<StageId, MiddlewareStackConfig>>);
-        let contract_attachments =
-            Some(Arc::new(contract_attachments_map) as Arc<HashMap<(StageId, StageId), Vec<String>>>);
+        let contract_attachments = Some(
+            Arc::new(contract_attachments_map) as Arc<HashMap<(StageId, StageId), Vec<String>>>
+        );
 
         let join_metadata = self
             .join_metadata

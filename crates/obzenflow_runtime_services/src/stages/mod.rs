@@ -9,12 +9,12 @@ pub mod stateful;
 pub mod transform;
 
 // Re-export commonly used types from common
+pub use common::handlers::source::SourceError;
 pub use common::{
     ControlEventAction, ControlEventStrategy, FiniteSourceHandler, InfiniteSourceHandler,
     ObserverHandler, ProcessingContext, ResourceManaged, SinkHandler, StatefulHandler,
     TransformHandler,
 };
-pub use common::handlers::source::SourceError;
 
 // Re-export JoinHandler from common::handlers
 pub use common::handlers::JoinHandler;

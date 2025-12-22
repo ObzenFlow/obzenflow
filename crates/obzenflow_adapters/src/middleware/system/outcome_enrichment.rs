@@ -142,7 +142,11 @@ impl OutcomeEnrichmentMiddlewareFactory {
 }
 
 impl MiddlewareFactory for OutcomeEnrichmentMiddlewareFactory {
-    fn create(&self, config: &StageConfig) -> Box<dyn Middleware> {
+    fn create(
+        &self,
+        config: &StageConfig,
+        _control_middleware: std::sync::Arc<crate::middleware::control::ControlMiddlewareAggregator>,
+    ) -> Box<dyn Middleware> {
         Box::new(OutcomeEnrichmentMiddleware::new(&config.name))
     }
 

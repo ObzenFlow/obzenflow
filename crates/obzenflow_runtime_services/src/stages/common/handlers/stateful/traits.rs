@@ -2,9 +2,9 @@
 //!
 //! Examples: Aggregators, windowing operations, session tracking
 
+use crate::stages::common::handler_error::HandlerError;
 use async_trait::async_trait;
 use obzenflow_core::event::ChainEventContent;
-use crate::stages::common::handler_error::HandlerError;
 use obzenflow_core::ChainEvent;
 
 /// Handler for stateful processing stages
@@ -129,10 +129,7 @@ pub trait StatefulHandler: Send + Sync {
     ///
     /// Default: Calls create_events()
     /// Override only if you need to modify state during emission
-    fn emit(
-        &self,
-        state: &mut Self::State,
-    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
+    fn emit(&self, state: &mut Self::State) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
         self.create_events(state)
     }
 

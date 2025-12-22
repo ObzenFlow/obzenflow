@@ -8,7 +8,7 @@ use obzenflow_core::{ChainEvent, FlowId, StageId, SystemId};
 use obzenflow_infra::journal::MemoryJournal;
 use obzenflow_runtime_services::id_conversions::StageIdExt;
 use obzenflow_runtime_services::stages::resources_builder::StageResourcesBuilder;
-use obzenflow_topology::{TopologyBuilder, StageType as TopologyStageType};
+use obzenflow_topology::{StageType as TopologyStageType, TopologyBuilder};
 
 #[tokio::test]
 async fn sink_wires_to_reducer_in_simple_chain() {

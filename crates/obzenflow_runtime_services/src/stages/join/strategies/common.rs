@@ -226,10 +226,7 @@ where
         Ok(vec![])
     }
 
-    async fn drain(
-        &self,
-        _state: &Self::State,
-    ) -> Result<Vec<ChainEvent>, HandlerError> {
+    async fn drain(&self, _state: &Self::State) -> Result<Vec<ChainEvent>, HandlerError> {
         Ok(vec![])
     }
 }
@@ -345,8 +342,7 @@ mod tests {
             .expect("process_event should succeed while hydrating catalog");
 
         // enrich
-        let stream_event =
-            StreamRow { key: "k1".into() }.to_event(WriterId::from(StageId::new()));
+        let stream_event = StreamRow { key: "k1".into() }.to_event(WriterId::from(StageId::new()));
         let out = handler
             .process_event(&mut state, stream_event, StageId::new(), writer.clone())
             .expect("process_event should succeed in stream_hit_emits_joined_row");

@@ -5,7 +5,7 @@
 
 use crate::event::context::StageType;
 use crate::event::status::processing_status::ErrorKind;
-use crate::id::StageId;
+use crate::id::{FlowId, StageId};
 use crate::metrics::Percentile;
 use crate::time::MetricsDuration;
 use serde::{Deserialize, Serialize};
@@ -71,11 +71,57 @@ pub struct AppMetricsSnapshot {
     /// Circuit breaker consecutive failures by stage
     pub circuit_breaker_consecutive_failures: HashMap<StageId, f64>,
 
-    /// Rate limiter delay rate by stage (0.0-1.0)
-    pub rate_limiter_delay_rate: HashMap<StageId, f64>,
+    /// Circuit breaker requests processed total by stage (monotonic counter)
+    pub circuit_breaker_requests_total: HashMap<StageId, u64>,
+
+    /// Circuit breaker requests rejected total by stage (monotonic counter)
+    pub circuit_breaker_rejections_total: HashMap<StageId, u64>,
+
+    /// Circuit breaker times entered Open by stage (monotonic counter).
+    pub circuit_breaker_opened_total: HashMap<StageId, u64>,
+
+    /// Circuit breaker allowed calls classified as non-failures by stage (monotonic counter).
+    ///
+    /// This is "success" from the breaker’s perspective (i.e., it did not count as an
+    /// infra failure toward opening), not necessarily domain-level success.
+    pub circuit_breaker_successes_total: HashMap<StageId, u64>,
+
+    /// Circuit breaker allowed calls classified as failures by stage (monotonic counter).
+    ///
+    /// These are calls that counted toward breaker opening (e.g. Timeout/Remote failures).
+    pub circuit_breaker_failures_total: HashMap<StageId, u64>,
+
+    /// Circuit breaker time spent in each state by stage (monotonic counter, seconds).
+    /// Maps (StageId, state) -> seconds_total, where state is one of: "closed", "half_open", "open".
+    pub circuit_breaker_time_in_state_seconds_total: HashMap<(StageId, String), f64>,
+
+    /// Circuit breaker state transitions by stage (monotonic counter).
+    /// Maps (StageId, from_state, to_state) -> transitions_total.
+    pub circuit_breaker_state_transitions_total: HashMap<(StageId, String, String), u64>,
 
     /// Rate limiter utilization by stage (0.0-1.0)
     pub rate_limiter_utilization: HashMap<StageId, f64>,
+
+    /// Rate limiter events processed total by stage (monotonic counter)
+    pub rate_limiter_events_total: HashMap<StageId, u64>,
+
+    /// Rate limiter delayed events total by stage (monotonic counter)
+    pub rate_limiter_delayed_total: HashMap<StageId, u64>,
+
+    /// Rate limiter tokens consumed total by stage (monotonic counter).
+    pub rate_limiter_tokens_consumed_total: HashMap<StageId, f64>,
+
+    /// Rate limiter total time spent blocked waiting for tokens (seconds, monotonic counter).
+    pub rate_limiter_delay_seconds_total: HashMap<StageId, f64>,
+
+    /// Rate limiter current bucket tokens by stage (FLOWIP-059a-3 Issue 3).
+    pub rate_limiter_bucket_tokens: HashMap<StageId, f64>,
+
+    /// Rate limiter bucket capacity by stage (FLOWIP-059a-3 Issue 3).
+    pub rate_limiter_bucket_capacity: HashMap<StageId, f64>,
+
+    /// Contract verification metrics per edge (upstream/downstream)
+    pub contract_metrics: ContractMetricsSnapshot,
 
     /// Flow-level metrics (if journey events are implemented)
     pub flow_metrics: Option<FlowMetricsSnapshot>,
@@ -100,6 +146,34 @@ pub struct AppMetricsSnapshot {
     /// This mirrors MetricsStore.stage_vector_clocks and is used by exporters
     /// to expose obzenflow_stage_vector_clock metrics.
     pub stage_vector_clocks: HashMap<StageId, u64>,
+}
+
+/// Contract verification metrics per edge.
+///
+/// These are derived from contract verification events emitted by readers
+/// (e.g. via UpstreamSubscription) and are exported to Prometheus.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ContractMetricsSnapshot {
+    /// Contract results by (upstream, downstream, contract_name, status).
+    ///
+    /// Status values are expected to be small/stable strings such as:
+    /// "passed", "failed", "pending".
+    pub results_total: HashMap<(StageId, StageId, String, String), u64>,
+
+    /// Contract violations by (upstream, downstream, contract_name, cause).
+    ///
+    /// Cause values are expected to be small/stable strings such as:
+    /// "seq_divergence", "content_mismatch", "delivery_mismatch", "accounting_mismatch", "other".
+    pub violations_total: HashMap<(StageId, StageId, String, String), u64>,
+
+    /// Contract overrides by (upstream, downstream, contract_name, policy).
+    pub overrides_total: HashMap<(StageId, StageId, String, String), u64>,
+
+    /// Latest reader sequence per contract edge (upstream, downstream, contract_name).
+    pub reader_seq: HashMap<(StageId, StageId, String), u64>,
+
+    /// Latest advertised writer sequence per contract edge (upstream, downstream, contract_name).
+    pub advertised_writer_seq: HashMap<(StageId, StageId, String), u64>,
 }
 
 /// Snapshot of infrastructure-level metrics from direct observation
@@ -174,10 +248,8 @@ pub struct StageMetricsSnapshot {
     pub errors_total: u64,
 
     /// Error breakdown by kind (authoritative, journal-backed)
-    pub errors_by_kind: std::collections::HashMap<
-        crate::event::status::processing_status::ErrorKind,
-        u64,
-    >,
+    pub errors_by_kind:
+        std::collections::HashMap<crate::event::status::processing_status::ErrorKind, u64>,
 
     /// Number of in-flight events at snapshot time
     pub in_flight: u32,
@@ -188,6 +260,11 @@ pub struct StageMetricsSnapshot {
     pub recent_p95_ms: u64,
     pub recent_p99_ms: u64,
     pub recent_p999_ms: u64,
+
+    /// Actual sum of processing times (nanoseconds) - never reconstructed from percentiles
+    /// FLOWIP-059a-3: This field tracks the real sum for accurate histogram _sum export.
+    #[serde(default)]
+    pub processing_time_sum_nanos: u64,
 
     /// Event loop utilization counters for this stage
     pub event_loops_total: u64,
@@ -245,6 +322,10 @@ pub struct StageMetadata {
 
     /// Flow name this stage belongs to
     pub flow_name: String,
+
+    /// Optional flow execution ID for joinability across surfaces (FLOWIP-059a)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub flow_id: Option<FlowId>,
 }
 
 impl Default for AppMetricsSnapshot {
@@ -269,8 +350,21 @@ impl Default for AppMetricsSnapshot {
             circuit_breaker_state: HashMap::new(),
             circuit_breaker_rejection_rate: HashMap::new(),
             circuit_breaker_consecutive_failures: HashMap::new(),
-            rate_limiter_delay_rate: HashMap::new(),
+            circuit_breaker_requests_total: HashMap::new(),
+            circuit_breaker_rejections_total: HashMap::new(),
+            circuit_breaker_opened_total: HashMap::new(),
+            circuit_breaker_successes_total: HashMap::new(),
+            circuit_breaker_failures_total: HashMap::new(),
+            circuit_breaker_time_in_state_seconds_total: HashMap::new(),
+            circuit_breaker_state_transitions_total: HashMap::new(),
             rate_limiter_utilization: HashMap::new(),
+            rate_limiter_events_total: HashMap::new(),
+            rate_limiter_delayed_total: HashMap::new(),
+            rate_limiter_tokens_consumed_total: HashMap::new(),
+            rate_limiter_delay_seconds_total: HashMap::new(),
+            rate_limiter_bucket_tokens: HashMap::new(),
+            rate_limiter_bucket_capacity: HashMap::new(),
+            contract_metrics: ContractMetricsSnapshot::default(),
             flow_metrics: None,
             stage_metadata: HashMap::new(),
             stage_first_event_time: HashMap::new(),

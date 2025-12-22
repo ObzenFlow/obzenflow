@@ -3,7 +3,7 @@ use std::sync::Arc;
 use obzenflow_core::event::types::{Count, DurationMs, SeqNo, ViolationCause};
 use obzenflow_core::event::{ChainEvent, ChainEventContent, ChainEventFactory};
 use obzenflow_core::journal::journal::Journal;
-use obzenflow_core::{JournalOwner, StageId, WriterId};
+use obzenflow_core::{JournalOwner, NoControlMiddleware, StageId, WriterId};
 use obzenflow_infra::journal::{DiskJournal, MemoryJournal};
 use obzenflow_runtime_services::messaging::upstream_subscription::{
     ContractConfig, ReaderProgress, UpstreamSubscription,
@@ -44,8 +44,9 @@ async fn build_subscription_with_contracts(
     StageId,
 ) {
     // Contract events can use an in-memory journal
-    let data_journal: Arc<MemoryJournal<ChainEvent>> =
-        Arc::new(MemoryJournal::with_owner(JournalOwner::stage(StageId::new())));
+    let data_journal: Arc<MemoryJournal<ChainEvent>> = Arc::new(MemoryJournal::with_owner(
+        JournalOwner::stage(StageId::new()),
+    ));
 
     // Upstream events need a disk journal so the subscription can obtain a reader
     let base = std::env::temp_dir().join(format!(
@@ -63,7 +64,11 @@ async fn build_subscription_with_contracts(
 
     let mut subscription = UpstreamSubscription::new_with_names(
         "contract_test",
-        &[(stage_id, "upstream".into(), upstream_journal.clone() as Arc<dyn Journal<ChainEvent>>)],
+        &[(
+            stage_id,
+            "upstream".into(),
+            upstream_journal.clone() as Arc<dyn Journal<ChainEvent>>,
+        )],
     )
     .await
     .expect("failed to create subscription");
@@ -82,6 +87,7 @@ async fn build_subscription_with_contracts(
         config,
         None,
         Some(stage_id),
+        Arc::new(NoControlMiddleware),
     );
 
     (subscription, data_journal, upstream_journal, stage_id)
@@ -278,8 +284,14 @@ async fn contract_seq_divergence_missing_events_emits_gap_and_violation() {
         other => panic!("expected ContractStatus::Violated, got {:?}", other),
     }
 
-    assert!(progress[0].contract_violated, "progress should be marked violated");
-    assert!(progress[0].final_emitted, "progress should be marked final_emitted");
+    assert!(
+        progress[0].contract_violated,
+        "progress should be marked violated"
+    );
+    assert!(
+        progress[0].final_emitted,
+        "progress should be marked final_emitted"
+    );
 
     // Inspect contract journal for gap + final events
     let events: Vec<_> = contract_journal
@@ -451,8 +463,14 @@ async fn contract_seq_divergence_overconsumption_sets_violation_without_gap() {
         ),
     }
 
-    assert!(progress[0].contract_violated, "progress should be marked violated");
-    assert!(progress[0].final_emitted, "progress should be marked final_emitted");
+    assert!(
+        progress[0].contract_violated,
+        "progress should be marked violated"
+    );
+    assert!(
+        progress[0].final_emitted,
+        "progress should be marked final_emitted"
+    );
 
     let events: Vec<_> = contract_journal
         .read_causally_ordered()

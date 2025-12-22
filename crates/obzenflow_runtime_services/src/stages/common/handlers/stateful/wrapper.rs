@@ -143,10 +143,7 @@ where
         emission.should_emit(state.events_seen, state.last_emit)
     }
 
-    fn emit(
-        &self,
-        state: &mut Self::State,
-    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
+    fn emit(&self, state: &mut Self::State) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
         // Update last emit time
         state.last_emit = Some(Instant::now());
 

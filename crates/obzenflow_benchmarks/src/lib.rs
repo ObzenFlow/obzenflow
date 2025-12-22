@@ -32,9 +32,9 @@
 /// Re-export commonly used types for benchmarks
 pub mod prelude {
     // Core types
-    pub use obzenflow_core::event::chain_event::ChainEvent as Event;
-    pub use obzenflow_core::event::event_id::EventId as Id;
-    pub use obzenflow_core::journal::writer_id::WriterId as Writer;
+    pub use obzenflow_core::ChainEvent as Event;
+    pub use obzenflow_core::EventId as Id;
+    pub use obzenflow_core::WriterId as Writer;
     pub use obzenflow_core::{ChainEvent, EventId, Result, WriterId};
 
     // Runtime services

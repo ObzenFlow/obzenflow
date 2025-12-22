@@ -402,10 +402,7 @@ impl<H: StatefulHandler + Send + Sync + 'static> FsmAction for StatefulAction<H>
 
                 // Initialize FSM-owned contract state for each upstream reader
                 let upstream_ids = ctx.upstream_subscription_factory.upstream_stage_ids();
-                ctx.contract_state = upstream_ids
-                    .into_iter()
-                    .map(ReaderProgress::new)
-                    .collect();
+                ctx.contract_state = upstream_ids.into_iter().map(ReaderProgress::new).collect();
 
                 // Create subscription using bound factory with contracts
                 if !ctx.upstream_subscription_factory.is_empty() {
@@ -417,6 +414,7 @@ impl<H: StatefulHandler + Send + Sync + 'static> FsmAction for StatefulAction<H>
                             ContractConfig::default(),
                             Some(ctx.system_journal.clone()),
                             Some(ctx.stage_id),
+                            ctx.instrumentation.control_middleware().clone(),
                         )
                         .await
                         .map_err(|e| {
@@ -504,7 +502,7 @@ impl<H: StatefulHandler + Send + Sync + 'static> FsmAction for StatefulAction<H>
                 let mut natural = true;
                 let mut upstream_vector_clock = None;
                 let mut upstream_last_event = None;
-                let runtime_context = ctx.instrumentation.snapshot();
+                let runtime_context = ctx.instrumentation.snapshot_with_control();
 
                 if let Some(buffered_event) = buffered {
                     if let obzenflow_core::event::ChainEventContent::FlowControl(

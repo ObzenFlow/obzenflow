@@ -59,7 +59,12 @@ impl HighVolumeSource {
 }
 
 impl FiniteSourceHandler for HighVolumeSource {
-    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, obzenflow_runtime_services::stages::common::handlers::source::traits::SourceError> {
+    fn next(
+        &mut self,
+    ) -> Result<
+        Option<Vec<ChainEvent>>,
+        obzenflow_runtime_services::stages::common::handlers::source::traits::SourceError,
+    > {
         if self.count >= self.total_events {
             println!("🏁 Source complete: Generated {} total events", self.count);
             return Ok(None);

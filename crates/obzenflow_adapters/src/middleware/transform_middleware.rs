@@ -94,8 +94,7 @@ impl<H: TransformHandler> MiddlewareTransform<H> {
                 }
                 MiddlewareAction::Abort => {
                     let mut err = event.clone();
-                    err.processing_info.status =
-                        ProcessingStatus::error("aborted by middleware");
+                    err.processing_info.status = ProcessingStatus::error("aborted by middleware");
                     return Ok(vec![err]);
                 }
             }

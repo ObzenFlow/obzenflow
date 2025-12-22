@@ -376,7 +376,7 @@ impl<H: FiniteSourceHandler + Send + Sync + 'static> FsmAction for FiniteSourceA
                 };
 
                 // Take a final runtime snapshot for wide-event semantics
-                let runtime_context = ctx.instrumentation.snapshot();
+                let runtime_context = ctx.instrumentation.snapshot_with_control();
 
                 // Emit EOF with writer positions populated
                 let mut eof_event = ChainEventFactory::eof_event(writer_id.clone(), natural);
@@ -592,22 +592,21 @@ mod tests {
     use crate::message_bus::FsmMessageBus;
     use crate::metrics::instrumentation::StageInstrumentation;
     use async_trait::async_trait;
-    use obzenflow_core::circuit_breaker_registry;
     use obzenflow_core::event::event_envelope::EventEnvelope;
     use obzenflow_core::event::identity::JournalWriterId;
     use obzenflow_core::event::journal_event::JournalEvent;
     use obzenflow_core::event::system_event::SystemEvent;
+    use obzenflow_core::id::JournalId;
     use obzenflow_core::journal::journal::Journal;
     use obzenflow_core::journal::journal_error::JournalError;
     use obzenflow_core::journal::journal_owner::JournalOwner;
     use obzenflow_core::journal::journal_reader::JournalReader;
-    use obzenflow_core::id::JournalId;
     use obzenflow_core::StageId as CoreStageId;
-    use std::sync::atomic::{AtomicU8, Ordering};
+    use std::sync::atomic::AtomicU8;
     use std::sync::{Arc, Mutex};
 
-    use crate::stages::source::strategies::CircuitBreakerSourceStrategy;
     use crate::stages::common::handlers::FiniteSourceHandler as TestFiniteSourceHandler;
+    use crate::stages::source::strategies::CircuitBreakerSourceStrategy;
 
     /// Minimal in-memory journal for tests
     struct TestJournal<T: JournalEvent> {
@@ -652,9 +651,7 @@ mod tests {
             Ok(env)
         }
 
-        async fn read_causally_ordered(
-            &self,
-        ) -> Result<Vec<EventEnvelope<T>>, JournalError> {
+        async fn read_causally_ordered(&self) -> Result<Vec<EventEnvelope<T>>, JournalError> {
             let guard = self.events.lock().unwrap();
             Ok(guard.clone())
         }
@@ -694,27 +691,18 @@ mod tests {
             }))
         }
 
-        async fn read_last_n(
-            &self,
-            count: usize,
-        ) -> Result<Vec<EventEnvelope<T>>, JournalError> {
+        async fn read_last_n(&self, count: usize) -> Result<Vec<EventEnvelope<T>>, JournalError> {
             let guard = self.events.lock().unwrap();
             let len = guard.len();
             let start = len.saturating_sub(count);
             // Return most recent first to match Journal contract.
-            Ok(guard[start..]
-                .iter()
-                .rev()
-                .cloned()
-                .collect())
+            Ok(guard[start..].iter().rev().cloned().collect())
         }
     }
 
     #[async_trait]
     impl<T: JournalEvent + 'static> JournalReader<T> for TestJournalReader<T> {
-        async fn next(
-            &mut self,
-        ) -> Result<Option<EventEnvelope<T>>, JournalError> {
+        async fn next(&mut self) -> Result<Option<EventEnvelope<T>>, JournalError> {
             if self.pos >= self.events.len() {
                 Ok(None)
             } else {
@@ -744,8 +732,10 @@ mod tests {
     impl TestFiniteSourceHandler for DummySource {
         fn next(
             &mut self,
-        ) -> Result<Option<Vec<ChainEvent>>, crate::stages::common::handlers::source::traits::SourceError>
-        {
+        ) -> Result<
+            Option<Vec<ChainEvent>>,
+            crate::stages::common::handlers::source::traits::SourceError,
+        > {
             // This test source never emits data; it's only used to drive EOF behaviour
             // in combination with the control strategy and breaker state.
             Ok(None)
@@ -788,8 +778,9 @@ mod tests {
 
         // Case 1: breaker closed -> natural EOF
         let state_closed = Arc::new(AtomicU8::new(0)); // Closed
-        circuit_breaker_registry::register_stage_state(stage_id, state_closed.clone());
-        let mut ctx = build_ctx(Arc::new(CircuitBreakerSourceStrategy::new(stage_id)));
+        let mut ctx = build_ctx(Arc::new(CircuitBreakerSourceStrategy::new(
+            state_closed.clone(),
+        )));
 
         // Allocate resources to set writer_id
         FiniteSourceAction::<DummySource>::AllocateResources
@@ -822,8 +813,9 @@ mod tests {
 
         // Case 2: breaker open -> poison EOF
         let state_open = Arc::new(AtomicU8::new(1)); // Open
-        circuit_breaker_registry::register_stage_state(stage_id, state_open.clone());
-        let mut ctx_open = build_ctx(Arc::new(CircuitBreakerSourceStrategy::new(stage_id)));
+        let mut ctx_open = build_ctx(Arc::new(CircuitBreakerSourceStrategy::new(
+            state_open.clone(),
+        )));
 
         FiniteSourceAction::<DummySource>::AllocateResources
             .execute(&mut ctx_open)

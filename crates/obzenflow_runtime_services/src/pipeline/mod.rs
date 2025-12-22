@@ -4,8 +4,8 @@ pub mod builder;
 pub mod config;
 pub mod fsm;
 pub mod handle;
-pub mod supervisor;
 pub mod join_metadata;
+pub mod supervisor;
 
 // Re-export commonly used types
 // Note: PipelineSupervisor is intentionally NOT exported - use PipelineBuilder

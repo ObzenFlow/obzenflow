@@ -224,16 +224,12 @@ impl FlowHandle {
     }
 
     /// Get structural contract names per edge (for topology endpoint)
-    pub fn contract_attachments(
-        &self,
-    ) -> Option<Arc<HashMap<(StageId, StageId), Vec<String>>>> {
+    pub fn contract_attachments(&self) -> Option<Arc<HashMap<(StageId, StageId), Vec<String>>>> {
         self.contract_attachments.clone()
     }
 
     /// Get join metadata per stage (for topology endpoint, FLOWIP-082a)
-    pub fn join_metadata(
-        &self,
-    ) -> Option<Arc<HashMap<StageId, crate::pipeline::JoinMetadata>>> {
+    pub fn join_metadata(&self) -> Option<Arc<HashMap<StageId, crate::pipeline::JoinMetadata>>> {
         self.join_metadata.clone()
     }
 

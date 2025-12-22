@@ -254,7 +254,7 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Super
                     })
                 };
             }
-            
+
             // Drained: terminal on success; still handle Error like from_any
             state StatefulState::Drained {
                 on StatefulEvent::Error => |_state: &StatefulState<H>, event: &StatefulEvent<H>, _ctx: &mut StatefulContext<H>| {
@@ -397,10 +397,7 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                     );
 
                     let poll_result = subscription
-                        .poll_next_with_state(
-                            state.variant_name(),
-                            Some(&mut contract_state[..]),
-                        )
+                        .poll_next_with_state(state.variant_name(), Some(&mut contract_state[..]))
                         .await;
 
                     match poll_result {
@@ -469,8 +466,8 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                                                     .check_contracts(&mut contract_state[..])
                                                     .await;
 
-                                            if let Some(outcome) = eof_outcome {
-                                                tracing::info!(
+                                                if let Some(outcome) = eof_outcome {
+                                                    tracing::info!(
                                                     target: "flowip-080o",
                                                     stage_name = %ctx.stage_name,
                                                         upstream_stage_id = ?outcome.stage_id,
@@ -493,11 +490,10 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                                                                 .event_type(),
                                                             "Stateful stage received final EOF for all upstreams, transitioning to draining"
                                                         );
-                                                        directive = Ok(
-                                                            EventLoopDirective::Transition(
+                                                        directive =
+                                                            Ok(EventLoopDirective::Transition(
                                                                 StatefulEvent::ReceivedEOF,
-                                                            ),
-                                                        );
+                                                            ));
                                                     } else {
                                                         // Non-final EOF: do not forward, do not drain yet.
                                                         directive =
@@ -505,8 +501,7 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                                                     }
                                                 } else {
                                                     // No outcome yet (unexpected), remain in Accumulating.
-                                                    directive =
-                                                        Ok(EventLoopDirective::Continue);
+                                                    directive = Ok(EventLoopDirective::Continue);
                                                 }
                                             }
 
@@ -515,8 +510,7 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
 
                                             // Drain events from pipeline BeginDrain should initiate stage draining
                                             if matches!(signal, FlowControlPayload::Drain) {
-                                                ctx.buffered_eof =
-                                                    Some(envelope.event.clone());
+                                                ctx.buffered_eof = Some(envelope.event.clone());
                                                 tracing::info!(
                                                     stage_name = %ctx.stage_name,
                                                     event_type = envelope.event.event_type(),
@@ -536,8 +530,7 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                                             );
                                             tokio::time::sleep(duration).await;
                                             // Return Continue to re-process after delay
-                                            directive =
-                                                Ok(EventLoopDirective::Continue);
+                                            directive = Ok(EventLoopDirective::Continue);
                                         }
                                         ControlEventAction::Retry => {
                                             tracing::info!(
@@ -656,9 +649,9 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                                 error = ?e,
                                 "stateful: poll_next returned Error"
                             );
-                            directive = Ok(EventLoopDirective::Transition(
-                                StatefulEvent::Error(format!("Subscription error: {}", e)),
-                            ));
+                            directive = Ok(EventLoopDirective::Transition(StatefulEvent::Error(
+                                format!("Subscription error: {}", e),
+                            )));
                         }
                     }
                 } else {
@@ -700,14 +693,14 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
 
                 let emit_result =
                     process_with_instrumentation(&ctx.instrumentation, || async move {
-                        handler
-                            .emit(&mut *current_state)
-                            .map_err(|err| -> Box<dyn std::error::Error + Send + Sync> {
+                        handler.emit(&mut *current_state).map_err(
+                            |err| -> Box<dyn std::error::Error + Send + Sync> {
                                 // Stage-fatal handler error in emit: record it in error metrics
                                 // before type erasure.
                                 instrumentation.record_error(err.kind());
                                 err.into()
-                            })
+                            },
+                        )
                     })
                     .await;
 
@@ -736,7 +729,10 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
 
                             let enriched_event = event
                                 .with_flow_context(flow_context)
-                                .with_runtime_context(ctx.instrumentation.snapshot());
+                                .with_runtime_context(
+                                    ctx.instrumentation
+                                        .snapshot_with_control(),
+                                );
 
                             // FLOWIP-080o-part-2: Only count data events for writer_seq.
                             // Lifecycle events (middleware metrics, etc.) are observability
@@ -796,10 +792,7 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                 if let Some(ref mut subscription) = maybe_subscription {
                     // Poll for remaining events without timeout hacks
                     match subscription
-                        .poll_next_with_state(
-                            state.variant_name(),
-                            Some(&mut contract_state[..]),
-                        )
+                        .poll_next_with_state(state.variant_name(), Some(&mut contract_state[..]))
                         .await
                     {
                         PollResult::Event(envelope) => {
@@ -853,7 +846,8 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                                                     let enriched_event = event
                                                         .with_flow_context(flow_context)
                                                         .with_runtime_context(
-                                                            ctx.instrumentation.snapshot(),
+                                                            ctx.instrumentation
+                                                                .snapshot_with_control(),
                                                         );
 
                                                     if enriched_event.is_data() {
@@ -900,23 +894,24 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
 
                                             // Count all error-marked events for lifecycle / flow rollups,
                                             // even when they are not stage-fatal.
-                                            ctx.instrumentation
-                                                .record_error(err.kind());
+                                            ctx.instrumentation.record_error(err.kind());
 
-                                            let route_to_error_journal =
-                                                match &error_event.processing_info.status {
-                                                    ProcessingStatus::Error { kind, .. } => {
-                                                        match kind {
-                                                            Some(ErrorKind::Timeout)
-                                                            | Some(ErrorKind::Remote)
-                                                            | Some(ErrorKind::Deserialization) => true,
-                                                            Some(ErrorKind::Validation)
-                                                            | Some(ErrorKind::Domain) => false,
-                                                            None | Some(ErrorKind::Unknown) => true,
-                                                        }
+                                            let route_to_error_journal = match &error_event
+                                                .processing_info
+                                                .status
+                                            {
+                                                ProcessingStatus::Error { kind, .. } => {
+                                                    match kind {
+                                                        Some(ErrorKind::Timeout)
+                                                        | Some(ErrorKind::Remote)
+                                                        | Some(ErrorKind::Deserialization) => true,
+                                                        Some(ErrorKind::Validation)
+                                                        | Some(ErrorKind::Domain) => false,
+                                                        None | Some(ErrorKind::Unknown) => true,
                                                     }
-                                                    _ => false,
-                                                };
+                                                }
+                                                _ => false,
+                                            };
 
                                             if route_to_error_journal {
                                                 tracing::info!(
@@ -956,7 +951,8 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                                                 let enriched_error = error_event
                                                     .with_flow_context(flow_context)
                                                     .with_runtime_context(
-                                                        ctx.instrumentation.snapshot(),
+                                                        ctx.instrumentation
+                                                            .snapshot_with_control(),
                                                     );
 
                                                 if enriched_error.is_data() {
@@ -1006,9 +1002,7 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                         PollResult::NoEvents => {
                             // Queue is truly drained - no more events available
                             // Do a final contract check before draining
-                            let _ = subscription
-                                .check_contracts(&mut contract_state[..])
-                                .await;
+                            let _ = subscription.check_contracts(&mut contract_state[..]).await;
 
                             tracing::info!(
                                 stage_name = %ctx.stage_name,
@@ -1059,15 +1053,14 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                     // Call handler.drain() with instrumentation; treat failures as stage-fatal.
                     let drain_result =
                         process_with_instrumentation(&ctx.instrumentation, || async move {
-                            handler
-                                .drain(&final_state)
-                                .await
-                                .map_err(|err| -> Box<dyn std::error::Error + Send + Sync> {
+                            handler.drain(&final_state).await.map_err(
+                                |err| -> Box<dyn std::error::Error + Send + Sync> {
                                     // Stage-fatal handler error in drain: record it in error metrics
                                     // before type erasure.
                                     instrumentation.record_error(err.kind());
                                     err.into()
-                                })
+                                },
+                            )
                         })
                         .await;
 
@@ -1088,13 +1081,15 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                                     flow_id: ctx.flow_id.to_string(),
                                     stage_name: ctx.stage_name.clone(),
                                     stage_id: self.stage_id.clone(),
-                                    stage_type:
-                                        obzenflow_core::event::context::StageType::Stateful,
+                                    stage_type: obzenflow_core::event::context::StageType::Stateful,
                                 };
 
                                 let enriched_event = event
                                     .with_flow_context(flow_context)
-                                    .with_runtime_context(ctx.instrumentation.snapshot());
+                                    .with_runtime_context(
+                                        ctx.instrumentation
+                                            .snapshot_with_control(),
+                                    );
 
                                 // FLOWIP-080o-part-2: Only count data events for writer_seq.
                                 // Lifecycle events (middleware metrics, etc.) are observability
@@ -1224,7 +1219,7 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> State
             .fetch_add(delta as u64, std::sync::atomic::Ordering::Relaxed);
 
         // Capture a fresh runtime context snapshot for the heartbeat.
-        let runtime_context = ctx.instrumentation.snapshot();
+        let runtime_context = ctx.instrumentation.snapshot_with_control();
 
         use obzenflow_core::event::context::StageType;
         use obzenflow_core::event::payloads::observability_payload::{

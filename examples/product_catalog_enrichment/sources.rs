@@ -26,7 +26,12 @@ impl CategorySource {
 }
 
 impl FiniteSourceHandler for CategorySource {
-    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, obzenflow_runtime_services::stages::common::handlers::source::traits::SourceError> {
+    fn next(
+        &mut self,
+    ) -> Result<
+        Option<Vec<ChainEvent>>,
+        obzenflow_runtime_services::stages::common::handlers::source::traits::SourceError,
+    > {
         if self.current_index < self.categories.len() {
             let category = &self.categories[self.current_index];
             self.current_index += 1;
@@ -60,7 +65,12 @@ impl ProductSource {
 }
 
 impl FiniteSourceHandler for ProductSource {
-    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, obzenflow_runtime_services::stages::common::handlers::source::traits::SourceError> {
+    fn next(
+        &mut self,
+    ) -> Result<
+        Option<Vec<ChainEvent>>,
+        obzenflow_runtime_services::stages::common::handlers::source::traits::SourceError,
+    > {
         if self.current_index < self.products.len() {
             let product = &self.products[self.current_index];
             self.current_index += 1;
@@ -94,7 +104,12 @@ impl SKUSource {
 }
 
 impl FiniteSourceHandler for SKUSource {
-    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, obzenflow_runtime_services::stages::common::handlers::source::traits::SourceError> {
+    fn next(
+        &mut self,
+    ) -> Result<
+        Option<Vec<ChainEvent>>,
+        obzenflow_runtime_services::stages::common::handlers::source::traits::SourceError,
+    > {
         if self.current_index < self.skus.len() {
             let sku = &self.skus[self.current_index];
             self.current_index += 1;
@@ -128,7 +143,12 @@ impl PromotionSource {
 }
 
 impl FiniteSourceHandler for PromotionSource {
-    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, obzenflow_runtime_services::stages::common::handlers::source::traits::SourceError> {
+    fn next(
+        &mut self,
+    ) -> Result<
+        Option<Vec<ChainEvent>>,
+        obzenflow_runtime_services::stages::common::handlers::source::traits::SourceError,
+    > {
         if self.current_index < self.promotions.len() {
             let promo = &self.promotions[self.current_index];
             self.current_index += 1;
@@ -162,7 +182,12 @@ impl PaymentSource {
 }
 
 impl FiniteSourceHandler for PaymentSource {
-    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, obzenflow_runtime_services::stages::common::handlers::source::traits::SourceError> {
+    fn next(
+        &mut self,
+    ) -> Result<
+        Option<Vec<ChainEvent>>,
+        obzenflow_runtime_services::stages::common::handlers::source::traits::SourceError,
+    > {
         if self.current_index < self.payments.len() {
             let payment = &self.payments[self.current_index];
             self.current_index += 1;
@@ -197,7 +222,12 @@ impl OrderSource {
 }
 
 impl FiniteSourceHandler for OrderSource {
-    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, obzenflow_runtime_services::stages::common::handlers::source::traits::SourceError> {
+    fn next(
+        &mut self,
+    ) -> Result<
+        Option<Vec<ChainEvent>>,
+        obzenflow_runtime_services::stages::common::handlers::source::traits::SourceError,
+    > {
         if self.current_index < self.orders.len() {
             let order = &self.orders[self.current_index];
             self.current_index += 1;

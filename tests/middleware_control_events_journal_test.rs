@@ -20,14 +20,13 @@ struct SimpleTransform;
 
 #[async_trait]
 impl TransformHandler for SimpleTransform {
-    fn process(
-        &self,
-        event: ChainEvent,
-    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
+    fn process(&self, event: ChainEvent) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
         Ok(vec![event])
     }
 
-    async fn drain(&mut self) -> std::result::Result<(), HandlerError> { Ok(()) }
+    async fn drain(&mut self) -> std::result::Result<(), HandlerError> {
+        Ok(())
+    }
 }
 
 struct MetricsEmittingMiddleware;
@@ -84,11 +83,7 @@ async fn test_middleware_control_events_flow_to_journal() {
     let writer_id = WriterId::from(stage_id);
 
     // Create test event
-    let event = ChainEventFactory::data_event(
-        writer_id.clone(),
-        "test.data",
-        json!({"value": 42}),
-    );
+    let event = ChainEventFactory::data_event(writer_id.clone(), "test.data", json!({"value": 42}));
 
     // Process event (simulating what TransformSupervisor does)
     let outputs = handler

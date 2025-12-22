@@ -77,16 +77,9 @@ impl DroppingTransform {
 
 #[async_trait]
 impl TransformHandler for DroppingTransform {
-    fn process(
-        &self,
-        event: ChainEvent,
-    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
+    fn process(&self, event: ChainEvent) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
         // Extract index from payload
-        if let Some(index) = event
-            .payload()
-            .get("index")
-            .and_then(|v| v.as_u64())
-        {
+        if let Some(index) = event.payload().get("index").and_then(|v| v.as_u64()) {
             if self.drop_indices.contains(&(index as usize)) {
                 // Drop this event (return empty vec)
                 return Ok(vec![]);
@@ -97,7 +90,9 @@ impl TransformHandler for DroppingTransform {
         Ok(vec![event])
     }
 
-    async fn drain(&mut self) -> std::result::Result<(), HandlerError> { Ok(()) }
+    async fn drain(&mut self) -> std::result::Result<(), HandlerError> {
+        Ok(())
+    }
 }
 
 /// Simple sink that just collects events
@@ -225,18 +220,14 @@ async fn test_dropped_events_detection() -> Result<()> {
     if has_dropped_metric {
         if let Some(line) = metrics_text
             .lines()
-            .find(|l| {
-                l.contains("obzenflow_dropped_events{flow=\"correlation_test_flow\"")
-            })
+            .find(|l| l.contains("obzenflow_dropped_events{flow=\"correlation_test_flow\""))
         {
             if let Some(value_str) = line.split_whitespace().last() {
                 if let Ok(value) = value_str.parse::<i64>() {
                     println!("\nDropped events: {}", value);
                     assert_eq!(value, 3, "Should have 3 dropped events");
 
-                    println!(
-                        "\n✅ Dropped event metric correctly reports 3 dropped events!"
-                    );
+                    println!("\n✅ Dropped event metric correctly reports 3 dropped events!");
                 }
             }
         }

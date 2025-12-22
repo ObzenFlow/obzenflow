@@ -204,7 +204,12 @@ impl OrderStreamSource {
 }
 
 impl FiniteSourceHandler for OrderStreamSource {
-    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, obzenflow_runtime_services::stages::common::handlers::source::traits::SourceError> {
+    fn next(
+        &mut self,
+    ) -> Result<
+        Option<Vec<ChainEvent>>,
+        obzenflow_runtime_services::stages::common::handlers::source::traits::SourceError,
+    > {
         if self.current_index >= self.orders.len() {
             return Ok(None);
         }
@@ -250,10 +255,7 @@ impl SalesDashboard {
 
 #[async_trait]
 impl SinkHandler for SalesDashboard {
-    async fn consume(
-        &mut self,
-        event: ChainEvent,
-    ) -> Result<DeliveryPayload, HandlerError> {
+    async fn consume(&mut self, event: ChainEvent) -> Result<DeliveryPayload, HandlerError> {
         // ✨ FLOWIP-082a: TopNByTyped emits events with input type's EVENT_TYPE
         if event.event_type() == OrderEvent::EVENT_TYPE {
             let payload = event.payload();

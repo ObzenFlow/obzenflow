@@ -1,8 +1,8 @@
 //! Common components shared across all stage types
 
 pub mod control_strategies;
-pub mod handlers;
 pub mod handler_error;
+pub mod handlers;
 pub mod source_handle;
 pub mod stage_handle;
 

@@ -377,7 +377,7 @@ impl<H: InfiniteSourceHandler + Send + Sync + 'static> FsmAction for InfiniteSou
                 );
 
                 // Take a final runtime snapshot for wide-event semantics
-                let runtime_context = ctx.instrumentation.snapshot();
+                let runtime_context = ctx.instrumentation.snapshot_with_control();
 
                 let mut eof_event = ChainEventFactory::eof_event(
                     writer_id.clone(),

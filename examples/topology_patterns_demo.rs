@@ -60,7 +60,12 @@ impl DataSource {
 }
 
 impl FiniteSourceHandler for DataSource {
-    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, obzenflow_runtime_services::stages::common::handlers::source::traits::SourceError> {
+    fn next(
+        &mut self,
+    ) -> Result<
+        Option<Vec<ChainEvent>>,
+        obzenflow_runtime_services::stages::common::handlers::source::traits::SourceError,
+    > {
         if self.count >= self.max_events {
             return Ok(None);
         }
@@ -152,10 +157,7 @@ impl StatefulHandler for MultiSourceAggregator {
         state.current_event.is_some()
     }
 
-    fn emit(
-        &self,
-        state: &mut Self::State,
-    ) -> Result<Vec<ChainEvent>, HandlerError> {
+    fn emit(&self, state: &mut Self::State) -> Result<Vec<ChainEvent>, HandlerError> {
         if let Some(event) = state.current_event.take() {
             let payload = event.payload();
             let source = payload["source"].as_str().unwrap_or("unknown").to_string();
@@ -201,10 +203,7 @@ impl StatefulHandler for MultiSourceAggregator {
         }
     }
 
-    fn create_events(
-        &self,
-        state: &Self::State,
-    ) -> Result<Vec<ChainEvent>, HandlerError> {
+    fn create_events(&self, state: &Self::State) -> Result<Vec<ChainEvent>, HandlerError> {
         // Audit: verify counts match expectations, log loudly if not
         for (src, expected) in &state.expected_counts {
             let got = state.events_by_source.get(src).cloned().unwrap_or(0);
@@ -354,10 +353,7 @@ impl PrioritySink {
 
 #[async_trait]
 impl SinkHandler for PrioritySink {
-    async fn consume(
-        &mut self,
-        event: ChainEvent,
-    ) -> Result<DeliveryPayload, HandlerError> {
+    async fn consume(&mut self, event: ChainEvent) -> Result<DeliveryPayload, HandlerError> {
         let payload = event.payload();
         let route = payload["route"].as_str().unwrap_or("");
 

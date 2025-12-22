@@ -122,10 +122,7 @@ impl<F> TransformHandler for Filter<F>
 where
     F: Fn(&ChainEvent) -> bool + Send + Sync + Clone + 'static,
 {
-    fn process(
-        &self,
-        event: ChainEvent,
-    ) -> Result<Vec<ChainEvent>, HandlerError> {
+    fn process(&self, event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
         if (self.predicate)(&event) {
             Ok(vec![event])
         } else {
@@ -231,10 +228,7 @@ where
     T: DeserializeOwned + Send + Sync + 'static,
     F: Fn(&T) -> bool + Send + Sync + Clone + 'static,
 {
-    fn process(
-        &self,
-        event: ChainEvent,
-    ) -> Result<Vec<ChainEvent>, HandlerError> {
+    fn process(&self, event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
         // Step 1: Deserialize ChainEvent payload → T
         let input_value: T = match serde_json::from_value(event.payload().clone()) {
             Ok(v) => v,

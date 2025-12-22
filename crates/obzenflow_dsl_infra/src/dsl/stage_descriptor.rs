@@ -5,6 +5,7 @@
 
 use crate::stage_handle_adapter::StageHandleAdapter;
 use async_trait::async_trait;
+use obzenflow_adapters::middleware::control::ControlMiddlewareAggregator;
 use obzenflow_adapters::middleware::{
     validate_middleware_safety, FiniteSourceHandlerExt, InfiniteSourceHandlerExt,
     JoinHandlerMiddlewareExt, Middleware, MiddlewareFactory, OutcomeEnrichmentMiddleware,
@@ -130,7 +131,12 @@ pub trait StageDescriptor: Send + Sync {
         resources: StageResources,
     ) -> Result<BoxedStageHandle, String> {
         // Default implementation without flow middleware
-        self.create_handle_with_flow_middleware(config, resources, vec![])
+        self.create_handle_with_flow_middleware(
+            config,
+            resources,
+            vec![],
+            Arc::new(ControlMiddlewareAggregator::new()),
+        )
             .await
     }
 
@@ -140,6 +146,7 @@ pub trait StageDescriptor: Send + Sync {
         config: StageConfig,
         resources: StageResources,
         flow_middleware: Vec<Box<dyn MiddlewareFactory>>,
+        control_middleware: Arc<ControlMiddlewareAggregator>,
     ) -> Result<BoxedStageHandle, String>;
 
     /// Structural: return configured stage-level middleware names (for topology)
@@ -168,6 +175,7 @@ pub trait StageDescriptor: Send + Sync {
 mod tests {
     use super::*;
     use obzenflow_adapters::middleware::control::circuit_breaker::circuit_breaker;
+    use obzenflow_core::ControlMiddlewareProvider;
     use obzenflow_core::event::{JournalEvent, SystemEvent};
     use obzenflow_core::{EventEnvelope, FlowId};
     use obzenflow_runtime_services::message_bus::FsmMessageBus;
@@ -179,7 +187,8 @@ mod tests {
     impl FiniteSourceHandler for DummyFiniteSource {
         fn next(
             &mut self,
-        ) -> Result<Option<Vec<ChainEvent>>, obzenflow_runtime_services::stages::SourceError> {
+        ) -> Result<Option<Vec<ChainEvent>>, obzenflow_runtime_services::stages::SourceError>
+        {
             // This dummy source never emits data; it's used only to verify that the
             // circuit breaker middleware wires up a CircuitBreakerSourceStrategy.
             Ok(None)
@@ -196,11 +205,11 @@ mod tests {
         };
 
         // Minimal StageResources: journals are never actually written in this unit test.
+        use obzenflow_core::id::JournalId;
         use obzenflow_core::journal::journal::Journal;
         use obzenflow_core::journal::journal_error::JournalError;
         use obzenflow_core::journal::journal_owner::JournalOwner;
         use obzenflow_core::journal::journal_reader::JournalReader;
-        use obzenflow_core::id::JournalId;
 
         struct NoopJournal<T: JournalEvent> {
             id: JournalId,
@@ -241,9 +250,7 @@ mod tests {
                 })
             }
 
-            async fn read_causally_ordered(
-                &self,
-            ) -> Result<Vec<EventEnvelope<T>>, JournalError> {
+            async fn read_causally_ordered(&self) -> Result<Vec<EventEnvelope<T>>, JournalError> {
                 Ok(Vec::new())
             }
 
@@ -283,9 +290,7 @@ mod tests {
 
         #[async_trait]
         impl<T: JournalEvent + 'static> JournalReader<T> for NoopReader {
-            async fn next(
-                &mut self,
-            ) -> Result<Option<EventEnvelope<T>>, JournalError> {
+            async fn next(&mut self) -> Result<Option<EventEnvelope<T>>, JournalError> {
                 Ok(None)
             }
 
@@ -335,18 +340,20 @@ mod tests {
             middleware: vec![circuit_breaker(1)],
         };
 
+        let control_middleware = Arc::new(ControlMiddlewareAggregator::new());
         let mut boxed: Box<dyn StageDescriptor> = Box::new(descriptor);
         let handle = boxed
-            .create_handle(config, resources)
+            .create_handle_with_flow_middleware(
+                config,
+                resources,
+                vec![],
+                control_middleware.clone(),
+            )
             .await
             .expect("handle creation should succeed");
 
-        // We can't directly inspect the internal config from the handle, but we can
-        // at least check that the CircuitBreakerSourceStrategy was constructed for
-        // this stage via the global circuit breaker registry, which is how the
-        // strategy observes breaker state.
-        let cb_state =
-            obzenflow_core::circuit_breaker_registry::get_stage_state(&stage_id);
+        // Ensure the breaker state is registered via the flow-scoped provider.
+        let cb_state = control_middleware.circuit_breaker_state(&stage_id);
         assert!(
             cb_state.is_some(),
             "circuit breaker state should be registered for source with circuit_breaker middleware"
@@ -392,14 +399,15 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> S
         config: StageConfig,
         resources: StageResources,
         flow_middleware: Vec<Box<dyn MiddlewareFactory>>,
+        control_middleware: Arc<ControlMiddlewareAggregator>,
     ) -> Result<BoxedStageHandle, String> {
         let writer_id = WriterId::from(config.stage_id);
 
         // Create instrumentation configuration
         let instrumentation_config = InstrumentationConfig::default();
-        let instrumentation = Arc::new(StageInstrumentation::new_with_config(
-            instrumentation_config,
-        ));
+        let mut instrumentation = StageInstrumentation::new_with_config(instrumentation_config);
+        let control_provider: Arc<dyn obzenflow_core::ControlMiddlewareProvider> =
+            control_middleware.clone();
 
         // Resolve flow and stage middleware
         let resolved = crate::middleware_resolution::resolve_middleware(
@@ -414,26 +422,42 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> S
         // Create system middleware with instrumentation
         let mut all_middleware = create_system_middleware(&config, StageType::FiniteSource);
 
+        let expects_circuit_breaker = resolved
+            .middleware
+            .iter()
+            .any(|spec| spec.factory.name() == "circuit_breaker");
+        let expects_rate_limiter = resolved
+            .middleware
+            .iter()
+            .any(|spec| spec.factory.name() == "rate_limiter");
+
         // Add resolved user middleware, tracking whether circuit_breaker is present.
-        // For sources specifically, circuit_breaker middleware is used only to
-        // register shared breaker state in the global registry (so
-        // CircuitBreakerSourceStrategy can observe it); we do not attach the
-        // middleware to the source handler itself. This avoids treating
-        // "empty output batches" from sources as failures, which would
-        // conflict with the explicit SourceError-based API (FLOWIP-051b).
+        //
+        // Note: circuit_breaker middleware MUST be attached for sources so it can:
+        // - observe SourceError-derived error events
+        // - trip/open and prevent hammering upstream dependencies
+        // - export correct per-stage breaker metrics
         let mut has_circuit_breaker = false;
         let mut user_middleware: Vec<Box<dyn Middleware>> = Vec::new();
         for spec in resolved.middleware.into_iter() {
             if spec.factory.name() == "circuit_breaker" {
                 has_circuit_breaker = true;
-                // Instantiate once for side effects (registry registration),
-                // but deliberately do not attach to the source middleware chain.
-                let _ = spec.factory.create(&config);
+                user_middleware.push(spec.factory.create(&config, control_middleware.clone()));
                 continue;
             }
-            user_middleware.push(spec.factory.create(&config));
+            user_middleware.push(spec.factory.create(&config, control_middleware.clone()));
         }
         all_middleware.extend(user_middleware);
+
+        instrumentation
+            .bind_control_middleware(
+                &config.stage_id,
+                &control_provider,
+                expects_circuit_breaker,
+                expects_rate_limiter,
+            )
+            .map_err(|e| e.to_string())?;
+        let instrumentation = Arc::new(instrumentation);
 
         // Apply all middleware
         let mut builder = self.handler.middleware(writer_id.clone());
@@ -448,7 +472,10 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> S
             stage_name: config.name.clone(),
             flow_name: config.flow_name.clone(),
             control_strategy: if has_circuit_breaker {
-                Some(Arc::new(CircuitBreakerSourceStrategy::new(config.stage_id)))
+                Some(Arc::new(
+                    CircuitBreakerSourceStrategy::try_new(config.stage_id, &control_provider)
+                        .map_err(|e| e.to_string())?,
+                ))
             } else {
                 None
             },
@@ -510,14 +537,15 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
         config: StageConfig,
         resources: StageResources,
         flow_middleware: Vec<Box<dyn MiddlewareFactory>>,
+        control_middleware: Arc<ControlMiddlewareAggregator>,
     ) -> Result<BoxedStageHandle, String> {
         let writer_id = WriterId::from(config.stage_id);
 
         // Create instrumentation configuration
         let instrumentation_config = InstrumentationConfig::default();
-        let instrumentation = Arc::new(StageInstrumentation::new_with_config(
-            instrumentation_config,
-        ));
+        let mut instrumentation = StageInstrumentation::new_with_config(instrumentation_config);
+        let control_provider: Arc<dyn obzenflow_core::ControlMiddlewareProvider> =
+            control_middleware.clone();
 
         // Resolve flow and stage middleware
         let resolved = crate::middleware_resolution::resolve_middleware(
@@ -532,22 +560,42 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
         // Create system middleware with instrumentation
         let mut all_middleware = create_system_middleware(&config, StageType::InfiniteSource);
 
+        let expects_circuit_breaker = resolved
+            .middleware
+            .iter()
+            .any(|spec| spec.factory.name() == "circuit_breaker");
+        let expects_rate_limiter = resolved
+            .middleware
+            .iter()
+            .any(|spec| spec.factory.name() == "rate_limiter");
+
         // Add resolved user middleware, tracking whether circuit_breaker is present.
-        // As with finite sources, we do not attach circuit_breaker middleware
-        // directly to infinite sources; it is used only for global breaker
-        // state registration. This keeps "empty output" semantics from being
-        // interpreted as failures at sources.
+        //
+        // Note: circuit_breaker middleware MUST be attached for sources so it can:
+        // - observe SourceError-derived error events
+        // - trip/open and prevent hammering upstream dependencies
+        // - export correct per-stage breaker metrics
         let mut has_circuit_breaker = false;
         let mut user_middleware: Vec<Box<dyn Middleware>> = Vec::new();
         for spec in resolved.middleware.into_iter() {
             if spec.factory.name() == "circuit_breaker" {
                 has_circuit_breaker = true;
-                let _ = spec.factory.create(&config);
+                user_middleware.push(spec.factory.create(&config, control_middleware.clone()));
                 continue;
             }
-            user_middleware.push(spec.factory.create(&config));
+            user_middleware.push(spec.factory.create(&config, control_middleware.clone()));
         }
         all_middleware.extend(user_middleware);
+
+        instrumentation
+            .bind_control_middleware(
+                &config.stage_id,
+                &control_provider,
+                expects_circuit_breaker,
+                expects_rate_limiter,
+            )
+            .map_err(|e| e.to_string())?;
+        let instrumentation = Arc::new(instrumentation);
 
         // Apply all middleware
         let mut builder = self.handler.middleware(writer_id.clone());
@@ -562,7 +610,10 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
             stage_name: config.name.clone(),
             flow_name: config.flow_name.clone(),
             control_strategy: if has_circuit_breaker {
-                Some(Arc::new(CircuitBreakerSourceStrategy::new(config.stage_id)))
+                Some(Arc::new(
+                    CircuitBreakerSourceStrategy::try_new(config.stage_id, &control_provider)
+                        .map_err(|e| e.to_string())?,
+                ))
             } else {
                 None
             },
@@ -624,6 +675,7 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stag
         config: StageConfig,
         resources: StageResources,
         flow_middleware: Vec<Box<dyn MiddlewareFactory>>,
+        control_middleware: Arc<ControlMiddlewareAggregator>,
     ) -> Result<BoxedStageHandle, String> {
         // Validate middleware safety
         for factory in &self.middleware {
@@ -659,20 +711,39 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stag
 
         // Create instrumentation configuration
         let instrumentation_config = InstrumentationConfig::default();
-        let instrumentation = Arc::new(StageInstrumentation::new_with_config(
-            instrumentation_config,
-        ));
+        let mut instrumentation = StageInstrumentation::new_with_config(instrumentation_config);
+        let control_provider: Arc<dyn obzenflow_core::ControlMiddlewareProvider> =
+            control_middleware.clone();
 
         // Create system middleware with instrumentation
         let mut all_middleware = create_system_middleware(&config, StageType::Transform);
+
+        let expects_circuit_breaker = resolved
+            .middleware
+            .iter()
+            .any(|spec| spec.factory.name() == "circuit_breaker");
+        let expects_rate_limiter = resolved
+            .middleware
+            .iter()
+            .any(|spec| spec.factory.name() == "rate_limiter");
 
         // Add resolved user middleware
         let user_middleware: Vec<Box<dyn Middleware>> = resolved
             .middleware
             .into_iter()
-            .map(|spec| spec.factory.create(&config))
+            .map(|spec| spec.factory.create(&config, control_middleware.clone()))
             .collect();
         all_middleware.extend(user_middleware);
+
+        instrumentation
+            .bind_control_middleware(
+                &config.stage_id,
+                &control_provider,
+                expects_circuit_breaker,
+                expects_rate_limiter,
+            )
+            .map_err(|e| e.to_string())?;
+        let instrumentation = Arc::new(instrumentation);
 
         // Apply all middleware
         let mut builder = self.handler.middleware();
@@ -746,6 +817,7 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
         config: StageConfig,
         resources: StageResources,
         flow_middleware: Vec<Box<dyn MiddlewareFactory>>,
+        control_middleware: Arc<ControlMiddlewareAggregator>,
     ) -> Result<BoxedStageHandle, String> {
         // Validate middleware safety
         for factory in &self.middleware {
@@ -779,20 +851,39 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
 
         // Create instrumentation configuration
         let instrumentation_config = InstrumentationConfig::default();
-        let instrumentation = Arc::new(StageInstrumentation::new_with_config(
-            instrumentation_config,
-        ));
+        let mut instrumentation = StageInstrumentation::new_with_config(instrumentation_config);
+        let control_provider: Arc<dyn obzenflow_core::ControlMiddlewareProvider> =
+            control_middleware.clone();
 
         // Create system middleware with instrumentation
         let mut all_middleware = create_system_middleware(&config, StageType::Sink);
+
+        let expects_circuit_breaker = resolved
+            .middleware
+            .iter()
+            .any(|spec| spec.factory.name() == "circuit_breaker");
+        let expects_rate_limiter = resolved
+            .middleware
+            .iter()
+            .any(|spec| spec.factory.name() == "rate_limiter");
 
         // Add resolved user middleware
         let user_middleware: Vec<Box<dyn Middleware>> = resolved
             .middleware
             .into_iter()
-            .map(|spec| spec.factory.create(&config))
+            .map(|spec| spec.factory.create(&config, control_middleware.clone()))
             .collect();
         all_middleware.extend(user_middleware);
+
+        instrumentation
+            .bind_control_middleware(
+                &config.stage_id,
+                &control_provider,
+                expects_circuit_breaker,
+                expects_rate_limiter,
+            )
+            .map_err(|e| e.to_string())?;
+        let instrumentation = Arc::new(instrumentation);
 
         // Apply all middleware
         let mut builder = self.handler.middleware();
@@ -993,6 +1084,7 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stage
         config: StageConfig,
         resources: StageResources,
         flow_middleware: Vec<Box<dyn MiddlewareFactory>>,
+        control_middleware: Arc<ControlMiddlewareAggregator>,
     ) -> Result<BoxedStageHandle, String> {
         // Validate middleware safety
         for factory in &self.middleware {
@@ -1026,20 +1118,39 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stage
 
         // Create instrumentation configuration
         let instrumentation_config = InstrumentationConfig::default();
-        let instrumentation = Arc::new(StageInstrumentation::new_with_config(
-            instrumentation_config,
-        ));
+        let mut instrumentation = StageInstrumentation::new_with_config(instrumentation_config);
+        let control_provider: Arc<dyn obzenflow_core::ControlMiddlewareProvider> =
+            control_middleware.clone();
 
         // Create system middleware with instrumentation (FLOWIP-080o-part-2)
         let mut all_middleware = create_system_middleware(&config, StageType::Stateful);
+
+        let expects_circuit_breaker = resolved
+            .middleware
+            .iter()
+            .any(|spec| spec.factory.name() == "circuit_breaker");
+        let expects_rate_limiter = resolved
+            .middleware
+            .iter()
+            .any(|spec| spec.factory.name() == "rate_limiter");
 
         // Add resolved user middleware
         let user_middleware: Vec<Box<dyn Middleware>> = resolved
             .middleware
             .into_iter()
-            .map(|spec| spec.factory.create(&config))
+            .map(|spec| spec.factory.create(&config, control_middleware.clone()))
             .collect();
         all_middleware.extend(user_middleware);
+
+        instrumentation
+            .bind_control_middleware(
+                &config.stage_id,
+                &control_provider,
+                expects_circuit_breaker,
+                expects_rate_limiter,
+            )
+            .map_err(|e| e.to_string())?;
+        let instrumentation = Arc::new(instrumentation);
 
         // Apply all middleware (FLOWIP-080o-part-2: MiddlewareStateful now exists)
         let mut builder = self.handler.middleware();
@@ -1156,6 +1267,7 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
         config: StageConfig,
         resources: StageResources,
         flow_middleware: Vec<Box<dyn MiddlewareFactory>>,
+        control_middleware: Arc<ControlMiddlewareAggregator>,
     ) -> Result<BoxedStageHandle, String> {
         // Validate middleware safety
         for factory in &self.middleware {
@@ -1189,20 +1301,39 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
 
         // Create instrumentation configuration
         let instrumentation_config = InstrumentationConfig::default();
-        let instrumentation = Arc::new(StageInstrumentation::new_with_config(
-            instrumentation_config,
-        ));
+        let mut instrumentation = StageInstrumentation::new_with_config(instrumentation_config);
+        let control_provider: Arc<dyn obzenflow_core::ControlMiddlewareProvider> =
+            control_middleware.clone();
 
         // Create system middleware with instrumentation (FLOWIP-080o-part-2)
         let mut all_middleware = create_system_middleware(&config, StageType::Join);
+
+        let expects_circuit_breaker = resolved
+            .middleware
+            .iter()
+            .any(|spec| spec.factory.name() == "circuit_breaker");
+        let expects_rate_limiter = resolved
+            .middleware
+            .iter()
+            .any(|spec| spec.factory.name() == "rate_limiter");
 
         // Add resolved user middleware
         let user_middleware: Vec<Box<dyn Middleware>> = resolved
             .middleware
             .into_iter()
-            .map(|spec| spec.factory.create(&config))
+            .map(|spec| spec.factory.create(&config, control_middleware.clone()))
             .collect();
         all_middleware.extend(user_middleware);
+
+        instrumentation
+            .bind_control_middleware(
+                &config.stage_id,
+                &control_provider,
+                expects_circuit_breaker,
+                expects_rate_limiter,
+            )
+            .map_err(|e| e.to_string())?;
+        let instrumentation = Arc::new(instrumentation);
 
         // Apply all middleware (FLOWIP-080o-part-2: MiddlewareJoin now exists)
         // Same middleware is applied to both reference and stream sides

@@ -241,7 +241,11 @@ mod tests {
 
     struct MockSkipControlFactory;
     impl MiddlewareFactory for MockSkipControlFactory {
-        fn create(&self, _config: &StageConfig) -> Box<dyn Middleware> {
+        fn create(
+            &self,
+            _config: &StageConfig,
+            _control_middleware: std::sync::Arc<crate::middleware::control::ControlMiddlewareAggregator>,
+        ) -> Box<dyn Middleware> {
             Box::new(MockSkipControlMiddleware)
         }
         fn name(&self) -> &str {
@@ -263,7 +267,11 @@ mod tests {
 
     struct MockInfiniteRetryFactory;
     impl MiddlewareFactory for MockInfiniteRetryFactory {
-        fn create(&self, _config: &StageConfig) -> Box<dyn Middleware> {
+        fn create(
+            &self,
+            _config: &StageConfig,
+            _control_middleware: std::sync::Arc<crate::middleware::control::ControlMiddlewareAggregator>,
+        ) -> Box<dyn Middleware> {
             Box::new(MockSkipControlMiddleware) // Reuse the middleware impl
         }
         fn name(&self) -> &str {
@@ -322,7 +330,11 @@ mod tests {
         // Create a mock safe middleware factory
         struct SafeFactory;
         impl MiddlewareFactory for SafeFactory {
-            fn create(&self, _: &StageConfig) -> Box<dyn Middleware> {
+            fn create(
+                &self,
+                _: &StageConfig,
+                _control_middleware: std::sync::Arc<crate::middleware::control::ControlMiddlewareAggregator>,
+            ) -> Box<dyn Middleware> {
                 unimplemented!()
             }
             fn name(&self) -> &str {

@@ -12,9 +12,9 @@ use obzenflow_runtime_services::stages::common::handlers::{
 use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::json;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::path::PathBuf;
 
 /// Test using the DSL macros with EventStore
 #[tokio::test]
@@ -74,15 +74,8 @@ async fn test_dsl_pipeline() -> Result<()> {
 
     #[async_trait]
     impl TransformHandler for Doubler {
-        fn process(
-            &self,
-            event: ChainEvent,
-        ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
-            if let Some(value) = event
-                .payload()
-                .get("value")
-                .and_then(|v| v.as_u64())
-            {
+        fn process(&self, event: ChainEvent) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
+            if let Some(value) = event.payload().get("value").and_then(|v| v.as_u64()) {
                 Ok(vec![ChainEventFactory::data_event(
                     event.writer_id.clone(),
                     "Doubled",
@@ -96,7 +89,9 @@ async fn test_dsl_pipeline() -> Result<()> {
             }
         }
 
-        async fn drain(&mut self) -> std::result::Result<(), HandlerError> { Ok(()) }
+        async fn drain(&mut self) -> std::result::Result<(), HandlerError> {
+            Ok(())
+        }
     }
 
     #[derive(Clone, Debug)]
@@ -116,11 +111,7 @@ async fn test_dsl_pipeline() -> Result<()> {
             &mut self,
             event: ChainEvent,
         ) -> std::result::Result<DeliveryPayload, HandlerError> {
-            if let Some(doubled) = event
-                .payload()
-                .get("doubled")
-                .and_then(|v| v.as_u64())
-            {
+            if let Some(doubled) = event.payload().get("doubled").and_then(|v| v.as_u64()) {
                 self.total.fetch_add(doubled, Ordering::Relaxed);
             }
             Ok(DeliveryPayload::success(

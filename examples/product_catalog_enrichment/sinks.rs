@@ -31,10 +31,7 @@ impl DashboardSink {
 
 #[async_trait]
 impl SinkHandler for DashboardSink {
-    async fn consume(
-        &mut self,
-        event: ChainEvent,
-    ) -> Result<DeliveryPayload, HandlerError> {
+    async fn consume(&mut self, event: ChainEvent) -> Result<DeliveryPayload, HandlerError> {
         if let Some(order) = EnrichedOrderWithPromo::from_event(&event) {
             self.order_count += 1;
 

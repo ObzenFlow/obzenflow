@@ -1,4 +1,5 @@
-#![cfg(skip)] // Disabled for now: rate limiter + finite source drain semantics need a dedicated flowip; kept as a manual harness
+#![cfg(skip)]
+// Disabled for now: rate limiter + finite source drain semantics need a dedicated flowip; kept as a manual harness
 
 //! Simplified end-to-end test for Rate Limiter metrics in FLOWIP-056-666
 //!
@@ -101,10 +102,7 @@ impl CountingSink {
 
 #[async_trait]
 impl SinkHandler for CountingSink {
-    async fn consume(
-        &mut self,
-        event: ChainEvent,
-    ) -> obzenflow_core::Result<DeliveryPayload> {
+    async fn consume(&mut self, event: ChainEvent) -> obzenflow_core::Result<DeliveryPayload> {
         if let Ok(mut c) = self.count.lock() {
             if event.is_data() {
                 *c += 1;
@@ -222,17 +220,14 @@ async fn test_rate_limiter_metrics_simple() -> Result<()> {
     );
 
     // Ensure the flow completed within a reasonable time bound.
-    let join_result =
-        tokio::time::timeout(Duration::from_secs(60), run_task).await;
+    let join_result = tokio::time::timeout(Duration::from_secs(60), run_task).await;
     match join_result {
         Ok(joined) => {
             // Propagate any error from the flow run
             joined.expect("Flow task panicked")?
         }
         Err(_) => {
-            panic!(
-                "rate_limiter_metrics_simple_e2e_test: flow did not complete within 60 seconds"
-            )
+            panic!("rate_limiter_metrics_simple_e2e_test: flow did not complete within 60 seconds")
         }
     }
 

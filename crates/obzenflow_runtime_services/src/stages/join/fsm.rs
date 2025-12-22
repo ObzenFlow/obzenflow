@@ -393,7 +393,8 @@ impl<H: JoinHandler + Send + Sync + 'static> FsmAction for JoinAction<H> {
 
                 // Initialize FSM-owned contract state for reference and stream sides
                 let ref_ids = ctx.reference_subscription_factory.upstream_stage_ids();
-                ctx.reference_contract_state = ref_ids.into_iter().map(ReaderProgress::new).collect();
+                ctx.reference_contract_state =
+                    ref_ids.into_iter().map(ReaderProgress::new).collect();
 
                 let stream_ids = ctx.stream_subscription_factory.upstream_stage_ids();
                 ctx.stream_contract_state =
@@ -408,6 +409,7 @@ impl<H: JoinHandler + Send + Sync + 'static> FsmAction for JoinAction<H> {
                         ContractConfig::default(),
                         Some(ctx.system_journal.clone()),
                         Some(ctx.stage_id),
+                        ctx.instrumentation.control_middleware().clone(),
                     )
                     .await
                     .map_err(|e| {
@@ -438,6 +440,7 @@ impl<H: JoinHandler + Send + Sync + 'static> FsmAction for JoinAction<H> {
                         ContractConfig::default(),
                         Some(ctx.system_journal.clone()),
                         Some(ctx.stage_id),
+                        ctx.instrumentation.control_middleware().clone(),
                     )
                     .await
                     .map_err(|e| {
@@ -523,7 +526,7 @@ impl<H: JoinHandler + Send + Sync + 'static> FsmAction for JoinAction<H> {
                 let mut natural = true;
                 let mut upstream_vector_clock = None;
                 let mut upstream_last_event = None;
-                let runtime_context = ctx.instrumentation.snapshot();
+                let runtime_context = ctx.instrumentation.snapshot_with_control();
 
                 if let Some(buffered_event) = buffered {
                     if let obzenflow_core::event::ChainEventContent::FlowControl(

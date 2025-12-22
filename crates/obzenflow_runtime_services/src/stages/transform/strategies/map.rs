@@ -126,10 +126,7 @@ impl<F> TransformHandler for Map<F>
 where
     F: Fn(ChainEvent) -> ChainEvent + Send + Sync + Clone + 'static,
 {
-    fn process(
-        &self,
-        event: ChainEvent,
-    ) -> Result<Vec<ChainEvent>, HandlerError> {
+    fn process(&self, event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
         Ok(vec![(self.mapper)(event)])
     }
 
@@ -253,10 +250,7 @@ where
     O: Serialize + Send + Sync + TypedPayload + 'static,
     F: Fn(T) -> O + Send + Sync + Clone + 'static,
 {
-    fn process(
-        &self,
-        event: ChainEvent,
-    ) -> Result<Vec<ChainEvent>, HandlerError> {
+    fn process(&self, event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
         // Step 1: Deserialize ChainEvent payload → T
         let input_value: T = match serde_json::from_value(event.payload().clone()) {
             Ok(v) => v,

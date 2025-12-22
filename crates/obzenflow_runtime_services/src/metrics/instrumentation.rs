@@ -5,9 +5,13 @@ use obzenflow_core::event::event_envelope::EventEnvelope;
 use obzenflow_core::event::identity::journal_writer_id::JournalWriterId;
 use obzenflow_core::event::vector_clock::VectorClock;
 use obzenflow_core::event::JournalEvent;
-use obzenflow_core::EventId;
-use obzenflow_core::WriterId;
 use obzenflow_core::metrics::StageMetricsSnapshot;
+use obzenflow_core::EventId;
+use obzenflow_core::StageId;
+use obzenflow_core::WriterId;
+use obzenflow_core::control_middleware::{
+    CircuitBreakerSnapshotter, ControlMiddlewareProvider, NoControlMiddleware, RateLimiterSnapshotter,
+};
 use serde::{Deserialize, Serialize}; // <‑‑ canonical path
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{OnceLock, RwLock};
@@ -36,6 +40,16 @@ impl Default for InstrumentationConfig {
     }
 }
 
+/// Error when binding control middleware fails validation.
+#[derive(Debug, thiserror::Error)]
+pub enum ControlBindError {
+    #[error("Stage {stage_id} configured with circuit_breaker middleware but none registered")]
+    MissingCircuitBreaker { stage_id: StageId },
+
+    #[error("Stage {stage_id} configured with rate_limiter middleware but none registered")]
+    MissingRateLimiter { stage_id: StageId },
+}
+
 /// Stage instrumentation that tracks metrics alongside FSM state
 pub struct StageInstrumentation {
     // Gauge metrics - current values
@@ -52,6 +66,9 @@ pub struct StageInstrumentation {
 
     // Histogram for processing time (percentiles)
     pub processing_time_histogram: RwLock<Histogram<u64>>,
+
+    // Actual sum of processing times (nanoseconds) - never reconstructed from percentiles
+    pub processing_time_sum_nanos: AtomicU64,
 
     // FSM state tracking
     pub current_state: RwLock<String>,
@@ -76,6 +93,22 @@ pub struct StageInstrumentation {
 
     // Configuration
     config: InstrumentationConfig,
+
+    // =========================================================================
+    // Control middleware bindings (FLOWIP-059a-3)
+    // =========================================================================
+
+    /// Flow-scoped provider for control middleware state/metrics.
+    control_middleware: Arc<dyn ControlMiddlewareProvider>,
+
+    /// Cached snapshotter for circuit breaker metrics (set once during stage construction).
+    cb_snapshotter: Option<Arc<CircuitBreakerSnapshotter>>,
+
+    /// Cached snapshotter for rate limiter metrics (set once during stage construction).
+    rl_snapshotter: Option<Arc<RateLimiterSnapshotter>>,
+
+    /// Cached circuit breaker state for control strategies (set once during stage construction).
+    cb_state: Option<Arc<std::sync::atomic::AtomicU8>>,
 }
 
 impl StageInstrumentation {
@@ -103,6 +136,9 @@ impl StageInstrumentation {
                     .expect("Failed to create histogram"),
             ),
 
+            // Actual sum - always tracked, never reconstructed
+            processing_time_sum_nanos: AtomicU64::new(0),
+
             // State
             current_state: RwLock::new("Created".to_string()),
             state_entered_at: RwLock::new(Instant::now()),
@@ -119,7 +155,49 @@ impl StageInstrumentation {
             errors_by_kind: RwLock::new(std::collections::HashMap::new()),
 
             config,
+
+            control_middleware: Arc::new(NoControlMiddleware),
+            cb_snapshotter: None,
+            rl_snapshotter: None,
+            cb_state: None,
         }
+    }
+
+    /// Bind control middleware from the provider for this stage.
+    ///
+    /// Called once during stage construction. Caches snapshotters and state to
+    /// avoid per-event lookups. Fails if expected middleware is missing.
+    pub fn bind_control_middleware(
+        &mut self,
+        stage_id: &StageId,
+        provider: &Arc<dyn ControlMiddlewareProvider>,
+        expects_circuit_breaker: bool,
+        expects_rate_limiter: bool,
+    ) -> Result<(), ControlBindError> {
+        self.control_middleware = provider.clone();
+
+        self.cb_snapshotter = provider.circuit_breaker_snapshotter(stage_id);
+        self.rl_snapshotter = provider.rate_limiter_snapshotter(stage_id);
+        self.cb_state = provider.circuit_breaker_state(stage_id);
+        let cb_contract_info_present = provider
+            .circuit_breaker_contract_info(stage_id)
+            .is_some();
+
+        if expects_circuit_breaker
+            && (self.cb_snapshotter.is_none() || self.cb_state.is_none() || !cb_contract_info_present)
+        {
+            return Err(ControlBindError::MissingCircuitBreaker {
+                stage_id: *stage_id,
+            });
+        }
+
+        if expects_rate_limiter && self.rl_snapshotter.is_none() {
+            return Err(ControlBindError::MissingRateLimiter {
+                stage_id: *stage_id,
+            });
+        }
+
+        Ok(())
     }
 
     /// Create a snapshot for event injection
@@ -157,6 +235,9 @@ impl StageInstrumentation {
                 0
             },
 
+            // Actual sum - always tracked, never reconstructed from percentiles
+            processing_time_sum_nanos: self.processing_time_sum_nanos.load(Ordering::Relaxed),
+
             // Counter snapshots (totals, not rates!)
             events_processed_total: self.events_processed_total.load(Ordering::Relaxed),
             errors_total: self.errors_total.load(Ordering::Relaxed),
@@ -185,7 +266,74 @@ impl StageInstrumentation {
                 .iter()
                 .map(|(k, v)| (k.clone(), v.load(Ordering::Relaxed)))
                 .collect(),
+
+    // Control middleware cumulative metrics are injected by supervisors
+    // via `snapshot_with_control()` so defaults are always present.
+            cb_requests_total: 0,
+            cb_successes_total: 0,
+            cb_failures_total: 0,
+            cb_rejections_total: 0,
+            cb_opened_total: 0,
+            cb_time_closed_seconds: 0.0,
+            cb_time_open_seconds: 0.0,
+            cb_time_half_open_seconds: 0.0,
+            cb_state: 0.0,
+            rl_events_total: 0,
+            rl_delayed_total: 0,
+            rl_tokens_consumed_total: 0.0,
+            rl_delay_seconds_total: 0.0,
+            rl_bucket_tokens: 0.0,
+            rl_bucket_capacity: 0.0,
         }
+    }
+
+    /// Create a wide-event snapshot that also includes cumulative control middleware metrics.
+    ///
+    /// This follows the wide-events philosophy: every event carries the current cumulative
+    /// circuit breaker and rate limiter state so tail-start observers can still export
+    /// accurate totals by reading the journal tail.
+    pub fn snapshot_with_control(&self) -> RuntimeContext {
+        let mut ctx = self.snapshot();
+
+        if let Some(cb_snapshotter) = &self.cb_snapshotter {
+            let cb = cb_snapshotter();
+            ctx.cb_requests_total = cb.requests_total;
+            ctx.cb_successes_total = cb.successes_total;
+            ctx.cb_failures_total = cb.failures_total;
+            ctx.cb_rejections_total = cb.rejections_total;
+            ctx.cb_opened_total = cb.opened_total;
+            ctx.cb_time_closed_seconds = cb.time_closed_seconds;
+            ctx.cb_time_open_seconds = cb.time_open_seconds;
+            ctx.cb_time_half_open_seconds = cb.time_half_open_seconds;
+            ctx.cb_state = match cb.state {
+                0 => 0.0, // closed
+                1 => 1.0, // open
+                2 => 0.5, // half_open
+                _ => 0.0,
+            };
+        }
+
+        if let Some(rl_snapshotter) = &self.rl_snapshotter {
+            let rl = rl_snapshotter();
+            ctx.rl_events_total = rl.events_total;
+            ctx.rl_delayed_total = rl.delayed_total;
+            ctx.rl_tokens_consumed_total = rl.tokens_consumed_total;
+            ctx.rl_delay_seconds_total = rl.delay_seconds_total;
+            ctx.rl_bucket_tokens = rl.bucket_tokens;
+            ctx.rl_bucket_capacity = rl.bucket_capacity;
+        }
+
+        ctx
+    }
+
+    /// Access the flow-scoped control middleware provider.
+    pub fn control_middleware(&self) -> &Arc<dyn ControlMiddlewareProvider> {
+        &self.control_middleware
+    }
+
+    /// Access cached circuit breaker state (if bound).
+    pub fn circuit_breaker_state(&self) -> Option<&Arc<std::sync::atomic::AtomicU8>> {
+        self.cb_state.as_ref()
     }
 
     /// Note a consumed envelope so downstream events capture reader position and origin.
@@ -203,8 +351,17 @@ impl StageInstrumentation {
         *self.last_emitted_writer.write().unwrap() = Some(event.writer_id().clone());
     }
 
-    /// Record processing duration in histogram
+    /// Record processing duration in histogram and sum.
+    ///
+    /// The sum is always tracked (for accurate Prometheus histogram export).
+    /// The histogram is only updated if enable_histograms is true.
     pub fn record_processing_time(&self, duration: Duration) {
+        // Always track the actual sum - this is never reconstructed from percentiles
+        let duration_nanos = duration.as_nanos() as u64;
+        self.processing_time_sum_nanos
+            .fetch_add(duration_nanos, Ordering::Relaxed);
+
+        // Histogram recording is optional (for percentiles)
         if !self.config.enable_histograms {
             return;
         }
@@ -256,10 +413,7 @@ impl StageInstrumentation {
     }
 
     /// Record an error occurrence with a specific ErrorKind.
-    pub fn record_error(
-        &self,
-        kind: obzenflow_core::event::status::processing_status::ErrorKind,
-    ) {
+    pub fn record_error(&self, kind: obzenflow_core::event::status::processing_status::ErrorKind) {
         self.errors_total.fetch_add(1, Ordering::Relaxed);
         let mut by_kind = self.errors_by_kind.write().unwrap();
         by_kind
@@ -334,6 +488,7 @@ pub fn snapshot_stage_metrics(instrumentation: &StageInstrumentation) -> StageMe
         recent_p95_ms: ctx.recent_p95_ms,
         recent_p99_ms: ctx.recent_p99_ms,
         recent_p999_ms: ctx.recent_p999_ms,
+        processing_time_sum_nanos: ctx.processing_time_sum_nanos,
         event_loops_total: ctx.event_loops_total,
         event_loops_with_work_total: ctx.event_loops_with_work_total,
     }

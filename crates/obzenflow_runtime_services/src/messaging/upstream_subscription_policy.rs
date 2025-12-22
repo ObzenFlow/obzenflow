@@ -1,7 +1,9 @@
 use obzenflow_core::event::types::SeqNo;
-use obzenflow_core::{ContractResult, StageId, ViolationCause, CircuitBreakerContractMode, circuit_breaker_contract_registry};
+use obzenflow_core::control_middleware::{CircuitBreakerContractMode, ControlMiddlewareProvider};
+use obzenflow_core::{ContractResult, StageId, ViolationCause};
 
 use obzenflow_core::event::types::ViolationCause as EventViolationCause;
+use std::sync::Arc;
 
 /// Final decision for a single edge after applying policies to raw contract results.
 #[derive(Clone)]
@@ -135,14 +137,17 @@ impl ContractPolicy for BreakerAwarePolicy {
 }
 
 /// Helper to build a default policy stack for an upstream stage.
-pub fn build_policy_stack_for_upstream(upstream_stage: StageId) -> ContractPolicyStack {
+pub fn build_policy_stack_for_upstream(
+    upstream_stage: StageId,
+    control_middleware: &Arc<dyn ControlMiddlewareProvider>,
+) -> ContractPolicyStack {
     let mut policies: Vec<Box<dyn ContractPolicy>> = Vec::new();
 
     // Always include strict transport semantics.
     policies.push(Box::new(TransportStrictPolicy));
 
     // If the upstream is configured as BreakerAware, add the breaker-aware override.
-    if let Some(info) = circuit_breaker_contract_registry::get_stage_info(&upstream_stage) {
+    if let Some(info) = control_middleware.circuit_breaker_contract_info(&upstream_stage) {
         if info.mode == CircuitBreakerContractMode::BreakerAware {
             policies.push(Box::new(BreakerAwarePolicy));
         }
@@ -154,10 +159,10 @@ pub fn build_policy_stack_for_upstream(upstream_stage: StageId) -> ContractPolic
 #[cfg(test)]
 mod tests {
     use super::*;
+    use obzenflow_core::event::types::SeqNo;
     use obzenflow_core::{
         ContractEvidence, ContractResult, ContractViolation, StageId, ViolationCause,
     };
-    use obzenflow_core::event::types::SeqNo;
     use serde_json::json;
 
     fn make_violation(cause: ViolationCause) -> ContractResult {
@@ -220,7 +225,10 @@ mod tests {
 
         let decision = policy.apply(&results, &edge, &hints, EdgeContractDecision::Pass);
         match decision {
-            EdgeContractDecision::Fail(EventViolationCause::SeqDivergence { advertised, reader }) => {
+            EdgeContractDecision::Fail(EventViolationCause::SeqDivergence {
+                advertised,
+                reader,
+            }) => {
                 assert_eq!(advertised, Some(SeqNo(3)));
                 assert_eq!(reader, SeqNo(1));
             }
@@ -334,9 +342,8 @@ mod tests {
             has_fallback_configured: true,
         };
 
-        let prior = EdgeContractDecision::Fail(EventViolationCause::Other(
-            "content_mismatch".into(),
-        ));
+        let prior =
+            EdgeContractDecision::Fail(EventViolationCause::Other("content_mismatch".into()));
 
         let decision = policy.apply(&[], &edge, &hints, prior);
         match decision {

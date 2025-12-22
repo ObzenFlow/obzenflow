@@ -6,16 +6,15 @@ use obzenflow_core::{
     event::chain_event::{ChainEvent, ChainEventFactory},
     event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload},
     id::StageId,
-    Result as CoreResult,
-    WriterId,
+    Result as CoreResult, WriterId,
 };
 use obzenflow_dsl_infra::{flow, sink, source, stateful};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
 use obzenflow_runtime_services::stages::common::handlers::{FiniteSourceHandler, SinkHandler};
-use obzenflow_runtime_services::stages::SourceError;
 use obzenflow_runtime_services::stages::stateful::{Conflate, GroupBy, Reduce};
+use obzenflow_runtime_services::stages::SourceError;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 

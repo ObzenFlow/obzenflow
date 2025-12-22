@@ -8,6 +8,7 @@ use crate::message_bus::FsmMessageBus;
 use crate::messaging::upstream_subscription::{ContractConfig, UpstreamSubscription};
 use obzenflow_core::event::SystemEvent;
 use obzenflow_core::journal::journal::Journal;
+use obzenflow_core::control_middleware::ControlMiddlewareProvider;
 use obzenflow_core::{ChainEvent, FlowId, StageId, SystemId, WriterId};
 use obzenflow_topology::Topology;
 use std::collections::HashMap;
@@ -92,6 +93,7 @@ impl SubscriptionFactory {
         contract_config: ContractConfig,
         system_journal: Option<Arc<dyn Journal<SystemEvent>>>,
         reader_stage: Option<StageId>,
+        control_middleware: Arc<dyn ControlMiddlewareProvider>,
     ) -> Result<UpstreamSubscription<ChainEvent>, String> {
         let subscription = self.create_subscription(journals).await?;
         Ok(subscription.with_contracts(
@@ -100,6 +102,7 @@ impl SubscriptionFactory {
             contract_config,
             system_journal,
             reader_stage,
+            control_middleware,
         ))
     }
 }
@@ -120,6 +123,7 @@ impl BoundSubscriptionFactory {
         contract_config: ContractConfig,
         system_journal: Option<Arc<dyn Journal<SystemEvent>>>,
         reader_stage: Option<StageId>,
+        control_middleware: Arc<dyn ControlMiddlewareProvider>,
     ) -> Result<UpstreamSubscription<ChainEvent>, String> {
         let subscription =
             UpstreamSubscription::new_with_names(&self.owner_label, &self.journals_with_names)
@@ -131,6 +135,7 @@ impl BoundSubscriptionFactory {
                     contract_config,
                     system_journal,
                     reader_stage,
+                    control_middleware,
                 );
 
         Ok(subscription)

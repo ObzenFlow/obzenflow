@@ -787,6 +787,42 @@ fn map_system_event_to_sse(envelope: &SystemEventEnvelope) -> SseEvent {
                 .event(sse_event_name)
                 .data(data.to_string())
         }
+        SystemEventType::ContractResult {
+            upstream,
+            reader,
+            contract_name,
+            status,
+            cause,
+            reader_seq,
+            advertised_writer_seq,
+        } => {
+            let mut data = json!({
+                "system_event_type": "contract_result",
+                "upstream_stage_id": upstream.to_string(),
+                "reader_stage_id": reader.to_string(),
+                "contract_name": contract_name,
+                "status": status,
+                "timestamp_ms": event.timestamp,
+            });
+
+            if let Some(cause) = cause {
+                data["cause"] = serde_json::json!(cause);
+            }
+            if let Some(seq) = reader_seq {
+                data["reader_seq"] = serde_json::json!(seq);
+            }
+            if let Some(seq) = advertised_writer_seq {
+                data["advertised_writer_seq"] = serde_json::json!(seq);
+            }
+            if let Some(vc) = &vector_clock_value {
+                data["vector_clock"] = vc.clone();
+            }
+
+            SseEvent::default()
+                .id(id_str)
+                .event("contract_result")
+                .data(data.to_string())
+        }
         SystemEventType::MetricsCoordination(metrics_event) => {
             let event_type = match metrics_event {
                 obzenflow_core::event::system_event::MetricsCoordinationEvent::Ready => {
@@ -821,6 +857,7 @@ fn map_system_event_to_sse(envelope: &SystemEventEnvelope) -> SseEvent {
         SystemEventType::ContractOverrideByPolicy {
             upstream,
             reader,
+            contract_name,
             original_cause,
             policy,
         } => {
@@ -828,6 +865,7 @@ fn map_system_event_to_sse(envelope: &SystemEventEnvelope) -> SseEvent {
                 "system_event_type": "contract_override_by_policy",
                 "upstream_stage_id": upstream.to_string(),
                 "reader_stage_id": reader.to_string(),
+                "contract_name": contract_name,
                 "original_cause": original_cause,
                 "policy": policy,
                 "timestamp_ms": event.timestamp,

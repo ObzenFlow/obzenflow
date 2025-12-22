@@ -10,16 +10,17 @@ use crate::middleware::{
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::payloads::observability_payload::{
-    MetricsLifecycle, MiddlewareLifecycle, ObservabilityPayload, RateLimiterEvent,
+    MiddlewareLifecycle, ObservabilityPayload, RateLimiterEvent,
 };
-use obzenflow_core::{EventId, StageId, WriterId};
+use obzenflow_core::{StageId, WriterId};
+use obzenflow_core::control_middleware::{RateLimiterMetrics, RateLimiterSnapshotter};
 use obzenflow_runtime_services::pipeline::config::StageConfig;
 use obzenflow_runtime_services::stages::common::control_strategies::{
     ControlEventStrategy, WindowingStrategy,
 };
 use serde_json::json;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 use tracing::{debug, info, trace};
 
 /// Token bucket rate limiter implementation
@@ -39,18 +40,29 @@ struct TokenBucket {
 
 #[derive(Debug)]
 struct RateLimiterStats {
-    requests_allowed: u64,
-    requests_delayed: u64,
-    tokens_consumed: f64,
+    // ---- Cumulative counters (never reset) ----
+    events_total: u64,
+    delayed_total: u64,
+    tokens_consumed_total: f64,
+    delay_seconds_total: f64,
+
+    // ---- Window counters (reset on summary emission) ----
+    events_window: u64,
+    delayed_window: u64,
+    tokens_consumed_window: f64,
     last_summary: Instant,
 }
 
 impl Default for RateLimiterStats {
     fn default() -> Self {
         Self {
-            requests_allowed: 0,
-            requests_delayed: 0,
-            tokens_consumed: 0.0,
+            events_total: 0,
+            delayed_total: 0,
+            tokens_consumed_total: 0.0,
+            delay_seconds_total: 0.0,
+            events_window: 0,
+            delayed_window: 0,
+            tokens_consumed_window: 0.0,
             last_summary: Instant::now(),
         }
     }
@@ -156,10 +168,21 @@ pub struct RateLimiterMiddleware {
     cost_per_event: f64,
     /// Statistics for periodic summaries
     stats: Arc<Mutex<RateLimiterStats>>,
+    /// Writer identity used for durable observability/control events.
+    ///
+    /// This must match the stage's writer_id so vector-clock watermarks and
+    /// stage attribution remain correct in downstream consumers.
+    writer_id: WriterId,
 }
 
 impl RateLimiterMiddleware {
-    fn new(events_per_second: f64, burst_capacity: Option<f64>, cost_per_event: f64) -> Self {
+    fn new(
+        stage_id: StageId,
+        events_per_second: f64,
+        burst_capacity: Option<f64>,
+        cost_per_event: f64,
+        control_middleware: std::sync::Arc<super::ControlMiddlewareAggregator>,
+    ) -> Self {
         // For very low rates, ensure we have at least 1 token capacity
         let capacity = burst_capacity.unwrap_or(events_per_second.max(1.0));
         let bucket = TokenBucket::new(capacity, events_per_second);
@@ -172,15 +195,44 @@ impl RateLimiterMiddleware {
             "Created rate limiter middleware"
         );
 
+        let stats = Arc::new(Mutex::new(RateLimiterStats::default()));
+        let bucket = Arc::new(Mutex::new(bucket));
+
+        let snapshotter: std::sync::Arc<RateLimiterSnapshotter> = Arc::new({
+            let stats = stats.clone();
+            let bucket = bucket.clone();
+            move || {
+                let stats_snapshot = stats.lock().ok();
+                let bucket_snapshot = bucket.lock().ok();
+
+                match (stats_snapshot, bucket_snapshot) {
+                    (Some(s), Some(b)) => RateLimiterMetrics {
+                        events_total: s.events_total,
+                        delayed_total: s.delayed_total,
+                        tokens_consumed_total: s.tokens_consumed_total,
+                        delay_seconds_total: s.delay_seconds_total,
+                        bucket_tokens: b.tokens,
+                        bucket_capacity: b.capacity,
+                    },
+                    (Some(s), None) => RateLimiterMetrics {
+                        events_total: s.events_total,
+                        delayed_total: s.delayed_total,
+                        tokens_consumed_total: s.tokens_consumed_total,
+                        delay_seconds_total: s.delay_seconds_total,
+                        bucket_tokens: 0.0,
+                        bucket_capacity: 0.0,
+                    },
+                    _ => RateLimiterMetrics::default(),
+                }
+            }
+        });
+        control_middleware.register_rate_limiter(stage_id, snapshotter);
+
         Self {
-            bucket: Arc::new(Mutex::new(bucket)),
+            bucket,
             cost_per_event,
-            stats: Arc::new(Mutex::new(RateLimiterStats {
-                requests_allowed: 0,
-                requests_delayed: 0,
-                tokens_consumed: 0.0,
-                last_summary: Instant::now(),
-            })),
+            stats,
+            writer_id: WriterId::from(stage_id),
         }
     }
 
@@ -189,13 +241,19 @@ impl RateLimiterMiddleware {
         let mut stats = self.stats.lock().unwrap();
         let bucket = self.bucket.lock().unwrap();
 
-        // Emit summary every 10 seconds or every 1000 requests
-        let should_emit = stats.last_summary.elapsed() >= Duration::from_secs(10)
-            || stats.requests_allowed + stats.requests_delayed >= 1000;
+        // Emit summary every 10 seconds or every 1000 processed events.
+        //
+        // Note: `requests_allowed` is incremented once per event that successfully
+        // consumes tokens (including events that were previously delayed), so it
+        // represents the true per-window event count. `requests_delayed` tracks
+        // how many events experienced backpressure and is used separately for
+        // delay-rate calculations.
+        let should_emit =
+            stats.last_summary.elapsed() >= Duration::from_secs(10) || stats.events_window >= 1000;
 
         if should_emit {
             let consumption_rate = if stats.last_summary.elapsed().as_secs() > 0 {
-                stats.tokens_consumed / stats.last_summary.elapsed().as_secs_f64()
+                stats.tokens_consumed_window / stats.last_summary.elapsed().as_secs_f64()
             } else {
                 0.0
             };
@@ -204,38 +262,31 @@ impl RateLimiterMiddleware {
 
             info!(
                 window_duration_s = stats.last_summary.elapsed().as_secs(),
-                requests_allowed = stats.requests_allowed,
-                requests_delayed = stats.requests_delayed,
-                tokens_consumed = stats.tokens_consumed,
+                requests_allowed = stats.events_window,
+                requests_delayed = stats.delayed_window,
+                tokens_consumed = stats.tokens_consumed_window,
                 consumption_rate,
                 utilization_pct = format!("{:.1}%", utilization * 100.0),
                 "Rate limiter summary"
             );
 
+            let events_in_window = stats.events_window;
             let event = ChainEventFactory::observability_event(
-                WriterId::from(StageId::new()),
-                ObservabilityPayload::Metrics(MetricsLifecycle::Custom {
-                    name: "rate_limiter_summary".to_string(),
-                    value: json!({
-                        "window_duration_s": stats.last_summary.elapsed().as_secs(),
-                        "requests_allowed": stats.requests_allowed,
-                        "requests_delayed": stats.requests_delayed,
-                        "tokens_consumed": stats.tokens_consumed,
-                        "consumption_rate": consumption_rate,
-                        "available_tokens": bucket.tokens,
-                        "capacity": bucket.capacity,
-                        "refill_rate": bucket.refill_rate,
-                        "utilization": utilization
-                    }),
-                    tags: None,
-                }),
+                self.writer_id,
+                ObservabilityPayload::Middleware(MiddlewareLifecycle::RateLimiter(
+                    RateLimiterEvent::WindowUtilization {
+                        utilization_percent: utilization * 100.0,
+                        events_in_window,
+                        window_size_ms: stats.last_summary.elapsed().as_millis() as u64,
+                    },
+                )),
             );
             ctx.write_control_event(event);
 
             // Reset stats
-            stats.requests_allowed = 0;
-            stats.requests_delayed = 0;
-            stats.tokens_consumed = 0.0;
+            stats.events_window = 0;
+            stats.delayed_window = 0;
+            stats.tokens_consumed_window = 0.0;
             stats.last_summary = Instant::now();
         }
     }
@@ -254,13 +305,18 @@ impl Middleware for RateLimiterMiddleware {
         trace!(event_id = %event_id, event_type = %event_type, "Rate limiter processing event");
 
         // Blocking loop - wait until we have tokens
+        let mut delayed_this_event = false;
         loop {
             let mut bucket = self.bucket.lock().unwrap();
 
             if bucket.try_consume(self.cost_per_event) {
                 // Track successful consumption
-                self.stats.lock().unwrap().requests_allowed += 1;
-                self.stats.lock().unwrap().tokens_consumed += self.cost_per_event;
+                if let Ok(mut stats) = self.stats.lock() {
+                    stats.events_total += 1;
+                    stats.tokens_consumed_total += self.cost_per_event;
+                    stats.events_window += 1;
+                    stats.tokens_consumed_window += self.cost_per_event;
+                }
 
                 let available = bucket.available_tokens();
                 debug!(
@@ -284,7 +340,7 @@ impl Middleware for RateLimiterMiddleware {
                     // Emit a window utilization event for state changes
                     let utilization = 1.0 - (bucket.tokens / bucket.capacity);
                     let event = ChainEventFactory::observability_event(
-                        WriterId::from(StageId::new()),
+                        self.writer_id,
                         ObservabilityPayload::Middleware(MiddlewareLifecycle::RateLimiter(
                             RateLimiterEvent::WindowUtilization {
                                 utilization_percent: utilization * 100.0,
@@ -327,7 +383,47 @@ impl Middleware for RateLimiterMiddleware {
             );
 
             // Track this as a delayed request
-            self.stats.lock().unwrap().requests_delayed += 1;
+            if !delayed_this_event {
+                delayed_this_event = true;
+                if let Ok(mut stats) = self.stats.lock() {
+                    stats.delayed_total += 1;
+                    stats.delayed_window += 1;
+                }
+
+                // Emit a durable delayed event so downstream observers (e.g. MetricsAggregator)
+                // can count delays without per-execution tracing.
+            let (current_rate, limit_rate) = {
+                let limit_rate = if self.cost_per_event > 0.0 {
+                    bucket.refill_rate / self.cost_per_event
+                } else {
+                    0.0
+                };
+
+                let current_rate = if let Ok(stats) = self.stats.lock() {
+                    let elapsed_s = stats.last_summary.elapsed().as_secs_f64();
+                    if elapsed_s > 0.0 && self.cost_per_event > 0.0 {
+                        (stats.tokens_consumed_window / elapsed_s) / self.cost_per_event
+                    } else {
+                        0.0
+                    }
+                } else {
+                    0.0
+                };
+
+                (current_rate, limit_rate)
+            };
+
+            ctx.write_control_event(ChainEventFactory::observability_event(
+                self.writer_id,
+                ObservabilityPayload::Middleware(MiddlewareLifecycle::RateLimiter(
+                    RateLimiterEvent::Delayed {
+                        delay_ms: wait_time.as_millis() as u64,
+                        current_rate,
+                        limit_rate,
+                    },
+                )),
+            ));
+            }
 
             // Check for threshold crossing
             if let Some((from, to)) = bucket.check_threshold_crossed() {
@@ -341,7 +437,7 @@ impl Middleware for RateLimiterMiddleware {
 
                 // Emit a window utilization event when exhausted
                 let event = ChainEventFactory::observability_event(
-                    WriterId::from(StageId::new()),
+                    self.writer_id,
                     ObservabilityPayload::Middleware(MiddlewareLifecycle::RateLimiter(
                         RateLimiterEvent::WindowUtilization {
                             utilization_percent: 100.0, // Exhausted = 100% utilized
@@ -368,6 +464,7 @@ impl Middleware for RateLimiterMiddleware {
 
             // Block until tokens should be available
             // For longer waits, use block_in_place to avoid blocking tokio worker threads
+            let wait_start = Instant::now();
             if wait_time > Duration::from_millis(1) {
                 trace!(event_id = %event_id, "Using block_in_place for wait > 1ms");
                 tokio::task::block_in_place(|| {
@@ -377,6 +474,12 @@ impl Middleware for RateLimiterMiddleware {
                 // For very short waits, just yield to scheduler
                 trace!(event_id = %event_id, "Using yield_now for wait <= 1ms");
                 std::thread::yield_now();
+            }
+            let waited = wait_start.elapsed();
+            if delayed_this_event {
+                if let Ok(mut stats) = self.stats.lock() {
+                    stats.delay_seconds_total += waited.as_secs_f64();
+                }
             }
 
             info!(
@@ -437,11 +540,17 @@ impl RateLimiterFactory {
 }
 
 impl MiddlewareFactory for RateLimiterFactory {
-    fn create(&self, _config: &StageConfig) -> Box<dyn Middleware> {
+    fn create(
+        &self,
+        config: &StageConfig,
+        control_middleware: std::sync::Arc<super::ControlMiddlewareAggregator>,
+    ) -> Box<dyn Middleware> {
         Box::new(RateLimiterMiddleware::new(
+            config.stage_id,
             self.events_per_second,
             self.burst_capacity,
             self.cost_per_event,
+            control_middleware,
         ))
     }
 
@@ -497,6 +606,7 @@ pub fn rate_limit_with_burst(events_per_second: f64, burst: f64) -> Box<dyn Midd
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::middleware::control::ControlMiddlewareAggregator;
     use obzenflow_core::event::{ChainEventFactory, EventId, WriterId};
 
     #[test]
@@ -528,8 +638,14 @@ mod tests {
 
     #[test]
     fn test_rate_limiter_allows_bursts() {
-        // Create middleware directly since the factory doesn't use the config
-        let middleware = RateLimiterMiddleware::new(10.0, Some(20.0), 1.0);
+        // Create middleware directly (we only need a stage_id for writer attribution)
+        let middleware = RateLimiterMiddleware::new(
+            StageId::new(),
+            10.0,
+            Some(20.0),
+            1.0,
+            Arc::new(ControlMiddlewareAggregator::new()),
+        );
 
         let mut ctx = MiddlewareContext::new();
 
@@ -553,8 +669,14 @@ mod tests {
 
     #[test]
     fn test_rate_limiter_control_events_pass_through() {
-        // Create middleware directly since the factory doesn't use the config
-        let middleware = RateLimiterMiddleware::new(1.0, None, 1.0);
+        // Create middleware directly (we only need a stage_id for writer attribution)
+        let middleware = RateLimiterMiddleware::new(
+            StageId::new(),
+            1.0,
+            None,
+            1.0,
+            Arc::new(ControlMiddlewareAggregator::new()),
+        );
 
         let mut ctx = MiddlewareContext::new();
 

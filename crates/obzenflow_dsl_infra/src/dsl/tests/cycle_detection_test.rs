@@ -10,7 +10,7 @@
 mod tests {
     use std::collections::HashMap;
 
-    use obzenflow_topology::{TopologyBuilder, EdgeKind};
+    use obzenflow_topology::{EdgeKind, TopologyBuilder};
 
     /// Build a topology using the DSL's `parse_topology!` macro and
     /// verify that stages in the feedback loop are detected as being

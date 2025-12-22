@@ -11,10 +11,10 @@ use anyhow::Result;
 use async_trait::async_trait;
 use obzenflow_adapters::middleware::circuit_breaker;
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventContent, ChainEventFactory};
-use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
-use obzenflow_core::journal::journal_owner::JournalOwner;
+use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::journal::journal::Journal;
+use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::{StageId, WriterId};
 use obzenflow_dsl_infra::{flow, sink, source, transform};
 use obzenflow_infra::journal::disk_journals;
@@ -85,10 +85,7 @@ impl FailingTransform {
 
 #[async_trait]
 impl TransformHandler for FailingTransform {
-    fn process(
-        &self,
-        mut event: ChainEvent,
-    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
+    fn process(&self, mut event: ChainEvent) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
         let current = self.seen.fetch_add(1, Ordering::Relaxed);
 
         if current >= self.max_successes {
@@ -105,7 +102,9 @@ impl TransformHandler for FailingTransform {
         }
     }
 
-    async fn drain(&mut self) -> std::result::Result<(), HandlerError> { Ok(()) }
+    async fn drain(&mut self) -> std::result::Result<(), HandlerError> {
+        Ok(())
+    }
 }
 
 /// Sink that simply counts successfully delivered events.
@@ -117,7 +116,12 @@ struct CountingSink {
 impl CountingSink {
     fn new() -> (Self, Arc<AtomicUsize>) {
         let count = Arc::new(AtomicUsize::new(0));
-        (Self { count: count.clone() }, count)
+        (
+            Self {
+                count: count.clone(),
+            },
+            count,
+        )
     }
 }
 
@@ -207,8 +211,7 @@ async fn breaker_driven_shutdown_emits_poison_eof_and_contract() -> Result<()> {
     // Discover the source stage journal on disk. Journals created via
     // `disk_journals("target/breaker_shutdown_contracts")` are stored under:
     //   target/breaker_shutdown_contracts/flows/<flow_id>/FiniteSource_source_<id>.log
-    let base_path = std::path::PathBuf::from("target/breaker_shutdown_contracts")
-        .join("flows");
+    let base_path = std::path::PathBuf::from("target/breaker_shutdown_contracts").join("flows");
 
     let mut source_journal_paths = Vec::new();
     if base_path.exists() {
@@ -249,7 +252,9 @@ async fn breaker_driven_shutdown_emits_poison_eof_and_contract() -> Result<()> {
                 journal_path.clone(),
                 JournalOwner::stage(StageId::new()),
             )
-            .map_err(|e| anyhow::anyhow!("Failed to open source journal {:?}: {:?}", journal_path, e))?;
+            .map_err(|e| {
+                anyhow::anyhow!("Failed to open source journal {:?}: {:?}", journal_path, e)
+            })?;
 
         let envelopes = journal
             .read_causally_ordered()
