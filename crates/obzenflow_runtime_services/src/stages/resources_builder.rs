@@ -112,6 +112,7 @@ impl BoundSubscriptionFactory {
     pub async fn build(&self) -> Result<UpstreamSubscription<ChainEvent>, String> {
         UpstreamSubscription::new_with_names(&self.owner_label, &self.journals_with_names)
             .await
+            .map(|sub| sub.transport_only())
             .map_err(|e| format!("Failed to create subscription: {:?}", e))
     }
 
@@ -136,7 +137,8 @@ impl BoundSubscriptionFactory {
                     system_journal,
                     reader_stage,
                     control_middleware,
-                );
+                )
+                .transport_only();
 
         Ok(subscription)
     }

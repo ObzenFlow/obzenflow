@@ -10,6 +10,7 @@ use crate::supervised_base::base::Supervisor;
 use crate::supervised_base::{EventLoopDirective, HandlerSupervised};
 use obzenflow_core::event::context::{FlowContext, StageType};
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
+use obzenflow_core::event::vector_clock::CausalOrderingService;
 use obzenflow_core::event::SystemEvent;
 use obzenflow_core::journal::journal::Journal;
 use obzenflow_core::EventEnvelope;
@@ -415,6 +416,21 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                                 event_id = ?envelope.event.id,
                                 "stateful: poll_next returned Event"
                             );
+                            // Retain the last consumed upstream envelope (with a merged
+                            // vector-clock) so that any subsequently emitted aggregate events can
+                            // be parented and preserve happened-before via vector clocks.
+                            match ctx.last_consumed_envelope.as_mut() {
+                                Some(merged) => {
+                                    CausalOrderingService::update_with_parent(
+                                        &mut merged.vector_clock,
+                                        &envelope.vector_clock,
+                                    );
+                                    merged.journal_writer_id = envelope.journal_writer_id;
+                                    merged.timestamp = envelope.timestamp.clone();
+                                    merged.event = envelope.event.clone();
+                                }
+                                None => ctx.last_consumed_envelope = Some(envelope.clone()),
+                            }
                             ctx.instrumentation.record_consumed(&envelope);
 
                             // We have work - increment loops with work
@@ -727,6 +743,12 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                 match emit_result {
                     Ok(events) if !events.is_empty() => {
                         let events_count = events.len();
+                        let stage_writer_id = ctx
+                            .writer_id
+                            .as_ref()
+                            .ok_or_else(|| "No writer ID available")?
+                            .clone();
+                        let parent = ctx.last_consumed_envelope.clone();
 
                         tracing::info!(
                             target: "flowip-080o",
@@ -736,8 +758,10 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                         );
 
                         // Write all aggregated events
-                        for event in events {
+                        for mut event in events {
                             use obzenflow_core::event::JournalEvent;
+                            // Enforce stage authorship for aggregate outputs.
+                            event.writer_id = stage_writer_id.clone();
 
                             let flow_context = FlowContext {
                                 flow_name: ctx.flow_name.clone(),
@@ -766,7 +790,7 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                             }
 
                             ctx.data_journal
-                                .append(enriched_event, None)
+                                .append(enriched_event, parent.as_ref())
                                 .await
                                 .map_err(|e| format!("Failed to write aggregated event: {}", e))?;
                         }
@@ -817,6 +841,21 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                         .await
                     {
                         PollResult::Event(envelope) => {
+                            // Retain the last consumed upstream envelope (with a merged
+                            // vector-clock) so that any final drain emissions can be parented and
+                            // preserve happened-before via vector clocks.
+                            match ctx.last_consumed_envelope.as_mut() {
+                                Some(merged) => {
+                                    CausalOrderingService::update_with_parent(
+                                        &mut merged.vector_clock,
+                                        &envelope.vector_clock,
+                                    );
+                                    merged.journal_writer_id = envelope.journal_writer_id;
+                                    merged.timestamp = envelope.timestamp.clone();
+                                    merged.event = envelope.event.clone();
+                                }
+                                None => ctx.last_consumed_envelope = Some(envelope.clone()),
+                            }
                             ctx.instrumentation.record_consumed(&envelope);
 
                             // Process the event based on type
@@ -1109,8 +1148,15 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
 
                     match drain_result {
                         Ok(drain_events) => {
+                            let stage_writer_id = ctx
+                                .writer_id
+                                .as_ref()
+                                .ok_or_else(|| "No writer ID available")?
+                                .clone();
+                            let parent = ctx.last_consumed_envelope.clone();
+
                             // Write the final aggregated events (if any)
-                            for event in drain_events {
+                            for mut event in drain_events {
                                 use obzenflow_core::event::JournalEvent;
                                 tracing::info!(
                                     target: "flowip-080o",
@@ -1119,6 +1165,8 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                                     event_id = ?event.id,
                                     "stateful: writing drain event to journal"
                                 );
+                                // Enforce stage authorship for drain aggregate outputs.
+                                event.writer_id = stage_writer_id.clone();
                                 let flow_context = FlowContext {
                                     flow_name: ctx.flow_name.clone(),
                                     flow_id: ctx.flow_id.to_string(),
@@ -1146,7 +1194,7 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                                     }
                                 }
                                 ctx.data_journal
-                                    .append(enriched_event, None)
+                                    .append(enriched_event, parent.as_ref())
                                     .await
                                     .map_err(|e| {
                                         format!("Failed to write final aggregated event: {}", e)

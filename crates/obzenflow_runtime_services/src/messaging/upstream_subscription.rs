@@ -299,6 +299,15 @@ pub struct UpstreamSubscription<T>
 where
     T: JournalEvent,
 {
+    /// Delivery filter for subscription events.
+    ///
+    /// Stage runtime subscriptions should generally avoid delivering stage-local
+    /// observability events (lifecycle/middleware metrics) to downstream handlers.
+    /// Observability events are still persisted to journals for tail readers (e.g. the
+    /// metrics aggregator), but delivering them to business-stage handlers forces
+    /// downstream stages to "drain" huge volumes of non-transport events before EOF.
+    delivery_filter: DeliveryFilter,
+
     /// Friendly owner label (stage or subsystem) for logging
     owner_label: String,
 
@@ -328,6 +337,18 @@ where
 
     /// Last EOF accounting outcome (set when an EOF is observed)
     last_eof_outcome: Option<EofOutcome>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DeliveryFilter {
+    /// Deliver all events to the caller (used by tail readers like the metrics aggregator).
+    All,
+    /// Deliver only transport-relevant events to the caller (used by stage runtime):
+    /// - Data events
+    /// - Flow control signals (EOF, drain, etc.)
+    ///
+    /// Observability events are consumed from journals but skipped (not returned).
+    TransportOnly,
 }
 
 impl<T> UpstreamSubscription<T>
@@ -426,6 +447,7 @@ where
         let state = SubscriptionState::new(readers.len());
 
         Ok(Self {
+            delivery_filter: DeliveryFilter::All,
             owner_label: owner_label.to_string(),
             readers,
             state,
@@ -435,6 +457,16 @@ where
             control_middleware: Arc::new(NoControlMiddleware),
             last_eof_outcome: None,
         })
+    }
+
+    /// Configure this subscription to deliver only transport-relevant events to the caller.
+    ///
+    /// This is intended for *stage runtime* subscriptions where downstream stages should
+    /// not be forced to process upstream observability events (e.g. middleware metrics)
+    /// as part of normal draining / shutdown.
+    pub fn transport_only(mut self) -> Self {
+        self.delivery_filter = DeliveryFilter::TransportOnly;
+        self
     }
 
     /// Create a subscription starting from explicit tail positions.
@@ -632,6 +664,25 @@ where
                         // This reader has observed post-baseline data; it is no longer
                         // logically at EOF due to a tail-start baseline.
                         self.state.clear_reader_baseline_at_tail(current_index);
+
+                        // Stage runtime subscriptions should not deliver upstream observability
+                        // events to handlers. We still consume them from journals so that the
+                        // subscription can make progress toward transport events and EOF.
+                        if matches!(self.delivery_filter, DeliveryFilter::TransportOnly) {
+                            if let Some(chain_event) =
+                                (&envelope.event as &dyn Any).downcast_ref::<ChainEvent>()
+                            {
+                                if matches!(
+                                    chain_event.content,
+                                    ChainEventContent::Observability(_)
+                                ) {
+                                    // Observability events are not part of the transport stream.
+                                    // Skip delivering to the caller, but keep progressing.
+                                    self.state.next_reader_index();
+                                    continue;
+                                }
+                            }
+                        }
 
                         tracing::debug!(
                             target: "flowip-080o",
@@ -1961,5 +2012,97 @@ mod tests {
             override_found,
             "expected ContractOverrideByPolicy system event in BreakerAware mode"
         );
+    }
+
+    #[tokio::test]
+    async fn transport_only_skips_observability_events() {
+        let upstream_stage = StageId::new();
+        let upstream_owner = JournalOwner::stage(upstream_stage);
+        let upstream_journal: Arc<dyn Journal<ChainEvent>> = Arc::new(TestJournal::new(upstream_owner));
+
+        let writer_id = WriterId::Stage(upstream_stage);
+
+        // Many real-world stage journals contain large volumes of lifecycle/observability events.
+        // Downstream stage subscriptions should not be forced to "process" them as part of normal
+        // transport draining; they should be skipped at the subscription layer.
+        upstream_journal
+            .append(
+                ChainEventFactory::stage_running(writer_id.clone(), upstream_stage),
+                None,
+            )
+            .await
+            .unwrap();
+        upstream_journal
+            .append(
+                ChainEventFactory::stage_running(writer_id.clone(), upstream_stage),
+                None,
+            )
+            .await
+            .unwrap();
+
+        upstream_journal
+            .append(
+                ChainEventFactory::data_event(writer_id.clone(), "test.event", json!({"n": 1})),
+                None,
+            )
+            .await
+            .unwrap();
+
+        upstream_journal
+            .append(
+                ChainEventFactory::stage_running(writer_id.clone(), upstream_stage),
+                None,
+            )
+            .await
+            .unwrap();
+
+        upstream_journal
+            .append(ChainEventFactory::eof_event(writer_id.clone(), true), None)
+            .await
+            .unwrap();
+
+        let upstreams: Vec<(StageId, String, Arc<dyn Journal<ChainEvent>>)> = vec![(
+            upstream_stage,
+            "upstream".to_string(),
+            upstream_journal.clone(),
+        )];
+
+        let mut subscription = UpstreamSubscription::new_with_names("test_owner", &upstreams)
+            .await
+            .unwrap()
+            .transport_only();
+
+        let mut reader_progress = vec![ReaderProgress::new(upstream_stage)];
+
+        let first = subscription
+            .poll_next_with_state("test_fsm", Some(&mut reader_progress[..]))
+            .await;
+        match first {
+            PollResult::Event(env) => match env.event.content {
+                ChainEventContent::Data { .. } => {}
+                other => panic!("expected first delivered event to be Data, got {:?}", other),
+            },
+            other => panic!("expected PollResult::Event, got {:?}", other),
+        }
+
+        let second = subscription
+            .poll_next_with_state("test_fsm", Some(&mut reader_progress[..]))
+            .await;
+        match second {
+            PollResult::Event(env) => match env.event.content {
+                ChainEventContent::FlowControl(FlowControlPayload::Eof { .. }) => {}
+                other => panic!("expected second delivered event to be EOF, got {:?}", other),
+            },
+            other => panic!("expected PollResult::Event, got {:?}", other),
+        }
+
+        let outcome = subscription
+            .take_last_eof_outcome()
+            .expect("expected subscription to mark authoritative EOF");
+        assert!(outcome.is_final);
+        assert_eq!(outcome.stage_id, upstream_stage);
+        assert_eq!(outcome.reader_index, 0);
+        assert_eq!(outcome.eof_count, 1);
+        assert_eq!(outcome.total_readers, 1);
     }
 }

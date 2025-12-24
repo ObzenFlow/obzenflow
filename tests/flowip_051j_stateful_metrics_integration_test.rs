@@ -17,6 +17,7 @@ use obzenflow_runtime_services::stages::common::handlers::{
 };
 use obzenflow_runtime_services::stages::SourceError;
 use serde_json::json;
+use std::io::BufRead;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 use tokio::time::sleep;
@@ -247,15 +248,19 @@ async fn flowip_051j_stateful_metrics_accumulate_is_instrumented() -> Result<()>
     let sleep_per_event = Duration::from_millis(5);
     let expected_processing_time_s = total_events as f64 * sleep_per_event.as_secs_f64();
 
+    let (sink_handler, sink_events) = CollectingSink::new();
+    let journal_dir = unique_journal_dir("flowip_051j_stateful_metrics");
+    let journal_dir_for_flow = journal_dir.clone();
+
     let flow_handle = flow! {
         name: "flowip_051j_stateful_metrics",
-        journals: disk_journals(unique_journal_dir("flowip_051j_stateful_metrics")),
+        journals: disk_journals(journal_dir_for_flow.clone()),
         middleware: [],
 
         stages: {
             src = source!("src" => BurstSource::new(total_events));
             counter = stateful!("counter" => SlowAccumulator::new(sleep_per_event));
-            snk = sink!("snk" => CollectingSink::new().0);
+            snk = sink!("snk" => sink_handler);
         },
 
         topology: {
@@ -342,6 +347,82 @@ async fn flowip_051j_stateful_metrics_accumulate_is_instrumented() -> Result<()>
         expected_processing_time_s * 0.5
     );
     assert!(sum_s < 10.0, "expected sum < 10s, got {sum_s}");
+
+    let events = sink_events.lock().unwrap();
+    let aggregate_events: Vec<&ChainEvent> = events
+        .iter()
+        .filter(|e| e.is_data() && e.event_type() == "test.stateful.aggregate")
+        .collect();
+    assert_eq!(
+        aggregate_events.len(),
+        1,
+        "expected sink to receive exactly one aggregate data event"
+    );
+    let event = aggregate_events[0];
+    assert_eq!(
+        event.writer_id,
+        WriterId::from(event.flow_context.stage_id),
+        "expected stateful aggregate output to be authored by the stateful stage"
+    );
+
+    // Ensure happened-before is preserved: the persisted aggregate event should
+    // carry the upstream vector-clock entries via a parented append.
+    let parent_vc = event
+        .runtime_context
+        .as_ref()
+        .and_then(|ctx| ctx.last_consumed_vector_clock.clone())
+        .ok_or_else(|| anyhow!("aggregate event missing last_consumed_vector_clock"))?;
+
+    let stage_log = journal_dir
+        .join("flows")
+        .join(&event.flow_context.flow_id)
+        .join(format!(
+            "Stateful_counter_stage_{}.log",
+            event.flow_context.stage_id.as_ulid()
+        ));
+
+    let file = std::fs::File::open(&stage_log)
+        .map_err(|e| anyhow!("failed to open stage journal {}: {e}", stage_log.display()))?;
+    let reader = std::io::BufReader::new(file);
+
+    let mut aggregate_record: Option<obzenflow_infra::journal::disk::log_record::LogRecord<
+        ChainEvent,
+    >> = None;
+    for line in reader.lines() {
+        let line = line.map_err(|e| anyhow!("failed reading {}: {e}", stage_log.display()))?;
+        let mut parts = line.splitn(3, ':');
+        let _len = parts.next();
+        let _crc = parts.next();
+        let json = parts
+            .next()
+            .ok_or_else(|| anyhow!("invalid journal line (missing json) in {}", stage_log.display()))?;
+
+        let record: obzenflow_infra::journal::disk::log_record::LogRecord<ChainEvent> =
+            serde_json::from_str(json)
+                .map_err(|e| anyhow!("failed to parse journal json in {}: {e}", stage_log.display()))?;
+
+        if record.event.id == event.id {
+            aggregate_record = Some(record);
+            break;
+        }
+    }
+
+    let aggregate_record =
+        aggregate_record.ok_or_else(|| anyhow!("missing aggregate event {} in {}", event.id, stage_log.display()))?;
+
+    for (writer_key, parent_seq) in parent_vc.clocks.iter() {
+        let seq = aggregate_record.vector_clock.get(writer_key);
+        assert!(
+            seq >= *parent_seq,
+            "expected aggregate vector clock to include parent key {writer_key} at >= {parent_seq}, got {seq}"
+        );
+    }
+
+    let stage_writer_key = WriterId::from(event.flow_context.stage_id).to_string();
+    assert!(
+        aggregate_record.vector_clock.get(&stage_writer_key) > 0,
+        "expected aggregate vector clock to advance stage writer key {stage_writer_key}"
+    );
 
     Ok(())
 }

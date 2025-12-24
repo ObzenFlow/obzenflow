@@ -4,6 +4,7 @@
 //! windowing operations, and session tracking.
 
 use obzenflow_core::event::context::{FlowContext, StageType};
+use obzenflow_core::event::event_envelope::EventEnvelope;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::types::SeqNo;
 use obzenflow_core::event::JournalEvent;
@@ -332,6 +333,14 @@ pub struct StatefulContext<H: StatefulHandler> {
     /// EOF event to forward when draining completes
     pub buffered_eof: Option<ChainEvent>,
 
+    /// Last upstream envelope consumed by this stage (with a vector-clock merged across all
+    /// consumed inputs).
+    ///
+    /// Used as the parent for emitted aggregate events so their journal envelopes preserve
+    /// happened-before relationships via vector clock propagation, even when upstream events are
+    /// concurrent.
+    pub last_consumed_envelope: Option<EventEnvelope<ChainEvent>>,
+
     /// Stage instrumentation for metrics tracking
     pub instrumentation: Arc<StageInstrumentation>,
 
@@ -376,6 +385,7 @@ impl<H: StatefulHandler> StatefulContext<H> {
             contract_state: Vec::new(),
             control_strategy,
             buffered_eof: None,
+            last_consumed_envelope: None,
             instrumentation,
             upstream_subscription_factory,
             events_since_last_heartbeat: 0,

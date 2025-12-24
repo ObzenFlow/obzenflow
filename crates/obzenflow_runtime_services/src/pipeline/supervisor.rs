@@ -359,11 +359,34 @@ impl crate::supervised_base::base::Supervisor for PipelineSupervisor {
                     })
                 };
 
-                on PipelineEvent::StopRequested => |_state: &PipelineState, _event: &PipelineEvent, _ctx: &mut PipelineContext| {
+                // Stop while already transitioning into drain should still arm a bounded drain timeout.
+                // Otherwise a stuck drain barrier becomes unkillable (StopRequested is ignored).
+                on PipelineEvent::StopRequested => |_state: &PipelineState, _event: &PipelineEvent, ctx: &mut PipelineContext| {
                     Box::pin(async move {
+                        if !ctx.stop_requested {
+                            let mut has_active_sources = false;
+                            let mut has_infinite_active_source = false;
+                            for source in ctx.source_supervisors.values() {
+                                if source.is_drained() {
+                                    continue;
+                                }
+                                has_active_sources = true;
+                                if source.stage_type().is_infinite_source() {
+                                    has_infinite_active_source = true;
+                                    break;
+                                }
+                            }
+                            ctx.stop_requested = true;
+                            ctx.stop_should_fail = has_active_sources && !has_infinite_active_source;
+                        }
+
+                        // Preserve any existing deadline (idempotency); otherwise arm it now.
+                        if ctx.stop_deadline.is_none() {
+                            ctx.stop_deadline = Some(Instant::now() + stop_drain_timeout());
+                        }
                         Ok(Transition {
                             next_state: PipelineState::SourceCompleted,
-                            actions: vec![],
+                            actions: vec![PipelineAction::StopSources],
                         })
                     })
                 };
@@ -424,6 +447,38 @@ impl crate::supervised_base::base::Supervisor for PipelineSupervisor {
                     })
                 };
 
+                // Stop during draining should not be a no-op: arm the stop deadline so the
+                // drain loop can time out (stop_drain_timeout) instead of waiting forever.
+                on PipelineEvent::StopRequested => |_state: &PipelineState, _event: &PipelineEvent, ctx: &mut PipelineContext| {
+                    Box::pin(async move {
+                        if !ctx.stop_requested {
+                            let mut has_active_sources = false;
+                            let mut has_infinite_active_source = false;
+                            for source in ctx.source_supervisors.values() {
+                                if source.is_drained() {
+                                    continue;
+                                }
+                                has_active_sources = true;
+                                if source.stage_type().is_infinite_source() {
+                                    has_infinite_active_source = true;
+                                    break;
+                                }
+                            }
+                            ctx.stop_requested = true;
+                            ctx.stop_should_fail = has_active_sources && !has_infinite_active_source;
+                        }
+
+                        if ctx.stop_deadline.is_none() {
+                            ctx.stop_deadline = Some(Instant::now() + stop_drain_timeout());
+                        }
+
+                        Ok(Transition {
+                            next_state: PipelineState::Draining,
+                            actions: vec![PipelineAction::StopSources],
+                        })
+                    })
+                };
+
                 on PipelineEvent::Error => |_state: &PipelineState, event: &PipelineEvent, _ctx: &mut PipelineContext| {
                     let event = event.clone();
                     Box::pin(async move {
@@ -448,14 +503,6 @@ impl crate::supervised_base::base::Supervisor for PipelineSupervisor {
                     })
                 };
 
-                on PipelineEvent::StopRequested => |_state: &PipelineState, _event: &PipelineEvent, _ctx: &mut PipelineContext| {
-                    Box::pin(async move {
-                        Ok(Transition {
-                            next_state: PipelineState::Draining,
-                            actions: vec![],
-                        })
-                    })
-                };
             }
 
             state PipelineState::AbortRequested {
