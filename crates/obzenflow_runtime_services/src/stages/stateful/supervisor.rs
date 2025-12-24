@@ -1,7 +1,9 @@
 //! Stateful supervisor implementation using HandlerSupervised pattern
 
 use crate::messaging::PollResult;
-use crate::metrics::instrumentation::{heartbeat_interval, process_with_instrumentation};
+use crate::metrics::instrumentation::{
+    heartbeat_interval, process_with_instrumentation_no_count,
+};
 use crate::stages::common::control_strategies::{ControlEventAction, ProcessingContext};
 use crate::stages::common::handlers::StatefulHandler;
 use crate::supervised_base::base::Supervisor;
@@ -13,7 +15,9 @@ use obzenflow_core::journal::journal::Journal;
 use obzenflow_core::EventEnvelope;
 use obzenflow_core::{ChainEvent, StageId};
 use obzenflow_fsm::{fsm, EventVariant, StateVariant, Transition};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::time::Instant;
 
 use super::fsm::{StatefulAction, StatefulContext, StatefulEvent, StatefulState};
 
@@ -555,20 +559,36 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                                 }
                                 obzenflow_core::event::ChainEventContent::Data { .. } => {
                                     // ✨ KEY DIFFERENCE: Accumulate without writing to journal
-                                    let mut should_emit = false;
-                                    {
-                                        // Limit the mutable borrow of ctx.current_state to this block
-                                        let current_state = &mut ctx.current_state;
+                                    let mut handler = (*ctx.handler).clone();
+                                    let event = envelope.event.clone();
 
-                                        // Clone handler to make it mutable
-                                        let mut handler = (*ctx.handler).clone();
+                                    // Accumulate into state without emitting domain events yet,
+                                    // but still record per-event processing time + counts.
+                                    ctx.instrumentation
+                                        .in_flight_count
+                                        .fetch_add(1, Ordering::Relaxed);
+                                    let start = Instant::now();
+                                    handler.accumulate(&mut ctx.current_state, event);
+                                    let duration = start.elapsed();
+                                    ctx.instrumentation
+                                        .in_flight_count
+                                        .fetch_sub(1, Ordering::Relaxed);
 
-                                        // Accumulate into state without emitting domain events yet.
-                                        handler.accumulate(current_state, envelope.event.clone());
-
-                                        // Check if we should emit based on updated state
-                                        should_emit = handler.should_emit(current_state);
+                                    ctx.instrumentation.record_processing_time(duration);
+                                    if ctx.instrumentation.check_anomaly(duration) {
+                                        ctx.instrumentation
+                                            .anomalies_total
+                                            .fetch_add(1, Ordering::Relaxed);
                                     }
+                                    ctx.instrumentation
+                                        .events_processed_total
+                                        .fetch_add(1, Ordering::Relaxed);
+                                    ctx.instrumentation
+                                        .events_accumulated_total
+                                        .fetch_add(1, Ordering::Relaxed);
+
+                                    // Check if we should emit based on updated state
+                                    let should_emit = handler.should_emit(&ctx.current_state);
 
                                     // Track accumulated events for observability heartbeats.
                                     ctx.events_since_last_heartbeat =
@@ -692,7 +712,7 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                 let instrumentation = ctx.instrumentation.clone();
 
                 let emit_result =
-                    process_with_instrumentation(&ctx.instrumentation, || async move {
+                    process_with_instrumentation_no_count(&ctx.instrumentation, || async move {
                         handler.emit(&mut *current_state).map_err(
                             |err| -> Box<dyn std::error::Error + Send + Sync> {
                                 // Stage-fatal handler error in emit: record it in error metrics
@@ -738,7 +758,8 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                             // Lifecycle events (middleware metrics, etc.) are observability
                             // overhead and should not participate in transport contracts.
                             if enriched_event.is_data() {
-                                ctx.instrumentation.record_emitted(&enriched_event);
+                                ctx.instrumentation
+                                    .record_output_event(&enriched_event);
                                 if let Some(ref mut sub) = ctx.subscription {
                                     sub.track_output_event();
                                 }
@@ -803,7 +824,29 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                                 // Accumulate data events during draining, synchronously
                                 let event = envelope.event.clone();
                                 let mut handler = (*ctx.handler).clone();
+
+                                ctx.instrumentation
+                                    .in_flight_count
+                                    .fetch_add(1, Ordering::Relaxed);
+                                let start = Instant::now();
                                 handler.accumulate(&mut ctx.current_state, event);
+                                let duration = start.elapsed();
+                                ctx.instrumentation
+                                    .in_flight_count
+                                    .fetch_sub(1, Ordering::Relaxed);
+
+                                ctx.instrumentation.record_processing_time(duration);
+                                if ctx.instrumentation.check_anomaly(duration) {
+                                    ctx.instrumentation
+                                        .anomalies_total
+                                        .fetch_add(1, Ordering::Relaxed);
+                                }
+                                ctx.instrumentation
+                                    .events_processed_total
+                                    .fetch_add(1, Ordering::Relaxed);
+                                ctx.instrumentation
+                                    .events_accumulated_total
+                                    .fetch_add(1, Ordering::Relaxed);
 
                                 // Track accumulated events during drain for heartbeat visibility.
                                 ctx.events_since_last_heartbeat =
@@ -852,7 +895,7 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
 
                                                     if enriched_event.is_data() {
                                                         ctx.instrumentation
-                                                            .record_emitted(&enriched_event);
+                                                            .record_output_event(&enriched_event);
                                                         // Track output for contract verification
                                                         subscription.track_output_event();
                                                     }
@@ -924,7 +967,7 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                                                 // transport contracts and metrics.
                                                 if error_event.is_data() {
                                                     ctx.instrumentation
-                                                        .record_emitted(&error_event);
+                                                        .record_output_event(&error_event);
                                                     subscription.track_output_event();
                                                 }
 
@@ -957,7 +1000,7 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
 
                                                 if enriched_error.is_data() {
                                                     ctx.instrumentation
-                                                        .record_emitted(&enriched_error);
+                                                        .record_output_event(&enriched_error);
                                                     subscription.track_output_event();
                                                 }
 
@@ -1052,7 +1095,7 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
 
                     // Call handler.drain() with instrumentation; treat failures as stage-fatal.
                     let drain_result =
-                        process_with_instrumentation(&ctx.instrumentation, || async move {
+                        process_with_instrumentation_no_count(&ctx.instrumentation, || async move {
                             handler.drain(&final_state).await.map_err(
                                 |err| -> Box<dyn std::error::Error + Send + Sync> {
                                     // Stage-fatal handler error in drain: record it in error metrics
@@ -1095,7 +1138,8 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                                 // Lifecycle events (middleware metrics, etc.) are observability
                                 // overhead and should not participate in transport contracts.
                                 if enriched_event.is_data() {
-                                    ctx.instrumentation.record_emitted(&enriched_event);
+                                    ctx.instrumentation
+                                        .record_output_event(&enriched_event);
                                     // Track output for contract verification
                                     if let Some(ref mut sub) = ctx.subscription {
                                         sub.track_output_event();
@@ -1179,8 +1223,7 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> State
 
     /// Emit an observability heartbeat when enough events have been accumulated.
     ///
-    /// This increments the instrumentation counters in batches (instead of per
-    /// event) and writes a lightweight `Observability` event carrying the latest
+    /// This writes a lightweight `Observability` event carrying the latest
     /// `runtime_context` snapshot for the accumulator.
     async fn emit_stateful_heartbeat_if_due(
         &self,
@@ -1211,12 +1254,6 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> State
                 return Ok(());
             }
         };
-
-        // Batch-update events_processed_total so the snapshot reflects all
-        // accumulated records without per-event instrumentation overhead.
-        ctx.instrumentation
-            .events_processed_total
-            .fetch_add(delta as u64, std::sync::atomic::Ordering::Relaxed);
 
         // Capture a fresh runtime context snapshot for the heartbeat.
         let runtime_context = ctx.instrumentation.snapshot_with_control();

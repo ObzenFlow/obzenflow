@@ -415,7 +415,9 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
                                 // Lifecycle events (middleware metrics, etc.) are observability
                                 // overhead and should not participate in transport contracts.
                                 if event_to_write.is_data() {
-                                    self.context.instrumentation.record_emitted(&event_to_write);
+                                    self.context
+                                        .instrumentation
+                                        .record_output_event(&event_to_write);
                                     self.context
                                         .instrumentation
                                         .events_processed_total

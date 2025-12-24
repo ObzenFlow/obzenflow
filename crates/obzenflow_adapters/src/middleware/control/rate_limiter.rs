@@ -294,9 +294,12 @@ impl RateLimiterMiddleware {
 
 impl Middleware for RateLimiterMiddleware {
     fn pre_handle(&self, event: &ChainEvent, ctx: &mut MiddlewareContext) -> MiddlewareAction {
-        // Always let control events through without blocking
-        if event.is_control() {
-            trace!(event_id = %event.id, event_type = %event.event_type(), "Control event bypassing rate limiter");
+        if event.is_control() || event.is_lifecycle() {
+            trace!(
+                event_id = %event.id,
+                event_type = %event.event_type(),
+                "Control/lifecycle event bypassing rate limiter"
+            );
             return MiddlewareAction::Continue;
         }
 
@@ -692,6 +695,40 @@ mod tests {
         match middleware.pre_handle(&eof, &mut ctx) {
             MiddlewareAction::Continue => {}
             other => panic!("Expected Continue for EOF, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_rate_limiter_lifecycle_events_pass_through() {
+        let middleware = RateLimiterMiddleware::new(
+            StageId::new(),
+            1.0,
+            None,
+            1.0,
+            Arc::new(ControlMiddlewareAggregator::new()),
+        );
+
+        let mut ctx = MiddlewareContext::new();
+
+        // Consume the one available token
+        let data_event =
+            ChainEventFactory::data_event(WriterId::from(StageId::new()), "test.event", json!({}));
+        middleware.pre_handle(&data_event, &mut ctx);
+
+        let lifecycle_event = ChainEventFactory::observability_event(
+            WriterId::from(StageId::new()),
+            ObservabilityPayload::Middleware(MiddlewareLifecycle::RateLimiter(
+                RateLimiterEvent::WindowUtilization {
+                    utilization_percent: 0.0,
+                    events_in_window: 0,
+                    window_size_ms: 1000,
+                },
+            )),
+        );
+
+        match middleware.pre_handle(&lifecycle_event, &mut ctx) {
+            MiddlewareAction::Continue => {}
+            other => panic!("Expected Continue for lifecycle event, got {:?}", other),
         }
     }
 

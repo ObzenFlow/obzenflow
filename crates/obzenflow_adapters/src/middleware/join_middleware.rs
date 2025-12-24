@@ -21,24 +21,16 @@ use obzenflow_core::event::status::processing_status::ProcessingStatus;
 use obzenflow_core::{ChainEvent, StageId, WriterId};
 use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
 use obzenflow_runtime_services::stages::common::handlers::JoinHandler;
+use std::sync::Arc;
 
 /// A JoinHandler wrapper that applies middleware to join operations
 ///
 /// The same middleware chain is applied to events from both the reference
 /// and stream sides of the join.
+#[derive(Clone)]
 pub struct MiddlewareJoin<H: JoinHandler> {
     inner: H,
-    middleware_chain: Vec<Box<dyn Middleware>>,
-}
-
-// Manual Clone implementation that clones the handler but creates empty middleware chain
-impl<H: JoinHandler + Clone> Clone for MiddlewareJoin<H> {
-    fn clone(&self) -> Self {
-        Self {
-            inner: self.inner.clone(),
-            middleware_chain: Vec::new(), // Don't clone middleware, start fresh
-        }
-    }
+    middleware_chain: Arc<Vec<Arc<dyn Middleware>>>,
 }
 
 impl<H: JoinHandler> std::fmt::Debug for MiddlewareJoin<H> {
@@ -55,13 +47,13 @@ impl<H: JoinHandler> MiddlewareJoin<H> {
     pub fn new(inner: H) -> Self {
         Self {
             inner,
-            middleware_chain: Vec::new(),
+            middleware_chain: Arc::new(Vec::new()),
         }
     }
 
     /// Add middleware to the chain
     pub fn with_middleware(mut self, middleware: Box<dyn Middleware>) -> Self {
-        self.middleware_chain.push(middleware);
+        Arc::make_mut(&mut self.middleware_chain).push(Arc::from(middleware));
         self
     }
 
@@ -77,7 +69,7 @@ impl<H: JoinHandler> MiddlewareJoin<H> {
         }
 
         // Pre-processing phase
-        for middleware in &self.middleware_chain {
+        for middleware in self.middleware_chain.iter() {
             match middleware.pre_handle(event, ctx) {
                 MiddlewareAction::Continue => continue,
                 MiddlewareAction::Skip(_) => return false,
@@ -101,7 +93,7 @@ impl<H: JoinHandler> MiddlewareJoin<H> {
 
         // Pre-write phase: allow middleware to enrich each result event
         for result in results.iter_mut() {
-            for middleware in &self.middleware_chain {
+            for middleware in self.middleware_chain.iter() {
                 middleware.pre_write(result, ctx);
             }
         }
@@ -115,7 +107,7 @@ impl<H: JoinHandler> MiddlewareJoin<H> {
         }
         let mut control_events = std::mem::take(&mut ctx.control_events);
         for control_event in &mut control_events {
-            for middleware in &self.middleware_chain {
+            for middleware in self.middleware_chain.iter() {
                 middleware.pre_write(control_event, ctx);
             }
         }
@@ -175,7 +167,7 @@ where
 
         // Pre-write phase: allow middleware to enrich result events
         for result in &mut results {
-            for middleware in &self.middleware_chain {
+            for middleware in self.middleware_chain.iter() {
                 middleware.pre_write(result, &ctx);
             }
         }
@@ -192,7 +184,7 @@ where
 
         // Pre-write phase: allow middleware to enrich result events
         for result in &mut results {
-            for middleware in &self.middleware_chain {
+            for middleware in self.middleware_chain.iter() {
                 middleware.pre_write(result, &ctx);
             }
         }
@@ -201,7 +193,7 @@ where
         // This is the final opportunity to emit middleware lifecycle events
         let mut control_events = std::mem::take(&mut ctx.control_events);
         for control_event in &mut control_events {
-            for middleware in &self.middleware_chain {
+            for middleware in self.middleware_chain.iter() {
                 middleware.pre_write(control_event, &ctx);
             }
         }
@@ -318,6 +310,8 @@ mod tests {
         .middleware()
         .with(SkipMiddleware)
         .build();
+        // Clone is used in join supervisor hot paths; ensure middleware survives clone.
+        let handler = handler.clone();
 
         let mut state = handler.initial_state();
         let writer_id = WriterId::from(StageId::new());

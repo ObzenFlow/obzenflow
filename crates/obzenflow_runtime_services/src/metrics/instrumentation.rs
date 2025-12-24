@@ -57,6 +57,10 @@ pub struct StageInstrumentation {
 
     // Counter metrics - monotonic, let Prometheus compute rates
     pub events_processed_total: AtomicU64,
+    /// Total input events accumulated into internal state (stateful/join stages).
+    pub events_accumulated_total: AtomicU64,
+    /// Total output events emitted by the stage (data/delivery; excludes observability-only events).
+    pub events_emitted_total: AtomicU64,
     pub errors_total: AtomicU64,
     pub failures_total: AtomicU64,              // Critical failures
     pub event_loops_total: AtomicU64,           // Total event loop iterations
@@ -123,6 +127,8 @@ impl StageInstrumentation {
 
             // Counters
             events_processed_total: AtomicU64::new(0),
+            events_accumulated_total: AtomicU64::new(0),
+            events_emitted_total: AtomicU64::new(0),
             errors_total: AtomicU64::new(0),
             failures_total: AtomicU64::new(0),
             event_loops_total: AtomicU64::new(0),
@@ -240,6 +246,8 @@ impl StageInstrumentation {
 
             // Counter snapshots (totals, not rates!)
             events_processed_total: self.events_processed_total.load(Ordering::Relaxed),
+            events_accumulated_total: self.events_accumulated_total.load(Ordering::Relaxed),
+            events_emitted_total: self.events_emitted_total.load(Ordering::Relaxed),
             errors_total: self.errors_total.load(Ordering::Relaxed),
             failures_total: self.failures_total.load(Ordering::Relaxed),
 
@@ -349,6 +357,15 @@ impl StageInstrumentation {
         self.writer_seq.fetch_add(1, Ordering::Relaxed);
         *self.last_emitted_event_id.write().unwrap() = Some(event.id().clone());
         *self.last_emitted_writer.write().unwrap() = Some(event.writer_id().clone());
+    }
+
+    /// Note an emitted output event and increment the emitted counter.
+    ///
+    /// Use this for data/delivery events that represent stage outputs. Do not
+    /// use it for observability-only events (e.g. metrics heartbeats).
+    pub fn record_output_event<T: JournalEvent>(&self, event: &T) {
+        self.record_emitted(event);
+        self.events_emitted_total.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Record processing duration in histogram and sum.
@@ -475,11 +492,54 @@ where
     result
 }
 
+/// Higher-order function for instrumented operations that should NOT increment
+/// `events_processed_total`.
+///
+/// Use this for work that is stage-internal (e.g. emitting aggregated results)
+/// and should not count as processing an additional input event.
+pub async fn process_with_instrumentation_no_count<T, F, Fut>(
+    instrumentation: &Arc<StageInstrumentation>,
+    f: F,
+) -> Result<T, Box<dyn Error + Send + Sync>>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<T, Box<dyn Error + Send + Sync>>>,
+{
+    // Track in-flight
+    instrumentation
+        .in_flight_count
+        .fetch_add(1, Ordering::Relaxed);
+
+    // Process with timing
+    let start = Instant::now();
+    let result = f().await;
+    let duration = start.elapsed();
+
+    // Update metrics
+    instrumentation
+        .in_flight_count
+        .fetch_sub(1, Ordering::Relaxed);
+
+    // Record processing time
+    instrumentation.record_processing_time(duration);
+
+    // Check for anomalies
+    if instrumentation.check_anomaly(duration) {
+        instrumentation
+            .anomalies_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    result
+}
+
 /// Create a UI-oriented stage metrics snapshot for lifecycle events
 pub fn snapshot_stage_metrics(instrumentation: &StageInstrumentation) -> StageMetricsSnapshot {
     let ctx = instrumentation.snapshot();
     StageMetricsSnapshot {
         events_processed_total: ctx.events_processed_total,
+        events_accumulated_total: ctx.events_accumulated_total,
+        events_emitted_total: ctx.events_emitted_total,
         errors_total: ctx.errors_total,
         errors_by_kind: ctx.errors_by_kind,
         in_flight: ctx.in_flight,

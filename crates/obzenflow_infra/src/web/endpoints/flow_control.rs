@@ -90,7 +90,7 @@ impl HttpEndpoint for FlowControlEndpoint {
             }
             FlowControlAction::Stop => {
                 tracing::info!("FlowControlEndpoint: Stop requested");
-                self.flow_handle.shutdown().await
+                self.flow_handle.stop().await
             }
         };
 
@@ -116,4 +116,3 @@ fn ok_json_response(body: FlowControlResponse) -> Result<Response, WebError> {
         source: None,
     })
 }
-

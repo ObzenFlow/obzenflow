@@ -27,6 +27,14 @@ pub struct RuntimeContext {
 
     // Counter snapshots - raw totals (Prometheus computes rates)
     pub events_processed_total: u64,
+    /// Total input events accumulated into internal state (stateful/join stages).
+    ///
+    /// For stateless stages, this is typically left at 0.
+    #[serde(default)]
+    pub events_accumulated_total: u64,
+    /// Total output events emitted by the stage (data/delivery; excludes observability-only events).
+    #[serde(default)]
+    pub events_emitted_total: u64,
     pub errors_total: u64,
     pub failures_total: u64,
     pub event_loops_total: u64,

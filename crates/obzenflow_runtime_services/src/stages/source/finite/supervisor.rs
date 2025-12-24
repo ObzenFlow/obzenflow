@@ -408,7 +408,9 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> H
                                 // should not participate in transport contracts.
                                 if event_to_write.is_data() {
                                     had_data = true;
-                                    self.context.instrumentation.record_emitted(&event_to_write);
+                                    self.context
+                                        .instrumentation
+                                        .record_output_event(&event_to_write);
                                     self.context
                                         .instrumentation
                                         .events_processed_total

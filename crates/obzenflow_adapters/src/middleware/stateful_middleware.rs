@@ -9,21 +9,13 @@ use obzenflow_core::event::status::processing_status::ProcessingStatus;
 use obzenflow_core::ChainEvent;
 use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
 use obzenflow_runtime_services::stages::common::handlers::StatefulHandler;
+use std::sync::Arc;
 
 /// A StatefulHandler wrapper that applies middleware to stateful operations
+#[derive(Clone)]
 pub struct MiddlewareStateful<H: StatefulHandler> {
     inner: H,
-    middleware_chain: Vec<Box<dyn Middleware>>,
-}
-
-// Manual Clone implementation that clones the handler but creates empty middleware chain
-impl<H: StatefulHandler + Clone> Clone for MiddlewareStateful<H> {
-    fn clone(&self) -> Self {
-        Self {
-            inner: self.inner.clone(),
-            middleware_chain: Vec::new(), // Don't clone middleware, start fresh
-        }
-    }
+    middleware_chain: Arc<Vec<Arc<dyn Middleware>>>,
 }
 
 impl<H: StatefulHandler> std::fmt::Debug for MiddlewareStateful<H> {
@@ -40,13 +32,13 @@ impl<H: StatefulHandler> MiddlewareStateful<H> {
     pub fn new(inner: H) -> Self {
         Self {
             inner,
-            middleware_chain: Vec::new(),
+            middleware_chain: Arc::new(Vec::new()),
         }
     }
 
     /// Add middleware to the chain
     pub fn with_middleware(mut self, middleware: Box<dyn Middleware>) -> Self {
-        self.middleware_chain.push(middleware);
+        Arc::make_mut(&mut self.middleware_chain).push(Arc::from(middleware));
         self
     }
 }
@@ -72,7 +64,7 @@ where
         let mut ctx = MiddlewareContext::new();
 
         // Pre-processing phase
-        for middleware in &self.middleware_chain {
+        for middleware in self.middleware_chain.iter() {
             match middleware.pre_handle(&event, &mut ctx) {
                 MiddlewareAction::Continue => continue,
                 MiddlewareAction::Skip(_) => {
@@ -110,7 +102,7 @@ where
 
         // Pre-write phase: allow middleware to enrich each result event
         for result in &mut results {
-            for middleware in &self.middleware_chain {
+            for middleware in self.middleware_chain.iter() {
                 middleware.pre_write(result, &ctx);
             }
         }
@@ -132,7 +124,7 @@ where
 
         // Pre-write phase: allow middleware to enrich each result event
         for result in &mut results {
-            for middleware in &self.middleware_chain {
+            for middleware in self.middleware_chain.iter() {
                 middleware.pre_write(result, &ctx);
             }
         }
@@ -149,7 +141,7 @@ where
 
         // Pre-write phase: allow middleware to enrich each result event
         for result in &mut results {
-            for middleware in &self.middleware_chain {
+            for middleware in self.middleware_chain.iter() {
                 middleware.pre_write(result, &ctx);
             }
         }
@@ -164,7 +156,7 @@ where
         }
         let mut control_events = std::mem::take(&mut ctx.control_events);
         for control_event in &mut control_events {
-            for middleware in &self.middleware_chain {
+            for middleware in self.middleware_chain.iter() {
                 middleware.pre_write(control_event, &ctx);
             }
         }
@@ -277,12 +269,14 @@ mod tests {
     #[tokio::test]
     async fn test_stateful_middleware_skip() {
         let accumulated_count = Arc::new(AtomicUsize::new(0));
-        let mut handler = TestStatefulHandler {
+        let handler = TestStatefulHandler {
             accumulated_count: accumulated_count.clone(),
         }
         .middleware()
         .with(SkipMiddleware)
         .build();
+        // Clone is how stateful stages are used in production (per-event clone in supervisor).
+        let mut handler = handler.clone();
 
         let mut state = handler.initial_state();
         let writer_id = WriterId::from(StageId::new());

@@ -20,6 +20,12 @@ pub struct AppMetricsSnapshot {
     /// Event counts by stage
     pub event_counts: HashMap<StageId, u64>,
 
+    /// Total events accumulated into internal state by stage (stateful/join stages).
+    pub events_accumulated_total: HashMap<StageId, u64>,
+
+    /// Total events emitted by stage (data/delivery; excludes observability-only events).
+    pub events_emitted_total: HashMap<StageId, u64>,
+
     /// Error counts by stage
     pub error_counts: HashMap<StageId, u64>,
 
@@ -244,6 +250,14 @@ pub struct StageMetricsSnapshot {
     /// Total events processed by this stage
     pub events_processed_total: u64,
 
+    /// Total events accumulated into internal state by this stage (stateful/join stages).
+    #[serde(default)]
+    pub events_accumulated_total: u64,
+
+    /// Total events emitted by this stage (data/delivery; excludes observability-only events).
+    #[serde(default)]
+    pub events_emitted_total: u64,
+
     /// Total errors observed at this stage
     pub errors_total: u64,
 
@@ -333,6 +347,8 @@ impl Default for AppMetricsSnapshot {
         Self {
             timestamp: chrono::Utc::now(),
             event_counts: HashMap::new(),
+            events_accumulated_total: HashMap::new(),
+            events_emitted_total: HashMap::new(),
             error_counts: HashMap::new(),
             error_counts_by_kind: HashMap::new(),
             processing_times: HashMap::new(),

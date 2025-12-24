@@ -13,6 +13,7 @@ use obzenflow_runtime_services::stages::common::handlers::{
 };
 use obzenflow_runtime_services::stages::SourceError;
 use serde_json::json;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const MAX_CB_BACKOFF_MS: u64 = 250;
@@ -84,21 +85,11 @@ fn source_error_event(writer_id: WriterId, source_type: &'static str, err: &Sour
 }
 
 /// A FiniteSourceHandler wrapper that applies middleware
+#[derive(Clone)]
 pub struct MiddlewareFiniteSource<H: FiniteSourceHandler> {
     inner: H,
-    middleware_chain: Vec<Box<dyn Middleware>>,
+    middleware_chain: Arc<Vec<Arc<dyn Middleware>>>,
     writer_id: WriterId, // Sources need a writer ID for synthetic events
-}
-
-// Manual Clone implementation that clones the handler but creates empty middleware chain
-impl<H: FiniteSourceHandler + Clone> Clone for MiddlewareFiniteSource<H> {
-    fn clone(&self) -> Self {
-        Self {
-            inner: self.inner.clone(),
-            middleware_chain: Vec::new(), // Don't clone middleware, start fresh
-            writer_id: self.writer_id.clone(),
-        }
-    }
 }
 
 impl<H: FiniteSourceHandler> std::fmt::Debug for MiddlewareFiniteSource<H> {
@@ -116,14 +107,14 @@ impl<H: FiniteSourceHandler> MiddlewareFiniteSource<H> {
     pub fn new(inner: H, writer_id: WriterId) -> Self {
         Self {
             inner,
-            middleware_chain: Vec::new(),
+            middleware_chain: Arc::new(Vec::new()),
             writer_id,
         }
     }
 
     /// Add middleware to the chain
     pub fn with_middleware(mut self, middleware: Box<dyn Middleware>) -> Self {
-        self.middleware_chain.push(middleware);
+        Arc::make_mut(&mut self.middleware_chain).push(Arc::from(middleware));
         self
     }
 }
@@ -156,7 +147,7 @@ impl<H: FiniteSourceHandler> FiniteSourceHandler for MiddlewareFiniteSource<H> {
         let mut ctx = MiddlewareContext::new();
 
         // Phase 0: circuit breaker pre-handle (must run before polling).
-        for middleware in &self.middleware_chain {
+        for middleware in self.middleware_chain.iter() {
             if middleware.middleware_name() != "circuit_breaker" {
                 continue;
             }
@@ -167,7 +158,7 @@ impl<H: FiniteSourceHandler> FiniteSourceHandler for MiddlewareFiniteSource<H> {
 
                     // Pre-write phase for skip results
                     for result in &mut results {
-                        for mw in &self.middleware_chain {
+                        for mw in self.middleware_chain.iter() {
                             mw.pre_write(result, &ctx);
                         }
                     }
@@ -175,7 +166,7 @@ impl<H: FiniteSourceHandler> FiniteSourceHandler for MiddlewareFiniteSource<H> {
                     // Append any control events emitted during skip
                     let mut control_events = std::mem::take(&mut ctx.control_events);
                     for control_event in &mut control_events {
-                        for mw in &self.middleware_chain {
+                        for mw in self.middleware_chain.iter() {
                             mw.pre_write(control_event, &ctx);
                         }
                     }
@@ -208,7 +199,7 @@ impl<H: FiniteSourceHandler> FiniteSourceHandler for MiddlewareFiniteSource<H> {
 
             let mut control_events = std::mem::take(&mut ctx.control_events);
             for control_event in &mut control_events {
-                for mw in &self.middleware_chain {
+                for mw in self.middleware_chain.iter() {
                     mw.pre_write(control_event, &ctx);
                 }
             }
@@ -217,7 +208,7 @@ impl<H: FiniteSourceHandler> FiniteSourceHandler for MiddlewareFiniteSource<H> {
 
         // Phase 1: all other middleware pre-handle (runs after polling, preserving existing
         // source semantics while still allowing CB gating above).
-        for middleware in &self.middleware_chain {
+        for middleware in self.middleware_chain.iter() {
             if middleware.middleware_name() == "circuit_breaker" {
                 continue;
             }
@@ -227,14 +218,14 @@ impl<H: FiniteSourceHandler> FiniteSourceHandler for MiddlewareFiniteSource<H> {
                     backoff_on_cb_rejection(&ctx);
 
                     for result in &mut results {
-                        for mw in &self.middleware_chain {
+                        for mw in self.middleware_chain.iter() {
                             mw.pre_write(result, &ctx);
                         }
                     }
 
                     let mut control_events = std::mem::take(&mut ctx.control_events);
                     for control_event in &mut control_events {
-                        for mw in &self.middleware_chain {
+                        for mw in self.middleware_chain.iter() {
                             mw.pre_write(control_event, &ctx);
                         }
                     }
@@ -258,7 +249,7 @@ impl<H: FiniteSourceHandler> FiniteSourceHandler for MiddlewareFiniteSource<H> {
 
         // Pre-write phase: enrich each result event
         for result in &mut results {
-            for middleware in &self.middleware_chain {
+            for middleware in self.middleware_chain.iter() {
                 middleware.pre_write(result, &ctx);
             }
         }
@@ -266,7 +257,7 @@ impl<H: FiniteSourceHandler> FiniteSourceHandler for MiddlewareFiniteSource<H> {
         // Append control events after all middleware runs
         let mut control_events = std::mem::take(&mut ctx.control_events);
         for control_event in &mut control_events {
-            for middleware in &self.middleware_chain {
+            for middleware in self.middleware_chain.iter() {
                 middleware.pre_write(control_event, &ctx);
             }
         }
@@ -277,21 +268,11 @@ impl<H: FiniteSourceHandler> FiniteSourceHandler for MiddlewareFiniteSource<H> {
 }
 
 /// An InfiniteSourceHandler wrapper that applies middleware
+#[derive(Clone)]
 pub struct MiddlewareInfiniteSource<H: InfiniteSourceHandler> {
     inner: H,
-    middleware_chain: Vec<Box<dyn Middleware>>,
+    middleware_chain: Arc<Vec<Arc<dyn Middleware>>>,
     writer_id: WriterId,
-}
-
-// Manual Clone implementation that clones the handler but creates empty middleware chain
-impl<H: InfiniteSourceHandler + Clone> Clone for MiddlewareInfiniteSource<H> {
-    fn clone(&self) -> Self {
-        Self {
-            inner: self.inner.clone(),
-            middleware_chain: Vec::new(), // Don't clone middleware, start fresh
-            writer_id: self.writer_id.clone(),
-        }
-    }
 }
 
 impl<H: InfiniteSourceHandler> std::fmt::Debug for MiddlewareInfiniteSource<H> {
@@ -309,14 +290,14 @@ impl<H: InfiniteSourceHandler> MiddlewareInfiniteSource<H> {
     pub fn new(inner: H, writer_id: WriterId) -> Self {
         Self {
             inner,
-            middleware_chain: Vec::new(),
+            middleware_chain: Arc::new(Vec::new()),
             writer_id,
         }
     }
 
     /// Add middleware to the chain
     pub fn with_middleware(mut self, middleware: Box<dyn Middleware>) -> Self {
-        self.middleware_chain.push(middleware);
+        Arc::make_mut(&mut self.middleware_chain).push(Arc::from(middleware));
         self
     }
 }
@@ -345,7 +326,7 @@ impl<H: InfiniteSourceHandler> InfiniteSourceHandler for MiddlewareInfiniteSourc
         let mut ctx = MiddlewareContext::new();
 
         // Pre-processing phase
-        for middleware in &self.middleware_chain {
+        for middleware in self.middleware_chain.iter() {
             match middleware.pre_handle(&synthetic_event, &mut ctx) {
                 MiddlewareAction::Continue => continue,
                 MiddlewareAction::Skip(mut results) => {
@@ -353,7 +334,7 @@ impl<H: InfiniteSourceHandler> InfiniteSourceHandler for MiddlewareInfiniteSourc
 
                     // Pre-write phase for skip results
                     for result in &mut results {
-                        for mw in &self.middleware_chain {
+                        for mw in self.middleware_chain.iter() {
                             mw.pre_write(result, &ctx);
                         }
                     }
@@ -361,7 +342,7 @@ impl<H: InfiniteSourceHandler> InfiniteSourceHandler for MiddlewareInfiniteSourc
                     // Append any control events emitted during skip
                     let mut control_events = std::mem::take(&mut ctx.control_events);
                     for control_event in &mut control_events {
-                        for mw in &self.middleware_chain {
+                        for mw in self.middleware_chain.iter() {
                             mw.pre_write(control_event, &ctx);
                         }
                     }
@@ -387,7 +368,7 @@ impl<H: InfiniteSourceHandler> InfiniteSourceHandler for MiddlewareInfiniteSourc
 
         // Pre-write phase: enrich each result event
         for result in &mut results {
-            for middleware in &self.middleware_chain {
+            for middleware in self.middleware_chain.iter() {
                 middleware.pre_write(result, &ctx);
             }
         }
@@ -395,7 +376,7 @@ impl<H: InfiniteSourceHandler> InfiniteSourceHandler for MiddlewareInfiniteSourc
         // Append control events after all middleware runs
         let mut control_events = std::mem::take(&mut ctx.control_events);
         for control_event in &mut control_events {
-            for middleware in &self.middleware_chain {
+            for middleware in self.middleware_chain.iter() {
                 middleware.pre_write(control_event, &ctx);
             }
         }

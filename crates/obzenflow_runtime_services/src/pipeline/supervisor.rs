@@ -5,7 +5,7 @@
 //! - Message bus for inter-FSM communication
 //! - Clean separation between supervision and business logic
 
-use super::fsm::{PipelineAction, PipelineContext, PipelineEvent, PipelineState};
+use super::fsm::{stop_drain_timeout, PipelineAction, PipelineContext, PipelineEvent, PipelineState};
 use crate::id_conversions::StageIdExt;
 use crate::messaging::SubscriptionPoller;
 use crate::supervised_base::{EventLoopDirective, SelfSupervised};
@@ -128,6 +128,16 @@ impl crate::supervised_base::base::Supervisor for PipelineSupervisor {
                     })
                 };
 
+                // Stop before materialization is a no-op.
+                on PipelineEvent::StopRequested => |_state: &PipelineState, _event: &PipelineEvent, _ctx: &mut PipelineContext| {
+                    Box::pin(async move {
+                        Ok(Transition {
+                            next_state: PipelineState::Created,
+                            actions: vec![],
+                        })
+                    })
+                };
+
                 on PipelineEvent::Run => |_state: &PipelineState, _event: &PipelineEvent, _ctx: &mut PipelineContext| {
                     Box::pin(async move {
                         tracing::error!("🚨 FATAL: Received Run event while in Created state!");
@@ -153,6 +163,18 @@ impl crate::supervised_base::base::Supervisor for PipelineSupervisor {
                                 PipelineAction::StartMetricsAggregator,
                                 PipelineAction::NotifyStagesStart,
                             ],
+                        })
+                    })
+                };
+
+                on PipelineEvent::StopRequested => |_state: &PipelineState, _event: &PipelineEvent, _ctx: &mut PipelineContext| {
+                    Box::pin(async move {
+                        Ok(Transition {
+                            next_state: PipelineState::Failed {
+                                reason: "stop_requested_during_materialization".to_string(),
+                                failure_cause: None,
+                            },
+                            actions: vec![PipelineAction::Cleanup],
                         })
                     })
                 };
@@ -198,6 +220,19 @@ impl crate::supervised_base::base::Supervisor for PipelineSupervisor {
                         })
                     })
                 };
+
+                // Stop before Run: cancel the flow and cleanup stages/sources.
+                on PipelineEvent::StopRequested => |_state: &PipelineState, _event: &PipelineEvent, _ctx: &mut PipelineContext| {
+                    Box::pin(async move {
+                        Ok(Transition {
+                            next_state: PipelineState::Failed {
+                                reason: "stop_requested_before_run".to_string(),
+                                failure_cause: None,
+                            },
+                            actions: vec![PipelineAction::Cleanup],
+                        })
+                    })
+                };
             }
 
             state PipelineState::Running {
@@ -232,6 +267,33 @@ impl crate::supervised_base::base::Supervisor for PipelineSupervisor {
                         Ok(Transition {
                             next_state: PipelineState::SourceCompleted,
                             actions: vec![], // No actions yet - just track state
+                        })
+                    })
+                };
+
+                on PipelineEvent::StopRequested => |_state: &PipelineState, _event: &PipelineEvent, ctx: &mut PipelineContext| {
+                    Box::pin(async move {
+                        if !ctx.stop_requested {
+                            let mut has_active_sources = false;
+                            let mut has_infinite_active_source = false;
+                            for source in ctx.source_supervisors.values() {
+                                if source.is_drained() {
+                                    continue;
+                                }
+                                has_active_sources = true;
+                                if source.stage_type().is_infinite_source() {
+                                    has_infinite_active_source = true;
+                                    break;
+                                }
+                            }
+                            ctx.stop_requested = true;
+                            ctx.stop_should_fail = has_active_sources && !has_infinite_active_source;
+                            ctx.stop_deadline = Some(Instant::now() + stop_drain_timeout());
+                        }
+
+                        Ok(Transition {
+                            next_state: PipelineState::SourceCompleted,
+                            actions: vec![PipelineAction::StopSources],
                         })
                     })
                 };
@@ -296,6 +358,15 @@ impl crate::supervised_base::base::Supervisor for PipelineSupervisor {
                         })
                     })
                 };
+
+                on PipelineEvent::StopRequested => |_state: &PipelineState, _event: &PipelineEvent, _ctx: &mut PipelineContext| {
+                    Box::pin(async move {
+                        Ok(Transition {
+                            next_state: PipelineState::SourceCompleted,
+                            actions: vec![],
+                        })
+                    })
+                };
             }
 
             state PipelineState::Draining {
@@ -357,10 +428,15 @@ impl crate::supervised_base::base::Supervisor for PipelineSupervisor {
                     let event = event.clone();
                     Box::pin(async move {
                         if let PipelineEvent::Error { message } = event {
+                            let failure_cause = if message == "stop_drain_timeout" {
+                                Some(ViolationCause::Other("stop_drain_timeout".into()))
+                            } else {
+                                None
+                            };
                             Ok(Transition {
                                 next_state: PipelineState::Failed {
                                     reason: message,
-                                    failure_cause: None,
+                                    failure_cause,
                                 },
                                 actions: vec![PipelineAction::Cleanup],
                             })
@@ -369,6 +445,15 @@ impl crate::supervised_base::base::Supervisor for PipelineSupervisor {
                                 "Invalid event".to_string(),
                             ))
                         }
+                    })
+                };
+
+                on PipelineEvent::StopRequested => |_state: &PipelineState, _event: &PipelineEvent, _ctx: &mut PipelineContext| {
+                    Box::pin(async move {
+                        Ok(Transition {
+                            next_state: PipelineState::Draining,
+                            actions: vec![],
+                        })
                     })
                 };
             }
@@ -400,6 +485,16 @@ impl crate::supervised_base::base::Supervisor for PipelineSupervisor {
                         }
                     })
                 };
+
+                on PipelineEvent::StopRequested => |state: &PipelineState, _event: &PipelineEvent, _ctx: &mut PipelineContext| {
+                    let state = state.clone();
+                    Box::pin(async move {
+                        Ok(Transition {
+                            next_state: state,
+                            actions: vec![],
+                        })
+                    })
+                };
             }
 
             // Drained and Failed are terminal; no explicit transitions here.
@@ -407,7 +502,18 @@ impl crate::supervised_base::base::Supervisor for PipelineSupervisor {
             unhandled => |state: &PipelineState, event: &PipelineEvent, _ctx: &mut PipelineContext| {
                 let state_name = state.variant_name().to_string();
                 let event_name = event.variant_name().to_string();
+                let is_stop = matches!(event, PipelineEvent::StopRequested);
                 Box::pin(async move {
+                    if is_stop {
+                        tracing::info!(
+                            supervisor = "PipelineSupervisor",
+                            state = %state_name,
+                            event = %event_name,
+                            "Ignoring StopRequested in current state"
+                        );
+                        return Ok(());
+                    }
+
                     tracing::error!(
                         supervisor = "PipelineSupervisor",
                         state = %state_name,
@@ -846,6 +952,22 @@ impl SelfSupervised for PipelineSupervisor {
             }
 
             PipelineState::Draining => {
+                // If Stop initiated this drain, enforce a bounded timeout so the
+                // pipeline terminates deterministically even if some stage never
+                // reports completion.
+                if let Some(deadline) = context.stop_deadline {
+                    if Instant::now() >= deadline {
+                        tracing::warn!(
+                            pipeline = %self.name,
+                            "Stop drain timeout expired; forcing pipeline failure"
+                        );
+                        context.stop_deadline = None;
+                        return Ok(EventLoopDirective::Transition(PipelineEvent::Error {
+                            message: "stop_drain_timeout".to_string(),
+                        }));
+                    }
+                }
+
                 // Continue polling for completion events during drain
                 let subscription = context
                     .completion_subscription
@@ -1046,19 +1168,42 @@ impl SelfSupervised for PipelineSupervisor {
                         obzenflow_core::event::system_event::SystemEventFactory::new(
                             self.system_id,
                         );
-                    let completed = system_event_factory.pipeline_completed(duration_ms, metrics);
+                    if context.stop_requested && context.stop_should_fail {
+                        // Finite-only flows treat Stop as a cancellation/abort signal.
+                        let failed = system_event_factory.pipeline_failed(
+                            "user_stop".to_string(),
+                            duration_ms,
+                            Some(metrics.clone()),
+                            Some(ViolationCause::Other("user_stop".into())),
+                        );
 
-                    if let Err(e) = self.system_journal.append(completed, None).await {
-                        tracing::error!(
-                            pipeline = %self.name,
-                            journal_error = %e,
-                            "Failed to write pipeline completed event"
-                        );
+                        if let Err(e) = self.system_journal.append(failed, None).await {
+                            tracing::error!(
+                                pipeline = %self.name,
+                                journal_error = %e,
+                                "Failed to write pipeline failed event for user_stop"
+                            );
+                        } else {
+                            tracing::info!(
+                                pipeline = %self.name,
+                                "Pipeline failed event written (user_stop)"
+                            );
+                        }
                     } else {
-                        tracing::info!(
-                            pipeline = %self.name,
-                            "Pipeline completed event written (success path)"
-                        );
+                        let completed = system_event_factory.pipeline_completed(duration_ms, metrics);
+
+                        if let Err(e) = self.system_journal.append(completed, None).await {
+                            tracing::error!(
+                                pipeline = %self.name,
+                                journal_error = %e,
+                                "Failed to write pipeline completed event"
+                            );
+                        } else {
+                            tracing::info!(
+                                pipeline = %self.name,
+                                "Pipeline completed event written (success path)"
+                            );
+                        }
                     }
                 }
 

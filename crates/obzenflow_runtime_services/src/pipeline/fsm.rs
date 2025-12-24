@@ -23,6 +23,8 @@ use obzenflow_fsm::{
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::sync::OnceLock;
+use std::time::Duration;
 
 /// Pipeline states
 #[derive(Clone, Debug, PartialEq)]
@@ -66,6 +68,8 @@ pub enum PipelineEvent {
     Materialize,
     MaterializationComplete,
     Run,
+    /// User-initiated stop request (distinct from natural source completion).
+    StopRequested,
     Shutdown,   // Source has completed
     BeginDrain, // Start draining all stages
     Abort {
@@ -87,6 +91,7 @@ impl EventVariant for PipelineEvent {
             PipelineEvent::Materialize => "Materialize",
             PipelineEvent::MaterializationComplete => "MaterializationComplete",
             PipelineEvent::Run => "Run",
+            PipelineEvent::StopRequested => "StopRequested",
             PipelineEvent::Shutdown => "Shutdown",
             PipelineEvent::BeginDrain => "BeginDrain",
             PipelineEvent::Abort { .. } => "Abort",
@@ -104,6 +109,8 @@ pub enum PipelineAction {
     NotifyStagesStart,
     NotifySourceReady,
     NotifySourceStart,
+    /// Request that all sources begin draining (stop producing and emit EOF).
+    StopSources,
     BeginDrain,
     Cleanup,
     StartMetricsAggregator,
@@ -189,9 +196,33 @@ pub struct PipelineContext {
 
     /// Last system event ID observed via completion_subscription (for tail reconciliation)
     pub last_system_event_id_seen: Option<obzenflow_core::EventId>,
+
+    /// Whether a user stop has been requested for this run.
+    pub stop_requested: bool,
+
+    /// Whether stop should be reported as a failure (e.g., finite-only flows).
+    pub stop_should_fail: bool,
+
+    /// Deadline for stop-triggered drain to complete.
+    pub stop_deadline: Option<std::time::Instant>,
 }
 
 impl FsmContext for PipelineContext {}
+
+/// Stop-triggered drain timeout.
+///
+/// Controlled via `OBZENFLOW_SHUTDOWN_TIMEOUT_SECS` with a sensible default:
+/// - If the env var is unset or invalid, defaults to 30 seconds.
+pub(crate) fn stop_drain_timeout() -> Duration {
+    static TIMEOUT: OnceLock<Duration> = OnceLock::new();
+    *TIMEOUT.get_or_init(|| {
+        std::env::var("OBZENFLOW_SHUTDOWN_TIMEOUT_SECS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .map(Duration::from_secs)
+            .unwrap_or_else(|| Duration::from_secs(30))
+    })
+}
 
 /// Compute flow-level lifecycle metrics from per-stage snapshots in the context.
 pub(crate) fn compute_flow_lifecycle_metrics(
@@ -441,6 +472,34 @@ impl FsmAction for PipelineAction {
                     })?;
                 }
                 tracing::info!("All sources started");
+            }
+
+            PipelineAction::StopSources => {
+                // Best-effort: request that all sources begin draining so they stop
+                // producing and emit authored EOF, allowing downstream stages to
+                // drain deterministically.
+                for (stage_id, source) in context.source_supervisors.iter() {
+                    if source.is_drained() {
+                        continue;
+                    }
+
+                    tracing::info!(
+                        source_stage_id = %stage_id,
+                        source_stage_name = %source.stage_name(),
+                        source_stage_type = %source.stage_type(),
+                        "Requesting source begin_drain for StopRequested"
+                    );
+
+                    if let Err(e) = source.begin_drain().await {
+                        tracing::warn!(
+                            source_stage_id = %stage_id,
+                            source_stage_name = %source.stage_name(),
+                            source_stage_type = %source.stage_type(),
+                            error = ?e,
+                            "Failed to request source begin_drain during stop; continuing"
+                        );
+                    }
+                }
             }
 
             PipelineAction::BeginDrain => {
@@ -940,6 +999,15 @@ pub fn build_pipeline_fsm() -> PipelineFsm {
                     })
                 })
             };
+
+            on PipelineEvent::StopRequested => |_state: &PipelineState, _event: &PipelineEvent, _ctx: &mut PipelineContext| {
+                Box::pin(async move {
+                    Ok(Transition {
+                        next_state: PipelineState::Created,
+                        actions: vec![],
+                    })
+                })
+            };
         }
 
         state PipelineState::Materializing {
@@ -962,10 +1030,18 @@ pub fn build_pipeline_fsm() -> PipelineFsm {
                 let event = event.clone();
                 Box::pin(async move {
                     if let PipelineEvent::Error { message } = event {
+                        let failure_cause =
+                            if message == "stop_drain_timeout" {
+                                Some(obzenflow_core::event::types::ViolationCause::Other(
+                                    "stop_drain_timeout".into(),
+                                ))
+                            } else {
+                                None
+                            };
                         Ok(Transition {
                             next_state: PipelineState::Failed {
                                 reason: message,
-                                failure_cause: None,
+                                failure_cause,
                             },
                             actions: vec![PipelineAction::Cleanup],
                         })
@@ -974,6 +1050,18 @@ pub fn build_pipeline_fsm() -> PipelineFsm {
                             "Invalid event".to_string(),
                         ))
                     }
+                })
+            };
+
+            on PipelineEvent::StopRequested => |_state: &PipelineState, _event: &PipelineEvent, _ctx: &mut PipelineContext| {
+                Box::pin(async move {
+                    Ok(Transition {
+                        next_state: PipelineState::Failed {
+                            reason: "stop_requested_during_materialization".to_string(),
+                            failure_cause: None,
+                        },
+                        actions: vec![PipelineAction::Cleanup],
+                    })
                 })
             };
         }
@@ -987,6 +1075,18 @@ pub fn build_pipeline_fsm() -> PipelineFsm {
                     Ok(Transition {
                         next_state: PipelineState::Running,
                         actions: vec![PipelineAction::NotifySourceStart],
+                    })
+                })
+            };
+
+            on PipelineEvent::StopRequested => |_state: &PipelineState, _event: &PipelineEvent, _ctx: &mut PipelineContext| {
+                Box::pin(async move {
+                    Ok(Transition {
+                        next_state: PipelineState::Failed {
+                            reason: "stop_requested_before_run".to_string(),
+                            failure_cause: None,
+                        },
+                        actions: vec![PipelineAction::Cleanup],
                     })
                 })
             };
@@ -1044,14 +1144,49 @@ pub fn build_pipeline_fsm() -> PipelineFsm {
                 })
             };
 
+            on PipelineEvent::StopRequested => |_state: &PipelineState, _event: &PipelineEvent, ctx: &mut PipelineContext| {
+                Box::pin(async move {
+                    if !ctx.stop_requested {
+                        let mut has_active_sources = false;
+                        let mut has_infinite_active_source = false;
+                        for source in ctx.source_supervisors.values() {
+                            if source.is_drained() {
+                                continue;
+                            }
+                            has_active_sources = true;
+                            if source.stage_type().is_infinite_source() {
+                                has_infinite_active_source = true;
+                                break;
+                            }
+                        }
+                        ctx.stop_requested = true;
+                        ctx.stop_should_fail = has_active_sources && !has_infinite_active_source;
+                        ctx.stop_deadline = Some(std::time::Instant::now() + stop_drain_timeout());
+                    }
+
+                    Ok(Transition {
+                        next_state: PipelineState::SourceCompleted,
+                        actions: vec![PipelineAction::StopSources],
+                    })
+                })
+            };
+
             on PipelineEvent::Error => |_state: &PipelineState, event: &PipelineEvent, _ctx: &mut PipelineContext| {
                 let event = event.clone();
                 Box::pin(async move {
                     if let PipelineEvent::Error { message } = event {
+                        let failure_cause =
+                            if message == "stop_drain_timeout" {
+                                Some(obzenflow_core::event::types::ViolationCause::Other(
+                                    "stop_drain_timeout".into(),
+                                ))
+                            } else {
+                                None
+                            };
                         Ok(Transition {
                             next_state: PipelineState::Failed {
                                 reason: message,
-                                failure_cause: None,
+                                failure_cause,
                             },
                             actions: vec![PipelineAction::Cleanup],
                         })
@@ -1070,6 +1205,15 @@ pub fn build_pipeline_fsm() -> PipelineFsm {
                     Ok(Transition {
                         next_state: PipelineState::Draining,
                         actions: vec![PipelineAction::BeginDrain],
+                    })
+                })
+            };
+
+            on PipelineEvent::StopRequested => |_state: &PipelineState, _event: &PipelineEvent, _ctx: &mut PipelineContext| {
+                Box::pin(async move {
+                    Ok(Transition {
+                        next_state: PipelineState::SourceCompleted,
+                        actions: vec![],
                     })
                 })
             };
@@ -1157,6 +1301,15 @@ pub fn build_pipeline_fsm() -> PipelineFsm {
                     }
                 })
             };
+
+            on PipelineEvent::StopRequested => |_state: &PipelineState, _event: &PipelineEvent, _ctx: &mut PipelineContext| {
+                Box::pin(async move {
+                    Ok(Transition {
+                        next_state: PipelineState::Draining,
+                        actions: vec![],
+                    })
+                })
+            };
         }
 
         state PipelineState::AbortRequested {
@@ -1194,6 +1347,16 @@ pub fn build_pipeline_fsm() -> PipelineFsm {
                             upstream: None,
                         },
                         actions: vec![PipelineAction::Cleanup],
+                    })
+                })
+            };
+
+            on PipelineEvent::StopRequested => |state: &PipelineState, _event: &PipelineEvent, _ctx: &mut PipelineContext| {
+                let state = state.clone();
+                Box::pin(async move {
+                    Ok(Transition {
+                        next_state: state,
+                        actions: vec![],
                     })
                 })
             };

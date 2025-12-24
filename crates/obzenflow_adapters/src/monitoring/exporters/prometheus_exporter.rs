@@ -145,6 +145,48 @@ impl PrometheusExporter {
             writeln!(output)?;
         }
 
+        // Accumulated event counts (stateful/join stages)
+        if !snapshot.events_accumulated_total.is_empty() {
+            writeln!(
+                output,
+                "# HELP obzenflow_events_accumulated_total Total number of events accumulated into internal state"
+            )?;
+            writeln!(output, "# TYPE obzenflow_events_accumulated_total counter")?;
+
+            for (stage_id, count) in &snapshot.events_accumulated_total {
+                if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
+                    writeln!(
+                        output,
+                        "obzenflow_events_accumulated_total{{{}}} {}",
+                        format_stage_labels(stage_id, metadata),
+                        count
+                    )?;
+                }
+            }
+            writeln!(output)?;
+        }
+
+        // Emitted event counts (data/delivery outputs)
+        if !snapshot.events_emitted_total.is_empty() {
+            writeln!(
+                output,
+                "# HELP obzenflow_events_emitted_total Total number of output events emitted by stage"
+            )?;
+            writeln!(output, "# TYPE obzenflow_events_emitted_total counter")?;
+
+            for (stage_id, count) in &snapshot.events_emitted_total {
+                if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
+                    writeln!(
+                        output,
+                        "obzenflow_events_emitted_total{{{}}} {}",
+                        format_stage_labels(stage_id, metadata),
+                        count
+                    )?;
+                }
+            }
+            writeln!(output)?;
+        }
+
         // Error counts by ErrorKind (if available).
         if !snapshot.error_counts_by_kind.is_empty() {
             writeln!(

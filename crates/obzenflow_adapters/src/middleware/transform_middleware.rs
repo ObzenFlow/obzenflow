@@ -10,21 +10,13 @@ use obzenflow_core::event::ChainEventFactory;
 use obzenflow_core::ChainEvent;
 use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
 use obzenflow_runtime_services::stages::common::handlers::TransformHandler;
+use std::sync::Arc;
 
 /// A TransformHandler wrapper that applies middleware to transform operations
+#[derive(Clone)]
 pub struct MiddlewareTransform<H: TransformHandler> {
     inner: H,
-    middleware_chain: Vec<Box<dyn Middleware>>,
-}
-
-// Manual Clone implementation that clones the handler but creates empty middleware chain
-impl<H: TransformHandler + Clone> Clone for MiddlewareTransform<H> {
-    fn clone(&self) -> Self {
-        Self {
-            inner: self.inner.clone(),
-            middleware_chain: Vec::new(), // Don't clone middleware, start fresh
-        }
-    }
+    middleware_chain: Arc<Vec<Arc<dyn Middleware>>>,
 }
 
 impl<H: TransformHandler> std::fmt::Debug for MiddlewareTransform<H> {
@@ -41,13 +33,13 @@ impl<H: TransformHandler> MiddlewareTransform<H> {
     pub fn new(inner: H) -> Self {
         Self {
             inner,
-            middleware_chain: Vec::new(),
+            middleware_chain: Arc::new(Vec::new()),
         }
     }
 
     /// Add middleware to the chain
     pub fn with_middleware(mut self, middleware: Box<dyn Middleware>) -> Self {
-        self.middleware_chain.push(middleware);
+        Arc::make_mut(&mut self.middleware_chain).push(Arc::from(middleware));
         self
     }
 
@@ -64,13 +56,13 @@ impl<H: TransformHandler> MiddlewareTransform<H> {
         let mut ctx = MiddlewareContext::new();
 
         // Pre-processing phase
-        for middleware in &self.middleware_chain {
+        for middleware in self.middleware_chain.iter() {
             match middleware.pre_handle(&event, &mut ctx) {
                 MiddlewareAction::Continue => continue,
                 MiddlewareAction::Skip(mut results) => {
                     // Pre-write phase for skip results
                     for result in &mut results {
-                        for mw in &self.middleware_chain {
+                        for mw in self.middleware_chain.iter() {
                             mw.pre_write(result, &ctx);
                         }
                     }
@@ -85,7 +77,7 @@ impl<H: TransformHandler> MiddlewareTransform<H> {
                     // Pre-write on control events - take ownership to avoid borrow issues
                     let mut control_events = std::mem::take(&mut ctx.control_events);
                     for control_event in &mut control_events {
-                        for mw in &self.middleware_chain {
+                        for mw in self.middleware_chain.iter() {
                             mw.pre_write(control_event, &ctx);
                         }
                     }
@@ -110,7 +102,7 @@ impl<H: TransformHandler> MiddlewareTransform<H> {
 
         // Pre-write phase: allow middleware to enrich each result event
         for result in &mut results {
-            for middleware in &self.middleware_chain {
+            for middleware in self.middleware_chain.iter() {
                 middleware.pre_write(result, &ctx);
             }
         }
@@ -125,7 +117,7 @@ impl<H: TransformHandler> MiddlewareTransform<H> {
         // Pre-write on control events - take ownership to avoid borrow issues
         let mut control_events = std::mem::take(&mut ctx.control_events);
         for control_event in &mut control_events {
-            for middleware in &self.middleware_chain {
+            for middleware in self.middleware_chain.iter() {
                 middleware.pre_write(control_event, &ctx);
             }
         }

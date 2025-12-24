@@ -217,6 +217,8 @@ pub struct StageMetrics {
     pub last_failures_total: Option<u64>,
     // Wide-event snapshot counters (Phase 6)
     pub latest_events_processed_total: Option<u64>,
+    pub latest_events_accumulated_total: Option<u64>,
+    pub latest_events_emitted_total: Option<u64>,
     pub latest_errors_total: Option<u64>,
     pub event_loops_total: u64,
     pub event_loops_with_work_total: u64,
@@ -274,6 +276,8 @@ impl Default for StageMetrics {
             last_in_flight: None,
             last_failures_total: None,
             latest_events_processed_total: None,
+            latest_events_accumulated_total: None,
+            latest_events_emitted_total: None,
             latest_errors_total: None,
             event_loops_total: 0,
             event_loops_with_work_total: 0,
@@ -354,6 +358,18 @@ impl MetricsAggregatorContext {
                                 .latest_events_processed_total
                                 .unwrap_or(0)
                                 .max(runtime_ctx.events_processed_total),
+                        );
+                        metrics.latest_events_accumulated_total = Some(
+                            metrics
+                                .latest_events_accumulated_total
+                                .unwrap_or(0)
+                                .max(runtime_ctx.events_accumulated_total),
+                        );
+                        metrics.latest_events_emitted_total = Some(
+                            metrics
+                                .latest_events_emitted_total
+                                .unwrap_or(0)
+                                .max(runtime_ctx.events_emitted_total),
                         );
                         metrics.latest_errors_total = Some(
                             metrics
@@ -485,6 +501,18 @@ impl MetricsAggregatorContext {
                                         .latest_events_processed_total
                                         .unwrap_or(0)
                                         .max(runtime_ctx.events_processed_total),
+                                );
+                                metrics.latest_events_accumulated_total = Some(
+                                    metrics
+                                        .latest_events_accumulated_total
+                                        .unwrap_or(0)
+                                        .max(runtime_ctx.events_accumulated_total),
+                                );
+                                metrics.latest_events_emitted_total = Some(
+                                    metrics
+                                        .latest_events_emitted_total
+                                        .unwrap_or(0)
+                                        .max(runtime_ctx.events_emitted_total),
                                 );
                                 metrics.latest_errors_total = Some(
                                     metrics
@@ -689,6 +717,16 @@ impl MetricsAggregatorContext {
             // Prefer wide-event snapshot counters when available
             let events_count = metrics.latest_events_processed_total.unwrap_or(0);
             snapshot.event_counts.insert(*stage_id, events_count);
+
+            let accumulated_count = metrics.latest_events_accumulated_total.unwrap_or(0);
+            snapshot
+                .events_accumulated_total
+                .insert(*stage_id, accumulated_count);
+
+            let emitted_count = metrics.latest_events_emitted_total.unwrap_or(0);
+            snapshot
+                .events_emitted_total
+                .insert(*stage_id, emitted_count);
 
             // Use wide-event snapshot errors_total as authoritative.
             let stage_errors_total = metrics.latest_errors_total.unwrap_or(0);
@@ -1402,6 +1440,18 @@ impl FsmAction for MetricsAggregatorAction {
                                 .unwrap_or(0)
                                 .max(runtime_ctx.events_processed_total),
                         );
+                        metrics.latest_events_accumulated_total = Some(
+                            metrics
+                                .latest_events_accumulated_total
+                                .unwrap_or(0)
+                                .max(runtime_ctx.events_accumulated_total),
+                        );
+                        metrics.latest_events_emitted_total = Some(
+                            metrics
+                                .latest_events_emitted_total
+                                .unwrap_or(0)
+                                .max(runtime_ctx.events_emitted_total),
+                        );
                         metrics.latest_errors_total = Some(
                             metrics
                                 .latest_errors_total
@@ -1465,6 +1515,18 @@ impl FsmAction for MetricsAggregatorAction {
                                 .latest_events_processed_total
                                 .unwrap_or(0)
                                 .max(snapshot.events_processed_total),
+                        );
+                        metrics.latest_events_accumulated_total = Some(
+                            metrics
+                                .latest_events_accumulated_total
+                                .unwrap_or(0)
+                                .max(snapshot.events_accumulated_total),
+                        );
+                        metrics.latest_events_emitted_total = Some(
+                            metrics
+                                .latest_events_emitted_total
+                                .unwrap_or(0)
+                                .max(snapshot.events_emitted_total),
                         );
                         metrics.latest_errors_total = Some(
                             metrics
@@ -1624,12 +1686,29 @@ pub fn build_metrics_aggregator_fsm() -> MetricsAggregatorFsm {
                 let event = event.clone();
                 Box::pin(async move {
                     match event {
-                        MetricsAggregatorEvent::ProcessSystemEvent { envelope } => Ok(Transition {
-                            next_state: MetricsAggregatorState::Running,
-                            actions: vec![MetricsAggregatorAction::ProcessSystemEvent {
-                                envelope: envelope.clone(),
-                            }],
-                        }),
+                        MetricsAggregatorEvent::ProcessSystemEvent { envelope } => {
+                            let should_drain = matches!(
+                                envelope.event.event,
+                                obzenflow_core::event::SystemEventType::PipelineLifecycle(
+                                    obzenflow_core::event::PipelineLifecycleEvent::Draining { .. }
+                                        | obzenflow_core::event::PipelineLifecycleEvent::AllStagesCompleted { .. }
+                                        | obzenflow_core::event::PipelineLifecycleEvent::Drained
+                                        | obzenflow_core::event::PipelineLifecycleEvent::Completed { .. }
+                                        | obzenflow_core::event::PipelineLifecycleEvent::Failed { .. }
+                                )
+                            );
+
+                            Ok(Transition {
+                                next_state: if should_drain {
+                                    MetricsAggregatorState::Draining
+                                } else {
+                                    MetricsAggregatorState::Running
+                                },
+                                actions: vec![MetricsAggregatorAction::ProcessSystemEvent {
+                                    envelope: envelope.clone(),
+                                }],
+                            })
+                        }
                         _ => Err(obzenflow_fsm::FsmError::HandlerError(
                             "Invalid event for ProcessSystemEvent handler".to_string(),
                         )),

@@ -609,7 +609,8 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Hand
                                                     );
                                                     // Error events are still data, so record them for
                                                     // transport contracts and metrics.
-                                                    ctx.instrumentation.record_emitted(&event);
+                                                    ctx.instrumentation
+                                                        .record_output_event(&event);
                                                     ctx.error_journal
                                                         .append(event, Some(&envelope))
                                                         .await
@@ -644,7 +645,7 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Hand
                                                     // overhead and should not participate in transport contracts.
                                                     if enriched_event.is_data() {
                                                         ctx.instrumentation
-                                                            .record_emitted(&enriched_event);
+                                                            .record_output_event(&enriched_event);
                                                         // Track output for contract verification
                                                         subscription.track_output_event();
                                                     }
@@ -856,7 +857,7 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Hand
                                         );
                                         // Only count data events for transport contracts (FLOWIP-080o-part-2)
                                         // Error events are still data, so count them
-                                        ctx.instrumentation.record_emitted(&event);
+                                        ctx.instrumentation.record_output_event(&event);
                                         ctx.error_journal
                                             .append(event, Some(&envelope))
                                             .await
@@ -890,7 +891,8 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Hand
                                         // Lifecycle events (middleware metrics, etc.) are observability
                                         // overhead and should not participate in transport contracts.
                                         if enriched_event.is_data() {
-                                            ctx.instrumentation.record_emitted(&enriched_event);
+                                            ctx.instrumentation
+                                                .record_output_event(&enriched_event);
                                             // Track output for contract verification
                                             subscription.track_output_event();
                                         }

@@ -260,6 +260,9 @@ impl SupervisorBuilder for PipelineBuilder {
             stage_lifecycle_metrics: HashMap::new(),
             flow_start_time: None,
             last_system_event_id_seen: None,
+            stop_requested: false,
+            stop_should_fail: false,
+            stop_deadline: None,
         };
 
         // Create channels using the common infrastructure

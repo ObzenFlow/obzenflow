@@ -274,7 +274,7 @@ impl<T: JournalEvent> JournalReader<T> for DiskJournalReader<T> {
                                 });
                             }
 
-                            tracing::info!(
+                            tracing::debug!(
                                 position = self.position,
                                 path = %self.path.display(),
                                 line_len = line.len(),

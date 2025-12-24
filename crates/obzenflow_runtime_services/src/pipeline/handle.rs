@@ -177,9 +177,23 @@ impl FlowHandle {
         Ok(metrics)
     }
 
-    /// Graceful shutdown by sending Shutdown event to FSM
+    /// User-initiated stop request.
+    ///
+    /// This is distinct from `PipelineEvent::Shutdown` which represents natural
+    /// source completion detected by the pipeline supervisor.
+    pub async fn stop(&self) -> Result<(), FlowError> {
+        // If the supervisor already terminated, treat Stop as an idempotent no-op.
+        // This avoids surfacing "supervisor not running" as an error to callers
+        // that may issue Stop more than once (e.g. UI retries).
+        if !self.is_running() {
+            return Ok(());
+        }
+        self.send_event(PipelineEvent::StopRequested).await
+    }
+
+    /// Backwards-compatible alias for `stop()`.
     pub async fn shutdown(&self) -> Result<(), FlowError> {
-        self.send_event(PipelineEvent::Shutdown).await
+        self.stop().await
     }
 
     /// Force shutdown by sending Error event to FSM

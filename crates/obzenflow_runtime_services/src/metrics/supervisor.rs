@@ -220,6 +220,18 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                                     event_type = envelope.event.event_type_name(),
                                     "Metrics aggregator received system event"
                                 );
+                                if matches!(
+                                    &envelope.event.event,
+                                    obzenflow_core::event::SystemEventType::PipelineLifecycle(
+                                        obzenflow_core::event::PipelineLifecycleEvent::Draining { .. }
+                                            | obzenflow_core::event::PipelineLifecycleEvent::AllStagesCompleted { .. }
+                                            | obzenflow_core::event::PipelineLifecycleEvent::Drained
+                                            | obzenflow_core::event::PipelineLifecycleEvent::Completed { .. }
+                                            | obzenflow_core::event::PipelineLifecycleEvent::Failed { .. }
+                                    )
+                                ) {
+                                    export_timer = None;
+                                }
                                 // Process system event through FSM event
                                 directive = Ok(EventLoopDirective::Transition(
                                     MetricsAggregatorEvent::ProcessSystemEvent { envelope }

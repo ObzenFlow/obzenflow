@@ -15,18 +15,18 @@ use std::sync::Arc;
 
 /// Read the most recent `RuntimeContext` from a journal's tail.
 ///
-/// Uses a graduated search (1, 5, 20 events) to handle cases where the
-/// very last event may not carry `runtime_context` (e.g., control events).
-/// In normal flows, data/delivery events near the tail always include
-/// `runtime_context`, so searching up to 20 events covers typical runs
-/// without turning this into an unbounded scan.
+/// Uses a graduated search to handle cases where the very last events may not
+/// carry `runtime_context` (e.g., control/forwarded events, partial writes).
+/// In typical flows, a small tail window is enough. For stateful stages that
+/// only emit on EOF, runtime snapshots may be sparse relative to control and
+/// middleware events, so we expand the window to keep `/metrics` accurate.
 ///
 /// This relies on `Journal::read_last_n` returning events in
 /// most-recent-first order.
 pub async fn read_latest_runtime_context(
     journal: &Arc<dyn Journal<ChainEvent>>,
 ) -> Option<RuntimeContext> {
-    for n in [1, 5, 20] {
+    for n in [1, 5, 20, 100, 500, 2_000] {
         match journal.read_last_n(n).await {
             Ok(events) => {
                 // IMPORTANT: read_last_n returns most recent first (API contract).
@@ -56,7 +56,7 @@ pub async fn read_latest_runtime_context_for_stage(
     journal: &Arc<dyn Journal<ChainEvent>>,
     stage_id: StageId,
 ) -> Option<RuntimeContext> {
-    for n in [1, 5, 20] {
+    for n in [1, 5, 20, 100, 500, 2_000] {
         match journal.read_last_n(n).await {
             Ok(events) => {
                 for env in events.into_iter() {
@@ -95,6 +95,8 @@ pub async fn read_stage_metrics_from_tail(
     stage_id: StageId,
 ) -> Option<StageMetricsSnapshot> {
     let mut events_processed_total: Option<u64> = None;
+    let mut events_accumulated_total: Option<u64> = None;
+    let mut events_emitted_total: Option<u64> = None;
     let mut errors_total: Option<u64> = None;
     let mut in_flight: Option<u32> = None;
     let mut p50_ms: Option<u64> = None;
@@ -130,6 +132,8 @@ pub async fn read_stage_metrics_from_tail(
     // Read from data journal first.
     if let Some(ctx) = read_latest_runtime_context_for_stage(data_journal, stage_id).await {
         update_max(&mut events_processed_total, ctx.events_processed_total);
+        update_max(&mut events_accumulated_total, ctx.events_accumulated_total);
+        update_max(&mut events_emitted_total, ctx.events_emitted_total);
         update_max(&mut errors_total, ctx.errors_total);
         in_flight = Some(ctx.in_flight);
         p50_ms = Some(ctx.recent_p50_ms);
@@ -153,6 +157,8 @@ pub async fn read_stage_metrics_from_tail(
     if let Some(error_journal) = error_journal {
         if let Some(ctx) = read_latest_runtime_context_for_stage(error_journal, stage_id).await {
             update_max(&mut events_processed_total, ctx.events_processed_total);
+            update_max(&mut events_accumulated_total, ctx.events_accumulated_total);
+            update_max(&mut events_emitted_total, ctx.events_emitted_total);
             update_max(&mut errors_total, ctx.errors_total);
             update_max(&mut processing_time_sum_nanos, ctx.processing_time_sum_nanos);
             update_max(&mut event_loops_total, ctx.event_loops_total);
@@ -177,6 +183,8 @@ pub async fn read_stage_metrics_from_tail(
     // Only return Some if we observed at least one runtime context.
     events_processed_total.map(|events| StageMetricsSnapshot {
         events_processed_total: events,
+        events_accumulated_total: events_accumulated_total.unwrap_or(0),
+        events_emitted_total: events_emitted_total.unwrap_or(0),
         errors_total: errors_total.unwrap_or(0),
         errors_by_kind,
         in_flight: in_flight.unwrap_or(0),
@@ -398,6 +406,8 @@ mod tests {
             recent_p999_ms: 0,
             processing_time_sum_nanos: 0,
             events_processed_total,
+            events_accumulated_total: 0,
+            events_emitted_total: 0,
             errors_total,
             failures_total: 0,
             event_loops_total: 0,
@@ -526,5 +536,46 @@ mod tests {
             .expect("ctx");
         assert_eq!(filtered_ctx.events_processed_total, 50);
         assert_eq!(filtered_ctx.errors_total, 0);
+    }
+
+    #[tokio::test]
+    async fn read_latest_runtime_context_for_stage_searches_past_forwarded_events() {
+        use obzenflow_core::event::ChainEventFactory;
+        use obzenflow_core::StageId;
+        use serde_json::json;
+
+        let stage_id = StageId::new();
+        let owner = JournalOwner::stage(stage_id);
+
+        let journal_raw = Arc::new(InMemoryChainJournal::new(owner));
+        let journal: Arc<dyn Journal<ChainEvent>> = journal_raw.clone();
+
+        // Seed a stage-authored event with runtime_context.
+        let seeded_ctx = runtime_context_with_errors(42, 0, &[]);
+        let mut seeded_event = ChainEventFactory::data_event(
+            WriterId::from(stage_id),
+            "seeded.data",
+            json!({"k": "v"}),
+        );
+        seeded_event.flow_context.stage_id = stage_id;
+        seeded_event = seeded_event.with_runtime_context(seeded_ctx);
+        journal_raw.append_raw(seeded_event);
+
+        // Append many forwarded/control-like events without runtime_context.
+        // This simulates stateful/join stage journals where tail events may not carry a snapshot.
+        for i in 0..50 {
+            let mut forwarded = ChainEventFactory::data_event(
+                WriterId::from(stage_id),
+                "forwarded.control",
+                json!({"i": i}),
+            );
+            forwarded.flow_context.stage_id = stage_id;
+            journal_raw.append_raw(forwarded);
+        }
+
+        let ctx = read_latest_runtime_context_for_stage(&journal, stage_id)
+            .await
+            .expect("ctx");
+        assert_eq!(ctx.events_processed_total, 42);
     }
 }

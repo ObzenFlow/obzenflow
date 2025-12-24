@@ -12,21 +12,13 @@ use obzenflow_core::time::MetricsDuration;
 use obzenflow_core::ChainEvent;
 use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
 use obzenflow_runtime_services::stages::common::handlers::SinkHandler;
+use std::sync::Arc;
 
 /// A SinkHandler wrapper that applies middleware
+#[derive(Clone)]
 pub struct MiddlewareSink<H: SinkHandler> {
     inner: H,
-    middleware_chain: Vec<Box<dyn Middleware>>,
-}
-
-// Manual Clone implementation that clones the handler but creates empty middleware chain
-impl<H: SinkHandler + Clone> Clone for MiddlewareSink<H> {
-    fn clone(&self) -> Self {
-        Self {
-            inner: self.inner.clone(),
-            middleware_chain: Vec::new(), // Don't clone middleware, start fresh
-        }
-    }
+    middleware_chain: Arc<Vec<Arc<dyn Middleware>>>,
 }
 
 impl<H: SinkHandler> std::fmt::Debug for MiddlewareSink<H> {
@@ -43,13 +35,13 @@ impl<H: SinkHandler> MiddlewareSink<H> {
     pub fn new(inner: H) -> Self {
         Self {
             inner,
-            middleware_chain: Vec::new(),
+            middleware_chain: Arc::new(Vec::new()),
         }
     }
 
     /// Add middleware to the chain
     pub fn with_middleware(mut self, middleware: Box<dyn Middleware>) -> Self {
-        self.middleware_chain.push(middleware);
+        Arc::make_mut(&mut self.middleware_chain).push(Arc::from(middleware));
         self
     }
 
@@ -62,7 +54,7 @@ impl<H: SinkHandler> MiddlewareSink<H> {
         let mut ctx = MiddlewareContext::new();
 
         // Pre-processing phase
-        for middleware in &self.middleware_chain {
+        for middleware in self.middleware_chain.iter() {
             match middleware.pre_handle(&event, &mut ctx) {
                 MiddlewareAction::Continue => continue,
                 MiddlewareAction::Skip(_) => {
@@ -89,7 +81,7 @@ impl<H: SinkHandler> MiddlewareSink<H> {
             Ok(payload) => {
                 // Post-processing phase - sinks don't produce output events
                 let empty = vec![];
-                for middleware in &self.middleware_chain {
+                for middleware in self.middleware_chain.iter() {
                     middleware.post_handle(&event, &empty, &mut ctx);
                 }
 
@@ -122,7 +114,7 @@ impl<H: SinkHandler> MiddlewareSink<H> {
             }
             Err(e) => {
                 // Give each middleware a chance to handle the error
-                for middleware in &self.middleware_chain {
+                for middleware in self.middleware_chain.iter() {
                     match middleware.on_error(&event, &mut ctx) {
                         ErrorAction::Propagate => continue,
                         ErrorAction::Recover(_) => {

@@ -671,10 +671,6 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                                 payload,
                                             )
                                             .with_flow_context(flow_context)
-                                            .with_runtime_context(
-                                                ctx.instrumentation
-                                                    .snapshot_with_control(),
-                                            )
                                             .with_causality(CausalityContext::with_parent(
                                                 envelope.event.id,
                                             ))
@@ -693,8 +689,13 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                                 // once per successfully processed input event. Bumping it again
                                                 // here would double-count and produce inflated events_out_total
                                                 // in flow lifecycle snapshots. See FLOWIP-059d postmortem.
-                                                ctx.instrumentation.record_emitted(&delivery_event);
+                                                ctx.instrumentation
+                                                    .record_output_event(&delivery_event);
                                             }
+                                            let delivery_event = delivery_event.with_runtime_context(
+                                                ctx.instrumentation
+                                                    .snapshot_with_control(),
+                                            );
                                             ctx.data_journal
                                                 .append(delivery_event, Some(&envelope))
                                                 .await?;
@@ -742,7 +743,7 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
 
                                                     if error_event.is_data() {
                                                         ctx.instrumentation
-                                                            .record_emitted(&error_event);
+                                                            .record_output_event(&error_event);
                                                     }
 
                                                     ctx.error_journal
@@ -764,17 +765,18 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                                         stage_type: StageType::Sink,
                                                     };
 
-                                                    let enriched_error = error_event
-                                                        .with_flow_context(flow_ctx)
+                                                    let enriched_error =
+                                                        error_event.with_flow_context(flow_ctx);
+
+                                                    if enriched_error.is_data() {
+                                                        ctx.instrumentation
+                                                            .record_output_event(&enriched_error);
+                                                    }
+                                                    let enriched_error = enriched_error
                                                         .with_runtime_context(
                                                             ctx.instrumentation
                                                                 .snapshot_with_control(),
                                                         );
-
-                                                    if enriched_error.is_data() {
-                                                        ctx.instrumentation
-                                                            .record_emitted(&enriched_error);
-                                                    }
 
                                                     ctx.data_journal
                                                         .append(enriched_error, Some(&envelope))
@@ -813,18 +815,19 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                                 fail_payload,
                                             )
                                             .with_flow_context(flow_ctx)
-                                            .with_runtime_context(
-                                                ctx.instrumentation
-                                                    .snapshot_with_control(),
-                                            )
                                             .with_causality(CausalityContext::with_parent(
                                                 envelope.event.id,
                                             ))
                                             .with_correlation_from(&envelope.event);
 
                                             if fail_event.is_data() || fail_event.is_delivery() {
-                                                ctx.instrumentation.record_emitted(&fail_event);
+                                                ctx.instrumentation
+                                                    .record_output_event(&fail_event);
                                             }
+                                            let fail_event = fail_event.with_runtime_context(
+                                                ctx.instrumentation
+                                                    .snapshot_with_control(),
+                                            );
                                             ctx.data_journal
                                                 .append(fail_event, Some(&envelope))
                                                 .await
