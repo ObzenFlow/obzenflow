@@ -650,10 +650,21 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Hand
                                                         subscription.track_output_event();
                                                     }
 
-                                                    ctx.data_journal
+                                                    let written = ctx
+                                                        .data_journal
                                                         .append(enriched_event, Some(&envelope))
                                                         .await
-                                                        .map_err(|e| format!("Failed to write transformed event: {}", e))?;
+                                                        .map_err(|e| {
+                                                            format!(
+                                                                "Failed to write transformed event: {}",
+                                                                e
+                                                            )
+                                                        })?;
+                                                    crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
+                                                        &written,
+                                                        &ctx.system_journal,
+                                                    )
+                                                    .await;
                                                 }
                                             }
                                         }
@@ -897,12 +908,18 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Hand
                                             subscription.track_output_event();
                                         }
 
-                                        ctx.data_journal
+                                        let written = ctx
+                                            .data_journal
                                             .append(enriched_event, Some(&envelope))
                                             .await
                                             .map_err(|e| {
                                                 format!("Failed to write transformed event: {}", e)
                                             })?;
+                                        crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
+                                            &written,
+                                            &ctx.system_journal,
+                                        )
+                                        .await;
                                     }
                                 }
                             } else {

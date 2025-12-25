@@ -7,13 +7,13 @@ use crate::middleware::{
     ErrorAction, Middleware, MiddlewareAction, MiddlewareContext, MiddlewareFactory,
     MiddlewareSafety,
 };
+use obzenflow_core::control_middleware::{RateLimiterMetrics, RateLimiterSnapshotter};
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::payloads::observability_payload::{
     MiddlewareLifecycle, ObservabilityPayload, RateLimiterEvent,
 };
 use obzenflow_core::{StageId, WriterId};
-use obzenflow_core::control_middleware::{RateLimiterMetrics, RateLimiterSnapshotter};
 use obzenflow_runtime_services::pipeline::config::StageConfig;
 use obzenflow_runtime_services::stages::common::control_strategies::{
     ControlEventStrategy, WindowingStrategy,
@@ -22,6 +22,13 @@ use serde_json::json;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tracing::{debug, info, trace};
+
+const ACTIVITY_PULSE_WINDOW_MS: u64 = 1000;
+const ACTIVITY_PULSE_WINDOW: Duration = Duration::from_secs(1);
+
+const MODE_ENTER_THRESHOLD_PCT: f64 = 100.0;
+const MODE_EXIT_THRESHOLD_PCT: f64 = 80.0;
+const MODE_EXIT_HOLD_WINDOWS: u8 = 2;
 
 /// Token bucket rate limiter implementation
 #[derive(Debug)]
@@ -34,8 +41,21 @@ struct TokenBucket {
     refill_rate: f64,
     /// Last time tokens were refilled
     last_refill: Instant,
-    /// Track if we've crossed threshold
-    was_exhausted: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RateLimiterMode {
+    Normal,
+    Limiting,
+}
+
+impl RateLimiterMode {
+    fn as_str(&self) -> &'static str {
+        match self {
+            RateLimiterMode::Normal => "normal",
+            RateLimiterMode::Limiting => "limiting",
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -51,6 +71,14 @@ struct RateLimiterStats {
     delayed_window: u64,
     tokens_consumed_window: f64,
     last_summary: Instant,
+
+    mode: RateLimiterMode,
+    exit_hold_count: u8,
+
+    pulse_window_start: Instant,
+    pulse_delayed_events: u64,
+    pulse_delay_ms_total: u64,
+    pulse_delay_ms_max: u64,
 }
 
 impl Default for RateLimiterStats {
@@ -64,6 +92,12 @@ impl Default for RateLimiterStats {
             delayed_window: 0,
             tokens_consumed_window: 0.0,
             last_summary: Instant::now(),
+            mode: RateLimiterMode::Normal,
+            exit_hold_count: 0,
+            pulse_window_start: Instant::now(),
+            pulse_delayed_events: 0,
+            pulse_delay_ms_total: 0,
+            pulse_delay_ms_max: 0,
         }
     }
 }
@@ -75,7 +109,6 @@ impl TokenBucket {
             tokens: capacity, // Start full
             refill_rate,
             last_refill: Instant::now(),
-            was_exhausted: false,
         }
     }
 
@@ -139,26 +172,6 @@ impl TokenBucket {
         self.refill();
         self.tokens
     }
-
-    /// Check if we've crossed the exhaustion threshold (< 10% capacity)
-    fn is_exhausted(&self) -> bool {
-        self.tokens < self.capacity * 0.1
-    }
-
-    /// Check if we've crossed a threshold and should emit control event
-    fn check_threshold_crossed(&mut self) -> Option<(&'static str, &'static str)> {
-        let exhausted = self.is_exhausted();
-
-        if exhausted && !self.was_exhausted {
-            self.was_exhausted = true;
-            Some(("normal", "exhausted"))
-        } else if !exhausted && self.was_exhausted {
-            self.was_exhausted = false;
-            Some(("exhausted", "normal"))
-        } else {
-            None
-        }
-    }
 }
 
 /// Rate limiting middleware using token bucket algorithm with blocking
@@ -166,6 +179,7 @@ pub struct RateLimiterMiddleware {
     bucket: Arc<Mutex<TokenBucket>>,
     /// Cost per event (default 1.0)
     cost_per_event: f64,
+    limit_rate: f64,
     /// Statistics for periodic summaries
     stats: Arc<Mutex<RateLimiterStats>>,
     /// Writer identity used for durable observability/control events.
@@ -197,6 +211,12 @@ impl RateLimiterMiddleware {
 
         let stats = Arc::new(Mutex::new(RateLimiterStats::default()));
         let bucket = Arc::new(Mutex::new(bucket));
+
+        let limit_rate = if cost_per_event > 0.0 {
+            events_per_second / cost_per_event
+        } else {
+            0.0
+        };
 
         let snapshotter: std::sync::Arc<RateLimiterSnapshotter> = Arc::new({
             let stats = stats.clone();
@@ -231,9 +251,45 @@ impl RateLimiterMiddleware {
         Self {
             bucket,
             cost_per_event,
+            limit_rate,
             stats,
             writer_id: WriterId::from(stage_id),
         }
+    }
+
+    fn maybe_emit_activity_pulse(&self, ctx: &mut MiddlewareContext) {
+        let mut stats = self.stats.lock().unwrap();
+        let now = Instant::now();
+        let elapsed = now.duration_since(stats.pulse_window_start);
+        if elapsed < ACTIVITY_PULSE_WINDOW {
+            return;
+        }
+
+        let delayed_events = stats.pulse_delayed_events;
+        let delay_ms_total = stats.pulse_delay_ms_total;
+        let delay_ms_max = stats.pulse_delay_ms_max;
+
+        stats.pulse_delayed_events = 0;
+        stats.pulse_delay_ms_total = 0;
+        stats.pulse_delay_ms_max = 0;
+        stats.pulse_window_start = now;
+
+        if delayed_events == 0 {
+            return;
+        }
+
+        ctx.write_control_event(ChainEventFactory::observability_event(
+            self.writer_id,
+            ObservabilityPayload::Middleware(MiddlewareLifecycle::RateLimiter(
+                RateLimiterEvent::ActivityPulse {
+                    window_ms: ACTIVITY_PULSE_WINDOW_MS,
+                    delayed_events,
+                    delay_ms_total,
+                    delay_ms_max,
+                    limit_rate: self.limit_rate,
+                },
+            )),
+        ));
     }
 
     /// Check if we should emit a summary and do so if needed
@@ -252,32 +308,79 @@ impl RateLimiterMiddleware {
             stats.last_summary.elapsed() >= Duration::from_secs(10) || stats.events_window >= 1000;
 
         if should_emit {
-            let consumption_rate = if stats.last_summary.elapsed().as_secs() > 0 {
-                stats.tokens_consumed_window / stats.last_summary.elapsed().as_secs_f64()
+            let window_duration = stats.last_summary.elapsed();
+            let elapsed_s = window_duration.as_secs_f64();
+
+            let consumption_rate_tokens_per_s = if elapsed_s > 0.0 {
+                stats.tokens_consumed_window / elapsed_s
             } else {
                 0.0
             };
 
-            let utilization = 1.0 - (bucket.tokens / bucket.capacity);
+            let utilization_pct = if bucket.refill_rate > 0.0 {
+                (consumption_rate_tokens_per_s / bucket.refill_rate) * 100.0
+            } else {
+                0.0
+            };
 
             info!(
-                window_duration_s = stats.last_summary.elapsed().as_secs(),
+                window_duration_s = window_duration.as_secs(),
                 requests_allowed = stats.events_window,
                 requests_delayed = stats.delayed_window,
                 tokens_consumed = stats.tokens_consumed_window,
-                consumption_rate,
-                utilization_pct = format!("{:.1}%", utilization * 100.0),
+                consumption_rate_tokens_per_s,
+                utilization_pct = format!("{:.1}%", utilization_pct),
                 "Rate limiter summary"
             );
 
             let events_in_window = stats.events_window;
+
+            let mut maybe_mode_change: Option<(RateLimiterMode, RateLimiterMode)> = None;
+            match stats.mode {
+                RateLimiterMode::Normal => {
+                    if utilization_pct >= MODE_ENTER_THRESHOLD_PCT {
+                        let from = stats.mode;
+                        stats.mode = RateLimiterMode::Limiting;
+                        stats.exit_hold_count = 0;
+                        maybe_mode_change = Some((from, stats.mode));
+                    }
+                }
+                RateLimiterMode::Limiting => {
+                    if utilization_pct <= MODE_EXIT_THRESHOLD_PCT {
+                        let next = stats.exit_hold_count.saturating_add(1);
+                        stats.exit_hold_count = next;
+                        let required = MODE_EXIT_HOLD_WINDOWS.max(1);
+                        if next >= required {
+                            let from = stats.mode;
+                            stats.mode = RateLimiterMode::Normal;
+                            stats.exit_hold_count = 0;
+                            maybe_mode_change = Some((from, stats.mode));
+                        }
+                    } else {
+                        stats.exit_hold_count = 0;
+                    }
+                }
+            }
+
+            if let Some((from, to)) = maybe_mode_change {
+                ctx.write_control_event(ChainEventFactory::observability_event(
+                    self.writer_id,
+                    ObservabilityPayload::Middleware(MiddlewareLifecycle::RateLimiter(
+                        RateLimiterEvent::ModeChange {
+                            mode_from: from.as_str().to_string(),
+                            mode_to: to.as_str().to_string(),
+                            limit_rate: self.limit_rate,
+                        },
+                    )),
+                ));
+            }
             let event = ChainEventFactory::observability_event(
                 self.writer_id,
                 ObservabilityPayload::Middleware(MiddlewareLifecycle::RateLimiter(
                     RateLimiterEvent::WindowUtilization {
-                        utilization_percent: utilization * 100.0,
+                        utilization_percent: utilization_pct,
                         events_in_window,
-                        window_size_ms: stats.last_summary.elapsed().as_millis() as u64,
+                        window_size_ms: window_duration.as_millis() as u64,
                     },
                 )),
             );
@@ -330,31 +433,6 @@ impl Middleware for RateLimiterMiddleware {
                     "Rate limit passed - processing event immediately"
                 );
 
-                // Check for threshold crossing
-                if let Some((from, to)) = bucket.check_threshold_crossed() {
-                    info!(
-                        from_state = from,
-                        to_state = to,
-                        available_tokens = bucket.tokens,
-                        capacity = bucket.capacity,
-                        "Rate limiter state transition"
-                    );
-
-                    // Emit a window utilization event for state changes
-                    let utilization = 1.0 - (bucket.tokens / bucket.capacity);
-                    let event = ChainEventFactory::observability_event(
-                        self.writer_id,
-                        ObservabilityPayload::Middleware(MiddlewareLifecycle::RateLimiter(
-                            RateLimiterEvent::WindowUtilization {
-                                utilization_percent: utilization * 100.0,
-                                events_in_window: 0, // This is a state transition event
-                                window_size_ms: 1000, // Default window
-                            },
-                        )),
-                    );
-                    ctx.write_control_event(event);
-                }
-
                 // We have tokens, allow the event
                 ctx.emit_event(
                     "rate_limiter",
@@ -391,65 +469,42 @@ impl Middleware for RateLimiterMiddleware {
                 if let Ok(mut stats) = self.stats.lock() {
                     stats.delayed_total += 1;
                     stats.delayed_window += 1;
+                    stats.pulse_delayed_events += 1;
                 }
 
                 // Emit a durable delayed event so downstream observers (e.g. MetricsAggregator)
                 // can count delays without per-execution tracing.
-            let (current_rate, limit_rate) = {
-                let limit_rate = if self.cost_per_event > 0.0 {
-                    bucket.refill_rate / self.cost_per_event
-                } else {
-                    0.0
-                };
-
-                let current_rate = if let Ok(stats) = self.stats.lock() {
-                    let elapsed_s = stats.last_summary.elapsed().as_secs_f64();
-                    if elapsed_s > 0.0 && self.cost_per_event > 0.0 {
-                        (stats.tokens_consumed_window / elapsed_s) / self.cost_per_event
+                let (current_rate, limit_rate) = {
+                    let limit_rate = if self.cost_per_event > 0.0 {
+                        bucket.refill_rate / self.cost_per_event
                     } else {
                         0.0
-                    }
-                } else {
-                    0.0
+                    };
+
+                    let current_rate = if let Ok(stats) = self.stats.lock() {
+                        let elapsed_s = stats.last_summary.elapsed().as_secs_f64();
+                        if elapsed_s > 0.0 && self.cost_per_event > 0.0 {
+                            (stats.tokens_consumed_window / elapsed_s) / self.cost_per_event
+                        } else {
+                            0.0
+                        }
+                    } else {
+                        0.0
+                    };
+
+                    (current_rate, limit_rate)
                 };
 
-                (current_rate, limit_rate)
-            };
-
-            ctx.write_control_event(ChainEventFactory::observability_event(
-                self.writer_id,
-                ObservabilityPayload::Middleware(MiddlewareLifecycle::RateLimiter(
-                    RateLimiterEvent::Delayed {
-                        delay_ms: wait_time.as_millis() as u64,
-                        current_rate,
-                        limit_rate,
-                    },
-                )),
-            ));
-            }
-
-            // Check for threshold crossing
-            if let Some((from, to)) = bucket.check_threshold_crossed() {
-                info!(
-                    from_state = from,
-                    to_state = to,
-                    available_tokens = bucket.tokens,
-                    capacity = bucket.capacity,
-                    "Rate limiter state transition (exhausted)"
-                );
-
-                // Emit a window utilization event when exhausted
-                let event = ChainEventFactory::observability_event(
+                ctx.write_control_event(ChainEventFactory::observability_event(
                     self.writer_id,
                     ObservabilityPayload::Middleware(MiddlewareLifecycle::RateLimiter(
-                        RateLimiterEvent::WindowUtilization {
-                            utilization_percent: 100.0, // Exhausted = 100% utilized
-                            events_in_window: 0,        // This is a state transition event
-                            window_size_ms: 1000,       // Default window
+                        RateLimiterEvent::Delayed {
+                            delay_ms: wait_time.as_millis() as u64,
+                            current_rate,
+                            limit_rate,
                         },
                     )),
-                );
-                ctx.write_control_event(event);
+                ));
             }
 
             ctx.emit_event(
@@ -482,6 +537,10 @@ impl Middleware for RateLimiterMiddleware {
             if delayed_this_event {
                 if let Ok(mut stats) = self.stats.lock() {
                     stats.delay_seconds_total += waited.as_secs_f64();
+                    let waited_ms = waited.as_millis() as u64;
+                    stats.pulse_delay_ms_total =
+                        stats.pulse_delay_ms_total.saturating_add(waited_ms);
+                    stats.pulse_delay_ms_max = stats.pulse_delay_ms_max.max(waited_ms);
                 }
             }
 
@@ -501,6 +560,7 @@ impl Middleware for RateLimiterMiddleware {
         _outputs: &[ChainEvent],
         ctx: &mut MiddlewareContext,
     ) {
+        self.maybe_emit_activity_pulse(ctx);
         // Check if we should emit a summary
         self.maybe_emit_summary(ctx);
     }
@@ -610,6 +670,7 @@ pub fn rate_limit_with_burst(events_per_second: f64, burst: f64) -> Box<dyn Midd
 mod tests {
     use super::*;
     use crate::middleware::control::ControlMiddlewareAggregator;
+    use obzenflow_core::event::chain_event::ChainEventContent;
     use obzenflow_core::event::{ChainEventFactory, EventId, WriterId};
 
     #[test]
@@ -742,5 +803,152 @@ mod tests {
             "Expected windowing strategy for rate limiter"
         );
         // Can't easily test the window duration without exposing internals
+    }
+
+    #[test]
+    fn test_rate_limiter_mode_hysteresis_transitions() {
+        let middleware = RateLimiterMiddleware::new(
+            StageId::new(),
+            100.0,
+            Some(1000.0),
+            1.0,
+            Arc::new(ControlMiddlewareAggregator::new()),
+        );
+
+        // ---- Window 1: utilization 120% -> Normal -> Limiting ----
+        {
+            let mut stats = middleware.stats.lock().unwrap();
+            stats.events_window = 1200;
+            stats.tokens_consumed_window = 1200.0;
+            stats.last_summary = Instant::now() - Duration::from_secs(10);
+        }
+
+        let mut ctx = MiddlewareContext::new();
+        middleware.maybe_emit_summary(&mut ctx);
+        assert_eq!(ctx.control_events.len(), 2);
+
+        match &ctx.control_events[0].content {
+            ChainEventContent::Observability(ObservabilityPayload::Middleware(
+                MiddlewareLifecycle::RateLimiter(RateLimiterEvent::ModeChange {
+                    mode_from,
+                    mode_to,
+                    limit_rate,
+                }),
+            )) => {
+                assert_eq!(mode_from, "normal");
+                assert_eq!(mode_to, "limiting");
+                assert!((limit_rate - 100.0).abs() < 1e-6);
+            }
+            other => panic!("Expected mode change event, got {:?}", other),
+        }
+
+        match &ctx.control_events[1].content {
+            ChainEventContent::Observability(ObservabilityPayload::Middleware(
+                MiddlewareLifecycle::RateLimiter(RateLimiterEvent::WindowUtilization {
+                    utilization_percent,
+                    events_in_window,
+                    window_size_ms,
+                }),
+            )) => {
+                assert!((utilization_percent - 120.0).abs() < 0.1);
+                assert_eq!(*events_in_window, 1200);
+                assert!(*window_size_ms >= 10_000);
+            }
+            other => panic!("Expected window utilization event, got {:?}", other),
+        }
+
+        // ---- Window 2: utilization 70% -> Limiting (hold=1) ----
+        {
+            let mut stats = middleware.stats.lock().unwrap();
+            stats.events_window = 700;
+            stats.tokens_consumed_window = 700.0;
+            stats.last_summary = Instant::now() - Duration::from_secs(10);
+        }
+
+        let mut ctx = MiddlewareContext::new();
+        middleware.maybe_emit_summary(&mut ctx);
+        assert_eq!(ctx.control_events.len(), 1);
+        match &ctx.control_events[0].content {
+            ChainEventContent::Observability(ObservabilityPayload::Middleware(
+                MiddlewareLifecycle::RateLimiter(RateLimiterEvent::WindowUtilization { .. }),
+            )) => {}
+            other => panic!("Expected window utilization event, got {:?}", other),
+        }
+
+        // ---- Window 3: utilization 70% -> Limiting -> Normal (hold=2) ----
+        {
+            let mut stats = middleware.stats.lock().unwrap();
+            stats.events_window = 700;
+            stats.tokens_consumed_window = 700.0;
+            stats.last_summary = Instant::now() - Duration::from_secs(10);
+        }
+
+        let mut ctx = MiddlewareContext::new();
+        middleware.maybe_emit_summary(&mut ctx);
+        assert_eq!(ctx.control_events.len(), 2);
+        match &ctx.control_events[0].content {
+            ChainEventContent::Observability(ObservabilityPayload::Middleware(
+                MiddlewareLifecycle::RateLimiter(RateLimiterEvent::ModeChange {
+                    mode_from,
+                    mode_to,
+                    ..
+                }),
+            )) => {
+                assert_eq!(mode_from, "limiting");
+                assert_eq!(mode_to, "normal");
+            }
+            other => panic!("Expected mode change event, got {:?}", other),
+        }
+
+        let stats = middleware.stats.lock().unwrap();
+        assert_eq!(stats.mode, RateLimiterMode::Normal);
+        assert_eq!(stats.exit_hold_count, 0);
+    }
+
+    #[test]
+    fn test_rate_limiter_activity_pulse_emission() {
+        let middleware = RateLimiterMiddleware::new(
+            StageId::new(),
+            5.0,
+            Some(10.0),
+            1.0,
+            Arc::new(ControlMiddlewareAggregator::new()),
+        );
+
+        {
+            let mut stats = middleware.stats.lock().unwrap();
+            stats.pulse_window_start = Instant::now() - Duration::from_secs(1);
+            stats.pulse_delayed_events = 3;
+            stats.pulse_delay_ms_total = 450;
+            stats.pulse_delay_ms_max = 200;
+        }
+
+        let mut ctx = MiddlewareContext::new();
+        middleware.maybe_emit_activity_pulse(&mut ctx);
+        assert_eq!(ctx.control_events.len(), 1);
+
+        match &ctx.control_events[0].content {
+            ChainEventContent::Observability(ObservabilityPayload::Middleware(
+                MiddlewareLifecycle::RateLimiter(RateLimiterEvent::ActivityPulse {
+                    window_ms,
+                    delayed_events,
+                    delay_ms_total,
+                    delay_ms_max,
+                    limit_rate,
+                }),
+            )) => {
+                assert_eq!(*window_ms, ACTIVITY_PULSE_WINDOW_MS);
+                assert_eq!(*delayed_events, 3);
+                assert_eq!(*delay_ms_total, 450);
+                assert_eq!(*delay_ms_max, 200);
+                assert!((limit_rate - 5.0).abs() < 1e-6);
+            }
+            other => panic!("Expected activity pulse event, got {:?}", other),
+        }
+
+        let stats = middleware.stats.lock().unwrap();
+        assert_eq!(stats.pulse_delayed_events, 0);
+        assert_eq!(stats.pulse_delay_ms_total, 0);
+        assert_eq!(stats.pulse_delay_ms_max, 0);
     }
 }

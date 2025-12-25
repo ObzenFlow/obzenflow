@@ -170,9 +170,49 @@ impl FlowHandle {
 
         // Save metrics exporter before consuming self
         let metrics = self.metrics_exporter.clone();
+        let system_journal = self.system_journal.clone();
 
         // Now wait for it to complete
         self.wait_for_completion().await?;
+
+        // Best-effort: wait for the metrics subsystem to complete its final export.
+        //
+        // Many tests (and UI clients) assume `/metrics` becomes accurate shortly after
+        // pipeline completion; in practice, the metrics aggregator may still be draining.
+        // We use the system journal's MetricsCoordination events as a synchronization point.
+        if let Some(journal) = system_journal {
+            use obzenflow_core::event::system_event::MetricsCoordinationEvent;
+            use obzenflow_core::event::SystemEventType;
+            use std::time::Duration;
+
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            while std::time::Instant::now() < deadline {
+                match journal.read_last_n(256).await {
+                    Ok(events) => {
+                        let drained = events.iter().any(|envelope| {
+                            matches!(
+                                envelope.event.event,
+                                SystemEventType::MetricsCoordination(
+                                    MetricsCoordinationEvent::Drained | MetricsCoordinationEvent::Shutdown
+                                )
+                            )
+                        });
+                        if drained {
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            journal_error = %e,
+                            "Failed to read system journal while waiting for metrics drain"
+                        );
+                        break;
+                    }
+                }
+
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }
 
         Ok(metrics)
     }

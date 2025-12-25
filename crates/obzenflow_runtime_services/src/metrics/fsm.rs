@@ -179,6 +179,13 @@ pub struct MetricsStore {
     /// Tracks the highest writer sequence observed for each stage's journal writer.
     pub stage_vector_clocks: HashMap<StageId, u64>,
 
+    /// Per-system vector clock watermark (FLOWIP-059c).
+    ///
+    /// Tracks the highest writer sequence observed for each system writer in the system journal.
+    /// We intentionally track only `WriterId::System` clocks to avoid confusing stage-journal
+    /// freshness with system-journal stage lifecycle events (separate clock domains).
+    pub system_vector_clocks: HashMap<SystemId, u64>,
+
     // Middleware observability accumulation (FLOWIP-059a)
     pub circuit_breaker_state: HashMap<StageId, f64>,
     pub circuit_breaker_rejection_rate: HashMap<StageId, f64>,
@@ -245,6 +252,7 @@ impl Default for MetricsStore {
             last_event_time: None,
             total_events_processed: 0,
             stage_vector_clocks: HashMap::new(),
+            system_vector_clocks: HashMap::new(),
             circuit_breaker_state: HashMap::new(),
             circuit_breaker_rejection_rate: HashMap::new(),
             circuit_breaker_consecutive_failures: HashMap::new(),
@@ -1107,6 +1115,15 @@ impl FsmAction for MetricsAggregatorAction {
                 // FLOWIP-059b: Process system journal events for lifecycle tracking
                 let store = &mut ctx.metrics_store;
 
+                // FLOWIP-059c: Track system-writer vector clocks so `metrics_watermark` can cover
+                // system-originated metrics (pipeline + metrics writers) in addition to stage journals.
+                if let Some(system_id) = envelope.event.writer_id.as_system() {
+                    let writer_key = envelope.event.writer_id.to_string();
+                    let seq = envelope.vector_clock.get(&writer_key);
+                    let entry = store.system_vector_clocks.entry(*system_id).or_insert(0);
+                    *entry = (*entry).max(seq);
+                }
+
                 match &envelope.event.event {
                     obzenflow_core::event::SystemEventType::StageLifecycle { stage_id, event } => {
                         // Track ALL states each stage has been in (never overwrite)
@@ -1582,6 +1599,33 @@ impl FsmAction for MetricsAggregatorAction {
                         tracing::info!("Successfully exported metrics");
                     }
                 }
+
+                // FLOWIP-059c: Emit a metrics watermark event so SSE clients can "pull-on-push"
+                // for `/metrics` refresh and deterministic freshness gating.
+                let mut clocks: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+                for (stage_id, seq) in &ctx.metrics_store.stage_vector_clocks {
+                    clocks.insert(WriterId::from(*stage_id).to_string(), *seq);
+                }
+                for (system_id, seq) in &ctx.metrics_store.system_vector_clocks {
+                    clocks.insert(WriterId::from(*system_id).to_string(), *seq);
+                }
+
+                let export_event = obzenflow_core::event::SystemEvent::new(
+                    WriterId::from(ctx.system_id),
+                    obzenflow_core::event::SystemEventType::MetricsCoordination(
+                        obzenflow_core::event::MetricsCoordinationEvent::Exported {
+                            watermark: obzenflow_core::event::vector_clock::VectorClock { clocks },
+                        },
+                    ),
+                );
+
+                if let Err(e) = ctx.system_journal.append(export_event, None).await {
+                    tracing::warn!(
+                        journal_error = %e,
+                        "Failed to publish metrics watermark event; continuing without system journal entry"
+                    );
+                }
+
                 Ok(())
             }
 
@@ -1672,7 +1716,7 @@ pub fn build_metrics_aggregator_fsm() -> MetricsAggregatorFsm {
             };
         }
 
-        state MetricsAggregatorState::Running {
+	        state MetricsAggregatorState::Running {
             on MetricsAggregatorEvent::StartDraining => |_state: &MetricsAggregatorState, _event: &MetricsAggregatorEvent, _ctx: &mut MetricsAggregatorContext| {
                 Box::pin(async move {
                     Ok(Transition {
@@ -1682,37 +1726,75 @@ pub fn build_metrics_aggregator_fsm() -> MetricsAggregatorFsm {
                 })
             };
 
-            on MetricsAggregatorEvent::ProcessSystemEvent => |_state: &MetricsAggregatorState, event: &MetricsAggregatorEvent, _ctx: &mut MetricsAggregatorContext| {
-                let event = event.clone();
-                Box::pin(async move {
-                    match event {
-                        MetricsAggregatorEvent::ProcessSystemEvent { envelope } => {
-                            let should_drain = matches!(
-                                envelope.event.event,
-                                obzenflow_core::event::SystemEventType::PipelineLifecycle(
-                                    obzenflow_core::event::PipelineLifecycleEvent::Draining { .. }
-                                        | obzenflow_core::event::PipelineLifecycleEvent::AllStagesCompleted { .. }
-                                        | obzenflow_core::event::PipelineLifecycleEvent::Drained
-                                        | obzenflow_core::event::PipelineLifecycleEvent::Completed { .. }
-                                        | obzenflow_core::event::PipelineLifecycleEvent::Failed { .. }
-                                )
-                            );
+	            on MetricsAggregatorEvent::ProcessSystemEvent => |_state: &MetricsAggregatorState, event: &MetricsAggregatorEvent, ctx: &mut MetricsAggregatorContext| {
+	                let event = event.clone();
+	                let last_event_id = ctx.metrics_store.last_event_id.clone();
+	                Box::pin(async move {
+	                    match event {
+	                        MetricsAggregatorEvent::ProcessSystemEvent { envelope } => {
+	                            let pipeline_event = match &envelope.event.event {
+	                                obzenflow_core::event::SystemEventType::PipelineLifecycle(event) => {
+	                                    Some(event)
+	                                }
+	                                _ => None,
+	                            };
 
-                            Ok(Transition {
-                                next_state: if should_drain {
-                                    MetricsAggregatorState::Draining
-                                } else {
-                                    MetricsAggregatorState::Running
-                                },
-                                actions: vec![MetricsAggregatorAction::ProcessSystemEvent {
-                                    envelope: envelope.clone(),
-                                }],
-                            })
-                        }
-                        _ => Err(obzenflow_fsm::FsmError::HandlerError(
-                            "Invalid event for ProcessSystemEvent handler".to_string(),
-                        )),
-                    }
+	                            let should_drain = matches!(
+	                                pipeline_event,
+	                                Some(
+	                                    obzenflow_core::event::PipelineLifecycleEvent::Draining { .. }
+	                                        | obzenflow_core::event::PipelineLifecycleEvent::AllStagesCompleted { .. }
+	                                )
+	                            );
+
+	                            let should_finalize = matches!(
+	                                pipeline_event,
+	                                Some(
+	                                    obzenflow_core::event::PipelineLifecycleEvent::Completed { .. }
+	                                        | obzenflow_core::event::PipelineLifecycleEvent::Failed { .. }
+	                                        | obzenflow_core::event::PipelineLifecycleEvent::Drained
+	                                )
+	                            );
+
+	                            if should_finalize {
+	                                let publish_last_event_id = last_event_id.clone();
+	                                return Ok(Transition {
+	                                    next_state: MetricsAggregatorState::Drained { last_event_id },
+	                                    actions: vec![
+	                                        MetricsAggregatorAction::ProcessSystemEvent {
+	                                            envelope: envelope.clone(),
+	                                        },
+	                                        MetricsAggregatorAction::ExportMetrics,
+	                                        MetricsAggregatorAction::PublishDrainComplete {
+	                                            last_event_id: publish_last_event_id,
+	                                        },
+	                                    ],
+	                                });
+	                            }
+
+	                            if should_drain {
+	                                return Ok(Transition {
+	                                    next_state: MetricsAggregatorState::Draining,
+	                                    actions: vec![
+	                                        MetricsAggregatorAction::ProcessSystemEvent {
+	                                            envelope: envelope.clone(),
+	                                        },
+	                                        MetricsAggregatorAction::ExportMetrics,
+	                                    ],
+	                                });
+	                            }
+
+	                            Ok(Transition {
+	                                next_state: MetricsAggregatorState::Running,
+	                                actions: vec![MetricsAggregatorAction::ProcessSystemEvent {
+	                                    envelope: envelope.clone(),
+	                                }],
+	                            })
+	                        }
+	                        _ => Err(obzenflow_fsm::FsmError::HandlerError(
+	                            "Invalid event for ProcessSystemEvent handler".to_string(),
+	                        )),
+	                    }
                 })
             };
 
@@ -1765,7 +1847,7 @@ pub fn build_metrics_aggregator_fsm() -> MetricsAggregatorFsm {
             };
         }
 
-        state MetricsAggregatorState::Draining {
+	        state MetricsAggregatorState::Draining {
             on MetricsAggregatorEvent::FlowTerminal => |_state: &MetricsAggregatorState, _event: &MetricsAggregatorEvent, ctx: &mut MetricsAggregatorContext| {
                 Box::pin(async move {
                     let last_event_id = ctx.metrics_store.last_event_id.clone();
@@ -1782,20 +1864,68 @@ pub fn build_metrics_aggregator_fsm() -> MetricsAggregatorFsm {
                 })
             };
 
-            on MetricsAggregatorEvent::ProcessSystemEvent => |_state: &MetricsAggregatorState, event: &MetricsAggregatorEvent, _ctx: &mut MetricsAggregatorContext| {
-                let event = event.clone();
-                Box::pin(async move {
-                    match event {
-                        MetricsAggregatorEvent::ProcessSystemEvent { envelope } => Ok(Transition {
-                            next_state: MetricsAggregatorState::Draining,
-                            actions: vec![MetricsAggregatorAction::ProcessSystemEvent {
-                                envelope: envelope.clone(),
-                            }],
-                        }),
-                        _ => Err(obzenflow_fsm::FsmError::HandlerError(
-                            "Invalid event for ProcessSystemEvent handler in Draining".to_string(),
-                        )),
-                    }
+	            on MetricsAggregatorEvent::ProcessSystemEvent => |_state: &MetricsAggregatorState, event: &MetricsAggregatorEvent, ctx: &mut MetricsAggregatorContext| {
+	                let event = event.clone();
+	                let last_event_id = ctx.metrics_store.last_event_id.clone();
+	                Box::pin(async move {
+	                    match event {
+	                        MetricsAggregatorEvent::ProcessSystemEvent { envelope } => {
+	                            let pipeline_event = match &envelope.event.event {
+	                                obzenflow_core::event::SystemEventType::PipelineLifecycle(event) => {
+	                                    Some(event)
+	                                }
+	                                _ => None,
+	                            };
+
+	                            let should_export = matches!(
+	                                pipeline_event,
+	                                Some(
+	                                    obzenflow_core::event::PipelineLifecycleEvent::Draining { .. }
+	                                        | obzenflow_core::event::PipelineLifecycleEvent::AllStagesCompleted { .. }
+	                                )
+	                            );
+
+	                            let should_finalize = matches!(
+	                                pipeline_event,
+	                                Some(
+	                                    obzenflow_core::event::PipelineLifecycleEvent::Completed { .. }
+	                                        | obzenflow_core::event::PipelineLifecycleEvent::Failed { .. }
+	                                        | obzenflow_core::event::PipelineLifecycleEvent::Drained
+	                                )
+	                            );
+
+	                            if should_finalize {
+	                                let publish_last_event_id = last_event_id.clone();
+	                                return Ok(Transition {
+	                                    next_state: MetricsAggregatorState::Drained { last_event_id },
+	                                    actions: vec![
+	                                        MetricsAggregatorAction::ProcessSystemEvent {
+	                                            envelope: envelope.clone(),
+	                                        },
+	                                        MetricsAggregatorAction::ExportMetrics,
+	                                        MetricsAggregatorAction::PublishDrainComplete {
+	                                            last_event_id: publish_last_event_id,
+	                                        },
+	                                    ],
+	                                });
+	                            }
+
+	                            let mut actions = vec![MetricsAggregatorAction::ProcessSystemEvent {
+	                                envelope: envelope.clone(),
+	                            }];
+	                            if should_export {
+	                                actions.push(MetricsAggregatorAction::ExportMetrics);
+	                            }
+
+	                            Ok(Transition {
+	                                next_state: MetricsAggregatorState::Draining,
+	                                actions,
+	                            })
+	                        }
+	                        _ => Err(obzenflow_fsm::FsmError::HandlerError(
+	                            "Invalid event for ProcessSystemEvent handler in Draining".to_string(),
+	                        )),
+	                    }
                 })
             };
 

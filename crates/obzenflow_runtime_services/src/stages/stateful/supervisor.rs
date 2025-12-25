@@ -789,10 +789,16 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                                 }
                             }
 
-                            ctx.data_journal
+                            let written = ctx
+                                .data_journal
                                 .append(enriched_event, parent.as_ref())
                                 .await
                                 .map_err(|e| format!("Failed to write aggregated event: {}", e))?;
+                            crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
+                                &written,
+                                &self.system_journal,
+                            )
+                            .await;
                         }
 
                         tracing::debug!(
@@ -939,7 +945,8 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                                                         subscription.track_output_event();
                                                     }
 
-                                                    ctx.data_journal
+                                                    let written = ctx
+                                                        .data_journal
                                                         .append(enriched_event, None)
                                                         .await
                                                         .map_err(|e| {
@@ -948,6 +955,11 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                                                                 e
                                                             )
                                                         })?;
+                                                    crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
+                                                        &written,
+                                                        &self.system_journal,
+                                                    )
+                                                    .await;
                                                 }
                                             }
                                         }
@@ -1193,12 +1205,18 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                                         sub.track_output_event();
                                     }
                                 }
-                                ctx.data_journal
+                                let written = ctx
+                                    .data_journal
                                     .append(enriched_event, parent.as_ref())
                                     .await
                                     .map_err(|e| {
                                         format!("Failed to write final aggregated event: {}", e)
                                     })?;
+                                crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
+                                    &written,
+                                    &self.system_journal,
+                                )
+                                .await;
                             }
 
                             tracing::info!(

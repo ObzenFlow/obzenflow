@@ -422,10 +422,18 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> H
                                 let enriched_event_to_write = event_to_write.with_runtime_context(
                                     self.context.instrumentation.snapshot_with_control(),
                                 );
-                                journal
+                                let written = journal
                                     .append(enriched_event_to_write, None)
                                     .await
                                     .map_err(|e| format!("Failed to write event: {}", e))?;
+
+                                if Arc::ptr_eq(journal, &self.context.data_journal) {
+                                    crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
+                                        &written,
+                                        &self.system_journal,
+                                    )
+                                    .await;
+                                }
                             }
                         }
 

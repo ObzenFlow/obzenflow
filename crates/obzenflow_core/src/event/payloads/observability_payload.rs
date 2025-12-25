@@ -168,6 +168,18 @@ pub enum RateLimiterEvent {
         current_rate: f64,
         limit_rate: f64,
     },
+    ActivityPulse {
+        window_ms: u64,
+        delayed_events: u64,
+        delay_ms_total: u64,
+        delay_ms_max: u64,
+        limit_rate: f64,
+    },
+    ModeChange {
+        mode_from: String,
+        mode_to: String,
+        limit_rate: f64,
+    },
     WindowUtilization {
         utilization_percent: f64,
         events_in_window: u64,

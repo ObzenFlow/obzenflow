@@ -1,9 +1,18 @@
 //! System orchestration events (written to control journal)
 
 use crate::event::types::{EventId, WriterId};
+use crate::event::vector_clock::VectorClock;
+use crate::event::payloads::observability_payload::MiddlewareLifecycle;
 use crate::id::{StageId, SystemId};
 use crate::metrics::{FlowLifecycleMetricsSnapshot, StageMetricsSnapshot};
 use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MiddlewareEventOrigin {
+    pub event_id: EventId,
+    pub writer_key: String,
+    pub seq: u64,
+}
 
 /// System orchestration event with metadata (written to control journal)
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -41,6 +50,24 @@ pub enum SystemEventType {
     /// Metrics subsystem coordination
     #[serde(rename = "metrics_coordination")]
     MetricsCoordination(MetricsCoordinationEvent),
+
+    /// Middleware lifecycle events mirrored into `system.log` (FLOWIP-059c).
+    ///
+    /// Middleware observability originates in stage journals via middleware control events.
+    /// `/api/flow/events` is backed by `system.log`, so we mirror selected low-volume middleware
+    /// events here for SSE consumption.
+    #[serde(rename = "middleware_lifecycle")]
+    MiddlewareLifecycle {
+        stage_id: StageId,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        stage_name: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        flow_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        flow_name: Option<String>,
+        origin: MiddlewareEventOrigin,
+        middleware: MiddlewareLifecycle,
+    },
 
     /// Contract status reported by a reader/subscriber (per upstream)
     #[serde(rename = "contract_status")]
@@ -148,6 +175,7 @@ pub enum MetricsCoordinationEvent {
     DrainRequested,
     Drained,
     Shutdown,
+    Exported { watermark: VectorClock },
 }
 
 impl SystemEvent {
@@ -489,7 +517,9 @@ impl JournalEvent for SystemEvent {
                 MetricsCoordinationEvent::DrainRequested => "system.metrics.drain_requested",
                 MetricsCoordinationEvent::Drained => "system.metrics.drained",
                 MetricsCoordinationEvent::Shutdown => "system.metrics.shutdown",
+                MetricsCoordinationEvent::Exported { .. } => "system.metrics.exported",
             },
+            SystemEventType::MiddlewareLifecycle { .. } => "system.middleware.lifecycle",
             SystemEventType::ContractStatus { pass, .. } => {
                 if *pass {
                     "system.contract.pass"

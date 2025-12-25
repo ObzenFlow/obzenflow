@@ -696,9 +696,15 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                                 ctx.instrumentation
                                                     .snapshot_with_control(),
                                             );
-                                            ctx.data_journal
+                                            let written = ctx
+                                                .data_journal
                                                 .append(delivery_event, Some(&envelope))
                                                 .await?;
+                                            crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
+                                                &written,
+                                                &self.system_journal,
+                                            )
+                                            .await;
 
                                             // If the handler returned a per-record error, surface it
                                             // as an error-marked event routed by ErrorKind policy.
@@ -828,12 +834,18 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                                 ctx.instrumentation
                                                     .snapshot_with_control(),
                                             );
-                                            ctx.data_journal
+                                            let written = ctx
+                                                .data_journal
                                                 .append(fail_event, Some(&envelope))
                                                 .await
                                                 .map_err(|je| {
                                                     format!("Failed to journal sink failure: {je}")
                                                 })?;
+                                            crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
+                                                &written,
+                                                &self.system_journal,
+                                            )
+                                            .await;
 
                                             directive =
                                                 Err(format!("Sink consume failed: {e}").into());

@@ -483,9 +483,15 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                     match action {
                                         ControlEventAction::Forward => {
                                             // Always forward control events downstream
-                                            self.data_journal
+                                            let written = self
+                                                .data_journal
                                                 .append(envelope.event.clone(), None)
                                                 .await?;
+                                            crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
+                                                &written,
+                                                &self.system_journal,
+                                            )
+                                            .await;
 
                                             if matches!(signal, FlowControlPayload::Eof { .. }) {
                                                 // FLOWIP-080p: use EofOutcome to decide when the
@@ -776,9 +782,15 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                     match action {
                                         ControlEventAction::Forward => {
                                             // Always forward control events downstream
-                                            self.data_journal
+                                            let written = self
+                                                .data_journal
                                                 .append(envelope.event.clone(), None)
                                                 .await?;
+                                            crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
+                                                &written,
+                                                &self.system_journal,
+                                            )
+                                            .await;
 
                                             // Use EofOutcome from the stream subscription to decide
                                             // when the join can move to Draining.
@@ -894,7 +906,13 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                                     // Track output for contract verification
                                                     subscription.track_output_event();
                                                 }
-                                                self.data_journal.append(event, None).await?;
+                                                let written =
+                                                    self.data_journal.append(event, None).await?;
+                                                crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
+                                                    &written,
+                                                    &self.system_journal,
+                                                )
+                                                .await;
                                             }
 
                                             directive = Ok(EventLoopDirective::Continue);
@@ -957,7 +975,15 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                                         .record_output_event(&error_event);
                                                     subscription.track_output_event();
                                                 }
-                                                self.data_journal.append(error_event, None).await?;
+                                                let written = self
+                                                    .data_journal
+                                                    .append(error_event, None)
+                                                    .await?;
+                                                crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
+                                                    &written,
+                                                    &self.system_journal,
+                                                )
+                                                .await;
                                             }
 
                                             directive = Ok(EventLoopDirective::Continue);
@@ -1131,7 +1157,13 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                                 // Track output for contract verification
                                                 subscription.track_output_event();
                                             }
-                                            self.data_journal.append(event, None).await?;
+                                            let written =
+                                                self.data_journal.append(event, None).await?;
+                                            crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
+                                                &written,
+                                                &self.system_journal,
+                                            )
+                                            .await;
                                         }
                                     }
                                     Err(err) => {
@@ -1155,9 +1187,15 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                     event_type = envelope.event.event_type(),
                                     "Forwarding reference control event during join draining"
                                 );
-                                self.data_journal
+                                let written = self
+                                    .data_journal
                                     .append(envelope.event.clone(), None)
                                     .await?;
+                                crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
+                                    &written,
+                                    &self.system_journal,
+                                )
+                                .await;
                             }
 
                             // Continue draining on next iteration; don't call handler.drain yet
@@ -1277,7 +1315,13 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                                 // Track output for contract verification
                                                 subscription.track_output_event();
                                             }
-                                            self.data_journal.append(event, None).await?;
+                                            let written =
+                                                self.data_journal.append(event, None).await?;
+                                            crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
+                                                &written,
+                                                &self.system_journal,
+                                            )
+                                            .await;
                                         }
                                     }
                                     Err(err) => {
@@ -1332,7 +1376,15 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                                     .record_output_event(&error_event);
                                                 subscription.track_output_event();
                                             }
-                                            self.data_journal.append(error_event, None).await?;
+                                            let written = self
+                                                .data_journal
+                                                .append(error_event, None)
+                                                .await?;
+                                            crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
+                                                &written,
+                                                &self.system_journal,
+                                            )
+                                            .await;
                                         }
                                     }
                                 }
@@ -1358,7 +1410,13 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                 });
                                 forward_event.runtime_context = None;
 
-                                self.data_journal.append(forward_event, None).await?;
+                                let written =
+                                    self.data_journal.append(forward_event, None).await?;
+                                crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
+                                    &written,
+                                    &self.system_journal,
+                                )
+                                .await;
                             }
 
                             // Continue draining on next iteration; don't call handler.drain yet
@@ -1426,7 +1484,12 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                             sub.track_output_event();
                         }
                     }
-                    self.data_journal.append(event, None).await?;
+                    let written = self.data_journal.append(event, None).await?;
+                    crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
+                        &written,
+                        &self.system_journal,
+                    )
+                    .await;
                 }
 
                 Ok(EventLoopDirective::Transition(JoinEvent::DrainComplete))
