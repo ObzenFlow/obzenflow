@@ -1,4 +1,4 @@
-//! Core domain layer - pure abstractions with zero dependencies
+//! Core domain layer - pure abstractions with minimal dependencies
 //!
 //! This is the innermost layer of the onion architecture.
 //! Everything here is pure types and traits with no knowledge

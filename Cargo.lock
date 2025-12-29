@@ -1751,6 +1751,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "obzenflow_sketches"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "once_cell"
 version = "1.21.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"

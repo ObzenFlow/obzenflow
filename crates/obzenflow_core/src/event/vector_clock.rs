@@ -4,7 +4,7 @@
 //! The causal ordering logic is implemented separately in domain services.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 /// Vector clock data structure for causal ordering
 ///
@@ -14,14 +14,17 @@ use std::collections::HashMap;
 pub struct VectorClock {
     /// Map from writer ID to sequence number
     /// Using String for writer ID to keep it simple and serializable
-    pub clocks: HashMap<String, u64>,
+    ///
+    /// `BTreeMap` provides deterministic iteration order, which helps keep JSON
+    /// encodings stable for hashing/replay tooling.
+    pub clocks: BTreeMap<String, u64>,
 }
 
 impl VectorClock {
     /// Create an empty vector clock
     pub fn new() -> Self {
         Self {
-            clocks: HashMap::new(),
+            clocks: BTreeMap::new(),
         }
     }
 

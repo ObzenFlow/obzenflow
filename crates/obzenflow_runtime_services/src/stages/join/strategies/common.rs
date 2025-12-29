@@ -12,7 +12,7 @@ use std::marker::PhantomData;
 /// Shared state structure for typed joins
 ///
 /// Uses in-memory HashMap for fast lookups (suitable for <1GB per side).
-/// For larger dimensions (>1GB), see FLOWIP-080m (CatalogStore) and FLOWIP-093 (Materialized Views).
+/// For larger dimensions (>1GB), see FLOWIP-093d (CatalogStore) and FLOWIP-093 (Materialized Views).
 #[derive(Clone, Debug)]
 pub struct TypedJoinState<Ref, Stream, K>
 where
