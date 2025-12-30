@@ -15,14 +15,13 @@ use obzenflow_fsm::{EventVariant, FsmAction, FsmContext, StateVariant};
 use serde::{Deserialize, Serialize};
 use std::marker::PhantomData;
 use std::sync::Arc;
-use tokio::sync::RwLock;
 
 use crate::messaging::upstream_subscription::{ContractConfig, ReaderProgress};
 use crate::messaging::UpstreamSubscription;
 use crate::metrics::instrumentation::{snapshot_stage_metrics, StageInstrumentation};
 use crate::metrics::tail_read;
 use crate::stages::common::control_strategies::ControlEventStrategy;
-use crate::stages::common::handlers::TransformHandler;
+use crate::stages::common::handlers::transform::traits::UnifiedTransformHandler;
 use crate::stages::resources_builder::BoundSubscriptionFactory;
 
 // ============================================================================
@@ -197,6 +196,9 @@ pub enum TransformAction<H> {
     /// Forward EOF event downstream
     ForwardEOF,
 
+    /// Drain the handler after the upstream subscription queue has been drained.
+    DrainHandler,
+
     /// Send completion event to journal
     SendCompletion,
 
@@ -217,6 +219,7 @@ impl<H> Clone for TransformAction<H> {
             Self::AllocateResources => Self::AllocateResources,
             Self::PublishRunning => Self::PublishRunning,
             Self::ForwardEOF => Self::ForwardEOF,
+            Self::DrainHandler => Self::DrainHandler,
             Self::SendCompletion => Self::SendCompletion,
             Self::SendFailure { message } => Self::SendFailure {
                 message: message.clone(),
@@ -233,6 +236,7 @@ impl<H> std::fmt::Debug for TransformAction<H> {
             Self::AllocateResources => write!(f, "AllocateResources"),
             Self::PublishRunning => write!(f, "PublishRunning"),
             Self::ForwardEOF => write!(f, "ForwardEOF"),
+            Self::DrainHandler => write!(f, "DrainHandler"),
             Self::SendCompletion => write!(f, "SendCompletion"),
             Self::SendFailure { message } => write!(f, "SendFailure({:?})", message),
             Self::Cleanup => write!(f, "Cleanup"),
@@ -246,9 +250,9 @@ impl<H> std::fmt::Debug for TransformAction<H> {
 // ============================================================================
 
 /// Context for transform handlers - contains everything actions need
-pub struct TransformContext<H: TransformHandler> {
-    /// The handler instance (stateless, so no RwLock needed)
-    pub handler: Arc<H>,
+pub struct TransformContext<H: UnifiedTransformHandler> {
+    /// The handler instance (owned - allows `drain(&mut self)` without locks)
+    pub handler: H,
 
     /// This transform's stage ID
     pub stage_id: obzenflow_core::StageId,
@@ -296,7 +300,7 @@ pub struct TransformContext<H: TransformHandler> {
     pub upstream_subscription_factory: BoundSubscriptionFactory,
 }
 
-impl<H: TransformHandler> TransformContext<H> {
+impl<H: UnifiedTransformHandler> TransformContext<H> {
     pub fn new(
         handler: H,
         stage_id: obzenflow_core::StageId,
@@ -312,7 +316,7 @@ impl<H: TransformHandler> TransformContext<H> {
         upstream_subscription_factory: BoundSubscriptionFactory,
     ) -> Self {
         Self {
-            handler: Arc::new(handler),
+            handler,
             stage_id,
             stage_name,
             flow_name,
@@ -333,14 +337,14 @@ impl<H: TransformHandler> TransformContext<H> {
     }
 }
 
-impl<H: TransformHandler + 'static> FsmContext for TransformContext<H> {}
+impl<H: UnifiedTransformHandler + 'static> FsmContext for TransformContext<H> {}
 
 // ============================================================================
 // FSM Action Implementation
 // ============================================================================
 
 #[async_trait::async_trait]
-impl<H: TransformHandler + Send + Sync + 'static> FsmAction for TransformAction<H> {
+impl<H: UnifiedTransformHandler + Send + Sync + 'static> FsmAction for TransformAction<H> {
     type Context = TransformContext<H>;
 
     async fn execute(&self, ctx: &mut Self::Context) -> Result<(), obzenflow_fsm::FsmError> {
@@ -398,6 +402,16 @@ impl<H: TransformHandler + Send + Sync + 'static> FsmAction for TransformAction<
                     stage_name = %ctx.stage_name,
                     "Transform published running event"
                 );
+                Ok(())
+            }
+
+            TransformAction::DrainHandler => {
+                let handler = &mut ctx.handler;
+                handler.drain().await.map_err(|e| {
+                    obzenflow_fsm::FsmError::HandlerError(format!(
+                        "Failed to drain transform handler: {e:?}"
+                    ))
+                })?;
                 Ok(())
             }
 

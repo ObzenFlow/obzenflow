@@ -10,11 +10,10 @@ use obzenflow_adapters::middleware::{
     validate_middleware_safety, FiniteSourceHandlerExt, InfiniteSourceHandlerExt,
     JoinHandlerMiddlewareExt, Middleware, MiddlewareFactory, OutcomeEnrichmentMiddleware,
     SinkHandlerExt, StatefulHandlerMiddlewareExt, SystemEnrichmentMiddleware, TimingMiddleware,
-    TransformHandlerExt,
+    TransformHandlerExt, AsyncTransformHandlerExt,
 };
 use obzenflow_core::event::context::StageType;
-use obzenflow_core::journal::journal::Journal;
-use obzenflow_core::{ChainEvent, StageId, WriterId};
+use obzenflow_core::{StageId, WriterId};
 use obzenflow_runtime_services::{
     metrics::instrumentation::{InstrumentationConfig, StageInstrumentation},
     stages::StageResources,
@@ -25,8 +24,8 @@ use obzenflow_runtime_services::{
         common::{
             control_strategies::{CompositeStrategy, ControlEventStrategy, JonestownStrategy},
             handlers::{
-                FiniteSourceHandler, InfiniteSourceHandler, JoinHandler, SinkHandler,
-                StatefulHandler, TransformHandler,
+                AsyncTransformHandler, FiniteSourceHandler, InfiniteSourceHandler, JoinHandler,
+                SinkHandler, StatefulHandler, TransformHandler,
             },
             stage_handle::{BoxedStageHandle, StageEvent},
         },
@@ -45,7 +44,9 @@ use obzenflow_runtime_services::{
             strategies::CircuitBreakerSourceStrategy,
         },
         stateful::{StatefulBuilder, StatefulConfig, StatefulEvent, StatefulState},
-        transform::{TransformBuilder, TransformConfig, TransformEvent, TransformState},
+        transform::{
+            AsyncTransformBuilder, TransformBuilder, TransformConfig, TransformEvent, TransformState,
+        },
     },
     supervised_base::SupervisorBuilder as SupervisorBuilderTrait,
 };
@@ -177,7 +178,7 @@ mod tests {
     use obzenflow_adapters::middleware::control::circuit_breaker::circuit_breaker;
     use obzenflow_core::ControlMiddlewareProvider;
     use obzenflow_core::event::{JournalEvent, SystemEvent};
-    use obzenflow_core::{EventEnvelope, FlowId};
+    use obzenflow_core::{ChainEvent, EventEnvelope, FlowId};
     use obzenflow_runtime_services::message_bus::FsmMessageBus;
     use obzenflow_runtime_services::stages::resources_builder::SubscriptionFactory;
 
@@ -767,6 +768,147 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stag
             .build()
             .await
             .map_err(|e| format!("Failed to build transform: {:?}", e))?;
+
+        // Create adapter to bridge to StageHandle
+        let adapter = StageHandleAdapter::new(
+            handle,
+            config.stage_id,
+            config.name,
+            StageType::Transform,
+            move |event| translate_stage_event_to_transform(event),
+            |state| check_transform_state(state),
+        );
+
+        Ok(Box::new(adapter) as BoxedStageHandle)
+    }
+}
+
+/// Descriptor for async transform stages.
+pub struct AsyncTransformDescriptor<H: AsyncTransformHandler + 'static> {
+    pub name: String,
+    pub handler: H,
+    pub middleware: Vec<Box<dyn MiddlewareFactory>>,
+}
+
+#[async_trait]
+impl<H: AsyncTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDescriptor
+    for AsyncTransformDescriptor<H>
+{
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn stage_type(&self) -> StageType {
+        StageType::Transform
+    }
+
+    fn stage_middleware_names(&self) -> Vec<String> {
+        self.middleware
+            .iter()
+            .map(|f| f.name().to_string())
+            .collect()
+    }
+
+    fn stage_middleware_factories(&self) -> &[Box<dyn MiddlewareFactory>] {
+        &self.middleware
+    }
+
+    async fn create_handle_with_flow_middleware(
+        self: Box<Self>,
+        config: StageConfig,
+        resources: StageResources,
+        flow_middleware: Vec<Box<dyn MiddlewareFactory>>,
+        control_middleware: Arc<ControlMiddlewareAggregator>,
+    ) -> Result<BoxedStageHandle, String> {
+        // Validate middleware safety
+        for factory in &self.middleware {
+            let validation_result =
+                validate_middleware_safety(factory.as_ref(), StageType::Transform, &self.name);
+
+            if !validation_result.is_ok() {
+                for error in &validation_result.errors {
+                    tracing::error!("{}", error);
+                }
+            }
+        }
+
+        // Create control strategy before moving middleware
+        let control_strategy = create_control_strategy_from_factories(&self.middleware, &self.name);
+
+        // Resolve flow and stage middleware
+        let resolved = crate::middleware_resolution::resolve_middleware(
+            flow_middleware,
+            self.middleware,
+            &config.name,
+        );
+
+        // Log the resolution
+        crate::middleware_resolution::log_resolved_middleware(&config.name, &resolved);
+
+        tracing::warn!(
+            "Control strategy created from stage middleware only - flow middleware not included for stage '{}'",
+            &config.name
+        );
+
+        // Create instrumentation configuration
+        let instrumentation_config = InstrumentationConfig::default();
+        let mut instrumentation = StageInstrumentation::new_with_config(instrumentation_config);
+        let control_provider: Arc<dyn obzenflow_core::ControlMiddlewareProvider> =
+            control_middleware.clone();
+
+        // Create system middleware with instrumentation
+        let mut all_middleware = create_system_middleware(&config, StageType::Transform);
+
+        let expects_circuit_breaker = resolved
+            .middleware
+            .iter()
+            .any(|spec| spec.factory.name() == "circuit_breaker");
+        let expects_rate_limiter = resolved
+            .middleware
+            .iter()
+            .any(|spec| spec.factory.name() == "rate_limiter");
+
+        // Add resolved user middleware
+        let user_middleware: Vec<Box<dyn Middleware>> = resolved
+            .middleware
+            .into_iter()
+            .map(|spec| spec.factory.create(&config, control_middleware.clone()))
+            .collect();
+        all_middleware.extend(user_middleware);
+
+        instrumentation
+            .bind_control_middleware(
+                &config.stage_id,
+                &control_provider,
+                expects_circuit_breaker,
+                expects_rate_limiter,
+            )
+            .map_err(|e| e.to_string())?;
+        let instrumentation = Arc::new(instrumentation);
+
+        // Apply all middleware
+        let mut builder = self.handler.middleware();
+        for mw in all_middleware {
+            builder = builder.with(mw);
+        }
+        let handler_with_middleware = builder.build();
+
+        // Create the stage configuration
+        let transform_config = TransformConfig {
+            stage_id: config.stage_id,
+            stage_name: config.name.clone(),
+            flow_name: config.flow_name.clone(),
+            control_strategy: Some(control_strategy),
+            upstream_stages: resources.upstream_stages.clone(),
+        };
+
+        // Use the builder to create the handle
+        let handle =
+            AsyncTransformBuilder::new(handler_with_middleware, transform_config, resources)
+                .with_instrumentation(instrumentation)
+                .build()
+                .await
+                .map_err(|e| format!("Failed to build async transform: {:?}", e))?;
 
         // Create adapter to bridge to StageHandle
         let adapter = StageHandleAdapter::new(

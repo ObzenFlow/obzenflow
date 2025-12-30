@@ -171,6 +171,7 @@ pub use stateful_middleware::{
     MiddlewareStateful, StatefulHandlerMiddlewareExt, StatefulMiddlewareBuilder,
 };
 pub use transform_middleware::{
+    AsyncMiddlewareTransform, AsyncTransformHandlerExt, AsyncTransformMiddlewareBuilder,
     MiddlewareTransform, TransformHandlerExt, TransformMiddlewareBuilder,
 };
 

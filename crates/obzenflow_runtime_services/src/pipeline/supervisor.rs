@@ -1043,6 +1043,31 @@ impl SelfSupervised for PipelineSupervisor {
                                     PipelineEvent::StageCompleted { envelope },
                                 ))
                             }
+                            obzenflow_core::event::SystemEventType::StageLifecycle {
+                                stage_id,
+                                event:
+                                    obzenflow_core::event::StageLifecycleEvent::Failed {
+                                        error,
+                                        metrics,
+                                        ..
+                                    },
+                            } => {
+                                if let Some(m) = metrics {
+                                    context.stage_lifecycle_metrics.insert(*stage_id, m.clone());
+                                }
+
+                                let stage_info = context
+                                    .topology
+                                    .stages()
+                                    .find(|s| s.id == stage_id.to_topology_id());
+                                let stage_name = stage_info
+                                    .map(|s| s.name.clone())
+                                    .unwrap_or_else(|| "unknown".to_string());
+
+                                Ok(EventLoopDirective::Transition(PipelineEvent::Error {
+                                    message: format!("Stage '{}' failed: {}", stage_name, error),
+                                }))
+                            }
                             obzenflow_core::event::SystemEventType::ContractStatus {
                                 upstream,
                                 reader,

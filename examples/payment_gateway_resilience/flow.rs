@@ -25,12 +25,12 @@ use obzenflow_core::{
     event::chain_event::{ChainEvent, ChainEventFactory},
     CircuitBreakerContractMode, TypedPayload,
 };
-use obzenflow_dsl_infra::{flow, sink, source, transform};
+use obzenflow_dsl_infra::{async_transform, flow, sink, source, transform};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime_services::prelude::FlowHandle;
 use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
-use obzenflow_runtime_services::stages::common::handlers::TransformHandler;
+use obzenflow_runtime_services::stages::common::handlers::{AsyncTransformHandler, TransformHandler};
 use serde_json::json;
 use std::num::NonZeroU32;
 
@@ -114,15 +114,21 @@ impl TransformHandler for ValidationTransform {
 ///
 /// The behaviour is intentionally simple:
 /// - Warmup: always succeeds, emits AuthorizedPayment.
-/// - Outage: models a remote timeout by marking events with
-///   ProcessingStatus::Error so the circuit breaker can see failures.
+/// - Outage: returns `Err(HandlerError::Timeout(..))` so the runtime can
+///   convert it into an error-marked event (and middleware can observe the
+///   resulting `ErrorKind`).
 /// - Recovery: healthy again, succeeds when circuit allows traffic.
 #[derive(Debug, Clone)]
 struct GatewayTransform;
 
 #[async_trait]
-impl TransformHandler for GatewayTransform {
-    fn process(&self, mut event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
+impl AsyncTransformHandler for GatewayTransform {
+    async fn process(&self, mut event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
+        // Simulated remote call latency. We want this stage to exercise async IO
+        // semantics without blocking the tokio runtime.
+        let latency_ms: u64 = fastrand::u64(50..=200);
+        tokio::time::sleep(std::time::Duration::from_millis(latency_ms)).await;
+
         // If validation has already failed we leave the event alone.
         if matches!(event.processing_info.status, ProcessingStatus::Error { .. }) {
             return Ok(vec![event]);
@@ -169,13 +175,12 @@ impl TransformHandler for GatewayTransform {
                 Ok(vec![out])
             }
             TrafficPhase::Outage => {
-                // Simulated remote outage: the gateway call "times out" and
-                // we model this as an explicit infra error on the event
-                // rather than by returning an empty Vec. CircuitBreaker
-                // middleware now keys off ProcessingStatus::Error instead of
-                // container emptiness, which is both clearer and safer.
-                event = event.mark_as_error("gateway_timeout_simulated", ErrorKind::Timeout);
-                Ok(vec![event])
+                // Simulated remote outage: the gateway call "times out".
+                //
+                // Returning `Err(Timeout)` exercises FLOWIP-086e's per-record
+                // error mapping + routing while still allowing middleware (CB)
+                // to classify infra failures.
+                Err(HandlerError::Timeout("gateway_timeout_simulated".to_string()))
             }
         }
     }
@@ -231,7 +236,7 @@ async fn build_flow() -> Result<FlowHandle> {
             // - Slow-call contribution for gateway calls that take too long.
             // - Explicit Open/HalfOpen policies that still match the original
             //   semantics (emit fallback while Open; single-probe HalfOpen).
-            gateway = transform!("gateway" => GatewayTransform, [
+            gateway = async_transform!("gateway" => GatewayTransform, [
                 CircuitBreakerBuilder::new(3)
                     .cooldown(std::time::Duration::from_secs(5))
                     // Rate-based failure mode: open when >= 60% of the last
@@ -311,7 +316,7 @@ async fn build_glitchy_flow(
                     .build()
             ]);
             validated = transform!("validation" => ValidationTransform);
-            gateway = transform!("gateway" => GatewayTransform, [
+            gateway = async_transform!("gateway" => GatewayTransform, [
                 CircuitBreakerBuilder::new(3)
                     .cooldown(std::time::Duration::from_secs(5))
                     .rate_based_over_last_n_calls(5, 0.6)
@@ -491,7 +496,7 @@ async fn build_strict_flow() -> Result<FlowHandle> {
         stages: {
             payments = source!("payments_strict" => PaymentCommandSource::new());
             validated = transform!("validation_strict" => ValidationTransform);
-            gateway = transform!("gateway_strict" => GatewayTransform);
+            gateway = async_transform!("gateway_strict" => GatewayTransform);
             summary = sink!("summary_strict" => PaymentSummarySink::new());
         },
 

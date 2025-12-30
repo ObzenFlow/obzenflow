@@ -1602,7 +1602,8 @@ impl FsmAction for MetricsAggregatorAction {
 
                 // FLOWIP-059c: Emit a metrics watermark event so SSE clients can "pull-on-push"
                 // for `/metrics` refresh and deterministic freshness gating.
-                let mut clocks: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+                let mut clocks: std::collections::BTreeMap<String, u64> =
+                    std::collections::BTreeMap::new();
                 for (stage_id, seq) in &ctx.metrics_store.stage_vector_clocks {
                     clocks.insert(WriterId::from(*stage_id).to_string(), *seq);
                 }

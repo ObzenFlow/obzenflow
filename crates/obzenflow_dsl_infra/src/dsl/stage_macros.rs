@@ -51,6 +51,22 @@ macro_rules! transform {
     }};
 }
 
+/// Create an async transform stage descriptor
+#[macro_export]
+macro_rules! async_transform {
+    ($name:literal => $handler:expr) => {
+        $crate::async_transform!($name => $handler, [])
+    };
+    ($name:literal => $handler:expr, [$($mw:expr),*]) => {{
+        use $crate::dsl::stage_descriptor::{AsyncTransformDescriptor, StageDescriptor};
+        Box::new(AsyncTransformDescriptor {
+            name: $name.to_string(),
+            handler: $handler,
+            middleware: vec![$(Box::new($mw)),*],
+        }) as Box<dyn StageDescriptor>
+    }};
+}
+
 /// Create a sink stage descriptor
 #[macro_export]
 macro_rules! sink {

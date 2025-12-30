@@ -2,4 +2,4 @@
 
 pub mod traits;
 
-pub use traits::TransformHandler;
+pub use traits::{AsyncTransformHandler, TransformHandler};

@@ -5,7 +5,8 @@
 //!
 //! Key features:
 //! - Start processing immediately (no waiting)
-//! - Stateless processing (handler uses Arc<H> not Arc<RwLock<H>>)
+//! - Ordered sequential processing (one event at a time)
+//! - Owned handler storage (no stage-level locks)
 //! - Control event strategies for customizing behavior
 //! - Can filter (0 outputs), pass through (1 output), or expand (N outputs)
 
@@ -17,8 +18,8 @@ pub mod strategies;
 pub mod supervisor;
 
 // Public API - only expose builder, handle, and essential types
-pub use crate::stages::common::handlers::TransformHandler;
-pub use builder::TransformBuilder;
+pub use crate::stages::common::handlers::{AsyncTransformHandler, TransformHandler};
+pub use builder::{AsyncTransformBuilder, TransformBuilder};
 pub use config::TransformConfig;
 pub use fsm::{TransformEvent, TransformState};
 pub use handle::{TransformHandle, TransformHandleExt};

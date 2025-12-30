@@ -5,7 +5,8 @@ use std::sync::Arc;
 use crate::message_bus::FsmMessageBus;
 use crate::metrics::instrumentation::StageInstrumentation;
 use crate::stages::common::control_strategies::{ControlEventStrategy, JonestownStrategy};
-use crate::stages::common::handlers::TransformHandler;
+use crate::stages::common::handlers::transform::traits::UnifiedTransformHandler;
+use crate::stages::common::handlers::{AsyncTransformHandler, TransformHandler};
 use crate::stages::resources_builder::StageResources;
 use crate::supervised_base::base::Supervisor;
 use crate::supervised_base::{
@@ -21,6 +22,7 @@ use super::config::TransformConfig;
 use super::fsm::{TransformAction, TransformContext, TransformEvent, TransformState};
 use super::handle::TransformHandle;
 use super::supervisor::TransformSupervisor;
+use crate::stages::common::handlers::transform::traits::AsyncTransformHandlerAdapter;
 
 /// Builder for creating transform stages
 pub struct TransformBuilder<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> {
@@ -136,9 +138,131 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Supe
     }
 }
 
+/// Builder for creating async transform stages.
+///
+/// This is the async-aware counterpart to `TransformBuilder` that accepts an
+/// `AsyncTransformHandler` and runs it through the same transform supervisor
+/// semantics (error mapping, draining, contract tracking).
+pub struct AsyncTransformBuilder<
+    H: AsyncTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
+> {
+    handler: H,
+    config: TransformConfig,
+    resources: StageResources,
+    instrumentation: Option<Arc<StageInstrumentation>>,
+}
+
+impl<H: AsyncTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
+    AsyncTransformBuilder<H>
+{
+    pub fn new(handler: H, config: TransformConfig, resources: StageResources) -> Self {
+        Self {
+            handler,
+            config,
+            resources,
+            instrumentation: None,
+        }
+    }
+
+    pub fn with_instrumentation(mut self, instrumentation: Arc<StageInstrumentation>) -> Self {
+        self.instrumentation = Some(instrumentation);
+        self
+    }
+
+    pub fn with_control_strategy(mut self, strategy: Arc<dyn ControlEventStrategy>) -> Self {
+        self.config.control_strategy = Some(strategy);
+        self
+    }
+}
+
+#[async_trait::async_trait]
+impl<H: AsyncTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> SupervisorBuilder
+    for AsyncTransformBuilder<H>
+{
+    type Handle = TransformHandle<AsyncTransformHandlerAdapter<H>>;
+    type Error = BuilderError;
+
+    async fn build(self) -> Result<Self::Handle, Self::Error> {
+        type Wrapped<H> = AsyncTransformHandlerAdapter<H>;
+
+        // Create channels for supervisor communication
+        let (event_sender, event_receiver, state_watcher) =
+            ChannelBuilder::new().build(TransformState::<Wrapped<H>>::Created);
+
+        // Use provided strategy or default to JonestownStrategy
+        let control_strategy = self
+            .config
+            .control_strategy
+            .unwrap_or_else(|| Arc::new(JonestownStrategy));
+
+        // Create instrumentation if not provided
+        let instrumentation = self
+            .instrumentation
+            .unwrap_or_else(|| Arc::new(StageInstrumentation::new()));
+
+        // Create context with bound subscription factory from resources
+        let context = TransformContext::new(
+            AsyncTransformHandlerAdapter(self.handler),
+            self.config.stage_id,
+            self.config.stage_name.clone(),
+            self.config.flow_name.clone(),
+            self.resources.flow_id.clone(),
+            self.resources.data_journal.clone(),
+            self.resources.error_journal.clone(),
+            self.resources.system_journal.clone(),
+            self.resources.message_bus.clone(),
+            control_strategy,
+            instrumentation,
+            self.resources.upstream_subscription_factory,
+        );
+
+        // Create supervisor (private - not exposed)
+        let supervisor = TransformSupervisor {
+            name: format!("transform_{}", self.config.stage_name),
+            data_journal: self.resources.data_journal.clone(),
+            system_journal: self.resources.system_journal.clone(),
+            stage_id: self.config.stage_id,
+            _marker: std::marker::PhantomData,
+        };
+
+        // Clone what we need for the task
+        let state_watcher_for_task = state_watcher.clone();
+
+        // Spawn the supervisor task
+        let supervisor_name = format!("transform_{}", self.config.stage_name);
+        let task =
+            SupervisorTaskBuilder::<TransformSupervisor<Wrapped<H>>>::new(&supervisor_name).spawn(
+                move || async move {
+                    // Create a wrapper that handles external events
+                    let supervisor_with_events = HandlerSupervisedWithExternalEvents {
+                        supervisor,
+                        external_events: event_receiver,
+                        state_watcher: state_watcher_for_task,
+                    };
+
+                    // Run with the wrapper
+                    HandlerSupervisedExt::run(
+                        supervisor_with_events,
+                        TransformState::<Wrapped<H>>::Created,
+                        context,
+                    )
+                    .await
+                },
+            );
+
+        // Build and return handle
+        HandleBuilder::new()
+            .with_event_sender(event_sender)
+            .with_state_watcher(state_watcher)
+            .with_supervisor_task(task)
+            .build_standard()
+            .map_err(|e| BuilderError::Other(e.to_string()))
+    }
+}
+
 /// Internal wrapper that bridges external events with the handler-supervised supervisor
 struct HandlerSupervisedWithExternalEvents<
-    H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
+    H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
 > {
     supervisor: TransformSupervisor<H>,
     external_events: EventReceiver<TransformEvent<H>>,
@@ -146,7 +270,7 @@ struct HandlerSupervisedWithExternalEvents<
 }
 
 // Delegate trait implementations to the inner supervisor
-impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Supervisor
+impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Supervisor
     for HandlerSupervisedWithExternalEvents<H>
 {
     type State = TransformState<H>;
@@ -170,13 +294,13 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Supe
 }
 
 // Implement Sealed for the wrapper
-impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
+impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
     crate::supervised_base::base::private::Sealed for HandlerSupervisedWithExternalEvents<H>
 {
 }
 
 #[async_trait::async_trait]
-impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSupervised
+impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSupervised
     for HandlerSupervisedWithExternalEvents<H>
 {
     type Handler = H;
