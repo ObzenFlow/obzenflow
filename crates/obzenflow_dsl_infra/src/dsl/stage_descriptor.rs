@@ -7,10 +7,11 @@ use crate::stage_handle_adapter::StageHandleAdapter;
 use async_trait::async_trait;
 use obzenflow_adapters::middleware::control::ControlMiddlewareAggregator;
 use obzenflow_adapters::middleware::{
-    validate_middleware_safety, FiniteSourceHandlerExt, InfiniteSourceHandlerExt,
+    validate_middleware_safety, AsyncFiniteSourceHandlerExt, AsyncTransformHandlerExt,
+    FiniteSourceHandlerExt, InfiniteSourceHandlerExt,
     JoinHandlerMiddlewareExt, Middleware, MiddlewareFactory, OutcomeEnrichmentMiddleware,
     SinkHandlerExt, StatefulHandlerMiddlewareExt, SystemEnrichmentMiddleware, TimingMiddleware,
-    TransformHandlerExt, AsyncTransformHandlerExt,
+    TransformHandlerExt,
 };
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::{StageId, WriterId};
@@ -24,8 +25,8 @@ use obzenflow_runtime_services::{
         common::{
             control_strategies::{CompositeStrategy, ControlEventStrategy, JonestownStrategy},
             handlers::{
-                AsyncTransformHandler, FiniteSourceHandler, InfiniteSourceHandler, JoinHandler,
-                SinkHandler, StatefulHandler, TransformHandler,
+                AsyncFiniteSourceHandler, AsyncTransformHandler, FiniteSourceHandler,
+                InfiniteSourceHandler, JoinHandler, SinkHandler, StatefulHandler, TransformHandler,
             },
             stage_handle::{BoxedStageHandle, StageEvent},
         },
@@ -35,7 +36,8 @@ use obzenflow_runtime_services::{
         },
         source::{
             finite::{
-                FiniteSourceBuilder, FiniteSourceConfig, FiniteSourceEvent, FiniteSourceState,
+                AsyncFiniteSourceBuilder, FiniteSourceBuilder, FiniteSourceConfig, FiniteSourceEvent,
+                FiniteSourceState,
             },
             infinite::{
                 InfiniteSourceBuilder, InfiniteSourceConfig, InfiniteSourceEvent,
@@ -51,6 +53,9 @@ use obzenflow_runtime_services::{
     supervised_base::SupervisorBuilder as SupervisorBuilderTrait,
 };
 use std::sync::Arc;
+use std::time::Duration;
+
+const DEFAULT_ASYNC_SOURCE_POLL_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Create system middleware for a stage
 fn create_system_middleware(
@@ -490,6 +495,172 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> S
             .map_err(|e| format!("Failed to build finite source: {:?}", e))?;
 
         // Create adapter to bridge to StageHandle
+        let adapter = StageHandleAdapter::new(
+            handle,
+            config.stage_id,
+            config.name,
+            StageType::FiniteSource,
+            move |event| translate_stage_event_to_finite_source(event),
+            |state| check_finite_source_state(state),
+        );
+
+        Ok(Box::new(adapter) as BoxedStageHandle)
+    }
+}
+
+/// Descriptor for async finite source stages.
+pub struct AsyncFiniteSourceDescriptor<H: AsyncFiniteSourceHandler + 'static> {
+    pub name: String,
+    pub handler: H,
+    pub poll_timeout: Option<Duration>,
+    pub middleware: Vec<Box<dyn MiddlewareFactory>>,
+}
+
+impl<H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
+    AsyncFiniteSourceDescriptor<H>
+{
+    /// Create a new async finite source descriptor with a default 30s poll timeout.
+    pub fn new(name: impl Into<String>, handler: H) -> Self {
+        Self {
+            name: name.into(),
+            handler,
+            poll_timeout: Some(DEFAULT_ASYNC_SOURCE_POLL_TIMEOUT),
+            middleware: Vec::new(),
+        }
+    }
+
+    /// Override poll timeout. `None` disables enforcement (handler manages its own).
+    pub fn with_poll_timeout(mut self, timeout: Option<Duration>) -> Self {
+        self.poll_timeout = timeout;
+        self
+    }
+
+    /// Add middleware to the chain.
+    pub fn with_middleware<M: MiddlewareFactory + 'static>(mut self, mw: M) -> Self {
+        self.middleware.push(Box::new(mw));
+        self
+    }
+
+    /// Build into a boxed StageDescriptor for DSL compatibility.
+    pub fn build(self) -> Box<dyn StageDescriptor> {
+        Box::new(self)
+    }
+}
+
+#[async_trait]
+impl<H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDescriptor
+    for AsyncFiniteSourceDescriptor<H>
+{
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn stage_type(&self) -> StageType {
+        StageType::FiniteSource
+    }
+
+    fn stage_middleware_names(&self) -> Vec<String> {
+        self.middleware
+            .iter()
+            .map(|f| f.name().to_string())
+            .collect()
+    }
+
+    fn stage_middleware_factories(&self) -> &[Box<dyn MiddlewareFactory>] {
+        &self.middleware
+    }
+
+    async fn create_handle_with_flow_middleware(
+        self: Box<Self>,
+        config: StageConfig,
+        resources: StageResources,
+        flow_middleware: Vec<Box<dyn MiddlewareFactory>>,
+        control_middleware: Arc<ControlMiddlewareAggregator>,
+    ) -> Result<BoxedStageHandle, String> {
+        let writer_id = WriterId::from(config.stage_id);
+        let poll_timeout = self.poll_timeout;
+
+        // Create instrumentation configuration
+        let instrumentation_config = InstrumentationConfig::default();
+        let mut instrumentation = StageInstrumentation::new_with_config(instrumentation_config);
+        let control_provider: Arc<dyn obzenflow_core::ControlMiddlewareProvider> =
+            control_middleware.clone();
+
+        // Resolve flow and stage middleware
+        let resolved = crate::middleware_resolution::resolve_middleware(
+            flow_middleware,
+            self.middleware,
+            &config.name,
+        );
+
+        crate::middleware_resolution::log_resolved_middleware(&config.name, &resolved);
+
+        let mut all_middleware = create_system_middleware(&config, StageType::FiniteSource);
+
+        let expects_circuit_breaker = resolved
+            .middleware
+            .iter()
+            .any(|spec| spec.factory.name() == "circuit_breaker");
+        let expects_rate_limiter = resolved
+            .middleware
+            .iter()
+            .any(|spec| spec.factory.name() == "rate_limiter");
+
+        let mut has_circuit_breaker = false;
+        let mut user_middleware: Vec<Box<dyn Middleware>> = Vec::new();
+        for spec in resolved.middleware.into_iter() {
+            if spec.factory.name() == "circuit_breaker" {
+                has_circuit_breaker = true;
+                user_middleware.push(spec.factory.create(&config, control_middleware.clone()));
+                continue;
+            }
+            user_middleware.push(spec.factory.create(&config, control_middleware.clone()));
+        }
+        all_middleware.extend(user_middleware);
+
+        instrumentation
+            .bind_control_middleware(
+                &config.stage_id,
+                &control_provider,
+                expects_circuit_breaker,
+                expects_rate_limiter,
+            )
+            .map_err(|e| e.to_string())?;
+        let instrumentation = Arc::new(instrumentation);
+
+        // Apply all middleware.
+        let mut builder = self
+            .handler
+            .middleware(writer_id.clone())
+            .with_poll_timeout(poll_timeout);
+        for mw in all_middleware {
+            builder = builder.with(mw);
+        }
+        let handler_with_middleware = builder.build();
+
+        // Create the stage configuration
+        let source_config = FiniteSourceConfig {
+            stage_id: config.stage_id,
+            stage_name: config.name.clone(),
+            flow_name: config.flow_name.clone(),
+            control_strategy: if has_circuit_breaker {
+                Some(Arc::new(
+                    CircuitBreakerSourceStrategy::try_new(config.stage_id, &control_provider)
+                        .map_err(|e| e.to_string())?,
+                ))
+            } else {
+                None
+            },
+        };
+
+        // Use the builder to create the handle
+        let handle =
+            AsyncFiniteSourceBuilder::new(handler_with_middleware, source_config, resources)
+                .with_instrumentation(instrumentation)
+                .build()
+                .await
+                .map_err(|e| format!("Failed to build async finite source: {:?}", e))?;
+
         let adapter = StageHandleAdapter::new(
             handle,
             config.stage_id,

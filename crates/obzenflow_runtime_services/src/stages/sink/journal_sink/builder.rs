@@ -197,7 +197,8 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
         context: &mut Self::Context,
     ) -> Result<EventLoopDirective<Self::Event>, Box<dyn std::error::Error + Send + Sync>> {
         // Lightweight instrumentation to understand sink FSM behaviour.
-        tracing::info!(
+        // Note: this runs on every loop; keep it at TRACE to avoid log spam.
+        tracing::trace!(
             target: "flowip-080o",
             stage_name = %self.supervisor.stage_name,
             fsm_state = %state.variant_name(),
@@ -210,7 +211,7 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
         // Check for external events first
         match self.external_events.try_recv() {
             Ok(event) => {
-                tracing::info!(
+                tracing::debug!(
                     target: "flowip-080o",
                     stage_name = %self.supervisor.stage_name,
                     event = %event.variant_name(),

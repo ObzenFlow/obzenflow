@@ -396,6 +396,10 @@ impl RateLimiterMiddleware {
 }
 
 impl Middleware for RateLimiterMiddleware {
+    fn middleware_name(&self) -> &'static str {
+        "rate_limiter"
+    }
+
     fn pre_handle(&self, event: &ChainEvent, ctx: &mut MiddlewareContext) -> MiddlewareAction {
         if event.is_control() || event.is_lifecycle() {
             trace!(

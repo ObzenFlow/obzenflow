@@ -27,9 +27,7 @@ pub trait FiniteSourceHandleExt<H> {
     fn is_terminal(&self) -> bool;
 }
 
-impl<H: FiniteSourceHandler + Send + Sync + 'static> FiniteSourceHandleExt<H>
-    for FiniteSourceHandle<H>
-{
+impl<H: Send + Sync + 'static> FiniteSourceHandleExt<H> for FiniteSourceHandle<H> {
     async fn initialize(&self) -> Result<(), HandleError> {
         self.send_event(FiniteSourceEvent::<H>::Initialize).await
     }

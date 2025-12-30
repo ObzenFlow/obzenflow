@@ -13,6 +13,6 @@ pub use join::JoinHandler;
 pub use observer::ObserverHandler;
 pub use resource_managed::ResourceManaged;
 pub use sink::SinkHandler;
-pub use source::{FiniteSourceHandler, InfiniteSourceHandler};
+pub use source::{AsyncFiniteSourceHandler, FiniteSourceHandler, InfiniteSourceHandler};
 pub use stateful::{StatefulHandler, StatefulHandlerExt, StatefulHandlerWithEmission};
 pub use transform::{AsyncTransformHandler, TransformHandler};

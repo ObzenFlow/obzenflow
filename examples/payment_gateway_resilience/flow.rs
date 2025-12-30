@@ -15,7 +15,10 @@
 
 use super::domain::{AuthorizedPayment, PaymentCommand, TrafficPhase, ValidatedPayment};
 use super::sinks::PaymentSummarySink;
-use super::sources::{PaymentCommandSource, ScrapedGlitchyPaymentCommandSource};
+use super::sources::{
+    AsyncScrapedGlitchyPaymentCommandSource, PaymentCommandSource,
+    ScrapedGlitchyPaymentCommandSource,
+};
 use anyhow::Result;
 use async_trait::async_trait;
 use obzenflow_adapters::middleware::circuit_breaker::{HalfOpenPolicy, OpenPolicy};
@@ -23,8 +26,10 @@ use obzenflow_adapters::middleware::{rate_limit, CircuitBreakerBuilder};
 use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
 use obzenflow_core::{
     event::chain_event::{ChainEvent, ChainEventFactory},
-    CircuitBreakerContractMode, TypedPayload,
+    CircuitBreakerContractMode,
+    TypedPayload,
 };
+use obzenflow_dsl_infra::dsl::stage_descriptor::AsyncFiniteSourceDescriptor;
 use obzenflow_dsl_infra::{async_transform, flow, sink, source, transform};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
@@ -40,6 +45,15 @@ fn env_usize(key: &str) -> Option<usize> {
 
 fn env_f64(key: &str) -> Option<f64> {
     std::env::var(key).ok().and_then(|value| value.parse::<f64>().ok())
+}
+
+fn env_bool(key: &str) -> Option<bool> {
+    let raw = std::env::var(key).ok()?;
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "y" | "on" => Some(true),
+        "0" | "false" | "no" | "n" | "off" => Some(false),
+        _ => None,
+    }
 }
 
 /// Stateless transform that performs cheap local validation.
@@ -285,36 +299,59 @@ async fn build_glitchy_flow(
     outage_events: usize,
     recovery_events: usize,
     summary_progress_every: usize,
+    use_async_source: bool,
+    async_poll_timeout: Option<std::time::Duration>,
 ) -> Result<FlowHandle> {
+    let payments_stage = if use_async_source {
+        AsyncFiniteSourceDescriptor::new(
+            "payments",
+            AsyncScrapedGlitchyPaymentCommandSource::with_cycle(
+                total_events,
+                warmup_events,
+                outage_events,
+                recovery_events,
+            ),
+        )
+        .with_poll_timeout(async_poll_timeout)
+        .with_middleware(
+            CircuitBreakerBuilder::new(2)
+                .cooldown(std::time::Duration::from_secs(2))
+                .open_policy(OpenPolicy::Skip)
+                .half_open_policy(HalfOpenPolicy::new(
+                    NonZeroU32::new(1).expect("permitted_probes must be non-zero"),
+                    OpenPolicy::Skip,
+                ))
+                .build(),
+        )
+        .build()
+    } else {
+        source!("payments" => ScrapedGlitchyPaymentCommandSource::with_cycle(
+            total_events,
+            warmup_events,
+            outage_events,
+            recovery_events,
+        ), [
+            CircuitBreakerBuilder::new(2)
+                .cooldown(std::time::Duration::from_secs(2))
+                .open_policy(OpenPolicy::Skip)
+                .half_open_policy(HalfOpenPolicy::new(
+                    NonZeroU32::new(1).expect("permitted_probes must be non-zero"),
+                    OpenPolicy::Skip,
+                ))
+                .build()
+        ])
+    };
+
     flow! {
         name: "payment_gateway_resilience_glitchy_demo",
         journals: disk_journals(std::path::PathBuf::from("target/payment-gateway-logs-glitchy")),
 
-        // Faster rate so the flow runs in ~minutes while still letting you observe
-        // breaker open/close cycles in `/metrics` over multiple glitch windows.
         middleware: [
             rate_limit(rate_limit_events_per_sec)
         ],
 
         stages: {
-            payments = source!("payments" => ScrapedGlitchyPaymentCommandSource::with_cycle(
-                total_events,
-                warmup_events,
-                outage_events,
-                recovery_events,
-            ), [
-                // Source-side circuit breaker: models "semi-reliable upstream feed".
-                // When the feed glitches, the breaker opens to avoid hammering, then
-                // allows occasional HalfOpen probes until recovery.
-                CircuitBreakerBuilder::new(2)
-                    .cooldown(std::time::Duration::from_secs(2))
-                    .open_policy(OpenPolicy::Skip)
-                    .half_open_policy(HalfOpenPolicy::new(
-                        NonZeroU32::new(1).expect("permitted_probes must be non-zero"),
-                        OpenPolicy::Skip,
-                    ))
-                    .build()
-            ]);
+            payments = payments_stage;
             validated = transform!("validation" => ValidationTransform);
             gateway = async_transform!("gateway" => GatewayTransform, [
                 CircuitBreakerBuilder::new(3)
@@ -388,6 +425,14 @@ pub fn run_example() -> Result<()> {
     // Example (very high volume):
     //   PAYMENT_GATEWAY_TOTAL_EVENTS=100000 PAYMENT_GATEWAY_RATE_LIMIT=1000 \
     //     cargo run --example payment_gateway_resilience --features obzenflow_infra/warp-server -- --server
+    //
+    // Async source demo (FLOWIP-086f):
+    //   PAYMENT_GATEWAY_ASYNC_SOURCE=1 \
+    //   PAYMENT_GATEWAY_TOTAL_EVENTS=60000 PAYMENT_GATEWAY_RATE_LIMIT=200 \
+    //     cargo run --example payment_gateway_resilience --features obzenflow_infra/warp-server -- --server
+    //
+    // Optional async poll timeout override (seconds). Use 0 to disable the timeout:
+    //   PAYMENT_GATEWAY_ASYNC_POLL_TIMEOUT_SECS=20
     let mut total_events = env_usize("PAYMENT_GATEWAY_TOTAL_EVENTS");
     let duration_secs = env_usize("PAYMENT_GATEWAY_DURATION_SECS");
     let mut rate_limit_events_per_sec = env_f64("PAYMENT_GATEWAY_RATE_LIMIT");
@@ -418,11 +463,28 @@ pub fn run_example() -> Result<()> {
     let outage_events = env_usize("PAYMENT_GATEWAY_OUTAGE_EVENTS").unwrap_or(1_000);
     let recovery_events = env_usize("PAYMENT_GATEWAY_RECOVERY_EVENTS").unwrap_or(1_000);
     let summary_progress_every = env_usize("PAYMENT_GATEWAY_PROGRESS_EVERY").unwrap_or(5_000);
+    let use_async_source = env_bool("PAYMENT_GATEWAY_ASYNC_SOURCE").unwrap_or(false);
+    let async_poll_timeout = match env_usize("PAYMENT_GATEWAY_ASYNC_POLL_TIMEOUT_SECS")
+        .unwrap_or(30)
+    {
+        0 => None,
+        secs => Some(std::time::Duration::from_secs(secs as u64)),
+    };
 
     if let Some(total_events) = total_events {
         println!("\n🔁 High-volume glitchy mode enabled");
         if let Some(reason) = glitchy_reason {
             println!("   enabled_by:     {reason}");
+        }
+        println!(
+            "   payments_src:   {}",
+            if use_async_source { "async (086f)" } else { "sync" }
+        );
+        if use_async_source {
+            match async_poll_timeout {
+                Some(d) => println!("   poll_timeout:   {}s", d.as_secs()),
+                None => println!("   poll_timeout:   disabled"),
+            }
         }
         println!("   total_events:   {total_events}");
         println!("   rate_limit:     {rate_limit_events_per_sec} events/sec");
@@ -445,6 +507,8 @@ pub fn run_example() -> Result<()> {
                         outage_events,
                         recovery_events,
                         summary_progress_every,
+                        use_async_source,
+                        async_poll_timeout,
                     )
                     .await
                 }

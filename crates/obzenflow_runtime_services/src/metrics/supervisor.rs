@@ -269,7 +269,7 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                                 } else {
                                     "data"
                                 };
-                                tracing::info!(
+                                tracing::trace!(
                                     event_id = %envelope.event.id(),
                                     event_type = envelope.event.event_type(),
                                     event_kind = kind,

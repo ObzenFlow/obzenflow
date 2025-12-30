@@ -394,6 +394,40 @@ impl FlowApplication {
                 // Wait for Ctrl+C
                 tokio::signal::ctrl_c().await?;
                 tracing::info!("👋 Shutting down server");
+
+                // The web server currently has no explicit shutdown hook; abort its task so we don't
+                // keep servicing requests while the pipeline is draining.
+                _handle.abort();
+                let _ = _handle.await;
+
+                // Best-effort: stop the flow before tearing down the runtime.
+                //
+                // We avoid force-aborting here because it can cancel in-flight disk journal
+                // writes (spawn_blocking), which then surfaces as "Background writer task was
+                // cancelled/panicked" errors inside stage supervisors.
+                let shutdown_timeout_secs = std::env::var("OBZENFLOW_SHUTDOWN_TIMEOUT_SECS")
+                    .ok()
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .unwrap_or(30);
+                let shutdown_timeout = std::time::Duration::from_secs(shutdown_timeout_secs);
+
+                if let Err(e) = flow_handle.stop().await {
+                    tracing::warn!(
+                        error = %e,
+                        "Failed to request flow stop during Ctrl+C shutdown; continuing shutdown"
+                    );
+                }
+
+                let start = std::time::Instant::now();
+                while flow_handle.is_running() && start.elapsed() < shutdown_timeout {
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+                if flow_handle.is_running() {
+                    tracing::warn!(
+                        shutdown_timeout_secs,
+                        "Flow did not terminate within shutdown timeout; exiting anyway"
+                    );
+                }
             }
 
             Ok(())

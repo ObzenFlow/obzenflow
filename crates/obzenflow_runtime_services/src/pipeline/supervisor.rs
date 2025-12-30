@@ -36,6 +36,9 @@ pub(crate) struct PipelineSupervisor {
     /// Throttled logging for barrier snapshots during drain
     pub(crate) last_barrier_log: Option<Instant>,
 
+    /// Throttled logging while waiting for external Run in startup_mode=manual.
+    pub(crate) last_manual_wait_log: Option<Instant>,
+
     /// Idle iterations observed during draining (for liveness guard)
     pub(crate) drain_idle_iters: u64,
 }
@@ -273,6 +276,12 @@ impl crate::supervised_base::base::Supervisor for PipelineSupervisor {
 
                 on PipelineEvent::StopRequested => |_state: &PipelineState, _event: &PipelineEvent, ctx: &mut PipelineContext| {
                     Box::pin(async move {
+                        // A user stop is a cancellation signal, not a "drain to completion".
+                        //
+                        // Attempting to drain can take arbitrarily long (e.g., large buffered
+                        // backlogs behind rate limits), which makes Ctrl+C and UI Stop feel hung.
+                        // Instead, we fail fast and let stage supervisors clean up quickly via
+                        // `force_shutdown`.
                         if !ctx.stop_requested {
                             let mut has_active_sources = false;
                             let mut has_infinite_active_source = false;
@@ -292,8 +301,11 @@ impl crate::supervised_base::base::Supervisor for PipelineSupervisor {
                         }
 
                         Ok(Transition {
-                            next_state: PipelineState::SourceCompleted,
-                            actions: vec![PipelineAction::StopSources],
+                            next_state: PipelineState::Failed {
+                                reason: "user_stop".to_string(),
+                                failure_cause: Some(ViolationCause::Other("user_stop".into())),
+                            },
+                            actions: vec![PipelineAction::Cleanup],
                         })
                     })
                 };
@@ -359,8 +371,7 @@ impl crate::supervised_base::base::Supervisor for PipelineSupervisor {
                     })
                 };
 
-                // Stop while already transitioning into drain should still arm a bounded drain timeout.
-                // Otherwise a stuck drain barrier becomes unkillable (StopRequested is ignored).
+                // Stop while transitioning into drain should still be fail-fast.
                 on PipelineEvent::StopRequested => |_state: &PipelineState, _event: &PipelineEvent, ctx: &mut PipelineContext| {
                     Box::pin(async move {
                         if !ctx.stop_requested {
@@ -380,13 +391,12 @@ impl crate::supervised_base::base::Supervisor for PipelineSupervisor {
                             ctx.stop_should_fail = has_active_sources && !has_infinite_active_source;
                         }
 
-                        // Preserve any existing deadline (idempotency); otherwise arm it now.
-                        if ctx.stop_deadline.is_none() {
-                            ctx.stop_deadline = Some(Instant::now() + stop_drain_timeout());
-                        }
                         Ok(Transition {
-                            next_state: PipelineState::SourceCompleted,
-                            actions: vec![PipelineAction::StopSources],
+                            next_state: PipelineState::Failed {
+                                reason: "user_stop".to_string(),
+                                failure_cause: Some(ViolationCause::Other("user_stop".into())),
+                            },
+                            actions: vec![PipelineAction::Cleanup],
                         })
                     })
                 };
@@ -447,8 +457,7 @@ impl crate::supervised_base::base::Supervisor for PipelineSupervisor {
                     })
                 };
 
-                // Stop during draining should not be a no-op: arm the stop deadline so the
-                // drain loop can time out (stop_drain_timeout) instead of waiting forever.
+                // Stop during draining is still a cancellation signal: fail fast.
                 on PipelineEvent::StopRequested => |_state: &PipelineState, _event: &PipelineEvent, ctx: &mut PipelineContext| {
                     Box::pin(async move {
                         if !ctx.stop_requested {
@@ -468,13 +477,12 @@ impl crate::supervised_base::base::Supervisor for PipelineSupervisor {
                             ctx.stop_should_fail = has_active_sources && !has_infinite_active_source;
                         }
 
-                        if ctx.stop_deadline.is_none() {
-                            ctx.stop_deadline = Some(Instant::now() + stop_drain_timeout());
-                        }
-
                         Ok(Transition {
-                            next_state: PipelineState::Draining,
-                            actions: vec![PipelineAction::StopSources],
+                            next_state: PipelineState::Failed {
+                                reason: "user_stop".to_string(),
+                                failure_cause: Some(ViolationCause::Other("user_stop".into())),
+                            },
+                            actions: vec![PipelineAction::Cleanup],
                         })
                     })
                 };
@@ -679,8 +687,12 @@ impl SelfSupervised for PipelineSupervisor {
                             .is_empty()
                     {
                         // This is a non-source stage that's already running
-                        context.running_stages.insert(*stage_id);
-                        tracing::info!("Stage '{}' was already running", stage.stage_name());
+                        if context.running_stages.insert(*stage_id) {
+                            tracing::info!(
+                                "Stage '{}' was already running",
+                                stage.stage_name()
+                            );
+                        }
                     }
                 }
 
@@ -764,10 +776,14 @@ impl SelfSupervised for PipelineSupervisor {
                         // In manual startup mode, we deliberately DO NOT auto-run
                         // the pipeline; instead we wait for an explicit Run event
                         // from FlowHandle (e.g. /api/flow/control Play).
-                        tracing::info!(
-                            "All {} non-source stages are running (startup_mode=manual); waiting for external Run",
-                            non_source_stages.len()
-                        );
+                        if self.should_log_manual_wait() {
+                            tracing::info!(
+                                "All {} non-source stages are running (startup_mode=manual); waiting for external Run",
+                                non_source_stages.len()
+                            );
+                        }
+                        // Avoid a tight poll/log loop while waiting for an external Run.
+                        tokio::time::sleep(Duration::from_millis(100)).await;
                         Ok(EventLoopDirective::Continue)
                     } else {
                         tracing::info!(
@@ -1556,6 +1572,18 @@ impl PipelineSupervisor {
             Some(last) if now.duration_since(last) < Duration::from_secs(1) => false,
             _ => {
                 self.last_barrier_log = Some(now);
+                true
+            }
+        }
+    }
+
+    /// Throttle "waiting for external Run" logging in startup_mode=manual.
+    fn should_log_manual_wait(&mut self) -> bool {
+        let now = Instant::now();
+        match self.last_manual_wait_log {
+            Some(last) if now.duration_since(last) < Duration::from_secs(5) => false,
+            _ => {
+                self.last_manual_wait_log = Some(now);
                 true
             }
         }

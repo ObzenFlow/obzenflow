@@ -17,7 +17,6 @@ use std::sync::Arc;
 
 use crate::metrics::instrumentation::{snapshot_stage_metrics, StageInstrumentation};
 use crate::metrics::tail_read;
-use crate::stages::common::handlers::FiniteSourceHandler;
 use crate::stages::source::strategies::{SourceControlContext, SourceControlStrategy};
 
 // ============================================================================
@@ -295,7 +294,7 @@ impl<H> FiniteSourceContext<H> {
     }
 }
 
-impl<H: FiniteSourceHandler + 'static> FsmContext for FiniteSourceContext<H> {}
+impl<H: Send + Sync + 'static> FsmContext for FiniteSourceContext<H> {}
 
 // ============================================================================
 // FSM Action Implementation
@@ -333,7 +332,7 @@ impl<H> std::fmt::Debug for FiniteSourceAction<H> {
 }
 
 #[async_trait::async_trait]
-impl<H: FiniteSourceHandler + Send + Sync + 'static> FsmAction for FiniteSourceAction<H> {
+impl<H: Send + Sync + 'static> FsmAction for FiniteSourceAction<H> {
     type Context = FiniteSourceContext<H>;
 
     async fn execute(&self, ctx: &mut Self::Context) -> Result<(), obzenflow_fsm::FsmError> {

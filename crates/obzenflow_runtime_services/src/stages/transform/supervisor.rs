@@ -369,7 +369,7 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
                     .event_loops_total
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-                tracing::info!(
+                tracing::trace!(
                     target: "flowip-080o",
                     stage_name = %ctx.stage_name,
                     loop_iteration = loop_count + 1,
@@ -382,7 +382,7 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
                 let mut contract_state = std::mem::take(&mut ctx.contract_state);
 
                 let directive = if let Some(subscription) = subscription_opt.as_mut() {
-                    tracing::info!(
+                    tracing::trace!(
                         target: "flowip-080o",
                         stage_name = %ctx.stage_name,
                         loop_iteration = loop_count + 1,
@@ -395,7 +395,7 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
                     {
                         PollResult::Event(envelope) => {
                             use obzenflow_core::event::JournalEvent;
-                            tracing::info!(
+                            tracing::trace!(
                                 target: "flowip-080o",
                                 stage_name = %ctx.stage_name,
                                 loop_iteration = loop_count + 1,
@@ -409,7 +409,7 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
                                 .event_loops_with_work_total
                                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-                            tracing::info!(
+                            tracing::trace!(
                                 target: "flowip-080o",
                                 stage_name = %ctx.stage_name,
                                 event_type = %envelope.event.event_type(),
@@ -741,7 +741,7 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
                                 stage_name = %ctx.stage_name,
                                 "No events available, sleeping"
                             );
-                            tracing::info!(
+                            tracing::trace!(
                                 target: "flowip-080o",
                                 stage_name = %ctx.stage_name,
                                 "transform: poll_next returned NoEvents; sleeping briefly"
@@ -788,7 +788,7 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
                         .await
                     {
                         PollResult::Event(envelope) => {
-                            tracing::info!(
+                            tracing::trace!(
                                 target: "flowip-080o",
                                 stage_name = %ctx.stage_name,
                                 event_type = %envelope.event.event_type(),
@@ -801,7 +801,7 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
                                 "Transform draining events"
                             );
 
-                            tracing::info!(
+                            tracing::trace!(
                                 target: "flowip-080o",
                                 stage_name = %ctx.stage_name,
                                 event_type = %envelope.event.event_type(),

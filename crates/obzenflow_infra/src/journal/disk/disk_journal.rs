@@ -488,7 +488,14 @@ impl<T: JournalEvent + 'static> Journal<T> for DiskJournal<T> {
         .await
         .map_err(|e| JournalError::Implementation {
             message: format!(
-                "Background writer task panicked for journal {}",
+                "Background writer task {} for journal {}",
+                if e.is_cancelled() {
+                    "was cancelled"
+                } else if e.is_panic() {
+                    "panicked"
+                } else {
+                    "failed"
+                },
                 self.path.display()
             ),
             source: Box::new(e),

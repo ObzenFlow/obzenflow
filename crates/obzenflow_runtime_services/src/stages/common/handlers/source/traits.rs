@@ -6,6 +6,7 @@
 //! - Infinite sources use Result<Vec<ChainEvent>, SourceError>.
 
 use obzenflow_core::ChainEvent;
+use async_trait::async_trait;
 use std::fmt;
 
 /// Errors that can occur while polling a source.
@@ -82,6 +83,28 @@ pub trait FiniteSourceHandler: Send + Sync {
     /// - `Err(SourceError)` means polling the source failed (timeout,
     ///   transport error, deserialization error, etc.).
     fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError>;
+}
+
+/// Async handler for finite sources.
+///
+/// This is intended for IO-bound sources (HTTP, DB reads, scraping) that need to `await`
+/// without blocking the runtime.
+///
+/// Semantics mirror `FiniteSourceHandler`:
+/// - `Ok(Some(events))` → source advanced; events may be empty or non-empty
+/// - `Ok(None)` → source exhausted; supervisor emits EOF and completes
+/// - `Err(SourceError)` → polling failed; middleware converts to error-marked event
+#[async_trait]
+pub trait AsyncFiniteSourceHandler: Send + Sync {
+    /// Pull zero or more events from the source asynchronously.
+    async fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError>;
+
+    /// Perform any cleanup during shutdown.
+    ///
+    /// Default is a no-op. Errors are logged by the supervisor but do not block shutdown.
+    async fn drain(&mut self) -> Result<(), SourceError> {
+        Ok(())
+    }
 }
 
 /// Handler for sources that run indefinitely

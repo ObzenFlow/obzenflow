@@ -431,7 +431,7 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                     .event_loops_total
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-                tracing::info!(
+                tracing::trace!(
                     target: "flowip-080o",
                     stage_name = %ctx.stage_name,
                     loop_iteration = loop_count + 1,
@@ -450,7 +450,7 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                 > = Ok(EventLoopDirective::Continue);
 
                 if let Some(mut subscription) = maybe_subscription {
-                    tracing::info!(
+                    tracing::trace!(
                         target: "flowip-080o",
                         stage_name = %ctx.stage_name,
                         loop_iteration = loop_count + 1,
@@ -464,7 +464,7 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                     match poll_result {
                         PollResult::Event(envelope) => {
                             use obzenflow_core::event::JournalEvent;
-                            tracing::info!(
+                            tracing::trace!(
                                 target: "flowip-080o",
                                 stage_name = %ctx.stage_name,
                                 loop_iteration = loop_count + 1,
@@ -875,7 +875,7 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                             }
 
                             // No events available right now, sleep briefly
-                            tracing::info!(
+                            tracing::trace!(
                                 target: "flowip-080o",
                                 stage_name = %ctx.stage_name,
                                 loop_iteration = loop_count + 1,

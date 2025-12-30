@@ -311,6 +311,7 @@ impl WarpServer {
                         };
 
                         let mut middleware_state = MiddlewareSseState::default();
+                        let mut stage_lifecycle_state = StageLifecycleSseState::default();
                         let mut last_pipeline_event: Option<&'static str> = None;
 
                         // When resuming, we fast-forward until we've passed the resume ID.
@@ -341,6 +342,7 @@ impl WarpServer {
                                         if let Some(resume_id) = &resume_event_id {
                                             if !resume_seen {
                                                 middleware_state.observe(&envelope);
+                                                stage_lifecycle_state.observe(&envelope);
                                                 last_pipeline_event = last_pipeline_event_name(&envelope)
                                                     .or(last_pipeline_event);
 
@@ -355,12 +357,14 @@ impl WarpServer {
                                         } else {
                                             // Fresh connect: discard history until we reach EOF once.
                                             middleware_state.observe(&envelope);
+                                            stage_lifecycle_state.observe(&envelope);
                                             last_pipeline_event = last_pipeline_event_name(&envelope)
                                                 .or(last_pipeline_event);
                                             continue;
                                         }
                                     }
 
+                                    stage_lifecycle_state.observe(&envelope);
                                     let ev =
                                         map_system_event_to_sse(&envelope, &mut middleware_state);
                                     if tx.send(Ok(ev)).is_err() {
@@ -381,6 +385,13 @@ impl WarpServer {
                                     if !ready_to_stream && resume_event_id.is_none() {
                                         // Fresh connect has now caught up to EOF.
                                         ready_to_stream = true;
+
+                                        for snapshot_ev in stage_lifecycle_state
+                                            .build_snapshot_sse_events()
+                                            .into_iter()
+                                        {
+                                            let _ = tx.send(Ok(snapshot_ev));
+                                        }
 
                                         if matches!(
                                             last_pipeline_event,
@@ -403,6 +414,13 @@ impl WarpServer {
                                         let err_ev =
                                             SseEvent::default().event("error").data(payload.to_string());
                                         let _ = tx.send(Ok(err_ev));
+
+                                        for snapshot_ev in stage_lifecycle_state
+                                            .build_snapshot_sse_events()
+                                            .into_iter()
+                                        {
+                                            let _ = tx.send(Ok(snapshot_ev));
+                                        }
                                     } else {
                                         // No new events; back off briefly.
                                         sleep(Duration::from_millis(100)).await;
@@ -1061,6 +1079,132 @@ fn is_flow_running_event(envelope: &SystemEventEnvelope) -> bool {
             obzenflow_core::event::system_event::PipelineLifecycleEvent::Running { .. }
         )
     )
+}
+
+#[derive(Default)]
+struct StageLifecycleSseState {
+    /// Latest lifecycle envelope per stage (best-effort).
+    ///
+    /// Used to bootstrap new SSE clients so the UI can render stage state even
+    /// if it connected after the original stage_running events were emitted.
+    latest_by_stage: std::collections::BTreeMap<obzenflow_core::StageId, SystemEventEnvelope>,
+}
+
+impl StageLifecycleSseState {
+    fn observe(&mut self, envelope: &SystemEventEnvelope) {
+        use obzenflow_core::event::system_event::StageLifecycleEvent;
+        use obzenflow_core::event::SystemEventType;
+
+        let SystemEventType::StageLifecycle { stage_id, event } = &envelope.event.event else {
+            return;
+        };
+
+        // Prefer terminal lifecycle events with metrics when duplicates exist
+        // (some stages write both a supervisor completion marker and a later
+        // metrics-enriched completion event).
+        let should_replace = match (self.latest_by_stage.get(stage_id), event) {
+            (None, _) => true,
+            (Some(prev), StageLifecycleEvent::Completed { metrics: None }) => {
+                !matches!(
+                    prev.event.event,
+                    SystemEventType::StageLifecycle {
+                        event: StageLifecycleEvent::Completed { metrics: Some(_) },
+                        ..
+                    }
+                )
+            }
+            (Some(prev), StageLifecycleEvent::Failed { metrics: None, .. }) => {
+                !matches!(
+                    prev.event.event,
+                    SystemEventType::StageLifecycle {
+                        event: StageLifecycleEvent::Failed { metrics: Some(_), .. },
+                        ..
+                    }
+                )
+            }
+            _ => true,
+        };
+
+        if should_replace {
+            self.latest_by_stage.insert(*stage_id, envelope.clone());
+        }
+    }
+
+    fn build_snapshot_sse_events(&self) -> Vec<SseEvent> {
+        let mut out = Vec::new();
+        for envelope in self.latest_by_stage.values() {
+            if let Some(ev) = map_stage_lifecycle_to_sse_snapshot(envelope) {
+                out.push(ev);
+            }
+        }
+        out
+    }
+}
+
+fn map_stage_lifecycle_to_sse_snapshot(envelope: &SystemEventEnvelope) -> Option<SseEvent> {
+    use obzenflow_core::event::system_event::StageLifecycleEvent;
+    use obzenflow_core::event::SystemEventType;
+    use serde_json::json;
+
+    let event: &SystemEvent = &envelope.event;
+    let vector_clock_value = serde_json::to_value(&envelope.vector_clock).ok();
+
+    let SystemEventType::StageLifecycle {
+        stage_id,
+        event: lifecycle,
+    } = &event.event
+    else {
+        return None;
+    };
+
+    let (event_type, metrics_value, error, recoverable) = match lifecycle {
+        StageLifecycleEvent::Running => ("stage_running", None, None, None),
+        StageLifecycleEvent::Draining { metrics } => (
+            "stage_draining",
+            metrics.as_ref().and_then(|m| serde_json::to_value(m).ok()),
+            None,
+            None,
+        ),
+        StageLifecycleEvent::Drained => ("stage_drained", None, None, None),
+        StageLifecycleEvent::Completed { metrics } => (
+            "stage_completed",
+            metrics.as_ref().and_then(|m| serde_json::to_value(m).ok()),
+            None,
+            None,
+        ),
+        StageLifecycleEvent::Failed {
+            error,
+            recoverable,
+            metrics,
+        } => (
+            "stage_failed",
+            metrics.as_ref().and_then(|m| serde_json::to_value(m).ok()),
+            Some(error.clone()),
+            *recoverable,
+        ),
+    };
+
+    let mut data = json!({
+        "system_event_type": "stage_lifecycle",
+        "event_type": event_type,
+        "stage_id": stage_id.to_string(),
+        "timestamp_ms": event.timestamp,
+    });
+
+    if let Some(vc) = &vector_clock_value {
+        data["vector_clock"] = vc.clone();
+    }
+    if let Some(m) = metrics_value {
+        data["metrics"] = m;
+    }
+    if let Some(err) = error {
+        data["error"] = serde_json::Value::String(err);
+    }
+    if let Some(rec) = recoverable {
+        data["recoverable"] = serde_json::Value::Bool(rec);
+    }
+
+    Some(SseEvent::default().event("stage_lifecycle").data(data.to_string()))
 }
 
 #[derive(Default)]

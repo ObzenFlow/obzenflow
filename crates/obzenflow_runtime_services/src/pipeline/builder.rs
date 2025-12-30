@@ -277,6 +277,7 @@ impl SupervisorBuilder for PipelineBuilder {
             system_id,
             system_journal: self.system_journal.clone(),
             last_barrier_log: None,
+            last_manual_wait_log: None,
             drain_idle_iters: 0,
         };
 
