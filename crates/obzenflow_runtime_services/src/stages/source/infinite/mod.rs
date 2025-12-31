@@ -2,6 +2,8 @@
 //!
 //! Infinite sources never complete naturally (Kafka, WebSocket, etc).
 
+pub mod async_builder;
+pub mod async_supervisor;
 pub mod builder;
 pub mod config;
 pub mod fsm;
@@ -9,6 +11,7 @@ pub mod handle;
 pub mod supervisor;
 
 // Re-export public API
+pub use async_builder::AsyncInfiniteSourceBuilder;
 pub use builder::InfiniteSourceBuilder;
 pub use config::InfiniteSourceConfig;
 pub use handle::{InfiniteSourceHandle, InfiniteSourceHandleExt};

@@ -300,11 +300,18 @@ impl crate::supervised_base::base::Supervisor for PipelineSupervisor {
                             ctx.stop_deadline = Some(Instant::now() + stop_drain_timeout());
                         }
 
-                        Ok(Transition {
-                            next_state: PipelineState::Failed {
+                        let next_state = if ctx.stop_should_fail {
+                            PipelineState::Failed {
                                 reason: "user_stop".to_string(),
                                 failure_cause: Some(ViolationCause::Other("user_stop".into())),
-                            },
+                            }
+                        } else {
+                            // Infinite-source flows treat Stop as a graceful completion signal.
+                            PipelineState::Drained
+                        };
+
+                        Ok(Transition {
+                            next_state,
                             actions: vec![PipelineAction::Cleanup],
                         })
                     })

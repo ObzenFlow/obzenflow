@@ -10,7 +10,7 @@ use obzenflow_core::event::status::processing_status::ErrorKind;
 use obzenflow_core::event::ChainEventFactory;
 use obzenflow_core::{ChainEvent, WriterId};
 use obzenflow_runtime_services::stages::common::handlers::{
-    AsyncFiniteSourceHandler, FiniteSourceHandler, InfiniteSourceHandler,
+    AsyncFiniteSourceHandler, AsyncInfiniteSourceHandler, FiniteSourceHandler, InfiniteSourceHandler,
 };
 use obzenflow_runtime_services::stages::SourceError;
 use serde_json::json;
@@ -377,6 +377,216 @@ impl<H: AsyncFiniteSourceHandler> AsyncFiniteSourceHandler for MiddlewareAsyncFi
     }
 }
 
+/// An AsyncInfiniteSourceHandler wrapper that applies middleware.
+#[derive(Clone)]
+pub struct MiddlewareAsyncInfiniteSource<H: AsyncInfiniteSourceHandler> {
+    inner: H,
+    middleware_chain: Arc<Vec<Arc<dyn Middleware>>>,
+    writer_id: WriterId, // Sources need a writer ID for synthetic events
+    poll_timeout: Option<Duration>,
+    empty_poll_backoff: ExponentialBackoff,
+}
+
+impl<H: AsyncInfiniteSourceHandler> std::fmt::Debug for MiddlewareAsyncInfiniteSource<H> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MiddlewareAsyncInfiniteSource")
+            .field("inner_type", &std::any::type_name::<H>())
+            .field("middleware_count", &self.middleware_chain.len())
+            .field("writer_id", &self.writer_id)
+            .field("poll_timeout", &self.poll_timeout)
+            .finish()
+    }
+}
+
+impl<H: AsyncInfiniteSourceHandler> MiddlewareAsyncInfiniteSource<H> {
+    /// Create a new middleware-wrapped async infinite source handler.
+    pub fn new(inner: H, writer_id: WriterId) -> Self {
+        Self {
+            inner,
+            middleware_chain: Arc::new(Vec::new()),
+            writer_id,
+            // Infinite sources should block efficiently by default (e.g. recv().await),
+            // so do not enforce a timeout unless the user opts in.
+            poll_timeout: None,
+            empty_poll_backoff: ExponentialBackoff::new(
+                Duration::from_millis(1),
+                Duration::from_millis(50),
+            ),
+        }
+    }
+
+    /// Override the poll timeout used to bound `inner.next().await`.
+    ///
+    /// - `Some(d)` enforces a timeout
+    /// - `None` disables the timeout (handler is responsible)
+    pub fn with_poll_timeout(mut self, poll_timeout: Option<Duration>) -> Self {
+        self.poll_timeout = poll_timeout;
+        self
+    }
+
+    /// Add middleware to the chain.
+    pub fn with_middleware(mut self, middleware: Box<dyn Middleware>) -> Self {
+        Arc::make_mut(&mut self.middleware_chain).push(Arc::from(middleware));
+        self
+    }
+}
+
+#[async_trait]
+impl<H: AsyncInfiniteSourceHandler> AsyncInfiniteSourceHandler for MiddlewareAsyncInfiniteSource<H> {
+    async fn next(&mut self) -> Result<Vec<ChainEvent>, SourceError> {
+        let synthetic_event = ChainEventFactory::data_event(
+            self.writer_id.clone(),
+            "system.source.next",
+            json!({
+                "source_type": "async_infinite",
+                "timestamp_ms": SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis()
+            }),
+        );
+
+        let mut ctx = MiddlewareContext::new();
+
+        // Phase 0: gating middleware (CB + flow_control + rate_limiter) before polling.
+        for middleware in self.middleware_chain.iter() {
+            let name = middleware.middleware_name();
+            if name != "circuit_breaker" && name != "rate_limiter" && name != "flow_control" {
+                continue;
+            }
+
+            match middleware.pre_handle(&synthetic_event, &mut ctx) {
+                MiddlewareAction::Continue => continue,
+                MiddlewareAction::Skip(mut results) => {
+                    match name {
+                        "circuit_breaker" => backoff_on_cb_rejection_async(&ctx).await,
+                        "flow_control" => {
+                            let backoff = self.empty_poll_backoff.next_backoff();
+                            tokio::time::sleep(backoff).await;
+                        }
+                        "rate_limiter" => {
+                            // Future-proofing: if a non-blocking rate limiter returns Skip,
+                            // add a small sleep to avoid hot-looping.
+                            tokio::time::sleep(Duration::from_millis(1)).await;
+                        }
+                        _ => {}
+                    }
+
+                    // Pre-write enrichment for skip results
+                    for result in &mut results {
+                        for mw in self.middleware_chain.iter() {
+                            mw.pre_write(result, &ctx);
+                        }
+                    }
+
+                    // Append control events
+                    let mut control_events = std::mem::take(&mut ctx.control_events);
+                    for control_event in &mut control_events {
+                        for mw in self.middleware_chain.iter() {
+                            mw.pre_write(control_event, &ctx);
+                        }
+                    }
+                    results.extend(control_events);
+
+                    if results.iter().any(|e| e.is_data()) {
+                        self.empty_poll_backoff.reset();
+                    }
+
+                    return Ok(results);
+                }
+                MiddlewareAction::Abort => return Ok(Vec::new()),
+            }
+        }
+
+        // Poll the inner source with an optional timeout.
+        let inner_result = match self.poll_timeout {
+            Some(poll_timeout) => match timeout(poll_timeout, self.inner.next()).await {
+                Ok(result) => result,
+                Err(_elapsed) => Err(SourceError::Timeout(format!(
+                    "poll timeout exceeded ({}s)",
+                    poll_timeout.as_secs()
+                ))),
+            },
+            None => self.inner.next().await,
+        };
+
+        // Phase 1: all other middleware pre-handle (after polling).
+        for middleware in self.middleware_chain.iter() {
+            let name = middleware.middleware_name();
+            if name == "circuit_breaker" || name == "rate_limiter" || name == "flow_control" {
+                continue;
+            }
+
+            match middleware.pre_handle(&synthetic_event, &mut ctx) {
+                MiddlewareAction::Continue => continue,
+                MiddlewareAction::Skip(mut results) => {
+                    // Pre-write enrichment for skip results
+                    for result in &mut results {
+                        for mw in self.middleware_chain.iter() {
+                            mw.pre_write(result, &ctx);
+                        }
+                    }
+
+                    // Append control events
+                    let mut control_events = std::mem::take(&mut ctx.control_events);
+                    for control_event in &mut control_events {
+                        for mw in self.middleware_chain.iter() {
+                            mw.pre_write(control_event, &ctx);
+                        }
+                    }
+                    results.extend(control_events);
+                    return Ok(results);
+                }
+                MiddlewareAction::Abort => return Ok(Vec::new()),
+            }
+        }
+
+        let mut results = match inner_result {
+            Ok(events) => events,
+            Err(err) => vec![source_error_event(
+                self.writer_id.clone(),
+                "async_infinite",
+                &err,
+            )],
+        };
+
+        // Post-processing phase (observation)
+        for middleware in self.middleware_chain.iter() {
+            middleware.post_handle(&synthetic_event, &results, &mut ctx);
+        }
+
+        // Pre-write phase: enrich each result event
+        for result in &mut results {
+            for middleware in self.middleware_chain.iter() {
+                middleware.pre_write(result, &ctx);
+            }
+        }
+
+        // Append control events after all middleware runs
+        let mut control_events = std::mem::take(&mut ctx.control_events);
+        for control_event in &mut control_events {
+            for mw in self.middleware_chain.iter() {
+                mw.pre_write(control_event, &ctx);
+            }
+        }
+        results.extend(control_events);
+
+        // Empty-poll backoff to prevent hot loops when no data is produced.
+        if !results.iter().any(|e| e.is_data()) {
+            let backoff = self.empty_poll_backoff.next_backoff();
+            tokio::time::sleep(backoff).await;
+        } else {
+            self.empty_poll_backoff.reset();
+        }
+
+        Ok(results)
+    }
+
+    async fn drain(&mut self) -> Result<(), SourceError> {
+        self.inner.drain().await
+    }
+}
+
 /// A FiniteSourceHandler wrapper that applies middleware
 #[derive(Clone)]
 pub struct MiddlewareFiniteSource<H: FiniteSourceHandler> {
@@ -699,6 +909,16 @@ pub trait AsyncFiniteSourceHandlerExt: AsyncFiniteSourceHandler + Sized {
 
 impl<T: AsyncFiniteSourceHandler> AsyncFiniteSourceHandlerExt for T {}
 
+/// Extension trait for async infinite sources.
+pub trait AsyncInfiniteSourceHandlerExt: AsyncInfiniteSourceHandler + Sized {
+    /// Start building a middleware chain for this handler.
+    fn middleware(self, writer_id: WriterId) -> AsyncInfiniteSourceMiddlewareBuilder<Self> {
+        AsyncInfiniteSourceMiddlewareBuilder::new(self, writer_id)
+    }
+}
+
+impl<T: AsyncInfiniteSourceHandler> AsyncInfiniteSourceHandlerExt for T {}
+
 /// Extension trait for infinite sources
 pub trait InfiniteSourceHandlerExt: InfiniteSourceHandler + Sized {
     /// Start building a middleware chain for this handler
@@ -758,6 +978,35 @@ impl<H: AsyncFiniteSourceHandler> AsyncFiniteSourceMiddlewareBuilder<H> {
 
     /// Build the final middleware-wrapped handler.
     pub fn build(self) -> MiddlewareAsyncFiniteSource<H> {
+        self.handler
+    }
+}
+
+/// Builder for async infinite source middleware chains.
+pub struct AsyncInfiniteSourceMiddlewareBuilder<H: AsyncInfiniteSourceHandler> {
+    handler: MiddlewareAsyncInfiniteSource<H>,
+}
+
+impl<H: AsyncInfiniteSourceHandler> AsyncInfiniteSourceMiddlewareBuilder<H> {
+    fn new(inner: H, writer_id: WriterId) -> Self {
+        Self {
+            handler: MiddlewareAsyncInfiniteSource::new(inner, writer_id),
+        }
+    }
+
+    pub fn with_poll_timeout(mut self, poll_timeout: Option<Duration>) -> Self {
+        self.handler = self.handler.with_poll_timeout(poll_timeout);
+        self
+    }
+
+    /// Add a middleware to the chain.
+    pub fn with<M: Middleware + 'static>(mut self, middleware: M) -> Self {
+        self.handler = self.handler.with_middleware(Box::new(middleware));
+        self
+    }
+
+    /// Build the final middleware-wrapped handler.
+    pub fn build(self) -> MiddlewareAsyncInfiniteSource<H> {
         self.handler
     }
 }
@@ -950,6 +1199,56 @@ mod tests {
             .next()
             .await
             .expect("async finite source wrapper should not propagate SourceError");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "breaker should prevent further inner.next() calls while Open"
+        );
+    }
+
+    #[derive(Clone, Debug)]
+    struct ErringAsyncInfiniteSource {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl AsyncInfiniteSourceHandler for ErringAsyncInfiniteSource {
+        async fn next(&mut self) -> Result<Vec<ChainEvent>, SourceError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Err(SourceError::Timeout("boom".to_string()))
+        }
+    }
+
+    #[tokio::test]
+    async fn async_infinite_source_errors_trip_circuit_breaker_and_prevent_polling() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let inner = ErringAsyncInfiniteSource { calls: calls.clone() };
+
+        let stage_id = StageId::new();
+        let writer_id = WriterId::from(stage_id);
+
+        // Cooldown is non-zero so the breaker stays Open long enough for the next call.
+        let cb = CircuitBreakerMiddleware::with_cooldown(1, Duration::from_millis(50));
+
+        let mut wrapped =
+            MiddlewareAsyncInfiniteSource::new(inner, writer_id).with_middleware(Box::new(cb));
+
+        let first = wrapped
+            .next()
+            .await
+            .expect("async infinite source wrapper should not propagate SourceError");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(
+            first.iter()
+                .any(|e| matches!(e.processing_info.status, ProcessingStatus::Error { .. })),
+            "expected an error-marked event"
+        );
+
+        // Second call should be rejected by the breaker and must not poll the inner source again.
+        let _ = wrapped
+            .next()
+            .await
+            .expect("async infinite source wrapper should not propagate SourceError");
         assert_eq!(
             calls.load(Ordering::SeqCst),
             1,

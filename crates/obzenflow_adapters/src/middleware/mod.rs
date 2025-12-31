@@ -164,9 +164,10 @@ pub use middleware_trait::{ErrorAction, Middleware, MiddlewareAction};
 pub use join_middleware::{JoinHandlerMiddlewareExt, JoinMiddlewareBuilder, MiddlewareJoin};
 pub use sink_middleware::{MiddlewareSink, SinkHandlerExt, SinkMiddlewareBuilder};
 pub use source_middleware::{
-    AsyncFiniteSourceHandlerExt, AsyncFiniteSourceMiddlewareBuilder, FiniteSourceHandlerExt,
-    FiniteSourceMiddlewareBuilder, InfiniteSourceHandlerExt, InfiniteSourceMiddlewareBuilder,
-    MiddlewareAsyncFiniteSource, MiddlewareFiniteSource, MiddlewareInfiniteSource,
+    AsyncFiniteSourceHandlerExt, AsyncFiniteSourceMiddlewareBuilder, AsyncInfiniteSourceHandlerExt,
+    AsyncInfiniteSourceMiddlewareBuilder, FiniteSourceHandlerExt, FiniteSourceMiddlewareBuilder,
+    InfiniteSourceHandlerExt, InfiniteSourceMiddlewareBuilder, MiddlewareAsyncFiniteSource,
+    MiddlewareAsyncInfiniteSource, MiddlewareFiniteSource, MiddlewareInfiniteSource,
 };
 pub use stateful_middleware::{
     MiddlewareStateful, StatefulHandlerMiddlewareExt, StatefulMiddlewareBuilder,

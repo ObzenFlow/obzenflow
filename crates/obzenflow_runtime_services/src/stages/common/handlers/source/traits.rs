@@ -107,6 +107,30 @@ pub trait AsyncFiniteSourceHandler: Send + Sync {
     }
 }
 
+/// Async handler for infinite sources.
+///
+/// This is intended for push/streaming sources that should await incoming data efficiently
+/// (e.g. `recv().await` on an internal channel) instead of polling with `try_recv()`.
+///
+/// Semantics mirror `InfiniteSourceHandler`:
+/// - `Ok(events)` → source advanced; `events` may be empty or non-empty
+/// - `Err(SourceError)` → polling failed; middleware converts to error-marked event
+///
+/// Infinite sources never complete naturally; shutdown is signaled externally (e.g. BeginDrain)
+/// and handlers can optionally implement `drain()` for best-effort cleanup.
+#[async_trait]
+pub trait AsyncInfiniteSourceHandler: Send + Sync {
+    /// Pull zero or more events from the source asynchronously.
+    async fn next(&mut self) -> Result<Vec<ChainEvent>, SourceError>;
+
+    /// Perform any cleanup during shutdown.
+    ///
+    /// Default is a no-op. Errors are logged by the supervisor but do not block shutdown.
+    async fn drain(&mut self) -> Result<(), SourceError> {
+        Ok(())
+    }
+}
+
 /// Handler for sources that run indefinitely
 ///
 /// Infinite sources:

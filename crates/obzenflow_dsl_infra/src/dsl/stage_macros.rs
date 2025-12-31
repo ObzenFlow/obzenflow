@@ -59,6 +59,30 @@ macro_rules! infinite_source {
     }};
 }
 
+/// Create an async infinite source stage descriptor
+#[macro_export]
+macro_rules! async_infinite_source {
+    ($name:literal => ($handler:expr, $poll_timeout:expr)) => {
+        $crate::dsl::stage_descriptor::AsyncInfiniteSourceDescriptor::new($name, $handler)
+            .with_poll_timeout($poll_timeout)
+            .build()
+    };
+    ($name:literal => ($handler:expr, $poll_timeout:expr), [$($mw:expr),*]) => {{
+        $crate::dsl::stage_descriptor::AsyncInfiniteSourceDescriptor::new($name, $handler)
+            .with_poll_timeout($poll_timeout)
+            $(.with_middleware($mw))*
+            .build()
+    }};
+    ($name:literal => $handler:expr) => {
+        $crate::async_infinite_source!($name => $handler, [])
+    };
+    ($name:literal => $handler:expr, [$($mw:expr),*]) => {{
+        $crate::dsl::stage_descriptor::AsyncInfiniteSourceDescriptor::new($name, $handler)
+            $(.with_middleware($mw))*
+            .build()
+    }};
+}
+
 /// Create a transform stage descriptor
 #[macro_export]
 macro_rules! transform {

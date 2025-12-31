@@ -27,9 +27,7 @@ pub trait InfiniteSourceHandleExt<H> {
     fn is_terminal(&self) -> bool;
 }
 
-impl<H: InfiniteSourceHandler + Send + Sync + 'static> InfiniteSourceHandleExt<H>
-    for InfiniteSourceHandle<H>
-{
+impl<H: Send + Sync + 'static> InfiniteSourceHandleExt<H> for InfiniteSourceHandle<H> {
     async fn initialize(&self) -> Result<(), HandleError> {
         self.send_event(InfiniteSourceEvent::<H>::Initialize).await
     }
