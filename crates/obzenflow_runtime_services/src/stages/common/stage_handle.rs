@@ -6,6 +6,16 @@
 use obzenflow_core::{event::context::StageType, StageId};
 use std::fmt;
 
+/// Canonical error message used when the pipeline requests an immediate stage shutdown.
+///
+/// Stage supervisors treat this as an *intentional cancellation* signal (not a "failed" error),
+/// and should emit `system.stage.cancelled` lifecycle events for observability/UI correctness.
+pub const FORCE_SHUTDOWN_MESSAGE: &str = "Force shutdown requested";
+
+/// Stable stop/cancel reason labels used across lifecycle events.
+pub const STOP_REASON_USER_STOP: &str = "user_stop";
+pub const STOP_REASON_TIMEOUT: &str = "stop_timeout";
+
 /// Error type for stage operations
 #[derive(Debug, Clone)]
 pub enum StageError {

@@ -29,7 +29,7 @@ use obzenflow_runtime_services::{
                 FiniteSourceHandler, InfiniteSourceHandler, JoinHandler, SinkHandler,
                 StatefulHandler, TransformHandler,
             },
-            stage_handle::{BoxedStageHandle, StageEvent},
+            stage_handle::{BoxedStageHandle, StageEvent, FORCE_SHUTDOWN_MESSAGE},
         },
         join::{JoinBuilder, JoinConfig, JoinEvent, JoinState},
         sink::journal_sink::{
@@ -1412,9 +1412,7 @@ fn translate_stage_event_to_finite_source<H>(
         StageEvent::Ready => Ok(FiniteSourceEvent::Ready),
         StageEvent::Start => Ok(FiniteSourceEvent::Start),
         StageEvent::BeginDrain => Ok(FiniteSourceEvent::BeginDrain),
-        StageEvent::ForceShutdown => Ok(FiniteSourceEvent::Error(
-            "Force shutdown requested".to_string(),
-        )),
+        StageEvent::ForceShutdown => Ok(FiniteSourceEvent::Error(FORCE_SHUTDOWN_MESSAGE.to_string())),
         _ => Err(format!(
             "Unsupported stage event for finite source: {:?}",
             event
@@ -1445,9 +1443,7 @@ fn translate_stage_event_to_infinite_source<H>(
         StageEvent::Ready => Ok(InfiniteSourceEvent::Ready),
         StageEvent::Start => Ok(InfiniteSourceEvent::Start),
         StageEvent::BeginDrain => Ok(InfiniteSourceEvent::BeginDrain),
-        StageEvent::ForceShutdown => Ok(InfiniteSourceEvent::Error(
-            "Force shutdown requested".to_string(),
-        )),
+        StageEvent::ForceShutdown => Ok(InfiniteSourceEvent::Error(FORCE_SHUTDOWN_MESSAGE.to_string())),
         _ => Err(format!(
             "Unsupported stage event for infinite source: {:?}",
             event
@@ -1475,9 +1471,7 @@ fn translate_stage_event_to_transform<H>(event: StageEvent) -> Result<TransformE
         StageEvent::Initialize => Ok(TransformEvent::Initialize),
         StageEvent::Ready | StageEvent::Start => Ok(TransformEvent::Ready), // Transforms don't have Start, they use Ready
         StageEvent::BeginDrain => Ok(TransformEvent::BeginDrain),
-        StageEvent::ForceShutdown => Ok(TransformEvent::Error(
-            "Force shutdown requested".to_string(),
-        )),
+        StageEvent::ForceShutdown => Ok(TransformEvent::Error(FORCE_SHUTDOWN_MESSAGE.to_string())),
         _ => Err(format!(
             "Unsupported stage event for transform: {:?}",
             event
@@ -1503,9 +1497,7 @@ fn translate_stage_event_to_sink<H>(event: StageEvent) -> Result<JournalSinkEven
         StageEvent::Initialize => Ok(JournalSinkEvent::Initialize),
         StageEvent::Ready | StageEvent::Start => Ok(JournalSinkEvent::Ready), // Sinks don't have Start, they use Ready
         StageEvent::BeginDrain => Ok(JournalSinkEvent::BeginDrain),
-        StageEvent::ForceShutdown => Ok(JournalSinkEvent::Error(
-            "Force shutdown requested".to_string(),
-        )),
+        StageEvent::ForceShutdown => Ok(JournalSinkEvent::Error(FORCE_SHUTDOWN_MESSAGE.to_string())),
         _ => Err(format!("Unsupported stage event for sink: {:?}", event)),
     }
 }
@@ -1672,9 +1664,7 @@ fn translate_stage_event_to_stateful<H>(event: StageEvent) -> Result<StatefulEve
         StageEvent::Initialize => Ok(StatefulEvent::Initialize),
         StageEvent::Ready | StageEvent::Start => Ok(StatefulEvent::Ready), // Stateful stages use Ready like transforms
         StageEvent::BeginDrain => Ok(StatefulEvent::BeginDrain),
-        StageEvent::ForceShutdown => {
-            Ok(StatefulEvent::Error("Force shutdown requested".to_string()))
-        }
+        StageEvent::ForceShutdown => Ok(StatefulEvent::Error(FORCE_SHUTDOWN_MESSAGE.to_string())),
         _ => Err(format!("Unsupported stage event for stateful: {:?}", event)),
     }
 }
@@ -1895,7 +1885,7 @@ fn translate_stage_event_to_join<H>(event: StageEvent) -> Result<JoinEvent<H>, S
         StageEvent::Initialize => Ok(JoinEvent::Initialize),
         StageEvent::Ready | StageEvent::Start => Ok(JoinEvent::Ready), // Join stages use Ready like transforms
         StageEvent::BeginDrain => Ok(JoinEvent::BeginDrain),
-        StageEvent::ForceShutdown => Ok(JoinEvent::Error("Force shutdown requested".to_string())),
+        StageEvent::ForceShutdown => Ok(JoinEvent::Error(FORCE_SHUTDOWN_MESSAGE.to_string())),
         _ => Err(format!("Unsupported stage event for join: {:?}", event)),
     }
 }

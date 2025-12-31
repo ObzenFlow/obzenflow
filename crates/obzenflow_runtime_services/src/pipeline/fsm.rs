@@ -6,6 +6,7 @@ use crate::id_conversions::StageIdExt;
 use crate::message_bus::FsmMessageBus;
 use crate::messaging::system_subscription::SystemSubscription;
 use crate::messaging::upstream_subscription::UpstreamSubscription;
+use crate::stages::common::stage_handle::{STOP_REASON_TIMEOUT, STOP_REASON_USER_STOP};
 use crate::supervised_base::SupervisorHandle;
 use obzenflow_core::event::payloads::observability_payload::{
     MetricsLifecycle, ObservabilityPayload,
@@ -25,6 +26,18 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::Duration;
+
+/// Stop intent for externally-initiated shutdown (UI/API/signal).
+///
+/// This is used internally by the pipeline supervisor to decide whether to
+/// short-circuit processing (`Cancel`) or attempt a bounded drain (`Graceful`).
+#[derive(Clone, Debug)]
+pub enum FlowStopMode {
+    /// Stop as quickly as possible (no drain barrier).
+    Cancel,
+    /// Stop intake and drain backlog up to the given timeout, then cancel.
+    Graceful { timeout: Duration },
+}
 
 /// Pipeline states
 #[derive(Clone, Debug, PartialEq)]
@@ -69,7 +82,15 @@ pub enum PipelineEvent {
     MaterializationComplete,
     Run,
     /// User-initiated stop request (distinct from natural source completion).
-    StopRequested,
+    StopRequested {
+        mode: FlowStopMode,
+        /// Optional override for the stop/cancel reason label used in terminal lifecycle events.
+        ///
+        /// Most callers should omit this and allow the runtime to default to `user_stop`.
+        /// This exists primarily for process-level timeout escalation paths that need to
+        /// report `stop_timeout` deterministically.
+        reason: Option<String>,
+    },
     Shutdown,   // Source has completed
     BeginDrain, // Start draining all stages
     Abort {
@@ -91,7 +112,7 @@ impl EventVariant for PipelineEvent {
             PipelineEvent::Materialize => "Materialize",
             PipelineEvent::MaterializationComplete => "MaterializationComplete",
             PipelineEvent::Run => "Run",
-            PipelineEvent::StopRequested => "StopRequested",
+            PipelineEvent::StopRequested { .. } => "StopRequested",
             PipelineEvent::Shutdown => "Shutdown",
             PipelineEvent::BeginDrain => "BeginDrain",
             PipelineEvent::Abort { .. } => "Abort",
@@ -109,6 +130,8 @@ pub enum PipelineAction {
     NotifyStagesStart,
     NotifySourceReady,
     NotifySourceStart,
+    /// Publish a pipeline stop-requested lifecycle marker (Cancel vs Graceful).
+    WritePipelineStopRequested { mode: FlowStopMode },
     /// Request that all sources begin draining (stop producing and emit EOF).
     StopSources,
     BeginDrain,
@@ -200,8 +223,11 @@ pub struct PipelineContext {
     /// Whether a user stop has been requested for this run.
     pub stop_requested: bool,
 
-    /// Whether stop should be reported as a failure (e.g., finite-only flows).
-    pub stop_should_fail: bool,
+    /// The requested stop mode (Cancel vs Graceful).
+    pub stop_mode: Option<FlowStopMode>,
+
+    /// Stable stop reason/cause label (e.g. "user_stop", "stop_timeout").
+    pub stop_reason: Option<String>,
 
     /// Deadline for stop-triggered drain to complete.
     pub stop_deadline: Option<std::time::Instant>,
@@ -472,6 +498,31 @@ impl FsmAction for PipelineAction {
                     })?;
                 }
                 tracing::info!("All sources started");
+            }
+
+            PipelineAction::WritePipelineStopRequested { mode } => {
+                let system_event_factory = SystemEventFactory::new(context.system_id);
+
+                let (mode_label, timeout_ms) = match mode {
+                    FlowStopMode::Cancel => ("cancel".to_string(), None),
+                    FlowStopMode::Graceful { timeout } => (
+                        "graceful".to_string(),
+                        Some(timeout.as_millis() as u64),
+                    ),
+                };
+
+                let stop_requested =
+                    system_event_factory.pipeline_stop_requested(mode_label, timeout_ms);
+                context
+                    .system_journal
+                    .append(stop_requested, None)
+                    .await
+                    .map_err(|e| {
+                        obzenflow_fsm::FsmError::HandlerError(format!(
+                            "Failed to publish pipeline stop requested event: {}",
+                            e
+                        ))
+                    })?;
             }
 
             PipelineAction::StopSources => {
@@ -1144,43 +1195,72 @@ pub fn build_pipeline_fsm() -> PipelineFsm {
                 })
             };
 
-            on PipelineEvent::StopRequested => |_state: &PipelineState, _event: &PipelineEvent, ctx: &mut PipelineContext| {
+            on PipelineEvent::StopRequested => |_state: &PipelineState, event: &PipelineEvent, ctx: &mut PipelineContext| {
+                let event = event.clone();
                 Box::pin(async move {
-                    // A user stop is a cancellation signal, not a "drain to completion".
-                    // Draining can take arbitrarily long under backpressure or large backlogs.
-                    if !ctx.stop_requested {
-                        let mut has_active_sources = false;
-                        let mut has_infinite_active_source = false;
-                        for source in ctx.source_supervisors.values() {
-                            if source.is_drained() {
-                                continue;
-                            }
-                            has_active_sources = true;
-                            if source.stage_type().is_infinite_source() {
-                                has_infinite_active_source = true;
-                                break;
-                            }
-                        }
-                        ctx.stop_requested = true;
-                        ctx.stop_should_fail = has_active_sources && !has_infinite_active_source;
-                        ctx.stop_deadline = Some(std::time::Instant::now() + stop_drain_timeout());
-                    }
-
-                    let next_state = if ctx.stop_should_fail {
-                        PipelineState::Failed {
-                            reason: "user_stop".to_string(),
-                            failure_cause: Some(obzenflow_core::event::types::ViolationCause::Other(
-                                "user_stop".into(),
-                            )),
-                        }
-                    } else {
-                        PipelineState::Drained
+                    let (mode, reason) = match event {
+                        PipelineEvent::StopRequested { mode, reason } => (mode, reason),
+                        _ => unreachable!("StopRequested handler received non-StopRequested event"),
                     };
 
-                    Ok(Transition {
-                        next_state,
-                        actions: vec![PipelineAction::Cleanup],
-                    })
+                    if let Some(incoming) = reason {
+                        let should_set = incoming == STOP_REASON_TIMEOUT || ctx.stop_reason.is_none();
+                        if should_set {
+                            ctx.stop_reason = Some(incoming);
+                        }
+                    }
+
+                    if !ctx.stop_requested {
+                        ctx.stop_requested = true;
+                    }
+                    if ctx.stop_reason.is_none() {
+                        ctx.stop_reason = Some(STOP_REASON_USER_STOP.to_string());
+                    }
+
+                    match mode.clone() {
+                        FlowStopMode::Cancel => {
+                            ctx.stop_mode = Some(FlowStopMode::Cancel);
+                            ctx.stop_deadline = None;
+
+                            let reason_label = ctx
+                                .stop_reason
+                                .clone()
+                                .unwrap_or_else(|| STOP_REASON_USER_STOP.to_string());
+
+                            Ok(Transition {
+                                next_state: PipelineState::Failed {
+                                    reason: reason_label.clone(),
+                                    failure_cause: Some(obzenflow_core::event::types::ViolationCause::Other(
+                                        reason_label.into(),
+                                    )),
+                                },
+                                actions: vec![
+                                    PipelineAction::WritePipelineStopRequested { mode },
+                                    PipelineAction::Cleanup,
+                                ],
+                            })
+                        }
+                        FlowStopMode::Graceful { timeout } => {
+                            if matches!(ctx.stop_mode, Some(FlowStopMode::Cancel)) {
+                                return Ok(Transition {
+                                    next_state: PipelineState::Running,
+                                    actions: vec![],
+                                });
+                            }
+
+                            ctx.stop_mode = Some(FlowStopMode::Graceful { timeout });
+                            ctx.stop_deadline = Some(std::time::Instant::now() + timeout);
+
+                            Ok(Transition {
+                                next_state: PipelineState::Draining,
+                                actions: vec![
+                                    PipelineAction::WritePipelineStopRequested { mode },
+                                    PipelineAction::StopSources,
+                                    PipelineAction::BeginDrain,
+                                ],
+                            })
+                        }
+                    }
                 })
             };
 
@@ -1222,35 +1302,72 @@ pub fn build_pipeline_fsm() -> PipelineFsm {
                 })
             };
 
-            // Stop while transitioning into drain is still a cancellation signal.
-            on PipelineEvent::StopRequested => |_state: &PipelineState, _event: &PipelineEvent, ctx: &mut PipelineContext| {
+            // Stop while transitioning into drain: either continue bounded drain (graceful) or cancel immediately.
+            on PipelineEvent::StopRequested => |_state: &PipelineState, event: &PipelineEvent, ctx: &mut PipelineContext| {
+                let event = event.clone();
                 Box::pin(async move {
-                    if !ctx.stop_requested {
-                        let mut has_active_sources = false;
-                        let mut has_infinite_active_source = false;
-                        for source in ctx.source_supervisors.values() {
-                            if source.is_drained() {
-                                continue;
-                            }
-                            has_active_sources = true;
-                            if source.stage_type().is_infinite_source() {
-                                has_infinite_active_source = true;
-                                break;
-                            }
+                    let (mode, reason) = match event {
+                        PipelineEvent::StopRequested { mode, reason } => (mode, reason),
+                        _ => unreachable!("StopRequested handler received non-StopRequested event"),
+                    };
+
+                    if let Some(incoming) = reason {
+                        let should_set = incoming == STOP_REASON_TIMEOUT || ctx.stop_reason.is_none();
+                        if should_set {
+                            ctx.stop_reason = Some(incoming);
                         }
-                        ctx.stop_requested = true;
-                        ctx.stop_should_fail = has_active_sources && !has_infinite_active_source;
                     }
 
-                    Ok(Transition {
-                        next_state: PipelineState::Failed {
-                            reason: "user_stop".to_string(),
-                            failure_cause: Some(obzenflow_core::event::types::ViolationCause::Other(
-                                "user_stop".into(),
-                            )),
-                        },
-                        actions: vec![PipelineAction::Cleanup],
-                    })
+                    if !ctx.stop_requested {
+                        ctx.stop_requested = true;
+                    }
+                    if ctx.stop_reason.is_none() {
+                        ctx.stop_reason = Some(STOP_REASON_USER_STOP.to_string());
+                    }
+
+                    match mode.clone() {
+                        FlowStopMode::Cancel => {
+                            ctx.stop_mode = Some(FlowStopMode::Cancel);
+                            ctx.stop_deadline = None;
+
+                            let reason_label = ctx
+                                .stop_reason
+                                .clone()
+                                .unwrap_or_else(|| STOP_REASON_USER_STOP.to_string());
+
+                            Ok(Transition {
+                                next_state: PipelineState::Failed {
+                                    reason: reason_label.clone(),
+                                    failure_cause: Some(obzenflow_core::event::types::ViolationCause::Other(
+                                        reason_label.into(),
+                                    )),
+                                },
+                                actions: vec![
+                                    PipelineAction::WritePipelineStopRequested { mode },
+                                    PipelineAction::Cleanup,
+                                ],
+                            })
+                        }
+                        FlowStopMode::Graceful { timeout } => {
+                            if matches!(ctx.stop_mode, Some(FlowStopMode::Cancel)) {
+                                return Ok(Transition {
+                                    next_state: PipelineState::SourceCompleted,
+                                    actions: vec![],
+                                });
+                            }
+
+                            ctx.stop_mode = Some(FlowStopMode::Graceful { timeout });
+                            ctx.stop_deadline = Some(std::time::Instant::now() + timeout);
+
+                            Ok(Transition {
+                                next_state: PipelineState::SourceCompleted,
+                                actions: vec![
+                                    PipelineAction::WritePipelineStopRequested { mode },
+                                    PipelineAction::StopSources,
+                                ],
+                            })
+                        }
+                    }
                 })
             };
         }
@@ -1261,38 +1378,6 @@ pub fn build_pipeline_fsm() -> PipelineFsm {
                     Ok(Transition {
                         next_state: PipelineState::Draining,
                         actions: vec![PipelineAction::BeginDrain],
-                    })
-                })
-            };
-
-            // Stop during draining is still a cancellation signal: fail fast.
-            on PipelineEvent::StopRequested => |_state: &PipelineState, _event: &PipelineEvent, ctx: &mut PipelineContext| {
-                Box::pin(async move {
-                    if !ctx.stop_requested {
-                        let mut has_active_sources = false;
-                        let mut has_infinite_active_source = false;
-                        for source in ctx.source_supervisors.values() {
-                            if source.is_drained() {
-                                continue;
-                            }
-                            has_active_sources = true;
-                            if source.stage_type().is_infinite_source() {
-                                has_infinite_active_source = true;
-                                break;
-                            }
-                        }
-                        ctx.stop_requested = true;
-                        ctx.stop_should_fail = has_active_sources && !has_infinite_active_source;
-                    }
-
-                    Ok(Transition {
-                        next_state: PipelineState::Failed {
-                            reason: "user_stop".to_string(),
-                            failure_cause: Some(obzenflow_core::event::types::ViolationCause::Other(
-                                "user_stop".into(),
-                            )),
-                        },
-                        actions: vec![PipelineAction::Cleanup],
                     })
                 })
             };
@@ -1351,35 +1436,72 @@ pub fn build_pipeline_fsm() -> PipelineFsm {
                 })
             };
 
-            // Stop during draining should not be a no-op: arm the stop deadline so the
-            // drain loop can time out (stop_drain_timeout) instead of waiting forever.
-            on PipelineEvent::StopRequested => |_state: &PipelineState, _event: &PipelineEvent, ctx: &mut PipelineContext| {
+            // Stop during draining: cancel immediately (Cancel) or apply bounded deadline (Graceful).
+            on PipelineEvent::StopRequested => |_state: &PipelineState, event: &PipelineEvent, ctx: &mut PipelineContext| {
+                let event = event.clone();
                 Box::pin(async move {
-                    if !ctx.stop_requested {
-                        let mut has_active_sources = false;
-                        let mut has_infinite_active_source = false;
-                        for source in ctx.source_supervisors.values() {
-                            if source.is_drained() {
-                                continue;
-                            }
-                            has_active_sources = true;
-                            if source.stage_type().is_infinite_source() {
-                                has_infinite_active_source = true;
-                                break;
-                            }
+                    let (mode, reason) = match event {
+                        PipelineEvent::StopRequested { mode, reason } => (mode, reason),
+                        _ => unreachable!("StopRequested handler received non-StopRequested event"),
+                    };
+
+                    if let Some(incoming) = reason {
+                        let should_set = incoming == STOP_REASON_TIMEOUT || ctx.stop_reason.is_none();
+                        if should_set {
+                            ctx.stop_reason = Some(incoming);
                         }
+                    }
+
+                    if !ctx.stop_requested {
                         ctx.stop_requested = true;
-                        ctx.stop_should_fail = has_active_sources && !has_infinite_active_source;
+                    }
+                    if ctx.stop_reason.is_none() {
+                        ctx.stop_reason = Some(STOP_REASON_USER_STOP.to_string());
                     }
 
-                    if ctx.stop_deadline.is_none() {
-                        ctx.stop_deadline = Some(std::time::Instant::now() + stop_drain_timeout());
-                    }
+                    match mode.clone() {
+                        FlowStopMode::Cancel => {
+                            ctx.stop_mode = Some(FlowStopMode::Cancel);
+                            ctx.stop_deadline = None;
 
-                    Ok(Transition {
-                        next_state: PipelineState::Draining,
-                        actions: vec![PipelineAction::StopSources],
-                    })
+                            let reason_label = ctx
+                                .stop_reason
+                                .clone()
+                                .unwrap_or_else(|| STOP_REASON_USER_STOP.to_string());
+
+                            Ok(Transition {
+                                next_state: PipelineState::Failed {
+                                    reason: reason_label.clone(),
+                                    failure_cause: Some(obzenflow_core::event::types::ViolationCause::Other(
+                                        reason_label.into(),
+                                    )),
+                                },
+                                actions: vec![
+                                    PipelineAction::WritePipelineStopRequested { mode },
+                                    PipelineAction::Cleanup,
+                                ],
+                            })
+                        }
+                        FlowStopMode::Graceful { timeout } => {
+                            if matches!(ctx.stop_mode, Some(FlowStopMode::Cancel)) {
+                                return Ok(Transition {
+                                    next_state: PipelineState::Draining,
+                                    actions: vec![],
+                                });
+                            }
+
+                            ctx.stop_mode = Some(FlowStopMode::Graceful { timeout });
+                            ctx.stop_deadline = Some(std::time::Instant::now() + timeout);
+
+                            Ok(Transition {
+                                next_state: PipelineState::Draining,
+                                actions: vec![
+                                    PipelineAction::WritePipelineStopRequested { mode },
+                                    PipelineAction::StopSources,
+                                ],
+                            })
+                        }
+                    }
                 })
             };
 

@@ -13,6 +13,7 @@ use clap::Parser;
 use obzenflow_runtime_services::prelude::FlowHandle;
 use std::future::Future;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::task::JoinHandle;
 
 /// Configuration for log level filtering
@@ -387,46 +388,141 @@ impl FlowApplication {
                 }
             }
 
-            if let Some(_handle) = server_handle {
+            if let Some(server_task) = server_handle {
                 tracing::info!("📊 Server running on port {}", config.server_port);
-                tracing::info!("⏸️  Press Ctrl+C to stop server...");
+                tracing::info!("⏸️  Press Ctrl+C to cancel; send SIGTERM to graceful-stop...");
 
-                // Wait for Ctrl+C
-                tokio::signal::ctrl_c().await?;
-                tracing::info!("👋 Shutting down server");
+                let shutdown_timeout_secs = std::env::var("OBZENFLOW_SHUTDOWN_TIMEOUT_SECS")
+                    .ok()
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .unwrap_or(30);
+                let grace_timeout = Duration::from_secs(shutdown_timeout_secs);
+
+                #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+                enum ShutdownSignal {
+                    Sigint,
+                    Sigterm,
+                }
+
+                #[cfg(unix)]
+                let mut sigterm_stream = tokio::signal::unix::signal(
+                    tokio::signal::unix::SignalKind::terminate(),
+                )?;
+
+                // Wait for first shutdown signal:
+                // - SIGINT (Ctrl+C) => Cancel
+                // - SIGTERM => GracefulStop(timeout=GRACE)
+                let first_signal = {
+                    #[cfg(unix)]
+                    {
+                        tokio::select! {
+                            _ = tokio::signal::ctrl_c() => ShutdownSignal::Sigint,
+                            _ = sigterm_stream.recv() => ShutdownSignal::Sigterm,
+                        }
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        tokio::signal::ctrl_c().await?;
+                        ShutdownSignal::Sigint
+                    }
+                };
+
+                tracing::info!(?first_signal, "👋 Shutting down server");
 
                 // The web server currently has no explicit shutdown hook; abort its task so we don't
                 // keep servicing requests while the pipeline is draining.
-                _handle.abort();
-                let _ = _handle.await;
+                server_task.abort();
+                let _ = server_task.await;
 
                 // Best-effort: stop the flow before tearing down the runtime.
                 //
                 // We avoid force-aborting here because it can cancel in-flight disk journal
                 // writes (spawn_blocking), which then surfaces as "Background writer task was
                 // cancelled/panicked" errors inside stage supervisors.
-                let shutdown_timeout_secs = std::env::var("OBZENFLOW_SHUTDOWN_TIMEOUT_SECS")
-                    .ok()
-                    .and_then(|s| s.parse::<u64>().ok())
-                    .unwrap_or(30);
-                let shutdown_timeout = std::time::Duration::from_secs(shutdown_timeout_secs);
-
-                if let Err(e) = flow_handle.stop().await {
-                    tracing::warn!(
-                        error = %e,
-                        "Failed to request flow stop during Ctrl+C shutdown; continuing shutdown"
-                    );
+                match first_signal {
+                    ShutdownSignal::Sigint => {
+                        if let Err(e) = flow_handle.stop_cancel().await {
+                            tracing::warn!(
+                                error = %e,
+                                "Failed to request flow cancel during SIGINT shutdown; continuing shutdown"
+                            );
+                        }
+                    }
+                    ShutdownSignal::Sigterm => {
+                        if let Err(e) = flow_handle.stop_graceful(grace_timeout).await {
+                            tracing::warn!(
+                                error = %e,
+                                "Failed to request flow graceful stop during SIGTERM shutdown; continuing shutdown"
+                            );
+                        }
+                    }
                 }
 
-                let start = std::time::Instant::now();
-                while flow_handle.is_running() && start.elapsed() < shutdown_timeout {
-                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                }
-                if flow_handle.is_running() {
-                    tracing::warn!(
-                        shutdown_timeout_secs,
-                        "Flow did not terminate within shutdown timeout; exiting anyway"
-                    );
+                let mut phase = first_signal;
+                let mut phase_deadline = match first_signal {
+                    ShutdownSignal::Sigint => Instant::now() + grace_timeout,
+                    ShutdownSignal::Sigterm => Instant::now() + grace_timeout,
+                };
+
+                while flow_handle.is_running() {
+                    if Instant::now() >= phase_deadline {
+                        if phase == ShutdownSignal::Sigterm {
+                        tracing::warn!(
+                            grace_secs = grace_timeout.as_secs(),
+                            "Graceful stop timeout expired; escalating to cancel"
+                        );
+                            if let Err(e) = flow_handle.stop_cancel_timeout().await {
+                                tracing::warn!(
+                                    error = %e,
+                                    "Failed to request flow cancel during escalation; continuing shutdown"
+                                );
+                            }
+                            phase = ShutdownSignal::Sigint;
+                            phase_deadline = Instant::now() + grace_timeout;
+                            continue;
+                        }
+
+                        tracing::warn!(
+                            shutdown_timeout_secs,
+                            "Flow did not terminate within shutdown timeout; exiting anyway"
+                        );
+                        break;
+                    }
+
+                    if phase == ShutdownSignal::Sigterm {
+                        #[cfg(unix)]
+                        {
+                            tokio::select! {
+                                _ = tokio::time::sleep(Duration::from_millis(50)) => {},
+                                _ = tokio::signal::ctrl_c() => {
+                                    tracing::warn!("Second SIGINT during graceful stop; escalating to cancel");
+                                    let _ = flow_handle.stop_cancel().await;
+                                    phase = ShutdownSignal::Sigint;
+                                    phase_deadline = Instant::now() + grace_timeout;
+                                }
+                                _ = sigterm_stream.recv() => {
+                                    tracing::warn!("Second SIGTERM during graceful stop; escalating to cancel");
+                                    let _ = flow_handle.stop_cancel().await;
+                                    phase = ShutdownSignal::Sigint;
+                                    phase_deadline = Instant::now() + grace_timeout;
+                                }
+                            }
+                        }
+                        #[cfg(not(unix))]
+                        {
+                            tokio::select! {
+                                _ = tokio::time::sleep(Duration::from_millis(50)) => {},
+                                _ = tokio::signal::ctrl_c() => {
+                                    tracing::warn!("Second SIGINT during graceful stop; escalating to cancel");
+                                    let _ = flow_handle.stop_cancel().await;
+                                    phase = ShutdownSignal::Sigint;
+                                    phase_deadline = Instant::now() + grace_timeout;
+                                }
+                            }
+                        }
+                    } else {
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
                 }
             }
 

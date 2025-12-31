@@ -1,5 +1,6 @@
-use super::fsm::{PipelineEvent, PipelineState};
+use super::fsm::{FlowStopMode, PipelineEvent, PipelineState};
 use crate::errors::FlowError;
+use crate::stages::common::stage_handle::STOP_REASON_TIMEOUT;
 use crate::supervised_base::{HandleError, StandardHandle, SupervisorHandle};
 use obzenflow_core::event::SystemEvent;
 use obzenflow_core::journal::journal::Journal;
@@ -9,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io;
 use std::sync::Arc;
+use std::time::Duration;
 
 /// Structural middleware configuration for a stage (FLOWIP-059).
 ///
@@ -222,13 +224,53 @@ impl FlowHandle {
     /// This is distinct from `PipelineEvent::Shutdown` which represents natural
     /// source completion detected by the pipeline supervisor.
     pub async fn stop(&self) -> Result<(), FlowError> {
+        self.stop_cancel().await
+    }
+
+    /// Stop as quickly as possible (Cancel semantics).
+    pub async fn stop_cancel(&self) -> Result<(), FlowError> {
         // If the supervisor already terminated, treat Stop as an idempotent no-op.
         // This avoids surfacing "supervisor not running" as an error to callers
         // that may issue Stop more than once (e.g. UI retries).
         if !self.is_running() {
             return Ok(());
         }
-        self.send_event(PipelineEvent::StopRequested).await
+        self.send_event(PipelineEvent::StopRequested {
+            mode: FlowStopMode::Cancel,
+            reason: None,
+        })
+        .await
+    }
+
+    /// Cancel due to a graceful stop timeout escalation (`stop_timeout`).
+    ///
+    /// This is primarily intended for process-level shutdown coordinators
+    /// (e.g. SIGTERM handlers) that enforce a deadline and need terminal
+    /// lifecycle observability to reflect that timeout.
+    #[doc(hidden)]
+    pub async fn stop_cancel_timeout(&self) -> Result<(), FlowError> {
+        if !self.is_running() {
+            return Ok(());
+        }
+        self.send_event(PipelineEvent::StopRequested {
+            mode: FlowStopMode::Cancel,
+            reason: Some(STOP_REASON_TIMEOUT.to_string()),
+        })
+        .await
+    }
+
+    /// Stop intake and attempt a bounded drain (GracefulStop semantics).
+    ///
+    /// On timeout expiry, the pipeline should escalate to Cancel.
+    pub async fn stop_graceful(&self, timeout: Duration) -> Result<(), FlowError> {
+        if !self.is_running() {
+            return Ok(());
+        }
+        self.send_event(PipelineEvent::StopRequested {
+            mode: FlowStopMode::Graceful { timeout },
+            reason: None,
+        })
+        .await
     }
 
     /// Backwards-compatible alias for `stop()`.

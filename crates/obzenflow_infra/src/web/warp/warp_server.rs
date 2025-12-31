@@ -313,6 +313,7 @@ impl WarpServer {
                         let mut middleware_state = MiddlewareSseState::default();
                         let mut stage_lifecycle_state = StageLifecycleSseState::default();
                         let mut last_pipeline_event: Option<&'static str> = None;
+                        let mut checkpoint_event_id: Option<EventId> = None;
 
                         // When resuming, we fast-forward until we've passed the resume ID.
                         // When starting fresh (no Last-Event-ID), we fast-forward to EOF so the
@@ -338,6 +339,7 @@ impl WarpServer {
                         loop {
                             match reader.next().await {
                                 Ok(Some(envelope)) => {
+                                    checkpoint_event_id = Some(envelope.event.id);
                                     if !ready_to_stream {
                                         if let Some(resume_id) = &resume_event_id {
                                             if !resume_seen {
@@ -393,6 +395,27 @@ impl WarpServer {
                                             let _ = tx.send(Ok(snapshot_ev));
                                         }
 
+                                        // Emit a synthetic bootstrap event with a checkpoint cursor so
+                                        // SSE clients can resume "at least once" after transient disconnects.
+                                        //
+                                        // The checkpoint id is the last *real* system journal event observed
+                                        // while building the snapshot, so the server can safely honor it as
+                                        // a resume cursor.
+                                        {
+                                            let payload = serde_json::json!({
+                                                "system_event_type": "bootstrap",
+                                                "event_type": "flow_bootstrap",
+                                                "checkpoint_event_id": checkpoint_event_id.map(|id| id.to_string()),
+                                            });
+                                            let mut ev = SseEvent::default()
+                                                .event("bootstrap")
+                                                .data(payload.to_string());
+                                            if let Some(id) = checkpoint_event_id {
+                                                ev = ev.id(id.to_string());
+                                            }
+                                            let _ = tx.send(Ok(ev));
+                                        }
+
                                         if matches!(
                                             last_pipeline_event,
                                             Some("flow_running" | "flow_draining" | "flow_stages_completed")
@@ -420,6 +443,23 @@ impl WarpServer {
                                             .into_iter()
                                         {
                                             let _ = tx.send(Ok(snapshot_ev));
+                                        }
+
+                                        // Best-effort: publish a bootstrap cursor even when we couldn't
+                                        // find the requested resume id (the client can treat this as a new base).
+                                        {
+                                            let payload = serde_json::json!({
+                                                "system_event_type": "bootstrap",
+                                                "event_type": "flow_bootstrap",
+                                                "checkpoint_event_id": checkpoint_event_id.map(|id| id.to_string()),
+                                            });
+                                            let mut ev = SseEvent::default()
+                                                .event("bootstrap")
+                                                .data(payload.to_string());
+                                            if let Some(id) = checkpoint_event_id {
+                                                ev = ev.id(id.to_string());
+                                            }
+                                            let _ = tx.send(Ok(ev));
                                         }
                                     } else {
                                         // No new events; back off briefly.
@@ -613,20 +653,29 @@ fn map_system_event_to_sse(
             stage_id,
             event: lifecycle,
         } => {
-            let (event_type, metrics_value, error, recoverable) = match lifecycle {
-                StageLifecycleEvent::Running => ("stage_running", None, None, None),
+            let (event_type, metrics_value, error, recoverable, reason) = match lifecycle {
+                StageLifecycleEvent::Running => ("stage_running", None, None, None, None),
                 StageLifecycleEvent::Draining { metrics } => (
                     "stage_draining",
                     metrics.as_ref().and_then(|m| serde_json::to_value(m).ok()),
                     None,
                     None,
+                    None,
                 ),
-                StageLifecycleEvent::Drained => ("stage_drained", None, None, None),
+                StageLifecycleEvent::Drained => ("stage_drained", None, None, None, None),
                 StageLifecycleEvent::Completed { metrics } => (
                     "stage_completed",
                     metrics.as_ref().and_then(|m| serde_json::to_value(m).ok()),
                     None,
                     None,
+                    None,
+                ),
+                StageLifecycleEvent::Cancelled { reason, metrics } => (
+                    "stage_cancelled",
+                    metrics.as_ref().and_then(|m| serde_json::to_value(m).ok()),
+                    None,
+                    None,
+                    Some(reason.clone()),
                 ),
                 StageLifecycleEvent::Failed {
                     error,
@@ -637,6 +686,7 @@ fn map_system_event_to_sse(
                     metrics.as_ref().and_then(|m| serde_json::to_value(m).ok()),
                     Some(error.clone()),
                     *recoverable,
+                    None,
                 ),
             };
 
@@ -651,17 +701,14 @@ fn map_system_event_to_sse(
                 data["vector_clock"] = vc.clone();
             }
 
-            // Skip supervisor-only completion events without metrics to avoid
-            // duplicate stage_completed events in the SSE stream.
-            if event_type == "stage_completed" && metrics_value.is_none() {
-                return SseEvent::default().comment("stage_completed_without_metrics_skipped");
-            }
-
             if let Some(m) = metrics_value {
                 data["metrics"] = m;
             }
             if let Some(err) = error {
                 data["error"] = serde_json::Value::String(err);
+            }
+            if let Some(r) = reason {
+                data["reason"] = serde_json::Value::String(r);
             }
             if let Some(rec) = recoverable {
                 data["recoverable"] = serde_json::Value::Bool(rec);
@@ -697,6 +744,27 @@ fn map_system_event_to_sse(
                 });
                 if let Some(count) = stage_count {
                     data["stage_count"] = json!(count);
+                }
+                if let Some(vc) = &vector_clock_value {
+                    data["vector_clock"] = vc.clone();
+                }
+                SseEvent::default()
+                    .id(id_str)
+                    .event("flow_lifecycle")
+                    .data(data.to_string())
+            }
+            obzenflow_core::event::system_event::PipelineLifecycleEvent::StopRequested {
+                mode,
+                timeout_ms,
+            } => {
+                let mut data = json!({
+                    "system_event_type": "pipeline_lifecycle",
+                    "event_type": "flow_stop_requested",
+                    "timestamp_ms": event.timestamp,
+                    "mode": mode,
+                });
+                if let Some(ms) = timeout_ms {
+                    data["timeout_ms"] = json!(ms);
                 }
                 if let Some(vc) = &vector_clock_value {
                     data["vector_clock"] = vc.clone();
@@ -788,6 +856,36 @@ fn map_system_event_to_sse(
                 let mut data = json!({
                     "system_event_type": "pipeline_lifecycle",
                     "event_type": "flow_failed",
+                    "timestamp_ms": event.timestamp,
+                    "reason": reason,
+                    "duration_ms": duration_ms,
+                });
+                if let Some(cause) = failure_cause {
+                    if let Ok(cause_value) = serde_json::to_value(cause) {
+                        data["failure_cause"] = cause_value;
+                    }
+                }
+                if let Some(m) = metrics_value {
+                    data["metrics"] = m;
+                }
+                if let Some(vc) = &vector_clock_value {
+                    data["vector_clock"] = vc.clone();
+                }
+                SseEvent::default()
+                    .id(id_str)
+                    .event("flow_lifecycle")
+                    .data(data.to_string())
+            }
+            obzenflow_core::event::system_event::PipelineLifecycleEvent::Cancelled {
+                reason,
+                duration_ms,
+                metrics,
+                failure_cause,
+            } => {
+                let metrics_value = metrics.as_ref().and_then(|m| serde_json::to_value(m).ok());
+                let mut data = json!({
+                    "system_event_type": "pipeline_lifecycle",
+                    "event_type": "flow_cancelled",
                     "timestamp_ms": event.timestamp,
                     "reason": reason,
                     "duration_ms": duration_ms,
@@ -1054,6 +1152,9 @@ fn last_pipeline_event_name(envelope: &SystemEventEnvelope) -> Option<&'static s
             obzenflow_core::event::system_event::PipelineLifecycleEvent::Running { .. } => {
                 "flow_running"
             }
+            obzenflow_core::event::system_event::PipelineLifecycleEvent::StopRequested { .. } => {
+                "flow_stop_requested"
+            }
             obzenflow_core::event::system_event::PipelineLifecycleEvent::Draining { .. } => {
                 "flow_draining"
             }
@@ -1066,6 +1167,9 @@ fn last_pipeline_event_name(envelope: &SystemEventEnvelope) -> Option<&'static s
             }
             obzenflow_core::event::system_event::PipelineLifecycleEvent::Failed { .. } => {
                 "flow_failed"
+            }
+            obzenflow_core::event::system_event::PipelineLifecycleEvent::Cancelled { .. } => {
+                "flow_cancelled"
             }
         }),
         _ => None,
@@ -1109,6 +1213,15 @@ impl StageLifecycleSseState {
                     prev.event.event,
                     SystemEventType::StageLifecycle {
                         event: StageLifecycleEvent::Completed { metrics: Some(_) },
+                        ..
+                    }
+                )
+            }
+            (Some(prev), StageLifecycleEvent::Cancelled { metrics: None, .. }) => {
+                !matches!(
+                    prev.event.event,
+                    SystemEventType::StageLifecycle {
+                        event: StageLifecycleEvent::Cancelled { metrics: Some(_), .. },
                         ..
                     }
                 )
@@ -1157,20 +1270,29 @@ fn map_stage_lifecycle_to_sse_snapshot(envelope: &SystemEventEnvelope) -> Option
         return None;
     };
 
-    let (event_type, metrics_value, error, recoverable) = match lifecycle {
-        StageLifecycleEvent::Running => ("stage_running", None, None, None),
+    let (event_type, metrics_value, error, recoverable, reason) = match lifecycle {
+        StageLifecycleEvent::Running => ("stage_running", None, None, None, None),
         StageLifecycleEvent::Draining { metrics } => (
             "stage_draining",
             metrics.as_ref().and_then(|m| serde_json::to_value(m).ok()),
             None,
             None,
+            None,
         ),
-        StageLifecycleEvent::Drained => ("stage_drained", None, None, None),
+        StageLifecycleEvent::Drained => ("stage_drained", None, None, None, None),
         StageLifecycleEvent::Completed { metrics } => (
             "stage_completed",
             metrics.as_ref().and_then(|m| serde_json::to_value(m).ok()),
             None,
             None,
+            None,
+        ),
+        StageLifecycleEvent::Cancelled { reason, metrics } => (
+            "stage_cancelled",
+            metrics.as_ref().and_then(|m| serde_json::to_value(m).ok()),
+            None,
+            None,
+            Some(reason.clone()),
         ),
         StageLifecycleEvent::Failed {
             error,
@@ -1181,6 +1303,7 @@ fn map_stage_lifecycle_to_sse_snapshot(envelope: &SystemEventEnvelope) -> Option
             metrics.as_ref().and_then(|m| serde_json::to_value(m).ok()),
             Some(error.clone()),
             *recoverable,
+            None,
         ),
     };
 
@@ -1199,6 +1322,9 @@ fn map_stage_lifecycle_to_sse_snapshot(envelope: &SystemEventEnvelope) -> Option
     }
     if let Some(err) = error {
         data["error"] = serde_json::Value::String(err);
+    }
+    if let Some(r) = reason {
+        data["reason"] = serde_json::Value::String(r);
     }
     if let Some(rec) = recoverable {
         data["recoverable"] = serde_json::Value::Bool(rec);

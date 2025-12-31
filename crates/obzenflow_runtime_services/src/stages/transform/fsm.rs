@@ -22,6 +22,9 @@ use crate::metrics::instrumentation::{snapshot_stage_metrics, StageInstrumentati
 use crate::metrics::tail_read;
 use crate::stages::common::control_strategies::ControlEventStrategy;
 use crate::stages::common::handlers::transform::traits::UnifiedTransformHandler;
+use crate::stages::common::stage_handle::{
+    FORCE_SHUTDOWN_MESSAGE, STOP_REASON_TIMEOUT, STOP_REASON_USER_STOP,
+};
 use crate::stages::resources_builder::BoundSubscriptionFactory;
 
 // ============================================================================
@@ -548,20 +551,42 @@ impl<H: UnifiedTransformHandler + Send + Sync + 'static> FsmAction for Transform
                     None => snapshot_stage_metrics(ctx.instrumentation.as_ref()),
                 };
 
-                let error_event = SystemEvent::stage_failed_with_metrics(
-                    ctx.stage_id,
-                    message.clone(),
-                    false, // not recoverable
-                    metrics,
-                );
+                let cancel_reason = match message.as_str() {
+                    FORCE_SHUTDOWN_MESSAGE | STOP_REASON_USER_STOP => Some(STOP_REASON_USER_STOP),
+                    STOP_REASON_TIMEOUT => Some(STOP_REASON_TIMEOUT),
+                    _ => None,
+                };
 
-                match ctx.system_journal.append(error_event, None).await {
+                let system_event = if let Some(reason) = cancel_reason {
+                    SystemEvent::stage_cancelled_with_metrics(
+                        ctx.stage_id,
+                        reason.to_string(),
+                        metrics,
+                    )
+                } else {
+                    SystemEvent::stage_failed_with_metrics(
+                        ctx.stage_id,
+                        message.clone(),
+                        false, // not recoverable
+                        metrics,
+                    )
+                };
+
+                match ctx.system_journal.append(system_event, None).await {
                     Ok(_) => {
-                        tracing::error!(
-                            stage_name = %ctx.stage_name,
-                            error = %message,
-                            "Transform stage encountered error"
-                        );
+                        if let Some(reason) = cancel_reason {
+                            tracing::info!(
+                                stage_name = %ctx.stage_name,
+                                reason = %reason,
+                                "Transform stage cancelled"
+                            );
+                        } else {
+                            tracing::error!(
+                                stage_name = %ctx.stage_name,
+                                error = %message,
+                                "Transform stage encountered error"
+                            );
+                        }
                     }
                     Err(e) => {
                         tracing::error!(

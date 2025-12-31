@@ -22,6 +22,9 @@ use crate::messaging::UpstreamSubscription;
 use crate::metrics::instrumentation::{snapshot_stage_metrics, StageInstrumentation};
 use crate::metrics::tail_read;
 use crate::stages::common::handlers::JoinHandler;
+use crate::stages::common::stage_handle::{
+    FORCE_SHUTDOWN_MESSAGE, STOP_REASON_TIMEOUT, STOP_REASON_USER_STOP,
+};
 use crate::stages::resources_builder::BoundSubscriptionFactory;
 
 // ============================================================================
@@ -645,20 +648,42 @@ impl<H: JoinHandler + Send + Sync + 'static> FsmAction for JoinAction<H> {
                     None => snapshot_stage_metrics(ctx.instrumentation.as_ref()),
                 };
 
-                let error_event = SystemEvent::stage_failed_with_metrics(
-                    ctx.stage_id,
-                    message.clone(),
-                    false, // not recoverable
-                    metrics,
-                );
+                let cancel_reason = match message.as_str() {
+                    FORCE_SHUTDOWN_MESSAGE | STOP_REASON_USER_STOP => Some(STOP_REASON_USER_STOP),
+                    STOP_REASON_TIMEOUT => Some(STOP_REASON_TIMEOUT),
+                    _ => None,
+                };
 
-                match ctx.system_journal.append(error_event, None).await {
+                let system_event = if let Some(reason) = cancel_reason {
+                    SystemEvent::stage_cancelled_with_metrics(
+                        ctx.stage_id,
+                        reason.to_string(),
+                        metrics,
+                    )
+                } else {
+                    SystemEvent::stage_failed_with_metrics(
+                        ctx.stage_id,
+                        message.clone(),
+                        false, // not recoverable
+                        metrics,
+                    )
+                };
+
+                match ctx.system_journal.append(system_event, None).await {
                     Ok(_) => {
-                        tracing::error!(
-                            stage_name = %ctx.stage_name,
-                            error = %message,
-                            "Join stage encountered error"
-                        );
+                        if let Some(reason) = cancel_reason {
+                            tracing::info!(
+                                stage_name = %ctx.stage_name,
+                                reason = %reason,
+                                "Join stage cancelled"
+                            );
+                        } else {
+                            tracing::error!(
+                                stage_name = %ctx.stage_name,
+                                error = %message,
+                                "Join stage encountered error"
+                            );
+                        }
                     }
                     Err(e) => {
                         tracing::error!(

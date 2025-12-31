@@ -34,6 +34,32 @@ impl SinkHandler for NoopSink {
 }
 
 #[derive(Clone, Debug)]
+struct SlowSink {
+    sleep: Duration,
+}
+
+impl SlowSink {
+    fn new(sleep: Duration) -> Self {
+        Self { sleep }
+    }
+}
+
+#[async_trait]
+impl SinkHandler for SlowSink {
+    async fn consume(
+        &mut self,
+        _event: ChainEvent,
+    ) -> std::result::Result<DeliveryPayload, HandlerError> {
+        tokio::time::sleep(self.sleep).await;
+        Ok(DeliveryPayload::success(
+            "slow_sink",
+            DeliveryMethod::Custom("Noop".to_string()),
+            None,
+        ))
+    }
+}
+
+#[derive(Clone, Debug)]
 struct SlowInfiniteSource {
     writer_id: WriterId,
     counter: u64,
@@ -125,6 +151,22 @@ async fn wait_for_running(handle: &FlowHandle) -> Result<()> {
     .map_err(|_| anyhow!("timeout waiting for pipeline to reach Running"))?
 }
 
+async fn wait_for_draining(handle: &FlowHandle) -> Result<()> {
+    let mut rx = handle.state_receiver();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if matches!(*rx.borrow(), PipelineState::Draining) {
+                return Ok(());
+            }
+            rx.changed()
+                .await
+                .map_err(|_| anyhow!("pipeline state channel closed"))?;
+        }
+    })
+    .await
+    .map_err(|_| anyhow!("timeout waiting for pipeline to reach Draining"))?
+}
+
 async fn terminal_lifecycle_event(
     journal: Arc<dyn Journal<SystemEvent>>,
 ) -> Result<Option<PipelineLifecycleEvent>> {
@@ -136,7 +178,12 @@ async fn terminal_lifecycle_event(
 
     for envelope in tail {
         if let SystemEventType::PipelineLifecycle(ev) = &envelope.event.event {
-            if matches!(ev, PipelineLifecycleEvent::Completed { .. } | PipelineLifecycleEvent::Failed { .. }) {
+            if matches!(
+                ev,
+                PipelineLifecycleEvent::Completed { .. }
+                    | PipelineLifecycleEvent::Failed { .. }
+                    | PipelineLifecycleEvent::Cancelled { .. }
+            ) {
                 return Ok(Some(ev.clone()));
             }
         }
@@ -146,7 +193,7 @@ async fn terminal_lifecycle_event(
 }
 
 #[tokio::test]
-async fn stop_infinite_source_reports_completed() -> Result<()> {
+async fn stop_infinite_source_reports_cancelled() -> Result<()> {
     let dir = tempdir()?;
     let journal_root = dir.path().join("journals");
 
@@ -181,17 +228,23 @@ async fn stop_infinite_source_reports_completed() -> Result<()> {
 
     let terminal = terminal_lifecycle_event(system_journal).await?;
     match terminal {
-        Some(PipelineLifecycleEvent::Completed { .. }) => Ok(()),
-        Some(PipelineLifecycleEvent::Failed { reason, .. }) => {
-            Err(anyhow!("expected pipeline_completed, got pipeline_failed reason={reason}"))
-        }
+        Some(PipelineLifecycleEvent::Cancelled { reason, .. }) if reason == "user_stop" => Ok(()),
+        Some(PipelineLifecycleEvent::Completed { .. }) => Err(anyhow!(
+            "expected pipeline_cancelled(user_stop), got pipeline_completed"
+        )),
+        Some(PipelineLifecycleEvent::Failed { reason, .. }) => Err(anyhow!(
+            "expected pipeline_cancelled(user_stop), got pipeline_failed reason={reason}"
+        )),
+        Some(PipelineLifecycleEvent::Cancelled { reason, .. }) => Err(anyhow!(
+            "expected pipeline_cancelled(user_stop), got pipeline_cancelled({reason})"
+        )),
         None => Err(anyhow!("expected terminal pipeline lifecycle event, found none")),
         _ => Err(anyhow!("unexpected non-terminal pipeline lifecycle event")),
     }
 }
 
 #[tokio::test]
-async fn stop_finite_source_reports_user_stop_failure() -> Result<()> {
+async fn stop_finite_source_reports_cancelled() -> Result<()> {
     let dir = tempdir()?;
     let journal_root = dir.path().join("journals");
 
@@ -227,13 +280,73 @@ async fn stop_finite_source_reports_user_stop_failure() -> Result<()> {
 
     let terminal = terminal_lifecycle_event(system_journal).await?;
     match terminal {
-        Some(PipelineLifecycleEvent::Failed { reason, .. }) if reason == "user_stop" => Ok(()),
-        Some(PipelineLifecycleEvent::Completed { .. }) => {
-            Err(anyhow!("expected pipeline_failed(user_stop), got pipeline_completed"))
+        Some(PipelineLifecycleEvent::Cancelled { reason, .. }) if reason == "user_stop" => Ok(()),
+        Some(PipelineLifecycleEvent::Completed { .. }) => Err(anyhow!(
+            "expected pipeline_cancelled(user_stop), got pipeline_completed"
+        )),
+        Some(PipelineLifecycleEvent::Failed { reason, .. }) => Err(anyhow!(
+            "expected pipeline_cancelled(user_stop), got pipeline_failed({reason})"
+        )),
+        Some(PipelineLifecycleEvent::Cancelled { reason, .. }) => Err(anyhow!(
+            "expected pipeline_cancelled(user_stop), got pipeline_cancelled({reason})"
+        )),
+        None => Err(anyhow!("expected terminal pipeline lifecycle event, found none")),
+        _ => Err(anyhow!("unexpected non-terminal pipeline lifecycle event")),
+    }
+}
+
+#[tokio::test]
+async fn stop_cancel_timeout_overrides_cancel_reason() -> Result<()> {
+    let dir = tempdir()?;
+    let journal_root = dir.path().join("journals");
+
+    let handle = flow! {
+        name: "flowip_051j_stop_cancel_timeout_reason",
+        journals: disk_journals(journal_root.clone()),
+        middleware: [],
+
+        stages: {
+            src = infinite_source!("src" => SlowInfiniteSource::new(Duration::from_millis(1)));
+            snk = sink!("snk" => SlowSink::new(Duration::from_millis(250)));
+        },
+
+        topology: {
+            src |> snk;
         }
-        Some(PipelineLifecycleEvent::Failed { reason, .. }) => {
-            Err(anyhow!("expected pipeline_failed(user_stop), got pipeline_failed({reason})"))
-        }
+    }
+    .await
+    .map_err(|e| anyhow!("Failed to create flow: {:?}", e))?;
+
+    let system_journal = handle
+        .system_journal()
+        .ok_or_else(|| anyhow!("flow handle did not expose system journal"))?;
+
+    wait_for_running(&handle).await?;
+
+    // First request a graceful stop so the pipeline records stop intent as user_stop.
+    handle.stop_graceful(Duration::from_secs(60)).await?;
+    wait_for_draining(&handle).await?;
+
+    // Then simulate a process-level timeout escalation and ensure the terminal lifecycle reason
+    // reflects stop_timeout (not user_stop).
+    handle.stop_cancel_timeout().await?;
+
+    tokio::time::timeout(Duration::from_secs(5), handle.wait_for_completion())
+        .await
+        .map_err(|_| anyhow!("timeout waiting for pipeline to terminate after stop"))??;
+
+    let terminal = terminal_lifecycle_event(system_journal).await?;
+    match terminal {
+        Some(PipelineLifecycleEvent::Cancelled { reason, .. }) if reason == "stop_timeout" => Ok(()),
+        Some(PipelineLifecycleEvent::Cancelled { reason, .. }) => Err(anyhow!(
+            "expected pipeline_cancelled(stop_timeout), got pipeline_cancelled({reason})"
+        )),
+        Some(PipelineLifecycleEvent::Completed { .. }) => Err(anyhow!(
+            "expected pipeline_cancelled(stop_timeout), got pipeline_completed"
+        )),
+        Some(PipelineLifecycleEvent::Failed { reason, .. }) => Err(anyhow!(
+            "expected pipeline_cancelled(stop_timeout), got pipeline_failed({reason})"
+        )),
         None => Err(anyhow!("expected terminal pipeline lifecycle event, found none")),
         _ => Err(anyhow!("unexpected non-terminal pipeline lifecycle event")),
     }

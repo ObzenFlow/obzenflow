@@ -261,7 +261,8 @@ impl SupervisorBuilder for PipelineBuilder {
             flow_start_time: None,
             last_system_event_id_seen: None,
             stop_requested: false,
-            stop_should_fail: false,
+            stop_mode: None,
+            stop_reason: None,
             stop_deadline: None,
         };
 

@@ -128,6 +128,15 @@ pub enum StageLifecycleEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         metrics: Option<StageMetricsSnapshot>,
     },
+    /// Stage terminated due to an intentional stop/cancel request.
+    ///
+    /// This is distinct from `Failed`: cancellation is user/operator initiated and
+    /// should not be treated as an unexpected error by UIs.
+    Cancelled {
+        reason: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        metrics: Option<StageMetricsSnapshot>,
+    },
     Failed {
         error: String,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -145,6 +154,15 @@ pub enum PipelineLifecycleEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         stage_count: Option<usize>,
     },
+    /// Stop has been requested by an external control plane (UI/API/signal).
+    ///
+    /// `mode` is informational for UIs; the runtime uses internal stop intent to
+    /// coordinate behaviour.
+    StopRequested {
+        mode: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        timeout_ms: Option<u64>,
+    },
     Draining {
         #[serde(skip_serializing_if = "Option::is_none")]
         metrics: Option<FlowLifecycleMetricsSnapshot>,
@@ -159,6 +177,18 @@ pub enum PipelineLifecycleEvent {
         metrics: FlowLifecycleMetricsSnapshot,
     },
     Failed {
+        reason: String,
+        duration_ms: u64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        metrics: Option<FlowLifecycleMetricsSnapshot>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        failure_cause: Option<crate::event::types::ViolationCause>,
+    },
+    /// Pipeline terminated due to an intentional stop/cancel request.
+    ///
+    /// This is distinct from `Failed`: cancellation is user/operator initiated and
+    /// should not be treated as an unexpected error by UIs.
+    Cancelled {
         reason: String,
         duration_ms: u64,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -207,6 +237,20 @@ impl SystemEvent {
             SystemEventType::StageLifecycle {
                 stage_id,
                 event: StageLifecycleEvent::Completed { metrics: None },
+            },
+        )
+    }
+
+    /// Helper for stages to create cancelled events
+    pub fn stage_cancelled(stage_id: StageId, reason: String) -> Self {
+        Self::new(
+            WriterId::from(stage_id),
+            SystemEventType::StageLifecycle {
+                stage_id,
+                event: StageLifecycleEvent::Cancelled {
+                    reason,
+                    metrics: None,
+                },
             },
         )
     }
@@ -266,6 +310,24 @@ impl SystemEvent {
                 event: StageLifecycleEvent::Failed {
                     error,
                     recoverable: Some(recoverable),
+                    metrics: Some(metrics),
+                },
+            },
+        )
+    }
+
+    /// Helper for stages to create cancelled events with metrics
+    pub fn stage_cancelled_with_metrics(
+        stage_id: StageId,
+        reason: String,
+        metrics: StageMetricsSnapshot,
+    ) -> Self {
+        Self::new(
+            WriterId::from(stage_id),
+            SystemEventType::StageLifecycle {
+                stage_id,
+                event: StageLifecycleEvent::Cancelled {
+                    reason,
                     metrics: Some(metrics),
                 },
             },
@@ -350,6 +412,19 @@ impl SystemEventFactory {
         )
     }
 
+    pub fn stage_cancelled(&self, stage_id: StageId, reason: String) -> SystemEvent {
+        SystemEvent::new(
+            self.writer_id,
+            SystemEventType::StageLifecycle {
+                stage_id,
+                event: StageLifecycleEvent::Cancelled {
+                    reason,
+                    metrics: None,
+                },
+            },
+        )
+    }
+
     /// Contract status summary emitted by readers/subscribers (per upstream)
     pub fn contract_status(
         &self,
@@ -387,6 +462,16 @@ impl SystemEventFactory {
             self.writer_id,
             SystemEventType::PipelineLifecycle(PipelineLifecycleEvent::Running {
                 stage_count: None,
+            }),
+        )
+    }
+
+    pub fn pipeline_stop_requested(&self, mode: String, timeout_ms: Option<u64>) -> SystemEvent {
+        SystemEvent::new(
+            self.writer_id,
+            SystemEventType::PipelineLifecycle(PipelineLifecycleEvent::StopRequested {
+                mode,
+                timeout_ms,
             }),
         )
     }
@@ -438,6 +523,24 @@ impl SystemEventFactory {
         SystemEvent::new(
             self.writer_id,
             SystemEventType::PipelineLifecycle(PipelineLifecycleEvent::Failed {
+                reason,
+                duration_ms,
+                metrics,
+                failure_cause,
+            }),
+        )
+    }
+
+    pub fn pipeline_cancelled(
+        &self,
+        reason: String,
+        duration_ms: u64,
+        metrics: Option<FlowLifecycleMetricsSnapshot>,
+        failure_cause: Option<crate::event::types::ViolationCause>,
+    ) -> SystemEvent {
+        SystemEvent::new(
+            self.writer_id,
+            SystemEventType::PipelineLifecycle(PipelineLifecycleEvent::Cancelled {
                 reason,
                 duration_ms,
                 metrics,
@@ -500,10 +603,12 @@ impl JournalEvent for SystemEvent {
                 StageLifecycleEvent::Drained => "system.stage.drained",
                 StageLifecycleEvent::Completed { .. } => "system.stage.completed",
                 StageLifecycleEvent::Failed { .. } => "system.stage.failed",
+                StageLifecycleEvent::Cancelled { .. } => "system.stage.cancelled",
             },
             SystemEventType::PipelineLifecycle(event) => match event {
                 PipelineLifecycleEvent::Starting => "system.pipeline.starting",
                 PipelineLifecycleEvent::Running { .. } => "system.pipeline.running",
+                PipelineLifecycleEvent::StopRequested { .. } => "system.pipeline.stop_requested",
                 PipelineLifecycleEvent::AllStagesCompleted { .. } => {
                     "system.pipeline.all_stages_completed"
                 }
@@ -511,6 +616,7 @@ impl JournalEvent for SystemEvent {
                 PipelineLifecycleEvent::Drained => "system.pipeline.drained",
                 PipelineLifecycleEvent::Completed { .. } => "system.pipeline.completed",
                 PipelineLifecycleEvent::Failed { .. } => "system.pipeline.failed",
+                PipelineLifecycleEvent::Cancelled { .. } => "system.pipeline.cancelled",
             },
             SystemEventType::MetricsCoordination(event) => match event {
                 MetricsCoordinationEvent::Ready => "system.metrics.ready",

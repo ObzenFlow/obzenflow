@@ -1125,62 +1125,85 @@ impl FsmAction for MetricsAggregatorAction {
                 }
 
                 match &envelope.event.event {
-                    obzenflow_core::event::SystemEventType::StageLifecycle { stage_id, event } => {
-                        // Track ALL states each stage has been in (never overwrite)
-                        match event {
-                            obzenflow_core::event::StageLifecycleEvent::Running => {
-                                store
-                                    .stage_lifecycle_states
-                                    .insert((*stage_id, "running".to_string()), true);
-                                tracing::debug!("Stage {:?} transitioned to running", stage_id);
-                            }
-                            obzenflow_core::event::StageLifecycleEvent::Completed { .. } => {
-                                store
-                                    .stage_lifecycle_states
-                                    .insert((*stage_id, "completed".to_string()), true);
-                                tracing::debug!("Stage {:?} transitioned to completed", stage_id);
-                            }
-                            obzenflow_core::event::StageLifecycleEvent::Failed { .. } => {
-                                store
-                                    .stage_lifecycle_states
-                                    .insert((*stage_id, "failed".to_string()), true);
-                                tracing::debug!("Stage {:?} transitioned to failed", stage_id);
-                            }
-                            _ => {} // Skip draining, drained for now
-                        }
-                    }
-                    obzenflow_core::event::SystemEventType::PipelineLifecycle(event) => {
+	                    obzenflow_core::event::SystemEventType::StageLifecycle { stage_id, event } => {
+	                        // Track ALL states each stage has been in (never overwrite)
+	                        match event {
+	                            obzenflow_core::event::StageLifecycleEvent::Running => {
+	                                store
+	                                    .stage_lifecycle_states
+	                                    .insert((*stage_id, "running".to_string()), true);
+	                                tracing::debug!("Stage {:?} transitioned to running", stage_id);
+	                            }
+	                            obzenflow_core::event::StageLifecycleEvent::Completed { .. } => {
+	                                store
+	                                    .stage_lifecycle_states
+	                                    .insert((*stage_id, "completed".to_string()), true);
+	                                tracing::debug!("Stage {:?} transitioned to completed", stage_id);
+	                            }
+	                            obzenflow_core::event::StageLifecycleEvent::Cancelled { .. } => {
+	                                store
+	                                    .stage_lifecycle_states
+	                                    .insert((*stage_id, "cancelled".to_string()), true);
+	                                tracing::debug!("Stage {:?} transitioned to cancelled", stage_id);
+	                            }
+	                            obzenflow_core::event::StageLifecycleEvent::Failed { .. } => {
+	                                store
+	                                    .stage_lifecycle_states
+	                                    .insert((*stage_id, "failed".to_string()), true);
+	                                tracing::debug!("Stage {:?} transitioned to failed", stage_id);
+	                            }
+	                            _ => {} // Skip draining, drained for now
+	                        }
+	                    }
+	                    obzenflow_core::event::SystemEventType::PipelineLifecycle(event) => {
                         // Track only essential pipeline events, with monotonic semantics:
                         // - "failed" is sticky and never regresses.
                         // - "completed" never regresses to "drained".
                         // - "drained" is only used when no explicit outcome was ever observed.
-                        match event {
-                            obzenflow_core::event::PipelineLifecycleEvent::AllStagesCompleted {
-                                ..
-                            } => {
-                                if store.pipeline_state.is_empty() {
-                                    store.pipeline_state = "all_stages_completed".to_string();
-                                }
-                                tracing::info!("Pipeline: all stages completed (metrics view)");
-                            }
-                            obzenflow_core::event::PipelineLifecycleEvent::Completed { .. } => {
-                                if store.pipeline_state != "failed" {
-                                    store.pipeline_state = "completed".to_string();
-                                    tracing::info!("Pipeline: completed (metrics view)");
-                                } else {
-                                    tracing::info!(
-                                        "Pipeline: completed event observed after failed; \
-                                         keeping failed as terminal state (metrics view)"
-                                    );
-                                }
-                            }
-                            obzenflow_core::event::PipelineLifecycleEvent::Failed { .. } => {
-                                // Failure is always terminal and sticky.
-                                if store.pipeline_state != "failed" {
-                                    store.pipeline_state = "failed".to_string();
-                                    tracing::info!("Pipeline: failed (metrics view)");
-                                }
-                            }
+	                        match event {
+	                            obzenflow_core::event::PipelineLifecycleEvent::StopRequested { .. } => {
+	                                if store.pipeline_state.is_empty() {
+	                                    store.pipeline_state = "stop_requested".to_string();
+	                                }
+	                                tracing::info!("Pipeline: stop requested (metrics view)");
+	                            }
+	                            obzenflow_core::event::PipelineLifecycleEvent::AllStagesCompleted {
+	                                ..
+	                            } => {
+	                                if store.pipeline_state.is_empty() {
+	                                    store.pipeline_state = "all_stages_completed".to_string();
+	                                }
+	                                tracing::info!("Pipeline: all stages completed (metrics view)");
+	                            }
+	                            obzenflow_core::event::PipelineLifecycleEvent::Completed { .. } => {
+	                                if store.pipeline_state != "failed" {
+	                                    store.pipeline_state = "completed".to_string();
+	                                    tracing::info!("Pipeline: completed (metrics view)");
+	                                } else {
+	                                    tracing::info!(
+	                                        "Pipeline: completed event observed after failed; \
+	                                         keeping failed as terminal state (metrics view)"
+	                                    );
+	                                }
+	                            }
+	                            obzenflow_core::event::PipelineLifecycleEvent::Cancelled { .. } => {
+	                                if store.pipeline_state != "failed" {
+	                                    store.pipeline_state = "cancelled".to_string();
+	                                    tracing::info!("Pipeline: cancelled (metrics view)");
+	                                } else {
+	                                    tracing::info!(
+	                                        "Pipeline: cancelled event observed after failed; \
+	                                         keeping failed as terminal state (metrics view)"
+	                                    );
+	                                }
+	                            }
+	                            obzenflow_core::event::PipelineLifecycleEvent::Failed { .. } => {
+	                                // Failure is always terminal and sticky.
+	                                if store.pipeline_state != "failed" {
+	                                    store.pipeline_state = "failed".to_string();
+	                                    tracing::info!("Pipeline: failed (metrics view)");
+	                                }
+	                            }
                             obzenflow_core::event::PipelineLifecycleEvent::Drained => {
                                 // Drained is a termination marker only; do not override an
                                 // explicit completed/failed outcome.
