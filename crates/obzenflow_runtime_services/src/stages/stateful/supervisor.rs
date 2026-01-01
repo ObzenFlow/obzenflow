@@ -584,6 +584,11 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                                         .in_flight_count
                                         .fetch_add(1, Ordering::Relaxed);
                                     let start = Instant::now();
+                                    if ctx.emit_interval.is_some()
+                                        && ctx.last_data_event_time.is_none()
+                                    {
+                                        ctx.last_data_event_time = Some(start);
+                                    }
                                     handler.accumulate(&mut ctx.current_state, event);
                                     let duration = start.elapsed();
                                     ctx.instrumentation
@@ -669,13 +674,32 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                                 }
                             }
 
-                            tracing::trace!(
-                                target: "flowip-080o",
-                                stage_name = %ctx.stage_name,
-                                loop_iteration = loop_count + 1,
-                                "stateful: poll_next returned NoEvents, sleeping"
-                            );
-                            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+                            if let (Some(baseline), Some(interval)) =
+                                (ctx.last_data_event_time, ctx.emit_interval)
+                            {
+                                if baseline.elapsed() >= interval {
+                                    let handler = (*ctx.handler).clone();
+                                    if handler.should_emit(&ctx.current_state) {
+                                        directive = Ok(EventLoopDirective::Transition(
+                                            StatefulEvent::ShouldEmit,
+                                        ));
+                                    }
+
+                                    // Reset baseline regardless to avoid hammering `should_emit`
+                                    // once the interval has elapsed.
+                                    ctx.last_data_event_time = Some(Instant::now());
+                                }
+                            }
+
+                            if matches!(directive, Ok(EventLoopDirective::Continue)) {
+                                tracing::trace!(
+                                    target: "flowip-080o",
+                                    stage_name = %ctx.stage_name,
+                                    loop_iteration = loop_count + 1,
+                                    "stateful: poll_next returned NoEvents, sleeping"
+                                );
+                                tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+                            }
                         }
                         PollResult::Error(e) => {
                             tracing::error!(
@@ -823,6 +847,11 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                             format!("Emit error: {}", e),
                         )));
                     }
+                }
+
+                if ctx.emit_interval.is_some() {
+                    // Restart the interval after each emission (FLOWIP-086h).
+                    ctx.last_data_event_time = Some(Instant::now());
                 }
 
                 Ok(EventLoopDirective::Transition(StatefulEvent::EmitComplete))

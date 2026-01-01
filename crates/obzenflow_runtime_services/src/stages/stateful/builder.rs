@@ -91,6 +91,7 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Super
             control_strategy,
             instrumentation,
             self.resources.upstream_subscription_factory,
+            self.config.emit_interval,
         );
 
         // Create supervisor (private - not exposed)

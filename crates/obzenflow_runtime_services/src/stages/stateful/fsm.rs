@@ -16,6 +16,7 @@ use obzenflow_fsm::{EventVariant, FsmAction, FsmContext, StateVariant};
 use serde::{Deserialize, Serialize};
 use std::marker::PhantomData;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 
 use crate::messaging::upstream_subscription::{ContractConfig, ReaderProgress};
@@ -353,6 +354,12 @@ pub struct StatefulContext<H: StatefulHandler> {
     /// Counter of accumulated events since the last observability heartbeat
     /// (FLOWIP-059 Phase 6.4 - accumulator heartbeats).
     pub events_since_last_heartbeat: u64,
+
+    /// Baseline for supervisor-driven `emit_interval` timing (FLOWIP-086h).
+    pub last_data_event_time: Option<Instant>,
+
+    /// Optional supervisor-driven emit interval for timer-driven emission while idle (FLOWIP-086h).
+    pub emit_interval: Option<Duration>,
 }
 
 impl<H: StatefulHandler> StatefulContext<H> {
@@ -370,6 +377,7 @@ impl<H: StatefulHandler> StatefulContext<H> {
         control_strategy: Arc<dyn ControlEventStrategy>,
         instrumentation: Arc<StageInstrumentation>,
         upstream_subscription_factory: BoundSubscriptionFactory,
+        emit_interval: Option<Duration>,
     ) -> Self {
         let initial_state = handler.initial_state();
         Self {
@@ -392,6 +400,8 @@ impl<H: StatefulHandler> StatefulContext<H> {
             instrumentation,
             upstream_subscription_factory,
             events_since_last_heartbeat: 0,
+            last_data_event_time: None,
+            emit_interval,
         }
     }
 }

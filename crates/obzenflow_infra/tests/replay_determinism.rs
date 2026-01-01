@@ -434,6 +434,7 @@ async fn run_stateful_supervisor_once() -> Vec<serde_json::Value> {
         stage_name: "stateful_supervisor_replay".to_string(),
         flow_name: "replay_flow".to_string(),
         upstream_stages: vec![src],
+        emit_interval: None,
         control_strategy: None,
     };
 

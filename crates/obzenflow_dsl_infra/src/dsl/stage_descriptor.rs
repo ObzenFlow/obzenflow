@@ -1523,7 +1523,37 @@ fn check_sink_state<H>(state: &JournalSinkState<H>) -> crate::stage_handle_adapt
 pub struct StatefulDescriptor<H: StatefulHandler + 'static> {
     pub name: String,
     pub handler: H,
+    pub emit_interval: Option<Duration>,
     pub middleware: Vec<Box<dyn MiddlewareFactory>>,
+}
+
+impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StatefulDescriptor<H> {
+    /// Create a new stateful descriptor with no emit interval.
+    pub fn new(name: impl Into<String>, handler: H) -> Self {
+        Self {
+            name: name.into(),
+            handler,
+            emit_interval: None,
+            middleware: Vec::new(),
+        }
+    }
+
+    /// Configure a supervisor-driven emit interval for timer-driven emission while idle.
+    pub fn with_emit_interval(mut self, emit_interval: Duration) -> Self {
+        self.emit_interval = Some(emit_interval);
+        self
+    }
+
+    /// Add middleware to the chain.
+    pub fn with_middleware<M: MiddlewareFactory + 'static>(mut self, mw: M) -> Self {
+        self.middleware.push(Box::new(mw));
+        self
+    }
+
+    /// Build into a boxed StageDescriptor for DSL compatibility.
+    pub fn build(self) -> Box<dyn StageDescriptor> {
+        Box::new(self)
+    }
 }
 
 #[async_trait]
@@ -1634,6 +1664,7 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stage
             stage_id: config.stage_id,
             stage_name: config.name.clone(),
             flow_name: config.flow_name.clone(),
+            emit_interval: self.emit_interval,
             control_strategy: Some(control_strategy),
             upstream_stages: resources.upstream_stages.clone(),
         };
