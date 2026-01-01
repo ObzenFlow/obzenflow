@@ -494,21 +494,20 @@ impl<H: Send + Sync + 'static> FsmAction for InfiniteSourceAction<H> {
 
             InfiniteSourceAction::WriteStageCompleted => {
                 // Write completion event to system journal with tail-read metrics.
-                // If no runtime_context is available in the journals at completion
-                // time, treat this as a hard error instead of fabricating metrics.
-                let metrics = tail_read::read_stage_metrics_from_tail(
+                //
+                // Some stages may legitimately complete without emitting any runtime-context
+                // bearing events (e.g. zero input). In that case, fall back to a best-effort
+                // snapshot from instrumentation instead of failing completion.
+                let metrics = match tail_read::read_stage_metrics_from_tail(
                     &ctx.data_journal,
                     Some(&ctx.error_journal),
                     ctx.stage_id,
                 )
                 .await
-                .ok_or_else(|| {
-                    obzenflow_fsm::FsmError::HandlerError(format!(
-                        "no runtime_context in journal tail for stage {} completion (data_journal={})",
-                        ctx.stage_id,
-                        ctx.data_journal.id(),
-                    ))
-                })?;
+                {
+                    Some(metrics) => metrics,
+                    None => snapshot_stage_metrics(ctx.instrumentation.as_ref()),
+                };
                 let completion_event =
                     SystemEvent::stage_completed_with_metrics(ctx.stage_id, metrics);
 

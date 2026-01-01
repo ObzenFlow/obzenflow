@@ -35,7 +35,7 @@ pub mod prelude {
     pub use obzenflow_core::ChainEvent as Event;
     pub use obzenflow_core::EventId as Id;
     pub use obzenflow_core::WriterId as Writer;
-    pub use obzenflow_core::{ChainEvent, EventId, Result, WriterId};
+    pub use obzenflow_core::{ChainEvent, EventId, WriterId};
 
     // Runtime services
     pub use obzenflow_runtime_services::prelude::*;
@@ -48,6 +48,61 @@ pub mod prelude {
 
     // Monitoring
     pub use obzenflow_adapters::monitoring::*;
+}
+
+fn bump_nofile_limit() {
+    #[cfg(unix)]
+    {
+        // Best-effort: 100-stage disk benchmarks can exceed macOS's default `ulimit -n 256`.
+        // Raise the soft limit up to the hard limit so journal readers/writers can start.
+        unsafe {
+            let mut current = libc::rlimit {
+                rlim_cur: 0,
+                rlim_max: 0,
+            };
+
+            if libc::getrlimit(libc::RLIMIT_NOFILE, &mut current) != 0 {
+                return;
+            }
+
+            // Keep this comfortably above the ~300 FDs a 100-stage disk pipeline can use.
+            let desired: libc::rlim_t = 4096;
+
+            if current.rlim_cur >= desired {
+                return;
+            }
+
+            let mut updated = current;
+            updated.rlim_cur = std::cmp::min(desired, current.rlim_max);
+
+            // If hard limit is lower than desired, raising won't help enough;
+            // still attempt to raise to the hard limit and continue either way.
+            let _ = libc::setrlimit(libc::RLIMIT_NOFILE, &updated);
+        }
+    }
+}
+
+/// Initialize tracing for benchmark binaries.
+///
+/// Benchmarks often want runtime diagnostics (FSM state transitions, waits, etc).
+/// We install a `tracing_subscriber` once, using `RUST_LOG` if provided and
+/// defaulting to `warn` to minimize benchmark overhead.
+pub fn init_tracing() {
+    use std::sync::OnceLock;
+
+    static INIT: OnceLock<()> = OnceLock::new();
+    INIT.get_or_init(|| {
+        bump_nofile_limit();
+
+        let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn"));
+
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_target(true)
+            .with_level(true)
+            .try_init();
+    });
 }
 
 // Any benchmark-specific utilities can be added here

@@ -1,6 +1,7 @@
 //! Builder for finite source stages
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::message_bus::FsmMessageBus;
 use crate::metrics::instrumentation::StageInstrumentation;
@@ -103,6 +104,10 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> S
             data_journal: self.resources.data_journal.clone(),
             system_journal: self.resources.system_journal.clone(),
             stage_id: self.config.stage_id,
+            idle_backoff: crate::supervised_base::idle_backoff::IdleBackoff::exponential_with_cap(
+                Duration::from_millis(1),
+                Duration::from_millis(10),
+            ),
         };
 
         // Clone what we need for the task
@@ -119,6 +124,7 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> S
                     supervisor,
                     external_events: event_receiver,
                     state_watcher: state_watcher_for_task,
+                    last_state: None,
                 };
 
                 // Run with the wrapper
@@ -148,6 +154,7 @@ struct HandlerSupervisedWithExternalEvents<
     supervisor: FiniteSourceSupervisor<H>,
     external_events: EventReceiver<FiniteSourceEvent<H>>,
     state_watcher: StateWatcher<FiniteSourceState<H>>,
+    last_state: Option<FiniteSourceState<H>>,
 }
 
 // Delegate trait implementations to the inner supervisor
@@ -205,8 +212,30 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> H
         state: &Self::State,
         context: &mut Self::Context,
     ) -> Result<EventLoopDirective<Self::Event>, Box<dyn std::error::Error + Send + Sync>> {
-        // Update state for external observers
-        let _ = self.state_watcher.update(state.clone());
+        // Update state for external observers only when it changes (FLOWIP-086i).
+        if self.last_state.as_ref() != Some(state) {
+            let new_state = state.clone();
+            let _ = self.state_watcher.update(new_state.clone());
+            self.last_state = Some(new_state);
+        }
+
+        // In these states the supervisor is purely waiting for external control events.
+        // Blocking here avoids a busy-spin loop (FLOWIP-086i).
+        if matches!(
+            state,
+            FiniteSourceState::Created | FiniteSourceState::Initialized | FiniteSourceState::WaitingForGun
+        ) {
+            match self.external_events.recv().await {
+                Some(event) => return Ok(EventLoopDirective::Transition(event)),
+                None => {
+                    if !matches!(state, FiniteSourceState::Failed(_)) {
+                        return Ok(EventLoopDirective::Transition(FiniteSourceEvent::Error(
+                            "External control channel closed".to_string(),
+                        )));
+                    }
+                }
+            }
+        }
 
         // Check for external events first
         match self.external_events.try_recv() {

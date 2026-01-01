@@ -41,6 +41,9 @@ pub(crate) struct AsyncFiniteSourceSupervisor<
 
     /// State watcher for UI/handles.
     pub(crate) state_watcher: StateWatcher<FiniteSourceState<H>>,
+
+    /// Last published state (avoid waking watchers every loop) (FLOWIP-086i).
+    pub(crate) last_state: Option<FiniteSourceState<H>>,
 }
 
 // Implement Sealed directly for AsyncFiniteSourceSupervisor to satisfy Supervisor trait bound
@@ -327,7 +330,11 @@ impl<H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
         state: &Self::State,
         _context: &mut Self::Context,
     ) -> Result<EventLoopDirective<Self::Event>, Box<dyn std::error::Error + Send + Sync>> {
-        let _ = self.state_watcher.update(state.clone());
+        if self.last_state.as_ref() != Some(state) {
+            let new_state = state.clone();
+            let _ = self.state_watcher.update(new_state.clone());
+            self.last_state = Some(new_state);
+        }
 
         match state {
             FiniteSourceState::Created

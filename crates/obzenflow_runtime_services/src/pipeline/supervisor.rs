@@ -257,6 +257,28 @@ impl crate::supervised_base::base::Supervisor for PipelineSupervisor {
                     })
                 };
 
+                // Handle action failures while Materialized (e.g. startup actions failing)
+                // so the pipeline can transition into a terminal Failed state instead
+                // of crashing the supervisor with an unhandled Error event.
+                on PipelineEvent::Error => |_state: &PipelineState, event: &PipelineEvent, _ctx: &mut PipelineContext| {
+                    let event = event.clone();
+                    Box::pin(async move {
+                        if let PipelineEvent::Error { message } = event {
+                            Ok(Transition {
+                                next_state: PipelineState::Failed {
+                                    reason: message,
+                                    failure_cause: None,
+                                },
+                                actions: vec![PipelineAction::Cleanup],
+                            })
+                        } else {
+                            Err(obzenflow_fsm::FsmError::HandlerError(
+                                "Invalid event".to_string(),
+                            ))
+                        }
+                    })
+                };
+
                 // Stop before Run: treat as an intentional cancel and cleanup stages/sources.
                 on PipelineEvent::StopRequested => |_state: &PipelineState, event: &PipelineEvent, ctx: &mut PipelineContext| {
                     let event = event.clone();

@@ -6,18 +6,18 @@
 
 use async_trait::async_trait;
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use obzenflow_adapters::monitoring::taxonomies::{
-    golden_signals::GoldenSignals, red::RED, use_taxonomy::USE,
-};
 use obzenflow_benchmarks::prelude::*;
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
-use obzenflow_core::event::event_id::EventId;
-use obzenflow_core::journal::writer_id::WriterId;
+use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
+use obzenflow_core::event::ChainEventContent;
+use obzenflow_core::WriterId;
 use obzenflow_dsl_infra::{flow, sink, source, transform};
-use obzenflow_infra::journal::DiskJournal;
+use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime_services::stages::common::handlers::{
     FiniteSourceHandler, SinkHandler, TransformHandler,
 };
+use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
+use obzenflow_runtime_services::supervised_base::SupervisorHandle;
 use obzenflow_runtime_services::stages::SourceError;
 use serde_json::json;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -33,9 +33,10 @@ const THROUGHPUT_EVENT_COUNT: u64 = 1000; // More events for accurate throughput
 const THROUGHPUT_WARMUP: u64 = 100;
 
 /// Test source that emits events with timestamps
+#[derive(Clone, Debug)]
 struct TimestampedSource {
     total_events: u64,
-    emitted: AtomicU64,
+    emitted: Arc<AtomicU64>,
     writer_id: WriterId,
 }
 
@@ -43,8 +44,8 @@ impl TimestampedSource {
     fn new(total_events: u64) -> Self {
         Self {
             total_events,
-            emitted: AtomicU64::new(0),
-            writer_id: WriterId::new(),
+            emitted: Arc::new(AtomicU64::new(0)),
+            writer_id: WriterId::from(obzenflow_core::StageId::new()),
         }
     }
 }
@@ -73,6 +74,7 @@ impl FiniteSourceHandler for TimestampedSource {
 }
 
 /// Passthrough stage that just forwards events
+#[derive(Clone, Debug)]
 struct PassthroughStage {
     name: String,
 }
@@ -85,14 +87,19 @@ impl PassthroughStage {
     }
 }
 
+#[async_trait]
 impl TransformHandler for PassthroughStage {
-    fn process(&self, event: ChainEvent) -> Vec<ChainEvent> {
-        vec![event]
+    fn process(&self, event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
+        Ok(vec![event])
+    }
+
+    async fn drain(&mut self) -> Result<(), HandlerError> {
+        Ok(())
     }
 }
 
 /// Sink that records latencies
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct TimestampedSink {
     expected_count: u64,
     received: Arc<AtomicU64>,
@@ -118,39 +125,36 @@ impl TimestampedSink {
 
 #[async_trait]
 impl SinkHandler for TimestampedSink {
-    fn consume(&mut self, event: ChainEvent) -> obzenflow_core::Result<()> {
-        if let (Some(emit_time_nanos), Some(index)) = (
-            event
-                .payload
-                .get("emit_time_nanos")
-                .and_then(|v| v.as_u64()),
-            event.payload.get("index").and_then(|v| v.as_u64()),
-        ) {
-            self.received.fetch_add(1, Ordering::Relaxed);
+    async fn consume(&mut self, event: ChainEvent) -> Result<DeliveryPayload, HandlerError> {
+        if let ChainEventContent::Data { payload, .. } = &event.content {
+            if let (Some(emit_time_nanos), Some(index)) = (
+                payload.get("emit_time_nanos").and_then(|v| v.as_u64()),
+                payload.get("index").and_then(|v| v.as_u64()),
+            ) {
+                self.received.fetch_add(1, Ordering::Relaxed);
 
-            // Skip warmup events for latency calculation
-            if index >= THROUGHPUT_WARMUP {
-                // Calculate latency from embedded timestamp
-                let receive_time_nanos = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos() as u64;
+                // Skip warmup events for latency calculation
+                if index >= THROUGHPUT_WARMUP {
+                    // Calculate latency from embedded timestamp
+                    let receive_time_nanos = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_nanos() as u64;
 
-                if receive_time_nanos > emit_time_nanos {
-                    let latency = Duration::from_nanos(receive_time_nanos - emit_time_nanos);
-                    let latencies = self.latencies.clone();
-                    tokio::spawn(async move {
-                        latencies.lock().await.push(latency);
-                    });
+                    if receive_time_nanos > emit_time_nanos {
+                        let latency = Duration::from_nanos(receive_time_nanos - emit_time_nanos);
+                        self.latencies.lock().await.push(latency);
+                    }
                 }
             }
         }
-        Ok(())
+
+        Ok(DeliveryPayload::success("noop", DeliveryMethod::Noop, None))
     }
 }
 
 /// Create a temporary journal for benchmarking
-async fn create_temp_journal(test_name: &str) -> anyhow::Result<(Arc<DiskJournal>, TempDir)> {
+fn create_temp_journals_base(test_name: &str) -> anyhow::Result<(std::path::PathBuf, TempDir)> {
     let temp_dir = tempdir()?;
     let journal_path = temp_dir.path().join(format!(
         "bench_{}_{}",
@@ -161,10 +165,7 @@ async fn create_temp_journal(test_name: &str) -> anyhow::Result<(Arc<DiskJournal
             .as_nanos()
     ));
     std::fs::create_dir_all(&journal_path)?;
-
-    let journal = Arc::new(DiskJournal::new(journal_path, test_name).await?);
-
-    Ok((journal, temp_dir))
+    Ok((journal_path, temp_dir))
 }
 
 /// Build pipeline with specified stage count
@@ -172,16 +173,16 @@ async fn build_pipeline(
     stage_count: usize,
     source: TimestampedSource,
     sink: TimestampedSink,
-    journal: Arc<DiskJournal>,
+    journals_base_path: std::path::PathBuf,
 ) -> anyhow::Result<FlowHandle> {
     let handle = match stage_count {
         1 => flow! {
-            journal: journal,
-            middleware: [GoldenSignals::monitoring()],
+            journals: disk_journals(journals_base_path.clone()),
+            middleware: [],
 
             stages: {
-                src = source!("source" => source, [RED::monitoring()]);
-                snk = sink!("sink" => sink, [RED::monitoring()]);
+                src = source!("source" => source);
+                snk = sink!("sink" => sink);
             },
 
             topology: {
@@ -191,14 +192,14 @@ async fn build_pipeline(
         .await
         .map_err(|e| anyhow::anyhow!("Failed to create 1-stage flow: {:?}", e))?,
         3 => flow! {
-            journal: journal,
-            middleware: [GoldenSignals::monitoring()],
+            journals: disk_journals(journals_base_path.clone()),
+            middleware: [],
 
             stages: {
-                src = source!("source" => source, [RED::monitoring()]);
-                s1 = transform!("stage1" => PassthroughStage::new("stage1"), [USE::monitoring()]);
-                s2 = transform!("stage2" => PassthroughStage::new("stage2"), [USE::monitoring()]);
-                snk = sink!("sink" => sink, [RED::monitoring()]);
+                src = source!("source" => source);
+                s1 = transform!("stage1" => PassthroughStage::new("stage1"));
+                s2 = transform!("stage2" => PassthroughStage::new("stage2"));
+                snk = sink!("sink" => sink);
             },
 
             topology: {
@@ -210,16 +211,16 @@ async fn build_pipeline(
         .await
         .map_err(|e| anyhow::anyhow!("Failed to create 3-stage flow: {:?}", e))?,
         5 => flow! {
-            journal: journal,
-            middleware: [GoldenSignals::monitoring()],
+            journals: disk_journals(journals_base_path.clone()),
+            middleware: [],
 
             stages: {
-                src = source!("source" => source, [RED::monitoring()]);
-                s1 = transform!("stage1" => PassthroughStage::new("stage1"), [USE::monitoring()]);
-                s2 = transform!("stage2" => PassthroughStage::new("stage2"), [USE::monitoring()]);
-                s3 = transform!("stage3" => PassthroughStage::new("stage3"), [USE::monitoring()]);
-                s4 = transform!("stage4" => PassthroughStage::new("stage4"), [USE::monitoring()]);
-                snk = sink!("sink" => sink, [RED::monitoring()]);
+                src = source!("source" => source);
+                s1 = transform!("stage1" => PassthroughStage::new("stage1"));
+                s2 = transform!("stage2" => PassthroughStage::new("stage2"));
+                s3 = transform!("stage3" => PassthroughStage::new("stage3"));
+                s4 = transform!("stage4" => PassthroughStage::new("stage4"));
+                snk = sink!("sink" => sink);
             },
 
             topology: {
@@ -235,21 +236,21 @@ async fn build_pipeline(
         10 => {
             // For larger pipelines, build stages programmatically
             let handle = flow! {
-                journal: journal,
-                middleware: [GoldenSignals::monitoring()],
+                journals: disk_journals(journals_base_path.clone()),
+                middleware: [],
                 
                 stages: {
-                    src = source!("source" => source, [RED::monitoring()]);
-                    s1 = transform!("stage1" => PassthroughStage::new("stage1"), [USE::monitoring()]);
-                    s2 = transform!("stage2" => PassthroughStage::new("stage2"), [USE::monitoring()]);
-                    s3 = transform!("stage3" => PassthroughStage::new("stage3"), [USE::monitoring()]);
-                    s4 = transform!("stage4" => PassthroughStage::new("stage4"), [USE::monitoring()]);
-                    s5 = transform!("stage5" => PassthroughStage::new("stage5"), [USE::monitoring()]);
-                    s6 = transform!("stage6" => PassthroughStage::new("stage6"), [USE::monitoring()]);
-                    s7 = transform!("stage7" => PassthroughStage::new("stage7"), [USE::monitoring()]);
-                    s8 = transform!("stage8" => PassthroughStage::new("stage8"), [USE::monitoring()]);
-                    s9 = transform!("stage9" => PassthroughStage::new("stage9"), [USE::monitoring()]);
-                    snk = sink!("sink" => sink, [RED::monitoring()]);
+                    src = source!("source" => source);
+                    s1 = transform!("stage1" => PassthroughStage::new("stage1"));
+                    s2 = transform!("stage2" => PassthroughStage::new("stage2"));
+                    s3 = transform!("stage3" => PassthroughStage::new("stage3"));
+                    s4 = transform!("stage4" => PassthroughStage::new("stage4"));
+                    s5 = transform!("stage5" => PassthroughStage::new("stage5"));
+                    s6 = transform!("stage6" => PassthroughStage::new("stage6"));
+                    s7 = transform!("stage7" => PassthroughStage::new("stage7"));
+                    s8 = transform!("stage8" => PassthroughStage::new("stage8"));
+                    s9 = transform!("stage9" => PassthroughStage::new("stage9"));
+                    snk = sink!("sink" => sink);
                 },
                 
                 topology: {
@@ -270,19 +271,18 @@ async fn build_pipeline(
         _ => return Err(anyhow::anyhow!("Unsupported stage count: {}", stage_count)),
     };
 
-    // Start the pipeline
     handle
-        .run()
+        .start()
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to run pipeline: {:?}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to start pipeline: {:?}", e))?;
 
     Ok(handle)
 }
 
 /// Run throughput test for a specific pipeline depth
 async fn run_throughput_test(stage_count: usize) -> anyhow::Result<f64> {
-    let (journal, _temp_dir) =
-        create_temp_journal(&format!("throughput_{}_stages", stage_count)).await?;
+    let (journals_base_path, _temp_dir) =
+        create_temp_journals_base(&format!("throughput_{}_stages", stage_count))?;
 
     let total_events = THROUGHPUT_WARMUP + THROUGHPUT_EVENT_COUNT;
     let source = TimestampedSource::new(total_events);
@@ -290,7 +290,7 @@ async fn run_throughput_test(stage_count: usize) -> anyhow::Result<f64> {
     let sink_clone = sink.clone();
 
     // Build pipeline
-    let handle = build_pipeline(stage_count, source, sink, journal).await?;
+    let handle = build_pipeline(stage_count, source, sink, journals_base_path).await?;
 
     // Start timing after warmup events
     let timeout = Duration::from_secs(60);
@@ -330,11 +330,15 @@ async fn run_throughput_test(stage_count: usize) -> anyhow::Result<f64> {
     // Calculate events per second
     let throughput = events_processed as f64 / measurement_elapsed.as_secs_f64();
 
+    // Ensure pipeline has terminated before returning (avoids interference between iterations).
+    handle.wait_for_completion().await?;
+
     Ok(throughput)
 }
 
 /// Benchmark throughput across different pipeline depths
 fn bench_throughput(c: &mut Criterion) {
+    obzenflow_benchmarks::init_tracing();
     let rt = Runtime::new().unwrap();
     let mut group = c.benchmark_group("throughput");
 
@@ -359,6 +363,7 @@ fn bench_throughput(c: &mut Criterion) {
 
 /// Benchmark time per event (inverse of throughput) for different perspectives
 fn bench_time_per_event(c: &mut Criterion) {
+    obzenflow_benchmarks::init_tracing();
     let rt = Runtime::new().unwrap();
     let mut group = c.benchmark_group("time_per_event");
 
@@ -390,6 +395,7 @@ fn bench_time_per_event(c: &mut Criterion) {
 
 /// Benchmark throughput degradation relative to single-stage pipeline
 fn bench_relative_throughput(c: &mut Criterion) {
+    obzenflow_benchmarks::init_tracing();
     let rt = Runtime::new().unwrap();
     let mut group = c.benchmark_group("relative_throughput");
 

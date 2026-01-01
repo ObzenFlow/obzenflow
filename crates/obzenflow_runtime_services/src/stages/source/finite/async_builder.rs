@@ -91,6 +91,7 @@ impl<H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
             stage_id: self.config.stage_id,
             external_events: event_receiver,
             state_watcher: state_watcher.clone(),
+            last_state: None,
         };
 
         let supervisor_name = format!("async_finite_source_{}", self.config.stage_name);

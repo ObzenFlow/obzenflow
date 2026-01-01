@@ -757,6 +757,19 @@ impl FsmAction for PipelineAction {
                         "Stage metadata collected for metrics aggregator"
                     );
 
+                    // Best-effort: create a system journal reader so we can optionally wait
+                    // for a Ready coordination event. Metrics must not gate pipeline startup.
+                    let mut ready_reader = match context.system_journal.reader().await {
+                        Ok(reader) => Some(reader),
+                        Err(e) => {
+                            tracing::warn!(
+                                journal_error = %e,
+                                "Failed to create system journal reader for metrics readiness; continuing without waiting"
+                            );
+                            None
+                        }
+                    };
+
                     // Spawn metrics aggregator using the builder pattern
                     tokio::spawn(async move {
                         use crate::metrics::{MetricsAggregatorBuilder, MetricsInputs};
@@ -786,43 +799,49 @@ impl FsmAction for PipelineAction {
                         }
                     });
 
-                    // Subscribe to system journal to wait for metrics ready event
-                    let mut ready_reader = context.system_journal.reader().await.map_err(|e| {
-                        obzenflow_fsm::FsmError::HandlerError(format!(
-                            "Failed to create system journal reader: {}",
-                            e
-                        ))
-                    })?;
-
-                    // Wait for metrics aggregator to be ready
-                    let deadline =
-                        tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
-                    loop {
-                        match tokio::time::timeout_at(deadline, ready_reader.next()).await {
-                            Ok(Ok(Some(envelope))) => {
-                                // Check if this is the metrics ready event
-                                if let obzenflow_core::event::SystemEventType::MetricsCoordination(
-                                    obzenflow_core::event::MetricsCoordinationEvent::Ready,
-                                ) = &envelope.event.event
-                                {
-                                    tracing::info!("Metrics aggregator is ready");
+                    // Best-effort: wait briefly for metrics aggregator readiness.
+                    // If it doesn't become ready quickly (or the journal read fails),
+                    // continue startup anyway.
+                    if let Some(mut ready_reader) = ready_reader.take() {
+                        let deadline =
+                            tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
+                        loop {
+                            match tokio::time::timeout_at(deadline, ready_reader.next()).await {
+                                Ok(Ok(Some(envelope))) => {
+                                    // Check if this is the metrics ready event
+                                    if let obzenflow_core::event::SystemEventType::MetricsCoordination(
+                                        obzenflow_core::event::MetricsCoordinationEvent::Ready,
+                                    ) = &envelope.event.event
+                                    {
+                                        tracing::info!("Metrics aggregator is ready");
+                                        break;
+                                    }
+                                }
+                                Ok(Ok(None)) => {
+                                    // No events available right now; avoid a tight spin loop.
+                                    // Sleep for a bounded duration without overshooting the deadline.
+                                    let remaining = deadline.saturating_duration_since(
+                                        tokio::time::Instant::now(),
+                                    );
+                                    let sleep_for =
+                                        std::cmp::min(remaining, tokio::time::Duration::from_millis(10));
+                                    if sleep_for != tokio::time::Duration::ZERO {
+                                        tokio::time::sleep(sleep_for).await;
+                                    }
+                                }
+                                Ok(Err(e)) => {
+                                    tracing::warn!(
+                                        journal_error = %e,
+                                        "Failed to read metrics ready event; continuing startup"
+                                    );
                                     break;
                                 }
-                                // Otherwise continue waiting for the right event
-                            }
-                            Ok(Ok(None)) => {
-                                // No more events, continue waiting
-                            }
-                            Ok(Err(e)) => {
-                                return Err(obzenflow_fsm::FsmError::HandlerError(format!(
-                                    "Failed to read metrics ready event: {}",
-                                    e
-                                )));
-                            }
-                            Err(_) => {
-                                return Err(obzenflow_fsm::FsmError::HandlerError(
-                                    "Timeout waiting for metrics aggregator to be ready".into(),
-                                ));
+                                Err(_) => {
+                                    tracing::warn!(
+                                        "Timeout waiting for metrics aggregator to be ready; continuing startup"
+                                    );
+                                    break;
+                                }
                             }
                         }
                     }
@@ -883,7 +902,16 @@ impl FsmAction for PipelineAction {
                             // Otherwise continue waiting for the right event
                         }
                         Ok(Ok(None)) => {
-                            // No more events, continue waiting
+                            // No events available right now; avoid a tight spin loop.
+                            // Sleep for a bounded duration without overshooting the deadline.
+                            let remaining = deadline.saturating_duration_since(
+                                tokio::time::Instant::now(),
+                            );
+                            let sleep_for =
+                                std::cmp::min(remaining, tokio::time::Duration::from_millis(10));
+                            if sleep_for != tokio::time::Duration::ZERO {
+                                tokio::time::sleep(sleep_for).await;
+                            }
                         }
                         Ok(Err(e)) => {
                             return Err(obzenflow_fsm::FsmError::HandlerError(format!(

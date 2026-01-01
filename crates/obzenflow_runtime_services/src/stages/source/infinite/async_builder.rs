@@ -91,6 +91,7 @@ impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
             stage_id: self.config.stage_id,
             external_events: event_receiver,
             state_watcher: state_watcher.clone(),
+            last_state: None,
         };
 
         let supervisor_name = format!("async_infinite_source_{}", self.config.stage_name);
@@ -118,4 +119,3 @@ impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
             .map_err(|e| BuilderError::Other(e.to_string()))
     }
 }
-

@@ -43,6 +43,9 @@ pub(crate) struct AsyncInfiniteSourceSupervisor<
 
     /// State watcher for UI/handles.
     pub(crate) state_watcher: StateWatcher<InfiniteSourceState<H>>,
+
+    /// Last published state (avoid waking watchers every loop) (FLOWIP-086i).
+    pub(crate) last_state: Option<InfiniteSourceState<H>>,
 }
 
 impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
@@ -319,7 +322,11 @@ impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
         state: &Self::State,
         _context: &mut Self::Context,
     ) -> Result<EventLoopDirective<Self::Event>, Box<dyn std::error::Error + Send + Sync>> {
-        let _ = self.state_watcher.update(state.clone());
+        if self.last_state.as_ref() != Some(state) {
+            let new_state = state.clone();
+            let _ = self.state_watcher.update(new_state.clone());
+            self.last_state = Some(new_state);
+        }
 
         match state {
             InfiniteSourceState::Created

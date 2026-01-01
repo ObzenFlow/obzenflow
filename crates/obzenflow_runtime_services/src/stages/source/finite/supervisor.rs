@@ -3,6 +3,7 @@
 use crate::stages::common::handlers::FiniteSourceHandler;
 use crate::supervised_base::base::Supervisor;
 use crate::supervised_base::{EventLoopDirective, HandlerSupervised};
+use crate::supervised_base::idle_backoff::IdleBackoff;
 use obzenflow_core::event::context::FlowContext;
 use obzenflow_core::event::SystemEvent;
 use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
@@ -35,6 +36,9 @@ pub(crate) struct FiniteSourceSupervisor<
 
     /// Stage ID
     pub(crate) stage_id: StageId,
+
+    /// Adaptive backoff for synchronous idle polls (FLOWIP-086i).
+    pub(crate) idle_backoff: IdleBackoff,
 }
 
 // Implement Sealed directly for FiniteSourceSupervisor to satisfy Supervisor trait bound
@@ -324,16 +328,19 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> H
         // Track every event loop iteration
         match state {
             FiniteSourceState::Created => {
+                self.idle_backoff.reset();
                 // Wait for initialization
                 Ok(EventLoopDirective::Continue)
             }
 
             FiniteSourceState::Initialized => {
+                self.idle_backoff.reset();
                 // Wait for Ready event from pipeline
                 Ok(EventLoopDirective::Continue)
             }
 
             FiniteSourceState::WaitingForGun => {
+                self.idle_backoff.reset();
                 // Wait for start signal from pipeline
                 Ok(EventLoopDirective::Continue)
             }
@@ -352,6 +359,7 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> H
 
                 match next_result {
                     Ok(Some(events)) if !events.is_empty() => {
+                        self.idle_backoff.reset();
                         // We have work - increment loops with work
                         self.context
                             .instrumentation
@@ -445,8 +453,9 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> H
                         Ok(EventLoopDirective::Continue)
                     }
                     Ok(Some(_events)) => {
-                        // Handler advanced but produced only control/observability events.
-                        // Treat as "no data" for completion semantics.
+                        // No events produced; apply adaptive idle backoff (FLOWIP-086i).
+                        let delay = self.idle_backoff.next_delay();
+                        tokio::time::sleep(delay).await;
                         Ok(EventLoopDirective::Continue)
                     }
                     Ok(None) => {
@@ -469,16 +478,19 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> H
             }
 
             FiniteSourceState::Draining => {
+                self.idle_backoff.reset();
                 // Draining state - prepare to send EOF
                 Ok(EventLoopDirective::Transition(FiniteSourceEvent::Completed))
             }
 
             FiniteSourceState::Drained => {
+                self.idle_backoff.reset();
                 // Terminal state
                 Ok(EventLoopDirective::Terminate)
             }
 
             FiniteSourceState::Failed(_) => {
+                self.idle_backoff.reset();
                 // Terminal state
                 Ok(EventLoopDirective::Terminate)
             }

@@ -32,6 +32,7 @@ ulid = "1.0"
 anyhow = "1.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+libc = "0.2"
 
 # System information for CPU usage benchmarks
 sysinfo = "0.29"
@@ -92,6 +93,11 @@ harness = false
 [[bench]]
 name = "idle_cpu_usage"
 path = "benches/runtime/idle_cpu_usage.rs"
+harness = false
+
+[[bench]]
+name = "waiting_for_gun_cpu_usage"
+path = "benches/runtime/waiting_for_gun_cpu_usage.rs"
 harness = false
 
 [[bench]]

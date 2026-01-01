@@ -143,7 +143,7 @@ macro_rules! flow {
             ];
 
             // Build the flow
-            $crate::build_typed_flow!($flow_name, $journals, stages, connections, create_flow_middleware)
+            $crate::build_typed_flow!($flow_name, journals, stages, connections, create_flow_middleware)
         }
     }};
 
@@ -190,7 +190,7 @@ macro_rules! flow {
             ];
 
             // Build the flow
-            $crate::build_typed_flow!($flow_name, $journals, stages, connections, create_flow_middleware)
+            $crate::build_typed_flow!($flow_name, journals, stages, connections, create_flow_middleware)
         }
     }};
 
@@ -237,7 +237,7 @@ macro_rules! flow {
             ];
 
             // Build the flow with default name
-            $crate::build_typed_flow!("default", $journals, stages, connections, create_flow_middleware)
+            $crate::build_typed_flow!("default", journals, stages, connections, create_flow_middleware)
         }
     }};
 
@@ -283,7 +283,7 @@ macro_rules! flow {
             ];
 
             // Build the flow
-            $crate::build_typed_flow!("default", $journals, stages, connections, create_flow_middleware)
+            $crate::build_typed_flow!("default", journals, stages, connections, create_flow_middleware)
         }
     }};
 }

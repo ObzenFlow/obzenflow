@@ -294,6 +294,7 @@ impl SupervisorBuilder for PipelineBuilder {
             supervisor,
             external_events: event_receiver,
             state_watcher: state_watcher_for_task,
+            last_state: None,
         };
 
         let supervisor_task = SupervisorTaskBuilder::<PipelineSupervisor>::new(
@@ -369,6 +370,7 @@ struct SupervisorWithExternalEvents {
     supervisor: PipelineSupervisor,
     external_events: EventReceiver<PipelineEvent>,
     state_watcher: StateWatcher<PipelineState>,
+    last_state: Option<PipelineState>,
 }
 
 // Delegate trait implementations to the inner supervisor
@@ -413,8 +415,34 @@ impl crate::supervised_base::SelfSupervised for SupervisorWithExternalEvents {
         crate::supervised_base::EventLoopDirective<Self::Event>,
         Box<dyn std::error::Error + Send + Sync>,
     > {
-        // Update state for external observers
-        let _ = self.state_watcher.update(state.clone());
+        // Update state for external observers only when it changes (FLOWIP-086i).
+        if self.last_state.as_ref() != Some(state) {
+            let new_state = state.clone();
+            let _ = self.state_watcher.update(new_state.clone());
+            self.last_state = Some(new_state);
+        }
+
+        // Terminal states should not process additional external control events.
+        // Delegate directly so the supervisor can terminate cleanly.
+        if matches!(state, PipelineState::Drained | PipelineState::Failed { .. }) {
+            return self.supervisor.dispatch_state(state, context).await;
+        }
+
+        // Created is a pure "wait for Materialize" state; block on control events to avoid spin.
+        if matches!(state, PipelineState::Created) {
+            match self.external_events.recv().await {
+                Some(event) => {
+                    return Ok(crate::supervised_base::EventLoopDirective::Transition(event));
+                }
+                None => {
+                    return Ok(crate::supervised_base::EventLoopDirective::Transition(
+                        PipelineEvent::Error {
+                            message: "External control channel closed".to_string(),
+                        },
+                    ));
+                }
+            }
+        }
 
         // During Materializing state, ignore external events to allow
         // supervisor's dispatch_state to complete materialization first

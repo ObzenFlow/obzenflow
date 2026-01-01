@@ -1643,6 +1643,7 @@ dependencies = [
  "criterion",
  "fastrand",
  "futures",
+ "libc",
  "obzenflow-topology",
  "obzenflow_adapters",
  "obzenflow_core",

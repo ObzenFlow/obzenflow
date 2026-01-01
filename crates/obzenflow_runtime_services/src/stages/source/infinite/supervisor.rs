@@ -3,6 +3,7 @@
 use crate::stages::common::handlers::InfiniteSourceHandler;
 use crate::supervised_base::base::Supervisor;
 use crate::supervised_base::{EventLoopDirective, HandlerSupervised};
+use crate::supervised_base::idle_backoff::IdleBackoff;
 use obzenflow_core::event::context::FlowContext;
 use obzenflow_core::event::SystemEvent;
 use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
@@ -37,6 +38,9 @@ pub(crate) struct InfiniteSourceSupervisor<
 
     /// Stage ID
     pub(crate) stage_id: StageId,
+
+    /// Adaptive backoff for synchronous idle polls (FLOWIP-086i).
+    pub(crate) idle_backoff: IdleBackoff,
 }
 
 // Implement Sealed directly for InfiniteSourceSupervisor to satisfy Supervisor trait bound
@@ -317,16 +321,19 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
         // Track every event loop iteration
         match state {
             InfiniteSourceState::Created => {
+                self.idle_backoff.reset();
                 // Wait for initialization
                 Ok(EventLoopDirective::Continue)
             }
 
             InfiniteSourceState::Initialized => {
+                self.idle_backoff.reset();
                 // Wait for ready signal
                 Ok(EventLoopDirective::Continue)
             }
 
             InfiniteSourceState::WaitingForGun => {
+                self.idle_backoff.reset();
                 // Wait for start signal from pipeline
                 tracing::debug!(
                     stage_name = %self.context.stage_name,
@@ -343,11 +350,14 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
 
                 // Check if we can emit
                 if !self.context.can_emit {
+                    let delay = self.idle_backoff.next_delay();
+                    tokio::time::sleep(delay).await;
                     return Ok(EventLoopDirective::Continue);
                 }
 
                 // Check if shutdown was requested
                 if self.context.shutdown_requested {
+                    self.idle_backoff.reset();
                     return Ok(EventLoopDirective::Transition(
                         InfiniteSourceEvent::BeginDrain,
                     ));
@@ -361,6 +371,7 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
 
                 match next_result {
                     Ok(events) if !events.is_empty() => {
+                        self.idle_backoff.reset();
                         // We have work - increment loops with work
                         self.context
                             .instrumentation
@@ -453,9 +464,12 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
                     }
                     Ok(_events) => {
                         // Handler advanced but produced no data/control events this tick.
+                        let delay = self.idle_backoff.next_delay();
+                        tokio::time::sleep(delay).await;
                         Ok(EventLoopDirective::Continue)
                     }
                     Err(e) => {
+                        self.idle_backoff.reset();
                         // SourceError surfaced from handler; delegate to control strategy
                         // via the standard error path.
                         tracing::error!(
@@ -471,6 +485,7 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
             }
 
             InfiniteSourceState::Draining => {
+                self.idle_backoff.reset();
                 // Draining state - prepare to send EOF
                 Ok(EventLoopDirective::Transition(
                     InfiniteSourceEvent::Completed,
@@ -478,11 +493,13 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
             }
 
             InfiniteSourceState::Drained => {
+                self.idle_backoff.reset();
                 // Terminal state
                 Ok(EventLoopDirective::Terminate)
             }
 
             InfiniteSourceState::Failed(_) => {
+                self.idle_backoff.reset();
                 // Terminal state
                 Ok(EventLoopDirective::Terminate)
             }

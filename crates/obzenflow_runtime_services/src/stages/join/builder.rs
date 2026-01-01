@@ -141,6 +141,7 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
                     supervisor,
                     external_events: event_receiver,
                     state_watcher: state_watcher_for_task,
+                    last_state: None,
                 };
 
                 // Run with the wrapper
@@ -166,6 +167,7 @@ struct HandlerSupervisedWithExternalEvents<
     supervisor: JoinSupervisor<H>,
     external_events: EventReceiver<JoinEvent<H>>,
     state_watcher: StateWatcher<JoinState<H>>,
+    last_state: Option<JoinState<H>>,
 }
 
 // Delegate trait implementations to the inner supervisor
@@ -222,12 +224,38 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
         state: &Self::State,
         context: &mut Self::Context,
     ) -> Result<EventLoopDirective<Self::Event>, Box<dyn std::error::Error + Send + Sync>> {
-        // Update state watcher (following transform/stateful pattern with explicit ignore)
-        let _ = self.state_watcher.update(state.clone());
+        // Update state watcher only when it changes (FLOWIP-086i).
+        if self.last_state.as_ref() != Some(state) {
+            let new_state = state.clone();
+            let _ = self.state_watcher.update(new_state.clone());
+            self.last_state = Some(new_state);
+        }
 
-        // Check for external events first
-        if let Ok(event) = self.external_events.try_recv() {
-            return Ok(EventLoopDirective::Transition(event));
+        // Created is a pure "wait for Initialize" state; block on control events to avoid spin.
+        if matches!(state, JoinState::Created) {
+            match self.external_events.recv().await {
+                Some(event) => return Ok(EventLoopDirective::Transition(event)),
+                None => {
+                    if !matches!(state, JoinState::Failed(_)) {
+                        return Ok(EventLoopDirective::Transition(JoinEvent::Error(
+                            "External control channel closed".to_string(),
+                        )));
+                    }
+                }
+            }
+        }
+
+        // Check for external events first (non-blocking in active states)
+        match self.external_events.try_recv() {
+            Ok(event) => return Ok(EventLoopDirective::Transition(event)),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {}
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                if !matches!(state, JoinState::Failed(_)) {
+                    return Ok(EventLoopDirective::Transition(JoinEvent::Error(
+                        "External control channel closed".to_string(),
+                    )));
+                }
+            }
         }
 
         // Otherwise delegate to supervisor

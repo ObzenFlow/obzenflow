@@ -9,6 +9,7 @@ pub mod builder;
 pub mod handle;
 pub mod handler_supervised;
 pub mod self_supervised;
+pub(crate) mod idle_backoff;
 
 // Re-export main types
 pub use base::EventLoopDirective;

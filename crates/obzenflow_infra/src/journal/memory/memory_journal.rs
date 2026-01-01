@@ -29,18 +29,18 @@ pub struct MemoryJournal<T: JournalEvent> {
 
 /// Reader for MemoryJournal
 ///
-/// This reader takes a snapshot of the journal's events in causal order
-/// at creation time and iterates over that immutable view. New events
-/// appended after the reader is created will not be visible through this
-/// reader, which is acceptable for test/dev usage.
+/// This reader iterates over the journal as events are appended (tail-like semantics).
+/// When it reaches the current end of the journal it returns `Ok(None)` for that call,
+/// but subsequent calls will observe newly appended events.
 pub struct MemoryJournalReader<T: JournalEvent> {
-    events: Vec<EventEnvelope<T>>,
+    events: Arc<Mutex<Vec<EventEnvelope<T>>>>,
     position: u64,
 }
 
 impl<T: JournalEvent> MemoryJournalReader<T> {
-    pub fn new(events: Vec<EventEnvelope<T>>, position: u64) -> Self {
-        let clamped = position.min(events.len() as u64);
+    pub fn new(events: Arc<Mutex<Vec<EventEnvelope<T>>>>, position: u64) -> Self {
+        let len = events.lock().unwrap().len() as u64;
+        let clamped = position.min(len);
         Self {
             events,
             position: clamped,
@@ -180,14 +180,14 @@ impl<T: JournalEvent + 'static> Journal<T> for MemoryJournal<T> {
     }
     
     async fn reader(&self) -> Result<Box<dyn JournalReader<T>>, JournalError> {
-        // Snapshot events in causal order at reader creation time
-        let events = self.read_causally_ordered().await?;
-        Ok(Box::new(MemoryJournalReader::new(events, 0)))
+        Ok(Box::new(MemoryJournalReader::new(self.events.clone(), 0)))
     }
     
-    async fn reader_from(&self, _position: u64) -> Result<Box<dyn JournalReader<T>>, JournalError> {
-        let events = self.read_causally_ordered().await?;
-        Ok(Box::new(MemoryJournalReader::new(events, _position)))
+    async fn reader_from(&self, position: u64) -> Result<Box<dyn JournalReader<T>>, JournalError> {
+        Ok(Box::new(MemoryJournalReader::new(
+            self.events.clone(),
+            position,
+        )))
     }
 
     async fn read_last_n(&self, count: usize) -> Result<Vec<EventEnvelope<T>>, JournalError> {
@@ -209,18 +209,24 @@ impl<T: JournalEvent + 'static> Journal<T> for MemoryJournal<T> {
 #[async_trait]
 impl<T: JournalEvent + 'static> JournalReader<T> for MemoryJournalReader<T> {
     async fn next(&mut self) -> Result<Option<EventEnvelope<T>>, JournalError> {
-        if self.position as usize >= self.events.len() {
-            return Ok(None);
-        }
-        let env = self.events.get(self.position as usize).cloned();
+        let env = {
+            let events = self.events.lock().unwrap();
+            events.get(self.position as usize).cloned()
+        };
+
         if env.is_some() {
             self.position += 1;
+        } else {
+            // This reader is frequently polled inside tight async loops that rely on timers.
+            // Without an `.await` point here, `next()` can complete immediately forever and
+            // starve the executor (preventing timeouts/other tasks from making progress).
+            tokio::task::yield_now().await;
         }
         Ok(env)
     }
 
     async fn skip(&mut self, n: u64) -> Result<u64, JournalError> {
-        let len = self.events.len() as u64;
+        let len = self.events.lock().unwrap().len() as u64;
         let start = self.position;
         let target = (self.position + n).min(len);
         self.position = target;
@@ -232,7 +238,7 @@ impl<T: JournalEvent + 'static> JournalReader<T> for MemoryJournalReader<T> {
     }
 
     fn is_at_end(&self) -> bool {
-        self.position as usize >= self.events.len()
+        self.position as usize >= self.events.lock().unwrap().len()
     }
 }
 

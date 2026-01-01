@@ -8,10 +8,12 @@
 use criterion::{criterion_group, criterion_main, Criterion};
 use obzenflow_benchmarks::prelude::*;
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
-use obzenflow_core::event::event_id::EventId;
-use obzenflow_core::journal::writer_id::WriterId;
+use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
+use obzenflow_core::event::ChainEventContent;
+use obzenflow_core::WriterId;
 use obzenflow_dsl_infra::{flow, sink, source, transform};
-use obzenflow_infra::journal::DiskJournal;
+use obzenflow_infra::journal::disk_journals;
+use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
 use obzenflow_runtime_services::stages::common::handlers::{
     FiniteSourceHandler, SinkHandler, TransformHandler,
 };
@@ -29,9 +31,10 @@ const WARMUP_EVENT_COUNT: u64 = 10;
 const TEST_EVENT_COUNT: u64 = 100;
 
 /// Test source that emits timestamped events
+#[derive(Clone, Debug)]
 struct TimestampedSource {
     total_events: u64,
-    emitted: AtomicU64,
+    emitted: Arc<AtomicU64>,
     writer_id: WriterId,
 }
 
@@ -39,8 +42,8 @@ impl TimestampedSource {
     fn new(total_events: u64) -> Self {
         Self {
             total_events,
-            emitted: AtomicU64::new(0),
-            writer_id: WriterId::new(),
+            emitted: Arc::new(AtomicU64::new(0)),
+            writer_id: WriterId::from(obzenflow_core::StageId::new()),
         }
     }
 }
@@ -67,6 +70,7 @@ impl FiniteSourceHandler for TimestampedSource {
 }
 
 /// Passthrough stage
+#[derive(Clone, Debug)]
 struct PassthroughStage {
     name: String,
 }
@@ -79,14 +83,19 @@ impl PassthroughStage {
     }
 }
 
+#[async_trait]
 impl TransformHandler for PassthroughStage {
-    fn process(&self, event: ChainEvent) -> Vec<ChainEvent> {
-        vec![event]
+    fn process(&self, event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
+        Ok(vec![event])
+    }
+
+    async fn drain(&mut self) -> Result<(), HandlerError> {
+        Ok(())
     }
 }
 
 /// Sink that collects latencies
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct LatencySink {
     expected_count: u64,
     received: Arc<AtomicU64>,
@@ -111,56 +120,51 @@ impl LatencySink {
 
 #[async_trait]
 impl SinkHandler for LatencySink {
-    fn consume(&mut self, event: ChainEvent) -> obzenflow_core::Result<()> {
-        if let (Some(emit_time_nanos), Some(event_id)) = (
-            event
-                .payload
-                .get("emit_time_nanos")
-                .and_then(|v| v.as_u64()),
-            event.payload.get("event_id").and_then(|v| v.as_u64()),
-        ) {
-            self.received.fetch_add(1, Ordering::Relaxed);
+    async fn consume(&mut self, event: ChainEvent) -> Result<DeliveryPayload, HandlerError> {
+        if let ChainEventContent::Data { payload, .. } = &event.content {
+            if let (Some(emit_time_nanos), Some(event_id)) = (
+                payload.get("emit_time_nanos").and_then(|v| v.as_u64()),
+                payload.get("event_id").and_then(|v| v.as_u64()),
+            ) {
+                self.received.fetch_add(1, Ordering::Relaxed);
 
-            // Skip warmup events
-            if event_id >= WARMUP_EVENT_COUNT {
-                let receive_time_nanos = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos() as u64;
+                // Skip warmup events
+                if event_id >= WARMUP_EVENT_COUNT {
+                    let receive_time_nanos = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap()
+                        .as_nanos() as u64;
 
-                if receive_time_nanos > emit_time_nanos {
-                    let latency = Duration::from_nanos(receive_time_nanos - emit_time_nanos);
-                    let latencies = self.latencies.clone();
-                    tokio::spawn(async move {
-                        latencies.lock().await.push(latency);
-                    });
+                    if receive_time_nanos > emit_time_nanos {
+                        let latency = Duration::from_nanos(receive_time_nanos - emit_time_nanos);
+                        self.latencies.lock().await.push(latency);
+                    }
                 }
             }
         }
-        Ok(())
+
+        Ok(DeliveryPayload::success("noop", DeliveryMethod::Noop, None))
     }
 }
 
 /// Run a single 2-stage pipeline test
 async fn run_2_stage_pipeline() -> anyhow::Result<Duration> {
     let temp_dir = tempdir()?;
-    let journal_path = temp_dir.path().join(format!(
+    let journals_base_path = temp_dir.path().join(format!(
         "two_stage_{}",
         std::time::SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos()
     ));
-    std::fs::create_dir_all(&journal_path)?;
-
-    let journal = Arc::new(DiskJournal::new(journal_path, "benchmark_2_stage").await?);
+    std::fs::create_dir_all(&journals_base_path)?;
 
     let source = TimestampedSource::new(WARMUP_EVENT_COUNT + TEST_EVENT_COUNT);
     let (sink, latencies) = LatencySink::new(WARMUP_EVENT_COUNT + TEST_EVENT_COUNT);
     let sink_clone = sink.clone();
 
     let handle = flow! {
-        journal: journal,
+        journals: disk_journals(journals_base_path),
         middleware: [],
 
         stages: {
@@ -207,6 +211,7 @@ async fn run_2_stage_pipeline() -> anyhow::Result<Duration> {
 }
 
 fn bench_2_stage_latency(c: &mut Criterion) {
+    obzenflow_benchmarks::init_tracing();
     let rt = Runtime::new().unwrap();
     let mut group = c.benchmark_group("2_stage_latency");
 

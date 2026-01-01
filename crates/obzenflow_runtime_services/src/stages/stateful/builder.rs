@@ -115,6 +115,7 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Super
                     supervisor,
                     external_events: event_receiver,
                     state_watcher: state_watcher_for_task,
+                    last_state: None,
                 };
 
                 // Run with the wrapper
@@ -144,6 +145,7 @@ struct HandlerSupervisedWithExternalEvents<
     supervisor: StatefulSupervisor<H>,
     external_events: EventReceiver<StatefulEvent<H>>,
     state_watcher: StateWatcher<StatefulState<H>>,
+    last_state: Option<StatefulState<H>>,
 }
 
 // Delegate trait implementations to the inner supervisor
@@ -203,8 +205,26 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
         state: &Self::State,
         context: &mut Self::Context,
     ) -> Result<EventLoopDirective<Self::Event>, Box<dyn std::error::Error + Send + Sync>> {
-        // Update state for external observers
-        let _ = self.state_watcher.update(state.clone());
+        // Update state for external observers only when it changes (FLOWIP-086i).
+        if self.last_state.as_ref() != Some(state) {
+            let new_state = state.clone();
+            let _ = self.state_watcher.update(new_state.clone());
+            self.last_state = Some(new_state);
+        }
+
+        // Created is a pure "wait for Initialize" state; block on control events to avoid spin.
+        if matches!(state, StatefulState::Created) {
+            match self.external_events.recv().await {
+                Some(event) => return Ok(EventLoopDirective::Transition(event)),
+                None => {
+                    if !matches!(state, StatefulState::Failed(_)) {
+                        return Ok(EventLoopDirective::Transition(StatefulEvent::Error(
+                            "External control channel closed".to_string(),
+                        )));
+                    }
+                }
+            }
+        }
 
         // Check for external events first
         match self.external_events.try_recv() {

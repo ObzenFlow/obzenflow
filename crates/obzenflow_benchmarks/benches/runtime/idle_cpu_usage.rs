@@ -7,13 +7,15 @@
 use criterion::{criterion_group, criterion_main, Criterion};
 use obzenflow_benchmarks::prelude::*;
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
-use obzenflow_core::event::event_id::EventId;
-use obzenflow_core::journal::writer_id::WriterId;
+use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
+use obzenflow_core::event::ChainEventContent;
 use obzenflow_dsl_infra::{flow, sink, source, transform};
-use obzenflow_infra::journal::DiskJournal;
+use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime_services::stages::common::handlers::{
     FiniteSourceHandler, SinkHandler, TransformHandler,
 };
+use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
+use obzenflow_runtime_services::supervised_base::SupervisorHandle;
 use obzenflow_runtime_services::stages::SourceError;
 // Monitoring removed per FLOWIP-056-666
 use async_trait::async_trait;
@@ -26,28 +28,30 @@ use tempfile::{tempdir, TempDir};
 use tokio::runtime::Runtime;
 
 /// Idle source that doesn't emit any events
+#[derive(Clone, Debug)]
 struct IdleSource {
-    completed: AtomicU64,
+    completed: Arc<AtomicU64>,
 }
 
 impl IdleSource {
     fn new() -> Self {
         Self {
-            completed: AtomicU64::new(0),
+            completed: Arc::new(AtomicU64::new(0)),
         }
     }
 }
 
 impl FiniteSourceHandler for IdleSource {
     fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
-        // Mark as completed immediately
-        self.completed.store(1, Ordering::Relaxed);
-        Ok(None)
+        // Intentionally emit nothing but also never complete (idle pipeline).
+        // This is the runtime "idle spin" scenario that FLOWIP-086i targets.
+        self.completed.fetch_add(1, Ordering::Relaxed);
+        Ok(Some(vec![]))
     }
 }
 
 /// Sink that records latencies
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct TimestampedSink {
     expected_count: u64,
     received: Arc<AtomicU64>,
@@ -73,39 +77,37 @@ impl TimestampedSink {
 
 #[async_trait]
 impl SinkHandler for TimestampedSink {
-    fn consume(&mut self, event: ChainEvent) -> obzenflow_core::Result<()> {
-        if let (Some(emit_time_nanos), Some(index)) = (
-            event
-                .payload
-                .get("emit_time_nanos")
-                .and_then(|v| v.as_u64()),
-            event.payload.get("index").and_then(|v| v.as_u64()),
-        ) {
-            self.received.fetch_add(1, Ordering::Relaxed);
+    async fn consume(&mut self, event: ChainEvent) -> Result<DeliveryPayload, HandlerError> {
+        if let ChainEventContent::Data { payload, .. } = &event.content {
+            if let (Some(emit_time_nanos), Some(index)) = (
+                payload.get("emit_time_nanos").and_then(|v| v.as_u64()),
+                payload.get("index").and_then(|v| v.as_u64()),
+            ) {
+                self.received.fetch_add(1, Ordering::Relaxed);
 
-            // Skip warmup events for latency calculation
-            if index >= 10 {
-                // WARMUP_EVENT_COUNT
-                // Calculate latency from embedded timestamp
-                let receive_time_nanos = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos() as u64;
+                // Skip warmup events for latency calculation
+                if index >= 10 {
+                    // WARMUP_EVENT_COUNT
+                    // Calculate latency from embedded timestamp
+                    let receive_time_nanos = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_nanos() as u64;
 
-                if receive_time_nanos > emit_time_nanos {
-                    let latency = Duration::from_nanos(receive_time_nanos - emit_time_nanos);
-                    let latencies = self.latencies.clone();
-                    tokio::spawn(async move {
-                        latencies.lock().await.push(latency);
-                    });
+                    if receive_time_nanos > emit_time_nanos {
+                        let latency = Duration::from_nanos(receive_time_nanos - emit_time_nanos);
+                        self.latencies.lock().await.push(latency);
+                    }
                 }
             }
         }
-        Ok(())
+
+        Ok(DeliveryPayload::success("noop", DeliveryMethod::Noop, None))
     }
 }
 
 /// Passthrough stage that just forwards events
+#[derive(Clone, Debug)]
 struct PassthroughStage {
     name: String,
 }
@@ -118,21 +120,23 @@ impl PassthroughStage {
     }
 }
 
+#[async_trait]
 impl TransformHandler for PassthroughStage {
-    fn process(&self, event: ChainEvent) -> Vec<ChainEvent> {
-        vec![event]
+    fn process(&self, event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
+        Ok(vec![event])
+    }
+
+    async fn drain(&mut self) -> Result<(), HandlerError> {
+        Ok(())
     }
 }
 
 /// Create a temporary journal for benchmarking
-async fn create_temp_journal(test_name: &str) -> anyhow::Result<(Arc<DiskJournal>, TempDir)> {
+fn create_temp_journals_base(test_name: &str) -> anyhow::Result<(std::path::PathBuf, TempDir)> {
     let temp_dir = tempdir()?;
     let journal_path = temp_dir.path().join(format!("bench_{}", test_name));
     std::fs::create_dir_all(&journal_path)?;
-
-    let journal = Arc::new(DiskJournal::new(journal_path, test_name).await?);
-
-    Ok((journal, temp_dir))
+    Ok((journal_path, temp_dir))
 }
 
 /// Build pipeline with specified stage count
@@ -140,11 +144,11 @@ async fn build_pipeline(
     stage_count: usize,
     source: IdleSource,
     sink: TimestampedSink,
-    journal: Arc<DiskJournal>,
+    journals_base_path: std::path::PathBuf,
 ) -> anyhow::Result<FlowHandle> {
     let handle = match stage_count {
         1 => flow! {
-            journal: journal,
+            journals: disk_journals(journals_base_path.clone()),
             middleware: [],
 
             stages: {
@@ -159,7 +163,7 @@ async fn build_pipeline(
         .await
         .map_err(|e| anyhow::anyhow!("Failed to create flow: {:?}", e))?,
         10 => flow! {
-            journal: journal,
+            journals: disk_journals(journals_base_path.clone()),
             middleware: [],
 
             stages: {
@@ -192,7 +196,7 @@ async fn build_pipeline(
         .await
         .map_err(|e| anyhow::anyhow!("Failed to create flow: {:?}", e))?,
         20 => flow! {
-            journal: journal,
+            journals: disk_journals(journals_base_path.clone()),
             middleware: [],
 
             stages: {
@@ -247,7 +251,7 @@ async fn build_pipeline(
         100 => {
             // For 100 stages, simplify to 10 stages for maintainability
             flow! {
-                journal: journal,
+                journals: disk_journals(journals_base_path.clone()),
                 middleware: [],
 
                 stages: {
@@ -288,19 +292,19 @@ async fn build_pipeline(
 
 /// Measure CPU usage of an idle pipeline
 async fn measure_idle_cpu() -> anyhow::Result<f64> {
-    let (journal, _temp_dir) = create_temp_journal("idle_cpu").await?;
+    let (journals_base_path, _temp_dir) = create_temp_journals_base("idle_cpu")?;
 
     // Create pipeline with non-emitting source
     let idle_source = IdleSource::new();
     let (sink, _) = TimestampedSink::new(0);
 
     let handle = flow! {
-        journal: journal,
-        middleware: [GoldenSignals::monitoring()],
+        journals: disk_journals(journals_base_path),
+        middleware: [],
 
         stages: {
             src = source!("source" => idle_source);
-            snk = sink!("sink" => sink, [RED::monitoring()]);
+            snk = sink!("sink" => sink);
         },
 
         topology: {
@@ -310,11 +314,11 @@ async fn measure_idle_cpu() -> anyhow::Result<f64> {
     .await
     .map_err(|e| anyhow::anyhow!("Failed to create flow: {:?}", e))?;
 
-    // Start the pipeline
+    // Start the pipeline (do not await completion; we want to measure idle CPU while running)
     handle
-        .run()
+        .start()
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to run pipeline: {:?}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to start pipeline: {:?}", e))?;
 
     // Let pipeline stabilize
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -343,13 +347,16 @@ async fn measure_idle_cpu() -> anyhow::Result<f64> {
         0.0
     };
 
-    // Pipeline runs to completion automatically
+    // Stop the pipeline so benchmark iterations don't leak background tasks.
+    let _ = handle.stop_cancel().await;
+    handle.wait_for_completion().await?;
 
     Ok(avg_cpu as f64)
 }
 
 /// Benchmark idle CPU usage
 fn bench_idle_cpu_usage(c: &mut Criterion) {
+    obzenflow_benchmarks::init_tracing();
     let rt = Runtime::new().unwrap();
     let mut group = c.benchmark_group("idle_cpu_usage");
 
@@ -371,6 +378,7 @@ fn bench_idle_cpu_usage(c: &mut Criterion) {
 
 /// Benchmark idle CPU with different pipeline depths
 fn bench_idle_cpu_by_depth(c: &mut Criterion) {
+    obzenflow_benchmarks::init_tracing();
     let rt = Runtime::new().unwrap();
     let mut group = c.benchmark_group("idle_cpu_by_depth");
 
@@ -394,20 +402,19 @@ fn bench_idle_cpu_by_depth(c: &mut Criterion) {
 
 /// Measure idle CPU with a specific number of stages
 async fn measure_idle_cpu_with_stages(stage_count: usize) -> anyhow::Result<f64> {
-    let (journal, _temp_dir) =
-        create_temp_journal(&format!("idle_cpu_{}_stages", stage_count)).await?;
+    let (journals_base_path, _temp_dir) =
+        create_temp_journals_base(&format!("idle_cpu_{}_stages", stage_count))?;
 
     let idle_source = IdleSource::new();
     let (sink, _) = TimestampedSink::new(0);
 
     // Build pipeline with specified stages
-    let handle = build_pipeline(stage_count, idle_source, sink, journal).await?;
+    let handle = build_pipeline(stage_count, idle_source, sink, journals_base_path).await?;
 
-    // Start the pipeline
     handle
-        .run()
+        .start()
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to run pipeline: {:?}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to start pipeline: {:?}", e))?;
 
     // Let stabilize
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -435,7 +442,8 @@ async fn measure_idle_cpu_with_stages(stage_count: usize) -> anyhow::Result<f64>
         0.0
     };
 
-    // Pipeline runs to completion automatically
+    let _ = handle.stop_cancel().await;
+    handle.wait_for_completion().await?;
 
     Ok(avg_cpu as f64)
 }

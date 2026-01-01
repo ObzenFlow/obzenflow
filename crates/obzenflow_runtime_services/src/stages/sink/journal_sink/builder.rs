@@ -109,6 +109,7 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
                     supervisor,
                     external_events: event_receiver,
                     state_watcher: state_watcher_for_task,
+                    last_state: None,
                 };
 
                 // Run with the wrapper
@@ -138,6 +139,7 @@ struct HandlerSupervisedWithExternalEvents<
     supervisor: JournalSinkSupervisor<H>,
     external_events: EventReceiver<JournalSinkEvent<H>>,
     state_watcher: StateWatcher<JournalSinkState<H>>,
+    last_state: Option<JournalSinkState<H>>,
 }
 
 // Delegate trait implementations to the inner supervisor
@@ -205,8 +207,34 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
             "sink_fsm: dispatch_state entry"
         );
 
-        // Update state for external observers
-        let _ = self.state_watcher.update(state.clone());
+        // Update state for external observers only when it changes (FLOWIP-086i).
+        if self.last_state.as_ref() != Some(state) {
+            let new_state = state.clone();
+            let _ = self.state_watcher.update(new_state.clone());
+            self.last_state = Some(new_state);
+        }
+
+        // Created is a pure "wait for Initialize" state; block on control events to avoid spin.
+        if matches!(state, JournalSinkState::Created) {
+            match self.external_events.recv().await {
+                Some(event) => {
+                    tracing::debug!(
+                        target: "flowip-080o",
+                        stage_name = %self.supervisor.stage_name,
+                        event = %event.variant_name(),
+                        "sink_fsm: received external event"
+                    );
+                    return Ok(EventLoopDirective::Transition(event));
+                }
+                None => {
+                    if !matches!(state, JournalSinkState::Failed(_)) {
+                        return Ok(EventLoopDirective::Transition(JournalSinkEvent::Error(
+                            "External control channel closed".to_string(),
+                        )));
+                    }
+                }
+            }
+        }
 
         // Check for external events first
         match self.external_events.try_recv() {
