@@ -8,6 +8,20 @@ use crate::id::JournalId;
 
 use async_trait::async_trait;
 
+/// Where a journal stores its data.
+///
+/// This is used for runtime resource preflight checks (e.g., estimating
+/// file-descriptor usage for disk-backed journals).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum JournalStorageKind {
+    /// On-disk, file-backed journaling (consumes OS file descriptors).
+    Disk,
+    /// In-memory journaling (does not consume per-journal file descriptors).
+    Memory,
+    /// Unknown / user-provided journal implementation.
+    Unknown,
+}
+
 /// Core journal trait - defines what a journal must do
 ///
 /// Infrastructure will implement this trait with actual storage
@@ -17,6 +31,14 @@ pub trait Journal<T>: Send + Sync
 where
     T: JournalEvent,
 {
+    /// Describe the underlying storage kind for this journal.
+    ///
+    /// Default is `Unknown` to avoid forcing custom journal implementations to
+    /// provide a storage classification.
+    fn storage_kind(&self) -> JournalStorageKind {
+        JournalStorageKind::Unknown
+    }
+
     /// Get the ID of this journal
     fn id(&self) -> &JournalId;
 

@@ -352,6 +352,10 @@ impl<T: JournalEvent> Clone for DiskJournal<T> {
 
 #[async_trait]
 impl<T: JournalEvent + 'static> Journal<T> for DiskJournal<T> {
+    fn storage_kind(&self) -> obzenflow_core::journal::JournalStorageKind {
+        obzenflow_core::journal::JournalStorageKind::Disk
+    }
+
     fn id(&self) -> &JournalId {
         &self.journal_id
     }

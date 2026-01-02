@@ -84,6 +84,10 @@ impl<T: JournalEvent> MemoryJournal<T> {
 
 #[async_trait]
 impl<T: JournalEvent + 'static> Journal<T> for MemoryJournal<T> {
+    fn storage_kind(&self) -> obzenflow_core::journal::JournalStorageKind {
+        obzenflow_core::journal::JournalStorageKind::Memory
+    }
+
     fn id(&self) -> &JournalId {
         &self.journal_id
     }

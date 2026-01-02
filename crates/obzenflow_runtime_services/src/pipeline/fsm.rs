@@ -6,7 +6,7 @@ use crate::id_conversions::StageIdExt;
 use crate::message_bus::FsmMessageBus;
 use crate::messaging::system_subscription::SystemSubscription;
 use crate::messaging::upstream_subscription::UpstreamSubscription;
-use crate::stages::common::stage_handle::{STOP_REASON_TIMEOUT, STOP_REASON_USER_STOP};
+use crate::stages::common::stage_handle::{StageError, STOP_REASON_TIMEOUT, STOP_REASON_USER_STOP};
 use crate::supervised_base::SupervisorHandle;
 use obzenflow_core::event::payloads::observability_payload::{
     MetricsLifecycle, ObservabilityPayload,
@@ -554,10 +554,13 @@ impl FsmAction for PipelineAction {
             }
 
             PipelineAction::BeginDrain => {
-                // Publish drain signal to system journal (lifecycle) and propagate FlowControl::Drain to all stage data journals
-                let writer_id = WriterId::from(context.system_id);
-
-                // System lifecycle event
+                // Publish drain signal to system journal (lifecycle).
+                //
+                // NOTE: Do NOT inject FlowControl::Drain into stage journals here.
+                // For finite flows, EOF propagation through per-stage journals is the
+                // correctness boundary; publishing drain into every stage journal can
+                // cause downstream stages to enter draining before upstream data has
+                // been fully written/consumed, leading to silent data loss.
                 let system_event_factory = SystemEventFactory::new(context.system_id);
                 let drain_system_event = system_event_factory.pipeline_draining();
                 context
@@ -570,25 +573,7 @@ impl FsmAction for PipelineAction {
                             e
                         ))
                     })?;
-
-                // Flow-control drain into every stage data journal so downstream stages see it
-                let drain_event = ChainEventFactory::drain_event(writer_id);
-                let stage_journals = context.stage_data_journals.clone();
-                for (stage_id, journal) in stage_journals {
-                    journal
-                        .append(drain_event.clone(), None)
-                        .await
-                        .map_err(|e| {
-                            obzenflow_fsm::FsmError::HandlerError(format!(
-                                "Failed to publish drain event to stage {:?}: {}",
-                                stage_id, e
-                            ))
-                        })?;
-                }
-
-                tracing::info!(
-                    "Published drain event to system journal and all stage data journals"
-                );
+                tracing::info!("Published pipeline draining event to system journal");
             }
 
             PipelineAction::Cleanup => {
@@ -596,23 +581,59 @@ impl FsmAction for PipelineAction {
 
                 // Signal all non-source stages to shut down
                 for (stage_id, handle) in context.stage_supervisors.iter() {
+                    // If the stage has already reached a terminal drained state, a force shutdown
+                    // is unnecessary and may fail because the supervisor has already stopped.
+                    if handle.is_drained() {
+                        continue;
+                    }
                     if let Err(e) = handle.force_shutdown().await {
-                        tracing::warn!(
-                            stage_id = %stage_id,
-                            error = ?e,
-                            "Failed to send force_shutdown to stage"
+                        let supervisor_not_running = matches!(
+                            &e,
+                            StageError::EventSendFailed(msg)
+                                if msg.contains("SupervisorNotRunning")
+                                    || msg.contains("Supervisor is not running")
                         );
+                        if supervisor_not_running {
+                            tracing::debug!(
+                                stage_id = %stage_id,
+                                error = ?e,
+                                "force_shutdown skipped: supervisor already stopped"
+                            );
+                        } else {
+                            tracing::warn!(
+                                stage_id = %stage_id,
+                                error = ?e,
+                                "Failed to send force_shutdown to stage"
+                            );
+                        }
                     }
                 }
 
                 // Signal all source stages to shut down
                 for (stage_id, handle) in context.source_supervisors.iter() {
+                    if handle.is_drained() {
+                        continue;
+                    }
                     if let Err(e) = handle.force_shutdown().await {
-                        tracing::warn!(
-                            stage_id = %stage_id,
-                            error = ?e,
-                            "Failed to send force_shutdown to source"
+                        let supervisor_not_running = matches!(
+                            &e,
+                            StageError::EventSendFailed(msg)
+                                if msg.contains("SupervisorNotRunning")
+                                    || msg.contains("Supervisor is not running")
                         );
+                        if supervisor_not_running {
+                            tracing::debug!(
+                                stage_id = %stage_id,
+                                error = ?e,
+                                "force_shutdown skipped: supervisor already stopped"
+                            );
+                        } else {
+                            tracing::warn!(
+                                stage_id = %stage_id,
+                                error = ?e,
+                                "Failed to send force_shutdown to source"
+                            );
+                        }
                     }
                 }
 
@@ -851,6 +872,18 @@ impl FsmAction for PipelineAction {
             }
 
             PipelineAction::DrainMetrics => {
+                // Metrics draining is only meaningful when the metrics aggregator is running.
+                // When metrics are disabled, skip to avoid unnecessary journal writes and
+                // spurious warnings during shutdown.
+                if context.metrics_exporter.is_none() {
+                    tracing::debug!("Skipping metrics drain (metrics exporter not configured)");
+                    return Ok(());
+                }
+
+                if context.stage_data_journals.is_empty() {
+                    return Ok(());
+                }
+
                 tracing::info!("Requesting metrics drain via data journals");
 
                 let writer_id = WriterId::from(context.system_id);
@@ -863,26 +896,28 @@ impl FsmAction for PipelineAction {
                 // (metrics aggregator reads from these journals)
                 let stage_journals = &context.stage_data_journals;
                 for (stage_id, journal) in stage_journals.iter() {
-                    journal
-                        .append(drain_event.clone(), None)
-                        .await
-                        .map_err(|e| {
-                            obzenflow_fsm::FsmError::HandlerError(format!(
-                                "Failed to publish drain event to stage {:?}: {}",
-                                stage_id, e
-                            ))
-                        })?;
+                    if let Err(e) = journal.append(drain_event.clone(), None).await {
+                        tracing::warn!(
+                            stage_id = %stage_id,
+                            error = %e,
+                            "Failed to publish metrics drain event to stage journal; continuing"
+                        );
+                    }
                 }
                 drop(stage_journals);
 
                 // 3. Wait for drain completion event from system journal
                 // The metrics aggregator will publish MetricsCoordination::Drained event when done
-                let mut reader = context.system_journal.reader().await.map_err(|e| {
-                    obzenflow_fsm::FsmError::HandlerError(format!(
-                        "Failed to create reader for drain completion: {}",
-                        e
-                    ))
-                })?;
+                let mut reader = match context.system_journal.reader().await {
+                    Ok(reader) => reader,
+                    Err(e) => {
+                        tracing::warn!(
+                            journal_error = %e,
+                            "Failed to create system journal reader for metrics drain completion; proceeding anyway"
+                        );
+                        return Ok(());
+                    }
+                };
 
                 // Wait for the specific drain completion event with a reasonable timeout
                 // Keep this short to avoid long post-completion hangs if the metrics aggregator is gone.
@@ -914,10 +949,11 @@ impl FsmAction for PipelineAction {
                             }
                         }
                         Ok(Err(e)) => {
-                            return Err(obzenflow_fsm::FsmError::HandlerError(format!(
-                                "Failed to receive drain completion: {}",
-                                e
-                            )))
+                            tracing::warn!(
+                                drain_error = %e,
+                                "Failed to receive metrics drain completion; proceeding anyway"
+                            );
+                            break;
                         }
                         Err(_) => {
                             tracing::warn!(
@@ -1172,6 +1208,18 @@ pub fn build_pipeline_fsm() -> PipelineFsm {
         }
 
         state PipelineState::Running {
+            // Idempotent start: the pipeline can auto-run (startup_mode=auto), so callers
+            // may still invoke `FlowHandle::run()`/`start()` after the supervisor already
+            // entered Running. Treat Run in Running as a no-op instead of a hard error.
+            on PipelineEvent::Run => |_state: &PipelineState, _event: &PipelineEvent, _ctx: &mut PipelineContext| {
+                Box::pin(async move {
+                    Ok(Transition {
+                        next_state: PipelineState::Running,
+                        actions: vec![],
+                    })
+                })
+            };
+
             on PipelineEvent::Abort => |_state: &PipelineState, event: &PipelineEvent, _ctx: &mut PipelineContext| {
                 let event = event.clone();
                 Box::pin(async move {

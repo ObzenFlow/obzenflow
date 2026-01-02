@@ -50,6 +50,19 @@ pub mod prelude {
     pub use obzenflow_adapters::monitoring::*;
 }
 
+fn set_default_env_var(key: &str, value: &str) {
+    if std::env::var_os(key).is_none() {
+        std::env::set_var(key, value);
+    }
+}
+
+fn configure_benchmark_defaults() {
+    // Metrics add substantial overhead (extra journal readers, extra parsing) and can
+    // push deep disk-journal benchmarks over OS file-descriptor limits. Benchmarks can
+    // opt back in by explicitly setting `OBZENFLOW_METRICS_ENABLED=true`.
+    set_default_env_var("OBZENFLOW_METRICS_ENABLED", "false");
+}
+
 fn bump_nofile_limit() {
     #[cfg(unix)]
     {
@@ -92,6 +105,7 @@ pub fn init_tracing() {
 
     static INIT: OnceLock<()> = OnceLock::new();
     INIT.get_or_init(|| {
+        configure_benchmark_defaults();
         bump_nofile_limit();
 
         let filter = tracing_subscriber::EnvFilter::try_from_default_env()

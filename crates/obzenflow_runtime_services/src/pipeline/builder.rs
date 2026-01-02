@@ -21,6 +21,7 @@ use obzenflow_core::event::WriterId;
 use obzenflow_core::event::{ChainEvent, SystemEvent};
 use obzenflow_core::id::{FlowId, SystemId};
 use obzenflow_core::journal::journal::Journal;
+use obzenflow_core::journal::JournalStorageKind;
 use obzenflow_core::metrics::MetricsExporter;
 use obzenflow_core::StageId;
 use obzenflow_topology::Topology;
@@ -145,6 +146,67 @@ impl SupervisorBuilder for PipelineBuilder {
 
     /// Build and start the pipeline, returning a FlowHandle
     async fn build(self) -> Result<Self::Handle, Self::Error> {
+        // Runtime resource preflight guardrails (FLOWIP-086n).
+        //
+        // Disk-backed journals scale file descriptors with topology size. Fail fast with an
+        // actionable error instead of partially starting and stalling on missing upstream reads.
+        let uses_disk_journals = matches!(self.system_journal.storage_kind(), JournalStorageKind::Disk);
+        if uses_disk_journals {
+            let stage_count = self
+                .stage_journals
+                .as_ref()
+                .map(|v| v.len())
+                .unwrap_or_else(|| self.topology.stages().count());
+            let edge_count = self.topology.edges().len();
+            let metrics_enabled = self.metrics_exporter.is_some();
+
+            let estimate = crate::runtime_resource_limits::estimate_disk_journal_fds(
+                stage_count,
+                edge_count,
+                metrics_enabled,
+            );
+
+            match crate::runtime_resource_limits::preflight_nofile_for_disk_journals(
+                estimate,
+                crate::runtime_resource_limits::env_try_raise_nofile(),
+            ) {
+                Ok(Some(limit)) => {
+                    tracing::info!(
+                        target: "flowip-086n",
+                        stages = estimate.stages,
+                        edges = estimate.edges,
+                        metrics_enabled = estimate.metrics_enabled,
+                        estimated_fds = estimate.estimated_fds,
+                        rlimit_soft = limit.soft,
+                        rlimit_hard = limit.hard,
+                        breakdown_writer_fds = estimate.breakdown.writer_fds,
+                        breakdown_stage_reader_fds = estimate.breakdown.stage_reader_fds,
+                        breakdown_metrics_reader_fds = estimate.breakdown.metrics_reader_fds,
+                        breakdown_system_reader_fds = estimate.breakdown.system_reader_fds,
+                        breakdown_overhead_fds = estimate.breakdown.overhead_fds,
+                        "Disk journal FD preflight"
+                    );
+
+                    // Warn when we're close to the current soft limit so operators can tune
+                    // before hitting a hard failure at startup.
+                    let warn_threshold = limit.soft.saturating_mul(70) / 100;
+                    if estimate.estimated_fds >= warn_threshold {
+                        tracing::warn!(
+                            target: "flowip-086n",
+                            estimated_fds = estimate.estimated_fds,
+                            rlimit_soft = limit.soft,
+                            warn_threshold = warn_threshold,
+                            "Disk journal pipeline is near the current RLIMIT_NOFILE soft limit"
+                        );
+                    }
+                }
+                Ok(None) => {
+                    // Platform does not expose RLIMIT_NOFILE; skip preflight.
+                }
+                Err(message) => return Err(BuilderError::Other(message)),
+            }
+        }
+
         // ErrorSink will be automatically created by the flow DSL
         // similar to how MetricsAggregator is created
 

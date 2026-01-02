@@ -423,7 +423,15 @@ where
 
             let reader: Box<dyn JournalReader<T>> = match reader_result {
                 Ok(reader) => reader,
-                Err(JournalError::Implementation { .. }) => {
+                Err(e)
+                    if crate::runtime_resource_limits::journal_error_is_too_many_open_files(&e) =>
+                {
+                    return Err(format!(
+                        "Too many open files while creating reader for upstream journal (owner={owner_label}, stage_id={stage_id:?}, stage_name={stage_name}, journal_id={journal_id:?}). Increase RLIMIT_NOFILE / `ulimit -n` or reduce pipeline size (consider `OBZENFLOW_METRICS_ENABLED=false` for development). Underlying error: {e}"
+                    )
+                    .into());
+                }
+                Err(JournalError::Implementation { message, source }) => {
                     // Best-effort: log the failure and use an empty reader so the
                     // FSM can continue operating (upstream treated as having no events).
                     tracing::error!(
@@ -431,6 +439,8 @@ where
                         stage_id = ?stage_id,
                         stage_name = stage_name,
                         journal_id = ?journal_id,
+                        journal_error_message = %message,
+                        journal_error_source = %source,
                         "Failed to create reader for upstream journal; using EmptyJournalReader (no events)"
                     );
                     Box::new(EmptyJournalReader::<T>::new()) as Box<dyn JournalReader<T>>
@@ -1471,6 +1481,7 @@ mod tests {
     use obzenflow_core::{CircuitBreakerContractInfo, CircuitBreakerContractMode};
     use serde_json::json;
     use std::collections::HashMap;
+    use std::io;
     use std::sync::atomic::AtomicU8;
     use std::sync::{Arc, Mutex, RwLock};
 
@@ -1663,6 +1674,116 @@ mod tests {
         fn is_at_end(&self) -> bool {
             self.pos >= self.events.len()
         }
+    }
+
+    #[cfg(unix)]
+    struct EmfileJournal<T: JournalEvent> {
+        id: JournalId,
+        owner: Option<JournalOwner>,
+        _phantom: std::marker::PhantomData<T>,
+    }
+
+    #[cfg(unix)]
+    impl<T: JournalEvent> EmfileJournal<T> {
+        fn new(owner: JournalOwner) -> Self {
+            Self {
+                id: JournalId::new(),
+                owner: Some(owner),
+                _phantom: std::marker::PhantomData,
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[async_trait]
+    impl<T: JournalEvent + 'static> Journal<T> for EmfileJournal<T> {
+        fn id(&self) -> &JournalId {
+            &self.id
+        }
+
+        fn owner(&self) -> Option<&JournalOwner> {
+            self.owner.as_ref()
+        }
+
+        async fn append(
+            &self,
+            _event: T,
+            _parent: Option<&EventEnvelope<T>>,
+        ) -> std::result::Result<EventEnvelope<T>, JournalError> {
+            Err(JournalError::Implementation {
+                message: "append not supported".to_string(),
+                source: "append not supported".into(),
+            })
+        }
+
+        async fn read_causally_ordered(
+            &self,
+        ) -> std::result::Result<Vec<EventEnvelope<T>>, JournalError> {
+            Ok(Vec::new())
+        }
+
+        async fn read_causally_after(
+            &self,
+            _after_event_id: &obzenflow_core::EventId,
+        ) -> std::result::Result<Vec<EventEnvelope<T>>, JournalError> {
+            Ok(Vec::new())
+        }
+
+        async fn read_event(
+            &self,
+            _event_id: &obzenflow_core::EventId,
+        ) -> std::result::Result<Option<EventEnvelope<T>>, JournalError> {
+            Ok(None)
+        }
+
+        async fn reader(&self) -> std::result::Result<Box<dyn JournalReader<T>>, JournalError> {
+            Err(JournalError::Implementation {
+                message: "open failed".to_string(),
+                source: Box::new(io::Error::from_raw_os_error(libc::EMFILE)),
+            })
+        }
+
+        async fn reader_from(
+            &self,
+            _position: u64,
+        ) -> std::result::Result<Box<dyn JournalReader<T>>, JournalError> {
+            self.reader().await
+        }
+
+        async fn read_last_n(
+            &self,
+            _count: usize,
+        ) -> std::result::Result<Vec<EventEnvelope<T>>, JournalError> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn fails_fast_on_too_many_open_files() {
+        let upstream_stage = StageId::new();
+        let upstream_owner = JournalOwner::stage(upstream_stage);
+
+        let upstream_journal: Arc<dyn Journal<ChainEvent>> =
+            Arc::new(EmfileJournal::new(upstream_owner));
+
+        let upstreams = vec![(
+            upstream_stage,
+            "upstream".to_string(),
+            upstream_journal,
+        )];
+
+        let err = UpstreamSubscription::<ChainEvent>::new_with_names_from_positions(
+            "downstream",
+            &upstreams,
+            &[0u64],
+        )
+        .await
+        .err()
+        .expect("Expected Too many open files error")
+        .to_string();
+
+        assert!(err.contains("Too many open files"));
     }
 
     async fn build_upstream_with_seq_divergence(

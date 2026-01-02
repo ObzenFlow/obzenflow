@@ -82,14 +82,13 @@ fn create_system_middleware(
     ]
 }
 
-/// Helper function to create a control strategy from middleware factories
-fn create_control_strategy_from_factories(
-    factories: &[Box<dyn MiddlewareFactory>],
-    _stage_name: &str,
+/// Helper function to create a control strategy from resolved middleware.
+fn create_control_strategy_from_middleware_specs(
+    middleware: &[crate::middleware_resolution::MiddlewareSpec],
 ) -> Arc<dyn ControlEventStrategy> {
-    let strategies: Vec<Box<dyn ControlEventStrategy>> = factories
+    let strategies: Vec<Box<dyn ControlEventStrategy>> = middleware
         .iter()
-        .filter_map(|factory| factory.create_control_strategy())
+        .filter_map(|spec| spec.factory.create_control_strategy())
         .collect();
 
     match strategies.len() {
@@ -1029,8 +1028,6 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stag
         }
 
         // Create control strategy before moving middleware
-        let control_strategy = create_control_strategy_from_factories(&self.middleware, &self.name);
-
         // Resolve flow and stage middleware
         let resolved = crate::middleware_resolution::resolve_middleware(
             flow_middleware,
@@ -1040,11 +1037,7 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stag
 
         // Log the resolution
         crate::middleware_resolution::log_resolved_middleware(&config.name, &resolved);
-
-        tracing::warn!(
-            "Control strategy created from stage middleware only - flow middleware not included for stage '{}'",
-            &config.name
-        );
+        let control_strategy = create_control_strategy_from_middleware_specs(&resolved.middleware);
 
         // Create instrumentation configuration
         let instrumentation_config = InstrumentationConfig::default();
@@ -1169,8 +1162,6 @@ impl<H: AsyncTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
         }
 
         // Create control strategy before moving middleware
-        let control_strategy = create_control_strategy_from_factories(&self.middleware, &self.name);
-
         // Resolve flow and stage middleware
         let resolved = crate::middleware_resolution::resolve_middleware(
             flow_middleware,
@@ -1180,11 +1171,7 @@ impl<H: AsyncTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
 
         // Log the resolution
         crate::middleware_resolution::log_resolved_middleware(&config.name, &resolved);
-
-        tracing::warn!(
-            "Control strategy created from stage middleware only - flow middleware not included for stage '{}'",
-            &config.name
-        );
+        let control_strategy = create_control_strategy_from_middleware_specs(&resolved.middleware);
 
         // Create instrumentation configuration
         let instrumentation_config = InstrumentationConfig::default();
@@ -1311,12 +1298,6 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
             }
         }
 
-        // Create control strategy before moving middleware
-        let control_strategy = create_control_strategy_from_factories(
-            &self.middleware, // TODO: Use resolved middleware once MiddlewareFactory supports clone
-            &self.name,
-        );
-
         // Resolve flow and stage middleware
         let resolved = crate::middleware_resolution::resolve_middleware(
             flow_middleware,
@@ -1326,6 +1307,7 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
 
         // Log the resolution
         crate::middleware_resolution::log_resolved_middleware(&config.name, &resolved);
+        let control_strategy = create_control_strategy_from_middleware_specs(&resolved.middleware);
 
         // Create instrumentation configuration
         let instrumentation_config = InstrumentationConfig::default();
@@ -1599,8 +1581,6 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stage
         }
 
         // Create control strategy before moving middleware
-        let control_strategy = create_control_strategy_from_factories(&self.middleware, &self.name);
-
         // Resolve flow and stage middleware
         let resolved = crate::middleware_resolution::resolve_middleware(
             flow_middleware,
@@ -1610,11 +1590,7 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stage
 
         // Log the resolution
         crate::middleware_resolution::log_resolved_middleware(&config.name, &resolved);
-
-        tracing::warn!(
-            "Control strategy created from stage middleware only - flow middleware not included for stage '{}'",
-            &config.name
-        );
+        let control_strategy = create_control_strategy_from_middleware_specs(&resolved.middleware);
 
         // Create instrumentation configuration
         let instrumentation_config = InstrumentationConfig::default();
@@ -1781,8 +1757,6 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
         }
 
         // Create control strategy before moving middleware
-        let control_strategy = create_control_strategy_from_factories(&self.middleware, &self.name);
-
         // Resolve flow and stage middleware
         let resolved = crate::middleware_resolution::resolve_middleware(
             flow_middleware,
@@ -1792,11 +1766,7 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
 
         // Log the resolution
         crate::middleware_resolution::log_resolved_middleware(&config.name, &resolved);
-
-        tracing::warn!(
-            "Control strategy created from stage middleware only - flow middleware not included for stage '{}'",
-            &config.name
-        );
+        let control_strategy = create_control_strategy_from_middleware_specs(&resolved.middleware);
 
         // Create instrumentation configuration
         let instrumentation_config = InstrumentationConfig::default();

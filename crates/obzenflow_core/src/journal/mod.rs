@@ -11,6 +11,7 @@ pub mod journal_reader;
 
 // Re-export commonly used types
 pub use journal::Journal;
+pub use journal::JournalStorageKind;
 pub use journal_error::JournalError;
 pub use journal_reader::JournalReader;
 

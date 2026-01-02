@@ -6,13 +6,13 @@
 //! benchmark ordering, warmup effects, or genuine framework issues.
 
 use criterion::{criterion_group, criterion_main, Criterion};
-use obzenflow_benchmarks::prelude::*;
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::event::ChainEventContent;
 use obzenflow_core::WriterId;
 use obzenflow_dsl_infra::{flow, sink, source, transform};
 use obzenflow_infra::journal::disk_journals;
+use obzenflow_runtime_services::pipeline::fsm::PipelineState;
 use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
 use obzenflow_runtime_services::stages::common::handlers::{
     FiniteSourceHandler, SinkHandler, TransformHandler,
@@ -27,8 +27,16 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tempfile::tempdir;
 use tokio::runtime::Runtime;
 
-const WARMUP_EVENT_COUNT: u64 = 10;
-const TEST_EVENT_COUNT: u64 = 100;
+const DEFAULT_WARMUP_EVENT_COUNT: u64 = 2;
+const DEFAULT_TEST_EVENT_COUNT: u64 = 20;
+const DEFAULT_PIPELINE_TIMEOUT_SECS: u64 = 180;
+
+fn env_u64(name: &str, default: u64) -> u64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(default)
+}
 
 /// Test source that emits timestamped events
 #[derive(Clone, Debug)]
@@ -71,15 +79,12 @@ impl FiniteSourceHandler for TimestampedSource {
 
 /// Passthrough stage
 #[derive(Clone, Debug)]
-struct PassthroughStage {
-    name: String,
-}
+struct PassthroughStage;
 
 impl PassthroughStage {
     fn new(name: &str) -> Self {
-        Self {
-            name: name.to_string(),
-        }
+        let _ = name;
+        Self
     }
 }
 
@@ -97,19 +102,22 @@ impl TransformHandler for PassthroughStage {
 /// Sink that collects latencies
 #[derive(Clone, Debug)]
 struct LatencySink {
-    expected_count: u64,
+    warmup_events: u64,
     received: Arc<AtomicU64>,
     latencies: Arc<tokio::sync::Mutex<Vec<Duration>>>,
 }
 
 impl LatencySink {
-    fn new(expected_count: u64) -> (Self, Arc<tokio::sync::Mutex<Vec<Duration>>>) {
+    fn new(
+        warmup_events: u64,
+        expected_count: u64,
+    ) -> (Self, Arc<tokio::sync::Mutex<Vec<Duration>>>) {
         let latencies = Arc::new(tokio::sync::Mutex::new(Vec::with_capacity(
             expected_count as usize,
         )));
         (
             Self {
-                expected_count,
+                warmup_events,
                 received: Arc::new(AtomicU64::new(0)),
                 latencies: latencies.clone(),
             },
@@ -129,7 +137,7 @@ impl SinkHandler for LatencySink {
                 self.received.fetch_add(1, Ordering::Relaxed);
 
                 // Skip warmup events
-                if event_id >= WARMUP_EVENT_COUNT {
+                if event_id >= self.warmup_events {
                     let receive_time_nanos = SystemTime::now()
                         .duration_since(UNIX_EPOCH)
                         .unwrap()
@@ -149,6 +157,13 @@ impl SinkHandler for LatencySink {
 
 /// Run a single 100-stage pipeline test
 async fn run_100_stage_pipeline() -> anyhow::Result<Duration> {
+    let warmup_events =
+        env_u64("OBZENFLOW_BENCH_100_STAGE_WARMUP_EVENTS", DEFAULT_WARMUP_EVENT_COUNT);
+    let test_events = env_u64("OBZENFLOW_BENCH_100_STAGE_TEST_EVENTS", DEFAULT_TEST_EVENT_COUNT);
+    let expected_events = warmup_events + test_events;
+    let pipeline_timeout =
+        Duration::from_secs(env_u64("OBZENFLOW_BENCH_100_STAGE_TIMEOUT_SECS", DEFAULT_PIPELINE_TIMEOUT_SECS));
+
     let temp_dir = tempdir()?;
     let journals_base_path = temp_dir.path().join(format!(
         "hundred_stage_{}",
@@ -159,8 +174,8 @@ async fn run_100_stage_pipeline() -> anyhow::Result<Duration> {
     ));
     std::fs::create_dir_all(&journals_base_path)?;
 
-    let source = TimestampedSource::new(WARMUP_EVENT_COUNT + TEST_EVENT_COUNT);
-    let (sink, latencies) = LatencySink::new(WARMUP_EVENT_COUNT + TEST_EVENT_COUNT);
+    let source = TimestampedSource::new(expected_events);
+    let (sink, latencies) = LatencySink::new(warmup_events, expected_events);
     let sink_clone = sink.clone();
 
     // Create 100 stages for true performance testing
@@ -378,24 +393,71 @@ async fn run_100_stage_pipeline() -> anyhow::Result<Duration> {
     .await
     .map_err(|e| anyhow::anyhow!("Failed to create flow: {:?}", e))?;
 
-    // Start the pipeline
+    // Start the pipeline (bounded wait so Criterion warmup doesn't hang forever).
     handle
-        .run()
+        .start()
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to run pipeline: {:?}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to start pipeline: {:?}", e))?;
 
-    // Wait for completion
-    let timeout = Duration::from_secs(300); // Extended timeout for true 100 stages
-    let start = Instant::now();
-
-    while sink_clone.received.load(Ordering::Relaxed) < WARMUP_EVENT_COUNT + TEST_EVENT_COUNT {
-        if start.elapsed() > timeout {
+    let mut state_rx = handle.state_receiver();
+    let deadline = Instant::now() + pipeline_timeout;
+    while handle.is_running() {
+        let now = Instant::now();
+        if now >= deadline {
             break;
         }
+
+        let remaining = deadline.saturating_duration_since(now);
+        let tick = std::cmp::min(remaining, Duration::from_millis(250));
+        match tokio::time::timeout(tick, state_rx.changed()).await {
+            Ok(Ok(())) => {}
+            Ok(Err(_)) => break, // sender dropped
+            Err(_) => {}         // periodic tick to re-check deadline/is_running
+        }
+    }
+
+    if handle.is_running() {
+        let _ = handle.stop_cancel().await;
+
+        let stop_deadline = Instant::now() + Duration::from_secs(10);
+        while handle.is_running() && Instant::now() < stop_deadline {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+
+        return Err(anyhow::anyhow!(
+            "100-stage pipeline did not complete within {:?} (final_state={:?}). Set `OBZENFLOW_BENCH_100_STAGE_TIMEOUT_SECS` to override.",
+            pipeline_timeout,
+            state_rx.borrow(),
+        ));
+    }
+
+    let final_state = state_rx.borrow().clone();
+    match final_state {
+        PipelineState::Drained => {}
+        PipelineState::Failed { reason, .. } => {
+            return Err(anyhow::anyhow!("100-stage pipeline failed: {reason}"));
+        }
+        other => {
+            return Err(anyhow::anyhow!(
+                "100-stage pipeline terminated unexpectedly (final_state={other:?})"
+            ));
+        }
+    }
+
+    // Verify expected delivery count (best-effort: allow a short settle window).
+    let settle_deadline = Instant::now() + Duration::from_secs(2);
+    while sink_clone.received.load(Ordering::Relaxed) < expected_events
+        && Instant::now() < settle_deadline
+    {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 
-    // Pipeline runs to completion
+    let received = sink_clone.received.load(Ordering::Relaxed);
+    if received < expected_events {
+        return Err(anyhow::anyhow!(
+            "100-stage pipeline completed but sink received {received}/{expected_events} events"
+        ));
+    }
 
     // Calculate median latency
     let mut collected = latencies.lock().await.clone();
@@ -413,7 +475,7 @@ fn bench_100_stage_latency(c: &mut Criterion) {
     let mut group = c.benchmark_group("100_stage_latency");
 
     group.sample_size(10); // Minimum required by Criterion
-    group.measurement_time(Duration::from_secs(180)); // Extended measurement time for true 100 stages
+    group.measurement_time(Duration::from_secs(30)); // Keep bounded so CI/dev runs complete
 
     group.bench_function("median_latency", |b| {
         b.to_async(&rt).iter_custom(|iters| async move {
