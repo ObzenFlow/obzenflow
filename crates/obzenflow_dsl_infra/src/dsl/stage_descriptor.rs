@@ -339,6 +339,8 @@ mod tests {
             message_bus: Arc::new(FsmMessageBus::new()),
             upstream_stages: Vec::new(),
             error_journals: Vec::new(),
+            backpressure_writer: Default::default(),
+            backpressure_readers: Default::default(),
         };
 
         let descriptor = FiniteSourceDescriptor {

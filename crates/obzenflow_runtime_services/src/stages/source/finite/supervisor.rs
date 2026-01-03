@@ -5,7 +5,8 @@ use crate::supervised_base::base::Supervisor;
 use crate::supervised_base::{EventLoopDirective, HandlerSupervised};
 use crate::supervised_base::idle_backoff::IdleBackoff;
 use obzenflow_core::event::context::FlowContext;
-use obzenflow_core::event::SystemEvent;
+use obzenflow_core::event::payloads::observability_payload::{MiddlewareLifecycle, ObservabilityPayload};
+use obzenflow_core::event::{ChainEventFactory, SystemEvent};
 use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
 use obzenflow_core::journal::journal::Journal;
 use obzenflow_core::{ChainEvent, StageId, WriterId};
@@ -323,7 +324,7 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> H
     async fn dispatch_state(
         &mut self,
         state: &Self::State,
-        _context: &mut Self::Context,
+        ctx: &mut Self::Context,
     ) -> Result<EventLoopDirective<Self::Event>, Box<dyn std::error::Error + Send + Sync>> {
         // Track every event loop iteration
         match state {
@@ -346,8 +347,157 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> H
             }
 
             FiniteSourceState::Running => {
-                self.context
-                    .instrumentation
+                // Drain any pending outputs first so backpressure doesn't let sources
+                // accumulate unbounded in-memory batches.
+                while let Some(event_to_write) = ctx.pending_outputs.pop_front() {
+                    let journal = if matches!(
+                        event_to_write.processing_info.status,
+                        obzenflow_core::event::status::processing_status::ProcessingStatus::Error { .. }
+                    ) {
+                        &ctx.error_journal
+                    } else {
+                        &ctx.data_journal
+                    };
+
+                    let event_to_write =
+                        event_to_write.with_runtime_context(ctx.instrumentation.snapshot_with_control());
+
+                    if Arc::ptr_eq(journal, &ctx.data_journal) && event_to_write.is_data() {
+                        // Debug-only: emit activity pulses even when bypass is enabled, so
+                        // operators can see what *would* have blocked (FLOWIP-086k).
+                        if crate::backpressure::BackpressureWriter::is_bypass_enabled() {
+                            if let Some((min_credit, limiting)) =
+                                ctx.backpressure_writer.min_downstream_credit_detail()
+                            {
+                                if min_credit < 1 {
+                                    ctx.backpressure_pulse.record_delay(
+                                        Duration::ZERO,
+                                        Some(min_credit),
+                                        Some(limiting),
+                                    );
+                                    if let Some(pulse) = ctx.backpressure_pulse.maybe_emit() {
+                                        let flow_context = FlowContext {
+                                            flow_name: ctx.flow_name.clone(),
+                                            flow_id: ctx.flow_id.to_string(),
+                                            stage_name: ctx.stage_name.clone(),
+                                            stage_id: self.stage_id.clone(),
+                                            stage_type: obzenflow_core::event::context::StageType::FiniteSource,
+                                        };
+
+                                        let event = ChainEventFactory::observability_event(
+                                            WriterId::from(self.stage_id),
+                                            ObservabilityPayload::Middleware(
+                                                MiddlewareLifecycle::Backpressure(pulse),
+                                            ),
+                                        )
+                                        .with_flow_context(flow_context)
+                                        .with_runtime_context(
+                                            ctx.instrumentation.snapshot_with_control(),
+                                        );
+
+                                        match ctx.data_journal.append(event, None).await {
+                                            Ok(written) => {
+                                                crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
+                                                    &written,
+                                                    &self.system_journal,
+                                                )
+                                                .await;
+                                            }
+                                            Err(e) => tracing::warn!(
+                                                stage_name = %ctx.stage_name,
+                                                journal_error = %e,
+                                                "Failed to append backpressure activity pulse"
+                                            ),
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        let Some(reservation) = ctx.backpressure_writer.reserve(1) else {
+                            // Requeue and back off (do not busy-spin).
+                            ctx.pending_outputs.push_front(event_to_write);
+                            let delay = ctx.backpressure_backoff.next_delay();
+                            ctx.backpressure_writer.record_wait(delay);
+
+                            if let Some((min_credit, limiting)) =
+                                ctx.backpressure_writer.min_downstream_credit_detail()
+                            {
+                                ctx.backpressure_pulse.record_delay(
+                                    delay,
+                                    Some(min_credit),
+                                    Some(limiting),
+                                );
+                            } else {
+                                ctx.backpressure_pulse.record_delay(delay, None, None);
+                            }
+                            if let Some(pulse) = ctx.backpressure_pulse.maybe_emit() {
+                                let flow_context = FlowContext {
+                                    flow_name: ctx.flow_name.clone(),
+                                    flow_id: ctx.flow_id.to_string(),
+                                    stage_name: ctx.stage_name.clone(),
+                                    stage_id: self.stage_id.clone(),
+                                    stage_type: obzenflow_core::event::context::StageType::FiniteSource,
+                                };
+
+                                let event = ChainEventFactory::observability_event(
+                                    WriterId::from(self.stage_id),
+                                    ObservabilityPayload::Middleware(
+                                        MiddlewareLifecycle::Backpressure(pulse),
+                                    ),
+                                )
+                                .with_flow_context(flow_context)
+                                .with_runtime_context(ctx.instrumentation.snapshot_with_control());
+
+                                match ctx.data_journal.append(event, None).await {
+                                    Ok(written) => {
+                                        crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
+                                            &written,
+                                            &self.system_journal,
+                                        )
+                                        .await;
+                                    }
+                                    Err(e) => tracing::warn!(
+                                        stage_name = %ctx.stage_name,
+                                        journal_error = %e,
+                                        "Failed to append backpressure activity pulse"
+                                    ),
+                                }
+                            }
+
+                            tokio::time::sleep(delay).await;
+                            return Ok(EventLoopDirective::Continue);
+                        };
+
+                        let written = journal
+                            .append(event_to_write, None)
+                            .await
+                            .map_err(|e| format!("Failed to write event: {}", e))?;
+                        reservation.commit(1);
+                        ctx.backpressure_backoff.reset();
+
+                        crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
+                            &written,
+                            &self.system_journal,
+                        )
+                        .await;
+                    } else {
+                        let written = journal
+                            .append(event_to_write, None)
+                            .await
+                            .map_err(|e| format!("Failed to write event: {}", e))?;
+
+                        if Arc::ptr_eq(journal, &ctx.data_journal) {
+                            crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
+                                &written,
+                                &self.system_journal,
+                            )
+                            .await;
+                        }
+                    }
+                }
+
+                ctx.instrumentation
                     .event_loops_total
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
@@ -361,8 +511,7 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> H
                     Ok(Some(events)) if !events.is_empty() => {
                         self.idle_backoff.reset();
                         // We have work - increment loops with work
-                        self.context
-                            .instrumentation
+                        ctx.instrumentation
                             .event_loops_with_work_total
                             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
@@ -383,9 +532,9 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> H
                         for event in events {
                             // Enrich with runtime context
                             let flow_context = FlowContext {
-                                flow_name: self.context.flow_name.clone(),
-                                flow_id: self.context.flow_id.to_string(),
-                                stage_name: self.context.stage_name.clone(),
+                                flow_name: ctx.flow_name.clone(),
+                                flow_id: ctx.flow_id.to_string(),
+                                stage_name: ctx.stage_name.clone(),
                                 stage_id: self.stage_id.clone(),
                                 stage_type: obzenflow_core::event::context::StageType::FiniteSource,
                             };
@@ -398,55 +547,28 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> H
                                 &staged_event.processing_info.status
                             {
                                 let k = kind.clone().unwrap_or(ErrorKind::Unknown);
-                                self.context.instrumentation.record_error(k);
+                                ctx.instrumentation.record_error(k);
                             }
 
                             // Apply run_if_not_error pattern (FLOWIP-082g)
                             let events_to_write = self.run_if_not_error(staged_event, |e| vec![e]);
 
-                            // Write events based on their status
+                            // Enqueue staged outputs, then drain via the pending queue.
                             for event_to_write in events_to_write {
-                                let journal = if matches!(event_to_write.processing_info.status, obzenflow_core::event::status::processing_status::ProcessingStatus::Error { .. }) {
-                                &self.context.error_journal
-                            } else {
-                                &self.context.data_journal
-                            };
-                                // FLOWIP-080o-part-2: Only count data events for writer_seq.
-                                // Lifecycle/control events are observability overhead and
-                                // should not participate in transport contracts.
                                 if event_to_write.is_data() {
                                     had_data = true;
-                                    self.context
-                                        .instrumentation
-                                        .record_output_event(&event_to_write);
-                                    self.context
-                                        .instrumentation
+                                    ctx.instrumentation.record_output_event(&event_to_write);
+                                    ctx.instrumentation
                                         .events_processed_total
                                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                    self.context
-                                        .instrumentation
-                                        .record_processing_time(per_data_event_duration);
+                                    ctx.instrumentation.record_processing_time(per_data_event_duration);
                                 }
-                                let enriched_event_to_write = event_to_write.with_runtime_context(
-                                    self.context.instrumentation.snapshot_with_control(),
-                                );
-                                let written = journal
-                                    .append(enriched_event_to_write, None)
-                                    .await
-                                    .map_err(|e| format!("Failed to write event: {}", e))?;
-
-                                if Arc::ptr_eq(journal, &self.context.data_journal) {
-                                    crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
-                                        &written,
-                                        &self.system_journal,
-                                    )
-                                    .await;
-                                }
+                                ctx.pending_outputs.push_back(event_to_write);
                             }
                         }
 
                         tracing::trace!(
-                            stage_name = %self.context.stage_name,
+                            stage_name = %ctx.stage_name,
                             "Finite source emitted batch of events"
                         );
 
@@ -466,7 +588,7 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> H
                         // SourceError surfaced from handler; delegate to control strategy
                         // via the standard error path.
                         tracing::error!(
-                            stage_name = %self.context.stage_name,
+                            stage_name = %ctx.stage_name,
                             error = %e,
                             "Finite source handler.next() returned error"
                         );

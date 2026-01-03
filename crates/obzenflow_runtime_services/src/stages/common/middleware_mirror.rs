@@ -1,5 +1,6 @@
 use obzenflow_core::event::payloads::observability_payload::{
-    CircuitBreakerEvent, MiddlewareLifecycle, ObservabilityPayload, RateLimiterEvent,
+    BackpressureEvent, CircuitBreakerEvent, MiddlewareLifecycle, ObservabilityPayload,
+    RateLimiterEvent,
 };
 use obzenflow_core::event::{ChainEventContent, SystemEvent, SystemEventType, WriterId};
 use obzenflow_core::journal::journal::Journal;
@@ -41,6 +42,7 @@ pub async fn mirror_middleware_event_to_system_journal(
                     | RateLimiterEvent::WindowUtilization { .. }
             )
         }
+        MiddlewareLifecycle::Backpressure(bp) => matches!(bp, BackpressureEvent::ActivityPulse { .. }),
         _ => false,
     };
     if !should_mirror {

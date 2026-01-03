@@ -910,6 +910,309 @@ impl PrometheusExporter {
             writeln!(output)?;
         }
 
+        // Backpressure metrics (FLOWIP-086k)
+        let has_backpressure_metrics = !snapshot.backpressure_window.is_empty()
+            || !snapshot.backpressure_in_flight.is_empty()
+            || !snapshot.backpressure_credits.is_empty()
+            || !snapshot.backpressure_blocked.is_empty()
+            || !snapshot.backpressure_min_reader_seq.is_empty()
+            || !snapshot.backpressure_writer_seq.is_empty()
+            || !snapshot.backpressure_wait_seconds_total.is_empty()
+            || snapshot.backpressure_bypass_enabled;
+
+        // Flow-level bypass flag (debug-only)
+        if has_backpressure_metrics {
+            let flow_name = snapshot
+                .stage_metadata
+                .values()
+                .next()
+                .map(|m| m.flow_name.as_str())
+                .unwrap_or("unknown");
+            let flow_id = snapshot.stage_metadata.values().find_map(|m| m.flow_id);
+            let enabled = if snapshot.backpressure_bypass_enabled { 1 } else { 0 };
+
+            writeln!(
+                output,
+                "# HELP obzenflow_backpressure_bypass_enabled Whether OBZENFLOW_BACKPRESSURE_DISABLED is active (debug-only)"
+            )?;
+            writeln!(output, "# TYPE obzenflow_backpressure_bypass_enabled gauge")?;
+            if let Some(flow_id) = flow_id {
+                writeln!(
+                    output,
+                    "obzenflow_backpressure_bypass_enabled{{flow=\"{}\",flow_id=\"{}\"}} {}",
+                    escape_label(flow_name),
+                    escape_label(&flow_id.to_string()),
+                    enabled
+                )?;
+            } else {
+                writeln!(
+                    output,
+                    "obzenflow_backpressure_bypass_enabled{{flow=\"{}\"}} {}",
+                    escape_label(flow_name),
+                    enabled
+                )?;
+            }
+            writeln!(output)?;
+        }
+
+        // Edge-scoped window
+        if !snapshot.backpressure_window.is_empty() {
+            writeln!(
+                output,
+                "# HELP obzenflow_backpressure_window Backpressure window size per edge (upstream->downstream)"
+            )?;
+            writeln!(output, "# TYPE obzenflow_backpressure_window gauge")?;
+
+            for ((upstream, downstream), window) in &snapshot.backpressure_window {
+                let upstream_id = upstream.to_string();
+                let downstream_id = downstream.to_string();
+
+                let upstream_meta = snapshot.stage_metadata.get(upstream);
+                let downstream_meta = snapshot.stage_metadata.get(downstream);
+
+                let flow_name = upstream_meta
+                    .map(|m| m.flow_name.as_str())
+                    .or_else(|| downstream_meta.map(|m| m.flow_name.as_str()))
+                    .unwrap_or("unknown");
+                let flow_id = upstream_meta
+                    .and_then(|m| m.flow_id)
+                    .or_else(|| downstream_meta.and_then(|m| m.flow_id));
+
+                let upstream_name = upstream_meta.map(|m| m.name.as_str()).unwrap_or("unknown");
+                let downstream_name = downstream_meta
+                    .map(|m| m.name.as_str())
+                    .unwrap_or("unknown");
+
+                if let Some(flow_id) = flow_id {
+                    writeln!(
+                        output,
+                        "obzenflow_backpressure_window{{flow=\"{}\",flow_id=\"{}\",upstream_stage_id=\"{}\",downstream_stage_id=\"{}\",upstream=\"{}\",downstream=\"{}\"}} {}",
+                        escape_label(flow_name),
+                        escape_label(&flow_id.to_string()),
+                        escape_label(&upstream_id),
+                        escape_label(&downstream_id),
+                        escape_label(upstream_name),
+                        escape_label(downstream_name),
+                        window
+                    )?;
+                } else {
+                    writeln!(
+                        output,
+                        "obzenflow_backpressure_window{{flow=\"{}\",upstream_stage_id=\"{}\",downstream_stage_id=\"{}\",upstream=\"{}\",downstream=\"{}\"}} {}",
+                        escape_label(flow_name),
+                        escape_label(&upstream_id),
+                        escape_label(&downstream_id),
+                        escape_label(upstream_name),
+                        escape_label(downstream_name),
+                        window
+                    )?;
+                }
+            }
+            writeln!(output)?;
+        }
+
+        // Edge-scoped in-flight
+        if !snapshot.backpressure_in_flight.is_empty() {
+            writeln!(
+                output,
+                "# HELP obzenflow_backpressure_in_flight In-flight events per edge (upstream effective writer - downstream reader)"
+            )?;
+            writeln!(output, "# TYPE obzenflow_backpressure_in_flight gauge")?;
+
+            for ((upstream, downstream), in_flight) in &snapshot.backpressure_in_flight {
+                let upstream_id = upstream.to_string();
+                let downstream_id = downstream.to_string();
+
+                let upstream_meta = snapshot.stage_metadata.get(upstream);
+                let downstream_meta = snapshot.stage_metadata.get(downstream);
+
+                let flow_name = upstream_meta
+                    .map(|m| m.flow_name.as_str())
+                    .or_else(|| downstream_meta.map(|m| m.flow_name.as_str()))
+                    .unwrap_or("unknown");
+                let flow_id = upstream_meta
+                    .and_then(|m| m.flow_id)
+                    .or_else(|| downstream_meta.and_then(|m| m.flow_id));
+
+                let upstream_name = upstream_meta.map(|m| m.name.as_str()).unwrap_or("unknown");
+                let downstream_name = downstream_meta
+                    .map(|m| m.name.as_str())
+                    .unwrap_or("unknown");
+
+                if let Some(flow_id) = flow_id {
+                    writeln!(
+                        output,
+                        "obzenflow_backpressure_in_flight{{flow=\"{}\",flow_id=\"{}\",upstream_stage_id=\"{}\",downstream_stage_id=\"{}\",upstream=\"{}\",downstream=\"{}\"}} {}",
+                        escape_label(flow_name),
+                        escape_label(&flow_id.to_string()),
+                        escape_label(&upstream_id),
+                        escape_label(&downstream_id),
+                        escape_label(upstream_name),
+                        escape_label(downstream_name),
+                        in_flight
+                    )?;
+                } else {
+                    writeln!(
+                        output,
+                        "obzenflow_backpressure_in_flight{{flow=\"{}\",upstream_stage_id=\"{}\",downstream_stage_id=\"{}\",upstream=\"{}\",downstream=\"{}\"}} {}",
+                        escape_label(flow_name),
+                        escape_label(&upstream_id),
+                        escape_label(&downstream_id),
+                        escape_label(upstream_name),
+                        escape_label(downstream_name),
+                        in_flight
+                    )?;
+                }
+            }
+            writeln!(output)?;
+        }
+
+        // Edge-scoped credits
+        if !snapshot.backpressure_credits.is_empty() {
+            writeln!(
+                output,
+                "# HELP obzenflow_backpressure_credits Remaining credits per edge (window - in_flight)"
+            )?;
+            writeln!(output, "# TYPE obzenflow_backpressure_credits gauge")?;
+
+            for ((upstream, downstream), credits) in &snapshot.backpressure_credits {
+                let upstream_id = upstream.to_string();
+                let downstream_id = downstream.to_string();
+
+                let upstream_meta = snapshot.stage_metadata.get(upstream);
+                let downstream_meta = snapshot.stage_metadata.get(downstream);
+
+                let flow_name = upstream_meta
+                    .map(|m| m.flow_name.as_str())
+                    .or_else(|| downstream_meta.map(|m| m.flow_name.as_str()))
+                    .unwrap_or("unknown");
+                let flow_id = upstream_meta
+                    .and_then(|m| m.flow_id)
+                    .or_else(|| downstream_meta.and_then(|m| m.flow_id));
+
+                let upstream_name = upstream_meta.map(|m| m.name.as_str()).unwrap_or("unknown");
+                let downstream_name = downstream_meta
+                    .map(|m| m.name.as_str())
+                    .unwrap_or("unknown");
+
+                if let Some(flow_id) = flow_id {
+                    writeln!(
+                        output,
+                        "obzenflow_backpressure_credits{{flow=\"{}\",flow_id=\"{}\",upstream_stage_id=\"{}\",downstream_stage_id=\"{}\",upstream=\"{}\",downstream=\"{}\"}} {}",
+                        escape_label(flow_name),
+                        escape_label(&flow_id.to_string()),
+                        escape_label(&upstream_id),
+                        escape_label(&downstream_id),
+                        escape_label(upstream_name),
+                        escape_label(downstream_name),
+                        credits
+                    )?;
+                } else {
+                    writeln!(
+                        output,
+                        "obzenflow_backpressure_credits{{flow=\"{}\",upstream_stage_id=\"{}\",downstream_stage_id=\"{}\",upstream=\"{}\",downstream=\"{}\"}} {}",
+                        escape_label(flow_name),
+                        escape_label(&upstream_id),
+                        escape_label(&downstream_id),
+                        escape_label(upstream_name),
+                        escape_label(downstream_name),
+                        credits
+                    )?;
+                }
+            }
+            writeln!(output)?;
+        }
+
+        // Stage-scoped blocked flag
+        if !snapshot.backpressure_blocked.is_empty() {
+            writeln!(
+                output,
+                "# HELP obzenflow_backpressure_blocked Whether the stage is blocked on downstream credits (0/1)"
+            )?;
+            writeln!(output, "# TYPE obzenflow_backpressure_blocked gauge")?;
+
+            for (stage_id, blocked) in &snapshot.backpressure_blocked {
+                if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
+                    writeln!(
+                        output,
+                        "obzenflow_backpressure_blocked{{{}}} {}",
+                        format_stage_labels(stage_id, metadata),
+                        blocked
+                    )?;
+                }
+            }
+            writeln!(output)?;
+        }
+
+        // Stage-scoped min reader sequence
+        if !snapshot.backpressure_min_reader_seq.is_empty() {
+            writeln!(
+                output,
+                "# HELP obzenflow_backpressure_min_reader_seq Minimum downstream reader sequence observed by the stage"
+            )?;
+            writeln!(
+                output,
+                "# TYPE obzenflow_backpressure_min_reader_seq gauge"
+            )?;
+
+            for (stage_id, seq) in &snapshot.backpressure_min_reader_seq {
+                if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
+                    writeln!(
+                        output,
+                        "obzenflow_backpressure_min_reader_seq{{{}}} {}",
+                        format_stage_labels(stage_id, metadata),
+                        seq
+                    )?;
+                }
+            }
+            writeln!(output)?;
+        }
+
+        // Stage-scoped writer sequence
+        if !snapshot.backpressure_writer_seq.is_empty() {
+            writeln!(
+                output,
+                "# HELP obzenflow_backpressure_writer_seq Writer sequence observed by the stage"
+            )?;
+            writeln!(output, "# TYPE obzenflow_backpressure_writer_seq gauge")?;
+
+            for (stage_id, seq) in &snapshot.backpressure_writer_seq {
+                if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
+                    writeln!(
+                        output,
+                        "obzenflow_backpressure_writer_seq{{{}}} {}",
+                        format_stage_labels(stage_id, metadata),
+                        seq
+                    )?;
+                }
+            }
+            writeln!(output)?;
+        }
+
+        // Stage-scoped wait seconds total (monotonic)
+        if !snapshot.backpressure_wait_seconds_total.is_empty() {
+            writeln!(
+                output,
+                "# HELP obzenflow_backpressure_wait_seconds_total Total time spent blocked waiting for downstream credits"
+            )?;
+            writeln!(
+                output,
+                "# TYPE obzenflow_backpressure_wait_seconds_total counter"
+            )?;
+
+            for (stage_id, seconds) in &snapshot.backpressure_wait_seconds_total {
+                if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
+                    writeln!(
+                        output,
+                        "obzenflow_backpressure_wait_seconds_total{{{}}} {}",
+                        format_stage_labels(stage_id, metadata),
+                        seconds
+                    )?;
+                }
+            }
+            writeln!(output)?;
+        }
+
         // Flow metrics (if available)
         if let Some(ref flow_metrics) = snapshot.flow_metrics {
             // Get flow name from stage metadata (all stages belong to same flow)

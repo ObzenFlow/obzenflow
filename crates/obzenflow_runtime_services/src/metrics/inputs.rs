@@ -5,6 +5,7 @@
 //! to subscribe to both types of journals for comprehensive metrics collection.
 
 use obzenflow_core::{event::ChainEvent, journal::journal::Journal, StageId};
+use crate::backpressure::BackpressureRegistry;
 use std::sync::Arc;
 
 /// Input structure for MetricsAggregator that separates data and error journals
@@ -19,6 +20,9 @@ pub struct MetricsInputs {
 
     /// Stage error journals - error outputs from pipeline stages (FLOWIP-082g)
     pub error_journals: Vec<(StageId, Arc<dyn Journal<ChainEvent>>)>,
+
+    /// Flow-scoped backpressure registry for observability (FLOWIP-086k).
+    pub backpressure_registry: Option<Arc<BackpressureRegistry>>,
 }
 
 impl MetricsInputs {
@@ -30,7 +34,21 @@ impl MetricsInputs {
         Self {
             stage_data_journals,
             error_journals,
+            backpressure_registry: None,
         }
+    }
+
+    pub fn with_backpressure_registry(mut self, registry: Arc<BackpressureRegistry>) -> Self {
+        self.backpressure_registry = Some(registry);
+        self
+    }
+
+    pub fn with_backpressure_registry_opt(
+        mut self,
+        registry: Option<Arc<BackpressureRegistry>>,
+    ) -> Self {
+        self.backpressure_registry = registry;
+        self
     }
 
     /// Get all data journals

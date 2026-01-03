@@ -551,6 +551,42 @@ macro_rules! build_typed_flow {
             error_journals.insert(stage_id, error_journal);
         }
 
+        // Backpressure is opt-in (FLOWIP-086k): extract per-stage windows from middleware configs.
+        use obzenflow_runtime_services::backpressure::BackpressurePlan;
+        use std::num::NonZeroU64;
+
+        let mut backpressure_plan = BackpressurePlan::disabled();
+        for (name, descriptor) in descriptors.iter() {
+            let stage_id = *name_to_id.get(name).expect("name_to_id should contain stage ids");
+            for factory in descriptor.stage_middleware_factories() {
+                if factory.name() != "backpressure" {
+                    continue;
+                }
+                let snapshot = factory.config_snapshot().ok_or_else(|| {
+                    FlowBuildError::StageResourcesFailed(format!(
+                        "Stage '{}' enables backpressure but did not provide a config snapshot",
+                        name
+                    ))
+                })?;
+                let window = snapshot
+                    .get("window")
+                    .and_then(|v| v.as_u64())
+                    .ok_or_else(|| {
+                        FlowBuildError::StageResourcesFailed(format!(
+                            "Stage '{}' backpressure config is missing a numeric 'window' field",
+                            name
+                        ))
+                    })?;
+                let window = NonZeroU64::new(window).ok_or_else(|| {
+                    FlowBuildError::StageResourcesFailed(format!(
+                        "Stage '{}' backpressure window must be > 0",
+                        name
+                    ))
+                })?;
+                backpressure_plan = backpressure_plan.with_stage_window(stage_id, window);
+            }
+        }
+
         // Use StageResourcesBuilder to handle all the complex wiring
         use obzenflow_runtime_services::stages::resources_builder::StageResourcesBuilder;
 
@@ -561,7 +597,8 @@ macro_rules! build_typed_flow {
             control_journal,
             stage_journals,
             error_journals,
-        );
+        )
+        .with_backpressure_plan(backpressure_plan);
 
         let stage_resources_set = resources_builder
             .build()
@@ -704,6 +741,7 @@ macro_rules! build_typed_flow {
                 let mut circuit_breaker_config: Option<serde_json::Value> = None;
                 let mut rate_limiter_config: Option<serde_json::Value> = None;
                 let mut retry_config: Option<serde_json::Value> = None;
+                let mut backpressure_config: Option<serde_json::Value> = None;
 
                 // Check flow-level middleware
                 for factory in &flow_middleware {
@@ -712,6 +750,7 @@ macro_rules! build_typed_flow {
                             "circuit_breaker" => circuit_breaker_config = Some(snapshot),
                             "rate_limiter" => rate_limiter_config = Some(snapshot),
                             "retry" => retry_config = Some(snapshot),
+                            "backpressure" => backpressure_config = Some(snapshot),
                             _ => {}
                         }
                     }
@@ -724,6 +763,7 @@ macro_rules! build_typed_flow {
                             "circuit_breaker" => circuit_breaker_config = Some(snapshot),
                             "rate_limiter" => rate_limiter_config = Some(snapshot),
                             "retry" => retry_config = Some(snapshot),
+                            "backpressure" => backpressure_config = Some(snapshot),
                             _ => {}
                         }
                     }
@@ -734,6 +774,7 @@ macro_rules! build_typed_flow {
                     circuit_breaker: circuit_breaker_config,
                     rate_limiter: rate_limiter_config,
                     retry: retry_config,
+                    backpressure: backpressure_config,
                 });
 
                 // Create handle with flow middleware (including CycleGuard if needed)
@@ -772,6 +813,7 @@ macro_rules! build_typed_flow {
             .with_sources(sources)
             .with_stage_journals(stage_resources_set.stage_journals.clone())
             .with_error_journals(stage_resources_set.error_journals.clone())
+            .with_backpressure_registry(stage_resources_set.backpressure_registry.clone())
             .with_middleware_stacks(middleware_stacks);
 
         if !join_metadata_map.is_empty() {

@@ -134,6 +134,7 @@ mod sink_middleware;
 mod source_middleware;
 mod stateful_middleware;
 mod transform_middleware;
+mod backpressure;
 
 // Common middleware utilities
 mod context;
@@ -189,6 +190,9 @@ pub use control::{
     circuit_breaker, rate_limit, rate_limit_with_burst, CircuitBreakerBuilder,
     CircuitBreakerMiddleware, RateLimiterFactory, RateLimiterMiddleware,
 };
+
+// Backpressure (config + topology observability; FLOWIP-086k)
+pub use backpressure::{backpressure, BackpressureMiddlewareFactory};
 
 // Re-export observability middleware for backward compatibility
 pub use observability::{

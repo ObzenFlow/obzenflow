@@ -94,6 +94,7 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> S
             self.resources.message_bus.clone(),
             instrumentation,
             control_strategy,
+            self.resources.backpressure_writer.clone(),
         );
 
         // Create supervisor (private - not exposed)

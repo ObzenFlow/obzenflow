@@ -4,6 +4,7 @@
 //! control journals, message bus, and other resources that stages need.
 
 use crate::id_conversions::StageIdExt;
+use crate::backpressure::{BackpressurePlan, BackpressureReader, BackpressureRegistry, BackpressureWriter};
 use crate::message_bus::FsmMessageBus;
 use crate::messaging::upstream_subscription::{ContractConfig, UpstreamSubscription};
 use obzenflow_core::event::SystemEvent;
@@ -192,6 +193,12 @@ pub struct StageResources {
 
     /// All error journals from all stages (only populated for ErrorSink)
     pub error_journals: Vec<(StageId, Arc<dyn Journal<ChainEvent>>)>,
+
+    /// Backpressure writer handle for this stage's data journal (FLOWIP-086k).
+    pub backpressure_writer: BackpressureWriter,
+
+    /// Backpressure readers keyed by upstream stage ID (FLOWIP-086k).
+    pub backpressure_readers: HashMap<StageId, BackpressureReader>,
 }
 
 /// Builder for creating all stage resources with proper wiring
@@ -202,6 +209,7 @@ pub struct StageResourcesBuilder {
     system_journal: Arc<dyn Journal<SystemEvent>>,
     stage_journals: HashMap<StageId, Arc<dyn Journal<ChainEvent>>>,
     error_journals: HashMap<StageId, Arc<dyn Journal<ChainEvent>>>,
+    backpressure_plan: BackpressurePlan,
 }
 
 impl StageResourcesBuilder {
@@ -221,27 +229,24 @@ impl StageResourcesBuilder {
             system_journal,
             stage_journals,
             error_journals,
+            backpressure_plan: BackpressurePlan::disabled(),
         }
+    }
+
+    /// Configure a flow-scoped backpressure plan (FLOWIP-086k).
+    pub fn with_backpressure_plan(mut self, plan: BackpressurePlan) -> Self {
+        self.backpressure_plan = plan;
+        self
     }
 
     /// Build all resources for all stages
     pub async fn build(self) -> Result<StageResourcesSet, String> {
-        // Debug: Log all stage_journals keys
-        tracing::info!(
-            target: "flowip-080o",
-            stage_journals_count = self.stage_journals.len(),
-            "StageResourcesBuilder::build() - stage_journals HashMap keys:"
-        );
-        for (stage_id, _) in &self.stage_journals {
-            tracing::info!(
-                target: "flowip-080o",
-                stage_id = ?stage_id,
-                "stage_journals key"
-            );
-        }
-
         // Create shared message bus
         let message_bus = Arc::new(FsmMessageBus::new());
+
+        // Build backpressure registry once per flow (Phase 1: in-process).
+        let backpressure_registry =
+            Arc::new(BackpressureRegistry::new(self.topology.as_ref(), &self.backpressure_plan));
 
         // Build stage resources for each stage
         let mut stage_resources = HashMap::new();
@@ -365,6 +370,13 @@ impl StageResourcesBuilder {
                 Vec::new()
             };
 
+            let backpressure_writer = backpressure_registry.writer(stage_id);
+            let mut backpressure_readers: HashMap<StageId, BackpressureReader> = HashMap::new();
+            for upstream_stage in upstream_journals.iter().map(|(id, _)| *id) {
+                backpressure_readers
+                    .insert(upstream_stage, backpressure_registry.reader(upstream_stage, stage_id));
+            }
+
             // Create subscription factory with ALL stage names (not just upstreams)
             // This allows join stages to create subscriptions after DSL adds reference
             let mut all_stage_names = upstream_stage_names.clone();
@@ -398,6 +410,8 @@ impl StageResourcesBuilder {
                     .map(StageId::from_topology_id)
                     .collect(),
                 error_journals: error_journals_for_stage,
+                backpressure_writer,
+                backpressure_readers,
             };
 
             tracing::info!(
@@ -419,6 +433,7 @@ impl StageResourcesBuilder {
             flow_id: self.flow_id,
             pipeline_system_id: self.pipeline_system_id,
             system_journal: self.system_journal,
+            backpressure_registry,
             stage_journals: all_stage_journals,
             error_journals: all_error_journals,
             stage_resources,
@@ -437,6 +452,9 @@ pub struct StageResourcesSet {
 
     /// System journal for orchestration events
     pub system_journal: Arc<dyn Journal<SystemEvent>>,
+
+    /// Flow-scoped backpressure registry for observability (FLOWIP-086k).
+    pub backpressure_registry: Arc<BackpressureRegistry>,
 
     /// All stage journals (for metrics aggregator to read)
     pub stage_journals: Vec<(StageId, Arc<dyn Journal<ChainEvent>>)>,

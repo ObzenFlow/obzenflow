@@ -22,7 +22,7 @@ use super::sources::{
 use anyhow::Result;
 use async_trait::async_trait;
 use obzenflow_adapters::middleware::circuit_breaker::{HalfOpenPolicy, OpenPolicy};
-use obzenflow_adapters::middleware::{rate_limit, CircuitBreakerBuilder};
+use obzenflow_adapters::middleware::{backpressure, rate_limit, CircuitBreakerBuilder};
 use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
 use obzenflow_core::{
     event::chain_event::{ChainEvent, ChainEventFactory},
@@ -38,6 +38,8 @@ use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
 use obzenflow_runtime_services::stages::common::handlers::{AsyncTransformHandler, TransformHandler};
 use serde_json::json;
 use std::num::NonZeroU32;
+
+const BACKPRESSURE_WINDOW: u64 = 1_000;
 
 fn env_usize(key: &str) -> Option<usize> {
     std::env::var(key).ok().and_then(|value| value.parse::<usize>().ok())
@@ -219,6 +221,7 @@ async fn build_flow() -> Result<FlowHandle> {
         stages: {
             // Source: scripted stream of payment commands across three phases.
             payments = source!("payments" => PaymentCommandSource::new(), [
+                backpressure(BACKPRESSURE_WINDOW),
                 // Source-side circuit breaker: for real-world sources (MQTT, HTTP scrape, etc.)
                 // this prevents hot loops when the upstream feed is unhealthy.
                 CircuitBreakerBuilder::new(2)
@@ -233,7 +236,9 @@ async fn build_flow() -> Result<FlowHandle> {
 
             // Local validation: cheap checks that do NOT involve external IO.
             // Validation failures are tagged as errors and still emitted.
-            validated = transform!("validation" => ValidationTransform);
+            validated = transform!("validation" => ValidationTransform, [
+                backpressure(BACKPRESSURE_WINDOW)
+            ]);
 
             // Gateway stage: where we "talk" to the unreliable dependency.
             //
@@ -313,6 +318,7 @@ async fn build_glitchy_flow(
             ),
         )
         .with_poll_timeout(async_poll_timeout)
+        .with_middleware(backpressure(BACKPRESSURE_WINDOW))
         .with_middleware(
             CircuitBreakerBuilder::new(2)
                 .cooldown(std::time::Duration::from_secs(2))
@@ -331,6 +337,7 @@ async fn build_glitchy_flow(
             outage_events,
             recovery_events,
         ), [
+            backpressure(BACKPRESSURE_WINDOW),
             CircuitBreakerBuilder::new(2)
                 .cooldown(std::time::Duration::from_secs(2))
                 .open_policy(OpenPolicy::Skip)
@@ -352,7 +359,9 @@ async fn build_glitchy_flow(
 
         stages: {
             payments = payments_stage;
-            validated = transform!("validation" => ValidationTransform);
+            validated = transform!("validation" => ValidationTransform, [
+                backpressure(BACKPRESSURE_WINDOW)
+            ]);
             gateway = async_transform!("gateway" => GatewayTransform, [
                 CircuitBreakerBuilder::new(3)
                     .cooldown(std::time::Duration::from_secs(5))
@@ -558,8 +567,12 @@ async fn build_strict_flow() -> Result<FlowHandle> {
         ],
 
         stages: {
-            payments = source!("payments_strict" => PaymentCommandSource::new());
-            validated = transform!("validation_strict" => ValidationTransform);
+            payments = source!("payments_strict" => PaymentCommandSource::new(), [
+                backpressure(BACKPRESSURE_WINDOW)
+            ]);
+            validated = transform!("validation_strict" => ValidationTransform, [
+                backpressure(BACKPRESSURE_WINDOW)
+            ]);
             gateway = async_transform!("gateway_strict" => GatewayTransform);
             summary = sink!("summary_strict" => PaymentSummarySink::new());
         },

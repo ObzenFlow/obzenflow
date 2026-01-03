@@ -867,6 +867,17 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                     }
                                 }
                             }
+
+                            // Backpressure ack: upstream input was consumed by sink handler.
+                            if envelope.event.is_data() {
+                                if let Some(upstream) =
+                                    subscription.last_delivered_upstream_stage()
+                                {
+                                    if let Some(reader) = ctx.backpressure_readers.get(&upstream) {
+                                        reader.ack_consumed(1);
+                                    }
+                                }
+                            }
                         }
                         PollResult::NoEvents => {
                             // Check contracts periodically while idle to emit progress/final/stall as needed

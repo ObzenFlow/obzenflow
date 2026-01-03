@@ -80,6 +80,7 @@ impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
             self.resources.message_bus.clone(),
             instrumentation,
             control_strategy,
+            self.resources.backpressure_writer.clone(),
         );
 
         let supervisor = AsyncInfiniteSourceSupervisor {

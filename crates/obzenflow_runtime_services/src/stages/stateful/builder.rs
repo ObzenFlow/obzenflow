@@ -92,6 +92,8 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Super
             instrumentation,
             self.resources.upstream_subscription_factory,
             self.config.emit_interval,
+            self.resources.backpressure_writer.clone(),
+            self.resources.backpressure_readers.clone(),
         );
 
         // Create supervisor (private - not exposed)

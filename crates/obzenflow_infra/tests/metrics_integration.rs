@@ -70,6 +70,7 @@ fn make_empty_context(
         // No upstream journals in this test; tail-read will simply see None.
         stage_data_journals: std::collections::HashMap::new(),
         stage_error_journals: std::collections::HashMap::new(),
+        backpressure_registry: None,
         data_subscription: None,
         error_subscription: None,
         system_subscription: None,

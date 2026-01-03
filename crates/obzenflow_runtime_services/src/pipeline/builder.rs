@@ -9,6 +9,7 @@ use super::{
     supervisor::PipelineSupervisor,
 };
 use crate::{
+    backpressure::BackpressureRegistry,
     id_conversions::StageIdExt,
     message_bus::FsmMessageBus,
     stages::common::stage_handle::BoxedStageHandle,
@@ -44,6 +45,7 @@ pub struct PipelineBuilder {
     middleware_stacks: Option<HashMap<StageId, MiddlewareStackConfig>>,
     contract_attachments: Option<HashMap<(StageId, StageId), Vec<String>>>,
     join_metadata: Option<HashMap<StageId, crate::pipeline::JoinMetadata>>,
+    backpressure_registry: Option<Arc<BackpressureRegistry>>,
 }
 
 impl PipelineBuilder {
@@ -66,6 +68,7 @@ impl PipelineBuilder {
             middleware_stacks: None,
             contract_attachments: None,
             join_metadata: None,
+            backpressure_registry: None,
         }
     }
 
@@ -135,6 +138,12 @@ impl PipelineBuilder {
         join_metadata: HashMap<StageId, crate::pipeline::JoinMetadata>,
     ) -> Self {
         self.join_metadata = Some(join_metadata);
+        self
+    }
+
+    /// Provide the flow-scoped backpressure registry for observability (FLOWIP-086k).
+    pub fn with_backpressure_registry(mut self, registry: Arc<BackpressureRegistry>) -> Self {
+        self.backpressure_registry = Some(registry);
         self
     }
 }
@@ -313,6 +322,7 @@ impl SupervisorBuilder for PipelineBuilder {
             stage_error_journals: self
                 .error_journals
                 .unwrap_or_else(|| Vec::<(StageId, Arc<dyn Journal<ChainEvent>>)>::new()),
+            backpressure_registry: self.backpressure_registry.clone(),
             completion_subscription: None,
             metrics_exporter: self.metrics_exporter.clone(),
             contract_status: HashMap::new(),

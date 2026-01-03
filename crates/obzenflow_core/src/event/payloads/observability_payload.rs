@@ -107,6 +107,7 @@ pub enum MetricsLifecycle {
 pub enum MiddlewareLifecycle {
     CircuitBreaker(CircuitBreakerEvent),
     RateLimiter(RateLimiterEvent),
+    Backpressure(BackpressureEvent),
     Retry(RetryEvent),
     Sli(SliEvent),
 }
@@ -188,6 +189,31 @@ pub enum RateLimiterEvent {
     ConfigChanged {
         old_rate: f64,
         new_rate: f64,
+    },
+}
+
+// ---- Backpressure --------------------------------------------------------
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum BackpressureEvent {
+    /// Low-volume, fixed-cadence pulse used as a UI animation driver (FLOWIP-086k).
+    ///
+    /// Mirrors the semantics of `RateLimiterEvent::ActivityPulse`: one event per second
+    /// when delay activity occurred within the window. This prevents per-block flooding
+    /// while still providing responsive real-time feedback.
+    ActivityPulse {
+        window_ms: u64,
+        delayed_events: u64,
+        delay_ms_total: u64,
+        delay_ms_max: u64,
+
+        /// Optional debug context: minimum downstream credit observed at pulse time.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        min_credit: Option<u64>,
+
+        /// Optional debug context: downstream stage ID that currently limits the writer.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        limiting_downstream_stage_id: Option<StageId>,
     },
 }
 

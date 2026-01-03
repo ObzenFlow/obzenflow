@@ -29,6 +29,9 @@ pub struct MiddlewareStackConfig {
     /// Retry policy static config (if present)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub retry: Option<serde_json::Value>,
+    /// Backpressure static config (if present; FLOWIP-086k)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backpressure: Option<serde_json::Value>,
 }
 
 impl MiddlewareStackConfig {
@@ -39,6 +42,7 @@ impl MiddlewareStackConfig {
             circuit_breaker: None,
             rate_limiter: None,
             retry: None,
+            backpressure: None,
         }
     }
 }

@@ -337,6 +337,13 @@ where
 
     /// Last EOF accounting outcome (set when an EOF is observed)
     last_eof_outcome: Option<EofOutcome>,
+
+    /// Upstream stage ID for the last event returned by `poll_next_with_state`.
+    ///
+    /// This is the topology-relevant upstream stage (the journal reader that produced
+    /// the envelope), and MUST NOT be derived from `envelope.event.writer_id`, which
+    /// can be intentionally preserved across stages for causal attribution.
+    last_delivered_upstream_stage: Option<StageId>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -466,7 +473,13 @@ where
             contract_policies: Vec::new(),
             control_middleware: Arc::new(NoControlMiddleware),
             last_eof_outcome: None,
+            last_delivered_upstream_stage: None,
         })
+    }
+
+    /// Stage ID of the upstream reader that produced the last delivered event.
+    pub fn last_delivered_upstream_stage(&self) -> Option<StageId> {
+        self.last_delivered_upstream_stage
     }
 
     /// Configure this subscription to deliver only transport-relevant events to the caller.
@@ -878,6 +891,7 @@ where
 
                     // Advance to next reader for fairness
                     self.state.next_reader_index();
+                    self.last_delivered_upstream_stage = Some(stage_id);
 
                     return PollResult::Event(envelope);
                 }

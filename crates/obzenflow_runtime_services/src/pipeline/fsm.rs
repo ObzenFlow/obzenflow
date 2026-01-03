@@ -197,6 +197,9 @@ pub struct PipelineContext {
     /// Stage error journals (for error sink) (FLOWIP-082e)
     pub stage_error_journals: Vec<(StageId, Arc<dyn Journal<ChainEvent>>)>,
 
+    /// Flow-scoped backpressure registry for observability (FLOWIP-086k).
+    pub backpressure_registry: Option<Arc<crate::backpressure::BackpressureRegistry>>,
+
     /// Per-source contract status (pass/fail) keyed by source StageId
     pub contract_status: HashMap<StageId, bool>,
 
@@ -762,6 +765,7 @@ impl FsmAction for PipelineAction {
                     }
                     // Get error journals for metrics (FLOWIP-082g)
                     let error_journals = context.stage_error_journals.clone();
+                    let backpressure_registry = context.backpressure_registry.clone();
                     if !error_journals.is_empty() {
                         tracing::info!(
                             error_journal_ids = ?error_journals.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
@@ -797,7 +801,8 @@ impl FsmAction for PipelineAction {
                         use crate::supervised_base::SupervisorBuilder;
 
                         // Create MetricsInputs with both data and error journals (FLOWIP-082g)
-                        let inputs = MetricsInputs::new(stage_journals, error_journals);
+                        let inputs = MetricsInputs::new(stage_journals, error_journals)
+                            .with_backpressure_registry_opt(backpressure_registry);
 
                         match MetricsAggregatorBuilder::new(inputs, system_journal, exporter)
                             .with_stage_metadata(stage_metadata)

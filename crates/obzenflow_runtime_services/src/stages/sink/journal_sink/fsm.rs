@@ -14,6 +14,7 @@ use crate::stages::common::stage_handle::{
     FORCE_SHUTDOWN_MESSAGE, STOP_REASON_TIMEOUT, STOP_REASON_USER_STOP,
 };
 use crate::stages::resources_builder::BoundSubscriptionFactory;
+use crate::backpressure::{BackpressureReader, BackpressureWriter};
 use futures::TryFutureExt;
 use obzenflow_core::event::context::{FlowContext, StageType};
 use obzenflow_core::event::{ChainEventFactory, SystemEvent};
@@ -21,6 +22,7 @@ use obzenflow_core::journal::journal::Journal;
 use obzenflow_core::{ChainEvent, EventId, FlowId, StageId, WriterId};
 use obzenflow_fsm::{EventVariant, FsmAction, FsmContext, StateVariant};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
@@ -307,6 +309,12 @@ pub struct JournalSinkContext<H: SinkHandler> {
 
     /// Control strategy for FlowControl events
     pub control_strategy: Arc<dyn ControlEventStrategy>,
+
+    /// Backpressure writer handle for this stage's journal (FLOWIP-086k).
+    pub backpressure_writer: BackpressureWriter,
+
+    /// Backpressure readers keyed by upstream stage ID (FLOWIP-086k).
+    pub backpressure_readers: HashMap<StageId, BackpressureReader>,
 }
 
 impl<H: SinkHandler> JournalSinkContext<H> {
@@ -323,6 +331,8 @@ impl<H: SinkHandler> JournalSinkContext<H> {
         control_strategy: Arc<dyn ControlEventStrategy>,
         instrumentation: Arc<StageInstrumentation>,
         upstream_subscription_factory: BoundSubscriptionFactory,
+        backpressure_writer: BackpressureWriter,
+        backpressure_readers: HashMap<StageId, BackpressureReader>,
     ) -> Self {
         Self {
             handler,
@@ -340,6 +350,8 @@ impl<H: SinkHandler> JournalSinkContext<H> {
             upstream_subscription_factory,
             control_strategy,
             instrumentation,
+            backpressure_writer,
+            backpressure_readers,
         }
     }
 }

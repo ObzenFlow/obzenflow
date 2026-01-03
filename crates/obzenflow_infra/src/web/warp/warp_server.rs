@@ -1427,7 +1427,7 @@ impl MiddlewareSseState {
         middleware: &obzenflow_core::event::payloads::observability_payload::MiddlewareLifecycle,
     ) -> Option<serde_json::Value> {
         use obzenflow_core::event::payloads::observability_payload::{
-            CircuitBreakerEvent, MiddlewareLifecycle, RateLimiterEvent,
+            BackpressureEvent, CircuitBreakerEvent, MiddlewareLifecycle, RateLimiterEvent,
         };
         use serde_json::json;
 
@@ -1600,6 +1600,32 @@ impl MiddlewareSseState {
                     }))
                 }
                 _ => None,
+            },
+            MiddlewareLifecycle::Backpressure(bp) => match bp {
+                BackpressureEvent::ActivityPulse {
+                    window_ms,
+                    delayed_events,
+                    delay_ms_total,
+                    delay_ms_max,
+                    min_credit,
+                    limiting_downstream_stage_id,
+                } => {
+                    let mut payload = json!({
+                        "middleware": "backpressure",
+                        "event_type": "activity_pulse",
+                        "window_ms": window_ms,
+                        "delayed_events": delayed_events,
+                        "delay_ms_total": delay_ms_total,
+                        "delay_ms_max": delay_ms_max,
+                    });
+                    if let Some(v) = min_credit {
+                        payload["min_credit"] = json!(v);
+                    }
+                    if let Some(v) = limiting_downstream_stage_id {
+                        payload["limiting_downstream_stage_id"] = json!(v.to_string());
+                    }
+                    Some(payload)
+                }
             },
             _ => None,
         }

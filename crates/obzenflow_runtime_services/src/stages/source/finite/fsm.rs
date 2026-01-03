@@ -12,15 +12,20 @@ use obzenflow_core::journal::journal::Journal;
 use obzenflow_core::{ChainEvent, EventId, FlowId, StageId, WriterId};
 use obzenflow_fsm::{EventVariant, FsmAction, FsmContext, StateVariant};
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
 use std::marker::PhantomData;
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::metrics::instrumentation::{snapshot_stage_metrics, StageInstrumentation};
 use crate::metrics::tail_read;
+use crate::stages::common::backpressure_activity_pulse::BackpressureActivityPulse;
 use crate::stages::common::stage_handle::{
     FORCE_SHUTDOWN_MESSAGE, STOP_REASON_TIMEOUT, STOP_REASON_USER_STOP,
 };
 use crate::stages::source::strategies::{SourceControlContext, SourceControlStrategy};
+use crate::backpressure::BackpressureWriter;
+use crate::supervised_base::idle_backoff::IdleBackoff;
 
 // ============================================================================
 // FSM States
@@ -262,6 +267,18 @@ pub struct FiniteSourceContext<H> {
     /// Mutable context for the source control strategy
     pub control_context: SourceControlContext,
 
+    /// Backpressure writer handle for this stage's journal (FLOWIP-086k).
+    pub backpressure_writer: BackpressureWriter,
+
+    /// Pending stage outputs blocked on downstream credits (FLOWIP-086k).
+    pub(crate) pending_outputs: VecDeque<ChainEvent>,
+
+    /// Backpressure activity pulse accumulator (Hz UI animation driver).
+    pub(crate) backpressure_pulse: BackpressureActivityPulse,
+
+    /// Backoff for blocked output writes (1ms → … → 50ms cap).
+    pub(crate) backpressure_backoff: IdleBackoff,
+
     /// Phantom to keep the handler type in the context's type parameters
     _marker: PhantomData<H>,
 }
@@ -278,6 +295,7 @@ impl<H> FiniteSourceContext<H> {
         bus: Arc<crate::message_bus::FsmMessageBus>,
         instrumentation: Arc<StageInstrumentation>,
         control_strategy: Arc<dyn SourceControlStrategy>,
+        backpressure_writer: BackpressureWriter,
     ) -> Self {
         Self {
             stage_id,
@@ -292,6 +310,13 @@ impl<H> FiniteSourceContext<H> {
             instrumentation,
             control_strategy,
             control_context: SourceControlContext::new(),
+            backpressure_writer,
+            pending_outputs: VecDeque::new(),
+            backpressure_pulse: BackpressureActivityPulse::new(),
+            backpressure_backoff: IdleBackoff::exponential_with_cap(
+                Duration::from_millis(1),
+                Duration::from_millis(50),
+            ),
             _marker: PhantomData,
         }
     }
@@ -796,6 +821,7 @@ mod tests {
                 bus.clone(),
                 instrumentation.clone(),
                 control_strategy,
+                crate::backpressure::BackpressureWriter::disabled(),
             )
         };
 

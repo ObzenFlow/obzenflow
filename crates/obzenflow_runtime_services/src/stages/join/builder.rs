@@ -117,6 +117,8 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
             instrumentation.clone(),
             reference_subscription_factory,
             stream_subscription_factory,
+            self.resources.backpressure_writer.clone(),
+            self.resources.backpressure_readers.clone(),
         );
 
         // Create supervisor

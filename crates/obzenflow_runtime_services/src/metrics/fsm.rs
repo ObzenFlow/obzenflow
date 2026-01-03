@@ -140,6 +140,9 @@ pub struct MetricsAggregatorContext {
     /// Mapping of stage IDs to their error journals for tail reads.
     pub stage_error_journals: HashMap<StageId, Arc<dyn Journal<ChainEvent>>>,
 
+    /// Flow-scoped backpressure registry for observability (FLOWIP-086k).
+    pub backpressure_registry: Option<Arc<crate::backpressure::BackpressureRegistry>>,
+
     /// Subscription to read from all stage data journals
     pub data_subscription:
         Option<crate::messaging::upstream_subscription::UpstreamSubscription<ChainEvent>>,
@@ -681,6 +684,7 @@ impl MetricsAggregatorContext {
             system_journal,
             stage_data_journals,
             stage_error_journals,
+            backpressure_registry: inputs.backpressure_registry.clone(),
             data_subscription: Some(data_subscription),
             error_subscription,
             system_subscription: Some(system_subscription),
@@ -881,6 +885,30 @@ impl MetricsAggregatorContext {
         snapshot.rate_limiter_delay_seconds_total = store.rate_limiter_delay_seconds_total.clone();
         snapshot.rate_limiter_bucket_tokens = store.rate_limiter_bucket_tokens.clone();
         snapshot.rate_limiter_bucket_capacity = store.rate_limiter_bucket_capacity.clone();
+
+        // FLOWIP-086k: Backpressure metrics (registry snapshot, not event-derived).
+        snapshot.backpressure_bypass_enabled =
+            crate::backpressure::BackpressureWriter::is_bypass_enabled();
+        if let Some(registry) = &self.backpressure_registry {
+            let bp = registry.metrics_snapshot();
+
+            snapshot.backpressure_window = bp.edge_window;
+            snapshot.backpressure_in_flight = bp.edge_in_flight;
+            snapshot.backpressure_credits = bp.edge_credits;
+
+            snapshot.backpressure_blocked = bp
+                .stage_blocked
+                .into_iter()
+                .map(|(stage_id, blocked)| (stage_id, if blocked { 1.0 } else { 0.0 }))
+                .collect();
+            snapshot.backpressure_min_reader_seq = bp.stage_min_reader_seq;
+            snapshot.backpressure_writer_seq = bp.stage_writer_seq;
+            snapshot.backpressure_wait_seconds_total = bp
+                .stage_wait_nanos_total
+                .into_iter()
+                .map(|(stage_id, nanos)| (stage_id, nanos as f64 / 1_000_000_000.0))
+                .collect();
+        }
 
         // FLOWIP-059a: Contract metrics
         snapshot.contract_metrics = store.contract_metrics.clone();
@@ -2185,6 +2213,7 @@ mod tests {
             )),
             stage_data_journals: HashMap::new(),
             stage_error_journals: HashMap::new(),
+            backpressure_registry: None,
             data_subscription: None,
             error_subscription: None,
             system_subscription: None,

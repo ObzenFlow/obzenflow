@@ -9,15 +9,18 @@ use crate::supervised_base::base::Supervisor;
 use crate::supervised_base::{EventLoopDirective, HandlerSupervised};
 use obzenflow_core::event::context::{FlowContext, StageType};
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
+use obzenflow_core::event::payloads::observability_payload::{MiddlewareLifecycle, ObservabilityPayload};
+use obzenflow_core::event::ChainEventFactory;
 use obzenflow_core::event::SystemEvent;
 use obzenflow_core::journal::journal::Journal;
-use obzenflow_core::{ChainEvent, StageId};
+use obzenflow_core::{ChainEvent, StageId, WriterId};
 use obzenflow_fsm::{fsm, EventVariant, StateVariant, Transition};
+use std::collections::VecDeque;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Instant;
 
-use super::fsm::{JoinAction, JoinContext, JoinEvent, JoinState};
+use super::fsm::{JoinAction, JoinContext, JoinEvent, JoinState, PendingTransition};
 
 /// Supervisor for join stages
 pub(crate) struct JoinSupervisor<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> {
@@ -642,6 +645,19 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                             ));
                                         }
                                     }
+
+                                    // Backpressure ack: reference input was consumed into join state.
+                                    if envelope.event.is_data() {
+                                        if let Some(upstream) =
+                                            subscription.last_delivered_upstream_stage()
+                                        {
+                                            if let Some(reader) =
+                                                ctx.backpressure_readers.get(&upstream)
+                                            {
+                                                reader.ack_consumed(1);
+                                            }
+                                        }
+                                    }
                                 }
                                 _ => {
                                     tracing::warn!(
@@ -735,13 +751,181 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                 > = Ok(EventLoopDirective::Continue);
 
                 if let Some(ref mut subscription) = stream_subscription {
-                    match subscription
-                        .poll_next_with_state(
-                            state.variant_name(),
-                            Some(&mut stream_contract_state[..]),
-                        )
-                        .await
-                    {
+                    // Drain pending outputs before polling upstream again (bounded to one input).
+                    let mut blocked_on_backpressure = false;
+                    while let Some(pending) = ctx.pending_outputs.pop_front() {
+                        if pending.is_data() {
+                            // Debug-only: emit activity pulses even when bypass is enabled, so
+                            // operators can see what *would* have blocked (FLOWIP-086k).
+                            if crate::backpressure::BackpressureWriter::is_bypass_enabled() {
+                                if let Some((min_credit, limiting)) =
+                                    ctx.backpressure_writer.min_downstream_credit_detail()
+                                {
+                                    if min_credit < 1 {
+                                        ctx.backpressure_pulse.record_delay(
+                                            std::time::Duration::ZERO,
+                                            Some(min_credit),
+                                            Some(limiting),
+                                        );
+                                        if let Some(pulse) = ctx.backpressure_pulse.maybe_emit() {
+                                            let flow_context = FlowContext {
+                                                flow_name: ctx.flow_name.clone(),
+                                                flow_id: ctx.flow_id.to_string(),
+                                                stage_name: ctx.stage_name.clone(),
+                                                stage_id: self.stage_id.clone(),
+                                                stage_type: StageType::Join,
+                                            };
+
+                                            let event = ChainEventFactory::observability_event(
+                                                WriterId::from(self.stage_id),
+                                                ObservabilityPayload::Middleware(
+                                                    MiddlewareLifecycle::Backpressure(pulse),
+                                                ),
+                                            )
+                                            .with_flow_context(flow_context)
+                                            .with_runtime_context(
+                                                ctx.instrumentation.snapshot_with_control(),
+                                            );
+
+                                            match self.data_journal.append(event, None).await {
+                                                Ok(written) => {
+                                                    crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
+                                                        &written,
+                                                        &self.system_journal,
+                                                    )
+                                                    .await;
+                                                }
+                                                Err(e) => tracing::warn!(
+                                                    stage_name = %ctx.stage_name,
+                                                    journal_error = %e,
+                                                    "Failed to append backpressure activity pulse"
+                                                ),
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            let Some(reservation) = ctx.backpressure_writer.reserve(1) else {
+                                ctx.pending_outputs.push_front(pending);
+                                let delay = ctx.backpressure_backoff.next_delay();
+                                ctx.backpressure_writer.record_wait(delay);
+
+                                if let Some((min_credit, limiting)) =
+                                    ctx.backpressure_writer.min_downstream_credit_detail()
+                                {
+                                    ctx.backpressure_pulse.record_delay(
+                                        delay,
+                                        Some(min_credit),
+                                        Some(limiting),
+                                    );
+                                } else {
+                                    ctx.backpressure_pulse.record_delay(delay, None, None);
+                                }
+                                if let Some(pulse) = ctx.backpressure_pulse.maybe_emit() {
+                                    let flow_context = FlowContext {
+                                        flow_name: ctx.flow_name.clone(),
+                                        flow_id: ctx.flow_id.to_string(),
+                                        stage_name: ctx.stage_name.clone(),
+                                        stage_id: self.stage_id.clone(),
+                                        stage_type: StageType::Join,
+                                    };
+
+                                    let event = ChainEventFactory::observability_event(
+                                        WriterId::from(self.stage_id),
+                                        ObservabilityPayload::Middleware(
+                                            MiddlewareLifecycle::Backpressure(pulse),
+                                        ),
+                                    )
+                                    .with_flow_context(flow_context)
+                                    .with_runtime_context(
+                                        ctx.instrumentation.snapshot_with_control(),
+                                    );
+
+                                    match self.data_journal.append(event, None).await {
+                                        Ok(written) => {
+                                            crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
+                                                &written,
+                                                &self.system_journal,
+                                            )
+                                            .await;
+                                        }
+                                        Err(e) => tracing::warn!(
+                                            stage_name = %ctx.stage_name,
+                                            journal_error = %e,
+                                            "Failed to append backpressure activity pulse"
+                                        ),
+                                    }
+                                }
+
+                                tokio::time::sleep(delay).await;
+                                blocked_on_backpressure = true;
+                                break;
+                            };
+
+                            let flow_context = FlowContext {
+                                flow_name: ctx.flow_name.clone(),
+                                flow_id: ctx.flow_id.to_string(),
+                                stage_name: ctx.stage_name.clone(),
+                                stage_id: self.stage_id.clone(),
+                                stage_type: StageType::Join,
+                            };
+
+                            let enriched = pending
+                                .with_flow_context(flow_context)
+                                .with_runtime_context(ctx.instrumentation.snapshot_with_control());
+
+                            if enriched.is_data() {
+                                ctx.instrumentation.record_output_event(&enriched);
+                                subscription.track_output_event();
+                            }
+
+                            let written = self.data_journal.append(enriched, None).await?;
+                            reservation.commit(1);
+                            ctx.backpressure_backoff.reset();
+                            crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
+                                &written,
+                                &self.system_journal,
+                            )
+                            .await;
+                        } else {
+                            let flow_context = FlowContext {
+                                flow_name: ctx.flow_name.clone(),
+                                flow_id: ctx.flow_id.to_string(),
+                                stage_name: ctx.stage_name.clone(),
+                                stage_id: self.stage_id.clone(),
+                                stage_type: StageType::Join,
+                            };
+
+                            let enriched = pending
+                                .with_flow_context(flow_context)
+                                .with_runtime_context(ctx.instrumentation.snapshot_with_control());
+
+                            let written = self.data_journal.append(enriched, None).await?;
+                            crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
+                                &written,
+                                &self.system_journal,
+                            )
+                            .await;
+                        }
+                    }
+
+                    if blocked_on_backpressure {
+                        directive = Ok(EventLoopDirective::Continue);
+                    } else {
+                        if let Some(upstream) = ctx.pending_ack_upstream.take() {
+                            if let Some(reader) = ctx.backpressure_readers.get(&upstream) {
+                                reader.ack_consumed(1);
+                            }
+                        }
+
+                        match subscription
+                            .poll_next_with_state(
+                                state.variant_name(),
+                                Some(&mut stream_contract_state[..]),
+                            )
+                            .await
+                        {
                         PollResult::Event(envelope) => {
                             // We have work on this loop iteration.
                             ctx.instrumentation.record_consumed(&envelope);
@@ -895,24 +1079,196 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
 
                                     match result {
                                         Ok(events) => {
+                                            let mut pending_data_outputs: VecDeque<ChainEvent> =
+                                                events.into();
 
-                                            // Write output events
-                                            for event in events {
-                                                // FLOWIP-080o-part-2: Only count data events for writer_seq.
-                                                // Lifecycle events (middleware metrics, etc.) are observability
-                                                // overhead and should not participate in transport contracts.
+                                            while let Some(event) = pending_data_outputs.pop_front()
+                                            {
                                                 if event.is_data() {
-                                                    ctx.instrumentation.record_output_event(&event);
-                                                    // Track output for contract verification
-                                                    subscription.track_output_event();
+                                                    // Debug-only: emit activity pulses even when bypass is enabled, so
+                                                    // operators can see what *would* have blocked (FLOWIP-086k).
+                                                    if crate::backpressure::BackpressureWriter::is_bypass_enabled() {
+                                                        if let Some((min_credit, limiting)) =
+                                                            ctx.backpressure_writer
+                                                                .min_downstream_credit_detail()
+                                                        {
+                                                            if min_credit < 1 {
+                                                                ctx.backpressure_pulse.record_delay(
+                                                                    std::time::Duration::ZERO,
+                                                                    Some(min_credit),
+                                                                    Some(limiting),
+                                                                );
+                                                                if let Some(pulse) = ctx.backpressure_pulse.maybe_emit() {
+                                                                    let flow_context = FlowContext {
+                                                                        flow_name: ctx.flow_name.clone(),
+                                                                        flow_id: ctx.flow_id.to_string(),
+                                                                        stage_name: ctx.stage_name.clone(),
+                                                                        stage_id: self.stage_id.clone(),
+                                                                        stage_type: StageType::Join,
+                                                                    };
+
+                                                                    let event = ChainEventFactory::observability_event(
+                                                                        WriterId::from(self.stage_id),
+                                                                        ObservabilityPayload::Middleware(
+                                                                            MiddlewareLifecycle::Backpressure(pulse),
+                                                                        ),
+                                                                    )
+                                                                    .with_flow_context(flow_context)
+                                                                    .with_runtime_context(
+                                                                        ctx.instrumentation.snapshot_with_control(),
+                                                                    );
+
+                                                                    match self.data_journal.append(event, None).await {
+                                                                        Ok(written) => {
+                                                                            crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
+                                                                                &written,
+                                                                                &self.system_journal,
+                                                                            )
+                                                                            .await;
+                                                                        }
+                                                                        Err(e) => tracing::warn!(
+                                                                            stage_name = %ctx.stage_name,
+                                                                            journal_error = %e,
+                                                                            "Failed to append backpressure activity pulse"
+                                                                        ),
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+
+                                                    let Some(reservation) =
+                                                        ctx.backpressure_writer.reserve(1)
+                                                    else {
+                                                        ctx.pending_ack_upstream = Some(source_id);
+                                                        ctx.pending_outputs.push_back(event);
+                                                        ctx.pending_outputs
+                                                            .extend(pending_data_outputs);
+                                                        let delay =
+                                                            ctx.backpressure_backoff.next_delay();
+                                                        ctx.backpressure_writer.record_wait(delay);
+
+                                                        if let Some((min_credit, limiting)) =
+                                                            ctx.backpressure_writer
+                                                                .min_downstream_credit_detail()
+                                                        {
+                                                            ctx.backpressure_pulse.record_delay(
+                                                                delay,
+                                                                Some(min_credit),
+                                                                Some(limiting),
+                                                            );
+                                                        } else {
+                                                            ctx.backpressure_pulse
+                                                                .record_delay(delay, None, None);
+                                                        }
+                                                        if let Some(pulse) =
+                                                            ctx.backpressure_pulse.maybe_emit()
+                                                        {
+                                                            let flow_context = FlowContext {
+                                                                flow_name: ctx.flow_name.clone(),
+                                                                flow_id: ctx.flow_id.to_string(),
+                                                                stage_name: ctx.stage_name.clone(),
+                                                                stage_id: self.stage_id.clone(),
+                                                                stage_type: StageType::Join,
+                                                            };
+
+                                                            let event = ChainEventFactory::observability_event(
+                                                                WriterId::from(self.stage_id),
+                                                                ObservabilityPayload::Middleware(
+                                                                    MiddlewareLifecycle::Backpressure(pulse),
+                                                                ),
+                                                            )
+                                                            .with_flow_context(flow_context)
+                                                            .with_runtime_context(
+                                                                ctx.instrumentation.snapshot_with_control(),
+                                                            );
+
+                                                            match self.data_journal.append(event, None).await {
+                                                                Ok(written) => {
+                                                                    crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
+                                                                        &written,
+                                                                        &self.system_journal,
+                                                                    )
+                                                                    .await;
+                                                                }
+                                                                Err(e) => tracing::warn!(
+                                                                    stage_name = %ctx.stage_name,
+                                                                    journal_error = %e,
+                                                                    "Failed to append backpressure activity pulse"
+                                                                ),
+                                                            }
+                                                        }
+                                                        tokio::time::sleep(delay).await;
+                                                        break;
+                                                    };
+
+                                                    let flow_context = FlowContext {
+                                                        flow_name: ctx.flow_name.clone(),
+                                                        flow_id: ctx.flow_id.to_string(),
+                                                        stage_name: ctx.stage_name.clone(),
+                                                        stage_id: self.stage_id.clone(),
+                                                        stage_type: StageType::Join,
+                                                    };
+
+                                                    let enriched_event = event
+                                                        .with_flow_context(flow_context)
+                                                        .with_runtime_context(
+                                                            ctx.instrumentation
+                                                                .snapshot_with_control(),
+                                                        );
+
+                                                    if enriched_event.is_data() {
+                                                        ctx.instrumentation
+                                                            .record_output_event(&enriched_event);
+                                                        subscription.track_output_event();
+                                                    }
+
+                                                    let written = self
+                                                        .data_journal
+                                                        .append(enriched_event, None)
+                                                        .await?;
+                                                    reservation.commit(1);
+                                                    ctx.backpressure_backoff.reset();
+                                                    crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
+                                                        &written,
+                                                        &self.system_journal,
+                                                    )
+                                                    .await;
+                                                } else {
+                                                    let flow_context = FlowContext {
+                                                        flow_name: ctx.flow_name.clone(),
+                                                        flow_id: ctx.flow_id.to_string(),
+                                                        stage_name: ctx.stage_name.clone(),
+                                                        stage_id: self.stage_id.clone(),
+                                                        stage_type: StageType::Join,
+                                                    };
+
+                                                    let enriched_event = event
+                                                        .with_flow_context(flow_context)
+                                                        .with_runtime_context(
+                                                            ctx.instrumentation
+                                                                .snapshot_with_control(),
+                                                        );
+
+                                                    let written = self
+                                                        .data_journal
+                                                        .append(enriched_event, None)
+                                                        .await?;
+                                                    crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
+                                                        &written,
+                                                        &self.system_journal,
+                                                    )
+                                                    .await;
                                                 }
-                                                let written =
-                                                    self.data_journal.append(event, None).await?;
-                                                crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
-                                                    &written,
-                                                    &self.system_journal,
-                                                )
-                                                .await;
+                                            }
+
+                                            // Backpressure ack: stream input consumed by join handler.
+                                            if ctx.pending_outputs.is_empty() {
+                                                if let Some(reader) =
+                                                    ctx.backpressure_readers.get(&source_id)
+                                                {
+                                                    reader.ack_consumed(1);
+                                                }
                                             }
 
                                             directive = Ok(EventLoopDirective::Continue);
@@ -955,11 +1311,6 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                             };
 
                                             if route_to_error_journal {
-                                                if error_event.is_data() {
-                                                    ctx.instrumentation
-                                                        .record_output_event(&error_event);
-                                                    subscription.track_output_event();
-                                                }
                                                 ctx.error_journal
                                                     .append(error_event, None)
                                                     .await
@@ -971,19 +1322,186 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                                 })?;
                                             } else {
                                                 if error_event.is_data() {
-                                                    ctx.instrumentation
-                                                        .record_output_event(&error_event);
-                                                    subscription.track_output_event();
+                                                    // Debug-only: emit activity pulses even when bypass is enabled, so
+                                                    // operators can see what *would* have blocked (FLOWIP-086k).
+                                                    if crate::backpressure::BackpressureWriter::is_bypass_enabled() {
+                                                        if let Some((min_credit, limiting)) =
+                                                            ctx.backpressure_writer.min_downstream_credit_detail()
+                                                        {
+                                                            if min_credit < 1 {
+                                                                ctx.backpressure_pulse.record_delay(
+                                                                    std::time::Duration::ZERO,
+                                                                    Some(min_credit),
+                                                                    Some(limiting),
+                                                                );
+                                                                if let Some(pulse) = ctx.backpressure_pulse.maybe_emit() {
+                                                                    let flow_context = FlowContext {
+                                                                        flow_name: ctx.flow_name.clone(),
+                                                                        flow_id: ctx.flow_id.to_string(),
+                                                                        stage_name: ctx.stage_name.clone(),
+                                                                        stage_id: self.stage_id.clone(),
+                                                                        stage_type: StageType::Join,
+                                                                    };
+
+                                                                    let event = ChainEventFactory::observability_event(
+                                                                        WriterId::from(self.stage_id),
+                                                                        ObservabilityPayload::Middleware(
+                                                                            MiddlewareLifecycle::Backpressure(pulse),
+                                                                        ),
+                                                                    )
+                                                                    .with_flow_context(flow_context)
+                                                                    .with_runtime_context(
+                                                                        ctx.instrumentation.snapshot_with_control(),
+                                                                    );
+
+                                                                    match self.data_journal.append(event, None).await {
+                                                                        Ok(written) => {
+                                                                            crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
+                                                                                &written,
+                                                                                &self.system_journal,
+                                                                            )
+                                                                            .await;
+                                                                        }
+                                                                        Err(e) => tracing::warn!(
+                                                                            stage_name = %ctx.stage_name,
+                                                                            journal_error = %e,
+                                                                            "Failed to append backpressure activity pulse"
+                                                                        ),
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+
+                                                    if let Some(reservation) =
+                                                        ctx.backpressure_writer.reserve(1)
+                                                    {
+                                                        let flow_context = FlowContext {
+                                                            flow_name: ctx.flow_name.clone(),
+                                                            flow_id: ctx.flow_id.to_string(),
+                                                            stage_name: ctx.stage_name.clone(),
+                                                            stage_id: self.stage_id.clone(),
+                                                            stage_type: StageType::Join,
+                                                        };
+
+                                                        let enriched_error = error_event
+                                                            .with_flow_context(flow_context)
+                                                            .with_runtime_context(
+                                                                ctx.instrumentation
+                                                                    .snapshot_with_control(),
+                                                            );
+
+                                                        if enriched_error.is_data() {
+                                                            ctx.instrumentation.record_output_event(
+                                                                &enriched_error,
+                                                            );
+                                                            subscription.track_output_event();
+                                                        }
+
+                                                        let written = self
+                                                            .data_journal
+                                                            .append(enriched_error, None)
+                                                            .await?;
+                                                        reservation.commit(1);
+                                                        ctx.backpressure_backoff.reset();
+                                                        crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
+                                                            &written,
+                                                            &self.system_journal,
+                                                        )
+                                                        .await;
+                                                    } else {
+                                                        ctx.pending_ack_upstream = Some(source_id);
+                                                        ctx.pending_outputs.push_back(error_event);
+                                                        let delay =
+                                                            ctx.backpressure_backoff.next_delay();
+                                                        ctx.backpressure_writer.record_wait(delay);
+
+                                                        if let Some((min_credit, limiting)) =
+                                                            ctx.backpressure_writer.min_downstream_credit_detail()
+                                                        {
+                                                            ctx.backpressure_pulse.record_delay(
+                                                                delay,
+                                                                Some(min_credit),
+                                                                Some(limiting),
+                                                            );
+                                                        } else {
+                                                            ctx.backpressure_pulse
+                                                                .record_delay(delay, None, None);
+                                                        }
+                                                        if let Some(pulse) =
+                                                            ctx.backpressure_pulse.maybe_emit()
+                                                        {
+                                                            let flow_context = FlowContext {
+                                                                flow_name: ctx.flow_name.clone(),
+                                                                flow_id: ctx.flow_id.to_string(),
+                                                                stage_name: ctx.stage_name.clone(),
+                                                                stage_id: self.stage_id.clone(),
+                                                                stage_type: StageType::Join,
+                                                            };
+
+                                                            let event = ChainEventFactory::observability_event(
+                                                                WriterId::from(self.stage_id),
+                                                                ObservabilityPayload::Middleware(
+                                                                    MiddlewareLifecycle::Backpressure(pulse),
+                                                                ),
+                                                            )
+                                                            .with_flow_context(flow_context)
+                                                            .with_runtime_context(
+                                                                ctx.instrumentation.snapshot_with_control(),
+                                                            );
+
+                                                            match self.data_journal.append(event, None).await {
+                                                                Ok(written) => {
+                                                                    crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
+                                                                        &written,
+                                                                        &self.system_journal,
+                                                                    )
+                                                                    .await;
+                                                                }
+                                                                Err(e) => tracing::warn!(
+                                                                    stage_name = %ctx.stage_name,
+                                                                    journal_error = %e,
+                                                                    "Failed to append backpressure activity pulse"
+                                                                ),
+                                                            }
+                                                        }
+                                                        tokio::time::sleep(delay).await;
+                                                    }
+                                                } else {
+                                                    let flow_context = FlowContext {
+                                                        flow_name: ctx.flow_name.clone(),
+                                                        flow_id: ctx.flow_id.to_string(),
+                                                        stage_name: ctx.stage_name.clone(),
+                                                        stage_id: self.stage_id.clone(),
+                                                        stage_type: StageType::Join,
+                                                    };
+
+                                                    let enriched_error = error_event
+                                                        .with_flow_context(flow_context)
+                                                        .with_runtime_context(
+                                                            ctx.instrumentation
+                                                                .snapshot_with_control(),
+                                                        );
+
+                                                    let written = self
+                                                        .data_journal
+                                                        .append(enriched_error, None)
+                                                        .await?;
+                                                    crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
+                                                        &written,
+                                                        &self.system_journal,
+                                                    )
+                                                    .await;
                                                 }
-                                                let written = self
-                                                    .data_journal
-                                                    .append(error_event, None)
-                                                    .await?;
-                                                crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
-                                                    &written,
-                                                    &self.system_journal,
-                                                )
-                                                .await;
+                                            }
+
+                                            // Backpressure ack: stream input consumed by join handler.
+                                            if ctx.pending_outputs.is_empty() {
+                                                if let Some(reader) =
+                                                    ctx.backpressure_readers.get(&source_id)
+                                                {
+                                                    reader.ack_consumed(1);
+                                                }
                                             }
 
                                             directive = Ok(EventLoopDirective::Continue);
@@ -1048,6 +1566,7 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                 format!("Stream subscription error: {}", e),
                             )));
                         }
+                        }
                     }
                 } else {
                     // No subscription - wait briefly
@@ -1078,11 +1597,216 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                 let mut stream_subscription = ctx.stream_subscription.take();
                 let mut stream_contract_state = std::mem::take(&mut ctx.stream_contract_state);
 
+                // Flush any pending stage outputs blocked on downstream credits.
+                let pending_upstream = ctx.pending_ack_upstream;
+                let mut blocked_on_backpressure = false;
+                while let Some(pending) = ctx.pending_outputs.pop_front() {
+                    if pending.is_data() {
+                        // Debug-only: emit activity pulses even when bypass is enabled, so
+                        // operators can see what *would* have blocked (FLOWIP-086k).
+                        if crate::backpressure::BackpressureWriter::is_bypass_enabled() {
+                            if let Some((min_credit, limiting)) =
+                                ctx.backpressure_writer.min_downstream_credit_detail()
+                            {
+                                if min_credit < 1 {
+                                    ctx.backpressure_pulse.record_delay(
+                                        std::time::Duration::ZERO,
+                                        Some(min_credit),
+                                        Some(limiting),
+                                    );
+                                    if let Some(pulse) = ctx.backpressure_pulse.maybe_emit() {
+                                        let flow_context = FlowContext {
+                                            flow_name: ctx.flow_name.clone(),
+                                            flow_id: ctx.flow_id.to_string(),
+                                            stage_name: ctx.stage_name.clone(),
+                                            stage_id: self.stage_id.clone(),
+                                            stage_type: StageType::Join,
+                                        };
+
+                                        let event = ChainEventFactory::observability_event(
+                                            WriterId::from(self.stage_id),
+                                            ObservabilityPayload::Middleware(
+                                                MiddlewareLifecycle::Backpressure(pulse),
+                                            ),
+                                        )
+                                        .with_flow_context(flow_context)
+                                        .with_runtime_context(
+                                            ctx.instrumentation.snapshot_with_control(),
+                                        );
+
+                                        match self.data_journal.append(event, None).await {
+                                            Ok(written) => {
+                                                crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
+                                                    &written,
+                                                    &self.system_journal,
+                                                )
+                                                .await;
+                                            }
+                                            Err(e) => tracing::warn!(
+                                                stage_name = %ctx.stage_name,
+                                                journal_error = %e,
+                                                "Failed to append backpressure activity pulse"
+                                            ),
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        let Some(reservation) = ctx.backpressure_writer.reserve(1) else {
+                            ctx.pending_outputs.push_front(pending);
+                            let delay = ctx.backpressure_backoff.next_delay();
+                            ctx.backpressure_writer.record_wait(delay);
+
+                            if let Some((min_credit, limiting)) =
+                                ctx.backpressure_writer.min_downstream_credit_detail()
+                            {
+                                ctx.backpressure_pulse.record_delay(
+                                    delay,
+                                    Some(min_credit),
+                                    Some(limiting),
+                                );
+                            } else {
+                                ctx.backpressure_pulse.record_delay(delay, None, None);
+                            }
+                            if let Some(pulse) = ctx.backpressure_pulse.maybe_emit() {
+                                let flow_context = FlowContext {
+                                    flow_name: ctx.flow_name.clone(),
+                                    flow_id: ctx.flow_id.to_string(),
+                                    stage_name: ctx.stage_name.clone(),
+                                    stage_id: self.stage_id.clone(),
+                                    stage_type: StageType::Join,
+                                };
+
+                                let event = ChainEventFactory::observability_event(
+                                    WriterId::from(self.stage_id),
+                                    ObservabilityPayload::Middleware(
+                                        MiddlewareLifecycle::Backpressure(pulse),
+                                    ),
+                                )
+                                .with_flow_context(flow_context)
+                                .with_runtime_context(
+                                    ctx.instrumentation.snapshot_with_control(),
+                                );
+
+                                match self.data_journal.append(event, None).await {
+                                    Ok(written) => {
+                                        crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
+                                            &written,
+                                            &self.system_journal,
+                                        )
+                                        .await;
+                                    }
+                                    Err(e) => tracing::warn!(
+                                        stage_name = %ctx.stage_name,
+                                        journal_error = %e,
+                                        "Failed to append backpressure activity pulse"
+                                    ),
+                                }
+                            }
+
+                            tokio::time::sleep(delay).await;
+                            blocked_on_backpressure = true;
+                            break;
+                        };
+
+                        let flow_context = FlowContext {
+                            flow_name: ctx.flow_name.clone(),
+                            flow_id: ctx.flow_id.to_string(),
+                            stage_name: ctx.stage_name.clone(),
+                            stage_id: self.stage_id.clone(),
+                            stage_type: StageType::Join,
+                        };
+
+                        let enriched = pending
+                            .with_flow_context(flow_context)
+                            .with_runtime_context(ctx.instrumentation.snapshot_with_control());
+
+                        if enriched.is_data() {
+                            ctx.instrumentation.record_output_event(&enriched);
+
+                            match pending_upstream {
+                                Some(upstream) if upstream == ctx.reference_stage_id => {
+                                    if let Some(sub) = ref_subscription.as_mut() {
+                                        sub.track_output_event();
+                                    }
+                                }
+                                Some(_) => {
+                                    if let Some(sub) = stream_subscription.as_mut() {
+                                        sub.track_output_event();
+                                    }
+                                }
+                                None => {
+                                    if let Some(sub) = ref_subscription.as_mut() {
+                                        sub.track_output_event();
+                                    }
+                                    if let Some(sub) = stream_subscription.as_mut() {
+                                        sub.track_output_event();
+                                    }
+                                }
+                            }
+                        }
+
+                        let written = self.data_journal.append(enriched, None).await?;
+                        reservation.commit(1);
+                        ctx.backpressure_backoff.reset();
+                        crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
+                            &written,
+                            &self.system_journal,
+                        )
+                        .await;
+                    } else {
+                        let flow_context = FlowContext {
+                            flow_name: ctx.flow_name.clone(),
+                            flow_id: ctx.flow_id.to_string(),
+                            stage_name: ctx.stage_name.clone(),
+                            stage_id: self.stage_id.clone(),
+                            stage_type: StageType::Join,
+                        };
+
+                        let enriched = pending
+                            .with_flow_context(flow_context)
+                            .with_runtime_context(ctx.instrumentation.snapshot_with_control());
+
+                        let written = self.data_journal.append(enriched, None).await?;
+                        crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
+                            &written,
+                            &self.system_journal,
+                        )
+                        .await;
+                    }
+                }
+
                 let mut directive: Result<
                     EventLoopDirective<Self::Event>,
                     Box<dyn std::error::Error + Send + Sync>,
                 > = Ok(EventLoopDirective::Continue);
                 let mut should_drain = true;
+
+                if blocked_on_backpressure {
+                    ctx.reference_contract_state = ref_contract_state;
+                    ctx.stream_contract_state = stream_contract_state;
+                    ctx.reference_subscription = ref_subscription;
+                    ctx.stream_subscription = stream_subscription;
+                    return Ok(EventLoopDirective::Continue);
+                }
+
+                if let Some(upstream) = ctx.pending_ack_upstream.take() {
+                    if let Some(reader) = ctx.backpressure_readers.get(&upstream) {
+                        reader.ack_consumed(1);
+                    }
+                }
+
+                if ctx.pending_outputs.is_empty()
+                    && matches!(ctx.pending_transition, Some(PendingTransition::DrainComplete))
+                {
+                    ctx.pending_transition = None;
+                    ctx.reference_contract_state = ref_contract_state;
+                    ctx.stream_contract_state = stream_contract_state;
+                    ctx.reference_subscription = ref_subscription;
+                    ctx.stream_subscription = stream_subscription;
+                    return Ok(EventLoopDirective::Transition(JoinEvent::DrainComplete));
+                }
 
                 // Drain reference subscription
                 if let Some(ref mut subscription) = ref_subscription {
@@ -1143,27 +1867,27 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                     .events_processed_total
                                     .fetch_add(1, Ordering::Relaxed);
 
-                                match result {
-                                    Ok(results) => {
-                                        ctx.instrumentation
-                                            .events_accumulated_total
-                                            .fetch_add(1, Ordering::Relaxed);
-                                        for event in results {
-                                            // FLOWIP-080o-part-2: Only count data events for writer_seq.
-                                            // Lifecycle events (middleware metrics, etc.) are observability
-                                            // overhead and should not participate in transport contracts.
-                                            if event.is_data() {
-                                                ctx.instrumentation.record_output_event(&event);
-                                                // Track output for contract verification
-                                                subscription.track_output_event();
+                                    match result {
+                                        Ok(results) => {
+                                            ctx.instrumentation
+                                                .events_accumulated_total
+                                                .fetch_add(1, Ordering::Relaxed);
+                                        let upstream_stage =
+                                            subscription.last_delivered_upstream_stage();
+
+                                        if results.is_empty() {
+                                            if let Some(upstream) = upstream_stage {
+                                                if let Some(reader) =
+                                                    ctx.backpressure_readers.get(&upstream)
+                                                {
+                                                    reader.ack_consumed(1);
+                                                }
                                             }
-                                            let written =
-                                                self.data_journal.append(event, None).await?;
-                                            crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
-                                                &written,
-                                                &self.system_journal,
-                                            )
-                                            .await;
+                                        } else {
+                                            ctx.pending_outputs.extend(results);
+                                            if let Some(upstream) = upstream_stage {
+                                                ctx.pending_ack_upstream = Some(upstream);
+                                            }
                                         }
                                     }
                                     Err(err) => {
@@ -1306,22 +2030,22 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
 
                                 match result {
                                     Ok(events) => {
-                                        for event in events {
-                                            // FLOWIP-080o-part-2: Only count data events for writer_seq.
-                                            // Lifecycle events (middleware metrics, etc.) are observability
-                                            // overhead and should not participate in transport contracts.
-                                            if event.is_data() {
-                                                ctx.instrumentation.record_output_event(&event);
-                                                // Track output for contract verification
-                                                subscription.track_output_event();
+                                        let upstream_stage =
+                                            subscription.last_delivered_upstream_stage();
+
+                                        if events.is_empty() {
+                                            if let Some(upstream) = upstream_stage {
+                                                if let Some(reader) =
+                                                    ctx.backpressure_readers.get(&upstream)
+                                                {
+                                                    reader.ack_consumed(1);
+                                                }
                                             }
-                                            let written =
-                                                self.data_journal.append(event, None).await?;
-                                            crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
-                                                &written,
-                                                &self.system_journal,
-                                            )
-                                            .await;
+                                        } else {
+                                            ctx.pending_outputs.extend(events);
+                                            if let Some(upstream) = upstream_stage {
+                                                ctx.pending_ack_upstream = Some(upstream);
+                                            }
                                         }
                                     }
                                     Err(err) => {
@@ -1355,6 +2079,9 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                             _ => false,
                                         };
 
+                                        let upstream_stage =
+                                            subscription.last_delivered_upstream_stage();
+
                                         if route_to_error_journal {
                                             if error_event.is_data() {
                                                 ctx.instrumentation
@@ -1370,21 +2097,20 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                                         e
                                                     )
                                                 })?;
-                                        } else {
-                                            if error_event.is_data() {
-                                                ctx.instrumentation
-                                                    .record_output_event(&error_event);
-                                                subscription.track_output_event();
+
+                                            // Backpressure ack: upstream input consumed.
+                                            if let Some(upstream) = upstream_stage {
+                                                if let Some(reader) =
+                                                    ctx.backpressure_readers.get(&upstream)
+                                                {
+                                                    reader.ack_consumed(1);
+                                                }
                                             }
-                                            let written = self
-                                                .data_journal
-                                                .append(error_event, None)
-                                                .await?;
-                                            crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
-                                                &written,
-                                                &self.system_journal,
-                                            )
-                                            .await;
+                                        } else {
+                                            ctx.pending_outputs.push_back(error_event);
+                                            if let Some(upstream) = upstream_stage {
+                                                ctx.pending_ack_upstream = Some(upstream);
+                                            }
                                         }
                                     }
                                 }
@@ -1468,31 +2194,9 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                     .map_err(|err| obzenflow_fsm::FsmError::HandlerError(err.to_string()))?;
                 ctx.handler_state = final_state;
 
-                // Write any final events
-                for event in events {
-                    // FLOWIP-080o-part-2: Only count data events for writer_seq.
-                    // Lifecycle events (middleware metrics, etc.) are observability
-                    // overhead and should not participate in transport contracts.
-                    if event.is_data() {
-                        ctx.instrumentation.record_output_event(&event);
-                        // Track output for contract verification - need to check which subscription
-                        // Since this is during drain, we need to track on both subscriptions
-                        if let Some(ref mut sub) = ctx.reference_subscription {
-                            sub.track_output_event();
-                        }
-                        if let Some(ref mut sub) = ctx.stream_subscription {
-                            sub.track_output_event();
-                        }
-                    }
-                    let written = self.data_journal.append(event, None).await?;
-                    crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
-                        &written,
-                        &self.system_journal,
-                    )
-                    .await;
-                }
-
-                Ok(EventLoopDirective::Transition(JoinEvent::DrainComplete))
+                ctx.pending_outputs.extend(events);
+                ctx.pending_transition = Some(PendingTransition::DrainComplete);
+                Ok(EventLoopDirective::Continue)
             }
 
             JoinState::Drained | JoinState::Failed(_) => Ok(EventLoopDirective::Terminate),

@@ -14,18 +14,23 @@ use obzenflow_core::StageId;
 use obzenflow_core::{ChainEvent, EventId, FlowId, WriterId};
 use obzenflow_fsm::{EventVariant, FsmAction, FsmContext, StateVariant};
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, VecDeque};
 use std::marker::PhantomData;
 use std::sync::Arc;
+use std::time::Duration;
 
+use crate::backpressure::{BackpressureReader, BackpressureWriter};
 use crate::messaging::upstream_subscription::{ContractConfig, ReaderProgress};
 use crate::messaging::UpstreamSubscription;
 use crate::metrics::instrumentation::{snapshot_stage_metrics, StageInstrumentation};
 use crate::metrics::tail_read;
+use crate::stages::common::backpressure_activity_pulse::BackpressureActivityPulse;
 use crate::stages::common::handlers::JoinHandler;
 use crate::stages::common::stage_handle::{
     FORCE_SHUTDOWN_MESSAGE, STOP_REASON_TIMEOUT, STOP_REASON_USER_STOP,
 };
 use crate::stages::resources_builder::BoundSubscriptionFactory;
+use crate::supervised_base::idle_backoff::IdleBackoff;
 
 // ============================================================================
 // FSM States
@@ -255,6 +260,11 @@ impl<H> std::fmt::Debug for JoinAction<H> {
 // FSM Context
 // ============================================================================
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PendingTransition {
+    DrainComplete,
+}
+
 /// Context for join handlers - contains everything actions need
 pub struct JoinContext<H: JoinHandler> {
     /// The handler instance (immutable, wrapped in Arc like StatefulContext)
@@ -322,6 +332,27 @@ pub struct JoinContext<H: JoinHandler> {
     /// Counter of reference-side events processed since the last heartbeat
     /// (used during Hydrating for observability snapshots).
     pub events_since_last_heartbeat: u64,
+
+    /// Backpressure writer handle for this stage's journal (FLOWIP-086k).
+    pub backpressure_writer: BackpressureWriter,
+
+    /// Backpressure readers keyed by upstream stage ID (FLOWIP-086k).
+    pub backpressure_readers: HashMap<StageId, BackpressureReader>,
+
+    /// Pending data outputs blocked on downstream credits (Phase 1: bounded to one input).
+    pub(crate) pending_outputs: VecDeque<ChainEvent>,
+
+    /// Pending state transition once blocked outputs are fully written.
+    pub(crate) pending_transition: Option<PendingTransition>,
+
+    /// Upstream stage awaiting a consumption ack once pending outputs are drained.
+    pub(crate) pending_ack_upstream: Option<StageId>,
+
+    /// Backpressure activity pulse accumulator (Hz UI animation driver).
+    pub(crate) backpressure_pulse: BackpressureActivityPulse,
+
+    /// Backoff for blocked output writes (1ms → … → 50ms cap).
+    pub(crate) backpressure_backoff: IdleBackoff,
 }
 
 impl<H: JoinHandler> JoinContext<H> {
@@ -341,6 +372,8 @@ impl<H: JoinHandler> JoinContext<H> {
         instrumentation: Arc<StageInstrumentation>,
         reference_subscription_factory: BoundSubscriptionFactory,
         stream_subscription_factory: BoundSubscriptionFactory,
+        backpressure_writer: BackpressureWriter,
+        backpressure_readers: HashMap<StageId, BackpressureReader>,
     ) -> Self {
         let handler_state = handler.initial_state();
         Self {
@@ -366,6 +399,16 @@ impl<H: JoinHandler> JoinContext<H> {
             reference_subscription_factory,
             stream_subscription_factory,
             events_since_last_heartbeat: 0,
+            backpressure_writer,
+            backpressure_readers,
+            pending_outputs: VecDeque::new(),
+            pending_transition: None,
+            pending_ack_upstream: None,
+            backpressure_pulse: BackpressureActivityPulse::new(),
+            backpressure_backoff: IdleBackoff::exponential_with_cap(
+                Duration::from_millis(1),
+                Duration::from_millis(50),
+            ),
         }
     }
 }

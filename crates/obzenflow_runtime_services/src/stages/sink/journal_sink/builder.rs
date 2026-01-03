@@ -85,6 +85,8 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
             control_strategy,
             instrumentation,
             self.resources.upstream_subscription_factory,
+            self.resources.backpressure_writer.clone(),
+            self.resources.backpressure_readers.clone(),
         );
 
         // Create supervisor (private - not exposed)

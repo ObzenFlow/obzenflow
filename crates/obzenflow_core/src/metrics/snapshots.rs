@@ -126,6 +126,30 @@ pub struct AppMetricsSnapshot {
     /// Rate limiter bucket capacity by stage (FLOWIP-059a-3 Issue 3).
     pub rate_limiter_bucket_capacity: HashMap<StageId, f64>,
 
+    /// Backpressure window per edge (upstream, downstream) (FLOWIP-086k).
+    pub backpressure_window: HashMap<(StageId, StageId), u64>,
+
+    /// Backpressure in-flight per edge (upstream, downstream) (FLOWIP-086k).
+    pub backpressure_in_flight: HashMap<(StageId, StageId), u64>,
+
+    /// Backpressure credits per edge (upstream, downstream) (FLOWIP-086k).
+    pub backpressure_credits: HashMap<(StageId, StageId), u64>,
+
+    /// Backpressure blocked state by stage (0/1; blocked on any downstream edge) (FLOWIP-086k).
+    pub backpressure_blocked: HashMap<StageId, f64>,
+
+    /// Whether the global backpressure bypass is enabled (debug-only) (FLOWIP-086k).
+    pub backpressure_bypass_enabled: bool,
+
+    /// Minimum downstream reader sequence observed by stage (FLOWIP-086k).
+    pub backpressure_min_reader_seq: HashMap<StageId, u64>,
+
+    /// Writer sequence observed by stage (FLOWIP-086k).
+    pub backpressure_writer_seq: HashMap<StageId, u64>,
+
+    /// Total time spent blocked waiting for downstream credits by stage (seconds; monotonic) (FLOWIP-086k).
+    pub backpressure_wait_seconds_total: HashMap<StageId, f64>,
+
     /// Contract verification metrics per edge (upstream/downstream)
     pub contract_metrics: ContractMetricsSnapshot,
 
@@ -380,6 +404,14 @@ impl Default for AppMetricsSnapshot {
             rate_limiter_delay_seconds_total: HashMap::new(),
             rate_limiter_bucket_tokens: HashMap::new(),
             rate_limiter_bucket_capacity: HashMap::new(),
+            backpressure_window: HashMap::new(),
+            backpressure_in_flight: HashMap::new(),
+            backpressure_credits: HashMap::new(),
+            backpressure_blocked: HashMap::new(),
+            backpressure_bypass_enabled: false,
+            backpressure_min_reader_seq: HashMap::new(),
+            backpressure_writer_seq: HashMap::new(),
+            backpressure_wait_seconds_total: HashMap::new(),
             contract_metrics: ContractMetricsSnapshot::default(),
             flow_metrics: None,
             stage_metadata: HashMap::new(),

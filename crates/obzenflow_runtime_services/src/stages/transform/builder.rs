@@ -93,6 +93,8 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Supe
             control_strategy,
             instrumentation,
             self.resources.upstream_subscription_factory,
+            self.resources.backpressure_writer.clone(),
+            self.resources.backpressure_readers.clone(),
         );
 
         // Create supervisor (private - not exposed)
@@ -215,6 +217,8 @@ impl<H: AsyncTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
             control_strategy,
             instrumentation,
             self.resources.upstream_subscription_factory,
+            self.resources.backpressure_writer.clone(),
+            self.resources.backpressure_readers.clone(),
         );
 
         // Create supervisor (private - not exposed)

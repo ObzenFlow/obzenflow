@@ -4,6 +4,7 @@
 //! and execution management.
 
 // Core modules
+pub mod backpressure;
 pub mod contracts;
 pub mod errors;
 pub mod id_conversions;
