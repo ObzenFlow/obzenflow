@@ -8,19 +8,18 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use obzenflow_core::{
-    event::chain_event::{ChainEvent, ChainEventFactory},
+    event::chain_event::ChainEvent,
     event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload},
-    id::StageId,
-    TypedPayload, WriterId,
+    TypedPayload,
 };
 use obzenflow_dsl_infra::{flow, sink, source, stateful};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
-use obzenflow_runtime_services::stages::common::handlers::{FiniteSourceHandler, SinkHandler};
+use obzenflow_runtime_services::stages::common::handlers::SinkHandler;
+use obzenflow_runtime_services::stages::source::FiniteSourceTyped;
 use obzenflow_runtime_services::stages::stateful::strategies::accumulators::TopNTyped;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 
 /// Domain type for game score events (FLOWIP-082a)
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -34,75 +33,6 @@ struct GameScore {
 impl TypedPayload for GameScore {
     const EVENT_TYPE: &'static str = "game.score";
     const SCHEMA_VERSION: u32 = 1;
-}
-
-/// Source that generates player score events
-#[derive(Clone, Debug)]
-struct GameScoreSource {
-    events: Vec<(String, f64, String)>, // (player, score, game_mode)
-    current_index: usize,
-    writer_id: WriterId,
-}
-
-impl GameScoreSource {
-    fn new() -> Self {
-        // Simulate player scores from various game modes
-        let events = vec![
-            ("Alice".to_string(), 1500.0, "Battle".to_string()),
-            ("Bob".to_string(), 2200.0, "Battle".to_string()),
-            ("Charlie".to_string(), 1800.0, "Racing".to_string()),
-            ("David".to_string(), 900.0, "Battle".to_string()),
-            ("Eve".to_string(), 3100.0, "Racing".to_string()),
-            ("Frank".to_string(), 2500.0, "Battle".to_string()),
-            ("Grace".to_string(), 1200.0, "Racing".to_string()),
-            ("Henry".to_string(), 2800.0, "Battle".to_string()),
-            ("Iris".to_string(), 1900.0, "Racing".to_string()),
-            ("Jack".to_string(), 3500.0, "Battle".to_string()),
-            // Some players play multiple times (score updates)
-            ("Alice".to_string(), 2100.0, "Battle".to_string()), // Alice improves!
-            ("Bob".to_string(), 1900.0, "Racing".to_string()),   // Bob tries racing
-            ("Charlie".to_string(), 2400.0, "Racing".to_string()), // Charlie improves!
-        ];
-
-        Self {
-            events,
-            current_index: 0,
-            writer_id: WriterId::from(StageId::new()),
-        }
-    }
-}
-
-impl FiniteSourceHandler for GameScoreSource {
-    fn next(
-        &mut self,
-    ) -> Result<
-        Option<Vec<ChainEvent>>,
-        obzenflow_runtime_services::stages::common::handlers::source::traits::SourceError,
-    > {
-        if self.current_index >= self.events.len() {
-            return Ok(None);
-        }
-
-        let (player, score, game_mode) = &self.events[self.current_index];
-        self.current_index += 1;
-
-        println!(
-            "📊 Score Update: {} scored {:.0} points in {} mode",
-            player, score, game_mode
-        );
-
-        // ✨ FLOWIP-082a: Emit typed event using EVENT_TYPE constant
-        Ok(Some(vec![ChainEventFactory::data_event(
-            self.writer_id.clone(),
-            GameScore::EVENT_TYPE,
-            json!({
-                "player": player,
-                "score": score,
-                "game_mode": game_mode,
-                "timestamp": self.current_index, // Simulated timestamp
-            }),
-        )]))
-    }
 }
 
 /// Sink that displays the leaderboard
@@ -175,14 +105,47 @@ async fn main() -> Result<()> {
 
     println!("Starting game score stream...\n");
 
-    FlowApplication::run(async {
+    // Simulate player scores from various game modes
+    let score_events: Vec<(String, f64, String)> = vec![
+        ("Alice".to_string(), 1500.0, "Battle".to_string()),
+        ("Bob".to_string(), 2200.0, "Battle".to_string()),
+        ("Charlie".to_string(), 1800.0, "Racing".to_string()),
+        ("David".to_string(), 900.0, "Battle".to_string()),
+        ("Eve".to_string(), 3100.0, "Racing".to_string()),
+        ("Frank".to_string(), 2500.0, "Battle".to_string()),
+        ("Grace".to_string(), 1200.0, "Racing".to_string()),
+        ("Henry".to_string(), 2800.0, "Battle".to_string()),
+        ("Iris".to_string(), 1900.0, "Racing".to_string()),
+        ("Jack".to_string(), 3500.0, "Battle".to_string()),
+        // Some players play multiple times (score updates)
+        ("Alice".to_string(), 2100.0, "Battle".to_string()), // Alice improves!
+        ("Bob".to_string(), 1900.0, "Racing".to_string()),   // Bob tries racing
+        ("Charlie".to_string(), 2400.0, "Racing".to_string()), // Charlie improves!
+    ];
+
+    FlowApplication::run(async move {
         flow! {
             name: "leaderboard_demo",
             journals: disk_journals(std::path::PathBuf::from("target/leaderboard-logs")),
             middleware: [],
 
             stages: {
-                scores = source!("scores" => GameScoreSource::new());
+                // FLOWIP-081: Typed finite sources (no WriterId/ChainEvent boilerplate)
+                scores = source!("scores" => FiniteSourceTyped::from_item_fn(move |index| {
+                    let (player, score, game_mode) = score_events.get(index)?;
+
+                    println!(
+                        "📊 Score Update: {} scored {:.0} points in {} mode",
+                        player, score, game_mode
+                    );
+
+                    Some(GameScore {
+                        player: player.clone(),
+                        score: *score,
+                        game_mode: game_mode.clone(),
+                        timestamp: index + 1, // Simulated timestamp
+                    })
+                }));
 
                 // FLOWIP-080j: TopNTyped accumulator tracking top 5 players
                 // Note: This takes the LATEST score for each player (key = player name)

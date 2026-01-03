@@ -18,13 +18,13 @@ async fn build_flow() -> Result<FlowHandle> {
         middleware: [],
 
         stages: {
-            categories = source!("categories" => CategorySource::new());
-            products = source!("products" => ProductSource::new());
-            skus = source!("skus" => SKUSource::new());
-            promotions = source!("promotions" => PromotionSource::new());
-            payment_methods = source!("payment_methods" => PaymentSource::new());
+            categories = source!("categories" => categories_source());
+            products = source!("products" => products_source());
+            skus = source!("skus" => skus_source());
+            promotions = source!("promotions" => promotions_source());
+            payment_methods = source!("payment_methods" => payment_methods_source());
 
-            orders = source!("orders" => OrderSource::new());
+            orders = source!("orders" => orders_source());
 
             sku_products = join!("sku_products" =>
                 with_ref!(products,

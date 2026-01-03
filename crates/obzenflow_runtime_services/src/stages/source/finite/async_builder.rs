@@ -10,6 +10,7 @@ use crate::supervised_base::{
     BuilderError, ChannelBuilder, HandleBuilder, HandlerSupervisedExt, SupervisorBuilder,
     SupervisorTaskBuilder,
 };
+use obzenflow_core::WriterId;
 
 use super::async_supervisor::AsyncFiniteSourceSupervisor;
 use super::config::FiniteSourceConfig;
@@ -83,9 +84,13 @@ impl<H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
             self.resources.backpressure_writer.clone(),
         );
 
+        // Ensure the handler (and any wrappers) receive the stage writer id before running (FLOWIP-081).
+        let mut handler = self.handler;
+        handler.bind_writer_id(WriterId::from(self.config.stage_id));
+
         let supervisor = AsyncFiniteSourceSupervisor {
             name: format!("async_finite_source_{}", self.config.stage_name),
-            handler: self.handler,
+            handler,
             context: Arc::new(context.clone()),
             data_journal: self.resources.data_journal.clone(),
             system_journal: self.resources.system_journal.clone(),

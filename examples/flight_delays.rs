@@ -32,9 +32,10 @@ use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
 use obzenflow_runtime_services::stages::common::handlers::{
-    FiniteSourceHandler, JoinHandler, SinkHandler, StatefulHandler, TransformHandler,
+    JoinHandler, SinkHandler, StatefulHandler, TransformHandler,
 };
 use obzenflow_runtime_services::stages::join::InnerJoinBuilder;
+use obzenflow_runtime_services::stages::source::FiniteSourceTyped;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
@@ -111,186 +112,8 @@ impl TypedPayload for CarrierStatistics {
 }
 
 // ============================================================================
-// Source: Carrier Reference Data (FLOWIP-080l)
+// Sources (FLOWIP-081: Typed Source Helpers)
 // ============================================================================
-
-/// Source that provides carrier reference data
-#[derive(Clone, Debug)]
-struct CarrierDataSource {
-    carriers_emitted: usize,
-}
-
-impl CarrierDataSource {
-    fn new() -> Self {
-        Self {
-            carriers_emitted: 0,
-        }
-    }
-}
-
-impl FiniteSourceHandler for CarrierDataSource {
-    fn next(
-        &mut self,
-    ) -> Result<
-        Option<Vec<ChainEvent>>,
-        obzenflow_runtime_services::stages::common::handlers::source::traits::SourceError,
-    > {
-        // Static carrier reference data
-        let carriers = vec![
-            ("AA", "American Airlines", "USA", 950),
-            ("UA", "United Airlines", "USA", 850),
-            ("DL", "Delta Air Lines", "USA", 900),
-            ("WN", "Southwest Airlines", "USA", 750),
-            ("BA", "British Airways", "UK", 290),
-            ("LH", "Lufthansa", "Germany", 340),
-            ("AF", "Air France", "France", 280),
-        ];
-
-        if self.carriers_emitted < carriers.len() {
-            let (code, name, country, fleet) = carriers[self.carriers_emitted];
-            self.carriers_emitted += 1;
-
-            let carrier = CarrierDetails {
-                carrier_code: code.to_string(),
-                carrier_name: name.to_string(),
-                country: country.to_string(),
-                fleet_size: fleet,
-            };
-
-            Ok(Some(vec![ChainEventFactory::data_event(
-                WriterId::from(StageId::new()),
-                &CarrierDetails::versioned_event_type(),
-                serde_json::to_value(&carrier).unwrap(),
-            )]))
-        } else {
-            Ok(None)
-        }
-    }
-}
-
-// ============================================================================
-// Source: Flight Data
-// ============================================================================
-
-/// Source that generates flight data
-#[derive(Clone, Debug)]
-struct FlightDataSource {
-    flights: Vec<(String, String, String, String, u32, u32)>,
-    current_index: usize,
-    writer_id: WriterId,
-}
-
-impl FlightDataSource {
-    fn new() -> Self {
-        let flights = vec![
-            (
-                "AA".to_string(),
-                "2023-12-01".to_string(),
-                "LAX".to_string(),
-                "JFK".to_string(),
-                120,
-                15,
-            ), // American Airlines, 15 min delay
-            (
-                "DL".to_string(),
-                "2023-12-01".to_string(),
-                "ATL".to_string(),
-                "ORD".to_string(),
-                90,
-                0,
-            ), // Delta, on time
-            (
-                "UA".to_string(),
-                "2023-12-01".to_string(),
-                "SFO".to_string(),
-                "LAX".to_string(),
-                60,
-                45,
-            ), // United, 45 min delay
-            (
-                "AA".to_string(),
-                "2023-12-01".to_string(),
-                "DFW".to_string(),
-                "MIA".to_string(),
-                180,
-                5,
-            ), // American Airlines, 5 min delay
-            (
-                "WN".to_string(),
-                "2023-12-01".to_string(),
-                "LAS".to_string(),
-                "PHX".to_string(),
-                75,
-                120,
-            ), // Southwest, 2 hour delay
-            (
-                "DL".to_string(),
-                "2023-12-01".to_string(),
-                "SEA".to_string(),
-                "DEN".to_string(),
-                110,
-                8,
-            ), // Delta, 8 min delay
-            (
-                "UA".to_string(),
-                "2023-12-01".to_string(),
-                "EWR".to_string(),
-                "SFO".to_string(),
-                300,
-                0,
-            ), // United, on time
-            (
-                "AA".to_string(),
-                "2023-12-01".to_string(),
-                "ORD".to_string(),
-                "LAX".to_string(),
-                240,
-                25,
-            ), // American Airlines, 25 min delay
-        ];
-
-        Self {
-            flights,
-            current_index: 0,
-            writer_id: WriterId::from(StageId::new()),
-        }
-    }
-}
-
-impl FiniteSourceHandler for FlightDataSource {
-    fn next(
-        &mut self,
-    ) -> Result<
-        Option<Vec<ChainEvent>>,
-        obzenflow_runtime_services::stages::common::handlers::source::traits::SourceError,
-    > {
-        if self.current_index < self.flights.len() {
-            let (carrier, date, origin, dest, duration, delay) = &self.flights[self.current_index];
-            self.current_index += 1;
-
-            // ✨ FLOWIP-082a: Create typed event
-            let flight = FlightRecord {
-                carrier: carrier.clone(),
-                date: date.clone(),
-                origin: origin.clone(),
-                destination: dest.clone(),
-                scheduled_duration: *duration,
-                delay_minutes: *delay,
-                flight_number: format!("{}{}", carrier, 1000 + self.current_index * 100),
-                delay_category: None,
-            };
-
-            // Emit event with TypedPayload's EVENT_TYPE
-            Ok(Some(vec![ChainEventFactory::data_event(
-                self.writer_id.clone(),
-                &FlightRecord::versioned_event_type(),
-                serde_json::to_value(&flight).unwrap(),
-            )]))
-        } else {
-            Ok(None)
-        }
-    }
-}
 
 // ============================================================================
 // Transform: Validator
@@ -562,6 +385,138 @@ async fn main() -> Result<()> {
 
     // Use FlowApplication for proper setup
     FlowApplication::run(async {
+        let carriers = vec![
+            CarrierDetails {
+                carrier_code: "AA".to_string(),
+                carrier_name: "American Airlines".to_string(),
+                country: "USA".to_string(),
+                fleet_size: 950,
+            },
+            CarrierDetails {
+                carrier_code: "UA".to_string(),
+                carrier_name: "United Airlines".to_string(),
+                country: "USA".to_string(),
+                fleet_size: 850,
+            },
+            CarrierDetails {
+                carrier_code: "DL".to_string(),
+                carrier_name: "Delta Air Lines".to_string(),
+                country: "USA".to_string(),
+                fleet_size: 900,
+            },
+            CarrierDetails {
+                carrier_code: "WN".to_string(),
+                carrier_name: "Southwest Airlines".to_string(),
+                country: "USA".to_string(),
+                fleet_size: 750,
+            },
+            CarrierDetails {
+                carrier_code: "BA".to_string(),
+                carrier_name: "British Airways".to_string(),
+                country: "UK".to_string(),
+                fleet_size: 290,
+            },
+            CarrierDetails {
+                carrier_code: "LH".to_string(),
+                carrier_name: "Lufthansa".to_string(),
+                country: "Germany".to_string(),
+                fleet_size: 340,
+            },
+            CarrierDetails {
+                carrier_code: "AF".to_string(),
+                carrier_name: "Air France".to_string(),
+                country: "France".to_string(),
+                fleet_size: 280,
+            },
+        ];
+
+        let flights_raw = vec![
+            (
+                "AA".to_string(),
+                "2023-12-01".to_string(),
+                "LAX".to_string(),
+                "JFK".to_string(),
+                120,
+                15,
+            ), // American Airlines, 15 min delay
+            (
+                "DL".to_string(),
+                "2023-12-01".to_string(),
+                "ATL".to_string(),
+                "ORD".to_string(),
+                90,
+                0,
+            ), // Delta, on time
+            (
+                "UA".to_string(),
+                "2023-12-01".to_string(),
+                "SFO".to_string(),
+                "LAX".to_string(),
+                60,
+                45,
+            ), // United, 45 min delay
+            (
+                "AA".to_string(),
+                "2023-12-01".to_string(),
+                "DFW".to_string(),
+                "MIA".to_string(),
+                180,
+                5,
+            ), // American Airlines, 5 min delay
+            (
+                "WN".to_string(),
+                "2023-12-01".to_string(),
+                "LAS".to_string(),
+                "PHX".to_string(),
+                75,
+                120,
+            ), // Southwest, 2 hour delay
+            (
+                "DL".to_string(),
+                "2023-12-01".to_string(),
+                "SEA".to_string(),
+                "DEN".to_string(),
+                110,
+                8,
+            ), // Delta, 8 min delay
+            (
+                "UA".to_string(),
+                "2023-12-01".to_string(),
+                "EWR".to_string(),
+                "SFO".to_string(),
+                300,
+                0,
+            ), // United, on time
+            (
+                "AA".to_string(),
+                "2023-12-01".to_string(),
+                "ORD".to_string(),
+                "LAX".to_string(),
+                240,
+                25,
+            ), // American Airlines, 25 min delay
+        ];
+
+        let flights: Vec<FlightRecord> = flights_raw
+            .into_iter()
+            .enumerate()
+            .map(
+                |(idx, (carrier, date, origin, destination, scheduled_duration, delay_minutes))| {
+                    let flight_number = format!("{}{}", carrier, 1000 + (idx + 1) * 100);
+                    FlightRecord {
+                        carrier,
+                        date,
+                        origin,
+                        destination,
+                        scheduled_duration,
+                        delay_minutes,
+                        flight_number,
+                        delay_category: None,
+                    }
+                },
+            )
+            .collect();
+
         flow! {
             name: "flight_delays",
             journals: disk_journals(std::path::PathBuf::from("target/flight-delays-logs")),
@@ -569,10 +524,10 @@ async fn main() -> Result<()> {
 
             stages: {
                 // Reference data source (FLOWIP-080l)
-                carriers = source!("carriers" => CarrierDataSource::new());
+                carriers = source!("carriers" => FiniteSourceTyped::from_iter(carriers));
 
                 // Stream data source
-                flights = source!("flights" => FlightDataSource::new());
+                flights = source!("flights" => FiniteSourceTyped::from_iter(flights));
 
                 // Processing stages
                 val = transform!("validator" => FlightValidator::new());

@@ -198,6 +198,11 @@ impl<H: AsyncFiniteSourceHandler> MiddlewareAsyncFiniteSource<H> {
 
 #[async_trait]
 impl<H: AsyncFiniteSourceHandler> AsyncFiniteSourceHandler for MiddlewareAsyncFiniteSource<H> {
+    fn bind_writer_id(&mut self, id: WriterId) {
+        self.writer_id = id;
+        self.inner.bind_writer_id(id);
+    }
+
     async fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
         let synthetic_event = ChainEventFactory::data_event(
             self.writer_id.clone(),
@@ -623,6 +628,11 @@ impl<H: FiniteSourceHandler> MiddlewareFiniteSource<H> {
 }
 
 impl<H: FiniteSourceHandler> FiniteSourceHandler for MiddlewareFiniteSource<H> {
+    fn bind_writer_id(&mut self, id: WriterId) {
+        self.writer_id = id;
+        self.inner.bind_writer_id(id);
+    }
+
     fn next(
         &mut self,
     ) -> Result<

@@ -24,14 +24,14 @@ use obzenflow_adapters::middleware::rate_limit;
 use obzenflow_core::{
     event::chain_event::{ChainEvent, ChainEventFactory},
     event::status::processing_status::ErrorKind,
-    id::StageId,
-    TypedPayload, WriterId,
+    TypedPayload,
 };
 use obzenflow_dsl_infra::{flow, sink, source, stateful, transform};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
-use obzenflow_runtime_services::stages::common::handlers::{FiniteSourceHandler, SinkHandler};
+use obzenflow_runtime_services::stages::common::handlers::SinkHandler;
+use obzenflow_runtime_services::stages::source::FiniteSourceTyped;
 // ✨ FLOWIP-080h: Import Map helper
 use obzenflow_runtime_services::stages::transform::Map;
 // ✨ FLOWIP-080j: Import ReduceTyped for type-safe accumulation
@@ -39,61 +39,6 @@ use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, Delivery
 use obzenflow_runtime_services::stages::stateful::strategies::accumulators::ReduceTyped;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-
-/// Source that generates 100k events
-#[derive(Clone, Debug)]
-struct HighVolumeSource {
-    count: usize,
-    writer_id: WriterId,
-    total_events: usize,
-}
-
-impl HighVolumeSource {
-    fn new(total_events: usize) -> Self {
-        Self {
-            count: 0,
-            writer_id: WriterId::from(StageId::new()),
-            total_events,
-        }
-    }
-}
-
-impl FiniteSourceHandler for HighVolumeSource {
-    fn next(
-        &mut self,
-    ) -> Result<
-        Option<Vec<ChainEvent>>,
-        obzenflow_runtime_services::stages::common::handlers::source::traits::SourceError,
-    > {
-        if self.count >= self.total_events {
-            println!("🏁 Source complete: Generated {} total events", self.count);
-            return Ok(None);
-        }
-
-        // Increment after we know we're emitting an event
-        let current_id = self.count;
-        self.count += 1;
-
-        // Log progress every 10k events for 100k demo
-        if self.count % 10_000 == 0 {
-            println!("📊 Generated {} events...", self.count);
-        }
-
-        // Every 100th event will simulate an error
-        let should_fail = current_id % 100 == 0;
-
-        // ✨ FLOWIP-082a: Emit typed event using EVENT_TYPE constant
-        Ok(Some(vec![ChainEventFactory::data_event(
-            self.writer_id.clone(),
-            &DataRequest::versioned_event_type(),
-            json!({
-                "id": current_id,
-                "should_fail": should_fail,
-                "batch": current_id / 100,  // Group into batches of 100
-            }),
-        )]))
-    }
-}
 
 // ============================================================================
 // FLOWIP-082a: Strongly-Typed Domain Events
@@ -314,7 +259,28 @@ fn main() -> Result<()> {
 
             stages: {
                 // Source generating 100k events
-                src = source!("high_volume_source" => HighVolumeSource::new(100_000));
+                src = source!("high_volume_source" =>
+                    FiniteSourceTyped::from_item_fn(move |index| {
+                        let total = 100_000usize;
+                        if index >= total {
+                            println!("🏁 Source complete: Generated {} total events", index);
+                            return None;
+                        }
+
+                        let current_id = index;
+                        let next_count = index + 1;
+
+                        if next_count % 10_000 == 0 {
+                            println!("📊 Generated {} events...", next_count);
+                        }
+
+                        Some(DataRequest {
+                            id: current_id,
+                            should_fail: current_id % 100 == 0,
+                            batch: current_id / 100,
+                        })
+                    })
+                );
 
                 // Error-prone transform (every 100th event fails)
                 // ✨ FLOWIP-080h: Using Map helper instead of ErrorProneTransform struct

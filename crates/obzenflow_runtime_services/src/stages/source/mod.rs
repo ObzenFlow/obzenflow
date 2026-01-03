@@ -7,3 +7,9 @@
 pub mod finite;
 pub mod infinite;
 pub mod strategies;
+pub mod typed;
+
+pub use typed::{
+    AsyncFiniteSourceTyped, FallibleAsyncFiniteSourceTyped, FallibleFiniteSourceTyped,
+    FiniteSourceTyped,
+};

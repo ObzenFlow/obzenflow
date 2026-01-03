@@ -9,19 +9,18 @@ use anyhow::Result;
 use async_trait::async_trait;
 use obzenflow_adapters::middleware::rate_limit;
 use obzenflow_core::{
-    event::chain_event::{ChainEvent, ChainEventFactory},
+    event::chain_event::ChainEvent,
     event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload},
-    id::StageId,
-    TypedPayload, WriterId,
+    TypedPayload,
 };
 use obzenflow_dsl_infra::{flow, sink, source, stateful};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
-use obzenflow_runtime_services::stages::common::handlers::{FiniteSourceHandler, SinkHandler};
+use obzenflow_runtime_services::stages::common::handlers::SinkHandler;
+use obzenflow_runtime_services::stages::source::FiniteSourceTyped;
 use obzenflow_runtime_services::stages::stateful::strategies::accumulators::TopNByTyped;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 
 // FLOWIP-082a: Strongly-typed event with schema version
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -39,208 +38,6 @@ struct OrderEvent {
 impl TypedPayload for OrderEvent {
     const EVENT_TYPE: &'static str = "ecommerce.order";
     const SCHEMA_VERSION: u32 = 1;
-}
-
-/// Source that generates e-commerce order events
-#[derive(Clone, Debug)]
-struct OrderStreamSource {
-    orders: Vec<(String, String, f64, u32, String)>, // (product_id, product_name, price, quantity, category)
-    current_index: usize,
-    writer_id: WriterId,
-}
-
-impl OrderStreamSource {
-    fn new() -> Self {
-        // Simulate a day of orders (some products appear multiple times)
-        let orders = vec![
-            (
-                "LAPTOP-001".to_string(),
-                "Gaming Laptop Pro".to_string(),
-                1299.99,
-                1,
-                "Electronics".to_string(),
-            ),
-            (
-                "PHONE-005".to_string(),
-                "Smartphone X".to_string(),
-                899.99,
-                2,
-                "Electronics".to_string(),
-            ),
-            (
-                "BOOK-101".to_string(),
-                "Rust Programming".to_string(),
-                45.99,
-                3,
-                "Books".to_string(),
-            ),
-            (
-                "LAPTOP-001".to_string(),
-                "Gaming Laptop Pro".to_string(),
-                1299.99,
-                2,
-                "Electronics".to_string(),
-            ), // Another laptop sale!
-            (
-                "CHAIR-020".to_string(),
-                "Ergonomic Office Chair".to_string(),
-                299.99,
-                1,
-                "Furniture".to_string(),
-            ),
-            (
-                "PHONE-005".to_string(),
-                "Smartphone X".to_string(),
-                899.99,
-                1,
-                "Electronics".to_string(),
-            ), // More phones
-            (
-                "MOUSE-015".to_string(),
-                "Wireless Mouse".to_string(),
-                29.99,
-                5,
-                "Electronics".to_string(),
-            ),
-            (
-                "LAPTOP-002".to_string(),
-                "Business Laptop".to_string(),
-                999.99,
-                1,
-                "Electronics".to_string(),
-            ),
-            (
-                "BOOK-101".to_string(),
-                "Rust Programming".to_string(),
-                45.99,
-                2,
-                "Books".to_string(),
-            ), // Book is popular!
-            (
-                "KEYBOARD-010".to_string(),
-                "Mechanical Keyboard".to_string(),
-                149.99,
-                3,
-                "Electronics".to_string(),
-            ),
-            (
-                "PHONE-005".to_string(),
-                "Smartphone X".to_string(),
-                899.99,
-                3,
-                "Electronics".to_string(),
-            ), // Phone bestseller
-            (
-                "DESK-030".to_string(),
-                "Standing Desk".to_string(),
-                599.99,
-                1,
-                "Furniture".to_string(),
-            ),
-            (
-                "LAPTOP-001".to_string(),
-                "Gaming Laptop Pro".to_string(),
-                1299.99,
-                1,
-                "Electronics".to_string(),
-            ), // Third laptop sale
-            (
-                "MONITOR-008".to_string(),
-                "4K Monitor".to_string(),
-                399.99,
-                2,
-                "Electronics".to_string(),
-            ),
-            (
-                "BOOK-102".to_string(),
-                "Data Science Handbook".to_string(),
-                55.99,
-                1,
-                "Books".to_string(),
-            ),
-            (
-                "PHONE-006".to_string(),
-                "Budget Phone".to_string(),
-                299.99,
-                4,
-                "Electronics".to_string(),
-            ),
-            (
-                "LAPTOP-001".to_string(),
-                "Gaming Laptop Pro".to_string(),
-                1299.99,
-                1,
-                "Electronics".to_string(),
-            ), // Fourth sale!
-            (
-                "CHAIR-020".to_string(),
-                "Ergonomic Office Chair".to_string(),
-                299.99,
-                2,
-                "Furniture".to_string(),
-            ),
-            (
-                "HEADPHONES-012".to_string(),
-                "Noise-Cancel Headphones".to_string(),
-                249.99,
-                2,
-                "Electronics".to_string(),
-            ),
-            (
-                "BOOK-101".to_string(),
-                "Rust Programming".to_string(),
-                45.99,
-                5,
-                "Books".to_string(),
-            ), // Bulk order!
-        ];
-
-        Self {
-            orders,
-            current_index: 0,
-            writer_id: WriterId::from(StageId::new()),
-        }
-    }
-}
-
-impl FiniteSourceHandler for OrderStreamSource {
-    fn next(
-        &mut self,
-    ) -> Result<
-        Option<Vec<ChainEvent>>,
-        obzenflow_runtime_services::stages::common::handlers::source::traits::SourceError,
-    > {
-        if self.current_index >= self.orders.len() {
-            return Ok(None);
-        }
-
-        let (product_id, product_name, price, quantity, category) =
-            &self.orders[self.current_index];
-        self.current_index += 1;
-
-        let order_value = price * (*quantity as f64);
-
-        println!(
-            "📦 Order #{}: {} x{} ({}) = ${:.2}",
-            self.current_index, product_name, quantity, product_id, order_value
-        );
-
-        // ✨ FLOWIP-082a: Emit typed event using EVENT_TYPE constant
-        Ok(Some(vec![ChainEventFactory::data_event(
-            self.writer_id.clone(),
-            OrderEvent::EVENT_TYPE,
-            json!({
-                "order_id": format!("ORD-{:04}", self.current_index),
-                "product_id": product_id,
-                "product_name": product_name,
-                "category": category,
-                "unit_price": price,
-                "quantity": quantity,
-                "total_value": order_value,
-                "timestamp": self.current_index, // Simulated timestamp
-            }),
-        )]))
-    }
 }
 
 /// Sink that displays top-selling products dashboard
@@ -326,14 +123,180 @@ async fn main() -> Result<()> {
 
     println!("Processing order stream...\n");
 
-    FlowApplication::run(async {
+    // Simulate a day of orders (some products appear multiple times)
+    let orders: Vec<(String, String, f64, u32, String)> = vec![
+        (
+            "LAPTOP-001".to_string(),
+            "Gaming Laptop Pro".to_string(),
+            1299.99,
+            1,
+            "Electronics".to_string(),
+        ),
+        (
+            "PHONE-005".to_string(),
+            "Smartphone X".to_string(),
+            899.99,
+            2,
+            "Electronics".to_string(),
+        ),
+        (
+            "BOOK-101".to_string(),
+            "Rust Programming".to_string(),
+            45.99,
+            3,
+            "Books".to_string(),
+        ),
+        (
+            "LAPTOP-001".to_string(),
+            "Gaming Laptop Pro".to_string(),
+            1299.99,
+            2,
+            "Electronics".to_string(),
+        ), // Another laptop sale!
+        (
+            "CHAIR-020".to_string(),
+            "Ergonomic Office Chair".to_string(),
+            299.99,
+            1,
+            "Furniture".to_string(),
+        ),
+        (
+            "PHONE-005".to_string(),
+            "Smartphone X".to_string(),
+            899.99,
+            1,
+            "Electronics".to_string(),
+        ), // More phones
+        (
+            "MOUSE-015".to_string(),
+            "Wireless Mouse".to_string(),
+            29.99,
+            5,
+            "Electronics".to_string(),
+        ),
+        (
+            "LAPTOP-002".to_string(),
+            "Business Laptop".to_string(),
+            999.99,
+            1,
+            "Electronics".to_string(),
+        ),
+        (
+            "BOOK-101".to_string(),
+            "Rust Programming".to_string(),
+            45.99,
+            2,
+            "Books".to_string(),
+        ), // Book is popular!
+        (
+            "KEYBOARD-010".to_string(),
+            "Mechanical Keyboard".to_string(),
+            149.99,
+            3,
+            "Electronics".to_string(),
+        ),
+        (
+            "PHONE-005".to_string(),
+            "Smartphone X".to_string(),
+            899.99,
+            3,
+            "Electronics".to_string(),
+        ), // Phone bestseller
+        (
+            "DESK-030".to_string(),
+            "Standing Desk".to_string(),
+            599.99,
+            1,
+            "Furniture".to_string(),
+        ),
+        (
+            "LAPTOP-001".to_string(),
+            "Gaming Laptop Pro".to_string(),
+            1299.99,
+            1,
+            "Electronics".to_string(),
+        ), // Third laptop sale
+        (
+            "MONITOR-008".to_string(),
+            "4K Monitor".to_string(),
+            399.99,
+            2,
+            "Electronics".to_string(),
+        ),
+        (
+            "BOOK-102".to_string(),
+            "Data Science Handbook".to_string(),
+            55.99,
+            1,
+            "Books".to_string(),
+        ),
+        (
+            "PHONE-006".to_string(),
+            "Budget Phone".to_string(),
+            299.99,
+            4,
+            "Electronics".to_string(),
+        ),
+        (
+            "LAPTOP-001".to_string(),
+            "Gaming Laptop Pro".to_string(),
+            1299.99,
+            1,
+            "Electronics".to_string(),
+        ), // Fourth sale!
+        (
+            "CHAIR-020".to_string(),
+            "Ergonomic Office Chair".to_string(),
+            299.99,
+            2,
+            "Furniture".to_string(),
+        ),
+        (
+            "HEADPHONES-012".to_string(),
+            "Noise-Cancel Headphones".to_string(),
+            249.99,
+            2,
+            "Electronics".to_string(),
+        ),
+        (
+            "BOOK-101".to_string(),
+            "Rust Programming".to_string(),
+            45.99,
+            5,
+            "Books".to_string(),
+        ), // Bulk order!
+    ];
+
+    FlowApplication::run(async move {
         flow! {
             name: "ecommerce_analytics",
             journals: disk_journals(std::path::PathBuf::from("target/ecommerce-logs")),
             middleware: [],
 
             stages: {
-                orders = source!("orders" => OrderStreamSource::new());
+                // FLOWIP-081: Typed finite sources (no WriterId/ChainEvent boilerplate)
+                orders = source!("orders" => FiniteSourceTyped::from_item_fn(move |index| {
+                    let (product_id, product_name, unit_price, quantity, category) =
+                        orders.get(index)?;
+                    let order_number = index + 1;
+                    let total_value = unit_price * (*quantity as f64);
+
+                    println!(
+                        "📦 Order #{}: {} x{} ({}) = ${:.2}",
+                        order_number, product_name, quantity, product_id, total_value
+                    );
+
+                    Some(OrderEvent {
+                        order_id: format!("ORD-{:04}", order_number),
+                        product_id: product_id.clone(),
+                        product_name: product_name.clone(),
+                        category: category.clone(),
+                        unit_price: *unit_price,
+                        quantity: *quantity,
+                        total_value,
+                        timestamp: order_number, // Simulated timestamp
+                    })
+                }));
 
                 // FLOWIP-080j: TopNByTyped - Type-safe accumulation with no ChainEvent!
                 // Type-safe extraction functions instead of string field names

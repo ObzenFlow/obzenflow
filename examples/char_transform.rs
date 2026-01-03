@@ -18,103 +18,21 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use obzenflow_core::{
-    event::chain_event::{ChainEvent, ChainEventFactory},
+    event::chain_event::ChainEvent,
     event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload},
-    id::StageId,
-    TypedPayload, WriterId,
+    TypedPayload,
 };
 use obzenflow_dsl_infra::{flow, sink, source, stateful, transform};
 use obzenflow_infra::application::{FlowApplication, LogLevel};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
-use obzenflow_runtime_services::stages::common::handlers::{FiniteSourceHandler, SinkHandler};
+use obzenflow_runtime_services::stages::common::handlers::SinkHandler;
+use obzenflow_runtime_services::stages::source::FiniteSourceTyped;
 // FLOWIP-080h: Typed transform helpers
 use obzenflow_runtime_services::stages::transform::MapTyped;
 // FLOWIP-080j: Typed stateful accumulators
 use obzenflow_runtime_services::stages::stateful::strategies::accumulators::ReduceTyped;
 use serde::{Deserialize, Serialize};
-
-/// Source that emits individual characters from sample sentences
-#[derive(Clone, Debug)]
-struct TextCharSource {
-    sentences: Vec<String>,
-    current_sentence: usize,
-    current_char: usize,
-    writer_id: WriterId,
-}
-
-impl TextCharSource {
-    fn new() -> Self {
-        Self {
-            sentences: vec![
-                "hello 2024 world!".to_string(),
-                "42 is the answer.".to_string(),
-                "rust 1 python 0.".to_string(),
-            ],
-            current_sentence: 0,
-            current_char: 0,
-            writer_id: WriterId::from(StageId::new()),
-        }
-    }
-}
-
-impl FiniteSourceHandler for TextCharSource {
-    fn next(
-        &mut self,
-    ) -> Result<
-        Option<Vec<ChainEvent>>,
-        obzenflow_runtime_services::stages::common::handlers::source::traits::SourceError,
-    > {
-        // Check if we've processed all sentences
-        if self.current_sentence >= self.sentences.len() {
-            return Ok(None);
-        }
-
-        let sentence = &self.sentences[self.current_sentence];
-        let chars: Vec<char> = sentence.chars().collect();
-
-        if self.current_char < chars.len() {
-            let ch = chars[self.current_char];
-            self.current_char += 1;
-
-            // ✨ FLOWIP-082a: Emit typed character event
-            let char_event = CharEvent {
-                value: ch.to_string(),
-                sentence_idx: self.current_sentence,
-                char_idx: self.current_char - 1,
-            };
-
-            Ok(Some(vec![ChainEventFactory::data_event(
-                self.writer_id.clone(),
-                CharEvent::EVENT_TYPE,
-                serde_json::to_value(&char_event).unwrap(),
-            )]))
-        } else {
-            // Move to next sentence
-            self.current_sentence += 1;
-            self.current_char = 0;
-
-            // Emit newline between sentences
-            if self.current_sentence < self.sentences.len() {
-                // ✨ FLOWIP-082a: Emit typed newline event
-                let newline_event = CharEvent {
-                    value: "\n".to_string(),
-                    sentence_idx: self.current_sentence - 1,
-                    char_idx: chars.len(),
-                };
-
-                Ok(Some(vec![ChainEventFactory::data_event(
-                    self.writer_id.clone(),
-                    CharEvent::EVENT_TYPE,
-                    serde_json::to_value(&newline_event).unwrap(),
-                )]))
-            } else {
-                // Recursively call to handle end or get next character
-                self.next()
-            }
-        }
-    }
-}
 
 // FLOWIP-080h & FLOWIP-082a: Domain types for type-safe transformations
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -255,13 +173,39 @@ async fn main() -> Result<()> {
         .with_console_subscriber()
         .with_log_level(LogLevel::Info)
         .run_async(async {
+            let sentences = [
+                "hello 2024 world!",
+                "42 is the answer.",
+                "rust 1 python 0.",
+            ];
+            let mut char_events = Vec::new();
+            for (sentence_idx, sentence) in sentences.iter().enumerate() {
+                let chars: Vec<char> = sentence.chars().collect();
+                for (char_idx, ch) in chars.iter().enumerate() {
+                    char_events.push(CharEvent {
+                        value: ch.to_string(),
+                        sentence_idx,
+                        char_idx,
+                    });
+                }
+
+                if sentence_idx + 1 < sentences.len() {
+                    char_events.push(CharEvent {
+                        value: "\n".to_string(),
+                        sentence_idx,
+                        char_idx: chars.len(),
+                    });
+                }
+            }
+
             flow! {
                 name: "char_transform",
                 journals: disk_journals(std::path::PathBuf::from("target/char-transform-logs")),
                 middleware: [],
 
                 stages: {
-                    src = source!("source" => TextCharSource::new());
+                    // FLOWIP-081: Typed finite sources (no WriterId/ChainEvent boilerplate)
+                    src = source!("source" => FiniteSourceTyped::from_iter(char_events));
 
                     // FLOWIP-080h: MapTyped for type-safe character transformation
                     mapper = transform!("char_mapper" =>

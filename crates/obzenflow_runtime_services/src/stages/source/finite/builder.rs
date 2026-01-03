@@ -16,7 +16,7 @@ use crate::supervised_base::{
 };
 use obzenflow_core::event::SystemEvent;
 use obzenflow_core::journal::journal::Journal;
-use obzenflow_core::{ChainEvent, StageId};
+use obzenflow_core::{ChainEvent, StageId, WriterId};
 
 use super::config::FiniteSourceConfig;
 use super::fsm::{FiniteSourceAction, FiniteSourceContext, FiniteSourceEvent, FiniteSourceState};
@@ -97,10 +97,14 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> S
             self.resources.backpressure_writer.clone(),
         );
 
+        // Ensure the handler (and any wrappers) receive the stage writer id before running (FLOWIP-081).
+        let mut handler = self.handler;
+        handler.bind_writer_id(WriterId::from(self.config.stage_id));
+
         // Create supervisor (private - not exposed)
         let supervisor = FiniteSourceSupervisor {
             name: format!("finite_source_{}", self.config.stage_name),
-            handler: self.handler,
+            handler,
             context: Arc::new(context.clone()),
             data_journal: self.resources.data_journal.clone(),
             system_journal: self.resources.system_journal.clone(),

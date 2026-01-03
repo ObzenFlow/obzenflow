@@ -20,6 +20,7 @@ use async_trait::async_trait;
 use obzenflow_core::{
     event::chain_event::{ChainEvent, ChainEventFactory},
     id::StageId,
+    TypedPayload,
     WriterId,
 };
 use obzenflow_dsl_infra::{flow, sink, source, stateful, transform};
@@ -27,11 +28,13 @@ use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
 use obzenflow_runtime_services::stages::common::handlers::{
-    FiniteSourceHandler, SinkHandler, StatefulHandler,
+    SinkHandler, StatefulHandler,
 };
+use obzenflow_runtime_services::stages::source::FiniteSourceTyped;
 // ✨ FLOWIP-080h: Import Map helper
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_runtime_services::stages::transform::Map;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::sync::{
@@ -39,49 +42,16 @@ use std::sync::{
     Arc,
 };
 
-/// Source that generates events from a specific data source
-#[derive(Clone, Debug)]
-struct DataSource {
-    source_name: String,
-    count: usize,
-    max_events: usize,
-    writer_id: WriterId,
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct RawDataEvent {
+    source: String,
+    id: usize,
+    value: i64,
 }
 
-impl DataSource {
-    fn new(source_name: &str, max_events: usize) -> Self {
-        Self {
-            source_name: source_name.to_string(),
-            count: 0,
-            max_events,
-            writer_id: WriterId::from(StageId::new()),
-        }
-    }
-}
-
-impl FiniteSourceHandler for DataSource {
-    fn next(
-        &mut self,
-    ) -> Result<
-        Option<Vec<ChainEvent>>,
-        obzenflow_runtime_services::stages::common::handlers::source::traits::SourceError,
-    > {
-        if self.count >= self.max_events {
-            return Ok(None);
-        }
-
-        self.count += 1;
-
-        Ok(Some(vec![ChainEventFactory::data_event(
-            self.writer_id.clone(),
-            "data.raw",
-            json!({
-                "source": self.source_name.clone(),
-                "id": self.count,
-                "value": self.count * 20,
-            }),
-        )]))
-    }
+impl TypedPayload for RawDataEvent {
+    const EVENT_TYPE: &'static str = "data.raw";
+    const SCHEMA_VERSION: u32 = 1;
 }
 
 /// State for aggregating data from multiple sources
@@ -422,9 +392,48 @@ async fn main() -> Result<()> {
 
             stages: {
                 // FAN-IN: Three sources feeding into one aggregator
-                kafka = source!("kafka_source" => DataSource::new("kafka", 5));
-                api = source!("api_source" => DataSource::new("api", 4));
-                file_src = source!("file_source" => DataSource::new("file", 4));
+                kafka = source!("kafka_source" => FiniteSourceTyped::from_item_fn({
+                    let source = "kafka".to_string();
+                    move |index| {
+                        if index >= 5 {
+                            return None;
+                        }
+                        let id = index + 1;
+                        Some(RawDataEvent {
+                            source: source.clone(),
+                            id,
+                            value: (id * 20) as i64,
+                        })
+                    }
+                }));
+                api = source!("api_source" => FiniteSourceTyped::from_item_fn({
+                    let source = "api".to_string();
+                    move |index| {
+                        if index >= 4 {
+                            return None;
+                        }
+                        let id = index + 1;
+                        Some(RawDataEvent {
+                            source: source.clone(),
+                            id,
+                            value: (id * 20) as i64,
+                        })
+                    }
+                }));
+                file_src = source!("file_source" => FiniteSourceTyped::from_item_fn({
+                    let source = "file".to_string();
+                    move |index| {
+                        if index >= 4 {
+                            return None;
+                        }
+                        let id = index + 1;
+                        Some(RawDataEvent {
+                            source: source.clone(),
+                            id,
+                            value: (id * 20) as i64,
+                        })
+                    }
+                }));
 
                 // Aggregator demonstrates fan-in with StatefulHandler
                 aggregator = stateful!("aggregator" => MultiSourceAggregator::new().with_expected({

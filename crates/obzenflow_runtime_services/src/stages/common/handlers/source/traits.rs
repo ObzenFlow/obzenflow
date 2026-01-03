@@ -6,6 +6,7 @@
 //! - Infinite sources use Result<Vec<ChainEvent>, SourceError>.
 
 use obzenflow_core::ChainEvent;
+use obzenflow_core::WriterId;
 use async_trait::async_trait;
 use std::fmt;
 
@@ -75,6 +76,11 @@ impl std::error::Error for SourceError {}
 /// }
 /// ```
 pub trait FiniteSourceHandler: Send + Sync {
+    /// Called by the runtime before the first `next()` to inject the stage `WriterId`.
+    ///
+    /// Default is a no-op for existing handlers that manage their own `WriterId`.
+    fn bind_writer_id(&mut self, _id: WriterId) {}
+
     /// Pull zero or more events from the source.
     ///
     /// - `Ok(Some(events))` means the source advanced; `events` may be empty
@@ -96,6 +102,11 @@ pub trait FiniteSourceHandler: Send + Sync {
 /// - `Err(SourceError)` → polling failed; middleware converts to error-marked event
 #[async_trait]
 pub trait AsyncFiniteSourceHandler: Send + Sync {
+    /// Called by the runtime before the first `next()` to inject the stage `WriterId`.
+    ///
+    /// Default is a no-op for existing handlers that manage their own `WriterId`.
+    fn bind_writer_id(&mut self, _id: WriterId) {}
+
     /// Pull zero or more events from the source asynchronously.
     async fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError>;
 

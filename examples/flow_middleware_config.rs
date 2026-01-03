@@ -28,63 +28,25 @@ use async_trait::async_trait;
 use obzenflow_adapters::middleware::rate_limit;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::{
-    event::chain_event::{ChainEvent, ChainEventFactory},
-    id::StageId,
-    WriterId,
+    event::chain_event::ChainEvent,
+    TypedPayload,
 };
 use obzenflow_dsl_infra::{flow, sink, source, transform};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
-use obzenflow_runtime_services::stages::common::handlers::{
-    FiniteSourceHandler, SinkHandler, TransformHandler,
-};
-use serde_json::json;
+use obzenflow_runtime_services::stages::common::handlers::{SinkHandler, TransformHandler};
+use obzenflow_runtime_services::stages::source::FiniteSourceTyped;
+use serde::{Deserialize, Serialize};
 
-/// Source that generates numbered events
-#[derive(Debug, Clone)]
-struct EventCounter {
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct CounterEvent {
     count: usize,
-    max_count: usize,
-    writer_id: WriterId,
 }
 
-impl EventCounter {
-    fn new(max_count: usize) -> Self {
-        Self {
-            count: 0,
-            max_count,
-            writer_id: WriterId::from(StageId::new()),
-        }
-    }
-}
-
-impl FiniteSourceHandler for EventCounter {
-    fn next(
-        &mut self,
-    ) -> Result<
-        Option<Vec<ChainEvent>>,
-        obzenflow_runtime_services::stages::common::handlers::source::traits::SourceError,
-    > {
-        if self.count >= self.max_count {
-            return Ok(None);
-        }
-
-        self.count += 1;
-
-        // Log progress every 20 events
-        if self.count % 20 == 0 {
-            println!("[SOURCE] Generated {} events", self.count);
-        }
-
-        Ok(Some(vec![ChainEventFactory::data_event(
-            self.writer_id.clone(),
-            "counter.event",
-            json!({
-                "count": self.count,
-            }),
-        )]))
-    }
+impl TypedPayload for CounterEvent {
+    const EVENT_TYPE: &'static str = "counter.event";
+    const SCHEMA_VERSION: u32 = 1;
 }
 
 /// Simple passthrough transform
@@ -184,7 +146,20 @@ async fn main() -> Result<()> {
             stages: {
                 // Source with stage-level override: 10 events/sec
                 // This overrides the flow-level 1.0 events/sec
-                src = source!("fast_source" => EventCounter::new(120), [
+                src = source!("fast_source" => FiniteSourceTyped::from_item_fn(|index| {
+                    if index >= 120 {
+                        return None;
+                    }
+
+                    let count = index + 1;
+
+                    // Log progress every 20 events
+                    if count % 20 == 0 {
+                        println!("[SOURCE] Generated {} events", count);
+                    }
+
+                    Some(CounterEvent { count })
+                }), [
                     rate_limit(10.0)
                 ]);
 

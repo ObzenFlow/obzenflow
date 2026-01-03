@@ -17,22 +17,21 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use obzenflow_core::{
-    event::chain_event::{ChainEvent, ChainEventFactory},
+    event::chain_event::ChainEvent,
     event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload},
-    id::StageId,
-    TypedPayload, WriterId,
+    TypedPayload,
 };
 use obzenflow_dsl_infra::{flow, sink, source, stateful};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
-use obzenflow_runtime_services::stages::common::handlers::{FiniteSourceHandler, SinkHandler};
+use obzenflow_runtime_services::stages::common::handlers::SinkHandler;
+use obzenflow_runtime_services::stages::source::FiniteSourceTyped;
 // FLOWIP-080j: Typed stateful accumulators
 use obzenflow_runtime_services::stages::stateful::strategies::accumulators::{
     GroupByTyped, ReduceTyped,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -58,132 +57,18 @@ impl TypedPayload for UserEvent {
     const SCHEMA_VERSION: u32 = 1;
 }
 
-/// Source that simulates user behavior events
-#[derive(Clone, Debug)]
-struct UserEventSource {
-    event_count: usize,
-    max_events: usize,
-    writer_id: WriterId,
-    users: Vec<String>,
-    pages: Vec<String>,
-}
+const USERS: [&str; 5] = ["user_001", "user_002", "user_003", "user_004", "user_005"];
+const PAGES: [&str; 5] = ["/home", "/products", "/cart", "/checkout", "/about"];
 
-impl UserEventSource {
-    fn new(max_events: usize) -> Self {
-        Self {
-            event_count: 0,
-            max_events,
-            writer_id: WriterId::from(StageId::new()),
-            users: vec![
-                "user_001".to_string(),
-                "user_002".to_string(),
-                "user_003".to_string(),
-                "user_004".to_string(),
-                "user_005".to_string(),
-            ],
-            pages: vec![
-                "/home".to_string(),
-                "/products".to_string(),
-                "/cart".to_string(),
-                "/checkout".to_string(),
-                "/about".to_string(),
-            ],
-        }
-    }
-
-    fn generate_event_payload(&mut self) -> serde_json::Value {
-        let user_idx = self.event_count % self.users.len();
-        let user_id = &self.users[user_idx];
-
-        // Simulate realistic user journey patterns with cart abandonment
-        // Pattern repeats every 20 events to create ~40% cart-to-purchase conversion
-        match self.event_count % 20 {
-            // Home page visits (30% of traffic)
-            0 | 1 | 2 | 3 | 4 | 5 => json!({
-                "user_id": user_id,
-                "event_type": "page_view",
-                "page": self.pages[0], // Home
-                "duration_ms": (3000 + (self.event_count * 17) % 2000) as u64,
-            }),
-            // Product browsing (25% of traffic)
-            6 | 7 | 8 | 9 => json!({
-                "user_id": user_id,
-                "event_type": "page_view",
-                "page": self.pages[1], // Products
-                "duration_ms": (5000 + (self.event_count * 23) % 5000) as u64,
-            }),
-            // Product interactions (15% of traffic)
-            10 | 11 | 12 => json!({
-                "user_id": user_id,
-                "event_type": "click",
-                "element": "product_card",
-                "page": self.pages[1],
-            }),
-            // Cart page views (10% - not everyone adds to cart)
-            13 | 14 => json!({
-                "user_id": user_id,
-                "event_type": "page_view",
-                "page": self.pages[2], // Cart
-                "duration_ms": (2000 + (self.event_count * 13) % 1000) as u64,
-            }),
-            // Scroll events (5%)
-            15 => json!({
-                "user_id": user_id,
-                "event_type": "scroll",
-                "depth": 50 + (self.event_count % 50) as u32,
-                "page": self.pages[1],
-            }),
-            // Checkout button clicks (5%)
-            16 => json!({
-                "user_id": user_id,
-                "event_type": "click",
-                "element": "checkout_button",
-                "page": self.pages[2],
-            }),
-            // Bounces/abandoned carts (5%)
-            17 => json!({
-                "user_id": user_id,
-                "event_type": "page_view",
-                "page": self.pages[4], // About page (bounce)
-                "duration_ms": (1000 + (self.event_count * 7) % 500) as u64,
-            }),
-            // Actual conversions (5% - realistic cart abandonment ~60%)
-            18 => json!({
-                "user_id": user_id,
-                "event_type": "conversion",
-                "value": 49.99 + (self.event_count as f64 * 1.23) % 150.0,
-            }),
-            // Additional product views (5%)
-            _ => json!({
-                "user_id": user_id,
-                "event_type": "page_view",
-                "page": self.pages[1], // Products
-                "duration_ms": (4000 + (self.event_count * 19) % 3000) as u64,
-            }),
-        }
-    }
-}
-
-impl FiniteSourceHandler for UserEventSource {
-    fn next(
-        &mut self,
-    ) -> Result<
-        Option<Vec<ChainEvent>>,
-        obzenflow_runtime_services::stages::common::handlers::source::traits::SourceError,
-    > {
-        if self.event_count >= self.max_events {
-            return Ok(None);
-        }
-
-        let payload = self.generate_event_payload();
-        self.event_count += 1;
-
-        // ✨ FLOWIP-082a: Emit typed event using EVENT_TYPE constant
-        Ok(Some(vec![ChainEventFactory::data_event(
-            self.writer_id.clone(),
-            UserEvent::EVENT_TYPE,
-            payload,
-        )]))
+fn base_event(user_id: String, event_type: &str) -> UserEvent {
+    UserEvent {
+        user_id,
+        event_type: event_type.to_string(),
+        page: None,
+        duration_ms: None,
+        element: None,
+        depth: None,
+        value: None,
     }
 }
 
@@ -440,7 +325,71 @@ async fn main() -> Result<()> {
 
             stages: {
                 // User event stream
-                events = source!("user_events" => UserEventSource::new(200));
+                events = source!("user_events" => FiniteSourceTyped::from_item_fn(move |index| {
+                    if index >= 200 {
+                        return None;
+                    }
+
+                    let user_id = USERS[index % USERS.len()].to_string();
+
+                    // Simulate realistic user journey patterns with cart abandonment
+                    // Pattern repeats every 20 events to create ~40% cart-to-purchase conversion
+                    Some(match index % 20 {
+                        // Home page visits (30% of traffic)
+                        0 | 1 | 2 | 3 | 4 | 5 => UserEvent {
+                            page: Some(PAGES[0].to_string()),
+                            duration_ms: Some((3000 + (index * 17) % 2000) as u64),
+                            ..base_event(user_id, "page_view")
+                        },
+                        // Product browsing (25% of traffic)
+                        6 | 7 | 8 | 9 => UserEvent {
+                            page: Some(PAGES[1].to_string()),
+                            duration_ms: Some((5000 + (index * 23) % 5000) as u64),
+                            ..base_event(user_id, "page_view")
+                        },
+                        // Product interactions (15% of traffic)
+                        10 | 11 | 12 => UserEvent {
+                            element: Some("product_card".to_string()),
+                            page: Some(PAGES[1].to_string()),
+                            ..base_event(user_id, "click")
+                        },
+                        // Cart page views (10% - not everyone adds to cart)
+                        13 | 14 => UserEvent {
+                            page: Some(PAGES[2].to_string()),
+                            duration_ms: Some((2000 + (index * 13) % 1000) as u64),
+                            ..base_event(user_id, "page_view")
+                        },
+                        // Scroll events (5%)
+                        15 => UserEvent {
+                            depth: Some(50 + (index % 50) as u32),
+                            page: Some(PAGES[1].to_string()),
+                            ..base_event(user_id, "scroll")
+                        },
+                        // Checkout button clicks (5%)
+                        16 => UserEvent {
+                            element: Some("checkout_button".to_string()),
+                            page: Some(PAGES[2].to_string()),
+                            ..base_event(user_id, "click")
+                        },
+                        // Bounces/abandoned carts (5%)
+                        17 => UserEvent {
+                            page: Some(PAGES[4].to_string()),
+                            duration_ms: Some((1000 + (index * 7) % 500) as u64),
+                            ..base_event(user_id, "page_view")
+                        },
+                        // Actual conversions (5% - realistic cart abandonment ~60%)
+                        18 => UserEvent {
+                            value: Some(49.99 + (index as f64 * 1.23) % 150.0),
+                            ..base_event(user_id, "conversion")
+                        },
+                        // Additional product views (5%)
+                        _ => UserEvent {
+                            page: Some(PAGES[1].to_string()),
+                            duration_ms: Some((4000 + (index * 19) % 3000) as u64),
+                            ..base_event(user_id, "page_view")
+                        },
+                    })
+                }));
 
                 // FLOWIP-080j: GroupByTyped for per-user session tracking
                 sessions = stateful!("session_tracker" =>

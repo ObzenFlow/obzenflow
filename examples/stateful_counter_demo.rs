@@ -22,61 +22,31 @@ use obzenflow_core::{
     event::chain_event::{ChainEvent, ChainEventFactory},
     event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload},
     id::StageId,
+    TypedPayload,
     WriterId,
 };
 use obzenflow_dsl_infra::{flow, sink, source, stateful, transform};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
-use obzenflow_runtime_services::stages::common::handlers::{
-    FiniteSourceHandler, SinkHandler, StatefulHandler,
-};
+use obzenflow_runtime_services::stages::common::handlers::{SinkHandler, StatefulHandler};
+use obzenflow_runtime_services::stages::source::FiniteSourceTyped;
 // ✨ FLOWIP-080h: Import Filter helper
 use obzenflow_runtime_services::stages::transform::Filter;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 // ============================================================================
 // Source: Emits numbered events
 // ============================================================================
 
-#[derive(Clone, Debug)]
-struct NumberSource {
-    current: u64,
-    max: u64,
-    writer_id: WriterId,
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct NumberEvent {
+    value: u64,
 }
 
-impl NumberSource {
-    fn new(max: u64) -> Self {
-        Self {
-            current: 1,
-            max,
-            writer_id: WriterId::from(StageId::new()),
-        }
-    }
-}
-
-impl FiniteSourceHandler for NumberSource {
-    fn next(
-        &mut self,
-    ) -> Result<
-        Option<Vec<ChainEvent>>,
-        obzenflow_runtime_services::stages::common::handlers::source::traits::SourceError,
-    > {
-        if self.current <= self.max {
-            let num = self.current;
-            self.current += 1;
-
-            println!("📤 Source emitting: {}", num);
-
-            Ok(Some(vec![ChainEventFactory::data_event(
-                self.writer_id.clone(),
-                "number",
-                json!({ "value": num }),
-            )]))
-        } else {
-            Ok(None)
-        }
-    }
+impl TypedPayload for NumberEvent {
+    const EVENT_TYPE: &'static str = "number";
+    const SCHEMA_VERSION: u32 = 1;
 }
 
 // ============================================================================
@@ -231,7 +201,16 @@ async fn main() -> Result<()> {
             middleware: [],
 
             stages: {
-                numbers = source!("numbers" => NumberSource::new(10));
+                // FLOWIP-081: Typed finite sources (no WriterId/ChainEvent boilerplate)
+                numbers = source!("numbers" => FiniteSourceTyped::from_item_fn(|index| {
+                    let value = (index as u64) + 1;
+                    if value > 10 {
+                        return None;
+                    }
+
+                    println!("📤 Source emitting: {}", value);
+                    Some(NumberEvent { value })
+                }));
                 // ✨ FLOWIP-080h: Using Filter helper instead of EvenFilter struct
                 evens = transform!("even_filter" => even_filter());
                 counter = stateful!("counter" => CounterHandler::new());

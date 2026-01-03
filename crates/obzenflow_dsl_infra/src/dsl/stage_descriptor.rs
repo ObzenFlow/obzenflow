@@ -468,8 +468,12 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> S
             .map_err(|e| e.to_string())?;
         let instrumentation = Arc::new(instrumentation);
 
+        // Inject stage writer id into the handler before wrapping with middleware (FLOWIP-081).
+        let mut handler = self.handler;
+        handler.bind_writer_id(writer_id);
+
         // Apply all middleware
-        let mut builder = self.handler.middleware(writer_id.clone());
+        let mut builder = handler.middleware(writer_id.clone());
         for mw in all_middleware {
             builder = builder.with(mw);
         }
@@ -631,11 +635,12 @@ impl<H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
             .map_err(|e| e.to_string())?;
         let instrumentation = Arc::new(instrumentation);
 
+        // Inject stage writer id into the handler before wrapping with middleware (FLOWIP-081).
+        let mut handler = self.handler;
+        handler.bind_writer_id(writer_id);
+
         // Apply all middleware.
-        let mut builder = self
-            .handler
-            .middleware(writer_id.clone())
-            .with_poll_timeout(poll_timeout);
+        let mut builder = handler.middleware(writer_id.clone()).with_poll_timeout(poll_timeout);
         for mw in all_middleware {
             builder = builder.with(mw);
         }
