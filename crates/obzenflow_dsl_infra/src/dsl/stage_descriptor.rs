@@ -777,8 +777,12 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
             .map_err(|e| e.to_string())?;
         let instrumentation = Arc::new(instrumentation);
 
+        // Inject stage writer id into the handler before wrapping with middleware (FLOWIP-081d).
+        let mut handler = self.handler;
+        handler.bind_writer_id(writer_id);
+
         // Apply all middleware
-        let mut builder = self.handler.middleware(writer_id.clone());
+        let mut builder = handler.middleware(writer_id.clone());
         for mw in all_middleware {
             builder = builder.with(mw);
         }
@@ -940,10 +944,11 @@ impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
             .map_err(|e| e.to_string())?;
         let instrumentation = Arc::new(instrumentation);
 
-        let mut builder = self
-            .handler
-            .middleware(writer_id.clone())
-            .with_poll_timeout(poll_timeout);
+        // Inject stage writer id into the handler before wrapping with middleware (FLOWIP-081d).
+        let mut handler = self.handler;
+        handler.bind_writer_id(writer_id);
+
+        let mut builder = handler.middleware(writer_id.clone()).with_poll_timeout(poll_timeout);
         for mw in all_middleware {
             builder = builder.with(mw);
         }

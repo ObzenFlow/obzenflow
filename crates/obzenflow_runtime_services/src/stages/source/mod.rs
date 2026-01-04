@@ -10,6 +10,7 @@ pub mod strategies;
 pub mod typed;
 
 pub use typed::{
-    AsyncFiniteSourceTyped, FallibleAsyncFiniteSourceTyped, FallibleFiniteSourceTyped,
-    FiniteSourceTyped,
+    AsyncFiniteSourceTyped, AsyncInfiniteSourceTyped, FallibleAsyncFiniteSourceTyped,
+    FallibleAsyncInfiniteSourceTyped, FallibleFiniteSourceTyped, FallibleInfiniteSourceTyped,
+    FiniteSourceTyped, InfiniteSourceTyped,
 };

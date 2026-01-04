@@ -1,21 +1,27 @@
-//! Typed source helpers (FLOWIP-081)
+//! Typed source helpers (FLOWIP-081 + FLOWIP-081d)
 //!
 //! These helpers let sources emit domain types (`T: TypedPayload + Serialize`) instead of
 //! manually constructing `ChainEvent` values with stage `WriterId` boilerplate.
 //!
 //! Notes:
-//! - EOF is supervisor-owned. Typed sources signal completion via `Ok(None)`.
+//! - Finite sources: EOF is supervisor-owned. Typed sources signal completion via `Ok(None)`.
+//! - Infinite sources: never complete naturally; they run until external shutdown.
 //! - The runtime injects the stage `WriterId` via `bind_writer_id()` before the first `next()`.
 
-use crate::stages::common::handlers::{AsyncFiniteSourceHandler, FiniteSourceHandler};
+use crate::stages::common::handlers::{
+    AsyncFiniteSourceHandler, AsyncInfiniteSourceHandler, FiniteSourceHandler, InfiniteSourceHandler,
+};
 use crate::stages::common::handlers::source::SourceError;
 use async_trait::async_trait;
+use futures::{Stream, StreamExt};
 use obzenflow_core::event::ChainEventFactory;
 use obzenflow_core::{ChainEvent, TypedPayload, WriterId};
 use serde::Serialize;
 use std::future::Future;
 use std::marker::PhantomData;
 use std::pin::Pin;
+use std::sync::{Arc, Mutex};
+use tokio::sync::Mutex as TokioMutex;
 
 /// Typed finite source for synchronous producers (use with `source!`).
 ///
@@ -591,13 +597,560 @@ where
     }
 }
 
+// =============================================================================
+// Typed Infinite Sources (FLOWIP-081d)
+// =============================================================================
+
+const DEFAULT_INFINITE_RECEIVER_BATCH_CAP: usize = 100;
+
+/// Typed infinite source for synchronous producers (use with `infinite_source!`).
+///
+/// The producer returns:
+/// - `vec![...]` to emit one or more items
+/// - `vec![]` for an idle poll (no data ready yet)
+#[derive(Clone)]
+pub struct InfiniteSourceTyped<T, F>
+where
+    T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
+    F: FnMut(usize) -> Vec<T> + Send + Sync + Clone,
+{
+    producer: F,
+    current_index: usize,
+    writer_id: Option<WriterId>,
+    _phantom: PhantomData<T>,
+}
+
+impl<T, F> InfiniteSourceTyped<T, F>
+where
+    T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
+    F: FnMut(usize) -> Vec<T> + Send + Sync + Clone,
+{
+    /// Create from a batch producer.
+    pub fn from_fn(producer: F) -> Self {
+        Self {
+            producer,
+            current_index: 0,
+            writer_id: None,
+            _phantom: PhantomData,
+        }
+    }
+}
+
+impl<T> InfiniteSourceTyped<T, fn(usize) -> Vec<T>>
+where
+    T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
+{
+    /// Create from a fallible batch producer.
+    pub fn from_fallible_fn<G>(
+        producer: G,
+    ) -> FallibleInfiniteSourceTyped<T, G>
+    where
+        G: FnMut(usize) -> Result<Vec<T>, SourceError> + Send + Sync + Clone,
+    {
+        FallibleInfiniteSourceTyped::from_fallible_fn(producer)
+    }
+
+    /// Create from a sync channel receiver with a batch size cap.
+    ///
+    /// Drains up to `batch_cap` messages per poll using `try_recv()`.
+    /// Returns:
+    /// - `Ok(vec![])` when the channel is empty (idle)
+    /// - `Err(SourceError::Other("channel closed"))` when the channel is closed
+    pub fn from_receiver(
+        receiver: std::sync::mpsc::Receiver<T>,
+        batch_cap: Option<usize>,
+    ) -> FallibleInfiniteSourceTyped<
+        T,
+        impl FnMut(usize) -> Result<Vec<T>, SourceError> + Send + Sync + Clone,
+    > {
+        let cap = batch_cap
+            .unwrap_or(DEFAULT_INFINITE_RECEIVER_BATCH_CAP)
+            .max(1);
+        let shared = Arc::new(Mutex::new(receiver));
+
+        FallibleInfiniteSourceTyped::from_fallible_fn(move |_index| {
+            let mut batch = Vec::new();
+            let guard = shared.lock().map_err(|e| {
+                SourceError::Other(format!("channel receiver lock poisoned: {e}"))
+            })?;
+
+            for _ in 0..cap {
+                match guard.try_recv() {
+                    Ok(item) => batch.push(item),
+                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        if batch.is_empty() {
+                            return Err(SourceError::Other("channel closed".to_string()));
+                        }
+                        break;
+                    }
+                }
+            }
+
+            Ok(batch)
+        })
+    }
+}
+
+impl<T, F> std::fmt::Debug for InfiniteSourceTyped<T, F>
+where
+    T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
+    F: FnMut(usize) -> Vec<T> + Send + Sync + Clone,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InfiniteSourceTyped")
+            .field("item_type", &std::any::type_name::<T>())
+            .field("current_index", &self.current_index)
+            .field("writer_id_bound", &self.writer_id.is_some())
+            .finish()
+    }
+}
+
+impl<T, F> InfiniteSourceHandler for InfiniteSourceTyped<T, F>
+where
+    T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
+    F: FnMut(usize) -> Vec<T> + Send + Sync + Clone,
+{
+    fn bind_writer_id(&mut self, id: WriterId) {
+        self.writer_id = Some(id);
+    }
+
+    fn next(&mut self) -> Result<Vec<ChainEvent>, SourceError> {
+        let writer_id = self
+            .writer_id
+            .ok_or_else(|| SourceError::Other("WriterId not bound".to_string()))?;
+
+        let items = (self.producer)(self.current_index);
+        if items.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let event_type = T::versioned_event_type();
+        let item_count = items.len();
+        let mut events = Vec::with_capacity(item_count);
+        for item in items {
+            let event = ChainEventFactory::data_event_from(writer_id, &event_type, &item)
+                .map_err(|e| {
+                    SourceError::Other(format!(
+                        "InfiniteSourceTyped failed to serialize {}: {e}",
+                        std::any::type_name::<T>()
+                    ))
+                })?;
+            events.push(event);
+        }
+        self.current_index = self.current_index.saturating_add(item_count);
+        Ok(events)
+    }
+}
+
+// =============================================================================
+// Fallible Sync Infinite Source
+// =============================================================================
+
+/// Typed infinite source for fallible synchronous producers (use with `infinite_source!`).
+///
+/// Unlike `InfiniteSourceTyped`, this accepts producers that can return `SourceError`,
+/// enabling typed sources for error-injection testing and unreliable upstreams.
+///
+/// The producer returns:
+/// - `Ok(vec![...])` to emit one or more items
+/// - `Ok(vec![])` for an idle poll (no data ready yet)
+/// - `Err(SourceError)` to signal a poll failure
+#[derive(Clone)]
+pub struct FallibleInfiniteSourceTyped<T, F>
+where
+    T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
+    F: FnMut(usize) -> Result<Vec<T>, SourceError> + Send + Sync + Clone,
+{
+    producer: F,
+    current_index: usize,
+    writer_id: Option<WriterId>,
+    _phantom: PhantomData<T>,
+}
+
+impl<T, F> FallibleInfiniteSourceTyped<T, F>
+where
+    T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
+    F: FnMut(usize) -> Result<Vec<T>, SourceError> + Send + Sync + Clone,
+{
+    /// Create from a fallible batch producer.
+    pub fn from_fallible_fn(producer: F) -> Self {
+        Self {
+            producer,
+            current_index: 0,
+            writer_id: None,
+            _phantom: PhantomData,
+        }
+    }
+}
+
+impl<T, F> std::fmt::Debug for FallibleInfiniteSourceTyped<T, F>
+where
+    T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
+    F: FnMut(usize) -> Result<Vec<T>, SourceError> + Send + Sync + Clone,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FallibleInfiniteSourceTyped")
+            .field("item_type", &std::any::type_name::<T>())
+            .field("current_index", &self.current_index)
+            .field("writer_id_bound", &self.writer_id.is_some())
+            .finish()
+    }
+}
+
+impl<T, F> InfiniteSourceHandler for FallibleInfiniteSourceTyped<T, F>
+where
+    T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
+    F: FnMut(usize) -> Result<Vec<T>, SourceError> + Send + Sync + Clone,
+{
+    fn bind_writer_id(&mut self, id: WriterId) {
+        self.writer_id = Some(id);
+    }
+
+    fn next(&mut self) -> Result<Vec<ChainEvent>, SourceError> {
+        let writer_id = self
+            .writer_id
+            .ok_or_else(|| SourceError::Other("WriterId not bound".to_string()))?;
+
+        let items = (self.producer)(self.current_index)?;
+        if items.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let event_type = T::versioned_event_type();
+        let item_count = items.len();
+        let mut events = Vec::with_capacity(item_count);
+        for item in items {
+            let event = ChainEventFactory::data_event_from(writer_id, &event_type, &item)
+                .map_err(|e| {
+                    SourceError::Other(format!(
+                        "FallibleInfiniteSourceTyped failed to serialize {}: {e}",
+                        std::any::type_name::<T>()
+                    ))
+                })?;
+            events.push(event);
+        }
+        self.current_index = self.current_index.saturating_add(item_count);
+        Ok(events)
+    }
+}
+
+// =============================================================================
+// Typed Async Infinite Sources
+// =============================================================================
+
+/// Typed infinite source for asynchronous producers (use with `async_infinite_source!`).
+///
+/// Note: Manual `Clone` impl to avoid requiring `Fut: Clone`.
+pub struct AsyncInfiniteSourceTyped<T, F, Fut>
+where
+    T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
+    F: FnMut(usize) -> Fut + Send + Sync + Clone,
+    Fut: Future<Output = Vec<T>> + Send,
+{
+    producer: F,
+    current_index: usize,
+    writer_id: Option<WriterId>,
+    _phantom: PhantomData<fn() -> (T, Fut)>,
+}
+
+impl<T, F, Fut> Clone for AsyncInfiniteSourceTyped<T, F, Fut>
+where
+    T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
+    F: FnMut(usize) -> Fut + Send + Sync + Clone,
+    Fut: Future<Output = Vec<T>> + Send,
+{
+    fn clone(&self) -> Self {
+        Self {
+            producer: self.producer.clone(),
+            current_index: self.current_index,
+            writer_id: self.writer_id,
+            _phantom: PhantomData,
+        }
+    }
+}
+
+impl<T, F, Fut> AsyncInfiniteSourceTyped<T, F, Fut>
+where
+    T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
+    F: FnMut(usize) -> Fut + Send + Sync + Clone,
+    Fut: Future<Output = Vec<T>> + Send,
+{
+    /// Create from an async batch producer.
+    pub fn from_fn(producer: F) -> Self {
+        Self {
+            producer,
+            current_index: 0,
+            writer_id: None,
+            _phantom: PhantomData,
+        }
+    }
+
+    /// Alias for readability when constructing async sources.
+    pub fn from_async_fn(producer: F) -> Self {
+        Self::from_fn(producer)
+    }
+}
+
+impl<T>
+    AsyncInfiniteSourceTyped<
+        T,
+        fn(usize) -> std::future::Ready<Vec<T>>,
+        std::future::Ready<Vec<T>>,
+    >
+where
+    T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
+{
+    /// Create from a fallible async batch producer.
+    pub fn from_fallible_async_fn<G, FutG>(
+        producer: G,
+    ) -> FallibleAsyncInfiniteSourceTyped<T, G, FutG>
+    where
+        G: FnMut(usize) -> FutG + Send + Sync + Clone,
+        FutG: Future<Output = Result<Vec<T>, SourceError>> + Send,
+    {
+        FallibleAsyncInfiniteSourceTyped::from_fallible_async_fn(producer)
+    }
+
+    /// Create from an async `Stream` with shared progress.
+    ///
+    /// The stream is wrapped in `Arc<Mutex<...>>` so handler clones share progress.
+    /// Stream end is modeled as `Err(SourceError::Other("stream ended"))`.
+    pub fn from_stream<S>(
+        stream: S,
+    ) -> FallibleAsyncInfiniteSourceTyped<
+        T,
+        impl FnMut(usize) -> Pin<Box<dyn Future<Output = Result<Vec<T>, SourceError>> + Send>>
+            + Send
+            + Sync
+            + Clone,
+        Pin<Box<dyn Future<Output = Result<Vec<T>, SourceError>> + Send>>,
+    >
+    where
+        S: Stream<Item = T> + Send + Unpin + 'static,
+    {
+        let shared = Arc::new(TokioMutex::new(stream));
+        FallibleAsyncInfiniteSourceTyped::from_fallible_async_fn(move |_index| {
+            let stream = shared.clone();
+            Box::pin(async move {
+                let mut guard = stream.lock().await;
+                match guard.next().await {
+                    Some(item) => Ok(vec![item]),
+                    None => Err(SourceError::Other("stream ended".to_string())),
+                }
+            }) as Pin<Box<dyn Future<Output = Result<Vec<T>, SourceError>> + Send>>
+        })
+    }
+
+    /// Create from an async channel receiver.
+    ///
+    /// The receiver is wrapped in `Arc<Mutex<...>>` so handler clones share progress.
+    /// Channel close is modeled as `Err(SourceError::Other("channel closed"))`.
+    pub fn from_receiver(
+        receiver: tokio::sync::mpsc::Receiver<T>,
+    ) -> FallibleAsyncInfiniteSourceTyped<
+        T,
+        impl FnMut(usize) -> Pin<Box<dyn Future<Output = Result<Vec<T>, SourceError>> + Send>>
+            + Send
+            + Sync
+            + Clone,
+        Pin<Box<dyn Future<Output = Result<Vec<T>, SourceError>> + Send>>,
+    > {
+        let shared = Arc::new(TokioMutex::new(receiver));
+        FallibleAsyncInfiniteSourceTyped::from_fallible_async_fn(move |_index| {
+            let rx = shared.clone();
+            Box::pin(async move {
+                let mut guard = rx.lock().await;
+                match guard.recv().await {
+                    Some(item) => Ok(vec![item]),
+                    None => Err(SourceError::Other("channel closed".to_string())),
+                }
+            }) as Pin<Box<dyn Future<Output = Result<Vec<T>, SourceError>> + Send>>
+        })
+    }
+}
+
+impl<T, F, Fut> std::fmt::Debug for AsyncInfiniteSourceTyped<T, F, Fut>
+where
+    T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
+    F: FnMut(usize) -> Fut + Send + Sync + Clone,
+    Fut: Future<Output = Vec<T>> + Send,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AsyncInfiniteSourceTyped")
+            .field("item_type", &std::any::type_name::<T>())
+            .field("current_index", &self.current_index)
+            .field("writer_id_bound", &self.writer_id.is_some())
+            .finish()
+    }
+}
+
+#[async_trait]
+impl<T, F, Fut> AsyncInfiniteSourceHandler for AsyncInfiniteSourceTyped<T, F, Fut>
+where
+    T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
+    F: FnMut(usize) -> Fut + Send + Sync + Clone,
+    Fut: Future<Output = Vec<T>> + Send,
+{
+    fn bind_writer_id(&mut self, id: WriterId) {
+        self.writer_id = Some(id);
+    }
+
+    async fn next(&mut self) -> Result<Vec<ChainEvent>, SourceError> {
+        let writer_id = self
+            .writer_id
+            .ok_or_else(|| SourceError::Other("WriterId not bound".to_string()))?;
+
+        let items = (self.producer)(self.current_index).await;
+        if items.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let event_type = T::versioned_event_type();
+        let item_count = items.len();
+        let mut events = Vec::with_capacity(item_count);
+        for item in items {
+            let event = ChainEventFactory::data_event_from(writer_id, &event_type, &item)
+                .map_err(|e| {
+                    SourceError::Other(format!(
+                        "AsyncInfiniteSourceTyped failed to serialize {}: {e}",
+                        std::any::type_name::<T>()
+                    ))
+                })?;
+            events.push(event);
+        }
+        self.current_index = self.current_index.saturating_add(item_count);
+        Ok(events)
+    }
+
+    async fn drain(&mut self) -> Result<(), SourceError> {
+        Ok(())
+    }
+}
+
+// =============================================================================
+// Fallible Async Infinite Source
+// =============================================================================
+
+/// Typed infinite source for fallible asynchronous producers (use with `async_infinite_source!`).
+///
+/// Unlike `AsyncInfiniteSourceTyped`, this accepts producers that can return `SourceError`,
+/// enabling typed sources for error-injection testing and unreliable upstreams.
+///
+/// The producer returns:
+/// - `Ok(vec![...])` to emit one or more items
+/// - `Ok(vec![])` for an idle poll (no data ready yet)
+/// - `Err(SourceError)` to signal a poll failure
+pub struct FallibleAsyncInfiniteSourceTyped<T, F, Fut>
+where
+    T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
+    F: FnMut(usize) -> Fut + Send + Sync + Clone,
+    Fut: Future<Output = Result<Vec<T>, SourceError>> + Send,
+{
+    producer: F,
+    current_index: usize,
+    writer_id: Option<WriterId>,
+    _phantom: PhantomData<fn() -> (T, Fut)>,
+}
+
+impl<T, F, Fut> Clone for FallibleAsyncInfiniteSourceTyped<T, F, Fut>
+where
+    T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
+    F: FnMut(usize) -> Fut + Send + Sync + Clone,
+    Fut: Future<Output = Result<Vec<T>, SourceError>> + Send,
+{
+    fn clone(&self) -> Self {
+        Self {
+            producer: self.producer.clone(),
+            current_index: self.current_index,
+            writer_id: self.writer_id,
+            _phantom: PhantomData,
+        }
+    }
+}
+
+impl<T, F, Fut> FallibleAsyncInfiniteSourceTyped<T, F, Fut>
+where
+    T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
+    F: FnMut(usize) -> Fut + Send + Sync + Clone,
+    Fut: Future<Output = Result<Vec<T>, SourceError>> + Send,
+{
+    /// Create from a fallible async batch producer.
+    pub fn from_fallible_async_fn(producer: F) -> Self {
+        Self {
+            producer,
+            current_index: 0,
+            writer_id: None,
+            _phantom: PhantomData,
+        }
+    }
+}
+
+impl<T, F, Fut> std::fmt::Debug for FallibleAsyncInfiniteSourceTyped<T, F, Fut>
+where
+    T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
+    F: FnMut(usize) -> Fut + Send + Sync + Clone,
+    Fut: Future<Output = Result<Vec<T>, SourceError>> + Send,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FallibleAsyncInfiniteSourceTyped")
+            .field("item_type", &std::any::type_name::<T>())
+            .field("current_index", &self.current_index)
+            .field("writer_id_bound", &self.writer_id.is_some())
+            .finish()
+    }
+}
+
+#[async_trait]
+impl<T, F, Fut> AsyncInfiniteSourceHandler for FallibleAsyncInfiniteSourceTyped<T, F, Fut>
+where
+    T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
+    F: FnMut(usize) -> Fut + Send + Sync + Clone,
+    Fut: Future<Output = Result<Vec<T>, SourceError>> + Send,
+{
+    fn bind_writer_id(&mut self, id: WriterId) {
+        self.writer_id = Some(id);
+    }
+
+    async fn next(&mut self) -> Result<Vec<ChainEvent>, SourceError> {
+        let writer_id = self
+            .writer_id
+            .ok_or_else(|| SourceError::Other("WriterId not bound".to_string()))?;
+
+        let items = (self.producer)(self.current_index).await?;
+        if items.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let event_type = T::versioned_event_type();
+        let item_count = items.len();
+        let mut events = Vec::with_capacity(item_count);
+        for item in items {
+            let event = ChainEventFactory::data_event_from(writer_id, &event_type, &item)
+                .map_err(|e| {
+                    SourceError::Other(format!(
+                        "FallibleAsyncInfiniteSourceTyped failed to serialize {}: {e}",
+                        std::any::type_name::<T>()
+                    ))
+                })?;
+            events.push(event);
+        }
+        self.current_index = self.current_index.saturating_add(item_count);
+        Ok(events)
+    }
+
+    async fn drain(&mut self) -> Result<(), SourceError> {
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use obzenflow_core::id::StageId;
     use serde::{Deserialize, Serialize};
 
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
     struct TestPayload {
         n: usize,
     }
@@ -834,5 +1387,218 @@ mod tests {
         let _ = src.next().await.expect("next should succeed");
         let done = src.next().await.expect("next should succeed");
         assert!(done.is_none(), "expected completion via Ok(None)");
+    }
+
+    // =========================================================================
+    // Infinite source tests (FLOWIP-081d)
+    // =========================================================================
+
+    #[test]
+    fn infinite_source_typed_emits_and_idles() {
+        let mut src = InfiniteSourceTyped::from_fn(|index| {
+            if index < 2 {
+                vec![TestPayload { n: index }]
+            } else {
+                Vec::new()
+            }
+        });
+
+        let writer_id = WriterId::from(StageId::new());
+        src.bind_writer_id(writer_id);
+
+        let first = src.next().expect("next should succeed");
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].writer_id, writer_id);
+        assert_eq!(first[0].event_type(), TestPayload::versioned_event_type());
+        assert_eq!(src.current_index, 1);
+
+        let second = src.next().expect("next should succeed");
+        assert_eq!(second.len(), 1);
+        assert_eq!(src.current_index, 2);
+
+        let idle = src.next().expect("next should succeed");
+        assert!(idle.is_empty(), "expected idle poll");
+        assert_eq!(src.current_index, 2, "idle should not advance index");
+    }
+
+    #[test]
+    fn fallible_infinite_source_typed_propagates_errors_and_retries() {
+        let attempts = Arc::new(Mutex::new(0usize));
+        let attempts_for_closure = attempts.clone();
+
+        let mut src = FallibleInfiniteSourceTyped::from_fallible_fn(move |index| {
+            if index == 0 {
+                return Ok(vec![TestPayload { n: 0 }]);
+            }
+
+            let mut attempts = attempts_for_closure.lock().expect("attempts lock poisoned");
+            *attempts += 1;
+            if *attempts == 1 {
+                return Err(SourceError::Transport("network error".to_string()));
+            }
+
+            Ok(vec![TestPayload { n: index }])
+        });
+
+        let writer_id = WriterId::from(StageId::new());
+        src.bind_writer_id(writer_id);
+
+        assert_eq!(src.current_index, 0);
+
+        // First: success (index advances)
+        let first = src.next().expect("next should succeed");
+        assert_eq!(first.len(), 1);
+        assert_eq!(src.current_index, 1);
+
+        // Second: error (index does not advance)
+        let err = src.next().expect_err("expected error");
+        assert!(matches!(err, SourceError::Transport(_)));
+        assert_eq!(src.current_index, 1);
+
+        // Third: success (retry same index)
+        let second = src.next().expect("next should succeed");
+        assert_eq!(second.len(), 1);
+        assert_eq!(src.current_index, 2);
+    }
+
+    #[test]
+    fn infinite_source_from_receiver_drains_and_errors_on_close() {
+        let (tx, rx) = std::sync::mpsc::channel::<TestPayload>();
+        tx.send(TestPayload { n: 1 }).expect("send 1");
+        tx.send(TestPayload { n: 2 }).expect("send 2");
+        drop(tx);
+
+        let mut src = InfiniteSourceTyped::from_receiver(rx, Some(100));
+        let writer_id = WriterId::from(StageId::new());
+        src.bind_writer_id(writer_id);
+
+        let batch = src.next().expect("next should succeed");
+        assert_eq!(batch.len(), 2);
+        assert_eq!(src.current_index, 2);
+
+        let err = src.next().expect_err("expected channel closed error");
+        match err {
+            SourceError::Other(msg) => assert_eq!(msg, "channel closed"),
+            other => panic!("expected Other(\"channel closed\"), got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn async_infinite_source_typed_emits_and_idles() {
+        let mut src = AsyncInfiniteSourceTyped::from_async_fn(|index| async move {
+            if index < 2 {
+                vec![TestPayload { n: index }]
+            } else {
+                Vec::new()
+            }
+        });
+
+        let writer_id = WriterId::from(StageId::new());
+        src.bind_writer_id(writer_id);
+
+        let first = src.next().await.expect("next should succeed");
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].writer_id, writer_id);
+        assert_eq!(first[0].event_type(), TestPayload::versioned_event_type());
+        assert_eq!(src.current_index, 1);
+
+        let second = src.next().await.expect("next should succeed");
+        assert_eq!(second.len(), 1);
+        assert_eq!(src.current_index, 2);
+
+        let idle = src.next().await.expect("next should succeed");
+        assert!(idle.is_empty(), "expected idle poll");
+        assert_eq!(src.current_index, 2);
+    }
+
+    #[tokio::test]
+    async fn fallible_async_infinite_source_typed_propagates_errors() {
+        let mut src =
+            FallibleAsyncInfiniteSourceTyped::from_fallible_async_fn(|index| async move {
+                if index == 0 {
+                    Ok(vec![TestPayload { n: 0 }])
+                } else {
+                    Err(SourceError::Timeout("boom".to_string()))
+                }
+            });
+
+        let writer_id = WriterId::from(StageId::new());
+        src.bind_writer_id(writer_id);
+
+        let first = src.next().await.expect("next should succeed");
+        assert_eq!(first.len(), 1);
+        assert_eq!(src.current_index, 1);
+
+        let err = src.next().await.expect_err("expected error");
+        assert!(matches!(err, SourceError::Timeout(_)));
+        assert_eq!(src.current_index, 1, "error should not advance index");
+    }
+
+    #[tokio::test]
+    async fn async_infinite_source_from_receiver_errors_on_close() {
+        let (tx, rx) = tokio::sync::mpsc::channel::<TestPayload>(16);
+        tx.send(TestPayload { n: 1 }).await.expect("send 1");
+        tx.send(TestPayload { n: 2 }).await.expect("send 2");
+        drop(tx);
+
+        let mut src = AsyncInfiniteSourceTyped::from_receiver(rx);
+        let writer_id = WriterId::from(StageId::new());
+        src.bind_writer_id(writer_id);
+
+        let first = src.next().await.expect("next should succeed");
+        assert_eq!(first.len(), 1);
+
+        let second = src.next().await.expect("next should succeed");
+        assert_eq!(second.len(), 1);
+
+        let err = src.next().await.expect_err("expected channel closed error");
+        match err {
+            SourceError::Other(msg) => assert_eq!(msg, "channel closed"),
+            other => panic!("expected Other(\"channel closed\"), got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn async_infinite_source_from_stream_ends_as_error() {
+        let stream = futures::stream::iter(vec![TestPayload { n: 1 }, TestPayload { n: 2 }]);
+        let mut src = AsyncInfiniteSourceTyped::from_stream(stream);
+        let writer_id = WriterId::from(StageId::new());
+        src.bind_writer_id(writer_id);
+
+        let first = src.next().await.expect("next should succeed");
+        assert_eq!(first.len(), 1);
+
+        let second = src.next().await.expect("next should succeed");
+        assert_eq!(second.len(), 1);
+
+        let err = src.next().await.expect_err("expected stream ended error");
+        match err {
+            SourceError::Other(msg) => assert_eq!(msg, "stream ended"),
+            other => panic!("expected Other(\"stream ended\"), got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn async_infinite_source_from_stream_clones_share_progress() {
+        let stream = futures::stream::iter(vec![TestPayload { n: 1 }, TestPayload { n: 2 }]);
+        let mut src1 = AsyncInfiniteSourceTyped::from_stream(stream);
+        let writer_id = WriterId::from(StageId::new());
+        src1.bind_writer_id(writer_id);
+
+        let mut src2 = src1.clone();
+
+        let first = src1.next().await.expect("next should succeed");
+        assert_eq!(first.len(), 1);
+        assert_eq!(
+            TestPayload::from_event(&first[0]).expect("payload"),
+            TestPayload { n: 1 }
+        );
+
+        let second = src2.next().await.expect("next should succeed");
+        assert_eq!(second.len(), 1);
+        assert_eq!(
+            TestPayload::from_event(&second[0]).expect("payload"),
+            TestPayload { n: 2 }
+        );
     }
 }

@@ -131,6 +131,11 @@ pub trait AsyncFiniteSourceHandler: Send + Sync {
 /// and handlers can optionally implement `drain()` for best-effort cleanup.
 #[async_trait]
 pub trait AsyncInfiniteSourceHandler: Send + Sync {
+    /// Called by the runtime before the first `next()` to inject the stage `WriterId`.
+    ///
+    /// Default is a no-op for existing handlers that manage their own `WriterId`.
+    fn bind_writer_id(&mut self, _id: WriterId) {}
+
     /// Pull zero or more events from the source asynchronously.
     async fn next(&mut self) -> Result<Vec<ChainEvent>, SourceError>;
 
@@ -180,6 +185,11 @@ pub trait AsyncInfiniteSourceHandler: Send + Sync {
 /// }
 /// ```
 pub trait InfiniteSourceHandler: Send + Sync {
+    /// Called by the runtime before the first `next()` to inject the stage `WriterId`.
+    ///
+    /// Default is a no-op for existing handlers that manage their own `WriterId`.
+    fn bind_writer_id(&mut self, _id: WriterId) {}
+
     /// Pull zero or more events from the source.
     ///
     /// - `Ok(events)` means the source advanced; `events` may be empty or non-empty.

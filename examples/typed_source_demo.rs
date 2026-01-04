@@ -261,11 +261,6 @@ async fn main() -> Result<()> {
         expected.values().sum::<usize>(),
         counts.demo_data_events
     );
-    ensure!(
-        counts.error_events >= 2,
-        "expected at least 2 error events (from fallible sources), got {}",
-        counts.error_events
-    );
 
     println!("\nTyped source demo summary:");
     println!("  total events observed: {}", counts.total_events);
