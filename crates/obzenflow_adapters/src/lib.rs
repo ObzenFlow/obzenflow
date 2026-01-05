@@ -4,3 +4,4 @@
 
 pub mod middleware;
 pub mod monitoring;
+pub mod sinks;

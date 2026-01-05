@@ -17,10 +17,10 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
+use obzenflow::sinks::ConsoleSink;
 use obzenflow_core::{
     event::{
         chain_event::{ChainEvent, ChainEventFactory},
-        status::processing_status::ErrorKind,
     },
     id::StageId,
     TypedPayload, // ✨ FLOWIP-082a
@@ -30,14 +30,12 @@ use obzenflow_dsl_infra::{flow, join, sink, source, stateful, transform, with_re
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
-use obzenflow_runtime_services::stages::common::handlers::{JoinHandler, StatefulHandler, TransformHandler};
+use obzenflow_runtime_services::stages::common::handlers::{StatefulHandler, TransformHandler};
 use obzenflow_runtime_services::stages::join::InnerJoinBuilder;
 use obzenflow_runtime_services::stages::source::FiniteSourceTyped;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 
 // ============================================================================
 // FLOWIP-082a & FLOWIP-080l: Typed Event Schemas
@@ -497,14 +495,9 @@ async fn main() -> Result<()> {
 
             // Aggregation and output
             agg = stateful!("aggregator" => CarrierAggregator::new());
-            printer = {
-                let header_printed = Arc::new(AtomicBool::new(false));
-                sink!("printer" => move |stats: CarrierStatistics| {
-                    if !header_printed.swap(true, Ordering::SeqCst) {
-                        println!("✈️  Carrier delay summary");
-                        println!("-------------------------");
-                    }
-
+            printer = sink!("printer" => ConsoleSink::<CarrierStatistics>::table(
+                &["status", "carrier", "avg_delay", "flights"],
+                |stats| {
                     let status = if stats.average_delay < 10.0 {
                         "🟢"
                     } else if stats.average_delay < 30.0 {
@@ -513,12 +506,14 @@ async fn main() -> Result<()> {
                         "🔴"
                     };
 
-                    println!(
-                        "  {} {}: {:.1} min avg delay ({} flights)",
-                        status, stats.carrier, stats.average_delay, stats.flight_count
-                    );
-                })
-            };
+                    vec![
+                        status.to_string(),
+                        stats.carrier.clone(),
+                        format!("{:.1} min", stats.average_delay),
+                        stats.flight_count.to_string(),
+                    ]
+                }
+            ));
         },
 
         topology: {
