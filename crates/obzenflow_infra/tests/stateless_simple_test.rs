@@ -66,38 +66,34 @@ impl SinkHandler for Printer {
 
 #[tokio::test]
 async fn stateless_pipeline_runs_to_completion() {
-    FlowApplication::run(async {
-        flow! {
-            name: "stateless_simple_test",
-            journals: disk_journals(std::path::PathBuf::from("target/stateless_simple_test_logs")),
-            middleware: [],
+    FlowApplication::run(flow! {
+        name: "stateless_simple_test",
+        journals: disk_journals(std::path::PathBuf::from("target/stateless_simple_test_logs")),
+        middleware: [],
 
-            stages: {
-                numbers = source!("numbers" => SimpleSource::new(5));
-                doubler = transform!("doubler" => Map::new(|event| {
-                    if let Some(value) = event.payload()["value"].as_u64() {
-                        ChainEventFactory::data_event(
-                            WriterId::from(StageId::new()),
-                            "doubled",
-                            json!({
-                                "original": value,
-                                "doubled": value * 2,
-                            }),
-                        )
-                    } else {
-                        event
-                    }
-                }));
-                printer = sink!("printer" => Printer);
-            },
+        stages: {
+            numbers = source!("numbers" => SimpleSource::new(5));
+            doubler = transform!("doubler" => Map::new(|event| {
+                if let Some(value) = event.payload()["value"].as_u64() {
+                    ChainEventFactory::data_event(
+                        WriterId::from(StageId::new()),
+                        "doubled",
+                        json!({
+                            "original": value,
+                            "doubled": value * 2,
+                        }),
+                    )
+                } else {
+                    event
+                }
+            }));
+            printer = sink!("printer" => Printer);
+        },
 
-            topology: {
-                numbers |> doubler;
-                doubler |> printer;
-            }
+        topology: {
+            numbers |> doubler;
+            doubler |> printer;
         }
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to create flow: {:?}", e))
     })
     .await
     .expect("flow should complete without stateful stages");

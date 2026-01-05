@@ -12,6 +12,7 @@ obzenflow_core = { path = "../obzenflow_core" }
 obzenflow-topology = { path = "../../../obzenflow-topology", version = "0.2" }
 obzenflow_runtime_services = { path = "../obzenflow_runtime_services" }
 obzenflow_adapters = { path = "../obzenflow_adapters" }
+obzenflow_dsl_infra = { path = "../obzenflow_dsl_infra" }
 
 # Infrastructure dependencies
 tokio = { version = "1", features = ["full", "tracing"] }
@@ -54,5 +55,4 @@ tokio-test = "0.4"
 tempfile = "3.8"
 uuid = { version = "1.0", features = ["v4"] }
 anyhow = "1.0"
-obzenflow_dsl_infra = { path = "../obzenflow_dsl_infra" }
 obzenflow-fsm = { path = "../../../obzenflow-fsm", version = "0.3.0" }

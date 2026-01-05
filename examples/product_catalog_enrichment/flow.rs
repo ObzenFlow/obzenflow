@@ -1,17 +1,17 @@
 use super::domain::*;
-use super::sinks::DashboardSink;
+use super::sinks::{per_order_printer, summary_printer, CatalogAnalyticsSummary};
 use super::sources::*;
 use anyhow::Result;
 use obzenflow_adapters::middleware::rate_limit;
-use obzenflow_dsl_infra::{flow, join, sink, source, with_ref};
+use obzenflow_dsl_infra::{flow, join, sink, source, stateful, with_ref};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime_services::prelude::FlowHandle;
 use obzenflow_runtime_services::stages::join::{
     InnerJoinBuilder, LeftJoinBuilder, StrictJoinBuilder,
 };
+use obzenflow_runtime_services::stages::stateful::strategies::accumulators::ReduceTyped;
 
-async fn build_flow() -> Result<FlowHandle> {
+fn build_flow() -> obzenflow_dsl_infra::FlowDefinition {
     flow! {
         name: "product_catalog_enrichment",
         journals: disk_journals(std::path::PathBuf::from("target/catalog-logs")),
@@ -164,7 +164,24 @@ async fn build_flow() -> Result<FlowHandle> {
                 )
             );
 
-            dashboard = sink!("dashboard" => DashboardSink::new(), [rate_limit(0.5)]);
+            per_order = sink!("per_order_printer" => per_order_printer(), [rate_limit(0.5)]);
+
+            stats = stateful!("catalog_stats" =>
+                ReduceTyped::new(
+                    CatalogAnalyticsSummary::default(),
+                    |summary: &mut CatalogAnalyticsSummary, order: &EnrichedOrderWithPromo| {
+                        summary.order_count += 1;
+                        summary.total_revenue += order.discounted_revenue;
+                        summary.total_margin += order.final_margin;
+
+                        if order.promo_code.is_some() && order.discount_pct.is_some() {
+                            summary.promo_orders += 1;
+                        }
+                    }
+                ).emit_on_eof()
+            );
+
+            summary = sink!("summary_printer" => summary_printer());
         },
 
         topology: {
@@ -174,11 +191,11 @@ async fn build_flow() -> Result<FlowHandle> {
             orders |> payment_validated;
             payment_validated |> enriched_orders;
             enriched_orders |> promo_enriched;
-            promo_enriched |> dashboard;
+            promo_enriched |> per_order;
+            promo_enriched |> stats;
+            stats |> summary;
         }
     }
-    .await
-    .map_err(|e| anyhow::anyhow!("Failed to create flow: {:?}", e))
 }
 
 pub fn run_example() -> Result<()> {
@@ -203,7 +220,7 @@ pub fn run_example() -> Result<()> {
         .with_console_subscriber()
         .with_log_level(obzenflow_infra::application::LogLevel::Info)
         .run_blocking(build_flow())
-        .map_err(|e| anyhow::anyhow!("Application failed: {:?}", e))?;
+        ?;
 
     println!("\n✅ Product catalog enrichment completed!");
     println!("\n💡 Try setting INJECT_BAD_PAYMENT=1 to see StrictJoin trigger Jonestown Protocol!");

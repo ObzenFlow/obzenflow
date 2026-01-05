@@ -564,7 +564,8 @@ impl<H: SinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAction<H> 
                     "sink: FlushBuffers action - calling handler.flush()"
                 );
                 match handler.flush().await {
-                    Ok(Some(payload)) => {
+                    Ok(Some(mut payload)) => {
+                        payload.destination = ctx.stage_name.clone();
                         tracing::info!(
                             target: "flowip-080o",
                             stage_name = %ctx.stage_name,

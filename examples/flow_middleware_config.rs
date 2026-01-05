@@ -133,11 +133,10 @@ async fn main() -> Result<()> {
 
     let journal_path = std::path::PathBuf::from("target/flow_middleware_config_journal");
 
-    FlowApplication::run(async {
-        flow! {
-            name: "middleware_config_demo",
-            journals: disk_journals(journal_path.clone()),
-            middleware: [
+    FlowApplication::run(flow! {
+        name: "middleware_config_demo",
+        journals: disk_journals(journal_path.clone()),
+        middleware: [
                 // Flow-level rate limit: 1.0 events/sec
                 // All stages inherit this unless they override
                 rate_limit(1.0)
@@ -175,12 +174,9 @@ async fn main() -> Result<()> {
                 src |> trans;
                 trans |> snk;
             }
-        }
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to create flow: {:?}", e))
     })
     .await
-    .map_err(|e| anyhow::anyhow!("Application failed: {:?}", e))?;
+    ?;
 
     println!("\n\nFlow completed successfully!");
     println!("\nKey observations:");

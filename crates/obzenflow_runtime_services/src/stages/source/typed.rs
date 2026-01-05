@@ -47,7 +47,7 @@ where
     F: FnMut(usize) -> Option<Vec<T>> + Send + Sync + Clone,
 {
     /// Create from a batch producer.
-    pub fn from_fn(producer: F) -> Self {
+    pub fn from_producer(producer: F) -> Self {
         Self {
             producer,
             current_index: 0,
@@ -61,11 +61,19 @@ impl<T> FiniteSourceTyped<T, fn(usize) -> Option<Vec<T>>>
 where
     T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
 {
-    /// Create from an iterator (collects to a Vec; requires `T: Clone`).
+    /// Create from an iterator (primary constructor).
     ///
+    /// Collects the iterator into a `Vec` and clones items on emission.
     /// Not suitable for very large datasets. Use a dedicated streaming source
     /// (e.g., FLOWIP-084 connectors) when inputs are unbounded.
-    pub fn from_iter<I>(
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let events = vec![MyEvent { id: 1 }, MyEvent { id: 2 }];
+    /// let source = FiniteSourceTyped::new(events);
+    /// ```
+    pub fn new<I>(
         iter: I,
     ) -> FiniteSourceTyped<T, impl FnMut(usize) -> Option<Vec<T>> + Send + Sync + Clone>
     where
@@ -74,7 +82,7 @@ where
         let items: Vec<T> = iter.into_iter().collect();
         let total = items.len();
 
-        FiniteSourceTyped::from_fn(move |index| {
+        FiniteSourceTyped::from_producer(move |index| {
             if index >= total {
                 None
             } else {
@@ -90,17 +98,19 @@ where
     where
         G: FnMut(usize) -> Option<T> + Send + Sync + Clone,
     {
-        FiniteSourceTyped::from_fn(move |index| producer(index).map(|item| vec![item]))
+        FiniteSourceTyped::from_producer(move |index| producer(index).map(|item| vec![item]))
     }
 
-    /// Create from a fallible batch producer.
-    pub fn from_fallible_fn<F>(
+    /// Create a fallible finite source from a batch producer.
+    ///
+    /// Returns `FallibleFiniteSourceTyped` for error-returning producers.
+    pub fn fallible<F>(
         producer: F,
     ) -> FallibleFiniteSourceTyped<T, F>
     where
         F: FnMut(usize) -> Result<Option<Vec<T>>, SourceError> + Send + Sync + Clone,
     {
-        FallibleFiniteSourceTyped::from_fallible_fn(producer)
+        FallibleFiniteSourceTyped::new(producer)
     }
 
     /// Convenience: create from a fallible single-item producer.
@@ -200,11 +210,19 @@ where
     T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
     F: FnMut(usize) -> Result<Option<Vec<T>>, SourceError> + Send + Sync + Clone,
 {
-    /// Create from a fallible batch producer.
+    /// Create from a fallible batch producer (primary constructor).
     ///
     /// The producer can return `SourceError` to signal poll failures (timeout,
     /// transport errors, etc.), which propagate directly to the handler's `next()`.
-    pub fn from_fallible_fn(producer: F) -> Self {
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let source = FallibleFiniteSourceTyped::new(|index| {
+    ///     if index >= 10 { Ok(None) } else { Ok(Some(vec![MyEvent { id: index }])) }
+    /// });
+    /// ```
+    pub fn new(producer: F) -> Self {
         Self {
             producer,
             current_index: 0,
@@ -227,7 +245,7 @@ where
     where
         G: FnMut(usize) -> Result<Option<T>, SourceError> + Send + Sync + Clone,
     {
-        FallibleFiniteSourceTyped::from_fallible_fn(move |index| {
+        FallibleFiniteSourceTyped::new(move |index| {
             producer(index).map(|opt| opt.map(|item| vec![item]))
         })
     }
@@ -330,19 +348,22 @@ where
     F: FnMut(usize) -> Fut + Send + Sync + Clone,
     Fut: Future<Output = Option<Vec<T>>> + Send,
 {
-    /// Create from an async batch producer.
-    pub fn from_fn(producer: F) -> Self {
+    /// Create from an async batch producer (primary constructor).
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let source = AsyncFiniteSourceTyped::new(|index| async move {
+    ///     if index >= 10 { None } else { Some(vec![MyEvent { id: index }]) }
+    /// });
+    /// ```
+    pub fn new(producer: F) -> Self {
         Self {
             producer,
             current_index: 0,
             writer_id: None,
             _phantom: PhantomData,
         }
-    }
-
-    /// Alias for readability when constructing async sources.
-    pub fn from_async_fn(producer: F) -> Self {
-        Self::from_fn(producer)
     }
 }
 
@@ -449,11 +470,19 @@ where
     F: FnMut(usize) -> Fut + Send + Sync + Clone,
     Fut: Future<Output = Result<Option<Vec<T>>, SourceError>> + Send,
 {
-    /// Create from a fallible async batch producer.
+    /// Create from a fallible async batch producer (primary constructor).
     ///
     /// The producer can return `SourceError` to signal poll failures (timeout,
     /// transport errors, etc.), which propagate directly to the handler's `next()`.
-    pub fn from_fallible_async_fn(producer: F) -> Self {
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let source = FallibleAsyncFiniteSourceTyped::new(|index| async move {
+    ///     if index >= 10 { Ok(None) } else { Ok(Some(vec![MyEvent { id: index }])) }
+    /// });
+    /// ```
+    pub fn new(producer: F) -> Self {
         Self {
             producer,
             current_index: 0,
@@ -490,7 +519,7 @@ where
         G: FnMut(usize) -> FutItem + Send + Sync + Clone + 'static,
         FutItem: Future<Output = Result<Option<T>, SourceError>> + Send + 'static,
     {
-        FallibleAsyncFiniteSourceTyped::from_fallible_async_fn(move |index| {
+        FallibleAsyncFiniteSourceTyped::new(move |index| {
             let fut = producer(index);
             Box::pin(async move { fut.await.map(|opt| opt.map(|item| vec![item])) })
                 as Pin<
@@ -511,15 +540,17 @@ impl<T>
 where
     T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
 {
-    /// Create from a fallible async batch producer.
-    pub fn from_fallible_async_fn<G, Fut>(
+    /// Create a fallible async source from a batch producer.
+    ///
+    /// Returns `FallibleAsyncFiniteSourceTyped` for error-returning producers.
+    pub fn fallible<G, Fut>(
         producer: G,
     ) -> FallibleAsyncFiniteSourceTyped<T, G, Fut>
     where
         G: FnMut(usize) -> Fut + Send + Sync + Clone,
         Fut: Future<Output = Result<Option<Vec<T>>, SourceError>> + Send,
     {
-        FallibleAsyncFiniteSourceTyped::from_fallible_async_fn(producer)
+        FallibleAsyncFiniteSourceTyped::new(producer)
     }
 
     /// Convenience: create from a fallible async single-item producer.
@@ -625,8 +656,16 @@ where
     T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
     F: FnMut(usize) -> Vec<T> + Send + Sync + Clone,
 {
-    /// Create from a batch producer.
-    pub fn from_fn(producer: F) -> Self {
+    /// Create from a batch producer (primary constructor).
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let source = InfiniteSourceTyped::new(|index| {
+    ///     vec![MyEvent { id: index }]
+    /// });
+    /// ```
+    pub fn new(producer: F) -> Self {
         Self {
             producer,
             current_index: 0,
@@ -640,14 +679,16 @@ impl<T> InfiniteSourceTyped<T, fn(usize) -> Vec<T>>
 where
     T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
 {
-    /// Create from a fallible batch producer.
-    pub fn from_fallible_fn<G>(
+    /// Create a fallible infinite source from a batch producer.
+    ///
+    /// Returns `FallibleInfiniteSourceTyped` for error-returning producers.
+    pub fn fallible<G>(
         producer: G,
     ) -> FallibleInfiniteSourceTyped<T, G>
     where
         G: FnMut(usize) -> Result<Vec<T>, SourceError> + Send + Sync + Clone,
     {
-        FallibleInfiniteSourceTyped::from_fallible_fn(producer)
+        FallibleInfiniteSourceTyped::new(producer)
     }
 
     /// Create from a sync channel receiver with a batch size cap.
@@ -668,7 +709,7 @@ where
             .max(1);
         let shared = Arc::new(Mutex::new(receiver));
 
-        FallibleInfiniteSourceTyped::from_fallible_fn(move |_index| {
+        FallibleInfiniteSourceTyped::new(move |_index| {
             let mut batch = Vec::new();
             let guard = shared.lock().map_err(|e| {
                 SourceError::Other(format!("channel receiver lock poisoned: {e}"))
@@ -773,8 +814,16 @@ where
     T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
     F: FnMut(usize) -> Result<Vec<T>, SourceError> + Send + Sync + Clone,
 {
-    /// Create from a fallible batch producer.
-    pub fn from_fallible_fn(producer: F) -> Self {
+    /// Create from a fallible batch producer (primary constructor).
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let source = FallibleInfiniteSourceTyped::new(|index| {
+    ///     Ok(vec![MyEvent { id: index }])
+    /// });
+    /// ```
+    pub fn new(producer: F) -> Self {
         Self {
             producer,
             current_index: 0,
@@ -876,19 +925,22 @@ where
     F: FnMut(usize) -> Fut + Send + Sync + Clone,
     Fut: Future<Output = Vec<T>> + Send,
 {
-    /// Create from an async batch producer.
-    pub fn from_fn(producer: F) -> Self {
+    /// Create from an async batch producer (primary constructor).
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let source = AsyncInfiniteSourceTyped::new(|index| async move {
+    ///     vec![MyEvent { id: index }]
+    /// });
+    /// ```
+    pub fn new(producer: F) -> Self {
         Self {
             producer,
             current_index: 0,
             writer_id: None,
             _phantom: PhantomData,
         }
-    }
-
-    /// Alias for readability when constructing async sources.
-    pub fn from_async_fn(producer: F) -> Self {
-        Self::from_fn(producer)
     }
 }
 
@@ -901,15 +953,17 @@ impl<T>
 where
     T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
 {
-    /// Create from a fallible async batch producer.
-    pub fn from_fallible_async_fn<G, FutG>(
+    /// Create a fallible async infinite source from a batch producer.
+    ///
+    /// Returns `FallibleAsyncInfiniteSourceTyped` for error-returning producers.
+    pub fn fallible<G, FutG>(
         producer: G,
     ) -> FallibleAsyncInfiniteSourceTyped<T, G, FutG>
     where
         G: FnMut(usize) -> FutG + Send + Sync + Clone,
         FutG: Future<Output = Result<Vec<T>, SourceError>> + Send,
     {
-        FallibleAsyncInfiniteSourceTyped::from_fallible_async_fn(producer)
+        FallibleAsyncInfiniteSourceTyped::new(producer)
     }
 
     /// Create from an async `Stream` with shared progress.
@@ -930,7 +984,7 @@ where
         S: Stream<Item = T> + Send + Unpin + 'static,
     {
         let shared = Arc::new(TokioMutex::new(stream));
-        FallibleAsyncInfiniteSourceTyped::from_fallible_async_fn(move |_index| {
+        FallibleAsyncInfiniteSourceTyped::new(move |_index| {
             let stream = shared.clone();
             Box::pin(async move {
                 let mut guard = stream.lock().await;
@@ -957,7 +1011,7 @@ where
         Pin<Box<dyn Future<Output = Result<Vec<T>, SourceError>> + Send>>,
     > {
         let shared = Arc::new(TokioMutex::new(receiver));
-        FallibleAsyncInfiniteSourceTyped::from_fallible_async_fn(move |_index| {
+        FallibleAsyncInfiniteSourceTyped::new(move |_index| {
             let rx = shared.clone();
             Box::pin(async move {
                 let mut guard = rx.lock().await;
@@ -1075,8 +1129,16 @@ where
     F: FnMut(usize) -> Fut + Send + Sync + Clone,
     Fut: Future<Output = Result<Vec<T>, SourceError>> + Send,
 {
-    /// Create from a fallible async batch producer.
-    pub fn from_fallible_async_fn(producer: F) -> Self {
+    /// Create from a fallible async batch producer (primary constructor).
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let source = FallibleAsyncInfiniteSourceTyped::new(|index| async move {
+    ///     Ok(vec![MyEvent { id: index }])
+    /// });
+    /// ```
+    pub fn new(producer: F) -> Self {
         Self {
             producer,
             current_index: 0,
@@ -1187,7 +1249,7 @@ mod tests {
     #[tokio::test]
     async fn async_finite_source_typed_emits_and_completes() {
         let total = 2usize;
-        let mut src = AsyncFiniteSourceTyped::from_fn(move |index| async move {
+        let mut src = AsyncFiniteSourceTyped::new(move |index| async move {
             if index >= total {
                 None
             } else {
@@ -1319,7 +1381,7 @@ mod tests {
     #[tokio::test]
     async fn fallible_async_finite_source_typed_emits_and_completes() {
         let total = 2usize;
-        let mut src = FallibleAsyncFiniteSourceTyped::from_fallible_async_fn(move |index| async move {
+        let mut src = FallibleAsyncFiniteSourceTyped::new(move |index| async move {
             if index >= total {
                 Ok(None)
             } else {
@@ -1342,7 +1404,7 @@ mod tests {
 
     #[tokio::test]
     async fn fallible_async_finite_source_typed_propagates_errors() {
-        let mut src = FallibleAsyncFiniteSourceTyped::from_fallible_async_fn(|index| async move {
+        let mut src = FallibleAsyncFiniteSourceTyped::new(|index| async move {
             if index == 0 {
                 Ok(Some(vec![TestPayload { n: 0 }]))
             } else {
@@ -1395,7 +1457,7 @@ mod tests {
 
     #[test]
     fn infinite_source_typed_emits_and_idles() {
-        let mut src = InfiniteSourceTyped::from_fn(|index| {
+        let mut src = InfiniteSourceTyped::new(|index| {
             if index < 2 {
                 vec![TestPayload { n: index }]
             } else {
@@ -1426,7 +1488,7 @@ mod tests {
         let attempts = Arc::new(Mutex::new(0usize));
         let attempts_for_closure = attempts.clone();
 
-        let mut src = FallibleInfiniteSourceTyped::from_fallible_fn(move |index| {
+        let mut src = FallibleInfiniteSourceTyped::new(move |index| {
             if index == 0 {
                 return Ok(vec![TestPayload { n: 0 }]);
             }
@@ -1485,7 +1547,7 @@ mod tests {
 
     #[tokio::test]
     async fn async_infinite_source_typed_emits_and_idles() {
-        let mut src = AsyncInfiniteSourceTyped::from_async_fn(|index| async move {
+        let mut src = AsyncInfiniteSourceTyped::new(|index| async move {
             if index < 2 {
                 vec![TestPayload { n: index }]
             } else {
@@ -1514,7 +1576,7 @@ mod tests {
     #[tokio::test]
     async fn fallible_async_infinite_source_typed_propagates_errors() {
         let mut src =
-            FallibleAsyncInfiniteSourceTyped::from_fallible_async_fn(|index| async move {
+            FallibleAsyncInfiniteSourceTyped::new(|index| async move {
                 if index == 0 {
                     Ok(vec![TestPayload { n: 0 }])
                 } else {

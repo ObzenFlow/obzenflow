@@ -33,7 +33,6 @@ use obzenflow_dsl_infra::dsl::stage_descriptor::AsyncFiniteSourceDescriptor;
 use obzenflow_dsl_infra::{async_transform, flow, sink, source, transform};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime_services::prelude::FlowHandle;
 use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
 use obzenflow_runtime_services::stages::common::handlers::{AsyncTransformHandler, TransformHandler};
 use serde_json::json;
@@ -206,7 +205,7 @@ impl AsyncTransformHandler for GatewayTransform {
     }
 }
 
-async fn build_flow() -> Result<FlowHandle> {
+fn build_flow() -> obzenflow_dsl_infra::FlowDefinition {
     flow! {
         name: "payment_gateway_resilience_demo",
         journals: disk_journals(std::path::PathBuf::from("target/payment-gateway-logs")),
@@ -293,11 +292,9 @@ async fn build_flow() -> Result<FlowHandle> {
             gateway |> summary;
         }
     }
-    .await
-    .map_err(|e| anyhow::anyhow!("Failed to create payment gateway flow: {:?}", e))
 }
 
-async fn build_glitchy_flow(
+fn build_glitchy_flow(
     total_events: usize,
     rate_limit_events_per_sec: f64,
     warmup_events: usize,
@@ -306,7 +303,7 @@ async fn build_glitchy_flow(
     summary_progress_every: usize,
     use_async_source: bool,
     async_poll_timeout: Option<std::time::Duration>,
-) -> Result<FlowHandle> {
+) -> obzenflow_dsl_infra::FlowDefinition {
     let payments_stage = if use_async_source {
         AsyncFiniteSourceDescriptor::new(
             "payments",
@@ -391,8 +388,6 @@ async fn build_glitchy_flow(
             gateway |> summary;
         }
     }
-    .await
-    .map_err(|e| anyhow::anyhow!("Failed to create glitchy payment gateway flow: {:?}", e))
 }
 
 pub fn run_example() -> Result<()> {
@@ -503,28 +498,24 @@ pub fn run_example() -> Result<()> {
         println!("   progress_log:   every {summary_progress_every} events");
     }
 
+    let flow = match total_events {
+        Some(total) => build_glitchy_flow(
+            total,
+            rate_limit_events_per_sec,
+            warmup_events,
+            outage_events,
+            recovery_events,
+            summary_progress_every,
+            use_async_source,
+            async_poll_timeout,
+        ),
+        None => build_flow(),
+    };
+
     FlowApplication::builder()
         .with_console_subscriber()
         .with_log_level(obzenflow_infra::application::LogLevel::Info)
-        .run_blocking(async move {
-            match total_events {
-                Some(total) => {
-                    build_glitchy_flow(
-                        total,
-                        rate_limit_events_per_sec,
-                        warmup_events,
-                        outage_events,
-                        recovery_events,
-                        summary_progress_every,
-                        use_async_source,
-                        async_poll_timeout,
-                    )
-                    .await
-                }
-                None => build_flow().await,
-            }
-        })
-        .map_err(|e| anyhow::anyhow!("Application failed: {:?}", e))?;
+        .run_blocking(flow)?;
 
     println!("\n✅ Payment gateway resilience demo completed!");
     println!("💡 Next step: scrape /metrics for obzenflow_circuit_breaker_*");
@@ -557,7 +548,7 @@ pub fn run_example_in_tests() -> Result<()> {
 /// contracts see the raw effects of a flaky gateway. Under the scripted
 /// outage pattern, the `gateway → summary` edge should eventually fail
 /// with a SeqDivergence transport violation.
-async fn build_strict_flow() -> Result<FlowHandle> {
+fn build_strict_flow() -> obzenflow_dsl_infra::FlowDefinition {
     flow! {
         name: "payment_gateway_resilience_strict_demo",
         journals: disk_journals(std::path::PathBuf::from("target/payment-gateway-logs-strict")),
@@ -583,8 +574,6 @@ async fn build_strict_flow() -> Result<FlowHandle> {
             gateway |> summary;
         }
     }
-    .await
-    .map_err(|e| anyhow::anyhow!("Failed to create strict payment gateway flow: {:?}", e))
 }
 
 /// Test-only runner for the strict flow; expected to fail with a contract violation.

@@ -384,11 +384,10 @@ async fn main() -> Result<()> {
     let med_counter_flow = med_counter.clone();
     let high_counter_flow = high_counter.clone();
 
-    FlowApplication::run(async move {
-        flow! {
-            name: "topology_patterns",
-            journals: disk_journals(journal_path.clone()),
-            middleware: [],
+    FlowApplication::run(flow! {
+        name: "topology_patterns",
+        journals: disk_journals(journal_path.clone()),
+        middleware: [],
 
             stages: {
                 // FAN-IN: Three sources feeding into one aggregator
@@ -468,12 +467,9 @@ async fn main() -> Result<()> {
                 router |> med_priority;
                 router |> high_priority;
             }
-        }
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to create flow: {:?}", e))
     })
     .await
-    .map_err(|e| anyhow::anyhow!("Application failed: {:?}", e))?;
+    ?;
 
     // Deterministic, consolidated fan-out summaries
     print_sink_summary("LOW", "low", low_counter.load(Ordering::Relaxed));

@@ -106,32 +106,28 @@ impl SinkHandler for CollectingSink {
 async fn groupby_with_on_eof_emits_one_aggregate_per_key() {
     let (sink, events) = CollectingSink::new();
 
-    FlowApplication::run(async move {
-        flow! {
-            name: "stateful_primitives_groupby_test",
-            journals: disk_journals(std::path::PathBuf::from("target/stateful_primitives_test_groupby")),
-            middleware: [],
+    FlowApplication::run(flow! {
+        name: "stateful_primitives_groupby_test",
+        journals: disk_journals(std::path::PathBuf::from("target/stateful_primitives_test_groupby")),
+        middleware: [],
 
-            stages: {
-                src = source!("transactions" => TransactionSource::new(10));
-                sales_by_product = stateful!("sales_aggregator" =>
-                    GroupBy::new("product_id", |event: &ChainEvent, stats: &mut ProductStats| {
-                        stats.quantity_sold += event.payload()["quantity"].as_u64().unwrap_or(0);
-                        stats.revenue += event.payload()["revenue"].as_f64().unwrap_or(0.0);
-                        stats.transaction_count += 1;
-                    })
-                    .emit_on_eof()
-                );
-                sink = sink!("sink" => sink);
-            },
+        stages: {
+            src = source!("transactions" => TransactionSource::new(10));
+            sales_by_product = stateful!("sales_aggregator" =>
+                GroupBy::new("product_id", |event: &ChainEvent, stats: &mut ProductStats| {
+                    stats.quantity_sold += event.payload()["quantity"].as_u64().unwrap_or(0);
+                    stats.revenue += event.payload()["revenue"].as_f64().unwrap_or(0.0);
+                    stats.transaction_count += 1;
+                })
+                .emit_on_eof()
+            );
+            sink = sink!("sink" => sink);
+        },
 
-            topology: {
-                src |> sales_by_product;
-                sales_by_product |> sink;
-            }
+        topology: {
+            src |> sales_by_product;
+            sales_by_product |> sink;
         }
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to create flow: {:?}", e))
     })
     .await
     .expect("flow should complete");
@@ -156,35 +152,31 @@ struct TotalStats {
 async fn reduce_with_on_eof_emits_single_total() {
     let (sink, events) = CollectingSink::new();
 
-    FlowApplication::run(async move {
-        flow! {
-            name: "stateful_primitives_reduce_test",
-            journals: disk_journals(std::path::PathBuf::from("target/stateful_primitives_test_reduce")),
-            middleware: [],
+    FlowApplication::run(flow! {
+        name: "stateful_primitives_reduce_test",
+        journals: disk_journals(std::path::PathBuf::from("target/stateful_primitives_test_reduce")),
+        middleware: [],
 
-            stages: {
-                src = source!("transactions" => TransactionSource::new(5));
-                totals = stateful!("totals" =>
-                    Reduce::new(
-                        TotalStats { total_revenue: 0.0, total_transactions: 0, total_quantity: 0 },
-                        |stats: &mut TotalStats, event: &ChainEvent| {
-                            stats.total_revenue += event.payload()["revenue"].as_f64().unwrap_or(0.0);
-                            stats.total_quantity += event.payload()["quantity"].as_u64().unwrap_or(0);
-                            stats.total_transactions += 1;
-                        }
-                    )
-                    .emit_on_eof()
-                );
-                sink = sink!("sink" => sink);
-            },
+        stages: {
+            src = source!("transactions" => TransactionSource::new(5));
+            totals = stateful!("totals" =>
+                Reduce::new(
+                    TotalStats { total_revenue: 0.0, total_transactions: 0, total_quantity: 0 },
+                    |stats: &mut TotalStats, event: &ChainEvent| {
+                        stats.total_revenue += event.payload()["revenue"].as_f64().unwrap_or(0.0);
+                        stats.total_quantity += event.payload()["quantity"].as_u64().unwrap_or(0);
+                        stats.total_transactions += 1;
+                    }
+                )
+                .emit_on_eof()
+            );
+            sink = sink!("sink" => sink);
+        },
 
-            topology: {
-                src |> totals;
-                totals |> sink;
-            }
+        topology: {
+            src |> totals;
+            totals |> sink;
         }
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to create flow: {:?}", e))
     })
     .await
     .expect("flow should complete");
@@ -201,28 +193,24 @@ async fn reduce_with_on_eof_emits_single_total() {
 async fn conflate_emits_latest_value_per_key() {
     let (sink, events) = CollectingSink::new();
 
-    FlowApplication::run(async move {
-        flow! {
-            name: "stateful_primitives_conflate_test",
-            journals: disk_journals(std::path::PathBuf::from("target/stateful_primitives_test_conflate")),
-            middleware: [],
+    FlowApplication::run(flow! {
+        name: "stateful_primitives_conflate_test",
+        journals: disk_journals(std::path::PathBuf::from("target/stateful_primitives_test_conflate")),
+        middleware: [],
 
-            stages: {
-                src = source!("transactions" => TransactionSource::new(8));
-                latest_by_product = stateful!("latest_snapshot" =>
-                    Conflate::new("product_id")
-                        .emit_within(Duration::from_millis(1))
-                );
-                sink = sink!("sink" => sink);
-            },
+        stages: {
+            src = source!("transactions" => TransactionSource::new(8));
+            latest_by_product = stateful!("latest_snapshot" =>
+                Conflate::new("product_id")
+                    .emit_within(Duration::from_millis(1))
+            );
+            sink = sink!("sink" => sink);
+        },
 
-            topology: {
-                src |> latest_by_product;
-                latest_by_product |> sink;
-            }
+        topology: {
+            src |> latest_by_product;
+            latest_by_product |> sink;
         }
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to create flow: {:?}", e))
     })
     .await
     .expect("flow should complete");

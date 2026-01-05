@@ -10,8 +10,8 @@
 use super::{ApplicationError, FlowConfig};
 use crate::application::config::StartupMode;
 use clap::Parser;
+use obzenflow_dsl_infra::FlowDefinition;
 use obzenflow_runtime_services::prelude::FlowHandle;
-use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::task::JoinHandle;
@@ -54,11 +54,9 @@ impl LogLevel {
 ///     FlowApplication::builder()
 ///         .with_console_subscriber()
 ///         .with_log_level(LogLevel::Info)
-///         .run_blocking(async {
-///             flow! {
-///                 name: "my_flow",
-///                 // ... flow definition
-///             }
+///         .run_blocking(flow! {
+///             name: "my_flow",
+///             // ... flow definition
 ///         })?;
 ///     Ok(())
 /// }
@@ -82,11 +80,11 @@ impl FlowApplicationBuilder {
     ///
     /// # Example
     /// ```ignore
-    /// // This works whether or not 'console' feature is enabled!
-    /// FlowApplication::builder()
-    ///     .with_console_subscriber()  // No-op if feature disabled
-    ///     .run_blocking(async { /* ... */ })
-    /// ```
+/// // This works whether or not 'console' feature is enabled!
+/// FlowApplication::builder()
+///     .with_console_subscriber()  // No-op if feature disabled
+///     .run_blocking(flow! { /* ... */ })
+/// ```
     pub fn with_console_subscriber(mut self) -> Self {
         self.console_subscriber = true;
         self
@@ -114,11 +112,7 @@ impl FlowApplicationBuilder {
     /// This builds the tokio runtime, initializes observability, and runs the flow.
     /// Use this when you have a plain `fn main()` and want FlowApplication to
     /// manage the entire runtime lifecycle.
-    pub fn run_blocking<F, E>(self, flow_future: F) -> Result<(), ApplicationError>
-    where
-        F: Future<Output = Result<FlowHandle, E>> + Send + 'static,
-        E: std::fmt::Display,
-    {
+    pub fn run_blocking(self, flow: FlowDefinition) -> Result<(), ApplicationError> {
         // Build tokio runtime so we have a handle for console-subscriber
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -129,23 +123,19 @@ impl FlowApplicationBuilder {
         self.init_observability(Some(runtime.handle()));
 
         // Run the flow in the runtime
-        runtime.block_on(FlowApplication::run(flow_future))
+        runtime.block_on(FlowApplication::run(flow))
     }
 
     /// Run the flow in an existing async context (with #[tokio::main])
     ///
     /// Use this when you already have a tokio runtime (e.g., from #[tokio::main])
     /// and just want FlowApplication to handle observability setup.
-    pub async fn run_async<F, E>(self, flow_future: F) -> Result<(), ApplicationError>
-    where
-        F: Future<Output = Result<FlowHandle, E>>,
-        E: std::fmt::Display,
-    {
+    pub async fn run_async(self, flow: FlowDefinition) -> Result<(), ApplicationError> {
         // Initialize tracing/console-subscriber with the current runtime handle
         self.init_observability(Some(&tokio::runtime::Handle::current()));
 
         // Run the flow
-        FlowApplication::run(flow_future).await
+        FlowApplication::run(flow).await
     }
 
     /// Initialize observability (tracing + console-subscriber)
@@ -256,15 +246,13 @@ impl FlowApplicationBuilder {
 ///
 /// #[tokio::main]
 /// async fn main() -> Result<(), Box<dyn std::error::Error>> {
-///     FlowApplication::run(async {
-///         flow! {
-///             name: "my_flow",
-///             // ... flow definition
-///         }
-///     }).await?;
-///     Ok(())
-/// }
-/// ```
+    ///     FlowApplication::run(flow! {
+    ///         name: "my_flow",
+    ///         // ... flow definition
+    ///     }).await?;
+    ///     Ok(())
+    /// }
+    /// ```
 ///
 /// # Example with builder (console-subscriber, no #[tokio::main])
 /// ```ignore
@@ -274,15 +262,13 @@ impl FlowApplicationBuilder {
 ///     FlowApplication::builder()
 ///         .with_console_subscriber()
 ///         .with_log_level(LogLevel::Info)
-///         .run_blocking(async {
-///             flow! {
-///                 name: "my_flow",
-///                 // ... flow definition
-///             }
-///         })?;
-///     Ok(())
-/// }
-/// ```
+    ///         .run_blocking(flow! {
+    ///             name: "my_flow",
+    ///             // ... flow definition
+    ///         })?;
+    ///     Ok(())
+    /// }
+    /// ```
 pub struct FlowApplication;
 
 impl FlowApplication {
@@ -298,7 +284,7 @@ impl FlowApplication {
     /// FlowApplication::builder()
     ///     .with_console_subscriber()
     ///     .with_log_level(LogLevel::Info)
-    ///     .run_blocking(async { /* flow */ })
+    ///     .run_blocking(flow! { /* flow */ })
     /// ```
     pub fn builder() -> FlowApplicationBuilder {
         FlowApplicationBuilder::default()
@@ -314,16 +300,12 @@ impl FlowApplication {
     /// 5. Manages server lifecycle after flow completes
     /// 
     /// # Arguments
-    /// * `flow_future` - A future that builds and returns a FlowHandle
+    /// * `flow` - A flow definition produced by `flow!`
     /// 
     /// # Returns
     /// * `Ok(())` if flow completes successfully
     /// * `Err(ApplicationError)` if flow fails or cannot start
-    pub async fn run<F, E>(flow_future: F) -> Result<(), ApplicationError>
-    where
-        F: Future<Output = Result<FlowHandle, E>>,
-        E: std::fmt::Display,
-    {
+    pub async fn run(flow: FlowDefinition) -> Result<(), ApplicationError> {
         // Best-effort tracing initialization when the builder isn't used.
         // This ensures examples like char_transform still emit logs without
         // requiring callers to wire tracing explicitly.
@@ -361,7 +343,7 @@ impl FlowApplication {
         tracing::info!("🚀 Starting FlowApplication");
         
         // Build the flow (this executes the flow! macro)
-        let flow_handle = flow_future
+        let flow_handle = flow
             .await
             .map_err(|e| ApplicationError::FlowBuildFailed(e.to_string()))?;
         let flow_handle = Arc::new(flow_handle);

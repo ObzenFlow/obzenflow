@@ -6,17 +6,12 @@
 //! Run with: cargo run --package obzenflow --example top_n_leaderboard
 
 use anyhow::Result;
-use async_trait::async_trait;
 use obzenflow_core::{
-    event::chain_event::ChainEvent,
-    event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload},
     TypedPayload,
 };
 use obzenflow_dsl_infra::{flow, sink, source, stateful};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
-use obzenflow_runtime_services::stages::common::handlers::SinkHandler;
 use obzenflow_runtime_services::stages::source::FiniteSourceTyped;
 use obzenflow_runtime_services::stages::stateful::strategies::accumulators::TopNTyped;
 use serde::{Deserialize, Serialize};
@@ -35,60 +30,24 @@ impl TypedPayload for GameScore {
     const SCHEMA_VERSION: u32 = 1;
 }
 
-/// Sink that displays the leaderboard
-#[derive(Clone, Debug)]
-struct LeaderboardDisplay;
-
-impl LeaderboardDisplay {
-    fn new() -> Self {
-        Self
-    }
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct LeaderboardEntry {
+    rank: usize,
+    key: String,
+    score: f64,
+    metadata: GameScore,
 }
 
-#[async_trait]
-impl SinkHandler for LeaderboardDisplay {
-    async fn consume(&mut self, event: ChainEvent) -> Result<DeliveryPayload, HandlerError> {
-        // ✨ FLOWIP-082a: TopNTyped emits with input type's EVENT_TYPE
-        if event.event_type() == GameScore::EVENT_TYPE {
-            let payload = event.payload();
-            let top_n = payload["top_n"].as_array().unwrap();
-            let count = payload["count"].as_u64().unwrap();
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct LeaderboardUpdate {
+    top_n: Vec<LeaderboardEntry>,
+    capacity: usize,
+    count: usize,
+}
 
-            println!("\n🏆 LEADERBOARD UPDATE 🏆");
-            println!("========================");
-            println!("Total Players Tracked: {}\n", count);
-
-            for (rank, entry) in top_n.iter().enumerate() {
-                let player = entry["key"].as_str().unwrap();
-                let score = entry["score"].as_f64().unwrap();
-                let metadata = &entry["metadata"];
-                let game_mode = metadata["game_mode"].as_str().unwrap_or("Unknown");
-
-                let medal = match rank {
-                    0 => "🥇",
-                    1 => "🥈",
-                    2 => "🥉",
-                    _ => "  ",
-                };
-
-                println!(
-                    "{} #{}: {} - {:.0} points ({})",
-                    medal,
-                    rank + 1,
-                    player,
-                    score,
-                    game_mode
-                );
-            }
-            println!("========================\n");
-        }
-
-        Ok(DeliveryPayload::success(
-            "leaderboard",
-            DeliveryMethod::Custom("Display".to_string()),
-            None,
-        ))
-    }
+impl TypedPayload for LeaderboardUpdate {
+    const EVENT_TYPE: &'static str = GameScore::EVENT_TYPE;
+    const SCHEMA_VERSION: u32 = GameScore::SCHEMA_VERSION;
 }
 
 #[tokio::main]
@@ -123,11 +82,10 @@ async fn main() -> Result<()> {
         ("Charlie".to_string(), 2400.0, "Racing".to_string()), // Charlie improves!
     ];
 
-    FlowApplication::run(async move {
-        flow! {
-            name: "leaderboard_demo",
-            journals: disk_journals(std::path::PathBuf::from("target/leaderboard-logs")),
-            middleware: [],
+    FlowApplication::run(flow! {
+        name: "leaderboard_demo",
+        journals: disk_journals(std::path::PathBuf::from("target/leaderboard-logs")),
+        middleware: [],
 
             stages: {
                 // FLOWIP-081: Typed finite sources (no WriterId/ChainEvent boilerplate)
@@ -158,19 +116,39 @@ async fn main() -> Result<()> {
                     ).emit_on_eof()  // Emit final leaderboard at end
                 );
 
-                display = sink!("display" => LeaderboardDisplay::new());
+                display = sink!("display" => |update: LeaderboardUpdate| {
+                    println!("\n🏆 LEADERBOARD UPDATE 🏆");
+                    println!("========================");
+                    println!("Total Players Tracked: {}\n", update.count);
+
+                    for entry in &update.top_n {
+                        let medal = match entry.rank {
+                            1 => "🥇",
+                            2 => "🥈",
+                            3 => "🥉",
+                            _ => "  ",
+                        };
+
+                        println!(
+                            "{} #{}: {} - {:.0} points ({})",
+                            medal,
+                            entry.rank,
+                            entry.key,
+                            entry.score,
+                            entry.metadata.game_mode
+                        );
+                    }
+                    println!("========================\n");
+                });
             },
 
             topology: {
                 scores |> leaderboard;
                 leaderboard |> display;
             }
-        }
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to create flow: {:?}", e))
     })
     .await
-    .map_err(|e| anyhow::anyhow!("Application failed: {:?}", e))?;
+    ?;
 
     println!("✅ Leaderboard demo completed!");
     println!("\n💡 Key Points:");

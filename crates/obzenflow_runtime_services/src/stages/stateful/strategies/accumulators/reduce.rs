@@ -410,12 +410,11 @@ where
     }
 
     fn emit(&self, state: &Self::State) -> Vec<ChainEvent> {
+        let payload = serde_json::to_value(state).expect("ReduceTyped failed to serialize state");
         vec![ChainEventFactory::data_event(
             self.writer_id.clone(),
             S::EVENT_TYPE,
-            json!({
-                "result": state,
-            }),
+            payload,
         )]
     }
 
@@ -631,7 +630,7 @@ mod typed_tests {
 
         assert_eq!(emitted.len(), 1);
         assert_eq!(emitted[0].event_type(), Counter::EVENT_TYPE);
-        assert_eq!(emitted[0].payload()["result"]["count"], 105);
+        assert_eq!(emitted[0].payload()["count"], 105);
     }
 
     #[test]

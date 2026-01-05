@@ -170,55 +170,6 @@ impl SinkHandler for CompletionSink {
     }
 }
 
-/// Sink that prints the aggregator's final summary
-#[derive(Clone, Debug)]
-struct SummarySink;
-
-impl SummarySink {
-    fn new() -> Self {
-        Self
-    }
-}
-
-#[async_trait]
-impl SinkHandler for SummarySink {
-    async fn consume(&mut self, event: ChainEvent) -> Result<DeliveryPayload, HandlerError> {
-        // ✨ FLOWIP-082a: ReduceTyped emits with state's EVENT_TYPE
-        if EventCountState::event_type_matches(&event.event_type()) {
-            let payload = event.payload();
-            let result = &payload["result"];
-            let count = result["event_count"].as_u64().unwrap_or(0);
-
-            println!("");
-            println!("=====================================");
-            println!("📊 Business-Level Event Count (FLOWIP-080j):");
-            println!("   Successfully processed: {} events", count);
-            println!(
-                "   Note: 1000 generated - {} = {} errors (routed to error journal)",
-                count,
-                1000 - count as u32
-            );
-            println!("=====================================");
-            println!("");
-            println!("💡 Key Improvement:");
-            println!("   59-line EventCounter StatefulHandler → ReduceTyped helper");
-            println!("   Type-safe accumulation with zero ChainEvent manipulation!");
-            println!("");
-            println!("📈 To view framework-level Prometheus metrics:");
-            println!("   1. Run with --server flag");
-            println!("   2. Visit http://localhost:3000/metrics");
-            println!("   3. See detailed per-stage metrics, errors, latencies, etc.");
-            println!("=====================================");
-        }
-
-        Ok(DeliveryPayload::success(
-            "summary_sink",
-            DeliveryMethod::Custom("InMemory".to_string()),
-            Some(1),
-        ))
-    }
-}
-
 #[tokio::main]
 async fn main() -> Result<()> {
     // Set environment to use prometheus exporter
@@ -238,11 +189,9 @@ async fn main() -> Result<()> {
     println!("  Without server:     cargo run -p obzenflow --example prometheus_1k_demo");
     println!("");
 
-    // Use FlowApplication to handle everything
-    FlowApplication::run(async {
-        flow! {
-            name: "prometheus_1k_demo",
-            journals: disk_journals(std::path::PathBuf::from("target/prometheus_1k_demo_journal")),
+    FlowApplication::run(flow! {
+        name: "prometheus_1k_demo",
+        journals: disk_journals(std::path::PathBuf::from("target/prometheus_1k_demo_journal")),
 
             // Flow-level rate limiting (1000 events/sec) for fast processing
             middleware: [
@@ -293,7 +242,30 @@ async fn main() -> Result<()> {
                         }
                     ).emit_on_eof()
                 );
-                counter_sink = sink!("summary_sink" => SummarySink::new());
+                counter_sink = sink!("summary_sink" => |summary: EventCountState| {
+                    let count = summary.event_count;
+                    let errors = 1_000usize.saturating_sub(count);
+
+                    println!("");
+                    println!("=====================================");
+                    println!("📊 Business-Level Event Count (FLOWIP-080j):");
+                    println!("   Successfully processed: {} events", count);
+                    println!(
+                        "   Note: 1000 generated - {} = {} errors (routed to error journal)",
+                        count, errors
+                    );
+                    println!("=====================================");
+                    println!("");
+                    println!("💡 Key Improvement:");
+                    println!("   59-line EventCounter StatefulHandler → ReduceTyped helper");
+                    println!("   Type-safe accumulation with zero ChainEvent manipulation!");
+                    println!("");
+                    println!("📈 To view framework-level Prometheus metrics:");
+                    println!("   1. Run with --server flag");
+                    println!("   2. Visit http://localhost:3000/metrics");
+                    println!("   3. See detailed per-stage metrics, errors, latencies, etc.");
+                    println!("=====================================");
+                });
 
                 // Fan-out branch 2: Completion sink
                 completion = sink!("completion_sink" => CompletionSink::new());
@@ -310,12 +282,9 @@ async fn main() -> Result<()> {
                 // Counter emits summary to its sink
                 counter |> counter_sink;
             }
-        }
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to create flow: {}", e))
     })
     .await
-    .map_err(|e| anyhow::anyhow!("Application failed: {}", e))?;
+    ?;
 
     Ok(())
 }

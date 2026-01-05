@@ -20,7 +20,6 @@ use anyhow::Result;
 use async_trait::async_trait;
 use obzenflow_core::{
     event::chain_event::{ChainEvent, ChainEventFactory},
-    event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload},
     id::StageId,
     TypedPayload,
     WriterId,
@@ -28,7 +27,7 @@ use obzenflow_core::{
 use obzenflow_dsl_infra::{flow, sink, source, stateful, transform};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
-use obzenflow_runtime_services::stages::common::handlers::{SinkHandler, StatefulHandler};
+use obzenflow_runtime_services::stages::common::handlers::StatefulHandler;
 use obzenflow_runtime_services::stages::source::FiniteSourceTyped;
 // ✨ FLOWIP-080h: Import Filter helper
 use obzenflow_runtime_services::stages::transform::Filter;
@@ -46,6 +45,18 @@ struct NumberEvent {
 
 impl TypedPayload for NumberEvent {
     const EVENT_TYPE: &'static str = "number";
+    const SCHEMA_VERSION: u32 = 1;
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct AggregationResult {
+    count: u64,
+    sum: u64,
+    average: f64,
+}
+
+impl TypedPayload for AggregationResult {
+    const EVENT_TYPE: &'static str = "aggregation";
     const SCHEMA_VERSION: u32 = 1;
 }
 
@@ -148,36 +159,6 @@ impl StatefulHandler for CounterHandler {
 }
 
 // ============================================================================
-// Sink: Print final results
-// ============================================================================
-
-#[derive(Clone, Debug)]
-struct PrintSink;
-
-impl PrintSink {
-    fn new() -> Self {
-        Self
-    }
-}
-
-#[async_trait]
-impl SinkHandler for PrintSink {
-    async fn consume(&mut self, event: ChainEvent) -> Result<DeliveryPayload, HandlerError> {
-        if event.event_type() == "aggregation" {
-            println!("\n✨ FINAL RESULT:");
-            println!("   Count: {}", event.payload()["count"]);
-            println!("   Sum: {}", event.payload()["sum"]);
-            println!("   Average: {}", event.payload()["average"]);
-        }
-        Ok(DeliveryPayload::success(
-            "console",
-            DeliveryMethod::Custom("Print".to_string()),
-            None,
-        ))
-    }
-}
-
-// ============================================================================
 // Main: Build and run the pipeline
 // ============================================================================
 
@@ -194,11 +175,10 @@ async fn main() -> Result<()> {
     // Use FlowApplication to handle everything
     use obzenflow_infra::application::FlowApplication;
 
-    FlowApplication::run(async {
-        flow! {
-            name: "stateful_counter_demo",
-            journals: disk_journals(std::path::PathBuf::from("target/stateful_demo_journal")),
-            middleware: [],
+    FlowApplication::run(flow! {
+        name: "stateful_counter_demo",
+        journals: disk_journals(std::path::PathBuf::from("target/stateful_demo_journal")),
+        middleware: [],
 
             stages: {
                 // FLOWIP-081: Typed finite sources (no WriterId/ChainEvent boilerplate)
@@ -214,7 +194,12 @@ async fn main() -> Result<()> {
                 // ✨ FLOWIP-080h: Using Filter helper instead of EvenFilter struct
                 evens = transform!("even_filter" => even_filter());
                 counter = stateful!("counter" => CounterHandler::new());
-                output = sink!("print" => PrintSink::new());
+                output = sink!("print" => |agg: AggregationResult| {
+                    println!("\n✨ FINAL RESULT:");
+                    println!("   Count: {}", agg.count);
+                    println!("   Sum: {}", agg.sum);
+                    println!("   Average: {}", agg.average);
+                });
             },
 
             topology: {
@@ -222,12 +207,9 @@ async fn main() -> Result<()> {
                 evens |> counter;
                 counter |> output;
             }
-        }
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to create flow: {}", e))
     })
     .await
-    .map_err(|e| anyhow::anyhow!("Application failed: {}", e))?;
+    ?;
 
     println!("\n✅ Pipeline completed successfully!");
     println!("\n📝 Summary:");

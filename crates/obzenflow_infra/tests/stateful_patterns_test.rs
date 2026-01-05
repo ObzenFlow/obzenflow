@@ -280,25 +280,21 @@ impl StatefulHandler for ImmediateEmitter {
 async fn counter_emits_single_event_on_drain() {
     let (sink, events) = CollectingSink::new();
 
-    FlowApplication::run(async move {
-        flow! {
-            name: "pattern_counter_test",
-            journals: disk_journals(std::path::PathBuf::from("target/stateful_patterns_test_counter")),
-            middleware: [],
+    FlowApplication::run(flow! {
+        name: "pattern_counter_test",
+        journals: disk_journals(std::path::PathBuf::from("target/stateful_patterns_test_counter")),
+        middleware: [],
 
-            stages: {
-                src = source!("numbers" => NumberSource::new(5));
-                counter = stateful!("counter" => CounterHandler::new());
-                sink = sink!("sink" => sink);
-            },
+        stages: {
+            src = source!("numbers" => NumberSource::new(5));
+            counter = stateful!("counter" => CounterHandler::new());
+            sink = sink!("sink" => sink);
+        },
 
-            topology: {
-                src |> counter;
-                counter |> sink;
-            }
+        topology: {
+            src |> counter;
+            counter |> sink;
         }
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to create flow: {:?}", e))
     })
     .await
     .expect("flow should complete");
@@ -316,25 +312,21 @@ async fn counter_emits_single_event_on_drain() {
 async fn accumulator_emits_one_event_per_input_on_drain() {
     let (sink, events) = CollectingSink::new();
 
-    FlowApplication::run(async move {
-        flow! {
-            name: "pattern_accumulator_test",
-            journals: disk_journals(std::path::PathBuf::from("target/stateful_patterns_test_accumulator")),
-            middleware: [],
+    FlowApplication::run(flow! {
+        name: "pattern_accumulator_test",
+        journals: disk_journals(std::path::PathBuf::from("target/stateful_patterns_test_accumulator")),
+        middleware: [],
 
-            stages: {
-                src = source!("numbers" => NumberSource::new(5));
-                acc = stateful!("accumulator" => AccumulatorHandler::new());
-                sink = sink!("sink" => sink);
-            },
+        stages: {
+            src = source!("numbers" => NumberSource::new(5));
+            acc = stateful!("accumulator" => AccumulatorHandler::new());
+            sink = sink!("sink" => sink);
+        },
 
-            topology: {
-                src |> acc;
-                acc |> sink;
-            }
+        topology: {
+            src |> acc;
+            acc |> sink;
         }
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to create flow: {:?}", e))
     })
     .await
     .expect("flow should complete");
@@ -350,25 +342,21 @@ async fn accumulator_emits_one_event_per_input_on_drain() {
 async fn sum_handler_emits_aggregated_result_on_drain() {
     let (sink, events) = CollectingSink::new();
 
-    FlowApplication::run(async move {
-        flow! {
-            name: "pattern_sum_test",
-            journals: disk_journals(std::path::PathBuf::from("target/stateful_patterns_test_sum")),
-            middleware: [],
+    FlowApplication::run(flow! {
+        name: "pattern_sum_test",
+        journals: disk_journals(std::path::PathBuf::from("target/stateful_patterns_test_sum")),
+        middleware: [],
 
-            stages: {
-                src = source!("numbers" => NumberSource::new(10));
-                summer = stateful!("sum" => SumHandler::new());
-                sink = sink!("sink" => sink);
-            },
+        stages: {
+            src = source!("numbers" => NumberSource::new(10));
+            summer = stateful!("sum" => SumHandler::new());
+            sink = sink!("sink" => sink);
+        },
 
-            topology: {
-                src |> summer;
-                summer |> sink;
-            }
+        topology: {
+            src |> summer;
+            summer |> sink;
         }
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to create flow: {:?}", e))
     })
     .await
     .expect("flow should complete");
@@ -386,25 +374,21 @@ async fn sum_handler_emits_aggregated_result_on_drain() {
 async fn immediate_emitter_emits_during_accumulating() {
     let (sink, events) = CollectingSink::new();
 
-    FlowApplication::run(async move {
-        flow! {
-            name: "pattern_immediate_test",
-            journals: disk_journals(std::path::PathBuf::from("target/stateful_patterns_test_immediate")),
-            middleware: [],
+    FlowApplication::run(flow! {
+        name: "pattern_immediate_test",
+        journals: disk_journals(std::path::PathBuf::from("target/stateful_patterns_test_immediate")),
+        middleware: [],
 
-            stages: {
-                src = source!("numbers" => NumberSource::new(5));
-                emitter = stateful!("emitter" => ImmediateEmitter::new());
-                sink = sink!("sink" => sink);
-            },
+        stages: {
+            src = source!("numbers" => NumberSource::new(5));
+            emitter = stateful!("emitter" => ImmediateEmitter::new());
+            sink = sink!("sink" => sink);
+        },
 
-            topology: {
-                src |> emitter;
-                emitter |> sink;
-            }
+        topology: {
+            src |> emitter;
+            emitter |> sink;
         }
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to create flow: {:?}", e))
     })
     .await
     .expect("flow should complete");
@@ -420,25 +404,21 @@ async fn immediate_emitter_emits_during_accumulating() {
 async fn empty_source_still_triggers_drain_for_stateful_handler() {
     let (sink, events) = CollectingSink::new();
 
-    FlowApplication::run(async move {
-        flow! {
-            name: "pattern_empty_test",
-            journals: disk_journals(std::path::PathBuf::from("target/stateful_patterns_test_empty")),
-            middleware: [],
+    FlowApplication::run(flow! {
+        name: "pattern_empty_test",
+        journals: disk_journals(std::path::PathBuf::from("target/stateful_patterns_test_empty")),
+        middleware: [],
 
-            stages: {
-                src = source!("empty" => EmptySource::new());
-                counter = stateful!("counter" => CounterHandler::new());
-                sink = sink!("sink" => sink);
-            },
+        stages: {
+            src = source!("empty" => EmptySource::new());
+            counter = stateful!("counter" => CounterHandler::new());
+            sink = sink!("sink" => sink);
+        },
 
-            topology: {
-                src |> counter;
-                counter |> sink;
-            }
+        topology: {
+            src |> counter;
+            counter |> sink;
         }
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to create flow: {:?}", e))
     })
     .await
     .expect("flow should complete");

@@ -15,17 +15,10 @@
 //! Run with: `cargo run -p obzenflow --example web_analytics_pipeline`
 
 use anyhow::Result;
-use async_trait::async_trait;
-use obzenflow_core::{
-    event::chain_event::ChainEvent,
-    event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload},
-    TypedPayload,
-};
+use obzenflow_core::TypedPayload;
 use obzenflow_dsl_infra::{flow, sink, source, stateful};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
-use obzenflow_runtime_services::stages::common::handlers::SinkHandler;
 use obzenflow_runtime_services::stages::source::FiniteSourceTyped;
 // FLOWIP-080j: Typed stateful accumulators
 use obzenflow_runtime_services::stages::stateful::strategies::accumulators::{
@@ -85,6 +78,17 @@ struct SessionData {
 impl TypedPayload for SessionData {
     const EVENT_TYPE: &'static str = "analytics.session_data";
     const SCHEMA_VERSION: u32 = 1;
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct SessionUpdate {
+    key: String,
+    result: SessionData,
+}
+
+impl TypedPayload for SessionUpdate {
+    const EVENT_TYPE: &'static str = SessionData::EVENT_TYPE;
+    const SCHEMA_VERSION: u32 = SessionData::SCHEMA_VERSION;
 }
 
 impl UserEvent {
@@ -180,128 +184,6 @@ impl UserEvent {
     }
 }
 
-/// Sink that displays analytics reports
-#[derive(Clone, Debug)]
-struct AnalyticsSink {
-    name: String,
-}
-
-impl AnalyticsSink {
-    fn new(name: &str) -> Self {
-        Self {
-            name: name.to_string(),
-        }
-    }
-}
-
-#[async_trait]
-impl SinkHandler for AnalyticsSink {
-    async fn consume(&mut self, event: ChainEvent) -> Result<DeliveryPayload, HandlerError> {
-        let payload = event.payload();
-
-        // ✨ FLOWIP-082a: GroupByTyped emits with state's EVENT_TYPE
-        if event.event_type() == SessionData::EVENT_TYPE {
-            if let (Some(key), Some(result)) = (payload.get("key"), payload.get("result")) {
-                // Session snapshot from GroupByTyped
-                println!("\n📊 [{}] Session Update:", self.name);
-                println!("   User: {}", key.as_str().unwrap_or("unknown"));
-                println!(
-                    "   - Events: {}",
-                    result["event_count"].as_u64().unwrap_or(0)
-                );
-                println!(
-                    "   - Pages: {}",
-                    result["pages_viewed"]
-                        .as_array()
-                        .map(|v| v.len())
-                        .unwrap_or(0)
-                );
-                println!("   - Clicks: {}", result["clicks"].as_u64().unwrap_or(0));
-                println!(
-                    "   - Duration: {}ms",
-                    result["total_duration_ms"].as_u64().unwrap_or(0)
-                );
-            }
-        }
-        // ✨ FLOWIP-082a: ReduceTyped emits with state's EVENT_TYPE
-        else if event.event_type() == FunnelState::EVENT_TYPE
-            || event.event_type() == MetricsState::EVENT_TYPE
-        {
-            if let Some(result) = payload.get("result") {
-                // Check if it's funnel or metrics by looking at the fields
-                if result.get("funnel_stages").is_some() {
-                    // Funnel update from ReduceTyped
-                    println!("\n🎯 [{}] Funnel Progress:", self.name);
-                    println!(
-                        "   Unique users: {}",
-                        result["total_users"]
-                            .as_object()
-                            .map(|m| m.len())
-                            .unwrap_or(0)
-                    );
-
-                    if let Some(stages) = result["funnel_stages"].as_object() {
-                        let home = stages.get("/home").and_then(|v| v.as_u64()).unwrap_or(0);
-                        let products = stages
-                            .get("/products")
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(0);
-                        let cart = stages.get("/cart").and_then(|v| v.as_u64()).unwrap_or(0);
-                        let conversions = result["conversions"]
-                            .as_array()
-                            .map(|v| v.len())
-                            .unwrap_or(0);
-                        let total_revenue: f64 = result["conversions"]
-                            .as_array()
-                            .map(|arr| arr.iter().filter_map(|v| v.as_f64()).sum())
-                            .unwrap_or(0.0);
-
-                        if home > 0 {
-                            println!(
-                                "   Home → Product: {:.1}%",
-                                (products as f64 / home as f64) * 100.0
-                            );
-                        }
-                        if products > 0 {
-                            println!(
-                                "   Product → Cart: {:.1}%",
-                                (cart as f64 / products as f64) * 100.0
-                            );
-                        }
-                        if cart > 0 {
-                            println!(
-                                "   Cart → Purchase: {:.1}%",
-                                (conversions as f64 / cart as f64) * 100.0
-                            );
-                        }
-                        println!("   Revenue: ${:.2}", total_revenue);
-                    }
-                } else {
-                    // Daily metrics from ReduceTyped
-                    println!("\n📈 [{}] Daily Summary:", self.name);
-                    println!(
-                        "   Total events: {}",
-                        result["total_events"].as_u64().unwrap_or(0)
-                    );
-                    println!(
-                        "   Total revenue: ${:.2}",
-                        result["total_revenue"].as_f64().unwrap_or(0.0)
-                    );
-                    if let Some(breakdown) = result["events_by_type"].as_object() {
-                        println!("   Event types: {} unique", breakdown.len());
-                    }
-                }
-            }
-        }
-
-        Ok(DeliveryPayload::success(
-            &self.name,
-            DeliveryMethod::Custom("Analytics".to_string()),
-            Some(1),
-        ))
-    }
-}
-
 #[tokio::main]
 async fn main() -> Result<()> {
     std::env::set_var("OBZENFLOW_METRICS_EXPORTER", "console");
@@ -317,11 +199,10 @@ async fn main() -> Result<()> {
     println!();
     println!("Zero ChainEvent manipulation - all type-safe!\n");
 
-    FlowApplication::run(async {
-        flow! {
-            name: "web_analytics",
-            journals: disk_journals(std::path::PathBuf::from("target/web_analytics")),
-            middleware: [],
+    FlowApplication::run(flow! {
+        name: "web_analytics",
+        journals: disk_journals(std::path::PathBuf::from("target/web_analytics")),
+        middleware: [],
 
             stages: {
                 // User event stream
@@ -422,9 +303,52 @@ async fn main() -> Result<()> {
                 );
 
                 // Sinks for each analysis type
-                session_sink = sink!("sessions" => AnalyticsSink::new("Sessions"));
-                funnel_sink = sink!("funnel" => AnalyticsSink::new("Funnel"));
-                metrics_sink = sink!("metrics" => AnalyticsSink::new("Metrics"));
+                session_sink = sink!("sessions" => |update: SessionUpdate| {
+                    println!("\n📊 [Sessions] Session Update:");
+                    println!("   User: {}", update.key);
+                    println!("   - Events: {}", update.result.event_count);
+                    println!("   - Pages: {}", update.result.pages_viewed.len());
+                    println!("   - Clicks: {}", update.result.clicks);
+                    println!("   - Duration: {}ms", update.result.total_duration_ms);
+                });
+
+                funnel_sink = sink!("funnel" => |funnel: FunnelState| {
+                    println!("\n🎯 [Funnel] Funnel Progress:");
+                    println!("   Unique users: {}", funnel.total_users.len());
+
+                    let home = *funnel.funnel_stages.get("/home").unwrap_or(&0);
+                    let products = *funnel.funnel_stages.get("/products").unwrap_or(&0);
+                    let cart = *funnel.funnel_stages.get("/cart").unwrap_or(&0);
+                    let conversions = funnel.conversions.len();
+                    let total_revenue: f64 = funnel.conversions.iter().copied().sum();
+
+                    if home > 0 {
+                        println!(
+                            "   Home → Product: {:.1}%",
+                            (products as f64 / home as f64) * 100.0
+                        );
+                    }
+                    if products > 0 {
+                        println!(
+                            "   Product → Cart: {:.1}%",
+                            (cart as f64 / products as f64) * 100.0
+                        );
+                    }
+                    if cart > 0 {
+                        println!(
+                            "   Cart → Purchase: {:.1}%",
+                            (conversions as f64 / cart as f64) * 100.0
+                        );
+                    }
+                    println!("   Revenue: ${:.2}", total_revenue);
+                });
+
+                metrics_sink = sink!("metrics" => |metrics: MetricsState| {
+                    println!("\n📈 [Metrics] Daily Summary:");
+                    println!("   Total events: {}", metrics.total_events);
+                    println!("   Total revenue: ${:.2}", metrics.total_revenue);
+                    println!("   Event types: {} unique", metrics.events_by_type.len());
+                });
             },
 
             topology: {
@@ -438,9 +362,6 @@ async fn main() -> Result<()> {
                 funnel |> funnel_sink;
                 metrics |> metrics_sink;
             }
-        }
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed: {:?}", e))
     })
     .await?;
 

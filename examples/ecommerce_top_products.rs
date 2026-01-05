@@ -6,18 +6,11 @@
 //! Run with: cargo run --package obzenflow --example ecommerce_top_products
 
 use anyhow::Result;
-use async_trait::async_trait;
 use obzenflow_adapters::middleware::rate_limit;
-use obzenflow_core::{
-    event::chain_event::ChainEvent,
-    event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload},
-    TypedPayload,
-};
+use obzenflow_core::TypedPayload;
 use obzenflow_dsl_infra::{flow, sink, source, stateful};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
-use obzenflow_runtime_services::stages::common::handlers::SinkHandler;
 use obzenflow_runtime_services::stages::source::FiniteSourceTyped;
 use obzenflow_runtime_services::stages::stateful::strategies::accumulators::TopNByTyped;
 use serde::{Deserialize, Serialize};
@@ -40,73 +33,26 @@ impl TypedPayload for OrderEvent {
     const SCHEMA_VERSION: u32 = 1;
 }
 
-/// Sink that displays top-selling products dashboard
-#[derive(Clone, Debug)]
-struct SalesDashboard;
-
-impl SalesDashboard {
-    fn new() -> Self {
-        Self
-    }
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct TopProductsEntry {
+    rank: usize,
+    key: String,
+    total_score: f64,
+    count: u64,
+    avg_score: f64,
+    metadata: OrderEvent,
 }
 
-#[async_trait]
-impl SinkHandler for SalesDashboard {
-    async fn consume(&mut self, event: ChainEvent) -> Result<DeliveryPayload, HandlerError> {
-        // ✨ FLOWIP-082a: TopNByTyped emits events with input type's EVENT_TYPE
-        if event.event_type() == OrderEvent::EVENT_TYPE {
-            let payload = event.payload();
-            let top_n = payload["top_n"].as_array().unwrap();
-            let total_items = payload["total_items"].as_u64().unwrap();
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct TopProductsUpdate {
+    top_n: Vec<TopProductsEntry>,
+    total_items: usize,
+    capacity: usize,
+}
 
-            println!("\n📊 TOP SELLING PRODUCTS DASHBOARD 📊");
-            println!("====================================");
-            println!("Total Unique Products Sold: {}\n", total_items);
-
-            let mut total_revenue = 0.0;
-
-            for entry in top_n.iter() {
-                let rank = entry["rank"].as_u64().unwrap();
-                let product_id = entry["key"].as_str().unwrap();
-                let total_value = entry["total_score"].as_f64().unwrap();
-                let order_count = entry["count"].as_u64().unwrap();
-                let metadata = &entry["metadata"];
-                let product_name = metadata["product_name"].as_str().unwrap_or("Unknown");
-                let category = metadata["category"].as_str().unwrap_or("Unknown");
-
-                total_revenue += total_value;
-
-                let medal = match rank {
-                    1 => "🥇",
-                    2 => "🥈",
-                    3 => "🥉",
-                    _ => "  ",
-                };
-
-                println!("{} #{}: {} ({})", medal, rank, product_name, product_id);
-                println!("      Category: {}", category);
-                println!(
-                    "      Revenue: ${:.2} from {} orders",
-                    total_value, order_count
-                );
-                println!(
-                    "      Avg Order Value: ${:.2}",
-                    total_value / order_count as f64
-                );
-                println!();
-            }
-
-            println!("------------------------------------");
-            println!("Top 5 Products Revenue: ${:.2}", total_revenue);
-            println!("====================================\n");
-        }
-
-        Ok(DeliveryPayload::success(
-            "dashboard",
-            DeliveryMethod::Custom("Display".to_string()),
-            None,
-        ))
-    }
+impl TypedPayload for TopProductsUpdate {
+    const EVENT_TYPE: &'static str = OrderEvent::EVENT_TYPE;
+    const SCHEMA_VERSION: u32 = OrderEvent::SCHEMA_VERSION;
 }
 
 #[tokio::main]
@@ -267,11 +213,10 @@ async fn main() -> Result<()> {
         ), // Bulk order!
     ];
 
-    FlowApplication::run(async move {
-        flow! {
-            name: "ecommerce_analytics",
-            journals: disk_journals(std::path::PathBuf::from("target/ecommerce-logs")),
-            middleware: [],
+    FlowApplication::run(flow! {
+        name: "ecommerce_analytics",
+        journals: disk_journals(std::path::PathBuf::from("target/ecommerce-logs")),
+        middleware: [],
 
             stages: {
                 // FLOWIP-081: Typed finite sources (no WriterId/ChainEvent boilerplate)
@@ -309,19 +254,48 @@ async fn main() -> Result<()> {
                     [rate_limit(3.0)]   // Process max 3 orders per second for demo visibility
                 );
 
-                dashboard = sink!("dashboard" => SalesDashboard::new());
+                dashboard = sink!("dashboard" => |update: TopProductsUpdate| {
+                    println!("\n📊 TOP SELLING PRODUCTS DASHBOARD 📊");
+                    println!("====================================");
+                    println!("Total Unique Products Sold: {}\n", update.total_items);
+
+                    let mut total_revenue = 0.0;
+                    for entry in &update.top_n {
+                        total_revenue += entry.total_score;
+
+                        let medal = match entry.rank {
+                            1 => "🥇",
+                            2 => "🥈",
+                            3 => "🥉",
+                            _ => "  ",
+                        };
+
+                        println!(
+                            "{} #{}: {} ({})",
+                            medal, entry.rank, entry.metadata.product_name, entry.key
+                        );
+                        println!("      Category: {}", entry.metadata.category);
+                        println!(
+                            "      Revenue: ${:.2} from {} orders",
+                            entry.total_score, entry.count
+                        );
+                        println!("      Avg Order Value: ${:.2}", entry.avg_score);
+                        println!();
+                    }
+
+                    println!("------------------------------------");
+                    println!("Top 5 Products Revenue: ${:.2}", total_revenue);
+                    println!("====================================\n");
+                });
             },
 
             topology: {
                 orders |> top_products;
                 top_products |> dashboard;
             }
-        }
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to create flow: {:?}", e))
     })
     .await
-    .map_err(|e| anyhow::anyhow!("Application failed: {:?}", e))?;
+    ?;
 
     println!("✅ E-commerce analytics completed!");
     println!("\n💡 Key Insights:");

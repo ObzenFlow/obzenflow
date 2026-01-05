@@ -1,9 +1,9 @@
 //! Typed Source Demo - FLOWIP-081
 //!
 //! Demonstrates typed finite sources without `WriterId` and `ChainEvent` boilerplate:
-//! - `FiniteSourceTyped`: `from_iter`, `from_item_fn`, `from_fn` (batch)
+//! - `FiniteSourceTyped`: `new` (from iterator), `from_item_fn`, `from_fn` (batch)
 //! - Fallible sync: `FiniteSourceTyped::from_fallible_item_fn`
-//! - `AsyncFiniteSourceTyped`: `from_async_fn`
+//! - `AsyncFiniteSourceTyped`: `new` (from async producer)
 //! - Fallible async: `AsyncFiniteSourceTyped::from_fallible_async_item_fn` (internal boxing)
 //!
 //! Run with: `cargo run -p obzenflow --example typed_source_demo`
@@ -105,7 +105,7 @@ fn expected_demo_counts() -> HashMap<String, usize> {
     HashMap::from([
         ("from_iter".to_string(), 3),
         ("from_item_fn".to_string(), 3),
-        ("from_fn_batch".to_string(), 5),
+        ("from_producer_batch".to_string(), 5),
         ("from_fallible_item_fn".to_string(), 3),
         ("from_async_fn".to_string(), 3),
         ("from_fallible_async_item_fn".to_string(), 3),
@@ -116,136 +116,130 @@ fn expected_demo_counts() -> HashMap<String, usize> {
 async fn main() -> Result<()> {
     let journal_path = std::path::PathBuf::from("target/typed_source_demo_journal");
     let counts = Arc::new(Mutex::new(Counts::default()));
+    let counts_for_sink = counts.clone();
 
-    FlowApplication::run({
-        let counts_for_sink = counts.clone();
-        async move {
-            flow! {
-                name: "typed_source_demo",
-                journals: disk_journals(journal_path.clone()),
-                middleware: [],
+    FlowApplication::run(flow! {
+        name: "typed_source_demo",
+        journals: disk_journals(journal_path.clone()),
+        middleware: [],
 
-                stages: {
-                    iter_src = source!("from_iter" => {
-                        let items: Vec<DemoEvent> = (0..3)
-                            .map(|i| DemoEvent { source: "from_iter".to_string(), index: i })
-                            .collect();
-                        FiniteSourceTyped::from_iter(items)
-                    });
+        stages: {
+            iter_src = source!("from_iter" => {
+                let items: Vec<DemoEvent> = (0..3)
+                    .map(|i| DemoEvent { source: "from_iter".to_string(), index: i })
+                    .collect();
+                FiniteSourceTyped::new(items)
+            });
 
-                    item_src = source!("from_item_fn" => FiniteSourceTyped::from_item_fn(|index| {
-                        if index >= 3 {
-                            return None;
-                        }
-                        Some(DemoEvent {
-                            source: "from_item_fn".to_string(),
-                            index,
-                        })
-                    }));
-
-                    batch_src = source!("from_fn_batch" => FiniteSourceTyped::from_fn({
-                        let total = 5usize;
-                        move |index| {
-                            if index >= total {
-                                return None;
-                            }
-
-                            let remaining = total - index;
-                            let batch_size = remaining.min(2);
-                            let mut batch = Vec::with_capacity(batch_size);
-                            for offset in 0..batch_size {
-                                batch.push(DemoEvent {
-                                    source: "from_fn_batch".to_string(),
-                                    index: index + offset,
-                                });
-                            }
-                            Some(batch)
-                        }
-                    }));
-
-                    fallible_src = source!("from_fallible_item_fn" => {
-                        let total = 3usize;
-                        let did_error = Arc::new(AtomicBool::new(false));
-
-                        FiniteSourceTyped::from_fallible_item_fn(move |index| {
-                            if index >= total {
-                                return Ok(None);
-                            }
-
-                            // Error exactly once on the first attempt at index=1.
-                            if index == 1 && !did_error.swap(true, Ordering::SeqCst) {
-                                return Err(SourceError::Transport(
-                                    "simulated transport failure (sync)".to_string(),
-                                ));
-                            }
-
-                            Ok(Some(DemoEvent {
-                                source: "from_fallible_item_fn".to_string(),
-                                index,
-                            }))
-                        })
-                    });
-
-                    async_src = async_source!("from_async_fn" => AsyncFiniteSourceTyped::from_async_fn({
-                        let total = 3usize;
-                        move |index| async move {
-                            if index >= total {
-                                None
-                            } else {
-                                tokio::time::sleep(Duration::from_millis(1)).await;
-                                Some(vec![DemoEvent {
-                                    source: "from_async_fn".to_string(),
-                                    index,
-                                }])
-                            }
-                        }
-                    }));
-
-                    fallible_async_src = async_source!("from_fallible_async_item_fn" => {
-                        let total = 3usize;
-                        let did_error = Arc::new(AtomicBool::new(false));
-
-                        AsyncFiniteSourceTyped::from_fallible_async_item_fn(move |index| {
-                            let did_error = did_error.clone();
-                            async move {
-                                if index >= total {
-                                    return Ok(None);
-                                }
-
-                                // Error exactly once on the first attempt at index=1.
-                                if index == 1 && !did_error.swap(true, Ordering::SeqCst) {
-                                    return Err(SourceError::Timeout(
-                                        "simulated timeout (async)".to_string(),
-                                    ));
-                                }
-
-                                tokio::time::sleep(Duration::from_millis(1)).await;
-                                Ok(Some(DemoEvent {
-                                    source: "from_fallible_async_item_fn".to_string(),
-                                    index,
-                                }))
-                            }
-                        })
-                    });
-
-                    snk = sink!("counting_sink" => CountingSink::new(counts_for_sink.clone()));
-                },
-
-                topology: {
-                    iter_src |> snk;
-                    item_src |> snk;
-                    batch_src |> snk;
-                    fallible_src |> snk;
-                    async_src |> snk;
-                    fallible_async_src |> snk;
+            item_src = source!("from_item_fn" => FiniteSourceTyped::from_item_fn(|index| {
+                if index >= 3 {
+                    return None;
                 }
-            }
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to create flow: {:?}", e))
+                Some(DemoEvent {
+                    source: "from_item_fn".to_string(),
+                    index,
+                })
+            }));
+
+            batch_src = source!("from_producer_batch" => FiniteSourceTyped::from_producer({
+                let total = 5usize;
+                move |index| {
+                    if index >= total {
+                        return None;
+                    }
+
+                    let remaining = total - index;
+                    let batch_size = remaining.min(2);
+                    let mut batch = Vec::with_capacity(batch_size);
+                    for offset in 0..batch_size {
+                        batch.push(DemoEvent {
+                            source: "from_producer_batch".to_string(),
+                            index: index + offset,
+                        });
+                    }
+                    Some(batch)
+                }
+            }));
+
+            fallible_src = source!("from_fallible_item_fn" => {
+                let total = 3usize;
+                let did_error = Arc::new(AtomicBool::new(false));
+
+                FiniteSourceTyped::from_fallible_item_fn(move |index| {
+                    if index >= total {
+                        return Ok(None);
+                    }
+
+                    // Error exactly once on the first attempt at index=1.
+                    if index == 1 && !did_error.swap(true, Ordering::SeqCst) {
+                        return Err(SourceError::Transport(
+                            "simulated transport failure (sync)".to_string(),
+                        ));
+                    }
+
+                    Ok(Some(DemoEvent {
+                        source: "from_fallible_item_fn".to_string(),
+                        index,
+                    }))
+                })
+            });
+
+            async_src = async_source!("from_async_fn" => AsyncFiniteSourceTyped::new({
+                let total = 3usize;
+                move |index| async move {
+                    if index >= total {
+                        None
+                    } else {
+                        tokio::time::sleep(Duration::from_millis(1)).await;
+                        Some(vec![DemoEvent {
+                            source: "from_async_fn".to_string(),
+                            index,
+                        }])
+                    }
+                }
+            }));
+
+            fallible_async_src = async_source!("from_fallible_async_item_fn" => {
+                let total = 3usize;
+                let did_error = Arc::new(AtomicBool::new(false));
+
+                AsyncFiniteSourceTyped::from_fallible_async_item_fn(move |index| {
+                    let did_error = did_error.clone();
+                    async move {
+                        if index >= total {
+                            return Ok(None);
+                        }
+
+                        // Error exactly once on the first attempt at index=1.
+                        if index == 1 && !did_error.swap(true, Ordering::SeqCst) {
+                            return Err(SourceError::Timeout(
+                                "simulated timeout (async)".to_string(),
+                            ));
+                        }
+
+                        tokio::time::sleep(Duration::from_millis(1)).await;
+                        Ok(Some(DemoEvent {
+                            source: "from_fallible_async_item_fn".to_string(),
+                            index,
+                        }))
+                    }
+                })
+            });
+
+            snk = sink!("counting_sink" => CountingSink::new(counts_for_sink.clone()));
+        },
+
+        topology: {
+            iter_src |> snk;
+            item_src |> snk;
+            batch_src |> snk;
+            fallible_src |> snk;
+            async_src |> snk;
+            fallible_async_src |> snk;
         }
     })
     .await
-    .map_err(|e| anyhow::anyhow!("Application failed: {:?}", e))?;
+    ?;
 
     let counts = counts.lock().expect("Counts lock poisoned");
     let expected = expected_demo_counts();

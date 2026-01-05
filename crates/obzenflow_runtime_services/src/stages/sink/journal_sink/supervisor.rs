@@ -639,7 +639,10 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                             let result = handler.consume(envelope_event).await;
 
                                             match result {
-                                                Ok(payload) => Ok((payload, None)),
+                                                Ok(mut payload) => {
+                                                    payload.destination = stage_name.clone();
+                                                    Ok((payload, None))
+                                                }
                                                 Err(err) => {
                                                     let fail_payload = DeliveryPayload::failed(
                                                         stage_name.clone(), // destination

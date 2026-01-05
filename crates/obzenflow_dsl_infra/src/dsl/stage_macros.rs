@@ -118,6 +118,34 @@ macro_rules! async_transform {
 /// Create a sink stage descriptor
 #[macro_export]
 macro_rules! sink {
+    ($name:literal => |$arg:ident : $ty:ty| $body:block) => {
+        $crate::sink!($name => |$arg: $ty| $body, [])
+    };
+    ($name:literal => move |$arg:ident : $ty:ty| $body:block) => {
+        $crate::sink!($name => move |$arg: $ty| $body, [])
+    };
+    ($name:literal => |$arg:ident : $ty:ty| $body:block, [$($mw:expr),*]) => {{
+        use $crate::dsl::stage_descriptor::{StageDescriptor, SinkDescriptor};
+        Box::new(SinkDescriptor {
+            name: $name.to_string(),
+            handler: ::obzenflow_runtime_services::stages::sink::SinkTyped::new(move |$arg: $ty| {
+                $body;
+                async move {}
+            }),
+            middleware: vec![$(Box::new($mw)),*],
+        }) as Box<dyn StageDescriptor>
+    }};
+    ($name:literal => move |$arg:ident : $ty:ty| $body:block, [$($mw:expr),*]) => {{
+        use $crate::dsl::stage_descriptor::{StageDescriptor, SinkDescriptor};
+        Box::new(SinkDescriptor {
+            name: $name.to_string(),
+            handler: ::obzenflow_runtime_services::stages::sink::SinkTyped::new(move |$arg: $ty| {
+                $body;
+                async move {}
+            }),
+            middleware: vec![$(Box::new($mw)),*],
+        }) as Box<dyn StageDescriptor>
+    }};
     ($name:literal => $handler:expr) => {
         $crate::sink!($name => $handler, [])
     };

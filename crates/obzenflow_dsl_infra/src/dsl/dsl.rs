@@ -99,54 +99,6 @@ macro_rules! parse_topology_with_joins {
 /// The main flow! macro using the clean typed approach
 #[macro_export]
 macro_rules! flow {
-    // Pattern with explicit flow name
-    {
-        name: $flow_name:literal,
-        journals: $journals:expr,
-        middleware: [$($flow_mw:expr),*],
-
-        stages: {
-            $($stage_name:ident = $stage_macro:ident!($name:literal => $handler:expr $(, [$($mw:expr),*])?);)*
-        },
-
-        topology: {
-            $(
-                $edge:tt
-            )*
-        }
-    } => {{
-        async move {
-            use $crate::prelude::*;
-            use $crate::dsl::stage_descriptor::*;
-            use std::collections::HashMap;
-
-            let journals = $journals;
-
-            // Create stages
-            let mut stages: HashMap<String, Box<dyn StageDescriptor>> = HashMap::new();
-
-            $(
-                let descriptor = $stage_macro!($name => $handler $(, [$($mw),*])?);
-                stages.insert(stringify!($stage_name).to_string(), descriptor);
-            )*
-
-            // Create connections
-            let mut connections: Vec<(String, String, obzenflow_topology::EdgeKind)> = Vec::new();
-
-            // Parse topology edges
-            $crate::parse_topology!(connections, $($edge)*);
-
-
-            // Create closure for flow middleware
-            let create_flow_middleware = || vec![
-                $(Box::new($flow_mw) as Box<dyn obzenflow_adapters::middleware::MiddlewareFactory>),*
-            ];
-
-            // Build the flow
-            $crate::build_typed_flow!($flow_name, journals, stages, connections, create_flow_middleware)
-        }
-    }};
-
     // Pattern with explicit flow name (stage descriptors as expressions)
     {
         name: $flow_name:literal,
@@ -163,7 +115,7 @@ macro_rules! flow {
             )*
         }
     } => {{
-        async move {
+        $crate::FlowDefinition::new(async move {
             use $crate::prelude::*;
             use $crate::dsl::stage_descriptor::*;
             use std::collections::HashMap;
@@ -191,57 +143,11 @@ macro_rules! flow {
 
             // Build the flow
             $crate::build_typed_flow!($flow_name, journals, stages, connections, create_flow_middleware)
-        }
+        })
     }};
 
     // Pattern without explicit flow name (uses "default")
-    {
-        journals: $journals:expr,
-        middleware: [$($flow_mw:expr),*],
-
-        stages: {
-            $($stage_name:ident = $stage_macro:ident!($name:literal => $handler:expr $(, [$($mw:expr),*])?);)*
-        },
-
-        topology: {
-            $(
-                $edge:tt
-            )*
-        }
-    } => {{
-        async move {
-            use $crate::prelude::*;
-            use $crate::dsl::stage_descriptor::*;
-            use std::collections::HashMap;
-
-            let journals = $journals;
-
-            // Create stages
-            let mut stages: HashMap<String, Box<dyn StageDescriptor>> = HashMap::new();
-
-            $(
-                let descriptor = $stage_macro!($name => $handler $(, [$($mw),*])?);
-                stages.insert(stringify!($stage_name).to_string(), descriptor);
-            )*
-
-            // Create connections
-            let mut connections: Vec<(String, String, obzenflow_topology::EdgeKind)> = Vec::new();
-
-            // Parse topology edges
-            $crate::parse_topology!(connections, $($edge)*);
-
-
-            // Create closure for flow middleware
-            let create_flow_middleware = || vec![
-                $(Box::new($flow_mw) as Box<dyn obzenflow_adapters::middleware::MiddlewareFactory>),*
-            ];
-
-            // Build the flow with default name
-            $crate::build_typed_flow!("default", journals, stages, connections, create_flow_middleware)
-        }
-    }};
-
-    // Pattern without explicit flow name (stage descriptors as expressions)
+    // (stage descriptors as expressions)
     {
         journals: $journals:expr,
         middleware: [$($flow_mw:expr),*],
@@ -256,7 +162,7 @@ macro_rules! flow {
             )*
         }
     } => {{
-        async move {
+        $crate::FlowDefinition::new(async move {
             use $crate::prelude::*;
             use $crate::dsl::stage_descriptor::*;
             use std::collections::HashMap;
@@ -284,7 +190,7 @@ macro_rules! flow {
 
             // Build the flow
             $crate::build_typed_flow!("default", journals, stages, connections, create_flow_middleware)
-        }
+        })
     }};
 }
 

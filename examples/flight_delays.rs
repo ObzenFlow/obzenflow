@@ -18,7 +18,6 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use obzenflow_core::{
-    event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload},
     event::{
         chain_event::{ChainEvent, ChainEventFactory},
         status::processing_status::ErrorKind,
@@ -31,14 +30,14 @@ use obzenflow_dsl_infra::{flow, join, sink, source, stateful, transform, with_re
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
-use obzenflow_runtime_services::stages::common::handlers::{
-    JoinHandler, SinkHandler, StatefulHandler, TransformHandler,
-};
+use obzenflow_runtime_services::stages::common::handlers::{JoinHandler, StatefulHandler, TransformHandler};
 use obzenflow_runtime_services::stages::join::InnerJoinBuilder;
 use obzenflow_runtime_services::stages::source::FiniteSourceTyped;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 // ============================================================================
 // FLOWIP-082a & FLOWIP-080l: Typed Event Schemas
@@ -305,60 +304,6 @@ impl StatefulHandler for CarrierAggregator {
 }
 
 // ============================================================================
-// Sink: Statistics Printer
-// ============================================================================
-
-/// Sink that prints carrier statistics
-#[derive(Clone, Debug)]
-struct StatisticsPrinter {
-    header_printed: bool,
-}
-
-impl StatisticsPrinter {
-    fn new() -> Self {
-        Self {
-            header_printed: false,
-        }
-    }
-}
-
-#[async_trait]
-impl SinkHandler for StatisticsPrinter {
-    async fn consume(&mut self, event: ChainEvent) -> Result<DeliveryPayload, HandlerError> {
-        // ✨ FLOWIP-082a: Check event type using constant
-        if CarrierStatistics::event_type_matches(&event.event_type()) {
-            if !self.header_printed {
-                println!("✈️  Carrier delay summary");
-                println!("-------------------------");
-                self.header_printed = true;
-            }
-
-            let payload = event.payload();
-            let carrier = payload["carrier"].as_str().unwrap_or("Unknown");
-            let avg_delay = payload["average_delay"].as_f64().unwrap_or(0.0);
-            let flight_count = payload["flight_count"].as_u64().unwrap_or(0);
-
-            let status = if avg_delay < 10.0 {
-                "🟢"
-            } else if avg_delay < 30.0 {
-                "🟡"
-            } else {
-                "🔴"
-            };
-            println!(
-                "  {} {}: {:.1} min avg delay ({} flights)",
-                status, carrier, avg_delay, flight_count
-            );
-        }
-        Ok(DeliveryPayload::success(
-            "statistics_printer",
-            DeliveryMethod::Custom("Print".to_string()),
-            None,
-        ))
-    }
-}
-
-// ============================================================================
 // Main Pipeline
 // ============================================================================
 
@@ -383,200 +328,208 @@ async fn main() -> Result<()> {
 
     println!("Running delay analysis pipeline...\n");
 
-    // Use FlowApplication for proper setup
-    FlowApplication::run(async {
-        let carriers = vec![
-            CarrierDetails {
-                carrier_code: "AA".to_string(),
-                carrier_name: "American Airlines".to_string(),
-                country: "USA".to_string(),
-                fleet_size: 950,
-            },
-            CarrierDetails {
-                carrier_code: "UA".to_string(),
-                carrier_name: "United Airlines".to_string(),
-                country: "USA".to_string(),
-                fleet_size: 850,
-            },
-            CarrierDetails {
-                carrier_code: "DL".to_string(),
-                carrier_name: "Delta Air Lines".to_string(),
-                country: "USA".to_string(),
-                fleet_size: 900,
-            },
-            CarrierDetails {
-                carrier_code: "WN".to_string(),
-                carrier_name: "Southwest Airlines".to_string(),
-                country: "USA".to_string(),
-                fleet_size: 750,
-            },
-            CarrierDetails {
-                carrier_code: "BA".to_string(),
-                carrier_name: "British Airways".to_string(),
-                country: "UK".to_string(),
-                fleet_size: 290,
-            },
-            CarrierDetails {
-                carrier_code: "LH".to_string(),
-                carrier_name: "Lufthansa".to_string(),
-                country: "Germany".to_string(),
-                fleet_size: 340,
-            },
-            CarrierDetails {
-                carrier_code: "AF".to_string(),
-                carrier_name: "Air France".to_string(),
-                country: "France".to_string(),
-                fleet_size: 280,
-            },
-        ];
+    let carriers = vec![
+        CarrierDetails {
+            carrier_code: "AA".to_string(),
+            carrier_name: "American Airlines".to_string(),
+            country: "USA".to_string(),
+            fleet_size: 950,
+        },
+        CarrierDetails {
+            carrier_code: "UA".to_string(),
+            carrier_name: "United Airlines".to_string(),
+            country: "USA".to_string(),
+            fleet_size: 850,
+        },
+        CarrierDetails {
+            carrier_code: "DL".to_string(),
+            carrier_name: "Delta Air Lines".to_string(),
+            country: "USA".to_string(),
+            fleet_size: 900,
+        },
+        CarrierDetails {
+            carrier_code: "WN".to_string(),
+            carrier_name: "Southwest Airlines".to_string(),
+            country: "USA".to_string(),
+            fleet_size: 750,
+        },
+        CarrierDetails {
+            carrier_code: "BA".to_string(),
+            carrier_name: "British Airways".to_string(),
+            country: "UK".to_string(),
+            fleet_size: 290,
+        },
+        CarrierDetails {
+            carrier_code: "LH".to_string(),
+            carrier_name: "Lufthansa".to_string(),
+            country: "Germany".to_string(),
+            fleet_size: 340,
+        },
+        CarrierDetails {
+            carrier_code: "AF".to_string(),
+            carrier_name: "Air France".to_string(),
+            country: "France".to_string(),
+            fleet_size: 280,
+        },
+    ];
 
-        let flights_raw = vec![
-            (
-                "AA".to_string(),
-                "2023-12-01".to_string(),
-                "LAX".to_string(),
-                "JFK".to_string(),
-                120,
-                15,
-            ), // American Airlines, 15 min delay
-            (
-                "DL".to_string(),
-                "2023-12-01".to_string(),
-                "ATL".to_string(),
-                "ORD".to_string(),
-                90,
-                0,
-            ), // Delta, on time
-            (
-                "UA".to_string(),
-                "2023-12-01".to_string(),
-                "SFO".to_string(),
-                "LAX".to_string(),
-                60,
-                45,
-            ), // United, 45 min delay
-            (
-                "AA".to_string(),
-                "2023-12-01".to_string(),
-                "DFW".to_string(),
-                "MIA".to_string(),
-                180,
-                5,
-            ), // American Airlines, 5 min delay
-            (
-                "WN".to_string(),
-                "2023-12-01".to_string(),
-                "LAS".to_string(),
-                "PHX".to_string(),
-                75,
-                120,
-            ), // Southwest, 2 hour delay
-            (
-                "DL".to_string(),
-                "2023-12-01".to_string(),
-                "SEA".to_string(),
-                "DEN".to_string(),
-                110,
-                8,
-            ), // Delta, 8 min delay
-            (
-                "UA".to_string(),
-                "2023-12-01".to_string(),
-                "EWR".to_string(),
-                "SFO".to_string(),
-                300,
-                0,
-            ), // United, on time
-            (
-                "AA".to_string(),
-                "2023-12-01".to_string(),
-                "ORD".to_string(),
-                "LAX".to_string(),
-                240,
-                25,
-            ), // American Airlines, 25 min delay
-        ];
+    let flights_raw = vec![
+        (
+            "AA".to_string(),
+            "2023-12-01".to_string(),
+            "LAX".to_string(),
+            "JFK".to_string(),
+            120,
+            15,
+        ),
+        (
+            "DL".to_string(),
+            "2023-12-01".to_string(),
+            "ATL".to_string(),
+            "ORD".to_string(),
+            90,
+            0,
+        ),
+        (
+            "UA".to_string(),
+            "2023-12-01".to_string(),
+            "SFO".to_string(),
+            "LAX".to_string(),
+            60,
+            45,
+        ),
+        (
+            "AA".to_string(),
+            "2023-12-01".to_string(),
+            "DFW".to_string(),
+            "MIA".to_string(),
+            180,
+            5,
+        ),
+        (
+            "WN".to_string(),
+            "2023-12-01".to_string(),
+            "LAS".to_string(),
+            "PHX".to_string(),
+            75,
+            120,
+        ),
+        (
+            "DL".to_string(),
+            "2023-12-01".to_string(),
+            "SEA".to_string(),
+            "DEN".to_string(),
+            110,
+            8,
+        ),
+        (
+            "UA".to_string(),
+            "2023-12-01".to_string(),
+            "EWR".to_string(),
+            "SFO".to_string(),
+            300,
+            0,
+        ),
+        (
+            "AA".to_string(),
+            "2023-12-01".to_string(),
+            "ORD".to_string(),
+            "LAX".to_string(),
+            240,
+            25,
+        ),
+    ];
 
-        let flights: Vec<FlightRecord> = flights_raw
-            .into_iter()
-            .enumerate()
-            .map(
-                |(idx, (carrier, date, origin, destination, scheduled_duration, delay_minutes))| {
-                    let flight_number = format!("{}{}", carrier, 1000 + (idx + 1) * 100);
-                    FlightRecord {
-                        carrier,
-                        date,
-                        origin,
-                        destination,
-                        scheduled_duration,
-                        delay_minutes,
-                        flight_number,
-                        delay_category: None,
+    let flights: Vec<FlightRecord> = flights_raw
+        .into_iter()
+        .enumerate()
+        .map(
+            |(idx, (carrier, date, origin, destination, scheduled_duration, delay_minutes))| {
+                let flight_number = format!("{}{}", carrier, 1000 + (idx + 1) * 100);
+                FlightRecord {
+                    carrier,
+                    date,
+                    origin,
+                    destination,
+                    scheduled_duration,
+                    delay_minutes,
+                    flight_number,
+                    delay_category: None,
+                }
+            },
+        )
+        .collect();
+
+    FlowApplication::run(flow! {
+        name: "flight_delays",
+        journals: disk_journals(std::path::PathBuf::from("target/flight-delays-logs")),
+        middleware: [],
+
+        stages: {
+            // Reference data source (FLOWIP-080l)
+            carriers = source!("carriers" => FiniteSourceTyped::new(carriers));
+
+            // Stream data source
+            flights = source!("flights" => FiniteSourceTyped::new(flights));
+
+            // Processing stages
+            val = transform!("validator" => FlightValidator::new());
+            calc = transform!("calculator" => DelayCalculator::new());
+
+            // Join stage to enrich flights with carrier details (FLOWIP-080l)
+            enricher = join!("enricher" => with_ref!(carriers,
+                InnerJoinBuilder::<CarrierDetails, FlightRecord, EnrichedFlight>::new()
+                    .catalog_key(|carrier: &CarrierDetails| carrier.carrier_code.clone())
+                    .stream_key(|flight: &FlightRecord| flight.carrier.clone())
+                    .build(|carrier: CarrierDetails, flight: FlightRecord| EnrichedFlight {
+                        carrier_code: flight.carrier.clone(),
+                        carrier_name: carrier.carrier_name.clone(),
+                        carrier_country: carrier.country.clone(),
+                        date: flight.date.clone(),
+                        origin: flight.origin.clone(),
+                        destination: flight.destination.clone(),
+                        scheduled_duration: flight.scheduled_duration,
+                        delay_minutes: flight.delay_minutes,
+                        flight_number: flight.flight_number.clone(),
+                        delay_category: flight.delay_category.clone(),
+                    })
+            ));
+
+            // Aggregation and output
+            agg = stateful!("aggregator" => CarrierAggregator::new());
+            printer = {
+                let header_printed = Arc::new(AtomicBool::new(false));
+                sink!("printer" => move |stats: CarrierStatistics| {
+                    if !header_printed.swap(true, Ordering::SeqCst) {
+                        println!("✈️  Carrier delay summary");
+                        println!("-------------------------");
                     }
-                },
-            )
-            .collect();
 
-        flow! {
-            name: "flight_delays",
-            journals: disk_journals(std::path::PathBuf::from("target/flight-delays-logs")),
-            middleware: [],
+                    let status = if stats.average_delay < 10.0 {
+                        "🟢"
+                    } else if stats.average_delay < 30.0 {
+                        "🟡"
+                    } else {
+                        "🔴"
+                    };
 
-            stages: {
-                // Reference data source (FLOWIP-080l)
-                carriers = source!("carriers" => FiniteSourceTyped::from_iter(carriers));
+                    println!(
+                        "  {} {}: {:.1} min avg delay ({} flights)",
+                        status, stats.carrier, stats.average_delay, stats.flight_count
+                    );
+                })
+            };
+        },
 
-                // Stream data source
-                flights = source!("flights" => FiniteSourceTyped::from_iter(flights));
-
-                // Processing stages
-                val = transform!("validator" => FlightValidator::new());
-                calc = transform!("calculator" => DelayCalculator::new());
-
-                // Join stage to enrich flights with carrier details (FLOWIP-080l)
-                enricher = join!("enricher" => with_ref!(carriers,
-                    InnerJoinBuilder::<CarrierDetails, FlightRecord, EnrichedFlight>::new()
-                        .catalog_key(|carrier: &CarrierDetails| carrier.carrier_code.clone())
-                        .stream_key(|flight: &FlightRecord| flight.carrier.clone())
-                        .build(|carrier: CarrierDetails, flight: FlightRecord| EnrichedFlight {
-                            carrier_code: flight.carrier.clone(),
-                            carrier_name: carrier.carrier_name.clone(),
-                            carrier_country: carrier.country.clone(),
-                            date: flight.date.clone(),
-                            origin: flight.origin.clone(),
-                            destination: flight.destination.clone(),
-                            scheduled_duration: flight.scheduled_duration,
-                            delay_minutes: flight.delay_minutes,
-                            flight_number: flight.flight_number.clone(),
-                            delay_category: flight.delay_category.clone(),
-                        })
-                ));
-
-                // Aggregation and output
-                agg = stateful!("aggregator" => CarrierAggregator::new());
-                printer = sink!("printer" => StatisticsPrinter::new());
-            },
-
-            topology: {
-                // Stream processing pipeline
-                flights |> val;
-                val |> calc;
-
-                // Join: enriches stream with reference data (FLOWIP-080l)
-                // Reference (carriers) is specified via join!(...reference: carriers, ...)
-                // Only stream input appears in topology
-                calc |> enricher;
-
-                // Aggregation pipeline
-                enricher |> agg;
-                agg |> printer;
-            }
+        topology: {
+            flights |> val;
+            val |> calc;
+            calc |> enricher;
+            enricher |> agg;
+            agg |> printer;
         }
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to create flow: {:?}", e))
     })
-    .await
-    .map_err(|e| anyhow::anyhow!("Application failed: {:?}", e))?;
+    .await?;
 
     println!("\n✅ Analysis pipeline completed!");
 

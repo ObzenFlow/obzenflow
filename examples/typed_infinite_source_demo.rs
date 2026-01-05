@@ -1,8 +1,8 @@
 //! Typed Infinite Source Demo - FLOWIP-081d
 //!
 //! Demonstrates typed infinite sources without `WriterId` and `ChainEvent` boilerplate:
-//! - `InfiniteSourceTyped`: `from_fn` (sync), `from_fallible_fn` (sync fallible)
-//! - `AsyncInfiniteSourceTyped`: `from_async_fn` (async), `from_fallible_async_fn` (async fallible)
+//! - `InfiniteSourceTyped`: `new` (sync), `fallible` (sync fallible)
+//! - `AsyncInfiniteSourceTyped`: `new` (async), `fallible` (async fallible)
 //! - `AsyncInfiniteSourceTyped::from_receiver`: channel-backed async infinite source
 //!
 //! The demo runs briefly, then requests a graceful stop so the flow terminates deterministically.
@@ -131,19 +131,17 @@ async fn main() -> Result<()> {
             middleware: [],
 
             stages: {
-                sync_src = infinite_source!("sync_from_fn" => InfiniteSourceTyped::from_fn({
-                    move |index| {
-                        if index >= per_source {
-                            Vec::new()
-                        } else {
-                            vec![DemoEvent { source: "sync_from_fn".to_string(), index }]
-                        }
+                sync_src = infinite_source!("sync_from_fn" => InfiniteSourceTyped::new(move |index| {
+                    if index >= per_source {
+                        Vec::new()
+                    } else {
+                        vec![DemoEvent { source: "sync_from_fn".to_string(), index }]
                     }
                 }));
 
                 sync_fallible_src = infinite_source!("sync_from_fallible_fn" => {
                     let did_error = Arc::new(AtomicBool::new(false));
-                    InfiniteSourceTyped::from_fallible_fn(move |index| {
+                    InfiniteSourceTyped::fallible(move |index| {
                         if index >= per_source {
                             return Ok(Vec::new());
                         }
@@ -160,7 +158,7 @@ async fn main() -> Result<()> {
                 });
 
                 async_src = async_infinite_source!("async_from_async_fn" =>
-                    AsyncInfiniteSourceTyped::from_async_fn({
+                    AsyncInfiniteSourceTyped::new({
                         move |index| async move {
                             if index >= per_source {
                                 Vec::new()
@@ -174,7 +172,7 @@ async fn main() -> Result<()> {
 
                 async_fallible_src = async_infinite_source!("async_from_fallible_async_fn" => {
                     let did_error = Arc::new(AtomicBool::new(false));
-                    AsyncInfiniteSourceTyped::from_fallible_async_fn(move |index| {
+                    AsyncInfiniteSourceTyped::fallible(move |index| {
                         let did_error = did_error.clone();
                         async move {
                             if index >= per_source {
