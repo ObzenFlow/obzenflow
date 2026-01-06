@@ -59,8 +59,8 @@ codegen-units = 1
 # Run benchmarks with: cargo bench -p obzenflow_benchmarks
 
 [[example]]
-name = "flight_delays"
-path = "examples/flight_delays.rs"
+name = "flight_delays_simple"
+path = "examples/flight_delays_simple.rs"
 
 [[example]]
 name = "char_transform"
@@ -73,6 +73,10 @@ path = "examples/flow_middleware_config.rs"
 [[example]]
 name = "product_catalog_enrichment"
 path = "examples/product_catalog_enrichment/main.rs"
+
+[[example]]
+name = "csv_demo_support_sla"
+path = "examples/csv_demo_support_sla/main.rs"
 
 [[example]]
 name = "payment_gateway_resilience"

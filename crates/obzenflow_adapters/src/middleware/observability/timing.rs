@@ -76,7 +76,7 @@ impl Middleware for TimingMiddleware {
                 // Store duration
                 event.processing_info.processing_time = duration;
 
-                tracing::info!(
+                tracing::debug!(
                     "TimingMiddleware[{}]: Set processing_time={} for event {}",
                     self.stage_name,
                     duration,
@@ -85,20 +85,20 @@ impl Middleware for TimingMiddleware {
 
                 // Log warning if timing seems too low for processor stage
                 if self.stage_name.contains("processor") && duration.as_nanos() < 5_000_000 {
-                    tracing::warn!(
+                    tracing::debug!(
                         "TimingMiddleware: Processor timing seems too low: {} for event {}",
                         duration,
                         event.id
                     );
                 }
             } else {
-                tracing::warn!(
+                tracing::debug!(
                     "TimingMiddleware: Could not parse start time from baggage for event {}",
                     event.id
                 );
             }
         } else {
-            tracing::warn!(
+            tracing::debug!(
                 "TimingMiddleware: No processing start time found for event {}",
                 event.id
             );

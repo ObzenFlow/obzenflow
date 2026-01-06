@@ -131,7 +131,9 @@ pub enum PipelineAction {
     NotifySourceReady,
     NotifySourceStart,
     /// Publish a pipeline stop-requested lifecycle marker (Cancel vs Graceful).
-    WritePipelineStopRequested { mode: FlowStopMode },
+    WritePipelineStopRequested {
+        mode: FlowStopMode,
+    },
     /// Request that all sources begin draining (stop producing and emit EOF).
     StopSources,
     BeginDrain,
@@ -508,10 +510,9 @@ impl FsmAction for PipelineAction {
 
                 let (mode_label, timeout_ms) = match mode {
                     FlowStopMode::Cancel => ("cancel".to_string(), None),
-                    FlowStopMode::Graceful { timeout } => (
-                        "graceful".to_string(),
-                        Some(timeout.as_millis() as u64),
-                    ),
+                    FlowStopMode::Graceful { timeout } => {
+                        ("graceful".to_string(), Some(timeout.as_millis() as u64))
+                    }
                 };
 
                 let stop_requested =
@@ -846,11 +847,12 @@ impl FsmAction for PipelineAction {
                                 Ok(Ok(None)) => {
                                     // No events available right now; avoid a tight spin loop.
                                     // Sleep for a bounded duration without overshooting the deadline.
-                                    let remaining = deadline.saturating_duration_since(
-                                        tokio::time::Instant::now(),
+                                    let remaining = deadline
+                                        .saturating_duration_since(tokio::time::Instant::now());
+                                    let sleep_for = std::cmp::min(
+                                        remaining,
+                                        tokio::time::Duration::from_millis(10),
                                     );
-                                    let sleep_for =
-                                        std::cmp::min(remaining, tokio::time::Duration::from_millis(10));
                                     if sleep_for != tokio::time::Duration::ZERO {
                                         tokio::time::sleep(sleep_for).await;
                                     }
@@ -912,60 +914,59 @@ impl FsmAction for PipelineAction {
                 drop(stage_journals);
 
                 // 3. Wait for drain completion event from system journal
-                // The metrics aggregator will publish MetricsCoordination::Drained event when done
-                let mut reader = match context.system_journal.reader().await {
-                    Ok(reader) => reader,
-                    Err(e) => {
-                        tracing::warn!(
-                            journal_error = %e,
-                            "Failed to create system journal reader for metrics drain completion; proceeding anyway"
-                        );
-                        return Ok(());
-                    }
-                };
+                // The metrics aggregator will publish MetricsCoordination::Drained when done.
+                //
+                // Use a tail-scan instead of `reader()` (which starts at the beginning) so we
+                // don't spend the drain timeout parsing unrelated system history.
+                let timeout_ms = std::env::var("OBZENFLOW_METRICS_DRAIN_TIMEOUT_MS")
+                    .ok()
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .unwrap_or(5_000);
+                let deadline =
+                    tokio::time::Instant::now() + tokio::time::Duration::from_millis(timeout_ms);
 
-                // Wait for the specific drain completion event with a reasonable timeout
-                // Keep this short to avoid long post-completion hangs if the metrics aggregator is gone.
-                let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(1);
+                const TAIL_SCAN_EVENTS: usize = 256;
+                const POLL_INTERVAL_MS: u64 = 10;
+
                 loop {
-                    match tokio::time::timeout_at(deadline, reader.next()).await {
-                        Ok(Ok(Some(envelope))) => {
-                            if matches!(
-                                &envelope.event.event,
-                                obzenflow_core::event::SystemEventType::MetricsCoordination(
-                                    obzenflow_core::event::MetricsCoordinationEvent::Drained
+                    match context.system_journal.read_last_n(TAIL_SCAN_EVENTS).await {
+                        Ok(events) => {
+                            if events.iter().any(|envelope| {
+                                matches!(
+                                    &envelope.event.event,
+                                    obzenflow_core::event::SystemEventType::MetricsCoordination(
+                                        obzenflow_core::event::MetricsCoordinationEvent::Drained
+                                    )
                                 )
-                            ) {
+                            }) {
                                 tracing::info!("Metrics successfully drained");
                                 break;
                             }
-                            // Otherwise continue waiting for the right event
                         }
-                        Ok(Ok(None)) => {
-                            // No events available right now; avoid a tight spin loop.
-                            // Sleep for a bounded duration without overshooting the deadline.
-                            let remaining = deadline.saturating_duration_since(
-                                tokio::time::Instant::now(),
-                            );
-                            let sleep_for =
-                                std::cmp::min(remaining, tokio::time::Duration::from_millis(10));
-                            if sleep_for != tokio::time::Duration::ZERO {
-                                tokio::time::sleep(sleep_for).await;
-                            }
-                        }
-                        Ok(Err(e)) => {
+                        Err(e) => {
                             tracing::warn!(
                                 drain_error = %e,
-                                "Failed to receive metrics drain completion; proceeding anyway"
+                                "Failed to read system journal while awaiting metrics drain completion; proceeding anyway"
                             );
                             break;
                         }
-                        Err(_) => {
-                            tracing::warn!(
-                                "Timeout waiting for metrics drain completion, proceeding anyway"
-                            );
-                            break;
-                        }
+                    }
+
+                    if tokio::time::Instant::now() >= deadline {
+                        tracing::warn!(
+                            timeout_ms,
+                            "Timeout waiting for metrics drain completion, proceeding anyway"
+                        );
+                        break;
+                    }
+
+                    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                    let sleep_for = std::cmp::min(
+                        remaining,
+                        tokio::time::Duration::from_millis(POLL_INTERVAL_MS),
+                    );
+                    if sleep_for != tokio::time::Duration::ZERO {
+                        tokio::time::sleep(sleep_for).await;
                     }
                 }
             }

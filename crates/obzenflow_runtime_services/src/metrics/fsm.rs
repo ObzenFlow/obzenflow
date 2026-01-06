@@ -408,7 +408,8 @@ impl MetricsAggregatorContext {
                             Some(runtime_ctx.processing_time_sum_nanos);
                     }
 
-                    metrics_store.update_control_metrics_from_runtime_context(*stage_id, runtime_ctx);
+                    metrics_store
+                        .update_control_metrics_from_runtime_context(*stage_id, runtime_ctx);
                 }
 
                 // Seed per-stage vector clock watermark from the last envelope
@@ -550,8 +551,10 @@ impl MetricsAggregatorContext {
                                     Some(runtime_ctx.processing_time_sum_nanos);
                             }
 
-                            metrics_store
-                                .update_control_metrics_from_runtime_context(*stage_id, runtime_ctx);
+                            metrics_store.update_control_metrics_from_runtime_context(
+                                *stage_id,
+                                runtime_ctx,
+                            );
                         }
 
                         let writer_id = envelope.event.writer_id().clone();
@@ -950,7 +953,7 @@ impl MetricsAggregatorContext {
 
 impl MetricsStore {
     /// Returns true when every known stage has reached a terminal lifecycle
-    /// state (completed or failed) according to system.events.
+    /// state (completed, failed, or cancelled) according to system.events.
     pub fn all_stages_terminal(&self, stage_metadata: &HashMap<StageId, StageMetadata>) -> bool {
         stage_metadata.keys().all(|stage_id| {
             self.stage_lifecycle_states
@@ -962,6 +965,11 @@ impl MetricsStore {
                     .get(&(*stage_id, "failed".to_string()))
                     .copied()
                     .unwrap_or(false)
+                || self
+                    .stage_lifecycle_states
+                    .get(&(*stage_id, "cancelled".to_string()))
+                    .copied()
+                    .unwrap_or(false)
         })
     }
 
@@ -969,7 +977,12 @@ impl MetricsStore {
     pub fn pipeline_terminal(&self) -> bool {
         matches!(
             self.pipeline_state.as_str(),
-            "completed" | "failed" | "drained"
+            "completed"
+                | "failed"
+                | "cancelled"
+                | "drained"
+                | "all_stages_completed"
+                | "stop_requested"
         )
     }
 
@@ -985,11 +998,7 @@ impl MetricsStore {
             .unwrap_or("closed");
 
         if from_state != next_state {
-            let transition_key = (
-                stage_id,
-                from_state.to_string(),
-                next_state.to_string(),
-            );
+            let transition_key = (stage_id, from_state.to_string(), next_state.to_string());
             let count = self
                 .circuit_breaker_state_transitions_total
                 .entry(transition_key)
@@ -1025,7 +1034,10 @@ impl MetricsStore {
             || runtime_ctx.cb_time_half_open_seconds > 0.0;
 
         if cb_present {
-            let total = self.circuit_breaker_requests_total.entry(stage_id).or_insert(0);
+            let total = self
+                .circuit_breaker_requests_total
+                .entry(stage_id)
+                .or_insert(0);
             *total = (*total).max(runtime_ctx.cb_requests_total);
 
             let rejected = self
@@ -1034,7 +1046,10 @@ impl MetricsStore {
                 .or_insert(0);
             *rejected = (*rejected).max(runtime_ctx.cb_rejections_total);
 
-            let opened = self.circuit_breaker_opened_total.entry(stage_id).or_insert(0);
+            let opened = self
+                .circuit_breaker_opened_total
+                .entry(stage_id)
+                .or_insert(0);
             *opened = (*opened).max(runtime_ctx.cb_opened_total);
 
             let successes = self
@@ -1153,85 +1168,87 @@ impl FsmAction for MetricsAggregatorAction {
                 }
 
                 match &envelope.event.event {
-	                    obzenflow_core::event::SystemEventType::StageLifecycle { stage_id, event } => {
-	                        // Track ALL states each stage has been in (never overwrite)
-	                        match event {
-	                            obzenflow_core::event::StageLifecycleEvent::Running => {
-	                                store
-	                                    .stage_lifecycle_states
-	                                    .insert((*stage_id, "running".to_string()), true);
-	                                tracing::debug!("Stage {:?} transitioned to running", stage_id);
-	                            }
-	                            obzenflow_core::event::StageLifecycleEvent::Completed { .. } => {
-	                                store
-	                                    .stage_lifecycle_states
-	                                    .insert((*stage_id, "completed".to_string()), true);
-	                                tracing::debug!("Stage {:?} transitioned to completed", stage_id);
-	                            }
-	                            obzenflow_core::event::StageLifecycleEvent::Cancelled { .. } => {
-	                                store
-	                                    .stage_lifecycle_states
-	                                    .insert((*stage_id, "cancelled".to_string()), true);
-	                                tracing::debug!("Stage {:?} transitioned to cancelled", stage_id);
-	                            }
-	                            obzenflow_core::event::StageLifecycleEvent::Failed { .. } => {
-	                                store
-	                                    .stage_lifecycle_states
-	                                    .insert((*stage_id, "failed".to_string()), true);
-	                                tracing::debug!("Stage {:?} transitioned to failed", stage_id);
-	                            }
-	                            _ => {} // Skip draining, drained for now
-	                        }
-	                    }
-	                    obzenflow_core::event::SystemEventType::PipelineLifecycle(event) => {
+                    obzenflow_core::event::SystemEventType::StageLifecycle { stage_id, event } => {
+                        // Track ALL states each stage has been in (never overwrite)
+                        match event {
+                            obzenflow_core::event::StageLifecycleEvent::Running => {
+                                store
+                                    .stage_lifecycle_states
+                                    .insert((*stage_id, "running".to_string()), true);
+                                tracing::debug!("Stage {:?} transitioned to running", stage_id);
+                            }
+                            obzenflow_core::event::StageLifecycleEvent::Completed { .. } => {
+                                store
+                                    .stage_lifecycle_states
+                                    .insert((*stage_id, "completed".to_string()), true);
+                                tracing::debug!("Stage {:?} transitioned to completed", stage_id);
+                            }
+                            obzenflow_core::event::StageLifecycleEvent::Cancelled { .. } => {
+                                store
+                                    .stage_lifecycle_states
+                                    .insert((*stage_id, "cancelled".to_string()), true);
+                                tracing::debug!("Stage {:?} transitioned to cancelled", stage_id);
+                            }
+                            obzenflow_core::event::StageLifecycleEvent::Failed { .. } => {
+                                store
+                                    .stage_lifecycle_states
+                                    .insert((*stage_id, "failed".to_string()), true);
+                                tracing::debug!("Stage {:?} transitioned to failed", stage_id);
+                            }
+                            _ => {} // Skip draining, drained for now
+                        }
+                    }
+                    obzenflow_core::event::SystemEventType::PipelineLifecycle(event) => {
                         // Track only essential pipeline events, with monotonic semantics:
                         // - "failed" is sticky and never regresses.
                         // - "completed" never regresses to "drained".
                         // - "drained" is only used when no explicit outcome was ever observed.
-	                        match event {
-	                            obzenflow_core::event::PipelineLifecycleEvent::StopRequested { .. } => {
-	                                if store.pipeline_state.is_empty() {
-	                                    store.pipeline_state = "stop_requested".to_string();
-	                                }
-	                                tracing::info!("Pipeline: stop requested (metrics view)");
-	                            }
-	                            obzenflow_core::event::PipelineLifecycleEvent::AllStagesCompleted {
-	                                ..
-	                            } => {
-	                                if store.pipeline_state.is_empty() {
-	                                    store.pipeline_state = "all_stages_completed".to_string();
-	                                }
-	                                tracing::info!("Pipeline: all stages completed (metrics view)");
-	                            }
-	                            obzenflow_core::event::PipelineLifecycleEvent::Completed { .. } => {
-	                                if store.pipeline_state != "failed" {
-	                                    store.pipeline_state = "completed".to_string();
-	                                    tracing::info!("Pipeline: completed (metrics view)");
-	                                } else {
-	                                    tracing::info!(
-	                                        "Pipeline: completed event observed after failed; \
+                        match event {
+                            obzenflow_core::event::PipelineLifecycleEvent::StopRequested {
+                                ..
+                            } => {
+                                if store.pipeline_state.is_empty() {
+                                    store.pipeline_state = "stop_requested".to_string();
+                                }
+                                tracing::info!("Pipeline: stop requested (metrics view)");
+                            }
+                            obzenflow_core::event::PipelineLifecycleEvent::AllStagesCompleted {
+                                ..
+                            } => {
+                                if store.pipeline_state.is_empty() {
+                                    store.pipeline_state = "all_stages_completed".to_string();
+                                }
+                                tracing::info!("Pipeline: all stages completed (metrics view)");
+                            }
+                            obzenflow_core::event::PipelineLifecycleEvent::Completed { .. } => {
+                                if store.pipeline_state != "failed" {
+                                    store.pipeline_state = "completed".to_string();
+                                    tracing::info!("Pipeline: completed (metrics view)");
+                                } else {
+                                    tracing::info!(
+                                        "Pipeline: completed event observed after failed; \
 	                                         keeping failed as terminal state (metrics view)"
-	                                    );
-	                                }
-	                            }
-	                            obzenflow_core::event::PipelineLifecycleEvent::Cancelled { .. } => {
-	                                if store.pipeline_state != "failed" {
-	                                    store.pipeline_state = "cancelled".to_string();
-	                                    tracing::info!("Pipeline: cancelled (metrics view)");
-	                                } else {
-	                                    tracing::info!(
-	                                        "Pipeline: cancelled event observed after failed; \
+                                    );
+                                }
+                            }
+                            obzenflow_core::event::PipelineLifecycleEvent::Cancelled { .. } => {
+                                if store.pipeline_state != "failed" {
+                                    store.pipeline_state = "cancelled".to_string();
+                                    tracing::info!("Pipeline: cancelled (metrics view)");
+                                } else {
+                                    tracing::info!(
+                                        "Pipeline: cancelled event observed after failed; \
 	                                         keeping failed as terminal state (metrics view)"
-	                                    );
-	                                }
-	                            }
-	                            obzenflow_core::event::PipelineLifecycleEvent::Failed { .. } => {
-	                                // Failure is always terminal and sticky.
-	                                if store.pipeline_state != "failed" {
-	                                    store.pipeline_state = "failed".to_string();
-	                                    tracing::info!("Pipeline: failed (metrics view)");
-	                                }
-	                            }
+                                    );
+                                }
+                            }
+                            obzenflow_core::event::PipelineLifecycleEvent::Failed { .. } => {
+                                // Failure is always terminal and sticky.
+                                if store.pipeline_state != "failed" {
+                                    store.pipeline_state = "failed".to_string();
+                                    tracing::info!("Pipeline: failed (metrics view)");
+                                }
+                            }
                             obzenflow_core::event::PipelineLifecycleEvent::Drained => {
                                 // Drained is a termination marker only; do not override an
                                 // explicit completed/failed outcome.
@@ -1327,14 +1344,14 @@ impl FsmAction for MetricsAggregatorAction {
 
                 let event = &envelope.event;
 
-	                // Update per-stage vector clock watermark (FLOWIP-059c).
-	                // We use the event writer_id component from the envelope's vector clock.
-	                let stage_id = event.flow_context.stage_id;
-	                let writer_id = event.writer_id().clone();
-	                let writer_key = writer_id.to_string();
-	                let seq = envelope.vector_clock.get(&writer_key);
-	                let entry = store.stage_vector_clocks.entry(stage_id).or_insert(0);
-	                *entry = (*entry).max(seq);
+                // Update per-stage vector clock watermark (FLOWIP-059c).
+                // We use the event writer_id component from the envelope's vector clock.
+                let stage_id = event.flow_context.stage_id;
+                let writer_id = event.writer_id().clone();
+                let writer_key = writer_id.to_string();
+                let seq = envelope.vector_clock.get(&writer_key);
+                let entry = store.stage_vector_clocks.entry(stage_id).or_insert(0);
+                *entry = (*entry).max(seq);
 
                 // Capture flow_id for joinability (FLOWIP-059a) when it becomes available.
                 if let Some(meta) = ctx.stage_metadata.get_mut(&stage_id) {
@@ -1355,104 +1372,104 @@ impl FsmAction for MetricsAggregatorAction {
                     middleware_event,
                 )) = &event.content
                 {
-	                    match middleware_event {
-	                        MiddlewareLifecycle::CircuitBreaker(cb) => match cb {
-	                            CircuitBreakerEvent::Opened {
-	                                error_rate: _,
-	                                failure_count,
-	                                ..
-	                            } => {
-	                                store.record_circuit_breaker_transition(stage_id, "open");
-	                                store.circuit_breaker_state.insert(stage_id, 1.0);
-	                                store
-	                                    .circuit_breaker_consecutive_failures
-	                                    .insert(stage_id, *failure_count as f64);
-	                            }
-	                            CircuitBreakerEvent::Closed { .. } => {
-	                                store.record_circuit_breaker_transition(stage_id, "closed");
-	                                store.circuit_breaker_state.insert(stage_id, 0.0);
-	                                store
-	                                    .circuit_breaker_consecutive_failures
-	                                    .insert(stage_id, 0.0);
-	                            }
-	                            CircuitBreakerEvent::HalfOpen { .. } => {
-	                                store.record_circuit_breaker_transition(stage_id, "half_open");
-	                                store.circuit_breaker_state.insert(stage_id, 0.5);
-	                            }
-	                            CircuitBreakerEvent::Summary {
-	                                requests_processed: _,
-	                                requests_rejected: _,
-	                                state,
-	                                consecutive_failures,
-	                                rejection_rate,
-	                                successes_total,
-	                                failures_total,
-	                                opened_total,
-	                                time_in_closed_seconds,
-	                                time_in_open_seconds,
-	                                time_in_half_open_seconds,
-	                                ..
-	                            } => {
-	                                store.set_circuit_breaker_last_state(stage_id, state);
+                    match middleware_event {
+                        MiddlewareLifecycle::CircuitBreaker(cb) => match cb {
+                            CircuitBreakerEvent::Opened {
+                                error_rate: _,
+                                failure_count,
+                                ..
+                            } => {
+                                store.record_circuit_breaker_transition(stage_id, "open");
+                                store.circuit_breaker_state.insert(stage_id, 1.0);
+                                store
+                                    .circuit_breaker_consecutive_failures
+                                    .insert(stage_id, *failure_count as f64);
+                            }
+                            CircuitBreakerEvent::Closed { .. } => {
+                                store.record_circuit_breaker_transition(stage_id, "closed");
+                                store.circuit_breaker_state.insert(stage_id, 0.0);
+                                store
+                                    .circuit_breaker_consecutive_failures
+                                    .insert(stage_id, 0.0);
+                            }
+                            CircuitBreakerEvent::HalfOpen { .. } => {
+                                store.record_circuit_breaker_transition(stage_id, "half_open");
+                                store.circuit_breaker_state.insert(stage_id, 0.5);
+                            }
+                            CircuitBreakerEvent::Summary {
+                                requests_processed: _,
+                                requests_rejected: _,
+                                state,
+                                consecutive_failures,
+                                rejection_rate,
+                                successes_total,
+                                failures_total,
+                                opened_total,
+                                time_in_closed_seconds,
+                                time_in_open_seconds,
+                                time_in_half_open_seconds,
+                                ..
+                            } => {
+                                store.set_circuit_breaker_last_state(stage_id, state);
 
-	                                store
-	                                    .circuit_breaker_rejection_rate
-	                                    .insert(stage_id, *rejection_rate);
-	                                store
-	                                    .circuit_breaker_consecutive_failures
-	                                    .insert(stage_id, *consecutive_failures as f64);
+                                store
+                                    .circuit_breaker_rejection_rate
+                                    .insert(stage_id, *rejection_rate);
+                                store
+                                    .circuit_breaker_consecutive_failures
+                                    .insert(stage_id, *consecutive_failures as f64);
 
-	                                // Cumulative breaker stats (FLOWIP-059a-2). These are emitted
-	                                // as monotonic totals in the Summary wide event.
-	                                let opened = store
-	                                    .circuit_breaker_opened_total
-	                                    .entry(stage_id)
-	                                    .or_insert(0);
-	                                *opened = (*opened).max(*opened_total);
+                                // Cumulative breaker stats (FLOWIP-059a-2). These are emitted
+                                // as monotonic totals in the Summary wide event.
+                                let opened = store
+                                    .circuit_breaker_opened_total
+                                    .entry(stage_id)
+                                    .or_insert(0);
+                                *opened = (*opened).max(*opened_total);
 
-	                                let successes = store
-	                                    .circuit_breaker_successes_total
-	                                    .entry(stage_id)
-	                                    .or_insert(0);
-	                                *successes = (*successes).max(*successes_total);
+                                let successes = store
+                                    .circuit_breaker_successes_total
+                                    .entry(stage_id)
+                                    .or_insert(0);
+                                *successes = (*successes).max(*successes_total);
 
-	                                let failures = store
-	                                    .circuit_breaker_failures_total
-	                                    .entry(stage_id)
-	                                    .or_insert(0);
-	                                *failures = (*failures).max(*failures_total);
+                                let failures = store
+                                    .circuit_breaker_failures_total
+                                    .entry(stage_id)
+                                    .or_insert(0);
+                                *failures = (*failures).max(*failures_total);
 
-	                                store
-	                                    .circuit_breaker_time_in_state_seconds_total
-	                                    .entry((stage_id, "closed".to_string()))
-	                                    .and_modify(|v| *v = (*v).max(*time_in_closed_seconds))
-	                                    .or_insert(*time_in_closed_seconds);
-	                                store
-	                                    .circuit_breaker_time_in_state_seconds_total
-	                                    .entry((stage_id, "open".to_string()))
-	                                    .and_modify(|v| *v = (*v).max(*time_in_open_seconds))
-	                                    .or_insert(*time_in_open_seconds);
-	                                store
-	                                    .circuit_breaker_time_in_state_seconds_total
-	                                    .entry((stage_id, "half_open".to_string()))
-	                                    .and_modify(|v| *v = (*v).max(*time_in_half_open_seconds))
-	                                    .or_insert(*time_in_half_open_seconds);
+                                store
+                                    .circuit_breaker_time_in_state_seconds_total
+                                    .entry((stage_id, "closed".to_string()))
+                                    .and_modify(|v| *v = (*v).max(*time_in_closed_seconds))
+                                    .or_insert(*time_in_closed_seconds);
+                                store
+                                    .circuit_breaker_time_in_state_seconds_total
+                                    .entry((stage_id, "open".to_string()))
+                                    .and_modify(|v| *v = (*v).max(*time_in_open_seconds))
+                                    .or_insert(*time_in_open_seconds);
+                                store
+                                    .circuit_breaker_time_in_state_seconds_total
+                                    .entry((stage_id, "half_open".to_string()))
+                                    .and_modify(|v| *v = (*v).max(*time_in_half_open_seconds))
+                                    .or_insert(*time_in_half_open_seconds);
 
-	                                // State string is Debug-formatted in the middleware
-	                                // (e.g. "Closed", "Open", "HalfOpen"); be liberal in parsing.
-	                                let state_norm = state.to_ascii_lowercase();
-	                                let state_value = match state_norm.as_str() {
-	                                    "closed" => Some(0.0),
-	                                    "open" => Some(1.0),
-	                                    "halfopen" | "half_open" | "half-open" => Some(0.5),
-	                                    _ => None,
-	                                };
-	                                if let Some(val) = state_value {
-	                                    store.circuit_breaker_state.insert(stage_id, val);
-	                                }
-	                            }
-	                            _ => {}
-	                        },
+                                // State string is Debug-formatted in the middleware
+                                // (e.g. "Closed", "Open", "HalfOpen"); be liberal in parsing.
+                                let state_norm = state.to_ascii_lowercase();
+                                let state_value = match state_norm.as_str() {
+                                    "closed" => Some(0.0),
+                                    "open" => Some(1.0),
+                                    "halfopen" | "half_open" | "half-open" => Some(0.5),
+                                    _ => None,
+                                };
+                                if let Some(val) = state_value {
+                                    store.circuit_breaker_state.insert(stage_id, val);
+                                }
+                            }
+                            _ => {}
+                        },
                         _ => {}
                     }
                 }
@@ -1632,10 +1649,11 @@ impl FsmAction for MetricsAggregatorAction {
                         )
                         .await
                         {
-                            ctx.metrics_store.update_control_metrics_from_runtime_context(
-                                *stage_id,
-                                &runtime_ctx,
-                            );
+                            ctx.metrics_store
+                                .update_control_metrics_from_runtime_context(
+                                    *stage_id,
+                                    &runtime_ctx,
+                                );
                         }
                     }
                 }
@@ -1768,7 +1786,7 @@ pub fn build_metrics_aggregator_fsm() -> MetricsAggregatorFsm {
             };
         }
 
-	        state MetricsAggregatorState::Running {
+            state MetricsAggregatorState::Running {
             on MetricsAggregatorEvent::StartDraining => |_state: &MetricsAggregatorState, _event: &MetricsAggregatorEvent, _ctx: &mut MetricsAggregatorContext| {
                 Box::pin(async move {
                     Ok(Transition {
@@ -1778,75 +1796,75 @@ pub fn build_metrics_aggregator_fsm() -> MetricsAggregatorFsm {
                 })
             };
 
-	            on MetricsAggregatorEvent::ProcessSystemEvent => |_state: &MetricsAggregatorState, event: &MetricsAggregatorEvent, ctx: &mut MetricsAggregatorContext| {
-	                let event = event.clone();
-	                let last_event_id = ctx.metrics_store.last_event_id.clone();
-	                Box::pin(async move {
-	                    match event {
-	                        MetricsAggregatorEvent::ProcessSystemEvent { envelope } => {
-	                            let pipeline_event = match &envelope.event.event {
-	                                obzenflow_core::event::SystemEventType::PipelineLifecycle(event) => {
-	                                    Some(event)
-	                                }
-	                                _ => None,
-	                            };
+                on MetricsAggregatorEvent::ProcessSystemEvent => |_state: &MetricsAggregatorState, event: &MetricsAggregatorEvent, ctx: &mut MetricsAggregatorContext| {
+                    let event = event.clone();
+                    let last_event_id = ctx.metrics_store.last_event_id.clone();
+                    Box::pin(async move {
+                        match event {
+                            MetricsAggregatorEvent::ProcessSystemEvent { envelope } => {
+                                let pipeline_event = match &envelope.event.event {
+                                    obzenflow_core::event::SystemEventType::PipelineLifecycle(event) => {
+                                        Some(event)
+                                    }
+                                    _ => None,
+                                };
 
-	                            let should_drain = matches!(
-	                                pipeline_event,
-	                                Some(
-	                                    obzenflow_core::event::PipelineLifecycleEvent::Draining { .. }
-	                                        | obzenflow_core::event::PipelineLifecycleEvent::AllStagesCompleted { .. }
-	                                )
-	                            );
+                                let should_drain = matches!(
+                                    pipeline_event,
+                                    Some(
+                                        obzenflow_core::event::PipelineLifecycleEvent::Draining { .. }
+                                            | obzenflow_core::event::PipelineLifecycleEvent::AllStagesCompleted { .. }
+                                    )
+                                );
 
-	                            let should_finalize = matches!(
-	                                pipeline_event,
-	                                Some(
-	                                    obzenflow_core::event::PipelineLifecycleEvent::Completed { .. }
-	                                        | obzenflow_core::event::PipelineLifecycleEvent::Failed { .. }
-	                                        | obzenflow_core::event::PipelineLifecycleEvent::Drained
-	                                )
-	                            );
+                                let should_finalize = matches!(
+                                    pipeline_event,
+                                    Some(
+                                        obzenflow_core::event::PipelineLifecycleEvent::Completed { .. }
+                                            | obzenflow_core::event::PipelineLifecycleEvent::Failed { .. }
+                                            | obzenflow_core::event::PipelineLifecycleEvent::Drained
+                                    )
+                                );
 
-	                            if should_finalize {
-	                                let publish_last_event_id = last_event_id.clone();
-	                                return Ok(Transition {
-	                                    next_state: MetricsAggregatorState::Drained { last_event_id },
-	                                    actions: vec![
-	                                        MetricsAggregatorAction::ProcessSystemEvent {
-	                                            envelope: envelope.clone(),
-	                                        },
-	                                        MetricsAggregatorAction::ExportMetrics,
-	                                        MetricsAggregatorAction::PublishDrainComplete {
-	                                            last_event_id: publish_last_event_id,
-	                                        },
-	                                    ],
-	                                });
-	                            }
+                                if should_finalize {
+                                    let publish_last_event_id = last_event_id.clone();
+                                    return Ok(Transition {
+                                        next_state: MetricsAggregatorState::Drained { last_event_id },
+                                        actions: vec![
+                                            MetricsAggregatorAction::ProcessSystemEvent {
+                                                envelope: envelope.clone(),
+                                            },
+                                            MetricsAggregatorAction::ExportMetrics,
+                                            MetricsAggregatorAction::PublishDrainComplete {
+                                                last_event_id: publish_last_event_id,
+                                            },
+                                        ],
+                                    });
+                                }
 
-	                            if should_drain {
-	                                return Ok(Transition {
-	                                    next_state: MetricsAggregatorState::Draining,
-	                                    actions: vec![
-	                                        MetricsAggregatorAction::ProcessSystemEvent {
-	                                            envelope: envelope.clone(),
-	                                        },
-	                                        MetricsAggregatorAction::ExportMetrics,
-	                                    ],
-	                                });
-	                            }
+                                if should_drain {
+                                    return Ok(Transition {
+                                        next_state: MetricsAggregatorState::Draining,
+                                        actions: vec![
+                                            MetricsAggregatorAction::ProcessSystemEvent {
+                                                envelope: envelope.clone(),
+                                            },
+                                            MetricsAggregatorAction::ExportMetrics,
+                                        ],
+                                    });
+                                }
 
-	                            Ok(Transition {
-	                                next_state: MetricsAggregatorState::Running,
-	                                actions: vec![MetricsAggregatorAction::ProcessSystemEvent {
-	                                    envelope: envelope.clone(),
-	                                }],
-	                            })
-	                        }
-	                        _ => Err(obzenflow_fsm::FsmError::HandlerError(
-	                            "Invalid event for ProcessSystemEvent handler".to_string(),
-	                        )),
-	                    }
+                                Ok(Transition {
+                                    next_state: MetricsAggregatorState::Running,
+                                    actions: vec![MetricsAggregatorAction::ProcessSystemEvent {
+                                        envelope: envelope.clone(),
+                                    }],
+                                })
+                            }
+                            _ => Err(obzenflow_fsm::FsmError::HandlerError(
+                                "Invalid event for ProcessSystemEvent handler".to_string(),
+                            )),
+                        }
                 })
             };
 
@@ -1899,7 +1917,7 @@ pub fn build_metrics_aggregator_fsm() -> MetricsAggregatorFsm {
             };
         }
 
-	        state MetricsAggregatorState::Draining {
+            state MetricsAggregatorState::Draining {
             on MetricsAggregatorEvent::FlowTerminal => |_state: &MetricsAggregatorState, _event: &MetricsAggregatorEvent, ctx: &mut MetricsAggregatorContext| {
                 Box::pin(async move {
                     let last_event_id = ctx.metrics_store.last_event_id.clone();
@@ -1916,68 +1934,68 @@ pub fn build_metrics_aggregator_fsm() -> MetricsAggregatorFsm {
                 })
             };
 
-	            on MetricsAggregatorEvent::ProcessSystemEvent => |_state: &MetricsAggregatorState, event: &MetricsAggregatorEvent, ctx: &mut MetricsAggregatorContext| {
-	                let event = event.clone();
-	                let last_event_id = ctx.metrics_store.last_event_id.clone();
-	                Box::pin(async move {
-	                    match event {
-	                        MetricsAggregatorEvent::ProcessSystemEvent { envelope } => {
-	                            let pipeline_event = match &envelope.event.event {
-	                                obzenflow_core::event::SystemEventType::PipelineLifecycle(event) => {
-	                                    Some(event)
-	                                }
-	                                _ => None,
-	                            };
+                on MetricsAggregatorEvent::ProcessSystemEvent => |_state: &MetricsAggregatorState, event: &MetricsAggregatorEvent, ctx: &mut MetricsAggregatorContext| {
+                    let event = event.clone();
+                    let last_event_id = ctx.metrics_store.last_event_id.clone();
+                    Box::pin(async move {
+                        match event {
+                            MetricsAggregatorEvent::ProcessSystemEvent { envelope } => {
+                                let pipeline_event = match &envelope.event.event {
+                                    obzenflow_core::event::SystemEventType::PipelineLifecycle(event) => {
+                                        Some(event)
+                                    }
+                                    _ => None,
+                                };
 
-	                            let should_export = matches!(
-	                                pipeline_event,
-	                                Some(
-	                                    obzenflow_core::event::PipelineLifecycleEvent::Draining { .. }
-	                                        | obzenflow_core::event::PipelineLifecycleEvent::AllStagesCompleted { .. }
-	                                )
-	                            );
+                                let should_export = matches!(
+                                    pipeline_event,
+                                    Some(
+                                        obzenflow_core::event::PipelineLifecycleEvent::Draining { .. }
+                                            | obzenflow_core::event::PipelineLifecycleEvent::AllStagesCompleted { .. }
+                                    )
+                                );
 
-	                            let should_finalize = matches!(
-	                                pipeline_event,
-	                                Some(
-	                                    obzenflow_core::event::PipelineLifecycleEvent::Completed { .. }
-	                                        | obzenflow_core::event::PipelineLifecycleEvent::Failed { .. }
-	                                        | obzenflow_core::event::PipelineLifecycleEvent::Drained
-	                                )
-	                            );
+                                let should_finalize = matches!(
+                                    pipeline_event,
+                                    Some(
+                                        obzenflow_core::event::PipelineLifecycleEvent::Completed { .. }
+                                            | obzenflow_core::event::PipelineLifecycleEvent::Failed { .. }
+                                            | obzenflow_core::event::PipelineLifecycleEvent::Drained
+                                    )
+                                );
 
-	                            if should_finalize {
-	                                let publish_last_event_id = last_event_id.clone();
-	                                return Ok(Transition {
-	                                    next_state: MetricsAggregatorState::Drained { last_event_id },
-	                                    actions: vec![
-	                                        MetricsAggregatorAction::ProcessSystemEvent {
-	                                            envelope: envelope.clone(),
-	                                        },
-	                                        MetricsAggregatorAction::ExportMetrics,
-	                                        MetricsAggregatorAction::PublishDrainComplete {
-	                                            last_event_id: publish_last_event_id,
-	                                        },
-	                                    ],
-	                                });
-	                            }
+                                if should_finalize {
+                                    let publish_last_event_id = last_event_id.clone();
+                                    return Ok(Transition {
+                                        next_state: MetricsAggregatorState::Drained { last_event_id },
+                                        actions: vec![
+                                            MetricsAggregatorAction::ProcessSystemEvent {
+                                                envelope: envelope.clone(),
+                                            },
+                                            MetricsAggregatorAction::ExportMetrics,
+                                            MetricsAggregatorAction::PublishDrainComplete {
+                                                last_event_id: publish_last_event_id,
+                                            },
+                                        ],
+                                    });
+                                }
 
-	                            let mut actions = vec![MetricsAggregatorAction::ProcessSystemEvent {
-	                                envelope: envelope.clone(),
-	                            }];
-	                            if should_export {
-	                                actions.push(MetricsAggregatorAction::ExportMetrics);
-	                            }
+                                let mut actions = vec![MetricsAggregatorAction::ProcessSystemEvent {
+                                    envelope: envelope.clone(),
+                                }];
+                                if should_export {
+                                    actions.push(MetricsAggregatorAction::ExportMetrics);
+                                }
 
-	                            Ok(Transition {
-	                                next_state: MetricsAggregatorState::Draining,
-	                                actions,
-	                            })
-	                        }
-	                        _ => Err(obzenflow_fsm::FsmError::HandlerError(
-	                            "Invalid event for ProcessSystemEvent handler in Draining".to_string(),
-	                        )),
-	                    }
+                                Ok(Transition {
+                                    next_state: MetricsAggregatorState::Draining,
+                                    actions,
+                                })
+                            }
+                            _ => Err(obzenflow_fsm::FsmError::HandlerError(
+                                "Invalid event for ProcessSystemEvent handler in Draining".to_string(),
+                            )),
+                        }
                 })
             };
 

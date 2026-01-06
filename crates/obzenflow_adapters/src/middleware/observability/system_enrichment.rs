@@ -99,7 +99,7 @@ impl Middleware for SystemEnrichmentMiddleware {
         }
 
         // Handle correlation IDs for journey tracking
-        if !event.is_lifecycle() {
+        if !event.is_lifecycle() && !event.is_control() {
             // Don't add correlation to lifecycle/control events
             match self.stage_type {
                 StageType::FiniteSource | StageType::InfiniteSource => {
@@ -129,7 +129,7 @@ impl Middleware for SystemEnrichmentMiddleware {
                 StageType::Transform | StageType::Stateful | StageType::Sink | StageType::Join => {
                     // stages (transform, stateful, join) and sinks preserve correlation IDs
                     // If somehow we get here without a correlation ID, log a warning
-                    if event.correlation_id.is_none() && !event.is_lifecycle() {
+                    if event.correlation_id.is_none() {
                         tracing::warn!(
                             "SystemEnrichmentMiddleware: Non-control event {} in {} stage missing correlation_id",
                             event.id,

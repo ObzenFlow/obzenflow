@@ -2,6 +2,7 @@
 
 use crate::stages::common::handler_error::HandlerError;
 use crate::stages::common::handlers::JoinHandler;
+use obzenflow_core::event::context::causality_context::CausalityContext;
 use obzenflow_core::event::schema::TypedPayload;
 use obzenflow_core::StageId;
 use obzenflow_core::{ChainEvent, WriterId};
@@ -178,12 +179,13 @@ where
         // Enriching: stream side
         if let Some(stream_data) = S::StreamType::from_event(&event) {
             let key = (self.stream_key_fn)(&stream_data);
-            let events = self.strategy.match_stream_event(
+            let mut events = self.strategy.match_stream_event(
                 &state.reference_catalog,
                 stream_data,
                 key,
                 writer_id,
             );
+            propagate_stream_lineage(&event, &mut events);
             return Ok(events);
         }
 
@@ -228,6 +230,47 @@ where
 
     async fn drain(&self, _state: &Self::State) -> Result<Vec<ChainEvent>, HandlerError> {
         Ok(vec![])
+    }
+}
+
+fn propagate_stream_lineage(parent: &ChainEvent, outputs: &mut [ChainEvent]) {
+    // The join strategies typically materialize new events via `TypedPayload::to_event`,
+    // which does not preserve correlation/lineage. Since joins conceptually enrich a
+    // stream event, we propagate correlation + causality from the stream parent.
+
+    // Match `ChainEventFactory::derived_event` defaults.
+    const DEFAULT_MAX_LINEAGE_DEPTH: usize = 100;
+    let max_depth = std::env::var("OBZENFLOW_MAX_LINEAGE_DEPTH")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(DEFAULT_MAX_LINEAGE_DEPTH);
+
+    for event in outputs.iter_mut() {
+        if event.is_lifecycle() || event.is_control() {
+            continue;
+        }
+
+        if event.correlation_id.is_none() {
+            event.correlation_id = parent.correlation_id;
+            event.correlation_payload = parent.correlation_payload.clone();
+        }
+
+        if event.causality.is_root() {
+            let mut causality = CausalityContext::with_parent(parent.id);
+
+            // Propagate ancestors up to depth limit (parent already counts as depth=1).
+            let ancestors_to_add = parent
+                .causality
+                .parent_ids
+                .iter()
+                .take(max_depth.saturating_sub(1));
+
+            for ancestor in ancestors_to_add {
+                causality = causality.add_parent(*ancestor);
+            }
+
+            event.causality = causality;
+        }
     }
 }
 

@@ -1,0 +1,6 @@
+customer_id,plan,region
+CUST-001,free,na
+CUST-002,pro,eu
+CUST-003,enterprise,na
+CUST-004,pro,apac
+CUST-005,free,eu
