@@ -2,7 +2,9 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use obzenflow_core::event::context::StageType;
+use obzenflow_core::event::ingestion::IngestionTelemetrySnapshot;
 use obzenflow_core::event::JournalWriterId;
+use obzenflow_core::event::payloads::observability_payload::{MetricsLifecycle, ObservabilityPayload};
 use obzenflow_core::event::{ChainEventFactory, SystemEvent, SystemEventType, WriterId};
 use obzenflow_core::id::{StageId, SystemId};
 use obzenflow_core::journal::journal::Journal;
@@ -214,4 +216,60 @@ async fn running_state_process_batch_transitions() {
         matches!(fsm.state(), MetricsAggregatorState::Running),
         "expected FSM to remain in Running after ProcessBatch"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn http_ingestion_snapshot_wide_event_populates_app_metrics_snapshot() {
+    let stage_id = StageId::new();
+    let system_id = SystemId::new();
+    let system_journal = make_system_journal(system_id);
+    let exporter = Arc::new(RecordingExporter::default());
+
+    let mut ctx = make_empty_context(system_id, system_journal, exporter.clone(), stage_id);
+
+    let snapshot = IngestionTelemetrySnapshot {
+        base_path: "/api/ingest".to_string(),
+        channel_depth: 12,
+        channel_capacity: 10_000,
+        requests_total: 5,
+        events_accepted_total: 4,
+        events_rejected_auth_total: 1,
+        events_rejected_validation_total: 0,
+        events_rejected_buffer_full_total: 0,
+        events_rejected_not_ready_total: 0,
+        events_rejected_payload_too_large_total: 0,
+        events_rejected_invalid_json_total: 0,
+        events_rejected_channel_closed_total: 0,
+    };
+
+    let event = ChainEventFactory::observability_event(
+        WriterId::from(stage_id),
+        ObservabilityPayload::Metrics(MetricsLifecycle::Custom {
+            name: "http_ingestion.snapshot".to_string(),
+            value: serde_json::to_value(&snapshot).unwrap(),
+            tags: None,
+        }),
+    );
+    let envelope = EventEnvelope::new(JournalWriterId::new(), event);
+
+    MetricsAggregatorAction::UpdateMetrics { envelope }
+        .execute(&mut ctx)
+        .await
+        .unwrap();
+    MetricsAggregatorAction::ExportMetrics
+        .execute(&mut ctx)
+        .await
+        .unwrap();
+
+    let snapshots = exporter.snapshots.lock().unwrap();
+    let last = snapshots.last().expect("exported snapshot");
+    let ing = last
+        .ingestion_metrics
+        .get("/api/ingest")
+        .expect("ingestion metrics entry");
+    assert_eq!(ing.requests_total, 5);
+    assert_eq!(ing.events_accepted_total, 4);
+    assert_eq!(ing.events_rejected_auth_total, 1);
+    assert_eq!(ing.channel_depth, 12);
+    assert_eq!(ing.channel_capacity, 10_000);
 }

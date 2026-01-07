@@ -170,6 +170,38 @@ pub struct ServerConfig {
 
     /// Number of worker threads (default: number of CPU cores)
     pub worker_threads: Option<usize>,
+
+    /// Cross-origin request configuration (CORS).
+    ///
+    /// If unset, the web server implementation decides a default.
+    pub cors: Option<CorsConfig>,
+}
+
+/// CORS configuration.
+#[derive(Debug, Clone)]
+pub struct CorsConfig {
+    pub mode: CorsMode,
+}
+
+#[derive(Debug, Clone)]
+pub enum CorsMode {
+    /// Adds permissive CORS headers (`Access-Control-Allow-Origin: *`).
+    ///
+    /// This is convenient for local development but dangerous for production if the API is
+    /// protected only by secrets in headers (e.g. API keys).
+    AllowAnyOrigin,
+    /// Adds CORS headers for the given origin allow-list.
+    AllowList(Vec<String>),
+    /// Do not add CORS headers (browser same-origin policy applies).
+    SameOrigin,
+}
+
+impl Default for CorsConfig {
+    fn default() -> Self {
+        Self {
+            mode: CorsMode::SameOrigin,
+        }
+    }
 }
 
 impl ServerConfig {
@@ -182,6 +214,7 @@ impl ServerConfig {
             max_body_size: None,
             request_timeout_secs: None,
             worker_threads: None,
+            cors: None,
         }
     }
 

@@ -10,6 +10,7 @@ pub mod journal_event;
 pub mod system_event;
 pub mod types;
 pub mod vector_clock;
+pub mod ingestion;
 
 // Subdirectory modules
 pub mod context;

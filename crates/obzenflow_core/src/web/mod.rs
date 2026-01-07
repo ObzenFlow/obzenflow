@@ -13,4 +13,4 @@ pub mod types;
 pub use endpoint::{EndpointMetadata, HttpEndpoint};
 pub use error::WebError;
 pub use server::WebServer;
-pub use types::{HttpMethod, Request, Response, ServerConfig};
+pub use types::{CorsConfig, CorsMode, HttpMethod, Request, Response, ServerConfig};

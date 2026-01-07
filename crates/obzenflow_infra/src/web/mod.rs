@@ -27,4 +27,4 @@ pub use factory::*;
 
 // THE ONE AND ONLY web server function
 #[cfg(feature = "warp-server")]
-pub use web_server::start_web_server;
+pub use web_server::{start_web_server, start_web_server_with_config};

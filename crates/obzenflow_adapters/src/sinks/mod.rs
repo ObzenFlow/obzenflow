@@ -5,7 +5,7 @@ pub mod csv;
 
 pub use console::{
     ConsoleSink, DebugFormatter, Formatter, JsonFormatter, JsonPrettyFormatter,
-    OutputDestination, TableFormatter,
+    OutputDestination, SnapshotTableFormatter, TableFormatter,
 };
 
 pub use csv::{CsvSink, CsvSinkBuilder};

@@ -105,6 +105,85 @@ pub struct TableFormatter<T, E> {
     _phantom: PhantomData<fn() -> T>,
 }
 
+fn render_table(columns: &[String], rows: &[Vec<String>], max_col_width: usize) -> String {
+    if rows.is_empty() {
+        return String::new();
+    }
+
+    let col_count = columns.len();
+    let widths: Vec<usize> = (0..col_count)
+        .map(|col_idx| {
+            let header_width = columns
+                .get(col_idx)
+                .map(|s| display_width(s.as_str()))
+                .unwrap_or(0);
+
+            let max_value_width = rows
+                .iter()
+                .filter_map(|row| row.get(col_idx).map(|s| display_width(s.as_str())))
+                .max()
+                .unwrap_or(0);
+
+            header_width
+                .max(max_value_width)
+                .min(max_col_width)
+                .max(1)
+        })
+        .collect();
+
+    let mut out = String::new();
+
+    // Top border
+    out.push('┌');
+    for (i, width) in widths.iter().enumerate() {
+        out.push_str(&"─".repeat(width + 2));
+        out.push(if i < widths.len() - 1 { '┬' } else { '┐' });
+    }
+    out.push('\n');
+
+    // Header row
+    out.push('│');
+    for (i, col) in columns.iter().enumerate() {
+        let col = truncate_with_ellipsis(col, widths[i]);
+        out.push(' ');
+        out.push_str(&pad_center(&col, widths[i]));
+        out.push(' ');
+        out.push('│');
+    }
+    out.push('\n');
+
+    // Header separator
+    out.push('├');
+    for (i, width) in widths.iter().enumerate() {
+        out.push_str(&"─".repeat(width + 2));
+        out.push(if i < widths.len() - 1 { '┼' } else { '┤' });
+    }
+    out.push('\n');
+
+    // Data rows
+    for row in rows {
+        out.push('│');
+        for col_idx in 0..col_count {
+            let cell = row.get(col_idx).map(String::as_str).unwrap_or("-");
+            let truncated = truncate_with_ellipsis(cell, widths[col_idx]);
+            out.push(' ');
+            out.push_str(&pad_right(&truncated, widths[col_idx]));
+            out.push(' ');
+            out.push('│');
+        }
+        out.push('\n');
+    }
+
+    // Bottom border
+    out.push('└');
+    for (i, width) in widths.iter().enumerate() {
+        out.push_str(&"─".repeat(width + 2));
+        out.push(if i < widths.len() - 1 { '┴' } else { '┘' });
+    }
+
+    out
+}
+
 impl<T, E> Clone for TableFormatter<T, E>
 where
     E: Clone,
@@ -150,84 +229,7 @@ where
     }
 
     fn render(&self) -> String {
-        if self.rows.is_empty() {
-            return String::new();
-        }
-
-        let col_count = self.columns.len();
-        let widths: Vec<usize> = (0..col_count)
-            .map(|col_idx| {
-                let header_width = self
-                    .columns
-                    .get(col_idx)
-                    .map(|s| display_width(s.as_str()))
-                    .unwrap_or(0);
-
-                let max_value_width = self
-                    .rows
-                    .iter()
-                    .filter_map(|row| row.get(col_idx).map(|s| display_width(s.as_str())))
-                    .max()
-                    .unwrap_or(0);
-
-                header_width
-                    .max(max_value_width)
-                    .min(self.max_col_width)
-                    .max(1)
-            })
-            .collect();
-
-        let mut out = String::new();
-
-        // Top border
-        out.push('┌');
-        for (i, width) in widths.iter().enumerate() {
-            out.push_str(&"─".repeat(width + 2));
-            out.push(if i < widths.len() - 1 { '┬' } else { '┐' });
-        }
-        out.push('\n');
-
-        // Header row
-        out.push('│');
-        for (i, col) in self.columns.iter().enumerate() {
-            let col = truncate_with_ellipsis(col, widths[i]);
-            out.push(' ');
-            out.push_str(&pad_center(&col, widths[i]));
-            out.push(' ');
-            out.push('│');
-        }
-        out.push('\n');
-
-        // Header separator
-        out.push('├');
-        for (i, width) in widths.iter().enumerate() {
-            out.push_str(&"─".repeat(width + 2));
-            out.push(if i < widths.len() - 1 { '┼' } else { '┤' });
-        }
-        out.push('\n');
-
-        // Data rows
-        for row in &self.rows {
-            out.push('│');
-            for col_idx in 0..col_count {
-                let cell = row.get(col_idx).map(String::as_str).unwrap_or("-");
-                let truncated = truncate_with_ellipsis(cell, widths[col_idx]);
-                out.push(' ');
-                out.push_str(&pad_right(&truncated, widths[col_idx]));
-                out.push(' ');
-                out.push('│');
-            }
-            out.push('\n');
-        }
-
-        // Bottom border
-        out.push('└');
-        for (i, width) in widths.iter().enumerate() {
-            out.push_str(&"─".repeat(width + 2));
-            out.push(if i < widths.len() - 1 { '┴' } else { '┘' });
-        }
-
-        out
+        render_table(&self.columns, &self.rows, self.max_col_width)
     }
 }
 
@@ -248,6 +250,131 @@ where
         let rendered = self.render();
         self.rows.clear();
         Some(rendered)
+    }
+}
+
+fn empty_lines<T>(_item: &T) -> Vec<String> {
+    Vec::new()
+}
+
+/// Snapshot table formatter - renders a full table on every `format()` call.
+///
+/// This is useful when each item is already a snapshot (e.g. a "materialized view"
+/// event containing multiple rows).
+pub struct SnapshotTableFormatter<
+    T,
+    E,
+    H = fn(&T) -> Vec<String>,
+    F = fn(&T) -> Vec<String>,
+> {
+    columns: Vec<String>,
+    header: H,
+    extractor: E,
+    footer: F,
+    max_col_width: usize,
+    _phantom: PhantomData<fn() -> T>,
+}
+
+impl<T, E, H, F> Clone for SnapshotTableFormatter<T, E, H, F>
+where
+    E: Clone,
+    H: Clone,
+    F: Clone,
+{
+    fn clone(&self) -> Self {
+        Self {
+            columns: self.columns.clone(),
+            header: self.header.clone(),
+            extractor: self.extractor.clone(),
+            footer: self.footer.clone(),
+            max_col_width: self.max_col_width,
+            _phantom: PhantomData,
+        }
+    }
+}
+
+impl<T, E, H, F> std::fmt::Debug for SnapshotTableFormatter<T, E, H, F> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SnapshotTableFormatter")
+            .field("column_count", &self.columns.len())
+            .field("max_col_width", &self.max_col_width)
+            .finish()
+    }
+}
+
+impl<T, E> SnapshotTableFormatter<T, E>
+where
+    E: Fn(&T) -> Vec<Vec<String>> + Send + Sync + Clone,
+{
+    pub fn new(columns: &[&str], extractor: E) -> Self {
+        Self {
+            columns: columns.iter().map(|s| s.to_string()).collect(),
+            header: empty_lines::<T>,
+            extractor,
+            footer: empty_lines::<T>,
+            max_col_width: 30,
+            _phantom: PhantomData,
+        }
+    }
+}
+
+impl<T, E, H, F> SnapshotTableFormatter<T, E, H, F> {
+    pub fn max_width(mut self, width: usize) -> Self {
+        self.max_col_width = width.max(1);
+        self
+    }
+
+    pub fn with_header<H2>(self, header: H2) -> SnapshotTableFormatter<T, E, H2, F> {
+        SnapshotTableFormatter {
+            columns: self.columns,
+            header,
+            extractor: self.extractor,
+            footer: self.footer,
+            max_col_width: self.max_col_width,
+            _phantom: PhantomData,
+        }
+    }
+
+    pub fn with_footer<F2>(self, footer: F2) -> SnapshotTableFormatter<T, E, H, F2> {
+        SnapshotTableFormatter {
+            columns: self.columns,
+            header: self.header,
+            extractor: self.extractor,
+            footer,
+            max_col_width: self.max_col_width,
+            _phantom: PhantomData,
+        }
+    }
+}
+
+impl<T, E, H, F> Formatter<T> for SnapshotTableFormatter<T, E, H, F>
+where
+    E: Fn(&T) -> Vec<Vec<String>> + Send + Sync + Clone,
+    H: Fn(&T) -> Vec<String> + Send + Sync + Clone,
+    F: Fn(&T) -> Vec<String> + Send + Sync + Clone,
+{
+    fn format(&mut self, item: &T) -> Option<String> {
+        let header = (self.header)(item);
+        let rows = (self.extractor)(item);
+        let footer = (self.footer)(item);
+        let table = render_table(&self.columns, &rows, self.max_col_width);
+
+        let mut parts = Vec::new();
+        if !header.is_empty() {
+            parts.push(header.join("\n"));
+        }
+        if !table.is_empty() {
+            parts.push(table);
+        }
+        if !footer.is_empty() {
+            parts.push(footer.join("\n"));
+        }
+
+        if parts.is_empty() {
+            None
+        } else {
+            Some(parts.join("\n"))
+        }
     }
 }
 
@@ -438,6 +565,21 @@ where
     {
         ConsoleSink {
             formatter: TableFormatter::new(columns, extractor),
+            destination: OutputDestination::Stdout,
+            include_non_data: false,
+            _phantom: PhantomData,
+        }
+    }
+
+    pub fn snapshot_table<E>(
+        columns: &[&str],
+        extractor: E,
+    ) -> ConsoleSink<T, SnapshotTableFormatter<T, E>>
+    where
+        E: Fn(&T) -> Vec<Vec<String>> + Send + Sync + Clone,
+    {
+        ConsoleSink {
+            formatter: SnapshotTableFormatter::new(columns, extractor),
             destination: OutputDestination::Stdout,
             include_non_data: false,
             _phantom: PhantomData,
@@ -637,6 +779,38 @@ mod tests {
 
         let cloned = formatter.clone();
         assert!(cloned.rows.is_empty(), "clone should not copy buffered rows");
+    }
+
+    #[test]
+    fn snapshot_table_formatter_renders_per_item_with_header_footer() {
+        #[derive(Clone, Debug, Serialize, Deserialize)]
+        struct Snapshot {
+            header: String,
+            rows: Vec<String>,
+        }
+
+        let mut formatter = SnapshotTableFormatter::new(&["value"], |s: &Snapshot| {
+            s.rows
+                .iter()
+                .map(|row| vec![row.clone()])
+                .collect::<Vec<_>>()
+        })
+        .with_header(|s: &Snapshot| vec![format!("header={}", s.header)])
+        .with_footer(|s: &Snapshot| vec![format!("rows={}", s.rows.len())]);
+
+        let out = formatter
+            .format(&Snapshot {
+                header: "demo".to_string(),
+                rows: vec!["a".to_string(), "b".to_string()],
+            })
+            .expect("snapshot table formatter should render");
+
+        assert!(out.contains("header=demo"));
+        assert!(out.contains("┌"));
+        assert!(out.contains("value"));
+        assert!(out.contains("a"));
+        assert!(out.contains("b"));
+        assert!(out.contains("rows=2"));
     }
 
     #[tokio::test]

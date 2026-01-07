@@ -5,8 +5,9 @@
 //! Event processing happens directly without FSM state tracking
 
 use obzenflow_core::event::chain_event::ChainEventContent;
+use obzenflow_core::event::ingestion::IngestionTelemetrySnapshot;
 use obzenflow_core::event::payloads::observability_payload::{
-    CircuitBreakerEvent, MiddlewareLifecycle, ObservabilityPayload,
+    CircuitBreakerEvent, MetricsLifecycle, MiddlewareLifecycle, ObservabilityPayload,
 };
 use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
 use obzenflow_core::event::{CorrelationId, JournalEvent, WriterId};
@@ -213,6 +214,9 @@ pub struct MetricsStore {
     // Contract metrics accumulation (FLOWIP-059a)
     pub contract_metrics: ContractMetricsSnapshot,
 
+    // HTTP ingestion telemetry (FLOWIP-084d)
+    pub ingestion_metrics: HashMap<String, IngestionTelemetrySnapshot>,
+
     // System event tracking (FLOWIP-059b - essential events only)
     // Track all states each stage has been in: (StageId, state_name) -> true
     pub stage_lifecycle_states: HashMap<(StageId, String), bool>,
@@ -274,6 +278,7 @@ impl Default for MetricsStore {
             rate_limiter_bucket_tokens: HashMap::new(),
             rate_limiter_bucket_capacity: HashMap::new(),
             contract_metrics: ContractMetricsSnapshot::default(),
+            ingestion_metrics: HashMap::new(),
             stage_lifecycle_states: HashMap::new(),
             pipeline_state: String::new(),
         }
@@ -916,6 +921,9 @@ impl MetricsAggregatorContext {
         // FLOWIP-059a: Contract metrics
         snapshot.contract_metrics = store.contract_metrics.clone();
 
+        // FLOWIP-084d: HTTP ingestion telemetry (wide events)
+        snapshot.ingestion_metrics = store.ingestion_metrics.clone();
+
         // FLOWIP-059b: Add lifecycle states
         snapshot.stage_lifecycle_states = store.stage_lifecycle_states.clone();
         snapshot.pipeline_state = store.pipeline_state.clone();
@@ -1365,6 +1373,57 @@ impl FsmAction for MetricsAggregatorAction {
                 // Skip system events entirely; they are not part of per-stage wide metrics.
                 if event.is_system() {
                     return Ok(());
+                }
+
+                // Consume HTTP ingestion telemetry wide events (FLOWIP-084d).
+                if let ChainEventContent::Observability(ObservabilityPayload::Metrics(
+                    MetricsLifecycle::Custom { name, value, .. },
+                )) = &event.content
+                {
+                    if name == "http_ingestion.snapshot" {
+                        match serde_json::from_value::<IngestionTelemetrySnapshot>(value.clone()) {
+                            Ok(snapshot) => {
+                                let entry = store
+                                    .ingestion_metrics
+                                    .entry(snapshot.base_path.clone())
+                                    .or_insert_with(|| snapshot.clone());
+
+                                // Monotonic counters: use max() to tolerate ordering.
+                                entry.requests_total = entry.requests_total.max(snapshot.requests_total);
+                                entry.events_accepted_total =
+                                    entry.events_accepted_total.max(snapshot.events_accepted_total);
+                                entry.events_rejected_auth_total = entry
+                                    .events_rejected_auth_total
+                                    .max(snapshot.events_rejected_auth_total);
+                                entry.events_rejected_validation_total = entry
+                                    .events_rejected_validation_total
+                                    .max(snapshot.events_rejected_validation_total);
+                                entry.events_rejected_buffer_full_total = entry
+                                    .events_rejected_buffer_full_total
+                                    .max(snapshot.events_rejected_buffer_full_total);
+                                entry.events_rejected_not_ready_total = entry
+                                    .events_rejected_not_ready_total
+                                    .max(snapshot.events_rejected_not_ready_total);
+                                entry.events_rejected_payload_too_large_total = entry
+                                    .events_rejected_payload_too_large_total
+                                    .max(snapshot.events_rejected_payload_too_large_total);
+                                entry.events_rejected_invalid_json_total = entry
+                                    .events_rejected_invalid_json_total
+                                    .max(snapshot.events_rejected_invalid_json_total);
+                                entry.events_rejected_channel_closed_total = entry
+                                    .events_rejected_channel_closed_total
+                                    .max(snapshot.events_rejected_channel_closed_total);
+
+                                // Gauges: overwrite with latest.
+                                entry.channel_depth = snapshot.channel_depth;
+                                entry.channel_capacity = entry.channel_capacity.max(snapshot.channel_capacity);
+                            }
+                            Err(e) => tracing::warn!(
+                                error = %e,
+                                "Failed to decode http_ingestion.snapshot payload; ignoring"
+                            ),
+                        }
+                    }
                 }
 
                 // Consume middleware observability events (FLOWIP-059a).

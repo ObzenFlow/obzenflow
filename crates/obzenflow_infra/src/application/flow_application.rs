@@ -8,9 +8,11 @@
 //! - Graceful shutdown handling
 
 use super::{ApplicationError, FlowConfig};
+use crate::application::config::CorsModeArg;
 use crate::application::config::StartupMode;
 use clap::Parser;
 use obzenflow_dsl_infra::FlowDefinition;
+use obzenflow_core::web::{CorsConfig, CorsMode, HttpEndpoint, ServerConfig};
 use obzenflow_runtime_services::prelude::FlowHandle;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -66,6 +68,8 @@ pub struct FlowApplicationBuilder {
     console_subscriber: bool,
     console_bind: Option<String>,
     log_level: Option<LogLevel>,
+    web_endpoints: Vec<Box<dyn HttpEndpoint>>,
+    flow_handle_hooks: Vec<Box<dyn Fn(&Arc<FlowHandle>) -> JoinHandle<()> + Send + Sync>>,
 }
 
 impl FlowApplicationBuilder {
@@ -107,6 +111,29 @@ impl FlowApplicationBuilder {
         self
     }
 
+    /// Register additional HTTP endpoints to be hosted by FlowApplication when running with `--server`.
+    pub fn with_web_endpoints(mut self, endpoints: Vec<Box<dyn HttpEndpoint>>) -> Self {
+        self.web_endpoints = endpoints;
+        self
+    }
+
+    /// Add a single HTTP endpoint to be hosted by FlowApplication when running with `--server`.
+    pub fn with_web_endpoint(mut self, endpoint: Box<dyn HttpEndpoint>) -> Self {
+        self.web_endpoints.push(endpoint);
+        self
+    }
+
+    /// Register a hook that runs after the flow is built (but before the server starts).
+    ///
+    /// This is useful for wiring FlowHandle state into other subsystems (e.g. ingestion readiness).
+    pub fn with_flow_handle_hook<F>(mut self, hook: F) -> Self
+    where
+        F: Fn(&Arc<FlowHandle>) -> JoinHandle<()> + Send + Sync + 'static,
+    {
+        self.flow_handle_hooks.push(Box::new(hook));
+        self
+    }
+
     /// Run the flow in a blocking context (without #[tokio::main])
     ///
     /// This builds the tokio runtime, initializes observability, and runs the flow.
@@ -123,7 +150,11 @@ impl FlowApplicationBuilder {
         self.init_observability(Some(runtime.handle()));
 
         // Run the flow in the runtime
-        runtime.block_on(FlowApplication::run(flow))
+        runtime.block_on(FlowApplication::run_with_web_endpoints_and_hooks(
+            flow,
+            self.web_endpoints,
+            self.flow_handle_hooks,
+        ))
     }
 
     /// Run the flow in an existing async context (with #[tokio::main])
@@ -135,7 +166,12 @@ impl FlowApplicationBuilder {
         self.init_observability(Some(&tokio::runtime::Handle::current()));
 
         // Run the flow
-        FlowApplication::run(flow).await
+        FlowApplication::run_with_web_endpoints_and_hooks(
+            flow,
+            self.web_endpoints,
+            self.flow_handle_hooks,
+        )
+        .await
     }
 
     /// Initialize observability (tracing + console-subscriber)
@@ -306,6 +342,22 @@ impl FlowApplication {
     /// * `Ok(())` if flow completes successfully
     /// * `Err(ApplicationError)` if flow fails or cannot start
     pub async fn run(flow: FlowDefinition) -> Result<(), ApplicationError> {
+        Self::run_with_web_endpoints(flow, Vec::new()).await
+    }
+
+    /// Run a flow and host additional web endpoints when `--server` is enabled.
+    pub async fn run_with_web_endpoints(
+        flow: FlowDefinition,
+        extra_endpoints: Vec<Box<dyn HttpEndpoint>>,
+    ) -> Result<(), ApplicationError> {
+        Self::run_with_web_endpoints_and_hooks(flow, extra_endpoints, Vec::new()).await
+    }
+
+    pub async fn run_with_web_endpoints_and_hooks(
+        flow: FlowDefinition,
+        extra_endpoints: Vec<Box<dyn HttpEndpoint>>,
+        flow_handle_hooks: Vec<Box<dyn Fn(&Arc<FlowHandle>) -> JoinHandle<()> + Send + Sync>>,
+    ) -> Result<(), ApplicationError> {
         // Best-effort tracing initialization when the builder isn't used.
         // This ensures examples like char_transform still emit logs without
         // requiring callers to wire tracing explicitly.
@@ -322,6 +374,23 @@ impl FlowApplication {
 
         // Parse CLI arguments automatically (like Spring Boot)
         let config = FlowConfig::parse();
+
+        if !extra_endpoints.is_empty() && !config.server {
+            return Err(ApplicationError::InvalidConfiguration(
+                "Web endpoints were configured, but FlowApplication is not running with --server".to_string(),
+            ));
+        }
+
+        if !config.cors_allow_origin.is_empty() && config.cors_mode != CorsModeArg::AllowList {
+            return Err(ApplicationError::InvalidConfiguration(
+                "--cors-allow-origin requires --cors-mode=allow-list".to_string(),
+            ));
+        }
+        if config.cors_mode == CorsModeArg::AllowList && config.cors_allow_origin.is_empty() {
+            return Err(ApplicationError::InvalidConfiguration(
+                "--cors-mode=allow-list requires at least one --cors-allow-origin".to_string(),
+            ));
+        }
 
         // Export startup mode to environment so lower layers (runtime_services)
         // can adjust behaviour (e.g. disable auto-Run in manual mode).
@@ -347,15 +416,54 @@ impl FlowApplication {
             .await
             .map_err(|e| ApplicationError::FlowBuildFailed(e.to_string()))?;
         let flow_handle = Arc::new(flow_handle);
+
+        let _hook_tasks: Vec<JoinHandle<()>> =
+            flow_handle_hooks.iter().map(|hook| hook(&flow_handle)).collect();
         
         // Start server if --server flag present
         let server_handle = if config.server {
-            Self::start_server(&flow_handle, config.server_port).await?
+            let cors_mode = match config.cors_mode {
+                CorsModeArg::AllowAnyOrigin => CorsMode::AllowAnyOrigin,
+                CorsModeArg::AllowList => CorsMode::AllowList(config.cors_allow_origin.clone()),
+                CorsModeArg::SameOrigin => CorsMode::SameOrigin,
+            };
+            let mut server_config = ServerConfig::localhost(config.server_port);
+            server_config.cors = Some(CorsConfig { mode: cors_mode });
+            Self::start_server(
+                &flow_handle,
+                server_config,
+                extra_endpoints,
+            )
+            .await?
         } else {
             None
         };
 
         if config.server {
+            if server_handle.is_none() {
+                match config.startup_mode {
+                    StartupMode::Manual => {
+                        return Err(ApplicationError::FeatureNotEnabled(
+                            "warp-server".to_string(),
+                        ));
+                    }
+                    StartupMode::Auto => {
+                        tracing::warn!("⚠️  Continuing without HTTP server");
+                        tracing::info!("▶️  Starting flow execution (no server)");
+                        let handle =
+                            Arc::try_unwrap(flow_handle).map_err(|_| {
+                                ApplicationError::FlowExecutionFailed(
+                                    "Failed to unwrap FlowHandle for non-server execution".to_string(),
+                                )
+                            })?;
+                        return handle
+                            .run()
+                            .await
+                            .map_err(|e| ApplicationError::FlowExecutionFailed(e.to_string()));
+                    }
+                }
+            }
+
             // Server mode: lifecycle is controlled via HTTP (and optionally startup_mode).
             match config.startup_mode {
                 StartupMode::Auto => {
@@ -528,11 +636,12 @@ impl FlowApplication {
             /// Internal: Start the web server with all endpoints
     async fn start_server(
         flow_handle: &Arc<FlowHandle>,
-        port: u16
+        server_config: ServerConfig,
+        extra_endpoints: Vec<Box<dyn HttpEndpoint>>,
     ) -> Result<Option<JoinHandle<()>>, ApplicationError> {
         #[cfg(feature = "warp-server")]
         {
-            use crate::web::start_web_server;
+            use crate::web::start_web_server_with_config;
             
             // Every flow has a topology - it's required to run
             let topology = flow_handle.topology()
@@ -540,14 +649,20 @@ impl FlowApplication {
                     "Flow missing topology - this should never happen".to_string()
                 ))?;
             let metrics = flow_handle.metrics_exporter();
+            if !extra_endpoints.is_empty() && metrics.is_none() {
+                return Err(ApplicationError::InvalidConfiguration(
+                    "HTTP ingestion requires a metrics exporter".to_string(),
+                ));
+            }
             let has_metrics = metrics.is_some();
+            let port = server_config.port;
 
             let flow_name = flow_handle.flow_name().to_string();
             let middleware_stacks = flow_handle.middleware_stacks();
             let contract_attachments = flow_handle.contract_attachments();
             let join_metadata = flow_handle.join_metadata();
 
-            let handle = start_web_server(
+            let handle = start_web_server_with_config(
                 topology,
                 flow_name,
                 middleware_stacks,
@@ -555,7 +670,8 @@ impl FlowApplication {
                 join_metadata,
                 metrics,
                 Some(flow_handle.clone()),
-                port,
+                extra_endpoints,
+                server_config,
             )
             .await
                 .map_err(|e| ApplicationError::ServerStartFailed(e.to_string()))?;
@@ -573,11 +689,13 @@ impl FlowApplication {
         
         #[cfg(not(feature = "warp-server"))]
         {
+            if !extra_endpoints.is_empty() {
+                return Err(ApplicationError::FeatureNotEnabled("warp-server".to_string()));
+            }
             tracing::warn!("⚠️  --server flag requires warp-server feature");
             tracing::warn!("   Recompile with --features obzenflow_infra/warp-server");
             tracing::warn!("");
             tracing::warn!("   Continuing without HTTP server...");
-            // Don't fail, just continue without server
             Ok(None)
         }
     }

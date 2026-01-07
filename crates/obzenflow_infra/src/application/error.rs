@@ -19,6 +19,9 @@ pub enum ApplicationError {
     /// Feature not enabled
     FeatureNotEnabled(String),
 
+    /// Invalid runtime configuration
+    InvalidConfiguration(String),
+
     /// IO error
     IoError(std::io::Error),
 
@@ -34,6 +37,7 @@ impl fmt::Display for ApplicationError {
             Self::ServerStartFailed(msg) => write!(f, "Server start failed: {}", msg),
             Self::RuntimeCreationFailed(msg) => write!(f, "Runtime creation failed: {}", msg),
             Self::FeatureNotEnabled(feature) => write!(f, "Feature not enabled: {}", feature),
+            Self::InvalidConfiguration(msg) => write!(f, "Invalid configuration: {}", msg),
             Self::IoError(err) => write!(f, "IO error: {}", err),
             Self::Other(err) => write!(f, "Application error: {}", err),
         }

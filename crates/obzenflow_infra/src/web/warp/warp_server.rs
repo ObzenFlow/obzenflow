@@ -13,10 +13,10 @@ use warp::{filters::BoxedFilter, Filter, Rejection, Reply};
 use obzenflow_core::event::event_envelope::SystemEventEnvelope;
 use obzenflow_core::event::SystemEvent;
 use obzenflow_core::journal::journal::Journal;
-use obzenflow_core::web::{
-    server::ServerShutdownHandle, HttpEndpoint, HttpMethod, Request, ServerConfig, WebError,
-    WebServer,
-};
+	use obzenflow_core::web::{
+	    server::ServerShutdownHandle, CorsMode, HttpEndpoint, HttpMethod, Request, ServerConfig,
+	    WebError, WebServer,
+	};
 use obzenflow_core::EventId;
 
 /// Warp-based web server implementation
@@ -25,6 +25,8 @@ pub struct WarpServer {
     /// Optional system journal for SSE lifecycle events
     system_journal: Option<Arc<dyn Journal<SystemEvent>>>,
 }
+
+const DEFAULT_MAX_BODY_SIZE_BYTES: usize = 10 * 1024 * 1024;
 
 impl WarpServer {
     /// Create a new Warp server
@@ -62,8 +64,8 @@ impl WarpServer {
         }
     }
 
-    /// Build Warp filter from endpoints  
-    fn build_filter(&self) -> BoxedFilter<(Box<dyn Reply>,)> {
+    /// Build Warp filter from endpoints.
+    fn build_filter(&self, max_body_size_bytes: u64) -> BoxedFilter<(Box<dyn Reply>,)> {
         let mut combined_route: Option<BoxedFilter<(Box<dyn Reply>,)>> = None;
 
         for endpoint in &self.endpoints {
@@ -71,7 +73,7 @@ impl WarpServer {
             let path_str = endpoint.path().to_string();
 
             // Create simple route for this endpoint
-            let route = self.build_simple_route(path_str, endpoint);
+            let route = self.build_simple_route(path_str, endpoint, max_body_size_bytes);
 
             combined_route = match combined_route {
                 Some(existing) => Some(existing.or(route).unify().boxed()),
@@ -108,6 +110,7 @@ impl WarpServer {
         &self,
         path_str: String,
         endpoint: Arc<dyn HttpEndpoint>,
+        max_body_size_bytes: u64,
     ) -> impl Filter<Extract = (Box<dyn Reply>,), Error = Rejection> + Clone {
         let path_filter = self.build_path_filter(&path_str);
 
@@ -187,6 +190,7 @@ impl WarpServer {
                     .unify(),
             )
             .and(warp::header::headers_cloned())
+            .and(warp::body::content_length_limit(max_body_size_bytes))
             .and(warp::body::bytes())
             .and_then({
                 let endpoint = endpoint.clone();
@@ -213,6 +217,7 @@ impl WarpServer {
                     .unify(),
             )
             .and(warp::header::headers_cloned())
+            .and(warp::body::content_length_limit(max_body_size_bytes))
             .and(warp::body::bytes())
             .and_then({
                 let endpoint = endpoint.clone();
@@ -239,6 +244,7 @@ impl WarpServer {
                     .unify(),
             )
             .and(warp::header::headers_cloned())
+            .and(warp::body::content_length_limit(max_body_size_bytes))
             .and(warp::body::bytes())
             .and_then({
                 let endpoint = endpoint.clone();
@@ -608,18 +614,43 @@ impl WebServer for WarpServer {
             source: Some(Box::new(e)),
         })?;
 
-        let routes = self.build_filter();
+        let max_body_size_bytes = config.max_body_size.unwrap_or(DEFAULT_MAX_BODY_SIZE_BYTES);
+        let routes = self.build_filter(max_body_size_bytes as u64);
 
-        // Add CORS support for development
-        // This allows the UI (running on different port) to access the API
-        let cors = warp::cors()
-            .allow_any_origin() // Allow any origin in development
-            .allow_methods(vec![
-                "GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS",
-            ])
-            .allow_headers(vec!["Content-Type", "Accept"]);
+        let cors_config = config.cors.unwrap_or_default();
+        let cors_mode = cors_config.mode;
+        if matches!(&cors_mode, CorsMode::AllowAnyOrigin) && !cfg!(debug_assertions) {
+            tracing::warn!(
+                "CORS is configured as AllowAnyOrigin in a release build; prefer an explicit allow-list for production"
+            );
+        }
 
-        let routes_with_cors = routes.with(cors);
+        // Add CORS support (configurable).
+        //
+        // Note: `CorsMode::SameOrigin` means "do not add CORS headers"; browsers will enforce
+        // the same-origin policy by default.
+        let routes_with_cors = if matches!(&cors_mode, CorsMode::SameOrigin) {
+            routes
+        } else {
+            let mut cors = warp::cors();
+            cors = match cors_mode {
+                CorsMode::AllowAnyOrigin => cors.allow_any_origin(),
+                CorsMode::AllowList(origins) => {
+                    let origins: Vec<&str> = origins.iter().map(String::as_str).collect();
+                    cors.allow_origins(origins)
+                }
+                CorsMode::SameOrigin => cors,
+            };
+
+            cors = cors
+                .allow_methods(vec!["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"])
+                .allow_headers(vec!["Content-Type", "Accept", "Authorization", "X-Api-Key"]);
+
+            routes
+                .with(cors)
+                .map(|reply| -> Box<dyn Reply> { Box::new(reply) })
+                .boxed()
+        };
 
         // Start the server
         warp::serve(routes_with_cors).run(addr).await;
@@ -631,6 +662,58 @@ impl WebServer for WarpServer {
         // Warp doesn't provide easy shutdown handles in this simple implementation
         // For production, we'd need to use warp::Server::bind_with_graceful_shutdown
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+    use obzenflow_core::web::{HttpMethod, Request, Response, WebError};
+
+    struct EchoEndpoint;
+
+    #[async_trait]
+    impl HttpEndpoint for EchoEndpoint {
+        fn path(&self) -> &str {
+            "/echo"
+        }
+
+        fn methods(&self) -> &[HttpMethod] {
+            &[HttpMethod::Post]
+        }
+
+        async fn handle(&self, _request: Request) -> Result<Response, WebError> {
+            Ok(Response::ok().with_text("OK"))
+        }
+    }
+
+    #[tokio::test]
+    async fn build_filter_enforces_content_length_limit() {
+        let mut server = WarpServer::new();
+        server.register_endpoint(Box::new(EchoEndpoint)).unwrap();
+        let filter = server.build_filter(10);
+
+        let response = warp::test::request()
+            .method("POST")
+            .path("/echo")
+            .header("content-length", "11")
+            .body(vec![0u8; 11])
+            .reply(&filter)
+            .await;
+
+        assert_eq!(response.status(), 413);
+
+        let response = warp::test::request()
+            .method("POST")
+            .path("/echo")
+            .header("content-length", "10")
+            .body(vec![0u8; 10])
+            .reply(&filter)
+            .await;
+
+        assert_eq!(response.status(), 200);
+        assert_eq!(response.body(), "OK");
     }
 }
 

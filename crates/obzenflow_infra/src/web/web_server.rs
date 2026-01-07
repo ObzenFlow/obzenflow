@@ -2,13 +2,15 @@
 //!
 //! Provides a simple way to start a web server with topology, metrics, and health endpoints
 
-use obzenflow_core::web::{WebServer, ServerConfig, WebError};
+use obzenflow_core::web::{HttpEndpoint, ServerConfig, WebError, WebServer};
 use obzenflow_core::metrics::MetricsExporter;
 use obzenflow_core::StageId;
 use obzenflow_topology::Topology;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::collections::HashMap;
 use obzenflow_runtime_services::pipeline::FlowHandle;
+use obzenflow_runtime_services::pipeline::fsm::PipelineState;
 
 /// Start a web server with all flow endpoints
 /// 
@@ -38,12 +40,57 @@ pub async fn start_web_server(
     join_metadata: Option<Arc<HashMap<StageId, obzenflow_runtime_services::pipeline::JoinMetadata>>>,
     metrics_exporter: Option<Arc<dyn MetricsExporter>>,
     flow_handle: Option<Arc<FlowHandle>>,
+    extra_endpoints: Vec<Box<dyn HttpEndpoint>>,
     port: u16,
+) -> Result<tokio::task::JoinHandle<()>, WebError> {
+    start_web_server_with_config(
+        topology,
+        flow_name,
+        middleware_stacks,
+        contract_attachments,
+        join_metadata,
+        metrics_exporter,
+        flow_handle,
+        extra_endpoints,
+        ServerConfig::localhost(port),
+    )
+    .await
+}
+
+/// Start a web server with all flow endpoints using an explicit `ServerConfig`.
+#[cfg(feature = "warp-server")]
+pub async fn start_web_server_with_config(
+    topology: Arc<Topology>,
+    flow_name: String,
+    middleware_stacks: Option<Arc<HashMap<StageId, obzenflow_runtime_services::pipeline::MiddlewareStackConfig>>>,
+    contract_attachments: Option<Arc<HashMap<(StageId, StageId), Vec<String>>>>,
+    join_metadata: Option<Arc<HashMap<StageId, obzenflow_runtime_services::pipeline::JoinMetadata>>>,
+    metrics_exporter: Option<Arc<dyn MetricsExporter>>,
+    flow_handle: Option<Arc<FlowHandle>>,
+    extra_endpoints: Vec<Box<dyn HttpEndpoint>>,
+    server_config: ServerConfig,
 ) -> Result<tokio::task::JoinHandle<()>, WebError> {
     use super::endpoints::topology::{StageMetadata, StageType, StageStatus};
     use super::endpoints::{FlowControlEndpoint, MetricsHttpEndpoint, TopologyHttpEndpoint};
     
     let mut server = super::warp::WarpServer::new();
+    let pipeline_ready = flow_handle.as_ref().map(|handle| {
+        let ready = Arc::new(AtomicBool::new(false));
+        let ready_for_task = ready.clone();
+        let mut state_rx = handle.state_receiver();
+        let _ = tokio::spawn(async move {
+            let initial_running = matches!(state_rx.borrow().clone(), PipelineState::Running);
+            ready_for_task.store(initial_running, Ordering::Release);
+            loop {
+                if state_rx.changed().await.is_err() {
+                    break;
+                }
+                let is_running = matches!(state_rx.borrow().clone(), PipelineState::Running);
+                ready_for_task.store(is_running, Ordering::Release);
+            }
+        });
+        ready
+    });
     
     // Create stage metadata for topology endpoint
     let mut stages_metadata = HashMap::new();
@@ -75,9 +122,9 @@ pub async fn start_web_server(
         join_metadata,
     )))?;
     
-    // Add metrics endpoint if exporter available
-    if let Some(ref metrics) = metrics_exporter {
-        server.register_endpoint(Box::new(MetricsHttpEndpoint::new(metrics.clone())))?;
+    let has_metrics_endpoint = metrics_exporter.is_some();
+    if let Some(exporter) = metrics_exporter {
+        server.register_endpoint(Box::new(MetricsHttpEndpoint::new(exporter)))?;
     }
 
     // Add flow control endpoint if a handle is available
@@ -88,23 +135,31 @@ pub async fn start_web_server(
         }
         server.register_endpoint(Box::new(FlowControlEndpoint::new(handle)))?;
     }
-    
+
+    for endpoint in extra_endpoints {
+        server.register_endpoint(endpoint)?;
+    }
+
     // Add health and ready endpoints (reuse from metrics_server)
     server.register_endpoint(Box::new(SimpleHealthEndpoint))?;
-    server.register_endpoint(Box::new(SimpleReadyEndpoint))?;
+    if let Some(pipeline_ready) = pipeline_ready {
+        server.register_endpoint(Box::new(PipelineReadyEndpoint::new(pipeline_ready)))?;
+    } else {
+        server.register_endpoint(Box::new(SimpleReadyEndpoint))?;
+    }
     
     // Start server in background
+    let addr = server_config.address();
     let handle = tokio::spawn(async move {
-        let config = ServerConfig::localhost(port);
-        if let Err(e) = server.start(config).await {
+        if let Err(e) = server.start(server_config).await {
             tracing::error!("Web server failed: {}", e);
         }
     });
     
     // Log available endpoints
-    tracing::info!("📊 Web server started on http://localhost:{}", port);
+    tracing::info!("📊 Web server started on http://{}", addr);
     tracing::info!("   /api/topology  - Flow structure");
-    if metrics_exporter.is_some() {
+    if has_metrics_endpoint {
         tracing::info!("   /metrics       - Prometheus metrics");
     }
     tracing::info!("   /health        - Health check");
@@ -114,7 +169,7 @@ pub async fn start_web_server(
 }
 
 // Reuse simple endpoints from metrics_server module
-use obzenflow_core::web::{HttpEndpoint, HttpMethod, Request, Response};
+use obzenflow_core::web::{HttpMethod, Request, Response};
 use async_trait::async_trait;
 
 /// Simple health endpoint
@@ -150,5 +205,37 @@ impl HttpEndpoint for SimpleReadyEndpoint {
     
     async fn handle(&self, _request: Request) -> Result<Response, WebError> {
         Ok(Response::ok().with_text("READY"))
+    }
+}
+
+/// Pipeline readiness endpoint.
+///
+/// If a FlowHandle is available, this reflects pipeline state (Running => 200, otherwise 503).
+struct PipelineReadyEndpoint {
+    ready: Arc<AtomicBool>,
+}
+
+impl PipelineReadyEndpoint {
+    fn new(ready: Arc<AtomicBool>) -> Self {
+        Self { ready }
+    }
+}
+
+#[async_trait]
+impl HttpEndpoint for PipelineReadyEndpoint {
+    fn path(&self) -> &str {
+        "/ready"
+    }
+
+    fn methods(&self) -> &[HttpMethod] {
+        &[HttpMethod::Get]
+    }
+
+    async fn handle(&self, _request: Request) -> Result<Response, WebError> {
+        if self.ready.load(Ordering::Acquire) {
+            Ok(Response::ok().with_text("READY"))
+        } else {
+            Ok(Response::new(503).with_text("NOT_READY"))
+        }
     }
 }

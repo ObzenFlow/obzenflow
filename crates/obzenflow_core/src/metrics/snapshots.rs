@@ -153,6 +153,11 @@ pub struct AppMetricsSnapshot {
     /// Contract verification metrics per edge (upstream/downstream)
     pub contract_metrics: ContractMetricsSnapshot,
 
+    /// HTTP ingestion telemetry metrics derived from wide events (FLOWIP-084d).
+    ///
+    /// Keyed by `base_path` (e.g., "/api/ingest").
+    pub ingestion_metrics: HashMap<String, crate::event::ingestion::IngestionTelemetrySnapshot>,
+
     /// Flow-level metrics (if journey events are implemented)
     pub flow_metrics: Option<FlowMetricsSnapshot>,
 
@@ -413,6 +418,7 @@ impl Default for AppMetricsSnapshot {
             backpressure_writer_seq: HashMap::new(),
             backpressure_wait_seconds_total: HashMap::new(),
             contract_metrics: ContractMetricsSnapshot::default(),
+            ingestion_metrics: HashMap::new(),
             flow_metrics: None,
             stage_metadata: HashMap::new(),
             stage_first_event_time: HashMap::new(),

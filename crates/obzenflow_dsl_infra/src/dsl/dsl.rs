@@ -280,6 +280,15 @@ macro_rules! build_typed_flow {
         // Build edges, including join reference edges and explicit topology edges
         let mut topology_edges: Vec<DirectedEdge> = Vec::new();
 
+        // Precompute explicit forward edges so join reference edges can avoid duplication (e.g.
+        // when using join tuple syntax in the topology block).
+        use std::collections::HashSet;
+        let explicit_forward_edges: HashSet<(String, String)> = connections
+            .iter()
+            .filter(|(_, _, kind)| matches!(kind, EdgeKind::Forward))
+            .map(|(from, to, _)| (from.clone(), to.clone()))
+            .collect();
+
         // Pass 2: Resolve join references and add reference edges
         for name in &descriptor_names {
             let descriptor = descriptors
@@ -291,9 +300,14 @@ macro_rules! build_typed_flow {
             let topology_id = to_topology_id(core_id);
 
             // If this is a join stage with a DSL reference variable, resolve it
-            if let Some(ref_var) = descriptor.reference_stage_name() {
+            if let Some(ref_var) = descriptor.reference_stage_name().map(|s| s.to_string()) {
+                // Compute this before mutating the descriptor; `reference_stage_name()` returns a
+                // `&str` tied to the descriptor borrow, and we may still need the value later.
+                let reference_edge_explicit =
+                    explicit_forward_edges.contains(&(ref_var.clone(), name.clone()));
+
                 let ref_id = name_to_id
-                    .get(ref_var)
+                    .get(ref_var.as_str())
                     .copied()
                     .ok_or_else(|| {
                         FlowBuildError::StageResourcesFailed(format!(
@@ -306,12 +320,15 @@ macro_rules! build_typed_flow {
                                name, ref_var, ref_id);
                 descriptor.set_reference_stage_id(ref_id);
 
-                // Add topology edge from reference stage to join stage (forward)
-                topology_edges.push(DirectedEdge::new(
-                    to_topology_id(ref_id),
-                    topology_id,
-                    EdgeKind::Forward,
-                ));
+                // Add topology edge from reference stage to join stage (forward) unless already
+                // declared in the user's explicit topology (e.g. join tuple syntax).
+                if !reference_edge_explicit {
+                    topology_edges.push(DirectedEdge::new(
+                        to_topology_id(ref_id),
+                        topology_id,
+                        EdgeKind::Forward,
+                    ));
+                }
             }
         }
 

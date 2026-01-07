@@ -1,5 +1,16 @@
 use clap::{Parser, ValueEnum};
 
+/// CORS mode for FlowApplication's HTTP server.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+pub enum CorsModeArg {
+    /// Adds permissive CORS headers (`Access-Control-Allow-Origin: *`).
+    AllowAnyOrigin,
+    /// Adds CORS headers for a configured allow-list.
+    AllowList,
+    /// Do not add CORS headers (browser same-origin policy applies).
+    SameOrigin,
+}
+
 /// Configuration for FlowApplication
 /// 
 /// This struct is automatically populated from CLI arguments when
@@ -25,6 +36,14 @@ pub struct FlowConfig {
         default_value_t = StartupMode::Auto
     )]
     pub startup_mode: StartupMode,
+
+    /// CORS mode for HTTP server endpoints (default: `same-origin`).
+    #[arg(long, value_enum, default_value_t = CorsModeArg::SameOrigin)]
+    pub cors_mode: CorsModeArg,
+
+    /// Allowed origins for CORS when `--cors-mode=allow-list` (repeatable).
+    #[arg(long = "cors-allow-origin")]
+    pub cors_allow_origin: Vec<String>,
     
     // Future fields will be added here:
     // - debug flag
