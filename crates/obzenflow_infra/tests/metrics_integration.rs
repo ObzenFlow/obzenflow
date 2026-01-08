@@ -54,6 +54,7 @@ fn single_stage_metadata(stage_id: StageId) -> HashMap<StageId, StageMetadata> {
         StageMetadata {
             name: "test_stage".to_string(),
             stage_type: StageType::Transform,
+            reference_mode: None,
             flow_name: "test_flow".to_string(),
             flow_id: None,
         },

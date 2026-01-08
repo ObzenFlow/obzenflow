@@ -2,6 +2,7 @@
 
 use crate::stages::common::handler_error::HandlerError;
 use crate::stages::common::handlers::JoinHandler;
+use crate::stages::join::config::{JoinReferenceMode, DEFAULT_REFERENCE_BATCH_CAP};
 use obzenflow_core::event::context::causality_context::CausalityContext;
 use obzenflow_core::event::schema::TypedPayload;
 use obzenflow_core::StageId;
@@ -101,6 +102,8 @@ where
     pub(crate) strategy: S,
     pub(crate) catalog_key_fn: CatalogKeyFn,
     pub(crate) stream_key_fn: StreamKeyFn,
+    pub(crate) reference_mode: JoinReferenceMode,
+    pub(crate) reference_batch_cap: Option<usize>,
     pub(crate) _phantom: PhantomData<S>,
 }
 
@@ -115,6 +118,8 @@ where
             strategy: self.strategy.clone(),
             catalog_key_fn: self.catalog_key_fn.clone(),
             stream_key_fn: self.stream_key_fn.clone(),
+            reference_mode: self.reference_mode,
+            reference_batch_cap: self.reference_batch_cap,
             _phantom: PhantomData,
         }
     }
@@ -132,6 +137,8 @@ where
             .field("strategy", &std::any::type_name::<S>())
             .field("catalog_key_fn", &"<closure>")
             .field("stream_key_fn", &"<closure>")
+            .field("reference_mode", &self.reference_mode)
+            .field("reference_batch_cap", &self.reference_batch_cap)
             .finish()
     }
 }
@@ -192,12 +199,41 @@ where
         Ok(vec![])
     }
 
+    fn reference_mode(&self) -> JoinReferenceMode {
+        self.reference_mode
+    }
+
+    fn reference_batch_cap(&self) -> Option<usize> {
+        self.reference_batch_cap
+    }
+
     fn on_source_eof(
         &self,
         state: &mut Self::State,
         source_id: StageId,
         _writer_id: WriterId,
     ) -> Result<Vec<ChainEvent>, HandlerError> {
+        // Live mode: the runtime invokes this hook for the *stream side only* (stream EOF is
+        // authoritative for completion). Reference EOF is forwarded but ignored.
+        if self.reference_mode == JoinReferenceMode::Live {
+            if state.stream_eof_seen {
+                tracing::debug!(
+                    strategy = %std::any::type_name::<S>(),
+                    "JoinWithStrategy: duplicate stream EOF ignored (Live)"
+                );
+                return Ok(vec![]);
+            }
+
+            state.stream_eof_seen = true;
+            state.stream_complete = true;
+            tracing::info!(
+                strategy = %std::any::type_name::<S>(),
+                source = ?source_id,
+                "JoinWithStrategy: stream EOF received (Live)"
+            );
+            return Ok(vec![]);
+        }
+
         if state.reference_eof_seen && state.stream_eof_seen {
             tracing::debug!(
                 strategy = %std::any::type_name::<S>(),
@@ -344,6 +380,8 @@ mod tests {
             strategy: TestJoinStrategy,
             catalog_key_fn: |c: &CatalogRow| c.key.clone(),
             stream_key_fn: |s: &StreamRow| s.key.clone(),
+            reference_mode: JoinReferenceMode::FiniteEof,
+            reference_batch_cap: Some(DEFAULT_REFERENCE_BATCH_CAP),
             _phantom: PhantomData,
         }
     }

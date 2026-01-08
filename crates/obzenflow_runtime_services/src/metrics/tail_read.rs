@@ -408,6 +408,7 @@ mod tests {
             events_processed_total,
             events_accumulated_total: 0,
             events_emitted_total: 0,
+            join_reference_since_last_stream: 0,
             errors_total,
             failures_total: 0,
             event_loops_total: 0,

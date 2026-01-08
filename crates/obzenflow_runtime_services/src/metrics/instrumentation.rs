@@ -54,6 +54,10 @@ pub enum ControlBindError {
 pub struct StageInstrumentation {
     // Gauge metrics - current values
     pub in_flight_count: AtomicU32,
+    /// Join-only gauge (Live join): number of reference events processed since the last stream event.
+    ///
+    /// Defaults to 0 for non-join stages.
+    pub join_reference_since_last_stream: AtomicU64,
 
     // Counter metrics - monotonic, let Prometheus compute rates
     pub events_processed_total: AtomicU64,
@@ -124,6 +128,7 @@ impl StageInstrumentation {
         Self {
             // Gauges
             in_flight_count: AtomicU32::new(0),
+            join_reference_since_last_stream: AtomicU64::new(0),
 
             // Counters
             events_processed_total: AtomicU64::new(0),
@@ -248,6 +253,9 @@ impl StageInstrumentation {
             events_processed_total: self.events_processed_total.load(Ordering::Relaxed),
             events_accumulated_total: self.events_accumulated_total.load(Ordering::Relaxed),
             events_emitted_total: self.events_emitted_total.load(Ordering::Relaxed),
+            join_reference_since_last_stream: self
+                .join_reference_since_last_stream
+                .load(Ordering::Relaxed),
             errors_total: self.errors_total.load(Ordering::Relaxed),
             failures_total: self.failures_total.load(Ordering::Relaxed),
 

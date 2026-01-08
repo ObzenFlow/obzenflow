@@ -35,6 +35,12 @@ pub struct RuntimeContext {
     /// Total output events emitted by the stage (data/delivery; excludes observability-only events).
     #[serde(default)]
     pub events_emitted_total: u64,
+
+    /// Join-only gauge (Live join): number of reference events processed since the last stream event.
+    ///
+    /// Default is 0 for non-join stages.
+    #[serde(default)]
+    pub join_reference_since_last_stream: u64,
     pub errors_total: u64,
     pub failures_total: u64,
     pub event_loops_total: u64,

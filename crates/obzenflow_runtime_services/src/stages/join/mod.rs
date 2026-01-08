@@ -1,11 +1,16 @@
 //! Join stage implementation
 //!
 //! Joins combine events from two upstream sources (reference and stream) to produce
-//! enriched output events. The reference-first convention means reference data always
-//! loads before stream processing begins.
+//! enriched output events.
+//!
+//! By default (`JoinReferenceMode::FiniteEof`), joins follow a hydrate-then-enrich model:
+//! reference loads to EOF before stream processing begins. In `JoinReferenceMode::Live`,
+//! the join processes stream events continuously while the reference side can keep
+//! receiving updates.
 //!
 //! # Key Features
 //! - Reference-first convention (no left/right confusion)
+//! - Optional live reference updates (`JoinReferenceMode::Live`)
 //! - Per-source EOF handling
 //! - 3 join strategies: InnerJoin, LeftJoin, StrictJoin
 //! - Type-safe key extraction via closures
@@ -26,7 +31,7 @@ pub mod supervisor;
 // Public API - only expose builder, handle, and essential types
 pub use crate::stages::common::handlers::JoinHandler;
 pub use builder::JoinBuilder;
-pub use config::JoinConfig;
+pub use config::{JoinConfig, JoinReferenceMode};
 pub use fsm::{JoinEvent, JoinState};
 pub use handle::JoinHandle;
 

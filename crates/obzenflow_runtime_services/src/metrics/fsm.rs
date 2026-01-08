@@ -10,6 +10,7 @@ use obzenflow_core::event::payloads::observability_payload::{
     CircuitBreakerEvent, MetricsLifecycle, MiddlewareLifecycle, ObservabilityPayload,
 };
 use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
+use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::{CorrelationId, JournalEvent, WriterId};
 use obzenflow_core::id::{FlowId, StageId, SystemId};
 use obzenflow_core::metrics::{ContractMetricsSnapshot, Percentile, StageMetadata};
@@ -229,6 +230,8 @@ pub struct StageMetrics {
     // Runtime context metrics (FLOWIP-056c / FLOWIP-059 Phase 6)
     pub last_in_flight: Option<u32>,
     pub last_failures_total: Option<u64>,
+    // Join-only gauge (Live join): number of reference events processed since the last stream event.
+    pub join_reference_since_last_stream: Option<u64>,
     // Wide-event snapshot counters (Phase 6)
     pub latest_events_processed_total: Option<u64>,
     pub latest_events_accumulated_total: Option<u64>,
@@ -291,6 +294,7 @@ impl Default for StageMetrics {
             errors_by_kind: HashMap::new(),
             last_in_flight: None,
             last_failures_total: None,
+            join_reference_since_last_stream: None,
             latest_events_processed_total: None,
             latest_events_accumulated_total: None,
             latest_events_emitted_total: None,
@@ -395,6 +399,8 @@ impl MetricsAggregatorContext {
                         );
                         metrics.last_in_flight = Some(runtime_ctx.in_flight);
                         metrics.last_failures_total = Some(runtime_ctx.failures_total);
+                        metrics.join_reference_since_last_stream =
+                            Some(runtime_ctx.join_reference_since_last_stream);
                         metrics.event_loops_total =
                             metrics.event_loops_total.max(runtime_ctx.event_loops_total);
                         metrics.event_loops_with_work_total = metrics
@@ -539,6 +545,8 @@ impl MetricsAggregatorContext {
                                 );
                                 metrics.last_in_flight = Some(runtime_ctx.in_flight);
                                 metrics.last_failures_total = Some(runtime_ctx.failures_total);
+                                metrics.join_reference_since_last_stream =
+                                    Some(runtime_ctx.join_reference_since_last_stream);
                                 metrics.event_loops_total =
                                     metrics.event_loops_total.max(runtime_ctx.event_loops_total);
                                 metrics.event_loops_with_work_total = metrics
@@ -709,6 +717,14 @@ impl MetricsAggregatorContext {
 
 impl FsmContext for MetricsAggregatorContext {}
 
+fn infer_join_reference_mode_from_fsm_state(fsm_state: &str) -> Option<&'static str> {
+    match fsm_state {
+        "Live" => Some("live"),
+        "Hydrating" | "Enriching" => Some("finite_eof"),
+        _ => None,
+    }
+}
+
 impl MetricsAggregatorContext {
     /// Build an `AppMetricsSnapshot` from the current in-memory `metrics_store`.
     ///
@@ -747,6 +763,16 @@ impl MetricsAggregatorContext {
             snapshot
                 .events_emitted_total
                 .insert(*stage_id, emitted_count);
+
+            if let Some(value) = metrics.join_reference_since_last_stream {
+                if let Some(metadata) = self.stage_metadata.get(stage_id) {
+                    if metadata.stage_type == StageType::Join {
+                        snapshot
+                            .join_reference_since_last_stream
+                            .insert(*stage_id, value);
+                    }
+                }
+            }
 
             // Use wide-event snapshot errors_total as authoritative.
             let stage_errors_total = metrics.latest_errors_total.unwrap_or(0);
@@ -1368,6 +1394,19 @@ impl FsmAction for MetricsAggregatorAction {
                             meta.flow_id = Some(flow_id);
                         }
                     }
+
+                    // Best-effort: infer join reference mode from the observed FSM state.
+                    // This enables exporters to attach a `reference_mode` label for joins
+                    // without requiring the pipeline to plumb join config into metrics metadata.
+                    if meta.reference_mode.is_none() && meta.stage_type == StageType::Join {
+                        if let Some(runtime_ctx) = &event.runtime_context {
+                            if let Some(mode) =
+                                infer_join_reference_mode_from_fsm_state(&runtime_ctx.fsm_state)
+                            {
+                                meta.reference_mode = Some(mode.to_string());
+                            }
+                        }
+                    }
                 }
 
                 // Skip system events entirely; they are not part of per-stage wide metrics.
@@ -1578,6 +1617,8 @@ impl FsmAction for MetricsAggregatorAction {
                         // Use max() for monotonic counters to handle out-of-order reads
                         metrics.last_in_flight = Some(runtime_ctx.in_flight);
                         metrics.last_failures_total = Some(runtime_ctx.failures_total);
+                        metrics.join_reference_since_last_stream =
+                            Some(runtime_ctx.join_reference_since_last_stream);
                         metrics.latest_events_processed_total = Some(
                             metrics
                                 .latest_events_processed_total
@@ -1698,6 +1739,19 @@ impl FsmAction for MetricsAggregatorAction {
                         tail_read::read_latest_runtime_context_for_stage(data_journal, *stage_id)
                             .await
                     {
+                        if let Some(meta) = ctx.stage_metadata.get_mut(stage_id) {
+                            if meta.reference_mode.is_none() && meta.stage_type == StageType::Join {
+                                if let Some(mode) =
+                                    infer_join_reference_mode_from_fsm_state(&runtime_ctx.fsm_state)
+                                {
+                                    meta.reference_mode = Some(mode.to_string());
+                                }
+                            }
+                        }
+                        if let Some(metrics) = ctx.metrics_store.stage_metrics.get_mut(stage_id) {
+                            metrics.join_reference_since_last_stream =
+                                Some(runtime_ctx.join_reference_since_last_stream);
+                        }
                         ctx.metrics_store
                             .update_control_metrics_from_runtime_context(*stage_id, &runtime_ctx);
                     }
@@ -1708,6 +1762,10 @@ impl FsmAction for MetricsAggregatorAction {
                         )
                         .await
                         {
+                            if let Some(metrics) = ctx.metrics_store.stage_metrics.get_mut(stage_id) {
+                                metrics.join_reference_since_last_stream =
+                                    Some(runtime_ctx.join_reference_since_last_stream);
+                            }
                             ctx.metrics_store
                                 .update_control_metrics_from_runtime_context(
                                     *stage_id,
@@ -2177,6 +2235,7 @@ mod tests {
             StageMetadata {
                 name: "test_stage".to_string(),
                 stage_type: StageType::Sink,
+                reference_mode: None,
                 flow_name: "test_flow".to_string(),
                 flow_id: None,
             },

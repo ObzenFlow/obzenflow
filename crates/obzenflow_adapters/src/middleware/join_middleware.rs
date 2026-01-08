@@ -152,6 +152,14 @@ where
         Ok(results)
     }
 
+    fn reference_mode(&self) -> obzenflow_runtime_services::stages::join::config::JoinReferenceMode {
+        self.inner.reference_mode()
+    }
+
+    fn reference_batch_cap(&self) -> Option<usize> {
+        self.inner.reference_batch_cap()
+    }
+
     fn on_source_eof(
         &self,
         state: &mut Self::State,

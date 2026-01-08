@@ -1824,6 +1824,10 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
         }
         let handler_with_middleware = builder.build();
 
+        // Extract join-mode configuration from the handler before moving it into the runtime.
+        let reference_mode = handler_with_middleware.reference_mode();
+        let reference_batch_cap = handler_with_middleware.reference_batch_cap();
+
         // Create the stage configuration
         // reference_stage_id comes from the builder (stored in self)
         // Stream stages come from topology (in upstream_stages, after DSL adds reference)
@@ -1849,6 +1853,8 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
             flow_name: config.flow_name.clone(),
             reference_source_id,
             stream_source_id,
+            reference_mode,
+            reference_batch_cap,
             control_strategy: Some(control_strategy.clone()),
             upstream_stages: resources.upstream_stages.clone(),
         };
@@ -1908,7 +1914,7 @@ fn check_join_state<H>(state: &JoinState<H>) -> crate::stage_handle_adapter::Sta
     match state {
         JoinState::Created => StageStatus::Created,
         JoinState::Initialized => StageStatus::Ready,
-        JoinState::Hydrating { .. } | JoinState::Enriching => StageStatus::Running,
+        JoinState::Hydrating | JoinState::Live | JoinState::Enriching => StageStatus::Running,
         JoinState::Draining => StageStatus::Draining,
         JoinState::Drained => StageStatus::Drained,
         JoinState::Failed(_) => StageStatus::Failed,

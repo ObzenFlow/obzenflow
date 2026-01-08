@@ -31,6 +31,7 @@ use crate::stages::common::stage_handle::{
 };
 use crate::stages::resources_builder::BoundSubscriptionFactory;
 use crate::supervised_base::idle_backoff::IdleBackoff;
+use super::config::JoinReferenceMode;
 
 // ============================================================================
 // FSM States
@@ -51,6 +52,14 @@ pub enum JoinState<H> {
     /// - Stream events queue in journal/subscription (natural backpressure)
     /// - Transitions to Enriching when reference EOF received
     Hydrating,
+
+    /// Live: Reference side remains active while stream events are processed continuously.
+    ///
+    /// During this state:
+    /// - Reads from both reference and stream subscriptions
+    /// - Reference updates can arrive at any time and update catalogs
+    /// - Stream events are enriched against the current catalog snapshot
+    Live,
 
     /// Enriching: Reference catalog complete, actively enriching stream events
     /// During this state:
@@ -79,6 +88,7 @@ impl<H> Clone for JoinState<H> {
             Self::Created => Self::Created,
             Self::Initialized => Self::Initialized,
             Self::Hydrating => Self::Hydrating,
+            Self::Live => Self::Live,
             Self::Enriching => Self::Enriching,
             Self::Draining => Self::Draining,
             Self::Drained => Self::Drained,
@@ -94,6 +104,7 @@ impl<H> std::fmt::Debug for JoinState<H> {
             Self::Created => write!(f, "Created"),
             Self::Initialized => write!(f, "Initialized"),
             Self::Hydrating => write!(f, "Hydrating"),
+            Self::Live => write!(f, "Live"),
             Self::Enriching => write!(f, "Enriching"),
             Self::Draining => write!(f, "Draining"),
             Self::Drained => write!(f, "Drained"),
@@ -115,6 +126,7 @@ impl<H: Send + Sync> PartialEq for JoinState<H> {
             (JoinState::Created, JoinState::Created) => true,
             (JoinState::Initialized, JoinState::Initialized) => true,
             (JoinState::Hydrating, JoinState::Hydrating) => true,
+            (JoinState::Live, JoinState::Live) => true,
             (JoinState::Enriching, JoinState::Enriching) => true,
             (JoinState::Draining, JoinState::Draining) => true,
             (JoinState::Drained, JoinState::Drained) => true,
@@ -130,6 +142,7 @@ impl<H: Send + Sync + 'static> StateVariant for JoinState<H> {
             JoinState::Created => "Created",
             JoinState::Initialized => "Initialized",
             JoinState::Hydrating => "Hydrating",
+            JoinState::Live => "Live",
             JoinState::Enriching => "Enriching",
             JoinState::Draining => "Draining",
             JoinState::Drained => "Drained",
@@ -191,7 +204,7 @@ impl<H: Clone + Send + Sync + 'static> EventVariant for JoinEvent<H> {
         match self {
             JoinEvent::Initialize => "Initialize",
             JoinEvent::Ready => "Ready",
-            JoinEvent::ReceivedEOF { .. } => "ReceivedEOF",
+            JoinEvent::ReceivedEOF => "ReceivedEOF",
             JoinEvent::ReferenceComplete => "ReferenceComplete",
             JoinEvent::BeginDrain => "BeginDrain",
             JoinEvent::DrainComplete => "DrainComplete",
@@ -329,6 +342,15 @@ pub struct JoinContext<H: JoinHandler> {
     pub reference_subscription_factory: BoundSubscriptionFactory,
     pub stream_subscription_factory: BoundSubscriptionFactory,
 
+    /// Reference join mode (FiniteEof vs Live).
+    pub reference_mode: JoinReferenceMode,
+
+    /// Live-mode fairness cap (see `JoinConfig.reference_batch_cap`).
+    pub reference_batch_cap: Option<usize>,
+
+    /// Live-mode counter: reference events processed since the last stream event.
+    pub reference_since_last_stream: usize,
+
     /// Counter of reference-side events processed since the last heartbeat
     /// (used during Hydrating for observability snapshots).
     pub events_since_last_heartbeat: u64,
@@ -372,6 +394,8 @@ impl<H: JoinHandler> JoinContext<H> {
         instrumentation: Arc<StageInstrumentation>,
         reference_subscription_factory: BoundSubscriptionFactory,
         stream_subscription_factory: BoundSubscriptionFactory,
+        reference_mode: JoinReferenceMode,
+        reference_batch_cap: Option<usize>,
         backpressure_writer: BackpressureWriter,
         backpressure_readers: HashMap<StageId, BackpressureReader>,
     ) -> Self {
@@ -398,6 +422,9 @@ impl<H: JoinHandler> JoinContext<H> {
             instrumentation,
             reference_subscription_factory,
             stream_subscription_factory,
+            reference_mode,
+            reference_batch_cap,
+            reference_since_last_stream: 0,
             events_since_last_heartbeat: 0,
             backpressure_writer,
             backpressure_readers,

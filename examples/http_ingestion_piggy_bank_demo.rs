@@ -13,15 +13,13 @@
 //! `curl -XPOST http://127.0.0.1:9090/api/bank/accounts/events -H 'content-type: application/json' -d '{"event_type":"bank.account","data":{"account_id":"acct-1","owner":"Alice","initial_balance_cents":1000}}'`
 //! `curl -XPOST http://127.0.0.1:9090/api/bank/accounts/events -H 'content-type: application/json' -d '{"event_type":"bank.account","data":{"account_id":"acct-2","owner":"Bob","initial_balance_cents":0}}'`
 //!
-//! 2) Seal the account catalog (join stages wait for reference EOF before consuming the stream):
-//! `curl http://127.0.0.1:9090/api/bank/accounts/seal`
-//!
-//! 3) Post transactions (stream side):
+//! 2) Post transactions (stream side):
 //! `curl -XPOST http://127.0.0.1:9090/api/bank/tx/events -H 'content-type: application/json' -d '{"event_type":"bank.tx","data":{"account_id":"acct-1","delta_cents":250,"note":"paycheck"}}'`
 //! `curl -XPOST http://127.0.0.1:9090/api/bank/tx/events -H 'content-type: application/json' -d '{"event_type":"bank.tx","data":{"account_id":"acct-1","delta_cents":-99,"note":"coffee"}}'`
 //!
 //! Notes:
 //! - Transactions for unknown accounts are dropped until the account exists.
+//! - Accounts can be submitted at any time; the join catalog updates continuously.
 //! - The stateful stage emits a `bank.checkbook` snapshot for every accepted transaction.
 //! - The `{accepted,rejected}` response is per-request (single POST => accepted=1). For cumulative counts, check `/metrics`.
 
@@ -29,13 +27,10 @@ use anyhow::Result;
 use async_trait::async_trait;
 use obzenflow_adapters::sinks::{ConsoleSink, SnapshotTableFormatter};
 use obzenflow_adapters::sources::http::HttpSource;
-use obzenflow_core::event::ingestion::EventSubmission;
 use obzenflow_core::event::schema::TypedPayload;
-use obzenflow_core::event::ChainEventFactory;
-use obzenflow_core::web::{HttpEndpoint, HttpMethod, Request, Response, WebError};
 use obzenflow_core::{ChainEvent, StageId, WriterId};
 use obzenflow_dsl_infra::{
-    async_infinite_source, async_source, flow, join, sink, stateful, with_ref,
+    async_infinite_source, flow, join, sink, stateful, with_ref,
 };
 use obzenflow_infra::application::{FlowApplication, LogLevel};
 use obzenflow_infra::journal::disk_journals;
@@ -43,18 +38,13 @@ use obzenflow_infra::web::endpoints::event_ingestion::{
     create_ingestion_endpoints, IngestionConfig, TypedValidator, ValidationConfig,
 };
 use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
-use obzenflow_runtime_services::stages::common::handlers::{
-    AsyncFiniteSourceHandler, StatefulHandler, StatefulHandlerExt,
-};
+use obzenflow_runtime_services::stages::common::handlers::{StatefulHandler, StatefulHandlerExt};
 use obzenflow_runtime_services::stages::join::strategies::InnerJoinBuilder;
 use obzenflow_runtime_services::stages::stateful::strategies::emissions::EmitAlways;
-use obzenflow_runtime_services::stages::SourceError;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use tokio::sync::Mutex;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct BankAccount {
@@ -227,143 +217,6 @@ fn format_cents(cents: i64) -> String {
     format!("{sign}${}.{:02}", abs / 100, abs % 100)
 }
 
-#[derive(Clone)]
-struct SealableHttpCatalogSource {
-    rx: Arc<Mutex<tokio::sync::mpsc::Receiver<EventSubmission>>>,
-    sealed: tokio::sync::watch::Receiver<bool>,
-    writer_id: Option<WriterId>,
-    max_batch_size: usize,
-}
-
-impl std::fmt::Debug for SealableHttpCatalogSource {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SealableHttpCatalogSource")
-            .field("writer_id_bound", &self.writer_id.is_some())
-            .field("max_batch_size", &self.max_batch_size)
-            .finish()
-    }
-}
-
-impl SealableHttpCatalogSource {
-    fn new(
-        rx: tokio::sync::mpsc::Receiver<EventSubmission>,
-        sealed: tokio::sync::watch::Receiver<bool>,
-        max_batch_size: usize,
-    ) -> Self {
-        Self {
-            rx: Arc::new(Mutex::new(rx)),
-            sealed,
-            writer_id: None,
-            max_batch_size: max_batch_size.max(1),
-        }
-    }
-
-    fn submission_to_event(&self, submission: EventSubmission) -> ChainEvent {
-        let writer_id = self
-            .writer_id
-            .clone()
-            .expect("WriterId must be bound before next() is called");
-        let EventSubmission { event_type, data, .. } = submission;
-        ChainEventFactory::data_event(writer_id, event_type, data)
-    }
-}
-
-#[async_trait]
-impl AsyncFiniteSourceHandler for SealableHttpCatalogSource {
-    fn bind_writer_id(&mut self, id: WriterId) {
-        self.writer_id = Some(id);
-    }
-
-    async fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
-        let mut rx = self.rx.lock().await;
-
-        if *self.sealed.borrow() {
-            let mut out = Vec::new();
-            while out.len() < self.max_batch_size {
-                match rx.try_recv() {
-                    Ok(submission) => out.push(self.submission_to_event(submission)),
-                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
-                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break,
-                }
-            }
-            return if out.is_empty() { Ok(None) } else { Ok(Some(out)) };
-        }
-
-        let mut out = Vec::new();
-
-        tokio::select! {
-            biased;
-            maybe_submission = rx.recv() => {
-                match maybe_submission {
-                    Some(submission) => out.push(self.submission_to_event(submission)),
-                    None => return Ok(None),
-                }
-            }
-            changed = self.sealed.changed() => {
-                if changed.is_err() {
-                    return Ok(None);
-                }
-            }
-        }
-
-        while out.len() < self.max_batch_size {
-            match rx.try_recv() {
-                Ok(submission) => out.push(self.submission_to_event(submission)),
-                Err(_) => break,
-            }
-        }
-
-        if out.is_empty() && *self.sealed.borrow() {
-            Ok(None)
-        } else {
-            Ok(Some(out))
-        }
-    }
-}
-
-struct AccountsSealEndpoint {
-    path: String,
-    sealed: tokio::sync::watch::Sender<bool>,
-    state: obzenflow_infra::web::endpoints::event_ingestion::IngestionState,
-}
-
-impl AccountsSealEndpoint {
-    fn new(
-        state: obzenflow_infra::web::endpoints::event_ingestion::IngestionState,
-        sealed: tokio::sync::watch::Sender<bool>,
-    ) -> Self {
-        let base_path = state.config.base_path.trim_end_matches('/');
-        Self {
-            path: format!("{base_path}/seal"),
-            sealed,
-            state,
-        }
-    }
-}
-
-#[async_trait]
-impl HttpEndpoint for AccountsSealEndpoint {
-    fn path(&self) -> &str {
-        &self.path
-    }
-
-    fn methods(&self) -> &[HttpMethod] {
-        const METHODS: [HttpMethod; 2] = [HttpMethod::Get, HttpMethod::Post];
-        &METHODS
-    }
-
-    async fn handle(&self, _request: Request) -> Result<Response, WebError> {
-        let _ = self.sealed.send(true);
-        self.state.ready.store(false, Ordering::Release);
-        Response::ok()
-            .with_json(&serde_json::json!({"sealed": true}))
-            .map_err(|e| WebError::RequestHandlingFailed {
-                message: e.to_string(),
-                source: None,
-            })
-    }
-}
-
 #[tokio::main]
 async fn main() -> Result<()> {
     // Required for --server mode (FlowApplication enforces metrics for extra endpoints).
@@ -377,12 +230,7 @@ async fn main() -> Result<()> {
     let (accounts_endpoints, accounts_rx, accounts_state) =
         create_ingestion_endpoints(accounts_config);
     let accounts_hook_state = accounts_state.clone();
-    let (accounts_sealed_tx, accounts_sealed_rx) = tokio::sync::watch::channel(false);
-    let accounts_source = SealableHttpCatalogSource::new(
-        accounts_rx,
-        accounts_sealed_rx,
-        accounts_state.config.max_batch_size,
-    );
+    let accounts_source = HttpSource::with_telemetry(accounts_rx, accounts_state.telemetry());
 
     let mut tx_config = IngestionConfig::default();
     tx_config.base_path = "/api/bank/tx".to_string();
@@ -396,15 +244,12 @@ async fn main() -> Result<()> {
     let mut endpoints = Vec::new();
     endpoints.extend(accounts_endpoints);
     endpoints.extend(tx_endpoints);
-    endpoints.push(Box::new(AccountsSealEndpoint::new(
-        accounts_state.clone(),
-        accounts_sealed_tx,
-    )));
 
     let join_handler =
         InnerJoinBuilder::<BankAccount, BankTransaction, EnrichedBankTransaction>::new()
             .catalog_key(|account: &BankAccount| account.account_id.clone())
             .stream_key(|tx: &BankTransaction| tx.account_id.clone())
+            .live()
             .build(|account: BankAccount, tx: BankTransaction| EnrichedBankTransaction {
                 account_id: tx.account_id,
                 owner: account.owner,
@@ -428,7 +273,7 @@ async fn main() -> Result<()> {
             middleware: [],
 
             stages: {
-                accounts = async_source!("accounts" => accounts_source);
+                accounts = async_infinite_source!("accounts" => accounts_source);
                 tx = async_infinite_source!("tx" => tx_source);
 
                 enriched = join!("enriched" => with_ref!(accounts, join_handler));

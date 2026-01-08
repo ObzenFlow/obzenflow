@@ -5,6 +5,23 @@ use obzenflow_core::StageId;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+/// Default Live join fairness cap (FLOWIP-084g).
+///
+/// When the join is in Live mode, after N reference events without a stream event the supervisor
+/// prioritizes polling the stream to prevent starvation.
+pub const DEFAULT_REFERENCE_BATCH_CAP: usize = 8;
+
+/// Controls whether the join requires reference EOF before processing the stream.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub enum JoinReferenceMode {
+    /// Current behavior: hydrate the reference side until EOF, then consume stream events.
+    #[default]
+    FiniteEof,
+
+    /// Live mode: consume reference updates and stream events concurrently (no reference EOF gate).
+    Live,
+}
+
 /// Configuration for a join stage
 #[derive(Clone, Serialize, Deserialize)]
 pub struct JoinConfig {
@@ -22,6 +39,15 @@ pub struct JoinConfig {
 
     /// Stage ID for the stream upstream
     pub stream_source_id: StageId,
+
+    /// Reference join mode (default: FiniteEof).
+    pub reference_mode: JoinReferenceMode,
+
+    /// Live-mode fairness cap: after N reference events without a stream event, prioritize a
+    /// stream poll. `None` disables the cap (pure priority based on selection order).
+    ///
+    /// Default: `Some(DEFAULT_REFERENCE_BATCH_CAP)`.
+    pub reference_batch_cap: Option<usize>,
 
     /// Control strategy for handling control events
     #[serde(skip)]
@@ -45,6 +71,8 @@ impl JoinConfig {
             flow_name: flow_name.into(),
             reference_source_id,
             stream_source_id,
+            reference_mode: JoinReferenceMode::FiniteEof,
+            reference_batch_cap: Some(DEFAULT_REFERENCE_BATCH_CAP),
             control_strategy: None,
             upstream_stages: vec![reference_source_id, stream_source_id],
         }

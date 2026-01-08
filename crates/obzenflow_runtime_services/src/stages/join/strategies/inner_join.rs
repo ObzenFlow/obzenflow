@@ -4,6 +4,7 @@
 
 use super::common::{JoinStrategy, JoinWithStrategy};
 use crate::stages::common::stage_handle::StageHandle;
+use crate::stages::join::config::{JoinReferenceMode, DEFAULT_REFERENCE_BATCH_CAP};
 use obzenflow_core::ChainEvent;
 use obzenflow_core::TypedPayload;
 use obzenflow_core::{StageId, WriterId};
@@ -91,6 +92,8 @@ where
         InnerJoinBuilderDslWithKeys {
             catalog_key_fn: self.catalog_key_fn,
             stream_key_fn: key_fn,
+            reference_mode: JoinReferenceMode::FiniteEof,
+            reference_batch_cap: Some(DEFAULT_REFERENCE_BATCH_CAP),
             _phantom: PhantomData,
         }
     }
@@ -100,6 +103,8 @@ where
 pub struct InnerJoinBuilderDslWithKeys<C, S, E, K, CatalogKeyFn, StreamKeyFn> {
     catalog_key_fn: CatalogKeyFn,
     stream_key_fn: StreamKeyFn,
+    reference_mode: JoinReferenceMode,
+    reference_batch_cap: Option<usize>,
     _phantom: PhantomData<(C, S, E, K)>,
 }
 
@@ -114,6 +119,16 @@ where
     StreamKeyFn: Fn(&S) -> K + Send + Sync + Clone,
 {
     /// Set the join function and build just the handler (for DSL use)
+    pub fn live(mut self) -> Self {
+        self.reference_mode = JoinReferenceMode::Live;
+        self
+    }
+
+    pub fn reference_batch_cap(mut self, cap: Option<usize>) -> Self {
+        self.reference_batch_cap = cap;
+        self
+    }
+
     pub fn build<J>(self, join_fn: J) -> InnerJoin<C, S, E, K, CatalogKeyFn, StreamKeyFn, J>
     where
         J: Fn(C, S) -> E + Send + Sync + Clone,
@@ -125,6 +140,8 @@ where
             },
             catalog_key_fn: self.catalog_key_fn,
             stream_key_fn: self.stream_key_fn,
+            reference_mode: self.reference_mode,
+            reference_batch_cap: self.reference_batch_cap,
             _phantom: PhantomData,
         }
     }
@@ -180,6 +197,8 @@ where
             reference_stage_id: self.reference_stage_id,
             catalog_key_fn: self.catalog_key_fn,
             stream_key_fn: key_fn,
+            reference_mode: JoinReferenceMode::FiniteEof,
+            reference_batch_cap: Some(DEFAULT_REFERENCE_BATCH_CAP),
             _phantom: PhantomData,
         }
     }
@@ -190,6 +209,8 @@ pub struct InnerJoinBuilderWithKeys<C, S, E, K, CatalogKeyFn, StreamKeyFn> {
     reference_stage_id: StageId,
     catalog_key_fn: CatalogKeyFn,
     stream_key_fn: StreamKeyFn,
+    reference_mode: JoinReferenceMode,
+    reference_batch_cap: Option<usize>,
     _phantom: PhantomData<(C, S, E, K)>,
 }
 
@@ -205,6 +226,16 @@ where
 {
     /// Set the join function and build the handler (returns tuple for programmatic use)
     /// Returns (reference_stage_id, strategy) for the DSL layer to use
+    pub fn live(mut self) -> Self {
+        self.reference_mode = JoinReferenceMode::Live;
+        self
+    }
+
+    pub fn reference_batch_cap(mut self, cap: Option<usize>) -> Self {
+        self.reference_batch_cap = cap;
+        self
+    }
+
     pub fn join<J>(
         self,
         join_fn: J,
@@ -221,6 +252,8 @@ where
                 },
                 catalog_key_fn: self.catalog_key_fn,
                 stream_key_fn: self.stream_key_fn,
+                reference_mode: self.reference_mode,
+                reference_batch_cap: self.reference_batch_cap,
                 _phantom: PhantomData,
             },
         )

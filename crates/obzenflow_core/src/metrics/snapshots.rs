@@ -26,6 +26,9 @@ pub struct AppMetricsSnapshot {
     /// Total events emitted by stage (data/delivery; excludes observability-only events).
     pub events_emitted_total: HashMap<StageId, u64>,
 
+    /// Join-only gauge (Live join): number of reference events processed since the last stream event.
+    pub join_reference_since_last_stream: HashMap<StageId, u64>,
+
     /// Error counts by stage
     pub error_counts: HashMap<StageId, u64>,
 
@@ -363,6 +366,13 @@ pub struct StageMetadata {
     /// Stage type for categorization
     pub stage_type: StageType,
 
+    /// Optional stage mode hint for filtering/diagnostics (e.g., join reference mode).
+    ///
+    /// This is intentionally a free-form string so exporters can attach it as a label
+    /// without introducing stage-type-specific dependencies into `obzenflow_core`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reference_mode: Option<String>,
+
     /// Flow name this stage belongs to
     pub flow_name: String,
 
@@ -378,6 +388,7 @@ impl Default for AppMetricsSnapshot {
             event_counts: HashMap::new(),
             events_accumulated_total: HashMap::new(),
             events_emitted_total: HashMap::new(),
+            join_reference_since_last_stream: HashMap::new(),
             error_counts: HashMap::new(),
             error_counts_by_kind: HashMap::new(),
             processing_times: HashMap::new(),

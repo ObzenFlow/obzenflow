@@ -742,6 +742,7 @@ impl FsmAction for PipelineAction {
                             let metadata = obzenflow_core::metrics::StageMetadata {
                                 name: stage_info.name.clone(),
                                 stage_type: stage_handle.stage_type(),
+                                reference_mode: None,
                                 flow_name: context.flow_name.clone(),
                                 flow_id: Some(context.flow_id.clone()),
                             };
@@ -758,6 +759,7 @@ impl FsmAction for PipelineAction {
                             let metadata = obzenflow_core::metrics::StageMetadata {
                                 name: stage_info.name.clone(),
                                 stage_type: stage_handle.stage_type(),
+                                reference_mode: None,
                                 flow_name: context.flow_name.clone(),
                                 flow_id: Some(context.flow_id.clone()),
                             };

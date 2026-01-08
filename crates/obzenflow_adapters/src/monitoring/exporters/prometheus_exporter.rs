@@ -187,6 +187,30 @@ impl PrometheusExporter {
             writeln!(output)?;
         }
 
+        // Live join gauge: how many reference events have been processed since the last stream event.
+        if !snapshot.join_reference_since_last_stream.is_empty() {
+            writeln!(
+                output,
+                "# HELP obzenflow_join_reference_since_last_stream Join live reference backlog gauge"
+            )?;
+            writeln!(
+                output,
+                "# TYPE obzenflow_join_reference_since_last_stream gauge"
+            )?;
+
+            for (stage_id, value) in &snapshot.join_reference_since_last_stream {
+                if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
+                    writeln!(
+                        output,
+                        "obzenflow_join_reference_since_last_stream{{{}}} {}",
+                        format_stage_labels(stage_id, metadata),
+                        value
+                    )?;
+                }
+            }
+            writeln!(output)?;
+        }
+
         // Error counts by ErrorKind (if available).
         if !snapshot.error_counts_by_kind.is_empty() {
             writeln!(
@@ -2022,21 +2046,28 @@ fn escape_label(value: &str) -> String {
 /// Returns the standard label set: flow, flow_id (when available), stage, stage_id
 fn format_stage_labels(stage_id: &StageId, metadata: &StageMetadata) -> String {
     let stage_id_str = stage_id.to_string();
+    let reference_mode = metadata
+        .reference_mode
+        .as_deref()
+        .map(|mode| format!(",reference_mode=\"{}\"", escape_label(mode)))
+        .unwrap_or_default();
 
     if let Some(flow_id) = &metadata.flow_id {
         format!(
-            "flow=\"{}\",flow_id=\"{}\",stage=\"{}\",stage_id=\"{}\"",
+            "flow=\"{}\",flow_id=\"{}\",stage=\"{}\",stage_id=\"{}\"{}",
             escape_label(&metadata.flow_name),
             escape_label(&flow_id.to_string()),
             escape_label(&metadata.name),
             escape_label(&stage_id_str),
+            reference_mode,
         )
     } else {
         format!(
-            "flow=\"{}\",stage=\"{}\",stage_id=\"{}\"",
+            "flow=\"{}\",stage=\"{}\",stage_id=\"{}\"{}",
             escape_label(&metadata.flow_name),
             escape_label(&metadata.name),
             escape_label(&stage_id_str),
+            reference_mode,
         )
     }
 }
@@ -2132,6 +2163,7 @@ mod tests {
                 name: "validation".to_string(),
                 flow_name: "order_flow".to_string(),
                 stage_type: obzenflow_core::event::context::StageType::Transform,
+                reference_mode: None,
                 flow_id: None,
             },
         );

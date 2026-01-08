@@ -117,6 +117,8 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
             instrumentation.clone(),
             reference_subscription_factory,
             stream_subscription_factory,
+            self.config.reference_mode,
+            self.config.reference_batch_cap,
             self.resources.backpressure_writer.clone(),
             self.resources.backpressure_readers.clone(),
         );

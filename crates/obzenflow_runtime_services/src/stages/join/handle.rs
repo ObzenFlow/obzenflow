@@ -70,7 +70,7 @@ impl<H: JoinHandler + Send + Sync + 'static> JoinHandleExt<H> for JoinHandle<H> 
     }
 
     fn is_hydrating(&self) -> bool {
-        matches!(self.current_state(), JoinState::<H>::Hydrating { .. })
+        matches!(self.current_state(), JoinState::<H>::Hydrating)
     }
 
     fn is_enriching(&self) -> bool {
