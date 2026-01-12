@@ -31,4 +31,3 @@ fn backpressure_bypass_env_var_allows_progress_while_credits_are_exhausted() {
         assert_eq!(writer.min_downstream_credit(), 0);
     }
 }
-

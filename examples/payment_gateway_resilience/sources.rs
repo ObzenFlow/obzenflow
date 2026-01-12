@@ -4,13 +4,12 @@ use async_trait::async_trait;
 use obzenflow_core::{
     event::chain_event::{ChainEvent, ChainEventFactory},
     id::StageId,
-    TypedPayload,
-    WriterId,
+    TypedPayload, WriterId,
 };
+use obzenflow_runtime_services::stages::common::handlers::source::traits::SourceError;
 use obzenflow_runtime_services::stages::common::handlers::{
     AsyncFiniteSourceHandler, FiniteSourceHandler,
 };
-use obzenflow_runtime_services::stages::common::handlers::source::traits::SourceError;
 use serde_json::json;
 use std::time::{Duration, Instant};
 
@@ -36,7 +35,11 @@ struct XorShift64(u64);
 impl XorShift64 {
     fn new(seed: u64) -> Self {
         // xorshift cannot have a zero state.
-        let seed = if seed == 0 { 0x9E37_79B9_7F4A_7C15 } else { seed };
+        let seed = if seed == 0 {
+            0x9E37_79B9_7F4A_7C15
+        } else {
+            seed
+        };
         Self(seed)
     }
 
@@ -200,8 +203,7 @@ impl SemiReliableFeed {
             println!("📡 payments feed recovered (resuming scrape)");
 
             // Schedule the next glitch sometime in the future.
-            self.next_glitch_at =
-                Some(now + Duration::from_secs(self.rng.gen_range_u64(10..=30)));
+            self.next_glitch_at = Some(now + Duration::from_secs(self.rng.gen_range_u64(10..=30)));
         }
 
         if matches!(self.next_glitch_at, Some(next_glitch_at) if now >= next_glitch_at) {
@@ -262,8 +264,7 @@ impl SemiReliableFeed {
             println!("📡 payments feed recovered (resuming scrape)");
 
             // Schedule the next glitch sometime in the future.
-            self.next_glitch_at =
-                Some(now + Duration::from_secs(self.rng.gen_range_u64(10..=30)));
+            self.next_glitch_at = Some(now + Duration::from_secs(self.rng.gen_range_u64(10..=30)));
         }
 
         if matches!(self.next_glitch_at, Some(next_glitch_at) if now >= next_glitch_at) {

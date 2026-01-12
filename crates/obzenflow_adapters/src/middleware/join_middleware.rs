@@ -152,7 +152,9 @@ where
         Ok(results)
     }
 
-    fn reference_mode(&self) -> obzenflow_runtime_services::stages::join::config::JoinReferenceMode {
+    fn reference_mode(
+        &self,
+    ) -> obzenflow_runtime_services::stages::join::config::JoinReferenceMode {
         self.inner.reference_mode()
     }
 

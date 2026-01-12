@@ -8,10 +8,12 @@ use obzenflow_core::event::ChainEventContent;
 use obzenflow_core::{StageId, WriterId};
 use obzenflow_dsl_infra::{async_infinite_source, flow, sink};
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime_services::pipeline::{FlowHandle, PipelineState};
 use obzenflow_runtime_services::pipeline::config::StageConfig;
+use obzenflow_runtime_services::pipeline::{FlowHandle, PipelineState};
 use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
-use obzenflow_runtime_services::stages::common::handlers::{AsyncInfiniteSourceHandler, SinkHandler};
+use obzenflow_runtime_services::stages::common::handlers::{
+    AsyncInfiniteSourceHandler, SinkHandler,
+};
 use obzenflow_runtime_services::stages::SourceError;
 use obzenflow_runtime_services::supervised_base::SupervisorHandle;
 use serde_json::json;
@@ -113,7 +115,12 @@ struct CollectSink {
 impl CollectSink {
     fn new() -> (Self, Arc<Mutex<Vec<ChainEvent>>>) {
         let events = Arc::new(Mutex::new(Vec::new()));
-        (Self { events: events.clone() }, events)
+        (
+            Self {
+                events: events.clone(),
+            },
+            events,
+        )
     }
 }
 
@@ -249,8 +256,10 @@ async fn async_infinite_source_emits_events_and_applies_stage_middleware() -> Re
     handle.start().await?;
     wait_for_running(&handle).await?;
 
-    tx.send(1).map_err(|_| anyhow!("failed to send to source channel"))?;
-    tx.send(2).map_err(|_| anyhow!("failed to send to source channel"))?;
+    tx.send(1)
+        .map_err(|_| anyhow!("failed to send to source channel"))?;
+    tx.send(2)
+        .map_err(|_| anyhow!("failed to send to source channel"))?;
 
     tokio::time::sleep(Duration::from_millis(25)).await;
 
@@ -288,4 +297,3 @@ async fn async_infinite_source_emits_events_and_applies_stage_middleware() -> Re
 
     Ok(())
 }
-

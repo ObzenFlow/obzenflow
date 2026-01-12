@@ -125,10 +125,7 @@ pub trait ControlMiddlewareProvider: Send + Sync {
 pub struct NoControlMiddleware;
 
 impl ControlMiddlewareProvider for NoControlMiddleware {
-    fn circuit_breaker_snapshotter(
-        &self,
-        _: &StageId,
-    ) -> Option<Arc<CircuitBreakerSnapshotter>> {
+    fn circuit_breaker_snapshotter(&self, _: &StageId) -> Option<Arc<CircuitBreakerSnapshotter>> {
         None
     }
 
@@ -146,4 +143,3 @@ impl ControlMiddlewareProvider for NoControlMiddleware {
 
     fn mark_circuit_breaker_opened(&self, _: &StageId) {}
 }
-

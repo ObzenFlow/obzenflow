@@ -294,8 +294,7 @@ async fn main() -> Result<()> {
                 top_products |> dashboard;
             }
     })
-    .await
-    ?;
+    .await?;
 
     println!("✅ E-commerce analytics completed!");
     println!("\n💡 Key Insights:");

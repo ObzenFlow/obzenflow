@@ -49,11 +49,7 @@ struct NoopSink;
 #[async_trait]
 impl SinkHandler for NoopSink {
     async fn consume(&mut self, _event: ChainEvent) -> Result<DeliveryPayload, HandlerError> {
-        Ok(DeliveryPayload::success(
-            "noop",
-            DeliveryMethod::Noop,
-            None,
-        ))
+        Ok(DeliveryPayload::success("noop", DeliveryMethod::Noop, None))
     }
 }
 
@@ -145,7 +141,8 @@ fn bench_waiting_for_gun_cpu_usage(c: &mut Criterion) {
     group.measurement_time(Duration::from_secs(45));
 
     group.bench_function("cpu_percentage", |b| {
-        b.to_async(&rt).iter(|| async { measure_waiting_for_gun_cpu().await.unwrap() });
+        b.to_async(&rt)
+            .iter(|| async { measure_waiting_for_gun_cpu().await.unwrap() });
     });
 
     group.finish();

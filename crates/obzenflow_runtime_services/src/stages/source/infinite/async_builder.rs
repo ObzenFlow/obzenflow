@@ -109,12 +109,8 @@ impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
                     stage_name_for_trace
                 );
 
-                HandlerSupervisedExt::run(
-                    supervisor,
-                    InfiniteSourceState::<H>::Created,
-                    context,
-                )
-                .await
+                HandlerSupervisedExt::run(supervisor, InfiniteSourceState::<H>::Created, context)
+                    .await
             });
 
         HandleBuilder::new()

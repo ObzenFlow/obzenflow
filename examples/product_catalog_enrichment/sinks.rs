@@ -52,7 +52,10 @@ pub fn per_order_printer() -> impl SinkHandler + Clone + std::fmt::Debug + 'stat
                 println!("   Discount: {:.0}%", discount * 100.0);
                 println!("   Original Revenue: ${:.2}", order.revenue);
                 println!("   Discounted Revenue: ${:.2} ✨", order.discounted_revenue);
-                println!("   Savings: ${:.2}", order.revenue - order.discounted_revenue);
+                println!(
+                    "   Savings: ${:.2}",
+                    order.revenue - order.discounted_revenue
+                );
             }
             _ => {
                 println!("\n⚪ No Promotion Applied");
@@ -63,7 +66,11 @@ pub fn per_order_printer() -> impl SinkHandler + Clone + std::fmt::Debug + 'stat
         println!("\n💰 Financial Summary:");
         println!("   Cost: ${:.2}", order.cost);
         println!("   Revenue: ${:.2}", order.discounted_revenue);
-        println!("   Margin: ${:.2} ({:.1}%)", order.final_margin, order.margin_pct * 100.0);
+        println!(
+            "   Margin: ${:.2} ({:.1}%)",
+            order.final_margin,
+            order.margin_pct * 100.0
+        );
         println!("{}", "=".repeat(60));
     })
 }
@@ -104,6 +111,8 @@ pub fn summary_printer() -> impl SinkHandler + Clone + std::fmt::Debug + 'static
             summary.promo_orders, summary.order_count
         );
         println!("\n   Note: LeftJoin preserved all orders, even without promotions!");
-        println!("   Note: StrictJoin would have failed on invalid payment (try INJECT_BAD_PAYMENT=1)");
+        println!(
+            "   Note: StrictJoin would have failed on invalid payment (try INJECT_BAD_PAYMENT=1)"
+        );
     })
 }

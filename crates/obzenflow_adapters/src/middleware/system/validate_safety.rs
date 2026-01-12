@@ -244,7 +244,9 @@ mod tests {
         fn create(
             &self,
             _config: &StageConfig,
-            _control_middleware: std::sync::Arc<crate::middleware::control::ControlMiddlewareAggregator>,
+            _control_middleware: std::sync::Arc<
+                crate::middleware::control::ControlMiddlewareAggregator,
+            >,
         ) -> Box<dyn Middleware> {
             Box::new(MockSkipControlMiddleware)
         }
@@ -270,7 +272,9 @@ mod tests {
         fn create(
             &self,
             _config: &StageConfig,
-            _control_middleware: std::sync::Arc<crate::middleware::control::ControlMiddlewareAggregator>,
+            _control_middleware: std::sync::Arc<
+                crate::middleware::control::ControlMiddlewareAggregator,
+            >,
         ) -> Box<dyn Middleware> {
             Box::new(MockSkipControlMiddleware) // Reuse the middleware impl
         }
@@ -333,7 +337,9 @@ mod tests {
             fn create(
                 &self,
                 _: &StageConfig,
-                _control_middleware: std::sync::Arc<crate::middleware::control::ControlMiddlewareAggregator>,
+                _control_middleware: std::sync::Arc<
+                    crate::middleware::control::ControlMiddlewareAggregator,
+                >,
             ) -> Box<dyn Middleware> {
                 unimplemented!()
             }

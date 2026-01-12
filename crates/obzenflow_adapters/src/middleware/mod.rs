@@ -129,12 +129,12 @@ mod middleware_safety;
 mod middleware_trait;
 
 // Handler-specific middleware adapters
+mod backpressure;
 mod join_middleware;
 mod sink_middleware;
 mod source_middleware;
 mod stateful_middleware;
 mod transform_middleware;
-mod backpressure;
 
 // Common middleware utilities
 mod context;

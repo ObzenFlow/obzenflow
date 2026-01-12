@@ -50,6 +50,7 @@ futures = "0.3"
 
 [features]
 console = ["obzenflow_infra/console", "dep:console-subscriber"]
+http-pull = ["obzenflow_infra/reqwest-client"]
 
 [profile.release]
 lto = true
@@ -81,3 +82,7 @@ path = "examples/csv_demo_support_sla/main.rs"
 [[example]]
 name = "payment_gateway_resilience"
 path = "examples/payment_gateway_resilience/main.rs"
+
+[[example]]
+name = "hn_ingestion_demo"
+path = "examples/hn_ingestion_demo/main.rs"

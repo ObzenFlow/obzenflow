@@ -24,7 +24,10 @@ struct NoopSink;
 
 #[async_trait]
 impl SinkHandler for NoopSink {
-    async fn consume(&mut self, _event: ChainEvent) -> std::result::Result<DeliveryPayload, HandlerError> {
+    async fn consume(
+        &mut self,
+        _event: ChainEvent,
+    ) -> std::result::Result<DeliveryPayload, HandlerError> {
         Ok(DeliveryPayload::success(
             "noop_sink",
             DeliveryMethod::Custom("Noop".to_string()),
@@ -238,7 +241,9 @@ async fn stop_infinite_source_reports_cancelled() -> Result<()> {
         Some(PipelineLifecycleEvent::Cancelled { reason, .. }) => Err(anyhow!(
             "expected pipeline_cancelled(user_stop), got pipeline_cancelled({reason})"
         )),
-        None => Err(anyhow!("expected terminal pipeline lifecycle event, found none")),
+        None => Err(anyhow!(
+            "expected terminal pipeline lifecycle event, found none"
+        )),
         _ => Err(anyhow!("unexpected non-terminal pipeline lifecycle event")),
     }
 }
@@ -290,7 +295,9 @@ async fn stop_finite_source_reports_cancelled() -> Result<()> {
         Some(PipelineLifecycleEvent::Cancelled { reason, .. }) => Err(anyhow!(
             "expected pipeline_cancelled(user_stop), got pipeline_cancelled({reason})"
         )),
-        None => Err(anyhow!("expected terminal pipeline lifecycle event, found none")),
+        None => Err(anyhow!(
+            "expected terminal pipeline lifecycle event, found none"
+        )),
         _ => Err(anyhow!("unexpected non-terminal pipeline lifecycle event")),
     }
 }
@@ -337,7 +344,9 @@ async fn stop_cancel_timeout_overrides_cancel_reason() -> Result<()> {
 
     let terminal = terminal_lifecycle_event(system_journal).await?;
     match terminal {
-        Some(PipelineLifecycleEvent::Cancelled { reason, .. }) if reason == "stop_timeout" => Ok(()),
+        Some(PipelineLifecycleEvent::Cancelled { reason, .. }) if reason == "stop_timeout" => {
+            Ok(())
+        }
         Some(PipelineLifecycleEvent::Cancelled { reason, .. }) => Err(anyhow!(
             "expected pipeline_cancelled(stop_timeout), got pipeline_cancelled({reason})"
         )),
@@ -347,7 +356,9 @@ async fn stop_cancel_timeout_overrides_cancel_reason() -> Result<()> {
         Some(PipelineLifecycleEvent::Failed { reason, .. }) => Err(anyhow!(
             "expected pipeline_cancelled(stop_timeout), got pipeline_failed({reason})"
         )),
-        None => Err(anyhow!("expected terminal pipeline lifecycle event, found none")),
+        None => Err(anyhow!(
+            "expected terminal pipeline lifecycle event, found none"
+        )),
         _ => Err(anyhow!("unexpected non-terminal pipeline lifecycle event")),
     }
 }

@@ -19,9 +19,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use obzenflow::sinks::ConsoleSink;
 use obzenflow_core::{
-    event::{
-        chain_event::{ChainEvent, ChainEventFactory},
-    },
+    event::chain_event::{ChainEvent, ChainEventFactory},
     id::StageId,
     TypedPayload, // ✨ FLOWIP-082a
     WriterId,

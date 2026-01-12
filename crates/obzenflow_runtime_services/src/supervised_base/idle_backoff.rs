@@ -35,4 +35,3 @@ impl IdleBackoff {
         self.current
     }
 }
-

@@ -235,26 +235,24 @@ impl<H: AsyncTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
 
         // Spawn the supervisor task
         let supervisor_name = format!("transform_{}", self.config.stage_name);
-        let task =
-            SupervisorTaskBuilder::<TransformSupervisor<Wrapped<H>>>::new(&supervisor_name).spawn(
-                move || async move {
-                    // Create a wrapper that handles external events
-                    let supervisor_with_events = HandlerSupervisedWithExternalEvents {
-                        supervisor,
-                        external_events: event_receiver,
-                        state_watcher: state_watcher_for_task,
-                        last_state: None,
-                    };
+        let task = SupervisorTaskBuilder::<TransformSupervisor<Wrapped<H>>>::new(&supervisor_name)
+            .spawn(move || async move {
+                // Create a wrapper that handles external events
+                let supervisor_with_events = HandlerSupervisedWithExternalEvents {
+                    supervisor,
+                    external_events: event_receiver,
+                    state_watcher: state_watcher_for_task,
+                    last_state: None,
+                };
 
-                    // Run with the wrapper
-                    HandlerSupervisedExt::run(
-                        supervisor_with_events,
-                        TransformState::<Wrapped<H>>::Created,
-                        context,
-                    )
-                    .await
-                },
-            );
+                // Run with the wrapper
+                HandlerSupervisedExt::run(
+                    supervisor_with_events,
+                    TransformState::<Wrapped<H>>::Created,
+                    context,
+                )
+                .await
+            });
 
         // Build and return handle
         HandleBuilder::new()

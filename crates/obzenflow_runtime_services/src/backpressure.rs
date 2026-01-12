@@ -150,10 +150,9 @@ impl BackpressureRegistry {
             let effective_writer = writer_seq + reserved;
 
             snapshot.stage_writer_seq.insert(*stage_id, writer_seq);
-            snapshot.stage_wait_nanos_total.insert(
-                *stage_id,
-                stage.wait_nanos_total.load(Ordering::Relaxed),
-            );
+            snapshot
+                .stage_wait_nanos_total
+                .insert(*stage_id, stage.wait_nanos_total.load(Ordering::Relaxed));
 
             let mut min_reader_seq = u64::MAX;
             let mut min_credit = u64::MAX;
@@ -177,9 +176,7 @@ impl BackpressureRegistry {
             snapshot
                 .stage_min_reader_seq
                 .insert(*stage_id, min_reader_seq);
-            snapshot
-                .stage_blocked
-                .insert(*stage_id, min_credit == 0);
+            snapshot.stage_blocked.insert(*stage_id, min_credit == 0);
         }
 
         snapshot
@@ -223,8 +220,8 @@ impl BackpressureWriter {
             return u64::MAX;
         }
 
-        let effective_writer = state.writer_seq.load(Ordering::Acquire)
-            + state.reserved.load(Ordering::Acquire);
+        let effective_writer =
+            state.writer_seq.load(Ordering::Acquire) + state.reserved.load(Ordering::Acquire);
 
         state
             .downstream_edges
@@ -243,8 +240,8 @@ impl BackpressureWriter {
             return None;
         }
 
-        let effective_writer = state.writer_seq.load(Ordering::Acquire)
-            + state.reserved.load(Ordering::Acquire);
+        let effective_writer =
+            state.writer_seq.load(Ordering::Acquire) + state.reserved.load(Ordering::Acquire);
 
         state
             .downstream_edges
@@ -415,9 +412,7 @@ impl BackpressureReader {
     }
 
     pub fn edge_ids(&self) -> Option<(StageId, StageId)> {
-        self.state
-            .as_ref()
-            .map(|s| (s.upstream, s.downstream))
+        self.state.as_ref().map(|s| (s.upstream, s.downstream))
     }
 }
 

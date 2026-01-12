@@ -26,26 +26,31 @@ use obzenflow_adapters::middleware::{backpressure, rate_limit, CircuitBreakerBui
 use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
 use obzenflow_core::{
     event::chain_event::{ChainEvent, ChainEventFactory},
-    CircuitBreakerContractMode,
-    TypedPayload,
+    CircuitBreakerContractMode, TypedPayload,
 };
 use obzenflow_dsl_infra::dsl::stage_descriptor::AsyncFiniteSourceDescriptor;
 use obzenflow_dsl_infra::{async_transform, flow, sink, source, transform};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
-use obzenflow_runtime_services::stages::common::handlers::{AsyncTransformHandler, TransformHandler};
+use obzenflow_runtime_services::stages::common::handlers::{
+    AsyncTransformHandler, TransformHandler,
+};
 use serde_json::json;
 use std::num::NonZeroU32;
 
 const BACKPRESSURE_WINDOW: u64 = 1_000;
 
 fn env_usize(key: &str) -> Option<usize> {
-    std::env::var(key).ok().and_then(|value| value.parse::<usize>().ok())
+    std::env::var(key)
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
 }
 
 fn env_f64(key: &str) -> Option<f64> {
-    std::env::var(key).ok().and_then(|value| value.parse::<f64>().ok())
+    std::env::var(key)
+        .ok()
+        .and_then(|value| value.parse::<f64>().ok())
 }
 
 fn env_bool(key: &str) -> Option<bool> {
@@ -195,7 +200,9 @@ impl AsyncTransformHandler for GatewayTransform {
                 // Returning `Err(Timeout)` exercises FLOWIP-086e's per-record
                 // error mapping + routing while still allowing middleware (CB)
                 // to classify infra failures.
-                Err(HandlerError::Timeout("gateway_timeout_simulated".to_string()))
+                Err(HandlerError::Timeout(
+                    "gateway_timeout_simulated".to_string(),
+                ))
             }
         }
     }
@@ -468,12 +475,11 @@ pub fn run_example() -> Result<()> {
     let recovery_events = env_usize("PAYMENT_GATEWAY_RECOVERY_EVENTS").unwrap_or(1_000);
     let summary_progress_every = env_usize("PAYMENT_GATEWAY_PROGRESS_EVERY").unwrap_or(5_000);
     let use_async_source = env_bool("PAYMENT_GATEWAY_ASYNC_SOURCE").unwrap_or(false);
-    let async_poll_timeout = match env_usize("PAYMENT_GATEWAY_ASYNC_POLL_TIMEOUT_SECS")
-        .unwrap_or(30)
-    {
-        0 => None,
-        secs => Some(std::time::Duration::from_secs(secs as u64)),
-    };
+    let async_poll_timeout =
+        match env_usize("PAYMENT_GATEWAY_ASYNC_POLL_TIMEOUT_SECS").unwrap_or(30) {
+            0 => None,
+            secs => Some(std::time::Duration::from_secs(secs as u64)),
+        };
 
     if let Some(total_events) = total_events {
         println!("\n🔁 High-volume glitchy mode enabled");
@@ -482,7 +488,11 @@ pub fn run_example() -> Result<()> {
         }
         println!(
             "   payments_src:   {}",
-            if use_async_source { "async (086f)" } else { "sync" }
+            if use_async_source {
+                "async (086f)"
+            } else {
+                "sync"
+            }
         );
         if use_async_source {
             match async_poll_timeout {

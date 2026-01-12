@@ -161,6 +161,11 @@ pub struct AppMetricsSnapshot {
     /// Keyed by `base_path` (e.g., "/api/ingest").
     pub ingestion_metrics: HashMap<String, crate::event::ingestion::IngestionTelemetrySnapshot>,
 
+    /// HTTP pull telemetry metrics derived from wide events (FLOWIP-084e).
+    ///
+    /// Keyed by stage ID (labels attach via `stage_metadata`).
+    pub http_pull_metrics: HashMap<StageId, crate::event::observability::HttpPullTelemetry>,
+
     /// Flow-level metrics (if journey events are implemented)
     pub flow_metrics: Option<FlowMetricsSnapshot>,
 
@@ -430,6 +435,7 @@ impl Default for AppMetricsSnapshot {
             backpressure_wait_seconds_total: HashMap::new(),
             contract_metrics: ContractMetricsSnapshot::default(),
             ingestion_metrics: HashMap::new(),
+            http_pull_metrics: HashMap::new(),
             flow_metrics: None,
             stage_metadata: HashMap::new(),
             stage_first_event_time: HashMap::new(),

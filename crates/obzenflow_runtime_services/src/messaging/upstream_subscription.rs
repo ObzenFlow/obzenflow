@@ -9,6 +9,7 @@
 //! - FSM owns control flow decisions (sleep, retry, transition)
 //! - Contract tracking is separated from subscription mechanics
 
+use obzenflow_core::control_middleware::{ControlMiddlewareProvider, NoControlMiddleware};
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::system_event::{SystemEvent, SystemEventType};
 use obzenflow_core::event::types::{
@@ -19,7 +20,6 @@ use obzenflow_core::event::{ChainEvent, ChainEventContent, ChainEventFactory, Jo
 use obzenflow_core::journal::journal::Journal;
 use obzenflow_core::journal::journal_error::JournalError;
 use obzenflow_core::journal::journal_reader::JournalReader;
-use obzenflow_core::control_middleware::{ControlMiddlewareProvider, NoControlMiddleware};
 use obzenflow_core::ContractResult;
 use obzenflow_core::EventEnvelope;
 use obzenflow_core::Result;
@@ -682,32 +682,29 @@ where
                 "subscription: calling reader.next()"
             );
 
-                match reader.next().await {
-                    Ok(Some(envelope)) => {
-                        // This reader has observed post-baseline data; it is no longer
-                        // logically at EOF due to a tail-start baseline.
-                        self.state.clear_reader_baseline_at_tail(current_index);
+            match reader.next().await {
+                Ok(Some(envelope)) => {
+                    // This reader has observed post-baseline data; it is no longer
+                    // logically at EOF due to a tail-start baseline.
+                    self.state.clear_reader_baseline_at_tail(current_index);
 
-                        // Stage runtime subscriptions should not deliver upstream observability
-                        // events to handlers. We still consume them from journals so that the
-                        // subscription can make progress toward transport events and EOF.
-                        if matches!(self.delivery_filter, DeliveryFilter::TransportOnly) {
-                            if let Some(chain_event) =
-                                (&envelope.event as &dyn Any).downcast_ref::<ChainEvent>()
-                            {
-                                if matches!(
-                                    chain_event.content,
-                                    ChainEventContent::Observability(_)
-                                ) {
-                                    // Observability events are not part of the transport stream.
-                                    // Skip delivering to the caller, but keep progressing.
-                                    self.state.next_reader_index();
-                                    continue;
-                                }
+                    // Stage runtime subscriptions should not deliver upstream observability
+                    // events to handlers. We still consume them from journals so that the
+                    // subscription can make progress toward transport events and EOF.
+                    if matches!(self.delivery_filter, DeliveryFilter::TransportOnly) {
+                        if let Some(chain_event) =
+                            (&envelope.event as &dyn Any).downcast_ref::<ChainEvent>()
+                        {
+                            if matches!(chain_event.content, ChainEventContent::Observability(_)) {
+                                // Observability events are not part of the transport stream.
+                                // Skip delivering to the caller, but keep progressing.
+                                self.state.next_reader_index();
+                                continue;
                             }
                         }
+                    }
 
-                        tracing::debug!(
+                    tracing::debug!(
                             target: "flowip-080o",
                             owner = %self.owner_label,
                             stage_id = ?stage_id,
@@ -1781,11 +1778,7 @@ mod tests {
         let upstream_journal: Arc<dyn Journal<ChainEvent>> =
             Arc::new(EmfileJournal::new(upstream_owner));
 
-        let upstreams = vec![(
-            upstream_stage,
-            "upstream".to_string(),
-            upstream_journal,
-        )];
+        let upstreams = vec![(upstream_stage, "upstream".to_string(), upstream_journal)];
 
         let err = UpstreamSubscription::<ChainEvent>::new_with_names_from_positions(
             "downstream",
@@ -2153,7 +2146,8 @@ mod tests {
     async fn transport_only_skips_observability_events() {
         let upstream_stage = StageId::new();
         let upstream_owner = JournalOwner::stage(upstream_stage);
-        let upstream_journal: Arc<dyn Journal<ChainEvent>> = Arc::new(TestJournal::new(upstream_owner));
+        let upstream_journal: Arc<dyn Journal<ChainEvent>> =
+            Arc::new(TestJournal::new(upstream_owner));
 
         let writer_id = WriterId::Stage(upstream_stage);
 

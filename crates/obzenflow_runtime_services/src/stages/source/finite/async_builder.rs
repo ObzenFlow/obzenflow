@@ -51,8 +51,8 @@ impl<H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
 }
 
 #[async_trait::async_trait]
-impl<H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> SupervisorBuilder
-    for AsyncFiniteSourceBuilder<H>
+impl<H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
+    SupervisorBuilder for AsyncFiniteSourceBuilder<H>
 {
     type Handle = FiniteSourceHandle<H>;
     type Error = BuilderError;
@@ -109,12 +109,8 @@ impl<H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
                     stage_name_for_trace
                 );
 
-                HandlerSupervisedExt::run(
-                    supervisor,
-                    FiniteSourceState::<H>::Created,
-                    context,
-                )
-                .await
+                HandlerSupervisedExt::run(supervisor, FiniteSourceState::<H>::Created, context)
+                    .await
             });
 
         HandleBuilder::new()

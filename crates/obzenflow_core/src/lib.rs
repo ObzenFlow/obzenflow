@@ -4,10 +4,11 @@
 //! Everything here is pure types and traits with no knowledge
 //! of infrastructure, I/O, or external systems.
 
-pub mod control_middleware;
 pub mod contracts;
+pub mod control_middleware;
 pub mod error;
 pub mod event;
+pub mod http_client;
 pub mod id;
 pub mod journal;
 pub mod metrics;

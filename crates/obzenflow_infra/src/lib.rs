@@ -3,6 +3,7 @@
 //! This layer contains persistence, external integrations, and I/O
 
 pub mod application;
+pub mod http_client;
 pub mod journal;
 pub mod monitoring_backend;
 pub mod web;

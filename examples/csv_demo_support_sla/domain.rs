@@ -89,4 +89,3 @@ pub fn due_bucket(effective_sla_hours: u32) -> &'static str {
         "backlog"
     }
 }
-

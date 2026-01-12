@@ -86,10 +86,7 @@ impl ControlMiddlewareProvider for ControlMiddlewareAggregator {
             .map(|reg| reg.metrics_fn.clone())
     }
 
-    fn rate_limiter_snapshotter(
-        &self,
-        stage_id: &StageId,
-    ) -> Option<Arc<RateLimiterSnapshotter>> {
+    fn rate_limiter_snapshotter(&self, stage_id: &StageId) -> Option<Arc<RateLimiterSnapshotter>> {
         self.rate_limiters
             .read()
             .expect("ControlMiddlewareAggregator: rate_limiters poisoned read lock")
@@ -127,4 +124,3 @@ impl ControlMiddlewareProvider for ControlMiddlewareAggregator {
         }
     }
 }
-

@@ -199,7 +199,8 @@ impl FlowHandle {
                             matches!(
                                 envelope.event.event,
                                 SystemEventType::MetricsCoordination(
-                                    MetricsCoordinationEvent::Drained | MetricsCoordinationEvent::Shutdown
+                                    MetricsCoordinationEvent::Drained
+                                        | MetricsCoordinationEvent::Shutdown
                                 )
                             )
                         });

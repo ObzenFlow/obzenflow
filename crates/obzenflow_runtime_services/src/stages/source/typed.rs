@@ -8,10 +8,11 @@
 //! - Infinite sources: never complete naturally; they run until external shutdown.
 //! - The runtime injects the stage `WriterId` via `bind_writer_id()` before the first `next()`.
 
-use crate::stages::common::handlers::{
-    AsyncFiniteSourceHandler, AsyncInfiniteSourceHandler, FiniteSourceHandler, InfiniteSourceHandler,
-};
 use crate::stages::common::handlers::source::SourceError;
+use crate::stages::common::handlers::{
+    AsyncFiniteSourceHandler, AsyncInfiniteSourceHandler, FiniteSourceHandler,
+    InfiniteSourceHandler,
+};
 use async_trait::async_trait;
 use futures::{Stream, StreamExt};
 use obzenflow_core::event::ChainEventFactory;
@@ -104,9 +105,7 @@ where
     /// Create a fallible finite source from a batch producer.
     ///
     /// Returns `FallibleFiniteSourceTyped` for error-returning producers.
-    pub fn fallible<F>(
-        producer: F,
-    ) -> FallibleFiniteSourceTyped<T, F>
+    pub fn fallible<F>(producer: F) -> FallibleFiniteSourceTyped<T, F>
     where
         F: FnMut(usize) -> Result<Option<Vec<T>>, SourceError> + Send + Sync + Clone,
     {
@@ -164,11 +163,11 @@ where
                 for item in items {
                     let event = ChainEventFactory::data_event_from(writer_id, &event_type, &item)
                         .map_err(|e| {
-                            SourceError::Other(format!(
-                                "SourceTyped failed to serialize {}: {e}",
-                                std::any::type_name::<T>()
-                            ))
-                        })?;
+                        SourceError::Other(format!(
+                            "SourceTyped failed to serialize {}: {e}",
+                            std::any::type_name::<T>()
+                        ))
+                    })?;
                     events.push(event);
                 }
                 self.current_index = self.current_index.saturating_add(item_count);
@@ -241,7 +240,10 @@ where
     /// Wraps the single-item producer into a batch producer internally.
     pub fn from_fallible_item_fn<G>(
         mut producer: G,
-    ) -> FallibleFiniteSourceTyped<T, impl FnMut(usize) -> Result<Option<Vec<T>>, SourceError> + Send + Sync + Clone>
+    ) -> FallibleFiniteSourceTyped<
+        T,
+        impl FnMut(usize) -> Result<Option<Vec<T>>, SourceError> + Send + Sync + Clone,
+    >
     where
         G: FnMut(usize) -> Result<Option<T>, SourceError> + Send + Sync + Clone,
     {
@@ -289,11 +291,11 @@ where
                 for item in items {
                     let event = ChainEventFactory::data_event_from(writer_id, &event_type, &item)
                         .map_err(|e| {
-                            SourceError::Other(format!(
-                                "FallibleSourceTyped failed to serialize {}: {e}",
-                                std::any::type_name::<T>()
-                            ))
-                        })?;
+                        SourceError::Other(format!(
+                            "FallibleSourceTyped failed to serialize {}: {e}",
+                            std::any::type_name::<T>()
+                        ))
+                    })?;
                     events.push(event);
                 }
                 self.current_index = self.current_index.saturating_add(item_count);
@@ -407,11 +409,11 @@ where
                 for item in items {
                     let event = ChainEventFactory::data_event_from(writer_id, &event_type, &item)
                         .map_err(|e| {
-                            SourceError::Other(format!(
-                                "SourceTyped failed to serialize {}: {e}",
-                                std::any::type_name::<T>()
-                            ))
-                        })?;
+                        SourceError::Other(format!(
+                            "SourceTyped failed to serialize {}: {e}",
+                            std::any::type_name::<T>()
+                        ))
+                    })?;
                     events.push(event);
                 }
                 self.current_index = self.current_index.saturating_add(item_count);
@@ -509,7 +511,10 @@ where
         mut producer: G,
     ) -> FallibleAsyncFiniteSourceTyped<
         T,
-        impl FnMut(usize) -> Pin<Box<dyn Future<Output = Result<Option<Vec<T>>, SourceError>> + Send>>
+        impl FnMut(
+                usize,
+            )
+                -> Pin<Box<dyn Future<Output = Result<Option<Vec<T>>, SourceError>> + Send>>
             + Send
             + Sync
             + Clone,
@@ -522,11 +527,7 @@ where
         FallibleAsyncFiniteSourceTyped::new(move |index| {
             let fut = producer(index);
             Box::pin(async move { fut.await.map(|opt| opt.map(|item| vec![item])) })
-                as Pin<
-                    Box<
-                        dyn Future<Output = Result<Option<Vec<T>>, SourceError>> + Send,
-                    >,
-                >
+                as Pin<Box<dyn Future<Output = Result<Option<Vec<T>>, SourceError>> + Send>>
         })
     }
 }
@@ -543,9 +544,7 @@ where
     /// Create a fallible async source from a batch producer.
     ///
     /// Returns `FallibleAsyncFiniteSourceTyped` for error-returning producers.
-    pub fn fallible<G, Fut>(
-        producer: G,
-    ) -> FallibleAsyncFiniteSourceTyped<T, G, Fut>
+    pub fn fallible<G, Fut>(producer: G) -> FallibleAsyncFiniteSourceTyped<T, G, Fut>
     where
         G: FnMut(usize) -> Fut + Send + Sync + Clone,
         Fut: Future<Output = Result<Option<Vec<T>>, SourceError>> + Send,
@@ -558,7 +557,10 @@ where
         producer: G,
     ) -> FallibleAsyncFiniteSourceTyped<
         T,
-        impl FnMut(usize) -> Pin<Box<dyn Future<Output = Result<Option<Vec<T>>, SourceError>> + Send>>
+        impl FnMut(
+                usize,
+            )
+                -> Pin<Box<dyn Future<Output = Result<Option<Vec<T>>, SourceError>> + Send>>
             + Send
             + Sync
             + Clone,
@@ -613,11 +615,11 @@ where
                 for item in items {
                     let event = ChainEventFactory::data_event_from(writer_id, &event_type, &item)
                         .map_err(|e| {
-                            SourceError::Other(format!(
-                                "FallibleAsyncSourceTyped failed to serialize {}: {e}",
-                                std::any::type_name::<T>()
-                            ))
-                        })?;
+                        SourceError::Other(format!(
+                            "FallibleAsyncSourceTyped failed to serialize {}: {e}",
+                            std::any::type_name::<T>()
+                        ))
+                    })?;
                     events.push(event);
                 }
                 self.current_index = self.current_index.saturating_add(item_count);
@@ -682,9 +684,7 @@ where
     /// Create a fallible infinite source from a batch producer.
     ///
     /// Returns `FallibleInfiniteSourceTyped` for error-returning producers.
-    pub fn fallible<G>(
-        producer: G,
-    ) -> FallibleInfiniteSourceTyped<T, G>
+    pub fn fallible<G>(producer: G) -> FallibleInfiniteSourceTyped<T, G>
     where
         G: FnMut(usize) -> Result<Vec<T>, SourceError> + Send + Sync + Clone,
     {
@@ -711,9 +711,9 @@ where
 
         FallibleInfiniteSourceTyped::new(move |_index| {
             let mut batch = Vec::new();
-            let guard = shared.lock().map_err(|e| {
-                SourceError::Other(format!("channel receiver lock poisoned: {e}"))
-            })?;
+            let guard = shared
+                .lock()
+                .map_err(|e| SourceError::Other(format!("channel receiver lock poisoned: {e}")))?;
 
             for _ in 0..cap {
                 match guard.try_recv() {
@@ -770,8 +770,8 @@ where
         let item_count = items.len();
         let mut events = Vec::with_capacity(item_count);
         for item in items {
-            let event = ChainEventFactory::data_event_from(writer_id, &event_type, &item)
-                .map_err(|e| {
+            let event =
+                ChainEventFactory::data_event_from(writer_id, &event_type, &item).map_err(|e| {
                     SourceError::Other(format!(
                         "InfiniteSourceTyped failed to serialize {}: {e}",
                         std::any::type_name::<T>()
@@ -870,8 +870,8 @@ where
         let item_count = items.len();
         let mut events = Vec::with_capacity(item_count);
         for item in items {
-            let event = ChainEventFactory::data_event_from(writer_id, &event_type, &item)
-                .map_err(|e| {
+            let event =
+                ChainEventFactory::data_event_from(writer_id, &event_type, &item).map_err(|e| {
                     SourceError::Other(format!(
                         "FallibleInfiniteSourceTyped failed to serialize {}: {e}",
                         std::any::type_name::<T>()
@@ -945,20 +945,14 @@ where
 }
 
 impl<T>
-    AsyncInfiniteSourceTyped<
-        T,
-        fn(usize) -> std::future::Ready<Vec<T>>,
-        std::future::Ready<Vec<T>>,
-    >
+    AsyncInfiniteSourceTyped<T, fn(usize) -> std::future::Ready<Vec<T>>, std::future::Ready<Vec<T>>>
 where
     T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
 {
     /// Create a fallible async infinite source from a batch producer.
     ///
     /// Returns `FallibleAsyncInfiniteSourceTyped` for error-returning producers.
-    pub fn fallible<G, FutG>(
-        producer: G,
-    ) -> FallibleAsyncInfiniteSourceTyped<T, G, FutG>
+    pub fn fallible<G, FutG>(producer: G) -> FallibleAsyncInfiniteSourceTyped<T, G, FutG>
     where
         G: FnMut(usize) -> FutG + Send + Sync + Clone,
         FutG: Future<Output = Result<Vec<T>, SourceError>> + Send,
@@ -1064,8 +1058,8 @@ where
         let item_count = items.len();
         let mut events = Vec::with_capacity(item_count);
         for item in items {
-            let event = ChainEventFactory::data_event_from(writer_id, &event_type, &item)
-                .map_err(|e| {
+            let event =
+                ChainEventFactory::data_event_from(writer_id, &event_type, &item).map_err(|e| {
                     SourceError::Other(format!(
                         "AsyncInfiniteSourceTyped failed to serialize {}: {e}",
                         std::any::type_name::<T>()
@@ -1188,8 +1182,8 @@ where
         let item_count = items.len();
         let mut events = Vec::with_capacity(item_count);
         for item in items {
-            let event = ChainEventFactory::data_event_from(writer_id, &event_type, &item)
-                .map_err(|e| {
+            let event =
+                ChainEventFactory::data_event_from(writer_id, &event_type, &item).map_err(|e| {
                     SourceError::Other(format!(
                         "FallibleAsyncInfiniteSourceTyped failed to serialize {}: {e}",
                         std::any::type_name::<T>()
@@ -1235,7 +1229,10 @@ mod tests {
         let writer_id = WriterId::from(StageId::new());
         src.bind_writer_id(writer_id);
 
-        let first = src.next().expect("next should succeed").expect("not complete");
+        let first = src
+            .next()
+            .expect("next should succeed")
+            .expect("not complete");
         assert_eq!(first.len(), 1);
         assert_eq!(first[0].writer_id, writer_id);
         assert_eq!(first[0].event_type(), TestPayload::versioned_event_type());
@@ -1292,7 +1289,10 @@ mod tests {
         let writer_id = WriterId::from(StageId::new());
         src.bind_writer_id(writer_id);
 
-        let first = src.next().expect("next should succeed").expect("not complete");
+        let first = src
+            .next()
+            .expect("next should succeed")
+            .expect("not complete");
         assert_eq!(first.len(), 1);
         assert_eq!(first[0].writer_id, writer_id);
         assert_eq!(first[0].event_type(), TestPayload::versioned_event_type());
@@ -1317,7 +1317,10 @@ mod tests {
         src.bind_writer_id(writer_id);
 
         // First call succeeds
-        let first = src.next().expect("next should succeed").expect("not complete");
+        let first = src
+            .next()
+            .expect("next should succeed")
+            .expect("not complete");
         assert_eq!(first.len(), 1);
 
         // Second call returns error
@@ -1354,7 +1357,10 @@ mod tests {
         assert_eq!(src.current_index, 0);
 
         // First: success (index advances)
-        let first = src.next().expect("next should succeed").expect("not complete");
+        let first = src
+            .next()
+            .expect("next should succeed")
+            .expect("not complete");
         assert_eq!(first.len(), 1);
         assert_eq!(src.current_index, 1);
 
@@ -1364,7 +1370,10 @@ mod tests {
         assert_eq!(src.current_index, 1);
 
         // Third: success (retry same index)
-        let second = src.next().expect("next should succeed").expect("not complete");
+        let second = src
+            .next()
+            .expect("next should succeed")
+            .expect("not complete");
         assert_eq!(second.len(), 1);
         assert_eq!(src.current_index, 2);
 
@@ -1392,7 +1401,11 @@ mod tests {
         let writer_id = WriterId::from(StageId::new());
         src.bind_writer_id(writer_id);
 
-        let first = src.next().await.expect("next should succeed").expect("not complete");
+        let first = src
+            .next()
+            .await
+            .expect("next should succeed")
+            .expect("not complete");
         assert_eq!(first.len(), 1);
         assert_eq!(first[0].writer_id, writer_id);
         assert_eq!(first[0].event_type(), TestPayload::versioned_event_type());
@@ -1416,7 +1429,11 @@ mod tests {
         src.bind_writer_id(writer_id);
 
         // First call succeeds
-        let first = src.next().await.expect("next should succeed").expect("not complete");
+        let first = src
+            .next()
+            .await
+            .expect("next should succeed")
+            .expect("not complete");
         assert_eq!(first.len(), 1);
 
         // Second call returns error
@@ -1430,18 +1447,23 @@ mod tests {
     #[tokio::test]
     async fn fallible_async_finite_source_typed_item_ctor_emits_and_completes() {
         let total = 2usize;
-        let mut src = AsyncFiniteSourceTyped::from_fallible_async_item_fn(move |index| async move {
-            if index >= total {
-                Ok(None)
-            } else {
-                Ok(Some(TestPayload { n: index }))
-            }
-        });
+        let mut src =
+            AsyncFiniteSourceTyped::from_fallible_async_item_fn(move |index| async move {
+                if index >= total {
+                    Ok(None)
+                } else {
+                    Ok(Some(TestPayload { n: index }))
+                }
+            });
 
         let writer_id = WriterId::from(StageId::new());
         src.bind_writer_id(writer_id);
 
-        let first = src.next().await.expect("next should succeed").expect("not complete");
+        let first = src
+            .next()
+            .await
+            .expect("next should succeed")
+            .expect("not complete");
         assert_eq!(first.len(), 1);
         assert_eq!(first[0].writer_id, writer_id);
         assert_eq!(first[0].event_type(), TestPayload::versioned_event_type());
@@ -1575,14 +1597,13 @@ mod tests {
 
     #[tokio::test]
     async fn fallible_async_infinite_source_typed_propagates_errors() {
-        let mut src =
-            FallibleAsyncInfiniteSourceTyped::new(|index| async move {
-                if index == 0 {
-                    Ok(vec![TestPayload { n: 0 }])
-                } else {
-                    Err(SourceError::Timeout("boom".to_string()))
-                }
-            });
+        let mut src = FallibleAsyncInfiniteSourceTyped::new(|index| async move {
+            if index == 0 {
+                Ok(vec![TestPayload { n: 0 }])
+            } else {
+                Err(SourceError::Timeout("boom".to_string()))
+            }
+        });
 
         let writer_id = WriterId::from(StageId::new());
         src.bind_writer_id(writer_id);

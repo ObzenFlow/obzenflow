@@ -3,6 +3,6 @@
 pub mod traits;
 
 pub use traits::{
-    AsyncFiniteSourceHandler, AsyncInfiniteSourceHandler, FiniteSourceHandler, InfiniteSourceHandler,
-    SourceError,
+    AsyncFiniteSourceHandler, AsyncInfiniteSourceHandler, FiniteSourceHandler,
+    InfiniteSourceHandler, SourceError,
 };

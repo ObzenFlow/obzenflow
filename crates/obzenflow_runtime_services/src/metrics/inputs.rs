@@ -4,8 +4,8 @@
 //! stage data journals from stage error journals, allowing MetricsAggregator
 //! to subscribe to both types of journals for comprehensive metrics collection.
 
-use obzenflow_core::{event::ChainEvent, journal::journal::Journal, StageId};
 use crate::backpressure::BackpressureRegistry;
+use obzenflow_core::{event::ChainEvent, journal::journal::Journal, StageId};
 use std::sync::Arc;
 
 /// Input structure for MetricsAggregator that separates data and error journals

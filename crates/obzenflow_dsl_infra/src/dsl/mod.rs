@@ -4,8 +4,8 @@
 //! that provide the high-level API for building ObzenFlow pipelines.
 
 mod dsl;
-mod flow_definition;
 pub mod error;
+mod flow_definition;
 pub mod stage_descriptor;
 mod stage_macros;
 
@@ -15,7 +15,7 @@ mod tests;
 // Re-export all public items
 #[allow(unused_imports)]
 pub use dsl::*;
-pub use flow_definition::FlowDefinition;
 pub use error::FlowBuildError;
+pub use flow_definition::FlowDefinition;
 #[allow(unused_imports)]
 pub use stage_macros::*;

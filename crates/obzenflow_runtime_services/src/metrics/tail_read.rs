@@ -141,7 +141,10 @@ pub async fn read_stage_metrics_from_tail(
         p95_ms = Some(ctx.recent_p95_ms);
         p99_ms = Some(ctx.recent_p99_ms);
         p999_ms = Some(ctx.recent_p999_ms);
-        update_max(&mut processing_time_sum_nanos, ctx.processing_time_sum_nanos);
+        update_max(
+            &mut processing_time_sum_nanos,
+            ctx.processing_time_sum_nanos,
+        );
         update_max(&mut event_loops_total, ctx.event_loops_total);
         update_max(
             &mut event_loops_with_work_total,
@@ -160,7 +163,10 @@ pub async fn read_stage_metrics_from_tail(
             update_max(&mut events_accumulated_total, ctx.events_accumulated_total);
             update_max(&mut events_emitted_total, ctx.events_emitted_total);
             update_max(&mut errors_total, ctx.errors_total);
-            update_max(&mut processing_time_sum_nanos, ctx.processing_time_sum_nanos);
+            update_max(
+                &mut processing_time_sum_nanos,
+                ctx.processing_time_sum_nanos,
+            );
             update_max(&mut event_loops_total, ctx.event_loops_total);
             update_max(
                 &mut event_loops_with_work_total,
@@ -467,11 +473,8 @@ mod tests {
 
         // Error journal snapshot: later snapshot with 5 total errors, including the same
         // domain errors plus additional remote errors.
-        let error_ctx = runtime_context_with_errors(
-            10,
-            5,
-            &[(ErrorKind::Domain, 2), (ErrorKind::Remote, 3)],
-        );
+        let error_ctx =
+            runtime_context_with_errors(10, 5, &[(ErrorKind::Domain, 2), (ErrorKind::Remote, 3)]);
         let mut error_event = ChainEventFactory::data_event(
             WriterId::from(stage_id),
             "test.error",

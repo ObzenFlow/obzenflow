@@ -6,9 +6,7 @@
 //! Run with: cargo run --package obzenflow --example top_n_leaderboard
 
 use anyhow::Result;
-use obzenflow_core::{
-    TypedPayload,
-};
+use obzenflow_core::TypedPayload;
 use obzenflow_dsl_infra::{flow, sink, source, stateful};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
@@ -147,8 +145,7 @@ async fn main() -> Result<()> {
                 leaderboard |> display;
             }
     })
-    .await
-    ?;
+    .await?;
 
     println!("✅ Leaderboard demo completed!");
     println!("\n💡 Key Points:");

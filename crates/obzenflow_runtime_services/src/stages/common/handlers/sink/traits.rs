@@ -11,13 +11,12 @@
 //! use obzenflow_core::{ChainEvent, Result};
 //! use async_trait::async_trait;
 //! use std::collections::HashMap;
-//! use reqwest::Client;
 //!
 //! use obzenflow_core::event::payloads::delivery_payload::DeliveryPayload;
 //!
 //! /// Minimal HTTP POST sink.
 //! struct HttpSink {
-//!     client: reqwest::Client,
+//!     client: YourHttpClient, // e.g., reqwest::Client
 //!     url:    String,
 //! }
 //!

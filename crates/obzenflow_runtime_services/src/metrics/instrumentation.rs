@@ -1,6 +1,10 @@
 //! FSM instrumentation for HandlerSupervised stages
 
 use hdrhistogram::Histogram;
+use obzenflow_core::control_middleware::{
+    CircuitBreakerSnapshotter, ControlMiddlewareProvider, NoControlMiddleware,
+    RateLimiterSnapshotter,
+};
 use obzenflow_core::event::event_envelope::EventEnvelope;
 use obzenflow_core::event::identity::journal_writer_id::JournalWriterId;
 use obzenflow_core::event::vector_clock::VectorClock;
@@ -9,9 +13,6 @@ use obzenflow_core::metrics::StageMetricsSnapshot;
 use obzenflow_core::EventId;
 use obzenflow_core::StageId;
 use obzenflow_core::WriterId;
-use obzenflow_core::control_middleware::{
-    CircuitBreakerSnapshotter, ControlMiddlewareProvider, NoControlMiddleware, RateLimiterSnapshotter,
-};
 use serde::{Deserialize, Serialize}; // <‑‑ canonical path
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{OnceLock, RwLock};
@@ -105,7 +106,6 @@ pub struct StageInstrumentation {
     // =========================================================================
     // Control middleware bindings (FLOWIP-059a-3)
     // =========================================================================
-
     /// Flow-scoped provider for control middleware state/metrics.
     control_middleware: Arc<dyn ControlMiddlewareProvider>,
 
@@ -190,12 +190,12 @@ impl StageInstrumentation {
         self.cb_snapshotter = provider.circuit_breaker_snapshotter(stage_id);
         self.rl_snapshotter = provider.rate_limiter_snapshotter(stage_id);
         self.cb_state = provider.circuit_breaker_state(stage_id);
-        let cb_contract_info_present = provider
-            .circuit_breaker_contract_info(stage_id)
-            .is_some();
+        let cb_contract_info_present = provider.circuit_breaker_contract_info(stage_id).is_some();
 
         if expects_circuit_breaker
-            && (self.cb_snapshotter.is_none() || self.cb_state.is_none() || !cb_contract_info_present)
+            && (self.cb_snapshotter.is_none()
+                || self.cb_state.is_none()
+                || !cb_contract_info_present)
         {
             return Err(ControlBindError::MissingCircuitBreaker {
                 stage_id: *stage_id,
@@ -283,8 +283,8 @@ impl StageInstrumentation {
                 .map(|(k, v)| (k.clone(), v.load(Ordering::Relaxed)))
                 .collect(),
 
-    // Control middleware cumulative metrics are injected by supervisors
-    // via `snapshot_with_control()` so defaults are always present.
+            // Control middleware cumulative metrics are injected by supervisors
+            // via `snapshot_with_control()` so defaults are always present.
             cb_requests_total: 0,
             cb_successes_total: 0,
             cb_failures_total: 0,

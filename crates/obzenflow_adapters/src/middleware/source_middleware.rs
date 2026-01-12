@@ -5,12 +5,15 @@
 
 use super::{Middleware, MiddlewareAction, MiddlewareContext};
 use async_trait::async_trait;
-use obzenflow_core::event::payloads::observability_payload::{MetricsLifecycle, ObservabilityPayload};
+use obzenflow_core::event::payloads::observability_payload::{
+    MetricsLifecycle, ObservabilityPayload,
+};
 use obzenflow_core::event::status::processing_status::ErrorKind;
 use obzenflow_core::event::ChainEventFactory;
 use obzenflow_core::{ChainEvent, WriterId};
 use obzenflow_runtime_services::stages::common::handlers::{
-    AsyncFiniteSourceHandler, AsyncInfiniteSourceHandler, FiniteSourceHandler, InfiniteSourceHandler,
+    AsyncFiniteSourceHandler, AsyncInfiniteSourceHandler, FiniteSourceHandler,
+    InfiniteSourceHandler,
 };
 use obzenflow_runtime_services::stages::SourceError;
 use serde_json::json;
@@ -64,7 +67,9 @@ fn backoff_on_cb_rejection(ctx: &MiddlewareContext) {
 
     // Avoid hot-looping when circuit breaker is Open or when a probe is already in-flight.
     let sleep_for = match (reason, cooldown_ms) {
-        (Some("circuit_open"), Some(ms)) if ms > 0 => Duration::from_millis(ms.min(MAX_CB_BACKOFF_MS)),
+        (Some("circuit_open"), Some(ms)) if ms > 0 => {
+            Duration::from_millis(ms.min(MAX_CB_BACKOFF_MS))
+        }
         (Some("probe_in_progress"), _) => Duration::from_millis(1),
         _ => return,
     };
@@ -121,7 +126,11 @@ fn source_error_kind(err: &SourceError) -> ErrorKind {
     }
 }
 
-fn source_error_event(writer_id: WriterId, source_type: &'static str, err: &SourceError) -> ChainEvent {
+fn source_error_event(
+    writer_id: WriterId,
+    source_type: &'static str,
+    err: &SourceError,
+) -> ChainEvent {
     let kind = source_error_kind(err);
     let timestamp_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -437,7 +446,9 @@ impl<H: AsyncInfiniteSourceHandler> MiddlewareAsyncInfiniteSource<H> {
 }
 
 #[async_trait]
-impl<H: AsyncInfiniteSourceHandler> AsyncInfiniteSourceHandler for MiddlewareAsyncInfiniteSource<H> {
+impl<H: AsyncInfiniteSourceHandler> AsyncInfiniteSourceHandler
+    for MiddlewareAsyncInfiniteSource<H>
+{
     fn bind_writer_id(&mut self, id: WriterId) {
         self.writer_id = id;
         self.inner.bind_writer_id(id);
@@ -1058,8 +1069,8 @@ impl<H: InfiniteSourceHandler> InfiniteSourceMiddlewareBuilder<H> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use async_trait::async_trait;
     use crate::middleware::control::circuit_breaker::CircuitBreakerMiddleware;
+    use async_trait::async_trait;
     use obzenflow_core::event::status::processing_status::ErrorKind;
     use obzenflow_core::event::status::processing_status::ProcessingStatus;
     use obzenflow_core::StageId;
@@ -1081,7 +1092,9 @@ mod tests {
     #[test]
     fn finite_source_errors_trip_circuit_breaker_and_prevent_polling() {
         let calls = Arc::new(AtomicUsize::new(0));
-        let inner = ErringFiniteSource { calls: calls.clone() };
+        let inner = ErringFiniteSource {
+            calls: calls.clone(),
+        };
 
         let stage_id = StageId::new();
         let writer_id = WriterId::from(stage_id);
@@ -1102,7 +1115,11 @@ mod tests {
             .iter()
             .filter(|e| matches!(e.processing_info.status, ProcessingStatus::Error { .. }))
             .collect();
-        assert_eq!(error_events.len(), 1, "expected exactly one source error event");
+        assert_eq!(
+            error_events.len(),
+            1,
+            "expected exactly one source error event"
+        );
         assert!(
             error_events[0].is_lifecycle(),
             "source errors should be lifecycle events (not data)"
@@ -1110,7 +1127,10 @@ mod tests {
 
         match &error_events[0].processing_info.status {
             ProcessingStatus::Error { kind, .. } => {
-                assert_eq!(kind.clone().unwrap_or(ErrorKind::Unknown), ErrorKind::Timeout);
+                assert_eq!(
+                    kind.clone().unwrap_or(ErrorKind::Unknown),
+                    ErrorKind::Timeout
+                );
             }
             _ => unreachable!("filtered to Error events"),
         }
@@ -1141,7 +1161,9 @@ mod tests {
     #[test]
     fn infinite_source_errors_trip_circuit_breaker_and_prevent_polling() {
         let calls = Arc::new(AtomicUsize::new(0));
-        let inner = ErringInfiniteSource { calls: calls.clone() };
+        let inner = ErringInfiniteSource {
+            calls: calls.clone(),
+        };
 
         let stage_id = StageId::new();
         let writer_id = WriterId::from(stage_id);
@@ -1157,7 +1179,8 @@ mod tests {
             .expect("infinite source wrapper should not propagate SourceError");
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert!(
-            first.iter()
+            first
+                .iter()
                 .any(|e| matches!(e.processing_info.status, ProcessingStatus::Error { .. })),
             "expected an error-marked event"
         );
@@ -1189,7 +1212,9 @@ mod tests {
     #[tokio::test]
     async fn async_finite_source_errors_trip_circuit_breaker_and_prevent_polling() {
         let calls = Arc::new(AtomicUsize::new(0));
-        let inner = ErringAsyncFiniteSource { calls: calls.clone() };
+        let inner = ErringAsyncFiniteSource {
+            calls: calls.clone(),
+        };
 
         let stage_id = StageId::new();
         let writer_id = WriterId::from(stage_id);
@@ -1242,7 +1267,9 @@ mod tests {
     #[tokio::test]
     async fn async_infinite_source_errors_trip_circuit_breaker_and_prevent_polling() {
         let calls = Arc::new(AtomicUsize::new(0));
-        let inner = ErringAsyncInfiniteSource { calls: calls.clone() };
+        let inner = ErringAsyncInfiniteSource {
+            calls: calls.clone(),
+        };
 
         let stage_id = StageId::new();
         let writer_id = WriterId::from(stage_id);
@@ -1259,7 +1286,8 @@ mod tests {
             .expect("async infinite source wrapper should not propagate SourceError");
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert!(
-            first.iter()
+            first
+                .iter()
                 .any(|e| matches!(e.processing_info.status, ProcessingStatus::Error { .. })),
             "expected an error-marked event"
         );

@@ -3,13 +3,15 @@
 //! This module handles the complex wiring of stage-local journals, upstream journals,
 //! control journals, message bus, and other resources that stages need.
 
+use crate::backpressure::{
+    BackpressurePlan, BackpressureReader, BackpressureRegistry, BackpressureWriter,
+};
 use crate::id_conversions::StageIdExt;
-use crate::backpressure::{BackpressurePlan, BackpressureReader, BackpressureRegistry, BackpressureWriter};
 use crate::message_bus::FsmMessageBus;
 use crate::messaging::upstream_subscription::{ContractConfig, UpstreamSubscription};
+use obzenflow_core::control_middleware::ControlMiddlewareProvider;
 use obzenflow_core::event::SystemEvent;
 use obzenflow_core::journal::journal::Journal;
-use obzenflow_core::control_middleware::ControlMiddlewareProvider;
 use obzenflow_core::{ChainEvent, FlowId, StageId, SystemId, WriterId};
 use obzenflow_topology::Topology;
 use std::collections::HashMap;
@@ -245,8 +247,10 @@ impl StageResourcesBuilder {
         let message_bus = Arc::new(FsmMessageBus::new());
 
         // Build backpressure registry once per flow (Phase 1: in-process).
-        let backpressure_registry =
-            Arc::new(BackpressureRegistry::new(self.topology.as_ref(), &self.backpressure_plan));
+        let backpressure_registry = Arc::new(BackpressureRegistry::new(
+            self.topology.as_ref(),
+            &self.backpressure_plan,
+        ));
 
         // Build stage resources for each stage
         let mut stage_resources = HashMap::new();
@@ -373,8 +377,10 @@ impl StageResourcesBuilder {
             let backpressure_writer = backpressure_registry.writer(stage_id);
             let mut backpressure_readers: HashMap<StageId, BackpressureReader> = HashMap::new();
             for upstream_stage in upstream_journals.iter().map(|(id, _)| *id) {
-                backpressure_readers
-                    .insert(upstream_stage, backpressure_registry.reader(upstream_stage, stage_id));
+                backpressure_readers.insert(
+                    upstream_stage,
+                    backpressure_registry.reader(upstream_stage, stage_id),
+                );
             }
 
             // Create subscription factory with ALL stage names (not just upstreams)

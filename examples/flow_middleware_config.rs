@@ -27,10 +27,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use obzenflow_adapters::middleware::rate_limit;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
-use obzenflow_core::{
-    event::chain_event::ChainEvent,
-    TypedPayload,
-};
+use obzenflow_core::{event::chain_event::ChainEvent, TypedPayload};
 use obzenflow_dsl_infra::{flow, sink, source, transform};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
@@ -175,8 +172,7 @@ async fn main() -> Result<()> {
                 trans |> snk;
             }
     })
-    .await
-    ?;
+    .await?;
 
     println!("\n\nFlow completed successfully!");
     println!("\nKey observations:");

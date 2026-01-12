@@ -252,7 +252,9 @@ impl MiddlewareFactory for WindowingMiddlewareFactory {
     fn create(
         &self,
         _config: &StageConfig,
-        _control_middleware: std::sync::Arc<crate::middleware::control::ControlMiddlewareAggregator>,
+        _control_middleware: std::sync::Arc<
+            crate::middleware::control::ControlMiddlewareAggregator,
+        >,
     ) -> Box<dyn Middleware> {
         Box::new(WindowingMiddleware::new(
             self.window_duration,

@@ -4,9 +4,11 @@ use crate::stages::common::handlers::AsyncInfiniteSourceHandler;
 use crate::supervised_base::base::Supervisor;
 use crate::supervised_base::{EventLoopDirective, EventReceiver, HandlerSupervised, StateWatcher};
 use obzenflow_core::event::context::FlowContext;
-use obzenflow_core::event::payloads::observability_payload::{MiddlewareLifecycle, ObservabilityPayload};
-use obzenflow_core::event::{ChainEventFactory, SystemEvent};
+use obzenflow_core::event::payloads::observability_payload::{
+    MiddlewareLifecycle, ObservabilityPayload,
+};
 use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
+use obzenflow_core::event::{ChainEventFactory, SystemEvent};
 use obzenflow_core::journal::journal::Journal;
 use obzenflow_core::{ChainEvent, StageId, WriterId};
 use obzenflow_fsm::{fsm, EventVariant, StateVariant, Transition};
@@ -289,8 +291,8 @@ impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
 }
 
 #[async_trait::async_trait]
-impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSupervised
-    for AsyncInfiniteSourceSupervisor<H>
+impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
+    HandlerSupervised for AsyncInfiniteSourceSupervisor<H>
 {
     type Handler = H;
 
@@ -352,8 +354,8 @@ impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
                         &ctx.data_journal
                     };
 
-                    let event_to_write =
-                        event_to_write.with_runtime_context(ctx.instrumentation.snapshot_with_control());
+                    let event_to_write = event_to_write
+                        .with_runtime_context(ctx.instrumentation.snapshot_with_control());
 
                     if Arc::ptr_eq(journal, &ctx.data_journal) && event_to_write.is_data() {
                         // Debug-only: emit activity pulses even when bypass is enabled, so
@@ -429,7 +431,8 @@ impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
                                     flow_id: ctx.flow_id.to_string(),
                                     stage_name: ctx.stage_name.clone(),
                                     stage_id: self.stage_id.clone(),
-                                    stage_type: obzenflow_core::event::context::StageType::InfiniteSource,
+                                    stage_type:
+                                        obzenflow_core::event::context::StageType::InfiniteSource,
                                 };
 
                                 let event = ChainEventFactory::observability_event(
@@ -502,8 +505,7 @@ impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
                     }
                 }
 
-                ctx
-                    .instrumentation
+                ctx.instrumentation
                     .event_loops_total
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
@@ -526,15 +528,16 @@ impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
 
                 match next_result {
                     Ok(events) if !events.is_empty() => {
-                        ctx
-                            .instrumentation
+                        ctx.instrumentation
                             .event_loops_with_work_total
                             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-                        let data_events_in_tick = events.iter().filter(|event| event.is_data()).count();
+                        let data_events_in_tick =
+                            events.iter().filter(|event| event.is_data()).count();
                         let per_data_event_duration = if data_events_in_tick > 0 {
                             let nanos = (tick_duration.as_nanos() / data_events_in_tick as u128)
-                                .min(u64::MAX as u128) as u64;
+                                .min(u64::MAX as u128)
+                                as u64;
                             Duration::from_nanos(nanos)
                         } else {
                             Duration::from_nanos(0)
@@ -546,7 +549,8 @@ impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
                                 flow_id: ctx.flow_id.to_string(),
                                 stage_name: ctx.stage_name.clone(),
                                 stage_id: self.stage_id.clone(),
-                                stage_type: obzenflow_core::event::context::StageType::InfiniteSource,
+                                stage_type:
+                                    obzenflow_core::event::context::StageType::InfiniteSource,
                             };
 
                             let staged_event = event.with_flow_context(flow_context);
@@ -563,10 +567,9 @@ impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
                             for event_to_write in events_to_write {
                                 if event_to_write.is_data() {
                                     ctx.instrumentation.record_output_event(&event_to_write);
-                                    ctx.instrumentation.events_processed_total.fetch_add(
-                                        1,
-                                        std::sync::atomic::Ordering::Relaxed,
-                                    );
+                                    ctx.instrumentation
+                                        .events_processed_total
+                                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                                     ctx.instrumentation
                                         .record_processing_time(per_data_event_duration);
                                 }
@@ -598,7 +601,9 @@ impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
                         "drain() failed; continuing shutdown"
                     );
                 }
-                Ok(EventLoopDirective::Transition(InfiniteSourceEvent::Completed))
+                Ok(EventLoopDirective::Transition(
+                    InfiniteSourceEvent::Completed,
+                ))
             }
 
             InfiniteSourceState::Drained => Ok(EventLoopDirective::Terminate),

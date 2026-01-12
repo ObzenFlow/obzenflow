@@ -12,7 +12,9 @@ use obzenflow_runtime_services::id_conversions::StageIdExt;
 use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
 use obzenflow_runtime_services::stages::common::handlers::StatefulHandler;
 use obzenflow_runtime_services::stages::resources_builder::StageResourcesBuilder;
-use obzenflow_runtime_services::stages::stateful::{StatefulBuilder, StatefulConfig, StatefulHandleExt};
+use obzenflow_runtime_services::stages::stateful::{
+    StatefulBuilder, StatefulConfig, StatefulHandleExt,
+};
 use obzenflow_runtime_services::supervised_base::SupervisorBuilder;
 use obzenflow_topology::{StageType as TopologyStageType, TopologyBuilder};
 use serde_json::json;
@@ -106,12 +108,15 @@ async fn stateful_emit_interval_emits_while_idle() {
 
     let topology = Arc::new(topology.build().expect("topology should build"));
 
-    let src_journal = Arc::new(MemoryJournal::<ChainEvent>::with_owner(JournalOwner::stage(src)));
-    let stateful_journal = Arc::new(MemoryJournal::<ChainEvent>::with_owner(JournalOwner::stage(
-        stateful_stage,
-    )));
-    let sink_journal =
-        Arc::new(MemoryJournal::<ChainEvent>::with_owner(JournalOwner::stage(sink)));
+    let src_journal = Arc::new(MemoryJournal::<ChainEvent>::with_owner(
+        JournalOwner::stage(src),
+    ));
+    let stateful_journal = Arc::new(MemoryJournal::<ChainEvent>::with_owner(
+        JournalOwner::stage(stateful_stage),
+    ));
+    let sink_journal = Arc::new(MemoryJournal::<ChainEvent>::with_owner(
+        JournalOwner::stage(sink),
+    ));
 
     let mut stage_journals: HashMap<StageId, Arc<dyn Journal<ChainEvent>>> = HashMap::new();
     stage_journals.insert(src, src_journal.clone());
@@ -141,11 +146,8 @@ async fn stateful_emit_interval_emits_while_idle() {
 
     // Seed one upstream data event to establish the baseline.
     let upstream_writer = WriterId::from(src);
-    let input_event = ChainEventFactory::data_event(
-        upstream_writer.clone(),
-        "test.input",
-        json!({ "seq": 1 }),
-    );
+    let input_event =
+        ChainEventFactory::data_event(upstream_writer.clone(), "test.input", json!({ "seq": 1 }));
     src_journal
         .append(input_event, None)
         .await

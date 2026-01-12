@@ -81,7 +81,10 @@ impl SinkHandler for CountingSink {
         }
 
         let event_type = event.event_type();
-        *counts.other_event_types.entry(event_type.clone()).or_insert(0) += 1;
+        *counts
+            .other_event_types
+            .entry(event_type.clone())
+            .or_insert(0) += 1;
 
         if event.is_data() && event_type == self.expected_event_type {
             counts.demo_data_events += 1;
@@ -93,11 +96,7 @@ impl SinkHandler for CountingSink {
             }
         }
 
-        Ok(DeliveryPayload::success(
-            "noop",
-            DeliveryMethod::Noop,
-            None,
-        ))
+        Ok(DeliveryPayload::success("noop", DeliveryMethod::Noop, None))
     }
 }
 
@@ -238,8 +237,7 @@ async fn main() -> Result<()> {
             fallible_async_src |> snk;
         }
     })
-    .await
-    ?;
+    .await?;
 
     let counts = counts.lock().expect("Counts lock poisoned");
     let expected = expected_demo_counts();

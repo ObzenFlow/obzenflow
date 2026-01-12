@@ -8,7 +8,9 @@ use crate::supervised_base::base::Supervisor;
 use crate::supervised_base::{EventLoopDirective, HandlerSupervised};
 use obzenflow_core::event::context::FlowContext;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
-use obzenflow_core::event::payloads::observability_payload::{MiddlewareLifecycle, ObservabilityPayload};
+use obzenflow_core::event::payloads::observability_payload::{
+    MiddlewareLifecycle, ObservabilityPayload,
+};
 use obzenflow_core::event::ChainEventFactory;
 use obzenflow_core::event::SystemEvent;
 use obzenflow_core::journal::journal::Journal;
@@ -911,9 +913,9 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
                                                             ctx.backpressure_backoff.next_delay();
                                                         ctx.backpressure_writer.record_wait(delay);
 
-                                                        if let Some((min_credit, limiting)) =
-                                                            ctx.backpressure_writer
-                                                                .min_downstream_credit_detail()
+                                                        if let Some((min_credit, limiting)) = ctx
+                                                            .backpressure_writer
+                                                            .min_downstream_credit_detail()
                                                         {
                                                             ctx.backpressure_pulse.record_delay(
                                                                 delay,
@@ -946,7 +948,11 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
                                                                 ctx.instrumentation.snapshot_with_control(),
                                                             );
 
-                                                            match ctx.data_journal.append(event, None).await {
+                                                            match ctx
+                                                                .data_journal
+                                                                .append(event, None)
+                                                                .await
+                                                            {
                                                                 Ok(written) => {
                                                                     crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
                                                                         &written,
@@ -1445,7 +1451,7 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
                                                 format!(
                                                     "Failed to write error event during drain: {}",
                                                     e
-                                            )
+                                                )
                                             })?;
                                         // Error events are isolated to the stage's error journal and
                                         // MUST NOT participate in downstream transport contracts.
@@ -1517,8 +1523,9 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
                                             let delay = ctx.backpressure_backoff.next_delay();
                                             ctx.backpressure_writer.record_wait(delay);
 
-                                            if let Some((min_credit, limiting)) =
-                                                ctx.backpressure_writer.min_downstream_credit_detail()
+                                            if let Some((min_credit, limiting)) = ctx
+                                                .backpressure_writer
+                                                .min_downstream_credit_detail()
                                             {
                                                 ctx.backpressure_pulse.record_delay(
                                                     delay,
@@ -1526,9 +1533,11 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
                                                     Some(limiting),
                                                 );
                                             } else {
-                                                ctx.backpressure_pulse.record_delay(delay, None, None);
+                                                ctx.backpressure_pulse
+                                                    .record_delay(delay, None, None);
                                             }
-                                            if let Some(pulse) = ctx.backpressure_pulse.maybe_emit() {
+                                            if let Some(pulse) = ctx.backpressure_pulse.maybe_emit()
+                                            {
                                                 let flow_context = FlowContext {
                                                     flow_name: ctx.flow_name.clone(),
                                                     flow_id: ctx.flow_id.to_string(),
@@ -1580,8 +1589,7 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
                                         let enriched_event = event
                                             .with_flow_context(flow_context)
                                             .with_runtime_context(
-                                                ctx.instrumentation
-                                                    .snapshot_with_control(),
+                                                ctx.instrumentation.snapshot_with_control(),
                                             );
 
                                         if enriched_event.is_data() {
@@ -1617,8 +1625,7 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
                                         let enriched_event = event
                                             .with_flow_context(flow_context)
                                             .with_runtime_context(
-                                                ctx.instrumentation
-                                                    .snapshot_with_control(),
+                                                ctx.instrumentation.snapshot_with_control(),
                                             );
 
                                         let written = ctx
@@ -1717,7 +1724,9 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
     }
 }
 
-impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> TransformSupervisor<H> {
+impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
+    TransformSupervisor<H>
+{
     /// Helper to forward control events
     async fn forward_control_event(
         &self,
@@ -1826,7 +1835,10 @@ mod tests {
             let mut env = EventEnvelope::new(JournalWriterId::from(self.id), event);
 
             if let Some(parent) = parent {
-                CausalOrderingService::update_with_parent(&mut env.vector_clock, &parent.vector_clock);
+                CausalOrderingService::update_with_parent(
+                    &mut env.vector_clock,
+                    &parent.vector_clock,
+                );
             }
 
             let writer_key = env.event.writer_id().to_string();
@@ -1980,8 +1992,14 @@ mod tests {
         let k = StageId::from_topology_id(k_top);
 
         let plan = BackpressurePlan::disabled()
-            .with_stage_window(s, NonZeroU64::new(upstream_window).expect("upstream_window"))
-            .with_stage_window(t, NonZeroU64::new(transform_window).expect("transform_window"));
+            .with_stage_window(
+                s,
+                NonZeroU64::new(upstream_window).expect("upstream_window"),
+            )
+            .with_stage_window(
+                t,
+                NonZeroU64::new(transform_window).expect("transform_window"),
+            );
         let registry = BackpressureRegistry::new(&topology, &plan);
 
         let upstream_journal: Arc<dyn Journal<ChainEvent>> =
@@ -2072,7 +2090,10 @@ mod tests {
         upstream_writer.reserve(1).expect("seed reserve").commit(1);
 
         let input = ChainEventFactory::data_event(WriterId::from(s), "bp_test.in", json!({}));
-        upstream_journal.append(input, None).await.expect("append input");
+        upstream_journal
+            .append(input, None)
+            .await
+            .expect("append input");
 
         let state = TransformState::<ExpandHandler>::Running;
         let directive = supervisor
@@ -2131,7 +2152,10 @@ mod tests {
         upstream_writer.reserve(1).expect("seed reserve").commit(1);
 
         let input = ChainEventFactory::data_event(WriterId::from(s), "bp_test.in", json!({}));
-        upstream_journal.append(input, None).await.expect("append input");
+        upstream_journal
+            .append(input, None)
+            .await
+            .expect("append input");
 
         let state = TransformState::<FilterHandler>::Running;
         supervisor
@@ -2158,7 +2182,10 @@ mod tests {
         // across stages for attribution. Backpressure MUST still ack the edge based on which
         // upstream journal produced the event.
         let input = ChainEventFactory::data_event(WriterId::from(t), "bp_test.in", json!({}));
-        upstream_journal.append(input, None).await.expect("append input");
+        upstream_journal
+            .append(input, None)
+            .await
+            .expect("append input");
 
         let state = TransformState::<FilterHandler>::Running;
         supervisor
@@ -2199,7 +2226,8 @@ mod tests {
         ));
 
         let state = TransformState::<ExpandHandler>::Running;
-        let mut task = tokio_test::task::spawn(async { supervisor.dispatch_state(&state, &mut ctx).await });
+        let mut task =
+            tokio_test::task::spawn(async { supervisor.dispatch_state(&state, &mut ctx).await });
 
         assert_pending!(task.poll());
 
@@ -2220,7 +2248,8 @@ mod tests {
         drop(task);
 
         // Still blocked on the same pending output: the next dispatch should back off to 2ms.
-        let mut task = tokio_test::task::spawn(async { supervisor.dispatch_state(&state, &mut ctx).await });
+        let mut task =
+            tokio_test::task::spawn(async { supervisor.dispatch_state(&state, &mut ctx).await });
         assert_pending!(task.poll());
         let waited = registry
             .metrics_snapshot()

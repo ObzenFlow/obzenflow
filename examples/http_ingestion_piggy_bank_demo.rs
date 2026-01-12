@@ -29,9 +29,7 @@ use obzenflow_adapters::sinks::{ConsoleSink, SnapshotTableFormatter};
 use obzenflow_adapters::sources::http::HttpSource;
 use obzenflow_core::event::schema::TypedPayload;
 use obzenflow_core::{ChainEvent, StageId, WriterId};
-use obzenflow_dsl_infra::{
-    async_infinite_source, flow, join, sink, stateful, with_ref,
-};
+use obzenflow_dsl_infra::{async_infinite_source, flow, join, sink, stateful, with_ref};
 use obzenflow_infra::application::{FlowApplication, LogLevel};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_infra::web::endpoints::event_ingestion::{
@@ -145,24 +143,26 @@ impl StatefulHandler for Checkbook {
             return;
         };
 
-        let ledger = state.ledgers.entry(tx.account_id.clone()).or_insert_with(|| {
-            AccountLedger {
+        let ledger = state
+            .ledgers
+            .entry(tx.account_id.clone())
+            .or_insert_with(|| AccountLedger {
                 owner: tx.owner.clone(),
                 initial_balance_cents: tx.initial_balance_cents,
                 current_balance_cents: tx.initial_balance_cents,
                 total_credits_cents: 0,
                 total_debits_cents: 0,
                 transactions: Vec::new(),
-            }
-        });
+            });
 
         ledger.owner = tx.owner.clone();
 
         if tx.delta_cents >= 0 {
             ledger.total_credits_cents = ledger.total_credits_cents.saturating_add(tx.delta_cents);
         } else {
-            ledger.total_debits_cents =
-                ledger.total_debits_cents.saturating_add(tx.delta_cents.saturating_abs());
+            ledger.total_debits_cents = ledger
+                .total_debits_cents
+                .saturating_add(tx.delta_cents.saturating_abs());
         }
 
         ledger.current_balance_cents = ledger.current_balance_cents.saturating_add(tx.delta_cents);
@@ -200,10 +200,7 @@ impl StatefulHandler for Checkbook {
         Ok(vec![snapshot.clone().to_event(self.writer_id.clone())])
     }
 
-    fn emit(
-        &self,
-        state: &mut Self::State,
-    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
+    fn emit(&self, state: &mut Self::State) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
         let Some(snapshot) = state.last_snapshot.take() else {
             return Ok(Vec::new());
         };
@@ -250,13 +247,15 @@ async fn main() -> Result<()> {
             .catalog_key(|account: &BankAccount| account.account_id.clone())
             .stream_key(|tx: &BankTransaction| tx.account_id.clone())
             .live()
-            .build(|account: BankAccount, tx: BankTransaction| EnrichedBankTransaction {
-                account_id: tx.account_id,
-                owner: account.owner,
-                initial_balance_cents: account.initial_balance_cents,
-                delta_cents: tx.delta_cents,
-                note: tx.note,
-            });
+            .build(
+                |account: BankAccount, tx: BankTransaction| EnrichedBankTransaction {
+                    account_id: tx.account_id,
+                    owner: account.owner,
+                    initial_balance_cents: account.initial_balance_cents,
+                    delta_cents: tx.delta_cents,
+                    note: tx.note,
+                },
+            );
 
     FlowApplication::builder()
         .with_log_level(LogLevel::Info)

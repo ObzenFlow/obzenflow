@@ -1,16 +1,16 @@
 //! Stateful supervisor implementation using HandlerSupervised pattern
 
 use crate::messaging::PollResult;
-use crate::metrics::instrumentation::{
-    heartbeat_interval, process_with_instrumentation_no_count,
-};
+use crate::metrics::instrumentation::{heartbeat_interval, process_with_instrumentation_no_count};
 use crate::stages::common::control_strategies::{ControlEventAction, ProcessingContext};
 use crate::stages::common::handlers::StatefulHandler;
 use crate::supervised_base::base::Supervisor;
 use crate::supervised_base::{EventLoopDirective, HandlerSupervised};
 use obzenflow_core::event::context::{FlowContext, StageType};
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
-use obzenflow_core::event::payloads::observability_payload::{MiddlewareLifecycle, ObservabilityPayload};
+use obzenflow_core::event::payloads::observability_payload::{
+    MiddlewareLifecycle, ObservabilityPayload,
+};
 use obzenflow_core::event::vector_clock::CausalOrderingService;
 use obzenflow_core::event::ChainEventFactory;
 use obzenflow_core::event::SystemEvent;
@@ -22,7 +22,9 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Instant;
 
-use super::fsm::{PendingTransition, StatefulAction, StatefulContext, StatefulEvent, StatefulState};
+use super::fsm::{
+    PendingTransition, StatefulAction, StatefulContext, StatefulEvent, StatefulState,
+};
 
 /// Supervisor for stateful stages
 pub(crate) struct StatefulSupervisor<
@@ -812,7 +814,8 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                                     if let Some(upstream) =
                                         subscription.last_delivered_upstream_stage()
                                     {
-                                        if let Some(reader) = ctx.backpressure_readers.get(&upstream)
+                                        if let Some(reader) =
+                                            ctx.backpressure_readers.get(&upstream)
                                         {
                                             reader.ack_consumed(1);
                                         }
@@ -922,7 +925,10 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                 // If we have outputs from a previous emit blocked on downstream credits,
                 // drain them first and complete the pending transition once empty.
                 if !ctx.pending_outputs.is_empty()
-                    || matches!(ctx.pending_transition, Some(PendingTransition::EmitComplete))
+                    || matches!(
+                        ctx.pending_transition,
+                        Some(PendingTransition::EmitComplete)
+                    )
                 {
                     while let Some(pending) = ctx.pending_outputs.pop_front() {
                         if pending.is_data() {
@@ -1097,7 +1103,10 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                     }
 
                     if ctx.pending_outputs.is_empty()
-                        && matches!(ctx.pending_transition, Some(PendingTransition::EmitComplete))
+                        && matches!(
+                            ctx.pending_transition,
+                            Some(PendingTransition::EmitComplete)
+                        )
                     {
                         ctx.pending_transition = None;
                         return Ok(EventLoopDirective::Transition(StatefulEvent::EmitComplete));
@@ -1161,10 +1170,9 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                             error = ?e,
                             "Failed to emit aggregated event, transitioning to Failed"
                         );
-                        Ok(EventLoopDirective::Transition(StatefulEvent::Error(format!(
-                            "Emit error: {}",
-                            e
-                        ))))
+                        Ok(EventLoopDirective::Transition(StatefulEvent::Error(
+                            format!("Emit error: {}", e),
+                        )))
                     }
                 }
             }
@@ -1256,9 +1264,7 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                                     ),
                                 )
                                 .with_flow_context(flow_context)
-                                .with_runtime_context(
-                                    ctx.instrumentation.snapshot_with_control(),
-                                );
+                                .with_runtime_context(ctx.instrumentation.snapshot_with_control());
 
                                 match ctx.data_journal.append(event, None).await {
                                     Ok(written) => {
@@ -1344,7 +1350,10 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                 }
 
                 if ctx.pending_outputs.is_empty()
-                    && matches!(ctx.pending_transition, Some(PendingTransition::DrainComplete))
+                    && matches!(
+                        ctx.pending_transition,
+                        Some(PendingTransition::DrainComplete)
+                    )
                 {
                     ctx.pending_transition = None;
                     return Ok(EventLoopDirective::Transition(StatefulEvent::DrainComplete));
@@ -1390,8 +1399,7 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                                 // Accumulate data events during draining, synchronously
                                 let event = envelope.event.clone();
                                 let mut handler = (*ctx.handler).clone();
-                                let upstream_stage =
-                                    subscription.last_delivered_upstream_stage();
+                                let upstream_stage = subscription.last_delivered_upstream_stage();
 
                                 ctx.instrumentation
                                     .in_flight_count
@@ -1617,8 +1625,9 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                     let instrumentation = ctx.instrumentation.clone();
 
                     // Call handler.drain() with instrumentation; treat failures as stage-fatal.
-                    let drain_result =
-                        process_with_instrumentation_no_count(&ctx.instrumentation, || async move {
+                    let drain_result = process_with_instrumentation_no_count(
+                        &ctx.instrumentation,
+                        || async move {
                             handler.drain(&final_state).await.map_err(
                                 |err| -> Box<dyn std::error::Error + Send + Sync> {
                                     // Stage-fatal handler error in drain: record it in error metrics
@@ -1627,8 +1636,9 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                                     err.into()
                                 },
                             )
-                        })
-                        .await;
+                        },
+                    )
+                    .await;
 
                     match drain_result {
                         Ok(drain_events) => {

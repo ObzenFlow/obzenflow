@@ -17,6 +17,7 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::backpressure::BackpressureWriter;
 use crate::metrics::instrumentation::{snapshot_stage_metrics, StageInstrumentation};
 use crate::metrics::tail_read;
 use crate::stages::common::backpressure_activity_pulse::BackpressureActivityPulse;
@@ -24,7 +25,6 @@ use crate::stages::common::stage_handle::{
     FORCE_SHUTDOWN_MESSAGE, STOP_REASON_TIMEOUT, STOP_REASON_USER_STOP,
 };
 use crate::stages::source::strategies::{SourceControlContext, SourceControlStrategy};
-use crate::backpressure::BackpressureWriter;
 use crate::supervised_base::idle_backoff::IdleBackoff;
 
 // ============================================================================

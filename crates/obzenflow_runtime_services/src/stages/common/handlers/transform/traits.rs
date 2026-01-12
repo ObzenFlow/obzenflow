@@ -121,7 +121,9 @@ impl<T: TransformHandler + Send + Sync> UnifiedTransformHandler for T {
 pub struct AsyncTransformHandlerAdapter<T>(pub T);
 
 #[async_trait]
-impl<T: AsyncTransformHandler + Send + Sync> UnifiedTransformHandler for AsyncTransformHandlerAdapter<T> {
+impl<T: AsyncTransformHandler + Send + Sync> UnifiedTransformHandler
+    for AsyncTransformHandlerAdapter<T>
+{
     async fn process(
         &self,
         event: ChainEvent,

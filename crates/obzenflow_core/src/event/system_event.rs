@@ -1,8 +1,8 @@
 //! System orchestration events (written to control journal)
 
+use crate::event::payloads::observability_payload::MiddlewareLifecycle;
 use crate::event::types::{EventId, WriterId};
 use crate::event::vector_clock::VectorClock;
-use crate::event::payloads::observability_payload::MiddlewareLifecycle;
 use crate::id::{StageId, SystemId};
 use crate::metrics::{FlowLifecycleMetricsSnapshot, StageMetricsSnapshot};
 use serde::{Deserialize, Serialize};

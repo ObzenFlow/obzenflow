@@ -67,7 +67,6 @@ pub struct RuntimeContext {
     // These fields are embedded into wide events so that the last event in a
     // journal always carries authoritative cumulative control-middleware state,
     // even when observers (e.g. MetricsAggregator) attach late and tail-start.
-
     /// Total requests that reached the wrapped handler (allowed calls).
     #[serde(default)]
     pub cb_requests_total: u64,
@@ -125,7 +124,6 @@ pub struct RuntimeContext {
     // These gauge fields embed the current bucket state into wide events so that
     // RL utilization can be computed reliably from the last event in a journal,
     // without depending on unreliable WindowUtilization events.
-
     /// Current tokens available in the rate limiter bucket.
     #[serde(default)]
     pub rl_bucket_tokens: f64,

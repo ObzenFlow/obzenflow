@@ -342,7 +342,9 @@ impl MiddlewareFactory for SystemEnrichmentMiddlewareFactory {
     fn create(
         &self,
         config: &StageConfig,
-        _control_middleware: std::sync::Arc<crate::middleware::control::ControlMiddlewareAggregator>,
+        _control_middleware: std::sync::Arc<
+            crate::middleware::control::ControlMiddlewareAggregator,
+        >,
     ) -> Box<dyn Middleware> {
         Box::new(SystemEnrichmentMiddleware::new(
             &self.flow_name,

@@ -77,7 +77,12 @@ struct CollectSink {
 impl CollectSink {
     fn new() -> (Self, Arc<Mutex<Vec<ChainEvent>>>) {
         let events = Arc::new(Mutex::new(Vec::new()));
-        (Self { events: events.clone() }, events)
+        (
+            Self {
+                events: events.clone(),
+            },
+            events,
+        )
     }
 }
 
@@ -163,7 +168,11 @@ async fn async_finite_source_emits_events_and_calls_drain() -> Result<()> {
         .cloned()
         .filter(|e| e.is_data())
         .collect();
-    assert_eq!(data_events.len(), 2, "expected two data events to reach the sink");
+    assert_eq!(
+        data_events.len(),
+        2,
+        "expected two data events to reach the sink"
+    );
     assert_eq!(
         drain_calls.load(Ordering::Relaxed),
         1,
@@ -209,7 +218,11 @@ async fn async_finite_source_applies_stage_middleware() -> Result<()> {
         .filter(|e| e.is_data())
         .collect();
 
-    assert_eq!(data_events.len(), 2, "expected two data events to reach the sink");
+    assert_eq!(
+        data_events.len(),
+        2,
+        "expected two data events to reach the sink"
+    );
     for event in data_events {
         assert_eq!(
             event.payload().get("mw").and_then(|v| v.as_bool()),
@@ -220,4 +233,3 @@ async fn async_finite_source_applies_stage_middleware() -> Result<()> {
 
     Ok(())
 }
-

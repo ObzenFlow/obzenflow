@@ -2,12 +2,14 @@
 
 use crate::stages::common::handlers::InfiniteSourceHandler;
 use crate::supervised_base::base::Supervisor;
-use crate::supervised_base::{EventLoopDirective, HandlerSupervised};
 use crate::supervised_base::idle_backoff::IdleBackoff;
+use crate::supervised_base::{EventLoopDirective, HandlerSupervised};
 use obzenflow_core::event::context::FlowContext;
-use obzenflow_core::event::payloads::observability_payload::{MiddlewareLifecycle, ObservabilityPayload};
-use obzenflow_core::event::{ChainEventFactory, SystemEvent};
+use obzenflow_core::event::payloads::observability_payload::{
+    MiddlewareLifecycle, ObservabilityPayload,
+};
 use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
+use obzenflow_core::event::{ChainEventFactory, SystemEvent};
 use obzenflow_core::journal::journal::Journal;
 use obzenflow_core::{ChainEvent, StageId, WriterId};
 use obzenflow_fsm::{fsm, EventVariant, StateVariant, Transition};
@@ -356,8 +358,8 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
                         &ctx.data_journal
                     };
 
-                    let event_to_write =
-                        event_to_write.with_runtime_context(ctx.instrumentation.snapshot_with_control());
+                    let event_to_write = event_to_write
+                        .with_runtime_context(ctx.instrumentation.snapshot_with_control());
 
                     if Arc::ptr_eq(journal, &ctx.data_journal) && event_to_write.is_data() {
                         // Debug-only: emit activity pulses even when bypass is enabled, so
@@ -434,7 +436,8 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
                                     flow_id: ctx.flow_id.to_string(),
                                     stage_name: ctx.stage_name.clone(),
                                     stage_id: self.stage_id.clone(),
-                                    stage_type: obzenflow_core::event::context::StageType::InfiniteSource,
+                                    stage_type:
+                                        obzenflow_core::event::context::StageType::InfiniteSource,
                                 };
 
                                 let event = ChainEventFactory::observability_event(
@@ -494,8 +497,7 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
                     }
                 }
 
-                ctx
-                    .instrumentation
+                ctx.instrumentation
                     .event_loops_total
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
@@ -509,16 +511,16 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
                     Ok(events) if !events.is_empty() => {
                         self.idle_backoff.reset();
                         // We have work - increment loops with work
-                        ctx
-                            .instrumentation
+                        ctx.instrumentation
                             .event_loops_with_work_total
                             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-                        let data_events_in_tick = events.iter().filter(|event| event.is_data()).count();
+                        let data_events_in_tick =
+                            events.iter().filter(|event| event.is_data()).count();
                         let per_data_event_duration = if data_events_in_tick > 0 {
-                            let nanos = (tick_duration.as_nanos()
-                                / data_events_in_tick as u128)
-                                .min(u64::MAX as u128) as u64;
+                            let nanos = (tick_duration.as_nanos() / data_events_in_tick as u128)
+                                .min(u64::MAX as u128)
+                                as u64;
                             Duration::from_nanos(nanos)
                         } else {
                             Duration::from_nanos(0)
@@ -547,8 +549,7 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
                             }
 
                             // Apply run_if_not_error pattern (FLOWIP-082g)
-                            let events_to_write =
-                                self.run_if_not_error(staged_event, |e| vec![e]);
+                            let events_to_write = self.run_if_not_error(staged_event, |e| vec![e]);
 
                             // Write events based on their status
                             for event_to_write in events_to_write {

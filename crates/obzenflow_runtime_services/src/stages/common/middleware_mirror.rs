@@ -42,7 +42,9 @@ pub async fn mirror_middleware_event_to_system_journal(
                     | RateLimiterEvent::WindowUtilization { .. }
             )
         }
-        MiddlewareLifecycle::Backpressure(bp) => matches!(bp, BackpressureEvent::ActivityPulse { .. }),
+        MiddlewareLifecycle::Backpressure(bp) => {
+            matches!(bp, BackpressureEvent::ActivityPulse { .. })
+        }
         _ => false,
     };
     if !should_mirror {

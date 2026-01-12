@@ -9,7 +9,9 @@ use obzenflow_core::event::status::processing_status::ProcessingStatus;
 use obzenflow_core::event::ChainEventFactory;
 use obzenflow_core::ChainEvent;
 use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
-use obzenflow_runtime_services::stages::common::handlers::{AsyncTransformHandler, TransformHandler};
+use obzenflow_runtime_services::stages::common::handlers::{
+    AsyncTransformHandler, TransformHandler,
+};
 use std::future::Future;
 use std::sync::Arc;
 
@@ -316,7 +318,8 @@ impl<H: AsyncTransformHandler> AsyncTransformHandler for AsyncMiddlewareTransfor
             return Ok(vec![event]);
         }
 
-        self.apply_middleware(event, |e| self.inner.process(e)).await
+        self.apply_middleware(event, |e| self.inner.process(e))
+            .await
     }
 
     async fn drain(&mut self) -> Result<(), HandlerError> {
@@ -463,7 +466,9 @@ mod tests {
                 matches!(
                     result.processing_info.status,
                     ProcessingStatus::Error {
-                        kind: Some(obzenflow_core::event::status::processing_status::ErrorKind::Timeout),
+                        kind: Some(
+                            obzenflow_core::event::status::processing_status::ErrorKind::Timeout
+                        ),
                         ..
                     }
                 )

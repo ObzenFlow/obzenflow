@@ -4,6 +4,7 @@
 //! They have a unique "Flushing" state that ensures all buffered
 //! data is written before shutdown.
 
+use crate::backpressure::{BackpressureReader, BackpressureWriter};
 use crate::messaging::upstream_subscription::{ContractConfig, ReaderProgress};
 use crate::messaging::UpstreamSubscription;
 use crate::metrics::instrumentation::{snapshot_stage_metrics, StageInstrumentation};
@@ -14,7 +15,6 @@ use crate::stages::common::stage_handle::{
     FORCE_SHUTDOWN_MESSAGE, STOP_REASON_TIMEOUT, STOP_REASON_USER_STOP,
 };
 use crate::stages::resources_builder::BoundSubscriptionFactory;
-use crate::backpressure::{BackpressureReader, BackpressureWriter};
 use futures::TryFutureExt;
 use obzenflow_core::event::context::{FlowContext, StageType};
 use obzenflow_core::event::{ChainEventFactory, SystemEvent};
@@ -588,9 +588,7 @@ impl<H: SinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAction<H> 
 
                         let evt = ChainEventFactory::delivery_event(writer_id, payload)
                             .with_flow_context(flow_ctx)
-                            .with_runtime_context(
-                                ctx.instrumentation.snapshot_with_control(),
-                            );
+                            .with_runtime_context(ctx.instrumentation.snapshot_with_control());
 
                         ctx.data_journal.append(evt, None).await.map_err(|e| {
                             obzenflow_fsm::FsmError::HandlerError(format!(

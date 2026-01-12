@@ -5,12 +5,13 @@
 //! Event processing happens directly without FSM state tracking
 
 use obzenflow_core::event::chain_event::ChainEventContent;
+use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::ingestion::IngestionTelemetrySnapshot;
+use obzenflow_core::event::observability::HttpPullTelemetry;
 use obzenflow_core::event::payloads::observability_payload::{
     CircuitBreakerEvent, MetricsLifecycle, MiddlewareLifecycle, ObservabilityPayload,
 };
 use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
-use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::{CorrelationId, JournalEvent, WriterId};
 use obzenflow_core::id::{FlowId, StageId, SystemId};
 use obzenflow_core::metrics::{ContractMetricsSnapshot, Percentile, StageMetadata};
@@ -218,6 +219,9 @@ pub struct MetricsStore {
     // HTTP ingestion telemetry (FLOWIP-084d)
     pub ingestion_metrics: HashMap<String, IngestionTelemetrySnapshot>,
 
+    // HTTP pull telemetry (FLOWIP-084e)
+    pub http_pull_metrics: HashMap<StageId, HttpPullTelemetry>,
+
     // System event tracking (FLOWIP-059b - essential events only)
     // Track all states each stage has been in: (StageId, state_name) -> true
     pub stage_lifecycle_states: HashMap<(StageId, String), bool>,
@@ -282,6 +286,7 @@ impl Default for MetricsStore {
             rate_limiter_bucket_capacity: HashMap::new(),
             contract_metrics: ContractMetricsSnapshot::default(),
             ingestion_metrics: HashMap::new(),
+            http_pull_metrics: HashMap::new(),
             stage_lifecycle_states: HashMap::new(),
             pipeline_state: String::new(),
         }
@@ -950,6 +955,9 @@ impl MetricsAggregatorContext {
         // FLOWIP-084d: HTTP ingestion telemetry (wide events)
         snapshot.ingestion_metrics = store.ingestion_metrics.clone();
 
+        // FLOWIP-084e: HTTP pull telemetry (wide events)
+        snapshot.http_pull_metrics = store.http_pull_metrics.clone();
+
         // FLOWIP-059b: Add lifecycle states
         snapshot.stage_lifecycle_states = store.stage_lifecycle_states.clone();
         snapshot.pipeline_state = store.pipeline_state.clone();
@@ -1428,9 +1436,11 @@ impl FsmAction for MetricsAggregatorAction {
                                     .or_insert_with(|| snapshot.clone());
 
                                 // Monotonic counters: use max() to tolerate ordering.
-                                entry.requests_total = entry.requests_total.max(snapshot.requests_total);
-                                entry.events_accepted_total =
-                                    entry.events_accepted_total.max(snapshot.events_accepted_total);
+                                entry.requests_total =
+                                    entry.requests_total.max(snapshot.requests_total);
+                                entry.events_accepted_total = entry
+                                    .events_accepted_total
+                                    .max(snapshot.events_accepted_total);
                                 entry.events_rejected_auth_total = entry
                                     .events_rejected_auth_total
                                     .max(snapshot.events_rejected_auth_total);
@@ -1455,11 +1465,67 @@ impl FsmAction for MetricsAggregatorAction {
 
                                 // Gauges: overwrite with latest.
                                 entry.channel_depth = snapshot.channel_depth;
-                                entry.channel_capacity = entry.channel_capacity.max(snapshot.channel_capacity);
+                                entry.channel_capacity =
+                                    entry.channel_capacity.max(snapshot.channel_capacity);
                             }
                             Err(e) => tracing::warn!(
                                 error = %e,
                                 "Failed to decode http_ingestion.snapshot payload; ignoring"
+                            ),
+                        }
+                    } else if name == "http_pull.snapshot" {
+                        match serde_json::from_value::<HttpPullTelemetry>(value.clone()) {
+                            Ok(snapshot) => {
+                                let entry = store
+                                    .http_pull_metrics
+                                    .entry(stage_id)
+                                    .or_insert_with(HttpPullTelemetry::default);
+
+                                // State/gauges: overwrite with latest.
+                                entry.state = snapshot.state.clone();
+                                entry.wait_reason = snapshot.wait_reason.clone();
+                                entry.next_wake_unix_secs = snapshot.next_wake_unix_secs;
+
+                                // Timestamps/counters: monotonic max to tolerate ordering.
+                                entry.last_success_unix_secs = match (
+                                    entry.last_success_unix_secs,
+                                    snapshot.last_success_unix_secs,
+                                ) {
+                                    (Some(a), Some(b)) => Some(a.max(b)),
+                                    (Some(a), None) => Some(a),
+                                    (None, Some(b)) => Some(b),
+                                    (None, None) => None,
+                                };
+
+                                entry.requests_total =
+                                    entry.requests_total.max(snapshot.requests_total);
+                                entry.responses_2xx =
+                                    entry.responses_2xx.max(snapshot.responses_2xx);
+                                entry.responses_4xx =
+                                    entry.responses_4xx.max(snapshot.responses_4xx);
+                                entry.responses_5xx =
+                                    entry.responses_5xx.max(snapshot.responses_5xx);
+                                entry.rate_limited_total =
+                                    entry.rate_limited_total.max(snapshot.rate_limited_total);
+                                entry.retries_total =
+                                    entry.retries_total.max(snapshot.retries_total);
+                                entry.events_decoded_total = entry
+                                    .events_decoded_total
+                                    .max(snapshot.events_decoded_total);
+
+                                entry.wait_seconds_rate_limit = entry
+                                    .wait_seconds_rate_limit
+                                    .max(snapshot.wait_seconds_rate_limit);
+                                entry.wait_seconds_poll_interval = entry
+                                    .wait_seconds_poll_interval
+                                    .max(snapshot.wait_seconds_poll_interval);
+                                entry.wait_seconds_backoff = entry
+                                    .wait_seconds_backoff
+                                    .max(snapshot.wait_seconds_backoff);
+                            }
+                            Err(e) => tracing::warn!(
+                                error = %e,
+                                "Failed to decode http_pull.snapshot payload; ignoring"
                             ),
                         }
                     }
@@ -1762,7 +1828,8 @@ impl FsmAction for MetricsAggregatorAction {
                         )
                         .await
                         {
-                            if let Some(metrics) = ctx.metrics_store.stage_metrics.get_mut(stage_id) {
+                            if let Some(metrics) = ctx.metrics_store.stage_metrics.get_mut(stage_id)
+                            {
                                 metrics.join_reference_since_last_stream =
                                     Some(runtime_ctx.join_reference_since_last_stream);
                             }

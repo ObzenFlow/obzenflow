@@ -99,9 +99,7 @@ impl CsvSinkBuilder {
     }
 
     pub fn build(self) -> Result<CsvSink, anyhow::Error> {
-        let path = self
-            .path
-            .ok_or_else(|| anyhow::anyhow!("path required"))?;
+        let path = self.path.ok_or_else(|| anyhow::anyhow!("path required"))?;
 
         if self.buffer_size == 0 {
             anyhow::bail!("buffer_size must be > 0");
@@ -134,10 +132,7 @@ impl CsvSinkBuilder {
         }
 
         let file = if self.append {
-            OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&path)?
+            OpenOptions::new().create(true).append(true).open(&path)?
         } else {
             File::create(&path)?
         };
@@ -415,8 +410,8 @@ mod tests {
     use obzenflow_core::event::ChainEventFactory;
     use obzenflow_core::StageId;
     use obzenflow_core::WriterId;
-    use std::io::Write;
     use std::io::Read;
+    use std::io::Write;
     use tempfile::NamedTempFile;
 
     #[tokio::test]
@@ -424,7 +419,11 @@ mod tests {
         let tmp = NamedTempFile::new().expect("temp file");
         let path = tmp.path().to_path_buf();
 
-        let mut sink = CsvSink::builder().path(&path).auto_flush(true).build().unwrap();
+        let mut sink = CsvSink::builder()
+            .path(&path)
+            .auto_flush(true)
+            .build()
+            .unwrap();
 
         let event = ChainEventFactory::data_event(
             WriterId::from(StageId::new()),

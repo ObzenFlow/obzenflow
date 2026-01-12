@@ -44,6 +44,9 @@ tokio-stream = { version = "0.1", optional = true }
 # Tokio-console for debugging (optional)
 console-subscriber = { version = "0.5", optional = true }
 
+# HTTP client implementations (optional)
+reqwest = { version = "0.12", features = ["rustls-tls"], optional = true }
+
 [features]
 default = []
 prometheus = ["dep:prometheus"]
@@ -51,6 +54,7 @@ statsd = ["dep:statsd"]
 warp-server = ["dep:warp", "dep:bytes", "dep:tokio-stream"]
 axum-server = ["dep:axum", "dep:tower", "dep:hyper"]
 console = ["dep:console-subscriber"]
+reqwest-client = ["dep:reqwest"]
 
 [dev-dependencies]
 tokio-test = "0.4"

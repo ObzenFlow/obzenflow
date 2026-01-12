@@ -1,6 +1,10 @@
 use async_trait::async_trait;
-use obzenflow_core::event::ingestion::{EventSubmission, IngestionTelemetry, IngestionTelemetrySnapshot};
-use obzenflow_core::event::payloads::observability_payload::{MetricsLifecycle, ObservabilityPayload};
+use obzenflow_core::event::ingestion::{
+    EventSubmission, IngestionTelemetry, IngestionTelemetrySnapshot,
+};
+use obzenflow_core::event::payloads::observability_payload::{
+    MetricsLifecycle, ObservabilityPayload,
+};
 use obzenflow_core::event::ChainEventFactory;
 use obzenflow_core::{ChainEvent, WriterId};
 use obzenflow_runtime_services::stages::common::handlers::AsyncInfiniteSourceHandler;
@@ -110,7 +114,9 @@ impl HttpSource {
             .writer_id
             .clone()
             .expect("WriterId must be bound before next() is called");
-        let EventSubmission { event_type, data, .. } = submission;
+        let EventSubmission {
+            event_type, data, ..
+        } = submission;
         ChainEventFactory::data_event(writer_id, event_type, data)
     }
 
@@ -148,8 +154,8 @@ impl AsyncInfiniteSourceHandler for HttpSource {
     async fn next(&mut self) -> Result<Vec<ChainEvent>, SourceError> {
         let mut rx = self.rx.lock().await;
 
-        let has_telemetry = self.telemetry.is_some()
-            && self.config.telemetry_flush_interval != Duration::ZERO;
+        let has_telemetry =
+            self.telemetry.is_some() && self.config.telemetry_flush_interval != Duration::ZERO;
 
         let mut out = Vec::new();
 

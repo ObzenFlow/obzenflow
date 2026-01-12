@@ -1688,12 +1688,15 @@ name = "obzenflow_core"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "bytes",
  "chrono",
+ "http 1.4.0",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
  "tokio",
  "ulid",
+ "url",
 ]
 
 [[package]]
@@ -1734,6 +1737,7 @@ dependencies = [
  "obzenflow_dsl_infra",
  "obzenflow_runtime_services",
  "prometheus",
+ "reqwest",
  "ring",
  "serde",
  "serde_json",
@@ -1767,7 +1771,6 @@ dependencies = [
  "obzenflow-topology",
  "obzenflow_core",
  "rand 0.8.5",
- "reqwest",
  "serde",
  "serde_json",
  "thiserror 1.0.69",

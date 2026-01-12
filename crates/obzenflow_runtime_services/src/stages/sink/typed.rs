@@ -113,7 +113,10 @@ where
         let destination = std::any::type_name::<T>();
 
         let (event_type, payload) = match &event.content {
-            ChainEventContent::Data { event_type, payload } => (event_type.as_str(), payload),
+            ChainEventContent::Data {
+                event_type,
+                payload,
+            } => (event_type.as_str(), payload),
             _ => {
                 return Ok(DeliveryPayload::success(
                     destination,
@@ -246,7 +249,10 @@ where
         let destination = std::any::type_name::<T>();
 
         let (event_type, payload) = match &event.content {
-            ChainEventContent::Data { event_type, payload } => (event_type.as_str(), payload),
+            ChainEventContent::Data {
+                event_type,
+                payload,
+            } => (event_type.as_str(), payload),
             _ => {
                 return Ok(DeliveryPayload::success(
                     destination,
@@ -354,7 +360,10 @@ mod tests {
 
         let mut sink = SinkTyped::new(|_value: TestPayload| async move {});
 
-        let err = sink.consume(event).await.expect_err("expected validation error");
+        let err = sink
+            .consume(event)
+            .await
+            .expect_err("expected validation error");
         assert!(matches!(err, HandlerError::Validation(_)));
     }
 
@@ -395,7 +404,10 @@ mod tests {
             serde_json::json!({"wrong": 1}),
         );
 
-        let err = sink.consume(event).await.expect_err("expected deserialization error");
+        let err = sink
+            .consume(event)
+            .await
+            .expect_err("expected deserialization error");
         assert!(matches!(err, HandlerError::Deserialization(_)));
     }
 
@@ -442,7 +454,10 @@ mod tests {
             serde_json::json!({"n": 1}),
         );
 
-        let err = sink.consume(event).await.expect_err("expected handler error");
+        let err = sink
+            .consume(event)
+            .await
+            .expect_err("expected handler error");
         assert!(matches!(err, HandlerError::Timeout(_)));
     }
 }

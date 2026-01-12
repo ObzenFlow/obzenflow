@@ -1,12 +1,14 @@
 use anyhow::Result;
 use async_trait::async_trait;
+use obzenflow_adapters::middleware::control::ControlMiddlewareAggregator;
+use obzenflow_adapters::middleware::{Middleware, MiddlewareContext, MiddlewareFactory};
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
+use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
 use obzenflow_core::event::ChainEventContent;
-use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
-use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::journal::journal::Journal;
+use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::StageId;
 use obzenflow_core::WriterId;
 use obzenflow_dsl_infra::{async_transform, flow, sink, source};
@@ -16,12 +18,10 @@ use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
 use obzenflow_runtime_services::stages::common::handlers::{
     AsyncTransformHandler, FiniteSourceHandler, SinkHandler,
 };
-use obzenflow_adapters::middleware::control::ControlMiddlewareAggregator;
-use obzenflow_adapters::middleware::{Middleware, MiddlewareContext, MiddlewareFactory};
 use serde_json::json;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::{Duration, SystemTime};
 
 fn unique_journal_dir(prefix: &str) -> std::path::PathBuf {
@@ -76,13 +76,21 @@ struct EventCounterSink {
 impl EventCounterSink {
     fn new() -> (Self, Arc<AtomicU64>) {
         let count = Arc::new(AtomicU64::new(0));
-        (Self { count: count.clone() }, count)
+        (
+            Self {
+                count: count.clone(),
+            },
+            count,
+        )
     }
 }
 
 #[async_trait]
 impl SinkHandler for EventCounterSink {
-    async fn consume(&mut self, event: ChainEvent) -> std::result::Result<DeliveryPayload, HandlerError> {
+    async fn consume(
+        &mut self,
+        event: ChainEvent,
+    ) -> std::result::Result<DeliveryPayload, HandlerError> {
         if event.is_data() {
             self.count.fetch_add(1, Ordering::Relaxed);
         }
@@ -102,7 +110,12 @@ struct CollectSink {
 impl CollectSink {
     fn new() -> (Self, Arc<Mutex<Vec<ChainEvent>>>) {
         let events = Arc::new(Mutex::new(Vec::new()));
-        (Self { events: events.clone() }, events)
+        (
+            Self {
+                events: events.clone(),
+            },
+            events,
+        )
     }
 }
 
@@ -129,13 +142,21 @@ struct AsyncErrorTransform {
 impl AsyncErrorTransform {
     fn new() -> (Self, Arc<AtomicU64>) {
         let drain_calls = Arc::new(AtomicU64::new(0));
-        (Self { drain_calls: drain_calls.clone() }, drain_calls)
+        (
+            Self {
+                drain_calls: drain_calls.clone(),
+            },
+            drain_calls,
+        )
     }
 }
 
 #[async_trait]
 impl AsyncTransformHandler for AsyncErrorTransform {
-    async fn process(&self, event: ChainEvent) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
+    async fn process(
+        &self,
+        event: ChainEvent,
+    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
         tokio::time::sleep(Duration::from_millis(5)).await;
 
         let index = event
@@ -196,7 +217,10 @@ struct AsyncPassThroughTransform;
 
 #[async_trait]
 impl AsyncTransformHandler for AsyncPassThroughTransform {
-    async fn process(&self, event: ChainEvent) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
+    async fn process(
+        &self,
+        event: ChainEvent,
+    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
         tokio::time::sleep(Duration::from_millis(5)).await;
         Ok(vec![event])
     }
@@ -225,7 +249,10 @@ impl AsyncDrainFailTransform {
 
 #[async_trait]
 impl AsyncTransformHandler for AsyncDrainFailTransform {
-    async fn process(&self, event: ChainEvent) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
+    async fn process(
+        &self,
+        event: ChainEvent,
+    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
         tokio::time::sleep(Duration::from_millis(5)).await;
         Ok(vec![event])
     }
@@ -296,8 +323,16 @@ async fn async_transform_routes_error_kinds_to_correct_journal() -> Result<()> {
         }
     }
 
-    assert_eq!(data_journals.len(), 1, "expected exactly one transform data journal");
-    assert_eq!(error_journals.len(), 1, "expected exactly one transform error journal");
+    assert_eq!(
+        data_journals.len(),
+        1,
+        "expected exactly one transform data journal"
+    );
+    assert_eq!(
+        error_journals.len(),
+        1,
+        "expected exactly one transform error journal"
+    );
 
     async fn read_chain_journal(
         path: std::path::PathBuf,
@@ -320,9 +355,16 @@ async fn async_transform_routes_error_kinds_to_correct_journal() -> Result<()> {
         .filter(|e| e.is_data())
         .collect();
 
-    assert_eq!(error_events.len(), 1, "expected 1 data event in error journal");
     assert_eq!(
-        error_events[0].payload().get("index").and_then(|v| v.as_u64()),
+        error_events.len(),
+        1,
+        "expected 1 data event in error journal"
+    );
+    assert_eq!(
+        error_events[0]
+            .payload()
+            .get("index")
+            .and_then(|v| v.as_u64()),
         Some(0)
     );
     assert!(matches!(
@@ -358,13 +400,21 @@ async fn async_transform_routes_error_kinds_to_correct_journal() -> Result<()> {
         }
     }
 
-    assert!(saw_domain, "expected Domain error event in transform data journal");
+    assert!(
+        saw_domain,
+        "expected Domain error event in transform data journal"
+    );
 
     // Sanity: ensure EOF exists somewhere in the transform data journal.
     let has_eof = read_chain_journal(data_journals[0].clone())
         .await?
         .into_iter()
-        .any(|env| matches!(env.event.content, ChainEventContent::FlowControl(FlowControlPayload::Eof { .. })));
+        .any(|env| {
+            matches!(
+                env.event.content,
+                ChainEventContent::FlowControl(FlowControlPayload::Eof { .. })
+            )
+        });
     assert!(has_eof, "expected EOF in transform data journal");
 
     Ok(())
@@ -407,7 +457,11 @@ async fn async_transform_applies_stage_middleware() -> Result<()> {
         .filter(|e| e.is_data())
         .collect();
 
-    assert_eq!(data_events.len(), 2, "expected two data events to reach the sink");
+    assert_eq!(
+        data_events.len(),
+        2,
+        "expected two data events to reach the sink"
+    );
     for event in data_events {
         assert_eq!(
             event.payload().get("mw").and_then(|v| v.as_bool()),

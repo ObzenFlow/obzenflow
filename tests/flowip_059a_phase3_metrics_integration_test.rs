@@ -24,8 +24,8 @@ use obzenflow_runtime_services::stages::SourceError;
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::SystemTime;
 use std::time::Instant;
+use std::time::SystemTime;
 use tokio::time::{sleep, Duration};
 
 #[derive(Clone, Debug)]
@@ -103,10 +103,8 @@ impl TransformHandler for TimeoutAfterFirstTransform {
             .unwrap_or(0);
 
         if idx >= 1 {
-            event.processing_info.status = ProcessingStatus::error_with_kind(
-                "simulated_timeout",
-                Some(ErrorKind::Timeout),
-            );
+            event.processing_info.status =
+                ProcessingStatus::error_with_kind("simulated_timeout", Some(ErrorKind::Timeout));
         }
 
         Ok(vec![event])
@@ -125,7 +123,12 @@ struct CountingSink {
 impl CountingSink {
     fn new() -> (Self, Arc<Mutex<u64>>) {
         let count = Arc::new(Mutex::new(0));
-        (Self { count: count.clone() }, count)
+        (
+            Self {
+                count: count.clone(),
+            },
+            count,
+        )
     }
 }
 
@@ -255,7 +258,11 @@ fn stage_id_with_middleware(
         .ok_or_else(|| anyhow!("no stage found with middleware '{middleware_name}'"))
 }
 
-fn metric_line_value(metrics_text: &str, metric_name: &str, required_substrings: &[String]) -> Option<f64> {
+fn metric_line_value(
+    metrics_text: &str,
+    metric_name: &str,
+    required_substrings: &[String],
+) -> Option<f64> {
     metrics_text.lines().find_map(|line| {
         if !line.starts_with(metric_name) {
             return None;
@@ -404,8 +411,9 @@ async fn flowip_059a_processing_time_sum_tracks_actual_work() -> Result<()> {
             "obzenflow_processing_time_seconds_bucket{",
             &[flow_label.clone(), stage_label.clone(), le_label],
         )
-        .ok_or_else(|| anyhow!("missing processing_time_seconds_bucket for {stage_label}, le={le}"))?
-            as u64;
+        .ok_or_else(|| {
+            anyhow!("missing processing_time_seconds_bucket for {stage_label}, le={le}")
+        })? as u64;
         assert!(
             bucket_count >= prev,
             "expected cumulative buckets; le={le} count={bucket_count} < prev={prev}"
@@ -470,16 +478,11 @@ async fn flowip_059a_circuit_breaker_counters_are_exported_with_joinable_labels(
         cb_stage_label.clone(),
     ];
 
-    let metrics_text = wait_for_metrics(
-        &exporter,
-        timeout_metrics,
-        &debug_patterns,
-        |text| {
-            text.contains("obzenflow_circuit_breaker_requests_total")
-                && text.contains("obzenflow_circuit_breaker_rejections_total")
-                && text.contains(&cb_stage_label)
-        },
-    )
+    let metrics_text = wait_for_metrics(&exporter, timeout_metrics, &debug_patterns, |text| {
+        text.contains("obzenflow_circuit_breaker_requests_total")
+            && text.contains("obzenflow_circuit_breaker_rejections_total")
+            && text.contains(&cb_stage_label)
+    })
     .await?;
 
     // Counters must exist and be stage_id joinable.
@@ -690,29 +693,21 @@ async fn flowip_059a_rate_limiter_metrics_are_exported_with_joinable_labels() ->
 
     let expected_events_total = 1001.0;
     let join_labels = vec![flow_label.clone(), rl_stage_label.clone()];
-    let metrics_text = wait_for_metrics(
-        &exporter,
-        timeout_metrics,
-        &debug_patterns,
-        |text| {
-            let events_total = metric_line_value(
-                text,
-                "obzenflow_rate_limiter_events_total{",
-                &join_labels,
-            );
-            let events_total_ok = events_total
-                .map(|v| (v - expected_events_total).abs() < f64::EPSILON)
-                .unwrap_or(false);
+    let metrics_text = wait_for_metrics(&exporter, timeout_metrics, &debug_patterns, |text| {
+        let events_total =
+            metric_line_value(text, "obzenflow_rate_limiter_events_total{", &join_labels);
+        let events_total_ok = events_total
+            .map(|v| (v - expected_events_total).abs() < f64::EPSILON)
+            .unwrap_or(false);
 
-            events_total_ok
-                && text.contains("obzenflow_rate_limiter_delayed_total")
-                && text.contains("obzenflow_rate_limiter_tokens_consumed_total")
-                && text.contains("obzenflow_rate_limiter_delay_seconds_total")
-                && text.contains("obzenflow_rate_limiter_utilization")
-                && text.contains("obzenflow_rate_limiter_bucket_tokens")
-                && text.contains("obzenflow_rate_limiter_bucket_capacity")
-        },
-    )
+        events_total_ok
+            && text.contains("obzenflow_rate_limiter_delayed_total")
+            && text.contains("obzenflow_rate_limiter_tokens_consumed_total")
+            && text.contains("obzenflow_rate_limiter_delay_seconds_total")
+            && text.contains("obzenflow_rate_limiter_utilization")
+            && text.contains("obzenflow_rate_limiter_bucket_tokens")
+            && text.contains("obzenflow_rate_limiter_bucket_capacity")
+    })
     .await?;
 
     // Counters must exist and be stage_id joinable.

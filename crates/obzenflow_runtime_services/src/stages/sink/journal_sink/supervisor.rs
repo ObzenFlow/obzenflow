@@ -695,10 +695,10 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                                 ctx.instrumentation
                                                     .record_output_event(&delivery_event);
                                             }
-                                            let delivery_event = delivery_event.with_runtime_context(
-                                                ctx.instrumentation
-                                                    .snapshot_with_control(),
-                                            );
+                                            let delivery_event = delivery_event
+                                                .with_runtime_context(
+                                                    ctx.instrumentation.snapshot_with_control(),
+                                                );
                                             let written = ctx
                                                 .data_journal
                                                 .append(delivery_event, Some(&envelope))
@@ -834,8 +834,7 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                                     .record_output_event(&fail_event);
                                             }
                                             let fail_event = fail_event.with_runtime_context(
-                                                ctx.instrumentation
-                                                    .snapshot_with_control(),
+                                                ctx.instrumentation.snapshot_with_control(),
                                             );
                                             let written = ctx
                                                 .data_journal
@@ -873,8 +872,7 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
 
                             // Backpressure ack: upstream input was consumed by sink handler.
                             if envelope.event.is_data() {
-                                if let Some(upstream) =
-                                    subscription.last_delivered_upstream_stage()
+                                if let Some(upstream) = subscription.last_delivered_upstream_stage()
                                 {
                                     if let Some(reader) = ctx.backpressure_readers.get(&upstream) {
                                         reader.ack_consumed(1);

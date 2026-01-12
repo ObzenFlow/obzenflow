@@ -19,6 +19,7 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 use std::time::Duration;
 
+use super::config::JoinReferenceMode;
 use crate::backpressure::{BackpressureReader, BackpressureWriter};
 use crate::messaging::upstream_subscription::{ContractConfig, ReaderProgress};
 use crate::messaging::UpstreamSubscription;
@@ -31,7 +32,6 @@ use crate::stages::common::stage_handle::{
 };
 use crate::stages::resources_builder::BoundSubscriptionFactory;
 use crate::supervised_base::idle_backoff::IdleBackoff;
-use super::config::JoinReferenceMode;
 
 // ============================================================================
 // FSM States

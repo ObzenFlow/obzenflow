@@ -142,9 +142,9 @@ impl CircuitBreakerSourceStrategy {
         stage_id: StageId,
         provider: &Arc<dyn ControlMiddlewareProvider>,
     ) -> Result<Self, ControlBindError> {
-        let cb_state = provider.circuit_breaker_state(&stage_id).ok_or(
-            ControlBindError::MissingCircuitBreaker { stage_id },
-        )?;
+        let cb_state = provider
+            .circuit_breaker_state(&stage_id)
+            .ok_or(ControlBindError::MissingCircuitBreaker { stage_id })?;
         Ok(Self { cb_state })
     }
 

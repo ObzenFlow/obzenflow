@@ -2,7 +2,9 @@ use obzenflow_adapters::sources::http::HttpSource;
 use obzenflow_core::event::ChainEventContent;
 use obzenflow_core::web::{HttpMethod, Request};
 use obzenflow_core::{StageId, WriterId};
-use obzenflow_infra::web::endpoints::event_ingestion::{create_ingestion_endpoints, IngestionConfig};
+use obzenflow_infra::web::endpoints::event_ingestion::{
+    create_ingestion_endpoints, IngestionConfig,
+};
 use obzenflow_runtime_services::stages::common::handlers::source::AsyncInfiniteSourceHandler;
 
 #[tokio::test]
@@ -34,11 +36,13 @@ async fn http_post_feeds_httpsource_chain_events() {
     assert_eq!(out.len(), 1);
 
     match &out[0].content {
-        ChainEventContent::Data { event_type, payload } => {
+        ChainEventContent::Data {
+            event_type,
+            payload,
+        } => {
             assert_eq!(event_type, "order.created");
             assert_eq!(payload, &serde_json::json!({ "order_id": "1" }));
         }
         other => panic!("expected data event, got {other:?}"),
     }
 }
-

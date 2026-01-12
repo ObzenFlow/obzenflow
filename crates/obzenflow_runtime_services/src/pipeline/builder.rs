@@ -159,7 +159,8 @@ impl SupervisorBuilder for PipelineBuilder {
         //
         // Disk-backed journals scale file descriptors with topology size. Fail fast with an
         // actionable error instead of partially starting and stalling on missing upstream reads.
-        let uses_disk_journals = matches!(self.system_journal.storage_kind(), JournalStorageKind::Disk);
+        let uses_disk_journals =
+            matches!(self.system_journal.storage_kind(), JournalStorageKind::Disk);
         if uses_disk_journals {
             let stage_count = self
                 .stage_journals
@@ -504,7 +505,9 @@ impl crate::supervised_base::SelfSupervised for SupervisorWithExternalEvents {
         if matches!(state, PipelineState::Created) {
             match self.external_events.recv().await {
                 Some(event) => {
-                    return Ok(crate::supervised_base::EventLoopDirective::Transition(event));
+                    return Ok(crate::supervised_base::EventLoopDirective::Transition(
+                        event,
+                    ));
                 }
                 None => {
                     return Ok(crate::supervised_base::EventLoopDirective::Transition(

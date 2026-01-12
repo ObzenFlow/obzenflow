@@ -925,10 +925,7 @@ impl SelfSupervised for PipelineSupervisor {
                     {
                         // This is a non-source stage that's already running
                         if context.running_stages.insert(*stage_id) {
-                            tracing::info!(
-                                "Stage '{}' was already running",
-                                stage.stage_name()
-                            );
+                            tracing::info!("Stage '{}' was already running", stage.stage_name());
                         }
                     }
                 }
@@ -1293,10 +1290,12 @@ impl SelfSupervised for PipelineSupervisor {
                         context.stop_deadline = None;
                         context.stop_reason = Some(STOP_REASON_TIMEOUT.to_string());
                         context.stop_mode = Some(FlowStopMode::Cancel);
-                        return Ok(EventLoopDirective::Transition(PipelineEvent::StopRequested {
-                            mode: FlowStopMode::Cancel,
-                            reason: Some(STOP_REASON_TIMEOUT.to_string()),
-                        }));
+                        return Ok(EventLoopDirective::Transition(
+                            PipelineEvent::StopRequested {
+                                mode: FlowStopMode::Cancel,
+                                reason: Some(STOP_REASON_TIMEOUT.to_string()),
+                            },
+                        ));
                     }
                 }
 
@@ -1701,7 +1700,10 @@ impl PipelineSupervisor {
             {
                 match event {
                     obzenflow_core::event::StageLifecycleEvent::Completed { metrics: Some(m) }
-                    | obzenflow_core::event::StageLifecycleEvent::Cancelled { metrics: Some(m), .. }
+                    | obzenflow_core::event::StageLifecycleEvent::Cancelled {
+                        metrics: Some(m),
+                        ..
+                    }
                     | obzenflow_core::event::StageLifecycleEvent::Failed {
                         metrics: Some(m), ..
                     } => {

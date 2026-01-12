@@ -21,8 +21,7 @@ use async_trait::async_trait;
 use obzenflow_core::{
     event::chain_event::{ChainEvent, ChainEventFactory},
     id::StageId,
-    TypedPayload,
-    WriterId,
+    TypedPayload, WriterId,
 };
 use obzenflow_dsl_infra::{flow, sink, source, stateful, transform};
 use obzenflow_infra::journal::disk_journals;
@@ -208,8 +207,7 @@ async fn main() -> Result<()> {
                 counter |> output;
             }
     })
-    .await
-    ?;
+    .await?;
 
     println!("\n✅ Pipeline completed successfully!");
     println!("\n📝 Summary:");

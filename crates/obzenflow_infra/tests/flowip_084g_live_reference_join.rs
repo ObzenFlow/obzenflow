@@ -164,7 +164,10 @@ async fn live_join_processes_stream_without_reference_eof() {
     // Stream emits one matching record and EOF.
     let stream_writer = WriterId::from(stream_stage);
     stream_journal
-        .append(StreamRow { key: "k1".into() }.to_event(stream_writer.clone()), None)
+        .append(
+            StreamRow { key: "k1".into() }.to_event(stream_writer.clone()),
+            None,
+        )
         .await
         .expect("append stream data");
     stream_journal
@@ -215,7 +218,10 @@ async fn live_join_processes_stream_without_reference_eof() {
         join_config,
         join_resources,
         reference_journal.clone() as Arc<dyn Journal<ChainEvent>>,
-        vec![(stream_stage, stream_journal.clone() as Arc<dyn Journal<ChainEvent>>)],
+        vec![(
+            stream_stage,
+            stream_journal.clone() as Arc<dyn Journal<ChainEvent>>,
+        )],
         control,
     )
     .expect("build join builder")
@@ -247,7 +253,13 @@ async fn live_join_processes_stream_without_reference_eof() {
         .filter_map(|env| JoinedRow::from_event(&env.event))
         .collect();
 
-    assert_eq!(joined, vec![JoinedRow { value: "v1".into(), key: "k1".into() }]);
+    assert_eq!(
+        joined,
+        vec![JoinedRow {
+            value: "v1".into(),
+            key: "k1".into()
+        }]
+    );
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -301,7 +313,9 @@ impl JoinHandler for CountReferenceEventsJoin {
         }
 
         if StreamEvent::from_event(&event).is_some() {
-            return Ok(vec![StreamObservedRefs { refs_seen: *state }.to_event(writer_id)]);
+            return Ok(vec![
+                StreamObservedRefs { refs_seen: *state }.to_event(writer_id)
+            ]);
         }
 
         Ok(Vec::new())
@@ -451,7 +465,10 @@ async fn live_join_reference_batch_cap_prevents_stream_starvation() {
         join_config,
         join_resources,
         reference_journal.clone() as Arc<dyn Journal<ChainEvent>>,
-        vec![(stream_stage, stream_journal.clone() as Arc<dyn Journal<ChainEvent>>)],
+        vec![(
+            stream_stage,
+            stream_journal.clone() as Arc<dyn Journal<ChainEvent>>,
+        )],
         control,
     )
     .expect("build join builder")
@@ -530,8 +547,11 @@ async fn live_join_forwards_reference_eof() {
         .expect("create reference disk journal"),
     );
     let stream_journal: Arc<DiskJournal<ChainEvent>> = Arc::new(
-        DiskJournal::with_owner(tmp.path().join("stream.log"), JournalOwner::stage(stream_stage))
-            .expect("create stream disk journal"),
+        DiskJournal::with_owner(
+            tmp.path().join("stream.log"),
+            JournalOwner::stage(stream_stage),
+        )
+        .expect("create stream disk journal"),
     );
     let join_journal: Arc<DiskJournal<ChainEvent>> = Arc::new(
         DiskJournal::with_owner(tmp.path().join("join.log"), JournalOwner::stage(join_stage))
@@ -588,7 +608,10 @@ async fn live_join_forwards_reference_eof() {
     // Stream emits one matching record and EOF.
     let stream_writer = WriterId::from(stream_stage);
     stream_journal
-        .append(StreamRow { key: "k1".into() }.to_event(stream_writer.clone()), None)
+        .append(
+            StreamRow { key: "k1".into() }.to_event(stream_writer.clone()),
+            None,
+        )
         .await
         .expect("append stream data");
     stream_journal
@@ -639,7 +662,10 @@ async fn live_join_forwards_reference_eof() {
         join_config,
         join_resources,
         reference_journal.clone() as Arc<dyn Journal<ChainEvent>>,
-        vec![(stream_stage, stream_journal.clone() as Arc<dyn Journal<ChainEvent>>)],
+        vec![(
+            stream_stage,
+            stream_journal.clone() as Arc<dyn Journal<ChainEvent>>,
+        )],
         control,
     )
     .expect("build join builder")
@@ -774,8 +800,11 @@ async fn live_join_reference_errors_are_per_record() {
         .expect("create reference disk journal"),
     );
     let stream_journal: Arc<DiskJournal<ChainEvent>> = Arc::new(
-        DiskJournal::with_owner(tmp.path().join("stream.log"), JournalOwner::stage(stream_stage))
-            .expect("create stream disk journal"),
+        DiskJournal::with_owner(
+            tmp.path().join("stream.log"),
+            JournalOwner::stage(stream_stage),
+        )
+        .expect("create stream disk journal"),
     );
     let join_journal: Arc<DiskJournal<ChainEvent>> = Arc::new(
         DiskJournal::with_owner(tmp.path().join("join.log"), JournalOwner::stage(join_stage))
@@ -844,7 +873,10 @@ async fn live_join_reference_errors_are_per_record() {
     // Stream emits one record + EOF (must still be processed).
     let stream_writer = WriterId::from(stream_stage);
     stream_journal
-        .append(StreamRow { key: "k1".into() }.to_event(stream_writer.clone()), None)
+        .append(
+            StreamRow { key: "k1".into() }.to_event(stream_writer.clone()),
+            None,
+        )
         .await
         .expect("append stream data");
     stream_journal
@@ -883,7 +915,10 @@ async fn live_join_reference_errors_are_per_record() {
         join_config,
         join_resources,
         reference_journal.clone() as Arc<dyn Journal<ChainEvent>>,
-        vec![(stream_stage, stream_journal.clone() as Arc<dyn Journal<ChainEvent>>)],
+        vec![(
+            stream_stage,
+            stream_journal.clone() as Arc<dyn Journal<ChainEvent>>,
+        )],
         control,
     )
     .expect("build join builder")
@@ -929,7 +964,13 @@ async fn live_join_reference_errors_are_per_record() {
     let saw_reference_error = error_events.iter().any(|env| {
         env.event.writer_id == reference_writer
             && CatalogRow::from_event(&env.event).is_some()
-            && matches!(env.event.processing_info.status, ProcessingStatus::Error { .. })
+            && matches!(
+                env.event.processing_info.status,
+                ProcessingStatus::Error { .. }
+            )
     });
-    assert!(saw_reference_error, "expected reference error event in error journal");
+    assert!(
+        saw_reference_error,
+        "expected reference error event in error journal"
+    );
 }

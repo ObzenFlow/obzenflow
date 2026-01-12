@@ -13,12 +13,12 @@ use obzenflow_core::event::ChainEventContent;
 use obzenflow_core::WriterId;
 use obzenflow_dsl_infra::{flow, sink, source, transform};
 use obzenflow_infra::journal::disk_journals;
+use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
 use obzenflow_runtime_services::stages::common::handlers::{
     FiniteSourceHandler, SinkHandler, TransformHandler,
 };
-use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
-use obzenflow_runtime_services::supervised_base::SupervisorHandle;
 use obzenflow_runtime_services::stages::SourceError;
+use obzenflow_runtime_services::supervised_base::SupervisorHandle;
 use serde_json::json;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -238,7 +238,7 @@ async fn build_pipeline(
             let handle = flow! {
                 journals: disk_journals(journals_base_path.clone()),
                 middleware: [],
-                
+
                 stages: {
                     src = source!("source" => source);
                     s1 = transform!("stage1" => PassthroughStage::new("stage1"));
@@ -252,7 +252,7 @@ async fn build_pipeline(
                     s9 = transform!("stage9" => PassthroughStage::new("stage9"));
                     snk = sink!("sink" => sink);
                 },
-                
+
                 topology: {
                     src |> s1;
                     s1 |> s2;
@@ -265,7 +265,9 @@ async fn build_pipeline(
                     s8 |> s9;
                     s9 |> snk;
                 }
-            }.await.map_err(|e| anyhow::anyhow!("Failed to create 10-stage flow: {:?}", e))?;
+            }
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to create 10-stage flow: {:?}", e))?;
             handle
         }
         _ => return Err(anyhow::anyhow!("Unsupported stage count: {}", stage_count)),

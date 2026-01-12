@@ -5,6 +5,10 @@
 //! monitoring and SLI middleware.
 
 use crate::middleware::{Middleware, MiddlewareAction, MiddlewareContext, MiddlewareFactory};
+use obzenflow_core::control_middleware::{
+    CircuitBreakerContractMode, CircuitBreakerMetrics, CircuitBreakerSnapshotter,
+    ControlMiddlewareProvider, NoControlMiddleware,
+};
 use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::payloads::observability_payload::{
     CircuitBreakerEvent, MiddlewareLifecycle, ObservabilityPayload,
@@ -12,10 +16,6 @@ use obzenflow_core::event::payloads::observability_payload::{
 use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
 use obzenflow_core::event::ChainEventFactory;
 use obzenflow_core::TypedPayload;
-use obzenflow_core::control_middleware::{
-    CircuitBreakerContractMode, CircuitBreakerMetrics, CircuitBreakerSnapshotter,
-    ControlMiddlewareProvider, NoControlMiddleware,
-};
 use obzenflow_core::{EventId, StageId, WriterId};
 use obzenflow_runtime_services::pipeline::config::StageConfig;
 use serde::de::DeserializeOwned;

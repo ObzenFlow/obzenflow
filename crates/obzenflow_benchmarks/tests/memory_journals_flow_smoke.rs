@@ -76,25 +76,22 @@ async fn memory_journals_flow_runs_to_completion() {
     let sink = CountingSink::new();
     let sink_clone = sink.clone();
 
-    let handle = tokio::time::timeout(
-        Duration::from_secs(10),
-        async {
-            flow! {
-                journals: memory_journals(),
-                middleware: [],
+    let handle = tokio::time::timeout(Duration::from_secs(10), async {
+        flow! {
+            journals: memory_journals(),
+            middleware: [],
 
-                stages: {
-                    src = source!("source" => source);
-                    snk = sink!("sink" => sink);
-                },
+            stages: {
+                src = source!("source" => source);
+                snk = sink!("sink" => sink);
+            },
 
-                topology: {
-                    src |> snk;
-                }
+            topology: {
+                src |> snk;
             }
-            .await
-        },
-    )
+        }
+        .await
+    })
     .await
     .expect("flow creation did not complete within timeout")
     .expect("failed to create flow");
@@ -119,7 +116,10 @@ async fn memory_journals_flow_runs_to_completion() {
             sink_clone.received.load(Ordering::Relaxed),
             total_events
         );
-        eprintln!("pipeline state at sink timeout: {:?}", handle.current_state());
+        eprintln!(
+            "pipeline state at sink timeout: {:?}",
+            handle.current_state()
+        );
     }
 
     let observed_terminal_state = tokio::time::timeout(Duration::from_secs(10), async {

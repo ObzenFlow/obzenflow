@@ -437,14 +437,15 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                         }
                         PollResult::NoEvents => {}
                         PollResult::Error(e) => {
-                            let err_msg = format!("Error reading system events during draining: {}", e);
+                            let err_msg =
+                                format!("Error reading system events during draining: {}", e);
                             tracing::error!(error = %err_msg, "Metrics aggregator draining system subscription errored");
                             ctx.data_subscription = data_subscription;
                             ctx.error_subscription = error_subscription;
                             ctx.system_subscription = system_subscription;
-                            return Ok(EventLoopDirective::Transition(MetricsAggregatorEvent::Error(
-                                err_msg,
-                            )));
+                            return Ok(EventLoopDirective::Transition(
+                                MetricsAggregatorEvent::Error(err_msg),
+                            ));
                         }
                     }
                 }
@@ -504,9 +505,9 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                                 error = %err_msg,
                                 "Metrics aggregator draining emitting Error event"
                             );
-                            return Ok(EventLoopDirective::Transition(MetricsAggregatorEvent::Error(
-                                err_msg,
-                            )));
+                            return Ok(EventLoopDirective::Transition(
+                                MetricsAggregatorEvent::Error(err_msg),
+                            ));
                         }
                     }
                 }
@@ -542,7 +543,8 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                         }
                         PollResult::NoEvents => {}
                         PollResult::Error(e) => {
-                            let err_msg = format!("Error journal read error during draining: {}", e);
+                            let err_msg =
+                                format!("Error journal read error during draining: {}", e);
                             ctx.data_subscription = data_subscription;
                             ctx.error_subscription = error_subscription;
                             ctx.system_subscription = system_subscription;
@@ -557,9 +559,9 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                                 error = %err_msg,
                                 "Metrics aggregator draining emitting Error event"
                             );
-                            return Ok(EventLoopDirective::Transition(MetricsAggregatorEvent::Error(
-                                err_msg,
-                            )));
+                            return Ok(EventLoopDirective::Transition(
+                                MetricsAggregatorEvent::Error(err_msg),
+                            ));
                         }
                     }
                 }

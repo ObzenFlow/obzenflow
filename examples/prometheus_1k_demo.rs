@@ -283,8 +283,7 @@ async fn main() -> Result<()> {
                 counter |> counter_sink;
             }
     })
-    .await
-    ?;
+    .await?;
 
     Ok(())
 }

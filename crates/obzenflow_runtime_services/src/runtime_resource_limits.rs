@@ -92,10 +92,7 @@ pub(crate) fn journal_error_is_too_many_open_files(err: &JournalError) -> bool {
 pub(crate) fn io_error_is_too_many_open_files(err: &io::Error) -> bool {
     #[cfg(unix)]
     {
-        matches!(
-            err.raw_os_error(),
-            Some(libc::EMFILE) | Some(libc::ENFILE)
-        )
+        matches!(err.raw_os_error(), Some(libc::EMFILE) | Some(libc::ENFILE))
     }
 
     #[cfg(not(unix))]

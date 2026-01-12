@@ -126,7 +126,8 @@ where
             bail!("headers must be provided when has_headers=false");
         }
 
-        let file = File::open(&path).with_context(|| format!("Failed to open CSV file: {}", path.display()))?;
+        let file = File::open(&path)
+            .with_context(|| format!("Failed to open CSV file: {}", path.display()))?;
         let mut reader = ReaderBuilder::new()
             .has_headers(false)
             .delimiter(self.delimiter)
@@ -155,10 +156,9 @@ where
                 let mut indices = Vec::with_capacity(columns.len());
                 let mut selected_headers = StringRecord::new();
                 for col in columns {
-                    let idx = file_headers
-                        .iter()
-                        .position(|h| h == col)
-                        .ok_or_else(|| anyhow!("select_columns references unknown header '{col}'"))?;
+                    let idx = file_headers.iter().position(|h| h == col).ok_or_else(|| {
+                        anyhow!("select_columns references unknown header '{col}'")
+                    })?;
                     indices.push(idx);
                     selected_headers.push_field(col);
                 }
@@ -295,15 +295,13 @@ where
         let event_type = T::versioned_event_type();
         let mut events = Vec::with_capacity(items.len());
         for item in items {
-            let event =
-                ChainEventFactory::data_event_from(writer_id.clone(), &event_type, &item).map_err(
-                    |e| {
-                        SourceError::Other(format!(
-                            "CsvSource failed to serialize {}: {e}",
-                            std::any::type_name::<T>()
-                        ))
-                    },
-                )?;
+            let event = ChainEventFactory::data_event_from(writer_id.clone(), &event_type, &item)
+                .map_err(|e| {
+                SourceError::Other(format!(
+                    "CsvSource failed to serialize {}: {e}",
+                    std::any::type_name::<T>()
+                ))
+            })?;
             events.push(event);
         }
 
@@ -467,10 +465,7 @@ mod tests {
         let mut src = CsvSource::from_file(tmp.path()).expect("source build");
         src.bind_writer_id(WriterId::from(obzenflow_core::StageId::new()));
 
-        let batch = src
-            .next()
-            .expect("next")
-            .expect("should have one batch");
+        let batch = src.next().expect("next").expect("should have one batch");
         assert_eq!(batch.len(), 1);
 
         let payload = batch[0].payload();
@@ -491,10 +486,7 @@ mod tests {
             .expect("source build");
         src.bind_writer_id(WriterId::from(obzenflow_core::StageId::new()));
 
-        let batch = src
-            .next()
-            .expect("next")
-            .expect("should have one batch");
+        let batch = src.next().expect("next").expect("should have one batch");
         assert_eq!(batch.len(), 1);
 
         let payload = batch[0].payload();
@@ -511,10 +503,7 @@ mod tests {
         let mut src = CsvSource::tsv_from_file(tmp.path()).expect("source build");
         src.bind_writer_id(WriterId::from(obzenflow_core::StageId::new()));
 
-        let batch = src
-            .next()
-            .expect("next")
-            .expect("should have one batch");
+        let batch = src.next().expect("next").expect("should have one batch");
         assert_eq!(batch.len(), 1);
 
         let payload = batch[0].payload();

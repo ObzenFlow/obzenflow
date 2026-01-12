@@ -143,11 +143,7 @@ async fn main() -> Result<()> {
     println!("  2. \"42 is the answer.\"");
     println!("  3. \"rust 1 python 0.\"\n");
 
-    let sentences = [
-        "hello 2024 world!",
-        "42 is the answer.",
-        "rust 1 python 0.",
-    ];
+    let sentences = ["hello 2024 world!", "42 is the answer.", "rust 1 python 0."];
     let char_events = build_char_events(&sentences);
 
     FlowApplication::builder()

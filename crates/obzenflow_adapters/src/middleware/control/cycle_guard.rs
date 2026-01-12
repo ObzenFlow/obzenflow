@@ -198,7 +198,9 @@ impl MiddlewareFactory for CycleGuardMiddlewareFactory {
     fn create(
         &self,
         config: &StageConfig,
-        _control_middleware: std::sync::Arc<crate::middleware::control::ControlMiddlewareAggregator>,
+        _control_middleware: std::sync::Arc<
+            crate::middleware::control::ControlMiddlewareAggregator,
+        >,
     ) -> Box<dyn Middleware> {
         Box::new(CycleGuardMiddleware::new(self.max_iterations, &config.name))
     }

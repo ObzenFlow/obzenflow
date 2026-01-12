@@ -219,8 +219,7 @@ pub fn run_example() -> Result<()> {
     FlowApplication::builder()
         .with_console_subscriber()
         .with_log_level(obzenflow_infra::application::LogLevel::Info)
-        .run_blocking(build_flow())
-        ?;
+        .run_blocking(build_flow())?;
 
     println!("\n✅ Product catalog enrichment completed!");
     println!("\n💡 Try setting INJECT_BAD_PAYMENT=1 to see StrictJoin trigger Jonestown Protocol!");

@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 /// Event submission payload from HTTP clients (FLOWIP-084d).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -174,7 +174,8 @@ impl IngestionTelemetry {
         let value = count as u64;
         match reason {
             IngestionRejectionReason::Auth => {
-                self.events_rejected_auth_total.fetch_add(value, Ordering::Relaxed);
+                self.events_rejected_auth_total
+                    .fetch_add(value, Ordering::Relaxed);
             }
             IngestionRejectionReason::Validation => {
                 self.events_rejected_validation_total

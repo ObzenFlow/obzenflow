@@ -1,5 +1,5 @@
-use obzenflow_core::event::types::SeqNo;
 use obzenflow_core::control_middleware::{CircuitBreakerContractMode, ControlMiddlewareProvider};
+use obzenflow_core::event::types::SeqNo;
 use obzenflow_core::{ContractResult, StageId, ViolationCause};
 
 use obzenflow_core::event::types::ViolationCause as EventViolationCause;

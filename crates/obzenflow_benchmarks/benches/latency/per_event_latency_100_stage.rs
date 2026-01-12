@@ -157,12 +157,19 @@ impl SinkHandler for LatencySink {
 
 /// Run a single 100-stage pipeline test
 async fn run_100_stage_pipeline() -> anyhow::Result<Duration> {
-    let warmup_events =
-        env_u64("OBZENFLOW_BENCH_100_STAGE_WARMUP_EVENTS", DEFAULT_WARMUP_EVENT_COUNT);
-    let test_events = env_u64("OBZENFLOW_BENCH_100_STAGE_TEST_EVENTS", DEFAULT_TEST_EVENT_COUNT);
+    let warmup_events = env_u64(
+        "OBZENFLOW_BENCH_100_STAGE_WARMUP_EVENTS",
+        DEFAULT_WARMUP_EVENT_COUNT,
+    );
+    let test_events = env_u64(
+        "OBZENFLOW_BENCH_100_STAGE_TEST_EVENTS",
+        DEFAULT_TEST_EVENT_COUNT,
+    );
     let expected_events = warmup_events + test_events;
-    let pipeline_timeout =
-        Duration::from_secs(env_u64("OBZENFLOW_BENCH_100_STAGE_TIMEOUT_SECS", DEFAULT_PIPELINE_TIMEOUT_SECS));
+    let pipeline_timeout = Duration::from_secs(env_u64(
+        "OBZENFLOW_BENCH_100_STAGE_TIMEOUT_SECS",
+        DEFAULT_PIPELINE_TIMEOUT_SECS,
+    ));
 
     let temp_dir = tempdir()?;
     let journals_base_path = temp_dir.path().join(format!(

@@ -124,10 +124,7 @@ fn render_table(columns: &[String], rows: &[Vec<String>], max_col_width: usize) 
                 .max()
                 .unwrap_or(0);
 
-            header_width
-                .max(max_value_width)
-                .min(max_col_width)
-                .max(1)
+            header_width.max(max_value_width).min(max_col_width).max(1)
         })
         .collect();
 
@@ -261,12 +258,7 @@ fn empty_lines<T>(_item: &T) -> Vec<String> {
 ///
 /// This is useful when each item is already a snapshot (e.g. a "materialized view"
 /// event containing multiple rows).
-pub struct SnapshotTableFormatter<
-    T,
-    E,
-    H = fn(&T) -> Vec<String>,
-    F = fn(&T) -> Vec<String>,
-> {
+pub struct SnapshotTableFormatter<T, E, H = fn(&T) -> Vec<String>, F = fn(&T) -> Vec<String>> {
     columns: Vec<String>,
     header: H,
     extractor: E,
@@ -619,7 +611,10 @@ where
 {
     async fn consume(&mut self, event: ChainEvent) -> Result<DeliveryPayload, HandlerError> {
         match &event.content {
-            ChainEventContent::Data { event_type, payload } => {
+            ChainEventContent::Data {
+                event_type,
+                payload,
+            } => {
                 if !T::event_type_matches(event_type) {
                     return Ok(DeliveryPayload::success(
                         "console",
@@ -738,8 +733,8 @@ mod tests {
 
     #[test]
     fn table_formatter_truncates_with_ellipsis() {
-        let mut formatter = TableFormatter::new(&["value"], |e: &TestEvent| vec![e.value.clone()])
-            .max_width(3);
+        let mut formatter =
+            TableFormatter::new(&["value"], |e: &TestEvent| vec![e.value.clone()]).max_width(3);
 
         let _ = formatter.format(&TestEvent {
             value: "abcdef".to_string(),
@@ -778,7 +773,10 @@ mod tests {
         });
 
         let cloned = formatter.clone();
-        assert!(cloned.rows.is_empty(), "clone should not copy buffered rows");
+        assert!(
+            cloned.rows.is_empty(),
+            "clone should not copy buffered rows"
+        );
     }
 
     #[test]

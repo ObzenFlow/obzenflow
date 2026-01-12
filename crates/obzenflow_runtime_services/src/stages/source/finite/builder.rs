@@ -228,7 +228,9 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> H
         // Blocking here avoids a busy-spin loop (FLOWIP-086i).
         if matches!(
             state,
-            FiniteSourceState::Created | FiniteSourceState::Initialized | FiniteSourceState::WaitingForGun
+            FiniteSourceState::Created
+                | FiniteSourceState::Initialized
+                | FiniteSourceState::WaitingForGun
         ) {
             match self.external_events.recv().await {
                 Some(event) => return Ok(EventLoopDirective::Transition(event)),

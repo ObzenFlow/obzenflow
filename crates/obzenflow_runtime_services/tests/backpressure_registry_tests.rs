@@ -24,16 +24,10 @@ fn backpressure_blocks_after_window_until_downstream_acks() {
     assert!(reader.is_enabled());
     assert_eq!(writer.min_downstream_credit(), 2);
 
-    writer
-        .reserve(1)
-        .expect("first reserve")
-        .commit(1);
+    writer.reserve(1).expect("first reserve").commit(1);
     assert_eq!(writer.min_downstream_credit(), 1);
 
-    writer
-        .reserve(1)
-        .expect("second reserve")
-        .commit(1);
+    writer.reserve(1).expect("second reserve").commit(1);
     assert_eq!(writer.min_downstream_credit(), 0);
 
     assert!(writer.reserve(1).is_none(), "should block at window");
@@ -91,4 +85,3 @@ fn backpressure_fan_out_is_barrier_slowest_wins() {
     writer.reserve(1).expect("w3").commit(1);
     assert_eq!(writer.min_downstream_credit(), 0);
 }
-

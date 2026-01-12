@@ -109,7 +109,12 @@ struct CollectingSink {
 impl CollectingSink {
     fn new() -> (Self, Arc<Mutex<Vec<ChainEvent>>>) {
         let events = Arc::new(Mutex::new(Vec::new()));
-        (Self { events: events.clone() }, events)
+        (
+            Self {
+                events: events.clone(),
+            },
+            events,
+        )
     }
 }
 
@@ -123,13 +128,15 @@ impl SinkHandler for CollectingSink {
         HandlerError,
     > {
         self.events.lock().unwrap().push(event);
-        Ok(obzenflow_core::event::payloads::delivery_payload::DeliveryPayload::success(
-            "test",
-            obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Custom(
-                "collect".to_string(),
+        Ok(
+            obzenflow_core::event::payloads::delivery_payload::DeliveryPayload::success(
+                "test",
+                obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Custom(
+                    "collect".to_string(),
+                ),
+                None,
             ),
-            None,
-        ))
+        )
     }
 }
 
@@ -302,7 +309,8 @@ async fn flowip_051j_stateful_metrics_accumulate_is_instrumented() -> Result<()>
         "obzenflow_events_total{",
         &[flow_label.clone(), stage_label.clone()],
     )
-    .ok_or_else(|| anyhow!("missing obzenflow_events_total for {stage_label}"))? as u64;
+    .ok_or_else(|| anyhow!("missing obzenflow_events_total for {stage_label}"))?
+        as u64;
 
     assert_eq!(
         events_total, total_events as u64,
@@ -314,7 +322,8 @@ async fn flowip_051j_stateful_metrics_accumulate_is_instrumented() -> Result<()>
         "obzenflow_events_accumulated_total{",
         &[flow_label.clone(), stage_label.clone()],
     )
-    .ok_or_else(|| anyhow!("missing obzenflow_events_accumulated_total for {stage_label}"))? as u64;
+    .ok_or_else(|| anyhow!("missing obzenflow_events_accumulated_total for {stage_label}"))?
+        as u64;
 
     assert_eq!(
         accumulated_total, total_events as u64,
@@ -326,7 +335,8 @@ async fn flowip_051j_stateful_metrics_accumulate_is_instrumented() -> Result<()>
         "obzenflow_events_emitted_total{",
         &[flow_label.clone(), stage_label.clone()],
     )
-    .ok_or_else(|| anyhow!("missing obzenflow_events_emitted_total for {stage_label}"))? as u64;
+    .ok_or_else(|| anyhow!("missing obzenflow_events_emitted_total for {stage_label}"))?
+        as u64;
 
     assert_eq!(
         emitted_total, 1,
@@ -385,21 +395,28 @@ async fn flowip_051j_stateful_metrics_accumulate_is_instrumented() -> Result<()>
         .map_err(|e| anyhow!("failed to open stage journal {}: {e}", stage_log.display()))?;
     let reader = std::io::BufReader::new(file);
 
-    let mut aggregate_record: Option<obzenflow_infra::journal::disk::log_record::LogRecord<
-        ChainEvent,
-    >> = None;
+    let mut aggregate_record: Option<
+        obzenflow_infra::journal::disk::log_record::LogRecord<ChainEvent>,
+    > = None;
     for line in reader.lines() {
         let line = line.map_err(|e| anyhow!("failed reading {}: {e}", stage_log.display()))?;
         let mut parts = line.splitn(3, ':');
         let _len = parts.next();
         let _crc = parts.next();
-        let json = parts
-            .next()
-            .ok_or_else(|| anyhow!("invalid journal line (missing json) in {}", stage_log.display()))?;
+        let json = parts.next().ok_or_else(|| {
+            anyhow!(
+                "invalid journal line (missing json) in {}",
+                stage_log.display()
+            )
+        })?;
 
         let record: obzenflow_infra::journal::disk::log_record::LogRecord<ChainEvent> =
-            serde_json::from_str(json)
-                .map_err(|e| anyhow!("failed to parse journal json in {}: {e}", stage_log.display()))?;
+            serde_json::from_str(json).map_err(|e| {
+                anyhow!(
+                    "failed to parse journal json in {}: {e}",
+                    stage_log.display()
+                )
+            })?;
 
         if record.event.id == event.id {
             aggregate_record = Some(record);
@@ -407,8 +424,13 @@ async fn flowip_051j_stateful_metrics_accumulate_is_instrumented() -> Result<()>
         }
     }
 
-    let aggregate_record =
-        aggregate_record.ok_or_else(|| anyhow!("missing aggregate event {} in {}", event.id, stage_log.display()))?;
+    let aggregate_record = aggregate_record.ok_or_else(|| {
+        anyhow!(
+            "missing aggregate event {} in {}",
+            event.id,
+            stage_log.display()
+        )
+    })?;
 
     for (writer_key, parent_seq) in parent_vc.clocks.iter() {
         let seq = aggregate_record.vector_clock.get(writer_key);
@@ -484,7 +506,8 @@ async fn flowip_051j_join_metrics_counts_hydration_as_accumulation() -> Result<(
         "obzenflow_events_total{",
         &[flow_label.clone(), stage_label.clone()],
     )
-    .ok_or_else(|| anyhow!("missing obzenflow_events_total for {stage_label}"))? as u64;
+    .ok_or_else(|| anyhow!("missing obzenflow_events_total for {stage_label}"))?
+        as u64;
 
     assert_eq!(
         events_total, reference_events as u64,
@@ -496,7 +519,8 @@ async fn flowip_051j_join_metrics_counts_hydration_as_accumulation() -> Result<(
         "obzenflow_events_accumulated_total{",
         &[flow_label.clone(), stage_label.clone()],
     )
-    .ok_or_else(|| anyhow!("missing obzenflow_events_accumulated_total for {stage_label}"))? as u64;
+    .ok_or_else(|| anyhow!("missing obzenflow_events_accumulated_total for {stage_label}"))?
+        as u64;
 
     assert_eq!(
         accumulated_total, reference_events as u64,
@@ -508,7 +532,8 @@ async fn flowip_051j_join_metrics_counts_hydration_as_accumulation() -> Result<(
         "obzenflow_events_emitted_total{",
         &[flow_label.clone(), stage_label.clone()],
     )
-    .ok_or_else(|| anyhow!("missing obzenflow_events_emitted_total for {stage_label}"))? as u64;
+    .ok_or_else(|| anyhow!("missing obzenflow_events_emitted_total for {stage_label}"))?
+        as u64;
 
     assert_eq!(
         emitted_total, 0,

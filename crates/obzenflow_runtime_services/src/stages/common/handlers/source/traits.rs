@@ -5,9 +5,9 @@
 //!   and infra failures are explicit in the type system.
 //! - Infinite sources use Result<Vec<ChainEvent>, SourceError>.
 
+use async_trait::async_trait;
 use obzenflow_core::ChainEvent;
 use obzenflow_core::WriterId;
-use async_trait::async_trait;
 use std::fmt;
 
 /// Errors that can occur while polling a source.

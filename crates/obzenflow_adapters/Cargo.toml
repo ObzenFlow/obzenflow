@@ -13,7 +13,7 @@ obzenflow-topology = { path = "../../../obzenflow-topology", version = "0.2" }
 obzenflow_runtime_services = { path = "../obzenflow_runtime_services" }
 
 # Adapter layer dependencies
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["full", "test-util"] }
 async-trait = "0.1"
 tracing = "0.1"
 hdrhistogram = "7.5"
@@ -33,6 +33,7 @@ serde = { version = "1.0.219", features = ["derive"] }
 
 [features]
 default = []
+http-pull = []
 metrics-prometheus = ["prometheus", "warp"]
 metrics-statsd = ["statsd"]
 

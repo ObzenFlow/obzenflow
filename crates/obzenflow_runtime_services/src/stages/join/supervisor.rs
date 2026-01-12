@@ -9,7 +9,9 @@ use crate::supervised_base::base::Supervisor;
 use crate::supervised_base::{EventLoopDirective, HandlerSupervised};
 use obzenflow_core::event::context::{FlowContext, StageType};
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
-use obzenflow_core::event::payloads::observability_payload::{MiddlewareLifecycle, ObservabilityPayload};
+use obzenflow_core::event::payloads::observability_payload::{
+    MiddlewareLifecycle, ObservabilityPayload,
+};
 use obzenflow_core::event::ChainEventFactory;
 use obzenflow_core::event::SystemEvent;
 use obzenflow_core::journal::journal::Journal;
@@ -986,168 +988,174 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                             )
                             .await
                         {
-                        PollResult::Event(envelope) => {
-                            // We have work on this loop iteration.
-                            ctx.instrumentation.record_consumed(&envelope);
-                            ctx.instrumentation
-                                .event_loops_with_work_total
-                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            PollResult::Event(envelope) => {
+                                // We have work on this loop iteration.
+                                ctx.instrumentation.record_consumed(&envelope);
+                                ctx.instrumentation
+                                    .event_loops_with_work_total
+                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-                            // Match on event content type like Transform does
-                            match &envelope.event.content {
-                                obzenflow_core::event::ChainEventContent::FlowControl(signal) => {
-                                    let mut processing_ctx = ProcessingContext::new();
+                                // Match on event content type like Transform does
+                                match &envelope.event.content {
+                                    obzenflow_core::event::ChainEventContent::FlowControl(
+                                        signal,
+                                    ) => {
+                                        let mut processing_ctx = ProcessingContext::new();
 
-                                    let action = match signal {
-                                        FlowControlPayload::Eof { natural, .. } => {
-                                            tracing::info!(
-                                                stage_name = %ctx.stage_name,
-                                                natural = natural,
-                                                writer_id = ?envelope.event.writer_id,
-                                                "Join received EOF via stream_subscription (stream complete)"
-                                            );
-                                            // Buffer EOF for downstream forwarding
-                                            ctx.buffered_eof = Some(envelope.event.clone());
-                                            ctx.control_strategy
-                                                .handle_eof(&envelope, &mut processing_ctx)
-                                        }
-                                        FlowControlPayload::Watermark { .. } => ctx
-                                            .control_strategy
-                                            .handle_watermark(&envelope, &mut processing_ctx),
-                                        FlowControlPayload::Checkpoint { .. } => ctx
-                                            .control_strategy
-                                            .handle_checkpoint(&envelope, &mut processing_ctx),
-                                        FlowControlPayload::Drain => ctx
-                                            .control_strategy
-                                            .handle_drain(&envelope, &mut processing_ctx),
-                                        _ => ControlEventAction::Forward,
-                                    };
+                                        let action = match signal {
+                                            FlowControlPayload::Eof { natural, .. } => {
+                                                tracing::info!(
+                                                    stage_name = %ctx.stage_name,
+                                                    natural = natural,
+                                                    writer_id = ?envelope.event.writer_id,
+                                                    "Join received EOF via stream_subscription (stream complete)"
+                                                );
+                                                // Buffer EOF for downstream forwarding
+                                                ctx.buffered_eof = Some(envelope.event.clone());
+                                                ctx.control_strategy
+                                                    .handle_eof(&envelope, &mut processing_ctx)
+                                            }
+                                            FlowControlPayload::Watermark { .. } => ctx
+                                                .control_strategy
+                                                .handle_watermark(&envelope, &mut processing_ctx),
+                                            FlowControlPayload::Checkpoint { .. } => ctx
+                                                .control_strategy
+                                                .handle_checkpoint(&envelope, &mut processing_ctx),
+                                            FlowControlPayload::Drain => ctx
+                                                .control_strategy
+                                                .handle_drain(&envelope, &mut processing_ctx),
+                                            _ => ControlEventAction::Forward,
+                                        };
 
-                                    match action {
-                                        ControlEventAction::Forward => {
-                                            // Always forward control events downstream
-                                            let written = self
-                                                .data_journal
-                                                .append(envelope.event.clone(), None)
-                                                .await?;
-                                            crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
+                                        match action {
+                                            ControlEventAction::Forward => {
+                                                // Always forward control events downstream
+                                                let written = self
+                                                    .data_journal
+                                                    .append(envelope.event.clone(), None)
+                                                    .await?;
+                                                crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
                                                 &written,
                                                 &self.system_journal,
                                             )
                                             .await;
 
-                                            // Use EofOutcome from the stream subscription to decide
-                                            // when the join can move to Draining.
-                                            if matches!(signal, FlowControlPayload::Eof { .. }) {
-                                                let eof_outcome =
-                                                    subscription.take_last_eof_outcome();
-                                                if let Some(outcome) = eof_outcome {
-                                                    tracing::info!(
-                                                        target: "flowip-080o",
-                                                        stage_name = %ctx.stage_name,
-                                                        upstream_stage_id = ?outcome.stage_id,
-                                                        upstream_stage_name = %outcome.stage_name,
-                                                        reader_index = outcome.reader_index,
-                                                        eof_count = outcome.eof_count,
-                                                        total_readers = outcome.total_readers,
-                                                        is_final = outcome.is_final,
-                                                        "Join (Enriching) evaluated EOF outcome for stream side"
-                                                    );
+                                                // Use EofOutcome from the stream subscription to decide
+                                                // when the join can move to Draining.
+                                                if matches!(signal, FlowControlPayload::Eof { .. })
+                                                {
+                                                    let eof_outcome =
+                                                        subscription.take_last_eof_outcome();
+                                                    if let Some(outcome) = eof_outcome {
+                                                        tracing::info!(
+                                                            target: "flowip-080o",
+                                                            stage_name = %ctx.stage_name,
+                                                            upstream_stage_id = ?outcome.stage_id,
+                                                            upstream_stage_name = %outcome.stage_name,
+                                                            reader_index = outcome.reader_index,
+                                                            eof_count = outcome.eof_count,
+                                                            total_readers = outcome.total_readers,
+                                                            is_final = outcome.is_final,
+                                                            "Join (Enriching) evaluated EOF outcome for stream side"
+                                                        );
 
-                                                    if outcome.is_final {
-                                                        directive =
-                                                            Ok(EventLoopDirective::Transition(
-                                                                JoinEvent::ReceivedEOF,
-                                                            ));
+                                                        if outcome.is_final {
+                                                            directive =
+                                                                Ok(EventLoopDirective::Transition(
+                                                                    JoinEvent::ReceivedEOF,
+                                                                ));
+                                                        } else {
+                                                            // Non-final EOF: keep enriching.
+                                                            directive =
+                                                                Ok(EventLoopDirective::Continue);
+                                                        }
                                                     } else {
-                                                        // Non-final EOF: keep enriching.
+                                                        // No outcome yet; keep enriching.
                                                         directive =
                                                             Ok(EventLoopDirective::Continue);
                                                     }
                                                 } else {
-                                                    // No outcome yet; keep enriching.
+                                                    // Non-EOF control event; just continue.
                                                     directive = Ok(EventLoopDirective::Continue);
                                                 }
-                                            } else {
-                                                // Non-EOF control event; just continue.
+                                            }
+                                            ControlEventAction::Delay(duration) => {
+                                                tracing::info!(
+                                                    stage_name = %ctx.stage_name,
+                                                    event_type = envelope.event.event_type(),
+                                                    duration = ?duration,
+                                                    "Join delaying control event"
+                                                );
+                                                tokio::time::sleep(duration).await;
+                                                directive = Ok(EventLoopDirective::Continue);
+                                            }
+                                            ControlEventAction::Retry
+                                            | ControlEventAction::Skip => {
+                                                tracing::info!(
+                                                    stage_name = %ctx.stage_name,
+                                                    event_type = envelope.event.event_type(),
+                                                    "Join ignoring control event (Retry/Skip not implemented)"
+                                                );
                                                 directive = Ok(EventLoopDirective::Continue);
                                             }
                                         }
-                                        ControlEventAction::Delay(duration) => {
-                                            tracing::info!(
-                                                stage_name = %ctx.stage_name,
-                                                event_type = envelope.event.event_type(),
-                                                duration = ?duration,
-                                                "Join delaying control event"
-                                            );
-                                            tokio::time::sleep(duration).await;
-                                            directive = Ok(EventLoopDirective::Continue);
-                                        }
-                                        ControlEventAction::Retry | ControlEventAction::Skip => {
-                                            tracing::info!(
-                                                stage_name = %ctx.stage_name,
-                                                event_type = envelope.event.event_type(),
-                                                "Join ignoring control event (Retry/Skip not implemented)"
-                                            );
-                                            directive = Ok(EventLoopDirective::Continue);
-                                        }
                                     }
-                                }
-                                obzenflow_core::event::ChainEventContent::Data { .. } => {
-                                    // Extract source_id from the event's writer_id
-                                    let source_id = envelope
-                                        .event
-                                        .writer_id
-                                        .as_stage()
-                                        .copied()
-                                        .ok_or_else(|| "Event writer is not a stage")?;
+                                    obzenflow_core::event::ChainEventContent::Data { .. } => {
+                                        // Extract source_id from the event's writer_id
+                                        let source_id = envelope
+                                            .event
+                                            .writer_id
+                                            .as_stage()
+                                            .copied()
+                                            .ok_or_else(|| "Event writer is not a stage")?;
 
-                                    // Process data event through handler, instrumented for metrics
-                                    let event = envelope.event.clone();
+                                        // Process data event through handler, instrumented for metrics
+                                        let event = envelope.event.clone();
 
-                                    // Get writer ID for the handler
-                                    let writer_id = ctx
-                                        .writer_id
-                                        .as_ref()
-                                        .ok_or_else(|| "No writer ID available")?
-                                        .clone();
+                                        // Get writer ID for the handler
+                                        let writer_id = ctx
+                                            .writer_id
+                                            .as_ref()
+                                            .ok_or_else(|| "No writer ID available")?
+                                            .clone();
 
-                                    ctx.instrumentation
-                                        .in_flight_count
-                                        .fetch_add(1, Ordering::Relaxed);
-                                    let start = Instant::now();
-                                    let result = ctx.handler.process_event(
-                                        &mut ctx.handler_state,
-                                        event,
-                                        source_id,
-                                        writer_id,
-                                    );
-                                    let duration = start.elapsed();
-                                    ctx.instrumentation
-                                        .in_flight_count
-                                        .fetch_sub(1, Ordering::Relaxed);
-
-                                    ctx.instrumentation.record_processing_time(duration);
-                                    if ctx.instrumentation.check_anomaly(duration) {
                                         ctx.instrumentation
-                                            .anomalies_total
+                                            .in_flight_count
                                             .fetch_add(1, Ordering::Relaxed);
-                                    }
-                                    ctx.instrumentation
-                                        .events_processed_total
-                                        .fetch_add(1, Ordering::Relaxed);
+                                        let start = Instant::now();
+                                        let result = ctx.handler.process_event(
+                                            &mut ctx.handler_state,
+                                            event,
+                                            source_id,
+                                            writer_id,
+                                        );
+                                        let duration = start.elapsed();
+                                        ctx.instrumentation
+                                            .in_flight_count
+                                            .fetch_sub(1, Ordering::Relaxed);
 
-                                    match result {
-                                        Ok(events) => {
-                                            let mut pending_data_outputs: VecDeque<ChainEvent> =
-                                                events.into();
+                                        ctx.instrumentation.record_processing_time(duration);
+                                        if ctx.instrumentation.check_anomaly(duration) {
+                                            ctx.instrumentation
+                                                .anomalies_total
+                                                .fetch_add(1, Ordering::Relaxed);
+                                        }
+                                        ctx.instrumentation
+                                            .events_processed_total
+                                            .fetch_add(1, Ordering::Relaxed);
 
-                                            while let Some(event) = pending_data_outputs.pop_front()
-                                            {
-                                                if event.is_data() {
-                                                    // Debug-only: emit activity pulses even when bypass is enabled, so
-                                                    // operators can see what *would* have blocked (FLOWIP-086k).
-                                                    if crate::backpressure::BackpressureWriter::is_bypass_enabled() {
+                                        match result {
+                                            Ok(events) => {
+                                                let mut pending_data_outputs: VecDeque<ChainEvent> =
+                                                    events.into();
+
+                                                while let Some(event) =
+                                                    pending_data_outputs.pop_front()
+                                                {
+                                                    if event.is_data() {
+                                                        // Debug-only: emit activity pulses even when bypass is enabled, so
+                                                        // operators can see what *would* have blocked (FLOWIP-086k).
+                                                        if crate::backpressure::BackpressureWriter::is_bypass_enabled() {
                                                         if let Some((min_credit, limiting)) =
                                                             ctx.backpressure_writer
                                                                 .min_downstream_credit_detail()
@@ -1197,42 +1205,54 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                                         }
                                                     }
 
-                                                    let Some(reservation) =
-                                                        ctx.backpressure_writer.reserve(1)
-                                                    else {
-                                                        ctx.pending_ack_upstream = Some(source_id);
-                                                        ctx.pending_outputs.push_back(event);
-                                                        ctx.pending_outputs
-                                                            .extend(pending_data_outputs);
-                                                        let delay =
-                                                            ctx.backpressure_backoff.next_delay();
-                                                        ctx.backpressure_writer.record_wait(delay);
-
-                                                        if let Some((min_credit, limiting)) =
+                                                        let Some(reservation) =
+                                                            ctx.backpressure_writer.reserve(1)
+                                                        else {
+                                                            ctx.pending_ack_upstream =
+                                                                Some(source_id);
+                                                            ctx.pending_outputs.push_back(event);
+                                                            ctx.pending_outputs
+                                                                .extend(pending_data_outputs);
+                                                            let delay = ctx
+                                                                .backpressure_backoff
+                                                                .next_delay();
                                                             ctx.backpressure_writer
-                                                                .min_downstream_credit_detail()
-                                                        {
-                                                            ctx.backpressure_pulse.record_delay(
-                                                                delay,
-                                                                Some(min_credit),
-                                                                Some(limiting),
-                                                            );
-                                                        } else {
-                                                            ctx.backpressure_pulse
-                                                                .record_delay(delay, None, None);
-                                                        }
-                                                        if let Some(pulse) =
-                                                            ctx.backpressure_pulse.maybe_emit()
-                                                        {
-                                                            let flow_context = FlowContext {
-                                                                flow_name: ctx.flow_name.clone(),
-                                                                flow_id: ctx.flow_id.to_string(),
-                                                                stage_name: ctx.stage_name.clone(),
-                                                                stage_id: self.stage_id.clone(),
-                                                                stage_type: StageType::Join,
-                                                            };
+                                                                .record_wait(delay);
 
-                                                            let event = ChainEventFactory::observability_event(
+                                                            if let Some((min_credit, limiting)) =
+                                                                ctx.backpressure_writer
+                                                                    .min_downstream_credit_detail()
+                                                            {
+                                                                ctx.backpressure_pulse
+                                                                    .record_delay(
+                                                                        delay,
+                                                                        Some(min_credit),
+                                                                        Some(limiting),
+                                                                    );
+                                                            } else {
+                                                                ctx.backpressure_pulse
+                                                                    .record_delay(
+                                                                        delay, None, None,
+                                                                    );
+                                                            }
+                                                            if let Some(pulse) =
+                                                                ctx.backpressure_pulse.maybe_emit()
+                                                            {
+                                                                let flow_context = FlowContext {
+                                                                    flow_name: ctx
+                                                                        .flow_name
+                                                                        .clone(),
+                                                                    flow_id: ctx
+                                                                        .flow_id
+                                                                        .to_string(),
+                                                                    stage_name: ctx
+                                                                        .stage_name
+                                                                        .clone(),
+                                                                    stage_id: self.stage_id.clone(),
+                                                                    stage_type: StageType::Join,
+                                                                };
+
+                                                                let event = ChainEventFactory::observability_event(
                                                                 WriterId::from(self.stage_id),
                                                                 ObservabilityPayload::Middleware(
                                                                     MiddlewareLifecycle::Backpressure(pulse),
@@ -1243,148 +1263,153 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                                                 ctx.instrumentation.snapshot_with_control(),
                                                             );
 
-                                                            match self.data_journal.append(event, None).await {
-                                                                Ok(written) => {
-                                                                    crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
+                                                                match self
+                                                                    .data_journal
+                                                                    .append(event, None)
+                                                                    .await
+                                                                {
+                                                                    Ok(written) => {
+                                                                        crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
                                                                         &written,
                                                                         &self.system_journal,
                                                                     )
                                                                     .await;
+                                                                    }
+                                                                    Err(e) => tracing::warn!(
+                                                                        stage_name = %ctx.stage_name,
+                                                                        journal_error = %e,
+                                                                        "Failed to append backpressure activity pulse"
+                                                                    ),
                                                                 }
-                                                                Err(e) => tracing::warn!(
-                                                                    stage_name = %ctx.stage_name,
-                                                                    journal_error = %e,
-                                                                    "Failed to append backpressure activity pulse"
-                                                                ),
                                                             }
+                                                            tokio::time::sleep(delay).await;
+                                                            break;
+                                                        };
+
+                                                        let flow_context = FlowContext {
+                                                            flow_name: ctx.flow_name.clone(),
+                                                            flow_id: ctx.flow_id.to_string(),
+                                                            stage_name: ctx.stage_name.clone(),
+                                                            stage_id: self.stage_id.clone(),
+                                                            stage_type: StageType::Join,
+                                                        };
+
+                                                        let enriched_event = event
+                                                            .with_flow_context(flow_context)
+                                                            .with_runtime_context(
+                                                                ctx.instrumentation
+                                                                    .snapshot_with_control(),
+                                                            );
+
+                                                        if enriched_event.is_data() {
+                                                            ctx.instrumentation
+                                                                .record_output_event(
+                                                                    &enriched_event,
+                                                                );
+                                                            subscription.track_output_event();
                                                         }
-                                                        tokio::time::sleep(delay).await;
-                                                        break;
-                                                    };
 
-                                                    let flow_context = FlowContext {
-                                                        flow_name: ctx.flow_name.clone(),
-                                                        flow_id: ctx.flow_id.to_string(),
-                                                        stage_name: ctx.stage_name.clone(),
-                                                        stage_id: self.stage_id.clone(),
-                                                        stage_type: StageType::Join,
-                                                    };
+                                                        let written = self
+                                                            .data_journal
+                                                            .append(enriched_event, None)
+                                                            .await?;
+                                                        reservation.commit(1);
+                                                        ctx.backpressure_backoff.reset();
+                                                        crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
+                                                        &written,
+                                                        &self.system_journal,
+                                                    )
+                                                    .await;
+                                                    } else {
+                                                        let flow_context = FlowContext {
+                                                            flow_name: ctx.flow_name.clone(),
+                                                            flow_id: ctx.flow_id.to_string(),
+                                                            stage_name: ctx.stage_name.clone(),
+                                                            stage_id: self.stage_id.clone(),
+                                                            stage_type: StageType::Join,
+                                                        };
 
-                                                    let enriched_event = event
-                                                        .with_flow_context(flow_context)
-                                                        .with_runtime_context(
-                                                            ctx.instrumentation
-                                                                .snapshot_with_control(),
-                                                        );
+                                                        let enriched_event = event
+                                                            .with_flow_context(flow_context)
+                                                            .with_runtime_context(
+                                                                ctx.instrumentation
+                                                                    .snapshot_with_control(),
+                                                            );
 
-                                                    if enriched_event.is_data() {
-                                                        ctx.instrumentation
-                                                            .record_output_event(&enriched_event);
-                                                        subscription.track_output_event();
+                                                        let written = self
+                                                            .data_journal
+                                                            .append(enriched_event, None)
+                                                            .await?;
+                                                        crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
+                                                        &written,
+                                                        &self.system_journal,
+                                                    )
+                                                    .await;
                                                     }
-
-                                                    let written = self
-                                                        .data_journal
-                                                        .append(enriched_event, None)
-                                                        .await?;
-                                                    reservation.commit(1);
-                                                    ctx.backpressure_backoff.reset();
-                                                    crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
-                                                        &written,
-                                                        &self.system_journal,
-                                                    )
-                                                    .await;
-                                                } else {
-                                                    let flow_context = FlowContext {
-                                                        flow_name: ctx.flow_name.clone(),
-                                                        flow_id: ctx.flow_id.to_string(),
-                                                        stage_name: ctx.stage_name.clone(),
-                                                        stage_id: self.stage_id.clone(),
-                                                        stage_type: StageType::Join,
-                                                    };
-
-                                                    let enriched_event = event
-                                                        .with_flow_context(flow_context)
-                                                        .with_runtime_context(
-                                                            ctx.instrumentation
-                                                                .snapshot_with_control(),
-                                                        );
-
-                                                    let written = self
-                                                        .data_journal
-                                                        .append(enriched_event, None)
-                                                        .await?;
-                                                    crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
-                                                        &written,
-                                                        &self.system_journal,
-                                                    )
-                                                    .await;
                                                 }
-                                            }
 
-                                            // Backpressure ack: stream input consumed by join handler.
-                                            if ctx.pending_outputs.is_empty() {
-                                                if let Some(reader) =
-                                                    ctx.backpressure_readers.get(&source_id)
-                                                {
-                                                    reader.ack_consumed(1);
+                                                // Backpressure ack: stream input consumed by join handler.
+                                                if ctx.pending_outputs.is_empty() {
+                                                    if let Some(reader) =
+                                                        ctx.backpressure_readers.get(&source_id)
+                                                    {
+                                                        reader.ack_consumed(1);
+                                                    }
                                                 }
+
+                                                directive = Ok(EventLoopDirective::Continue);
                                             }
-
-                                            directive = Ok(EventLoopDirective::Continue);
-                                        }
-                                        Err(err) => {
-
-                                            // Per-record join enrichment failure: turn input into an error-marked event
-                                            use obzenflow_core::event::status::processing_status::{
+                                            Err(err) => {
+                                                // Per-record join enrichment failure: turn input into an error-marked event
+                                                use obzenflow_core::event::status::processing_status::{
                                                 ErrorKind, ProcessingStatus,
                                             };
 
-                                            let reason = format!(
-                                                "Join handler error during enrichment: {:?}",
-                                                err
-                                            );
-                                            let error_event = envelope
-                                                .event
-                                                .clone()
-                                                .mark_as_error(reason, err.kind());
+                                                let reason = format!(
+                                                    "Join handler error during enrichment: {:?}",
+                                                    err
+                                                );
+                                                let error_event = envelope
+                                                    .event
+                                                    .clone()
+                                                    .mark_as_error(reason, err.kind());
 
-                                            // Count all error-marked events for lifecycle / flow rollups,
-                                            // even when they are not stage-fatal.
-                                            ctx.instrumentation.record_error(err.kind());
+                                                // Count all error-marked events for lifecycle / flow rollups,
+                                                // even when they are not stage-fatal.
+                                                ctx.instrumentation.record_error(err.kind());
 
-                                            let route_to_error_journal = match &error_event
-                                                .processing_info
-                                                .status
-                                            {
-                                                ProcessingStatus::Error { kind, .. } => {
-                                                    match kind {
-                                                        Some(ErrorKind::Timeout)
-                                                        | Some(ErrorKind::Remote)
-                                                        | Some(ErrorKind::Deserialization) => true,
-                                                        Some(ErrorKind::Validation)
-                                                        | Some(ErrorKind::Domain) => false,
-                                                        None | Some(ErrorKind::Unknown) => true,
-                                                    }
-                                                }
-                                                _ => false,
-                                            };
+                                                let route_to_error_journal =
+                                                    match &error_event.processing_info.status {
+                                                        ProcessingStatus::Error {
+                                                            kind, ..
+                                                        } => match kind {
+                                                            Some(ErrorKind::Timeout)
+                                                            | Some(ErrorKind::Remote)
+                                                            | Some(ErrorKind::Deserialization) => {
+                                                                true
+                                                            }
+                                                            Some(ErrorKind::Validation)
+                                                            | Some(ErrorKind::Domain) => false,
+                                                            None | Some(ErrorKind::Unknown) => true,
+                                                        },
+                                                        _ => false,
+                                                    };
 
-                                            if route_to_error_journal {
-                                                ctx.error_journal
-                                                    .append(error_event, None)
-                                                    .await
-                                                    .map_err(|e| {
-                                                    format!(
+                                                if route_to_error_journal {
+                                                    ctx.error_journal
+                                                        .append(error_event, None)
+                                                        .await
+                                                        .map_err(|e| {
+                                                            format!(
                                                         "Failed to write join error event: {}",
                                                         e
                                                     )
-                                                })?;
-                                            } else {
-                                                if error_event.is_data() {
-                                                    // Debug-only: emit activity pulses even when bypass is enabled, so
-                                                    // operators can see what *would* have blocked (FLOWIP-086k).
-                                                    if crate::backpressure::BackpressureWriter::is_bypass_enabled() {
+                                                        })?;
+                                                } else {
+                                                    if error_event.is_data() {
+                                                        // Debug-only: emit activity pulses even when bypass is enabled, so
+                                                        // operators can see what *would* have blocked (FLOWIP-086k).
+                                                        if crate::backpressure::BackpressureWriter::is_bypass_enabled() {
                                                         if let Some((min_credit, limiting)) =
                                                             ctx.backpressure_writer.min_downstream_credit_detail()
                                                         {
@@ -1433,9 +1458,120 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                                         }
                                                     }
 
-                                                    if let Some(reservation) =
-                                                        ctx.backpressure_writer.reserve(1)
-                                                    {
+                                                        if let Some(reservation) =
+                                                            ctx.backpressure_writer.reserve(1)
+                                                        {
+                                                            let flow_context = FlowContext {
+                                                                flow_name: ctx.flow_name.clone(),
+                                                                flow_id: ctx.flow_id.to_string(),
+                                                                stage_name: ctx.stage_name.clone(),
+                                                                stage_id: self.stage_id.clone(),
+                                                                stage_type: StageType::Join,
+                                                            };
+
+                                                            let enriched_error = error_event
+                                                                .with_flow_context(flow_context)
+                                                                .with_runtime_context(
+                                                                    ctx.instrumentation
+                                                                        .snapshot_with_control(),
+                                                                );
+
+                                                            if enriched_error.is_data() {
+                                                                ctx.instrumentation
+                                                                    .record_output_event(
+                                                                        &enriched_error,
+                                                                    );
+                                                                subscription.track_output_event();
+                                                            }
+
+                                                            let written = self
+                                                                .data_journal
+                                                                .append(enriched_error, None)
+                                                                .await?;
+                                                            reservation.commit(1);
+                                                            ctx.backpressure_backoff.reset();
+                                                            crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
+                                                            &written,
+                                                            &self.system_journal,
+                                                        )
+                                                        .await;
+                                                        } else {
+                                                            ctx.pending_ack_upstream =
+                                                                Some(source_id);
+                                                            ctx.pending_outputs
+                                                                .push_back(error_event);
+                                                            let delay = ctx
+                                                                .backpressure_backoff
+                                                                .next_delay();
+                                                            ctx.backpressure_writer
+                                                                .record_wait(delay);
+
+                                                            if let Some((min_credit, limiting)) =
+                                                                ctx.backpressure_writer
+                                                                    .min_downstream_credit_detail()
+                                                            {
+                                                                ctx.backpressure_pulse
+                                                                    .record_delay(
+                                                                        delay,
+                                                                        Some(min_credit),
+                                                                        Some(limiting),
+                                                                    );
+                                                            } else {
+                                                                ctx.backpressure_pulse
+                                                                    .record_delay(
+                                                                        delay, None, None,
+                                                                    );
+                                                            }
+                                                            if let Some(pulse) =
+                                                                ctx.backpressure_pulse.maybe_emit()
+                                                            {
+                                                                let flow_context = FlowContext {
+                                                                    flow_name: ctx
+                                                                        .flow_name
+                                                                        .clone(),
+                                                                    flow_id: ctx
+                                                                        .flow_id
+                                                                        .to_string(),
+                                                                    stage_name: ctx
+                                                                        .stage_name
+                                                                        .clone(),
+                                                                    stage_id: self.stage_id.clone(),
+                                                                    stage_type: StageType::Join,
+                                                                };
+
+                                                                let event = ChainEventFactory::observability_event(
+                                                                WriterId::from(self.stage_id),
+                                                                ObservabilityPayload::Middleware(
+                                                                    MiddlewareLifecycle::Backpressure(pulse),
+                                                                ),
+                                                            )
+                                                            .with_flow_context(flow_context)
+                                                            .with_runtime_context(
+                                                                ctx.instrumentation.snapshot_with_control(),
+                                                            );
+
+                                                                match self
+                                                                    .data_journal
+                                                                    .append(event, None)
+                                                                    .await
+                                                                {
+                                                                    Ok(written) => {
+                                                                        crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
+                                                                        &written,
+                                                                        &self.system_journal,
+                                                                    )
+                                                                    .await;
+                                                                    }
+                                                                    Err(e) => tracing::warn!(
+                                                                        stage_name = %ctx.stage_name,
+                                                                        journal_error = %e,
+                                                                        "Failed to append backpressure activity pulse"
+                                                                    ),
+                                                                }
+                                                            }
+                                                            tokio::time::sleep(delay).await;
+                                                        }
+                                                    } else {
                                                         let flow_context = FlowContext {
                                                             flow_name: ctx.flow_name.clone(),
                                                             flow_id: ctx.flow_id.to_string(),
@@ -1451,138 +1587,46 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                                                     .snapshot_with_control(),
                                                             );
 
-                                                        if enriched_error.is_data() {
-                                                            ctx.instrumentation.record_output_event(
-                                                                &enriched_error,
-                                                            );
-                                                            subscription.track_output_event();
-                                                        }
-
                                                         let written = self
                                                             .data_journal
                                                             .append(enriched_error, None)
                                                             .await?;
-                                                        reservation.commit(1);
-                                                        ctx.backpressure_backoff.reset();
                                                         crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
-                                                            &written,
-                                                            &self.system_journal,
-                                                        )
-                                                        .await;
-                                                    } else {
-                                                        ctx.pending_ack_upstream = Some(source_id);
-                                                        ctx.pending_outputs.push_back(error_event);
-                                                        let delay =
-                                                            ctx.backpressure_backoff.next_delay();
-                                                        ctx.backpressure_writer.record_wait(delay);
-
-                                                        if let Some((min_credit, limiting)) =
-                                                            ctx.backpressure_writer.min_downstream_credit_detail()
-                                                        {
-                                                            ctx.backpressure_pulse.record_delay(
-                                                                delay,
-                                                                Some(min_credit),
-                                                                Some(limiting),
-                                                            );
-                                                        } else {
-                                                            ctx.backpressure_pulse
-                                                                .record_delay(delay, None, None);
-                                                        }
-                                                        if let Some(pulse) =
-                                                            ctx.backpressure_pulse.maybe_emit()
-                                                        {
-                                                            let flow_context = FlowContext {
-                                                                flow_name: ctx.flow_name.clone(),
-                                                                flow_id: ctx.flow_id.to_string(),
-                                                                stage_name: ctx.stage_name.clone(),
-                                                                stage_id: self.stage_id.clone(),
-                                                                stage_type: StageType::Join,
-                                                            };
-
-                                                            let event = ChainEventFactory::observability_event(
-                                                                WriterId::from(self.stage_id),
-                                                                ObservabilityPayload::Middleware(
-                                                                    MiddlewareLifecycle::Backpressure(pulse),
-                                                                ),
-                                                            )
-                                                            .with_flow_context(flow_context)
-                                                            .with_runtime_context(
-                                                                ctx.instrumentation.snapshot_with_control(),
-                                                            );
-
-                                                            match self.data_journal.append(event, None).await {
-                                                                Ok(written) => {
-                                                                    crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
-                                                                        &written,
-                                                                        &self.system_journal,
-                                                                    )
-                                                                    .await;
-                                                                }
-                                                                Err(e) => tracing::warn!(
-                                                                    stage_name = %ctx.stage_name,
-                                                                    journal_error = %e,
-                                                                    "Failed to append backpressure activity pulse"
-                                                                ),
-                                                            }
-                                                        }
-                                                        tokio::time::sleep(delay).await;
-                                                    }
-                                                } else {
-                                                    let flow_context = FlowContext {
-                                                        flow_name: ctx.flow_name.clone(),
-                                                        flow_id: ctx.flow_id.to_string(),
-                                                        stage_name: ctx.stage_name.clone(),
-                                                        stage_id: self.stage_id.clone(),
-                                                        stage_type: StageType::Join,
-                                                    };
-
-                                                    let enriched_error = error_event
-                                                        .with_flow_context(flow_context)
-                                                        .with_runtime_context(
-                                                            ctx.instrumentation
-                                                                .snapshot_with_control(),
-                                                        );
-
-                                                    let written = self
-                                                        .data_journal
-                                                        .append(enriched_error, None)
-                                                        .await?;
-                                                    crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
                                                         &written,
                                                         &self.system_journal,
                                                     )
                                                     .await;
+                                                    }
                                                 }
-                                            }
 
-                                            // Backpressure ack: stream input consumed by join handler.
-                                            if ctx.pending_outputs.is_empty() {
-                                                if let Some(reader) =
-                                                    ctx.backpressure_readers.get(&source_id)
-                                                {
-                                                    reader.ack_consumed(1);
+                                                // Backpressure ack: stream input consumed by join handler.
+                                                if ctx.pending_outputs.is_empty() {
+                                                    if let Some(reader) =
+                                                        ctx.backpressure_readers.get(&source_id)
+                                                    {
+                                                        reader.ack_consumed(1);
+                                                    }
                                                 }
-                                            }
 
-                                            directive = Ok(EventLoopDirective::Continue);
+                                                directive = Ok(EventLoopDirective::Continue);
+                                            }
                                         }
                                     }
-                                }
-                                _ => {
-                                    // Other content types - log and continue
-                                    tracing::warn!(
-                                        stage_name = %ctx.stage_name,
-                                        event_type = envelope.event.event_type(),
-                                        "Join received unexpected event content type"
-                                    );
-                                    directive = Ok(EventLoopDirective::Continue);
+                                    _ => {
+                                        // Other content types - log and continue
+                                        tracing::warn!(
+                                            stage_name = %ctx.stage_name,
+                                            event_type = envelope.event.event_type(),
+                                            "Join received unexpected event content type"
+                                        );
+                                        directive = Ok(EventLoopDirective::Continue);
+                                    }
                                 }
                             }
-                        }
-                        PollResult::NoEvents => {
-                            // Check contracts if appropriate
-                            if subscription.should_check_contracts(&stream_contract_state[..]) {
-                                match subscription
+                            PollResult::NoEvents => {
+                                // Check contracts if appropriate
+                                if subscription.should_check_contracts(&stream_contract_state[..]) {
+                                    match subscription
                                     .check_contracts(&mut stream_contract_state[..])
                                     .await
                                 {
@@ -1610,22 +1654,22 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                         );
                                     }
                                 }
-                            }
+                                }
 
-                            // No events available right now, sleep briefly and continue
-                            tracing::trace!(
-                                stage_name = %ctx.stage_name,
-                                "No stream events available, sleeping"
-                            );
-                            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-                            directive = Ok(EventLoopDirective::Continue);
-                        }
-                        PollResult::Error(e) => {
-                            tracing::error!("Stream subscription error: {}", e);
-                            directive = Ok(EventLoopDirective::Transition(JoinEvent::Error(
-                                format!("Stream subscription error: {}", e),
-                            )));
-                        }
+                                // No events available right now, sleep briefly and continue
+                                tracing::trace!(
+                                    stage_name = %ctx.stage_name,
+                                    "No stream events available, sleeping"
+                                );
+                                tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+                                directive = Ok(EventLoopDirective::Continue);
+                            }
+                            PollResult::Error(e) => {
+                                tracing::error!("Stream subscription error: {}", e);
+                                directive = Ok(EventLoopDirective::Transition(JoinEvent::Error(
+                                    format!("Stream subscription error: {}", e),
+                                )));
+                            }
                         }
                     }
                 } else {
@@ -1749,9 +1793,7 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                     ),
                                 )
                                 .with_flow_context(flow_context)
-                                .with_runtime_context(
-                                    ctx.instrumentation.snapshot_with_control(),
-                                );
+                                .with_runtime_context(ctx.instrumentation.snapshot_with_control());
 
                                 match self.data_journal.append(event, None).await {
                                     Ok(written) => {
@@ -1862,7 +1904,10 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                 }
 
                 if ctx.pending_outputs.is_empty()
-                    && matches!(ctx.pending_transition, Some(PendingTransition::DrainComplete))
+                    && matches!(
+                        ctx.pending_transition,
+                        Some(PendingTransition::DrainComplete)
+                    )
                 {
                     ctx.pending_transition = None;
                     ctx.reference_contract_state = ref_contract_state;
@@ -1931,11 +1976,11 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                     .events_processed_total
                                     .fetch_add(1, Ordering::Relaxed);
 
-                                    match result {
-                                        Ok(results) => {
-                                            ctx.instrumentation
-                                                .events_accumulated_total
-                                                .fetch_add(1, Ordering::Relaxed);
+                                match result {
+                                    Ok(results) => {
+                                        ctx.instrumentation
+                                            .events_accumulated_total
+                                            .fetch_add(1, Ordering::Relaxed);
                                         let upstream_stage =
                                             subscription.last_delivered_upstream_stage();
 
@@ -2113,7 +2158,6 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                         }
                                     }
                                     Err(err) => {
-
                                         // Per-record join failure during draining: mark input as error.
                                         use obzenflow_core::event::status::processing_status::{
                                             ErrorKind, ProcessingStatus,
@@ -2200,8 +2244,7 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                 });
                                 forward_event.runtime_context = None;
 
-                                let written =
-                                    self.data_journal.append(forward_event, None).await?;
+                                let written = self.data_journal.append(forward_event, None).await?;
                                 crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
                                     &written,
                                     &self.system_journal,
@@ -2313,9 +2356,9 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> JoinSuper
 
                                 let event = ChainEventFactory::observability_event(
                                     WriterId::from(self.stage_id),
-                                    ObservabilityPayload::Middleware(MiddlewareLifecycle::Backpressure(
-                                        pulse,
-                                    )),
+                                    ObservabilityPayload::Middleware(
+                                        MiddlewareLifecycle::Backpressure(pulse),
+                                    ),
                                 )
                                 .with_flow_context(flow_context)
                                 .with_runtime_context(ctx.instrumentation.snapshot_with_control());
@@ -2347,8 +2390,11 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> JoinSuper
                     if let Some((min_credit, limiting)) =
                         ctx.backpressure_writer.min_downstream_credit_detail()
                     {
-                        ctx.backpressure_pulse
-                            .record_delay(delay, Some(min_credit), Some(limiting));
+                        ctx.backpressure_pulse.record_delay(
+                            delay,
+                            Some(min_credit),
+                            Some(limiting),
+                        );
                     } else {
                         ctx.backpressure_pulse.record_delay(delay, None, None);
                     }
@@ -2486,7 +2532,12 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> JoinSuper
         if prefer_stream {
             if let Some(ref mut subscription) = stream_subscription {
                 handled_event = self
-                    .poll_live_stream(subscription, &mut stream_contract_state, ctx, &mut directive)
+                    .poll_live_stream(
+                        subscription,
+                        &mut stream_contract_state,
+                        ctx,
+                        &mut directive,
+                    )
                     .await?;
             }
             if !handled_event {
@@ -2504,18 +2555,18 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> JoinSuper
         } else {
             if let Some(ref mut subscription) = ref_subscription {
                 handled_event = self
-                    .poll_live_reference(
-                        subscription,
-                        &mut ref_contract_state,
-                        ctx,
-                        &mut directive,
-                    )
+                    .poll_live_reference(subscription, &mut ref_contract_state, ctx, &mut directive)
                     .await?;
             }
             if !handled_event {
                 if let Some(ref mut subscription) = stream_subscription {
                     handled_event = self
-                        .poll_live_stream(subscription, &mut stream_contract_state, ctx, &mut directive)
+                        .poll_live_stream(
+                            subscription,
+                            &mut stream_contract_state,
+                            ctx,
+                            &mut directive,
+                        )
                         .await?;
                 }
             }
@@ -2525,7 +2576,9 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> JoinSuper
             // No events available right now: check contracts for both sides if appropriate.
             if let Some(ref mut subscription) = ref_subscription {
                 if subscription.should_check_contracts(&ref_contract_state[..]) {
-                    let _ = subscription.check_contracts(&mut ref_contract_state[..]).await;
+                    let _ = subscription
+                        .check_contracts(&mut ref_contract_state[..])
+                        .await;
                 }
             }
             if let Some(ref mut subscription) = stream_subscription {
@@ -2589,9 +2642,9 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> JoinSuper
 
                                 let event = ChainEventFactory::observability_event(
                                     WriterId::from(self.stage_id),
-                                    ObservabilityPayload::Middleware(MiddlewareLifecycle::Backpressure(
-                                        pulse,
-                                    )),
+                                    ObservabilityPayload::Middleware(
+                                        MiddlewareLifecycle::Backpressure(pulse),
+                                    ),
                                 )
                                 .with_flow_context(flow_context)
                                 .with_runtime_context(ctx.instrumentation.snapshot_with_control());
@@ -2623,8 +2676,11 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> JoinSuper
                     if let Some((min_credit, limiting)) =
                         ctx.backpressure_writer.min_downstream_credit_detail()
                     {
-                        ctx.backpressure_pulse
-                            .record_delay(delay, Some(min_credit), Some(limiting));
+                        ctx.backpressure_pulse.record_delay(
+                            delay,
+                            Some(min_credit),
+                            Some(limiting),
+                        );
                     } else {
                         ctx.backpressure_pulse.record_delay(delay, None, None);
                     }
@@ -2747,7 +2803,10 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> JoinSuper
         }
 
         if ctx.pending_outputs.is_empty()
-            && matches!(ctx.pending_transition, Some(PendingTransition::DrainComplete))
+            && matches!(
+                ctx.pending_transition,
+                Some(PendingTransition::DrainComplete)
+            )
         {
             ctx.pending_transition = None;
             ctx.reference_subscription = ref_subscription;
@@ -2770,7 +2829,9 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> JoinSuper
                 let writer_id = ctx
                     .writer_id
                     .as_ref()
-                    .ok_or_else(|| obzenflow_fsm::FsmError::HandlerError("No writer ID available".to_string()))?
+                    .ok_or_else(|| {
+                        obzenflow_fsm::FsmError::HandlerError("No writer ID available".to_string())
+                    })?
                     .clone();
 
                 let eof_events = handler
@@ -2850,16 +2911,18 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> JoinSuper
                             FlowControlPayload::Checkpoint { .. } => ctx
                                 .control_strategy
                                 .handle_checkpoint(&envelope, &mut processing_ctx),
-                            FlowControlPayload::Drain => {
-                                ctx.control_strategy.handle_drain(&envelope, &mut processing_ctx)
-                            }
+                            FlowControlPayload::Drain => ctx
+                                .control_strategy
+                                .handle_drain(&envelope, &mut processing_ctx),
                             _ => ControlEventAction::Forward,
                         };
 
                         match action {
                             ControlEventAction::Forward => {
-                                let written =
-                                    self.data_journal.append(envelope.event.clone(), None).await?;
+                                let written = self
+                                    .data_journal
+                                    .append(envelope.event.clone(), None)
+                                    .await?;
                                 crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
                                     &written,
                                     &self.system_journal,
@@ -2910,16 +2973,16 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> JoinSuper
                             .events_processed_total
                             .fetch_add(1, Ordering::Relaxed);
 
-	                        match result {
-	                            Ok(events) => {
-	                                ctx.instrumentation
-	                                    .events_accumulated_total
-	                                    .fetch_add(1, Ordering::Relaxed);
-	
-	                                if !events.is_empty() {
-	                                    tracing::debug!(
-	                                        stage_name = %ctx.stage_name,
-	                                        produced = events.len(),
+                        match result {
+                            Ok(events) => {
+                                ctx.instrumentation
+                                    .events_accumulated_total
+                                    .fetch_add(1, Ordering::Relaxed);
+
+                                if !events.is_empty() {
+                                    tracing::debug!(
+                                            stage_name = %ctx.stage_name,
+                                            produced = events.len(),
                                         "Live join: reference event produced outputs"
                                     );
                                 }
@@ -2976,15 +3039,17 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> JoinSuper
                                             }
                                         }
 
-                                        let Some(reservation) = ctx.backpressure_writer.reserve(1) else {
+                                        let Some(reservation) = ctx.backpressure_writer.reserve(1)
+                                        else {
                                             ctx.pending_ack_upstream = Some(source_id);
                                             ctx.pending_outputs.push_back(out_event);
                                             ctx.pending_outputs.extend(pending_data_outputs);
                                             let delay = ctx.backpressure_backoff.next_delay();
                                             ctx.backpressure_writer.record_wait(delay);
 
-                                            if let Some((min_credit, limiting)) =
-                                                ctx.backpressure_writer.min_downstream_credit_detail()
+                                            if let Some((min_credit, limiting)) = ctx
+                                                .backpressure_writer
+                                                .min_downstream_credit_detail()
                                             {
                                                 ctx.backpressure_pulse.record_delay(
                                                     delay,
@@ -2992,9 +3057,11 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> JoinSuper
                                                     Some(limiting),
                                                 );
                                             } else {
-                                                ctx.backpressure_pulse.record_delay(delay, None, None);
+                                                ctx.backpressure_pulse
+                                                    .record_delay(delay, None, None);
                                             }
-                                            if let Some(pulse) = ctx.backpressure_pulse.maybe_emit() {
+                                            if let Some(pulse) = ctx.backpressure_pulse.maybe_emit()
+                                            {
                                                 let flow_context = FlowContext {
                                                     flow_name: ctx.flow_name.clone(),
                                                     flow_id: ctx.flow_id.to_string(),
@@ -3044,14 +3111,18 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> JoinSuper
 
                                         let enriched_event = out_event
                                             .with_flow_context(flow_context)
-                                            .with_runtime_context(ctx.instrumentation.snapshot_with_control());
+                                            .with_runtime_context(
+                                                ctx.instrumentation.snapshot_with_control(),
+                                            );
 
                                         if enriched_event.is_data() {
-                                            ctx.instrumentation.record_output_event(&enriched_event);
+                                            ctx.instrumentation
+                                                .record_output_event(&enriched_event);
                                             subscription.track_output_event();
                                         }
 
-                                        let written = self.data_journal.append(enriched_event, None).await?;
+                                        let written =
+                                            self.data_journal.append(enriched_event, None).await?;
                                         reservation.commit(1);
                                         ctx.backpressure_backoff.reset();
                                         crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
@@ -3070,9 +3141,12 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> JoinSuper
 
                                         let enriched_event = out_event
                                             .with_flow_context(flow_context)
-                                            .with_runtime_context(ctx.instrumentation.snapshot_with_control());
+                                            .with_runtime_context(
+                                                ctx.instrumentation.snapshot_with_control(),
+                                            );
 
-                                        let written = self.data_journal.append(enriched_event, None).await?;
+                                        let written =
+                                            self.data_journal.append(enriched_event, None).await?;
                                         crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
                                             &written,
                                             &self.system_journal,
@@ -3096,28 +3170,32 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> JoinSuper
 
                                 let reason =
                                     format!("Join handler error during live reference: {:?}", err);
-                                let error_event = envelope.event.clone().mark_as_error(reason, err.kind());
+                                let error_event =
+                                    envelope.event.clone().mark_as_error(reason, err.kind());
                                 ctx.instrumentation.record_error(err.kind());
 
-                                let route_to_error_journal = match &error_event.processing_info.status {
-                                    ProcessingStatus::Error { kind, .. } => match kind {
-                                        Some(ErrorKind::Timeout)
-                                        | Some(ErrorKind::Remote)
-                                        | Some(ErrorKind::Deserialization) => true,
-                                        Some(ErrorKind::Validation) | Some(ErrorKind::Domain) => false,
-                                        None | Some(ErrorKind::Unknown) => true,
-                                    },
-                                    _ => false,
-                                };
+                                let route_to_error_journal =
+                                    match &error_event.processing_info.status {
+                                        ProcessingStatus::Error { kind, .. } => match kind {
+                                            Some(ErrorKind::Timeout)
+                                            | Some(ErrorKind::Remote)
+                                            | Some(ErrorKind::Deserialization) => true,
+                                            Some(ErrorKind::Validation)
+                                            | Some(ErrorKind::Domain) => false,
+                                            None | Some(ErrorKind::Unknown) => true,
+                                        },
+                                        _ => false,
+                                    };
 
                                 if route_to_error_journal {
-                                    ctx.error_journal
-                                        .append(error_event, None)
-                                        .await
-                                        .map_err(|e| format!("Failed to write join error event: {}", e))?;
+                                    ctx.error_journal.append(error_event, None).await.map_err(
+                                        |e| format!("Failed to write join error event: {}", e),
+                                    )?;
                                 } else {
                                     if error_event.is_data() {
-                                        if let Some(reservation) = ctx.backpressure_writer.reserve(1) {
+                                        if let Some(reservation) =
+                                            ctx.backpressure_writer.reserve(1)
+                                        {
                                             let flow_context = FlowContext {
                                                 flow_name: ctx.flow_name.clone(),
                                                 flow_id: ctx.flow_id.to_string(),
@@ -3128,14 +3206,20 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> JoinSuper
 
                                             let enriched_error = error_event
                                                 .with_flow_context(flow_context)
-                                                .with_runtime_context(ctx.instrumentation.snapshot_with_control());
+                                                .with_runtime_context(
+                                                    ctx.instrumentation.snapshot_with_control(),
+                                                );
 
                                             if enriched_error.is_data() {
-                                                ctx.instrumentation.record_output_event(&enriched_error);
+                                                ctx.instrumentation
+                                                    .record_output_event(&enriched_error);
                                                 subscription.track_output_event();
                                             }
 
-                                            let written = self.data_journal.append(enriched_error, None).await?;
+                                            let written = self
+                                                .data_journal
+                                                .append(enriched_error, None)
+                                                .await?;
                                             reservation.commit(1);
                                             ctx.backpressure_backoff.reset();
                                             crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
@@ -3161,9 +3245,12 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> JoinSuper
 
                                         let enriched_error = error_event
                                             .with_flow_context(flow_context)
-                                            .with_runtime_context(ctx.instrumentation.snapshot_with_control());
+                                            .with_runtime_context(
+                                                ctx.instrumentation.snapshot_with_control(),
+                                            );
 
-                                        let written = self.data_journal.append(enriched_error, None).await?;
+                                        let written =
+                                            self.data_journal.append(enriched_error, None).await?;
                                         crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
                                             &written,
                                             &self.system_journal,
@@ -3220,12 +3307,12 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> JoinSuper
                     .event_loops_with_work_total
                     .fetch_add(1, Ordering::Relaxed);
 
-	                // Stream processed -> capture and reset fairness counter.
-	                let reference_since_last_stream = ctx.reference_since_last_stream;
-	                ctx.reference_since_last_stream = 0;
-	                ctx.instrumentation
-	                    .join_reference_since_last_stream
-	                    .store(reference_since_last_stream as u64, Ordering::Relaxed);
+                // Stream processed -> capture and reset fairness counter.
+                let reference_since_last_stream = ctx.reference_since_last_stream;
+                ctx.reference_since_last_stream = 0;
+                ctx.instrumentation
+                    .join_reference_since_last_stream
+                    .store(reference_since_last_stream as u64, Ordering::Relaxed);
 
                 match &envelope.event.content {
                     obzenflow_core::event::ChainEventContent::FlowControl(signal) => {
@@ -3249,16 +3336,18 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> JoinSuper
                             FlowControlPayload::Checkpoint { .. } => ctx
                                 .control_strategy
                                 .handle_checkpoint(&envelope, &mut processing_ctx),
-                            FlowControlPayload::Drain => {
-                                ctx.control_strategy.handle_drain(&envelope, &mut processing_ctx)
-                            }
+                            FlowControlPayload::Drain => ctx
+                                .control_strategy
+                                .handle_drain(&envelope, &mut processing_ctx),
                             _ => ControlEventAction::Forward,
                         };
 
                         match action {
                             ControlEventAction::Forward => {
-                                let written =
-                                    self.data_journal.append(envelope.event.clone(), None).await?;
+                                let written = self
+                                    .data_journal
+                                    .append(envelope.event.clone(), None)
+                                    .await?;
                                 crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
                                     &written,
                                     &self.system_journal,
@@ -3269,8 +3358,9 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> JoinSuper
                                     let eof_outcome = subscription.take_last_eof_outcome();
                                     if let Some(outcome) = eof_outcome {
                                         if outcome.is_final {
-                                            *directive =
-                                                Ok(EventLoopDirective::Transition(JoinEvent::ReceivedEOF));
+                                            *directive = Ok(EventLoopDirective::Transition(
+                                                JoinEvent::ReceivedEOF,
+                                            ));
                                             return Ok(true);
                                         }
                                     }
@@ -3381,7 +3471,8 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> JoinSuper
                                             }
                                         }
 
-                                        let Some(reservation) = ctx.backpressure_writer.reserve(1) else {
+                                        let Some(reservation) = ctx.backpressure_writer.reserve(1)
+                                        else {
                                             ctx.pending_ack_upstream = Some(source_id);
                                             ctx.pending_outputs.push_back(out_event);
                                             ctx.pending_outputs.extend(pending_data_outputs);
@@ -3402,14 +3493,18 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> JoinSuper
 
                                         let enriched_event = out_event
                                             .with_flow_context(flow_context)
-                                            .with_runtime_context(ctx.instrumentation.snapshot_with_control());
+                                            .with_runtime_context(
+                                                ctx.instrumentation.snapshot_with_control(),
+                                            );
 
                                         if enriched_event.is_data() {
-                                            ctx.instrumentation.record_output_event(&enriched_event);
+                                            ctx.instrumentation
+                                                .record_output_event(&enriched_event);
                                             subscription.track_output_event();
                                         }
 
-                                        let written = self.data_journal.append(enriched_event, None).await?;
+                                        let written =
+                                            self.data_journal.append(enriched_event, None).await?;
                                         reservation.commit(1);
                                         ctx.backpressure_backoff.reset();
                                         crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
@@ -3428,9 +3523,12 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> JoinSuper
 
                                         let enriched_event = out_event
                                             .with_flow_context(flow_context)
-                                            .with_runtime_context(ctx.instrumentation.snapshot_with_control());
+                                            .with_runtime_context(
+                                                ctx.instrumentation.snapshot_with_control(),
+                                            );
 
-                                        let written = self.data_journal.append(enriched_event, None).await?;
+                                        let written =
+                                            self.data_journal.append(enriched_event, None).await?;
                                         crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
                                             &written,
                                             &self.system_journal,
@@ -3454,28 +3552,32 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> JoinSuper
 
                                 let reason =
                                     format!("Join handler error during live enrichment: {:?}", err);
-                                let error_event = envelope.event.clone().mark_as_error(reason, err.kind());
+                                let error_event =
+                                    envelope.event.clone().mark_as_error(reason, err.kind());
                                 ctx.instrumentation.record_error(err.kind());
 
-                                let route_to_error_journal = match &error_event.processing_info.status {
-                                    ProcessingStatus::Error { kind, .. } => match kind {
-                                        Some(ErrorKind::Timeout)
-                                        | Some(ErrorKind::Remote)
-                                        | Some(ErrorKind::Deserialization) => true,
-                                        Some(ErrorKind::Validation) | Some(ErrorKind::Domain) => false,
-                                        None | Some(ErrorKind::Unknown) => true,
-                                    },
-                                    _ => false,
-                                };
+                                let route_to_error_journal =
+                                    match &error_event.processing_info.status {
+                                        ProcessingStatus::Error { kind, .. } => match kind {
+                                            Some(ErrorKind::Timeout)
+                                            | Some(ErrorKind::Remote)
+                                            | Some(ErrorKind::Deserialization) => true,
+                                            Some(ErrorKind::Validation)
+                                            | Some(ErrorKind::Domain) => false,
+                                            None | Some(ErrorKind::Unknown) => true,
+                                        },
+                                        _ => false,
+                                    };
 
                                 if route_to_error_journal {
-                                    ctx.error_journal
-                                        .append(error_event, None)
-                                        .await
-                                        .map_err(|e| format!("Failed to write join error event: {}", e))?;
+                                    ctx.error_journal.append(error_event, None).await.map_err(
+                                        |e| format!("Failed to write join error event: {}", e),
+                                    )?;
                                 } else {
                                     if error_event.is_data() {
-                                        if let Some(reservation) = ctx.backpressure_writer.reserve(1) {
+                                        if let Some(reservation) =
+                                            ctx.backpressure_writer.reserve(1)
+                                        {
                                             let flow_context = FlowContext {
                                                 flow_name: ctx.flow_name.clone(),
                                                 flow_id: ctx.flow_id.to_string(),
@@ -3486,14 +3588,20 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> JoinSuper
 
                                             let enriched_error = error_event
                                                 .with_flow_context(flow_context)
-                                                .with_runtime_context(ctx.instrumentation.snapshot_with_control());
+                                                .with_runtime_context(
+                                                    ctx.instrumentation.snapshot_with_control(),
+                                                );
 
                                             if enriched_error.is_data() {
-                                                ctx.instrumentation.record_output_event(&enriched_error);
+                                                ctx.instrumentation
+                                                    .record_output_event(&enriched_error);
                                                 subscription.track_output_event();
                                             }
 
-                                            let written = self.data_journal.append(enriched_error, None).await?;
+                                            let written = self
+                                                .data_journal
+                                                .append(enriched_error, None)
+                                                .await?;
                                             reservation.commit(1);
                                             ctx.backpressure_backoff.reset();
                                             crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
@@ -3519,9 +3627,12 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> JoinSuper
 
                                         let enriched_error = error_event
                                             .with_flow_context(flow_context)
-                                            .with_runtime_context(ctx.instrumentation.snapshot_with_control());
+                                            .with_runtime_context(
+                                                ctx.instrumentation.snapshot_with_control(),
+                                            );
 
-                                        let written = self.data_journal.append(enriched_error, None).await?;
+                                        let written =
+                                            self.data_journal.append(enriched_error, None).await?;
                                         crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
                                             &written,
                                             &self.system_journal,

@@ -37,19 +37,19 @@ use obzenflow_runtime_services::{
         },
         source::{
             finite::{
-                AsyncFiniteSourceBuilder, FiniteSourceBuilder, FiniteSourceConfig, FiniteSourceEvent,
-                FiniteSourceState,
+                AsyncFiniteSourceBuilder, FiniteSourceBuilder, FiniteSourceConfig,
+                FiniteSourceEvent, FiniteSourceState,
             },
             infinite::{
                 AsyncInfiniteSourceBuilder, InfiniteSourceBuilder, InfiniteSourceConfig,
-                InfiniteSourceEvent,
-                InfiniteSourceState,
+                InfiniteSourceEvent, InfiniteSourceState,
             },
             strategies::CircuitBreakerSourceStrategy,
         },
         stateful::{StatefulBuilder, StatefulConfig, StatefulEvent, StatefulState},
         transform::{
-            AsyncTransformBuilder, TransformBuilder, TransformConfig, TransformEvent, TransformState,
+            AsyncTransformBuilder, TransformBuilder, TransformConfig, TransformEvent,
+            TransformState,
         },
     },
     supervised_base::SupervisorBuilder as SupervisorBuilderTrait,
@@ -144,7 +144,7 @@ pub trait StageDescriptor: Send + Sync {
             vec![],
             Arc::new(ControlMiddlewareAggregator::new()),
         )
-            .await
+        .await
     }
 
     /// Create the handle for this stage with flow-level middleware
@@ -182,8 +182,8 @@ pub trait StageDescriptor: Send + Sync {
 mod tests {
     use super::*;
     use obzenflow_adapters::middleware::control::circuit_breaker::circuit_breaker;
-    use obzenflow_core::ControlMiddlewareProvider;
     use obzenflow_core::event::{JournalEvent, SystemEvent};
+    use obzenflow_core::ControlMiddlewareProvider;
     use obzenflow_core::{ChainEvent, EventEnvelope, FlowId};
     use obzenflow_runtime_services::message_bus::FsmMessageBus;
     use obzenflow_runtime_services::stages::resources_builder::SubscriptionFactory;
@@ -640,7 +640,9 @@ impl<H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
         handler.bind_writer_id(writer_id);
 
         // Apply all middleware.
-        let mut builder = handler.middleware(writer_id.clone()).with_poll_timeout(poll_timeout);
+        let mut builder = handler
+            .middleware(writer_id.clone())
+            .with_poll_timeout(poll_timeout);
         for mw in all_middleware {
             builder = builder.with(mw);
         }
@@ -866,8 +868,8 @@ impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
 }
 
 #[async_trait]
-impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDescriptor
-    for AsyncInfiniteSourceDescriptor<H>
+impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
+    StageDescriptor for AsyncInfiniteSourceDescriptor<H>
 {
     fn name(&self) -> &str {
         &self.name
@@ -948,7 +950,9 @@ impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
         let mut handler = self.handler;
         handler.bind_writer_id(writer_id);
 
-        let mut builder = handler.middleware(writer_id.clone()).with_poll_timeout(poll_timeout);
+        let mut builder = handler
+            .middleware(writer_id.clone())
+            .with_poll_timeout(poll_timeout);
         for mw in all_middleware {
             builder = builder.with(mw);
         }
@@ -1406,7 +1410,9 @@ fn translate_stage_event_to_finite_source<H>(
         StageEvent::Ready => Ok(FiniteSourceEvent::Ready),
         StageEvent::Start => Ok(FiniteSourceEvent::Start),
         StageEvent::BeginDrain => Ok(FiniteSourceEvent::BeginDrain),
-        StageEvent::ForceShutdown => Ok(FiniteSourceEvent::Error(FORCE_SHUTDOWN_MESSAGE.to_string())),
+        StageEvent::ForceShutdown => {
+            Ok(FiniteSourceEvent::Error(FORCE_SHUTDOWN_MESSAGE.to_string()))
+        }
         _ => Err(format!(
             "Unsupported stage event for finite source: {:?}",
             event
@@ -1437,7 +1443,9 @@ fn translate_stage_event_to_infinite_source<H>(
         StageEvent::Ready => Ok(InfiniteSourceEvent::Ready),
         StageEvent::Start => Ok(InfiniteSourceEvent::Start),
         StageEvent::BeginDrain => Ok(InfiniteSourceEvent::BeginDrain),
-        StageEvent::ForceShutdown => Ok(InfiniteSourceEvent::Error(FORCE_SHUTDOWN_MESSAGE.to_string())),
+        StageEvent::ForceShutdown => Ok(InfiniteSourceEvent::Error(
+            FORCE_SHUTDOWN_MESSAGE.to_string(),
+        )),
         _ => Err(format!(
             "Unsupported stage event for infinite source: {:?}",
             event
@@ -1491,7 +1499,9 @@ fn translate_stage_event_to_sink<H>(event: StageEvent) -> Result<JournalSinkEven
         StageEvent::Initialize => Ok(JournalSinkEvent::Initialize),
         StageEvent::Ready | StageEvent::Start => Ok(JournalSinkEvent::Ready), // Sinks don't have Start, they use Ready
         StageEvent::BeginDrain => Ok(JournalSinkEvent::BeginDrain),
-        StageEvent::ForceShutdown => Ok(JournalSinkEvent::Error(FORCE_SHUTDOWN_MESSAGE.to_string())),
+        StageEvent::ForceShutdown => {
+            Ok(JournalSinkEvent::Error(FORCE_SHUTDOWN_MESSAGE.to_string()))
+        }
         _ => Err(format!("Unsupported stage event for sink: {:?}", event)),
     }
 }

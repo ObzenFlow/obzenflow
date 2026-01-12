@@ -66,7 +66,10 @@ impl CountingSink {
 #[async_trait]
 impl SinkHandler for CountingSink {
     async fn consume(&mut self, event: ChainEvent) -> Result<DeliveryPayload, HandlerError> {
-        let mut counts = self.counts.lock().expect("CountingSink counts lock poisoned");
+        let mut counts = self
+            .counts
+            .lock()
+            .expect("CountingSink counts lock poisoned");
 
         counts.total_events += 1;
 
@@ -79,7 +82,10 @@ impl SinkHandler for CountingSink {
         }
 
         let event_type = event.event_type();
-        *counts.other_event_types.entry(event_type.clone()).or_insert(0) += 1;
+        *counts
+            .other_event_types
+            .entry(event_type.clone())
+            .or_insert(0) += 1;
 
         if event.is_data() && event_type == self.expected_event_type {
             counts.demo_data_events += 1;
