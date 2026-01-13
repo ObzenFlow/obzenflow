@@ -78,6 +78,7 @@ impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
             self.resources.data_journal.clone(),
             self.resources.error_journal.clone(),
             self.resources.system_journal.clone(),
+            self.resources.replay_archive.clone(),
             self.resources.message_bus.clone(),
             instrumentation,
             control_strategy,
@@ -98,6 +99,9 @@ impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
             external_events: event_receiver,
             state_watcher: state_watcher.clone(),
             last_state: None,
+            replay_driver: None,
+            replay_started_at: None,
+            replay_completed_emitted: false,
         };
 
         let supervisor_name = format!("async_infinite_source_{}", self.config.stage_name);

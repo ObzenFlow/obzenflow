@@ -990,6 +990,62 @@ fn map_system_event_to_sse(
                     .data(data.to_string())
             }
         },
+        SystemEventType::ReplayLifecycle(replay_event) => match replay_event {
+            obzenflow_core::event::ReplayLifecycleEvent::Started {
+                archive_path,
+                archive_flow_id,
+                archive_status,
+                archive_status_derivation,
+                allow_incomplete,
+                source_stages,
+            } => {
+                let mut data = json!({
+                    "system_event_type": "replay_lifecycle",
+                    "event_type": "replay_started",
+                    "timestamp_ms": event.timestamp,
+                    "archive_path": archive_path,
+                    "archive_flow_id": archive_flow_id,
+                    "archive_status": archive_status,
+                    "archive_status_derivation": archive_status_derivation,
+                    "allow_incomplete": allow_incomplete,
+                    "source_stages": source_stages,
+                });
+                if let Some(stage_id) = event.writer_id.as_stage() {
+                    data["stage_id"] = json!(stage_id.to_string());
+                }
+                if let Some(vc) = &vector_clock_value {
+                    data["vector_clock"] = vc.clone();
+                }
+                SseEvent::default()
+                    .id(id_str)
+                    .event("replay_lifecycle")
+                    .data(data.to_string())
+            }
+            obzenflow_core::event::ReplayLifecycleEvent::Completed {
+                replayed_count,
+                skipped_count,
+                duration_ms,
+            } => {
+                let mut data = json!({
+                    "system_event_type": "replay_lifecycle",
+                    "event_type": "replay_completed",
+                    "timestamp_ms": event.timestamp,
+                    "replayed_count": replayed_count,
+                    "skipped_count": skipped_count,
+                    "duration_ms": duration_ms,
+                });
+                if let Some(stage_id) = event.writer_id.as_stage() {
+                    data["stage_id"] = json!(stage_id.to_string());
+                }
+                if let Some(vc) = &vector_clock_value {
+                    data["vector_clock"] = vc.clone();
+                }
+                SseEvent::default()
+                    .id(id_str)
+                    .event("replay_lifecycle")
+                    .data(data.to_string())
+            }
+        },
         SystemEventType::MiddlewareLifecycle {
             stage_id,
             stage_name,

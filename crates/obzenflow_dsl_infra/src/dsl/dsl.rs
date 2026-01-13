@@ -246,6 +246,20 @@ macro_rules! build_typed_flow {
         let mut name_to_id = HashMap::new();
         let mut descriptors = HashMap::new();
 
+        // Phase 0 prerequisite (FLOWIP-095a): descriptor.name() must be unique.
+        // This is the stable cross-run replay key used by `run_manifest.json`.
+        let mut seen_descriptor_names: HashMap<String, String> = HashMap::new();
+        for (var_name, descriptor) in stages.iter() {
+            let desc_name = descriptor.name().to_string();
+            if let Some(first_var) = seen_descriptor_names.insert(desc_name.clone(), var_name.clone()) {
+                return Err(FlowBuildError::DuplicateStageName {
+                    name: desc_name,
+                    first_var,
+                    second_var: var_name.clone(),
+                });
+            }
+        }
+
         // Pass 1: Create stage IDs
         for (name, descriptor) in &stages {
             // Generate a real ULID using the core crate's StageId::new()
@@ -415,8 +429,8 @@ macro_rules! build_typed_flow {
         use obzenflow_core::journal::journal_name::JournalName;
         use obzenflow_core::journal::journal_owner::JournalOwner;
 
-        let control_journal = journal_factory
-            .create_system_journal(
+        let control_journal = obzenflow_runtime_services::journal::FlowJournalFactory::create_system_journal(
+                &mut journal_factory,
                 JournalName::System,
                 JournalOwner::system(pipeline_id.clone()),
             )
@@ -429,6 +443,7 @@ macro_rules! build_typed_flow {
 
         let mut stage_journals = HashMap::new();
         let mut error_journals = HashMap::new();
+        let mut manifest_stages: HashMap<String, obzenflow_core::journal::run_manifest::RunManifestStage> = HashMap::new();
         for (name, &stage_id) in name_to_id.iter() {
             // Get the descriptor to access stage type and name
             let descriptor = descriptors.get(name).ok_or_else(|| {
@@ -438,8 +453,8 @@ macro_rules! build_typed_flow {
                 ))
             })?;
 
-            let journal = journal_factory
-                .create_chain_journal(
+            let journal = obzenflow_runtime_services::journal::FlowJournalFactory::create_chain_journal(
+                    &mut journal_factory,
                     JournalName::Stage {
                         id: stage_id,
                         stage_type: descriptor.stage_type(),
@@ -452,12 +467,12 @@ macro_rules! build_typed_flow {
                         "Failed to create journal for stage {:?}: {:?}",
                         stage_id, e
                     ))
-                })?;
+            })?;
             stage_journals.insert(stage_id, journal);
 
             // Create error journal for this stage (FLOWIP-082e)
-            let error_journal = journal_factory
-                .create_chain_journal(
+            let error_journal = obzenflow_runtime_services::journal::FlowJournalFactory::create_chain_journal(
+                    &mut journal_factory,
                     JournalName::Stage {
                         id: stage_id,
                         stage_type: descriptor.stage_type(),
@@ -470,9 +485,67 @@ macro_rules! build_typed_flow {
                         "Failed to create error journal for stage {:?}: {:?}",
                         stage_id, e
                     ))
-                })?;
+            })?;
             error_journals.insert(stage_id, error_journal);
+
+            // Record static mapping for replay lookup (FLOWIP-095a).
+            let stage_key = descriptor.name().to_string();
+            let data_journal_file = JournalName::Stage {
+                id: stage_id,
+                stage_type: descriptor.stage_type(),
+                name: descriptor.name().to_string(),
+            }
+            .to_filename();
+            let error_journal_file = JournalName::Stage {
+                id: stage_id,
+                stage_type: descriptor.stage_type(),
+                name: format!("{}_error", descriptor.name()),
+            }
+            .to_filename();
+            manifest_stages.insert(
+                stage_key,
+                obzenflow_core::journal::run_manifest::RunManifestStage {
+                    dsl_var: name.clone(),
+                    stage_type: descriptor.stage_type(),
+                    stage_id: stage_id.to_string(),
+                    data_journal_file,
+                    error_journal_file,
+                },
+            );
         }
+
+        // Write run manifest (disk journals persist; memory journals no-op) - FLOWIP-095a.
+        let replay_manifest = std::env::var_os("OBZENFLOW_REPLAY_FROM").map(|path| {
+            let allow_incomplete_archive = std::env::var("OBZENFLOW_ALLOW_INCOMPLETE_ARCHIVE")
+                .ok()
+                .is_some_and(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"));
+
+            obzenflow_core::journal::run_manifest::RunManifestReplayConfig {
+                replay_from: path.to_string_lossy().to_string(),
+                allow_incomplete_archive,
+            }
+        });
+
+        let run_manifest = obzenflow_core::journal::run_manifest::RunManifest {
+            manifest_version: obzenflow_core::journal::run_manifest::RUN_MANIFEST_VERSION.to_string(),
+            obzenflow_version: obzenflow_core::build_info::OBZENFLOW_VERSION.to_string(),
+            flow_id: flow_id.to_string(),
+            flow_name: $flow_name.to_string(),
+            created_at: obzenflow_core::chrono::Utc::now(),
+            replay: replay_manifest,
+            stages: manifest_stages,
+            system_journal_file: JournalName::System.to_filename(),
+        };
+        obzenflow_runtime_services::journal::FlowJournalFactory::write_run_manifest(
+            &journal_factory,
+            &run_manifest,
+        )
+        .map_err(|e| {
+            FlowBuildError::JournalFactoryFailed(format!(
+                "Failed to write run_manifest.json: {:?}",
+                e
+            ))
+        })?;
 
         // Backpressure is opt-in (FLOWIP-086k): extract per-stage windows from middleware configs.
         use obzenflow_runtime_services::backpressure::BackpressurePlan;
@@ -521,7 +594,14 @@ macro_rules! build_typed_flow {
             stage_journals,
             error_journals,
         )
-        .with_backpressure_plan(backpressure_plan);
+        .with_backpressure_plan(backpressure_plan)
+        .with_replay_archive(
+            obzenflow_runtime_services::journal::FlowJournalFactory::replay_archive_from_env(
+                &mut journal_factory,
+            )
+            .await
+                .map_err(|e| FlowBuildError::StageResourcesFailed(format!("Failed to open replay archive: {e}")))?,
+        );
 
         let stage_resources_set = resources_builder
             .build()

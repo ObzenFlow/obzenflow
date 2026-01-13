@@ -1,4 +1,5 @@
 use clap::{Parser, ValueEnum};
+use std::path::PathBuf;
 
 /// CORS mode for FlowApplication's HTTP server.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
@@ -44,6 +45,18 @@ pub struct FlowConfig {
     /// Allowed origins for CORS when `--cors-mode=allow-list` (repeatable).
     #[arg(long = "cors-allow-origin")]
     pub cors_allow_origin: Vec<String>,
+
+    /// Replay sources from a completed archived run directory (FLOWIP-095a).
+    ///
+    /// The path must be the exact run directory containing `run_manifest.json`.
+    #[arg(long)]
+    pub replay_from: Option<PathBuf>,
+
+    /// Allow replaying from incomplete archives (failed/cancelled/missing system.log).
+    ///
+    /// This is intended for debugging; outputs may be partial and not suitable for regression comparison.
+    #[arg(long)]
+    pub allow_incomplete_archive: bool,
     
     // Future fields will be added here:
     // - debug flag

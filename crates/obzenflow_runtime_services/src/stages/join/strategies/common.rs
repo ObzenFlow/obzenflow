@@ -291,6 +291,10 @@ fn propagate_stream_lineage(parent: &ChainEvent, outputs: &mut [ChainEvent]) {
             event.correlation_payload = parent.correlation_payload.clone();
         }
 
+        if event.replay_context.is_none() {
+            event.replay_context = parent.replay_context.clone();
+        }
+
         if event.causality.is_root() {
             let mut causality = CausalityContext::with_parent(parent.id);
 

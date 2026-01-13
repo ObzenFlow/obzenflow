@@ -9,6 +9,7 @@ use crate::backpressure::{
 use crate::id_conversions::StageIdExt;
 use crate::message_bus::FsmMessageBus;
 use crate::messaging::upstream_subscription::{ContractConfig, UpstreamSubscription};
+use crate::replay::ReplayArchive;
 use obzenflow_core::control_middleware::ControlMiddlewareProvider;
 use obzenflow_core::event::SystemEvent;
 use obzenflow_core::journal::journal::Journal;
@@ -201,6 +202,10 @@ pub struct StageResources {
 
     /// Backpressure readers keyed by upstream stage ID (FLOWIP-086k).
     pub backpressure_readers: HashMap<StageId, BackpressureReader>,
+
+    /// Optional replay archive injection (FLOWIP-095a). Sources use this to
+    /// read archived journals instead of calling external systems.
+    pub replay_archive: Option<Arc<dyn ReplayArchive>>,
 }
 
 /// Builder for creating all stage resources with proper wiring
@@ -212,6 +217,7 @@ pub struct StageResourcesBuilder {
     stage_journals: HashMap<StageId, Arc<dyn Journal<ChainEvent>>>,
     error_journals: HashMap<StageId, Arc<dyn Journal<ChainEvent>>>,
     backpressure_plan: BackpressurePlan,
+    replay_archive: Option<Arc<dyn ReplayArchive>>,
 }
 
 impl StageResourcesBuilder {
@@ -232,12 +238,19 @@ impl StageResourcesBuilder {
             stage_journals,
             error_journals,
             backpressure_plan: BackpressurePlan::disabled(),
+            replay_archive: None,
         }
     }
 
     /// Configure a flow-scoped backpressure plan (FLOWIP-086k).
     pub fn with_backpressure_plan(mut self, plan: BackpressurePlan) -> Self {
         self.backpressure_plan = plan;
+        self
+    }
+
+    /// Inject a replay archive implementation (FLOWIP-095a).
+    pub fn with_replay_archive(mut self, replay_archive: Option<Arc<dyn ReplayArchive>>) -> Self {
+        self.replay_archive = replay_archive;
         self
     }
 
@@ -418,6 +431,7 @@ impl StageResourcesBuilder {
                 error_journals: error_journals_for_stage,
                 backpressure_writer,
                 backpressure_readers,
+                replay_archive: self.replay_archive.clone(),
             };
 
             tracing::info!(

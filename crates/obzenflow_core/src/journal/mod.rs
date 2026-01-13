@@ -8,12 +8,19 @@ pub mod journal_error;
 pub mod journal_name;
 pub mod journal_owner;
 pub mod journal_reader;
+pub mod archive;
+pub mod run_manifest;
 
 // Re-export commonly used types
 pub use journal::Journal;
 pub use journal::JournalStorageKind;
 pub use journal_error::JournalError;
 pub use journal_reader::JournalReader;
+pub use archive::{ArchiveStatus, StatusDerivation};
+pub use run_manifest::{
+    RunManifest, RunManifestReplayConfig, RunManifestStage, RUN_MANIFEST_FILENAME,
+    RUN_MANIFEST_VERSION,
+};
 
 // Type aliases for clarity
 use crate::event::{ChainEvent, SystemEvent};

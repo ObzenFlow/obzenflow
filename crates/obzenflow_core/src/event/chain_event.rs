@@ -3,7 +3,7 @@
 
 use crate::event::context::causality_context::CausalityContext;
 use crate::event::context::observability_context::ObservabilityContext;
-use crate::event::context::{FlowContext, IntentContext, ProcessingContext, RuntimeContext};
+use crate::event::context::{FlowContext, IntentContext, ProcessingContext, ReplayContext, RuntimeContext};
 use crate::event::status::processing_status::{ErrorKind, ProcessingStatus};
 use crate::event::types::{CorrelationId, EventId, WriterId};
 use crate::id::StageId;
@@ -49,6 +49,10 @@ pub struct ChainEvent {
     /// Metadata about when/where this correlation entered the flow
     #[serde(skip_serializing_if = "Option::is_none")]
     pub correlation_payload: Option<CorrelationPayload>,
+
+    /// Provenance for replayed events (FLOWIP-095a).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replay_context: Option<ReplayContext>,
 
     // === Runtime Instrumentation (FLOWIP-056c) ===
     /// Runtime snapshot at event creation time
@@ -98,6 +102,7 @@ impl ChainEvent {
             intent: None,
             correlation_id: None,
             correlation_payload: None,
+            replay_context: None,
             runtime_context: None,
             observability: None,
         }
@@ -196,6 +201,15 @@ impl ChainEvent {
 
     pub fn is_lifecycle(&self) -> bool {
         matches!(self.content, ChainEventContent::Observability(_))
+    }
+
+    /// Whether this event should be replayed from an archive (FLOWIP-095a).
+    pub fn is_replayable(&self) -> bool {
+        matches!(
+            &self.content,
+            ChainEventContent::Data { .. }
+                | ChainEventContent::FlowControl(FlowControlPayload::Watermark { .. })
+        )
     }
 
     /// Mark this event as an error with a structured ErrorKind.
@@ -909,6 +923,7 @@ impl ChainEventFactory {
         // Propagate correlation
         event.correlation_id = parent.correlation_id;
         event.correlation_payload = parent.correlation_payload.clone();
+        event.replay_context = parent.replay_context.clone();
 
         // FIX (FLOWIP-082): Propagate full lineage with depth limit
         const DEFAULT_MAX_LINEAGE_DEPTH: usize = 100;
@@ -981,6 +996,7 @@ impl ChainEventFactory {
             intent: None,
             correlation_id: None,
             correlation_payload: None,
+            replay_context: None,
             runtime_context: None,
             observability: None,
         };

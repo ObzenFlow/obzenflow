@@ -1,6 +1,6 @@
 .DS_Store
 *.log
-/target
+**/target/
 .claude
 .idea
 __pycache__/

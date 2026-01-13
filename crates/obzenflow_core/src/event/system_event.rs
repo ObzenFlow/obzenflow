@@ -4,8 +4,10 @@ use crate::event::payloads::observability_payload::MiddlewareLifecycle;
 use crate::event::types::{EventId, WriterId};
 use crate::event::vector_clock::VectorClock;
 use crate::id::{StageId, SystemId};
+use crate::journal::{ArchiveStatus, StatusDerivation};
 use crate::metrics::{FlowLifecycleMetricsSnapshot, StageMetricsSnapshot};
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MiddlewareEventOrigin {
@@ -46,6 +48,10 @@ pub enum SystemEventType {
     /// Pipeline lifecycle events
     #[serde(rename = "pipeline_lifecycle")]
     PipelineLifecycle(PipelineLifecycleEvent),
+
+    /// Replay lifecycle events (FLOWIP-095a).
+    #[serde(rename = "replay_lifecycle")]
+    ReplayLifecycle(ReplayLifecycleEvent),
 
     /// Metrics subsystem coordination
     #[serde(rename = "metrics_coordination")]
@@ -195,6 +201,24 @@ pub enum PipelineLifecycleEvent {
         metrics: Option<FlowLifecycleMetricsSnapshot>,
         #[serde(skip_serializing_if = "Option::is_none")]
         failure_cause: Option<crate::event::types::ViolationCause>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "replay_event", rename_all = "snake_case")]
+pub enum ReplayLifecycleEvent {
+    Started {
+        archive_path: PathBuf,
+        archive_flow_id: String,
+        archive_status: ArchiveStatus,
+        archive_status_derivation: StatusDerivation,
+        allow_incomplete: bool,
+        source_stages: Vec<String>,
+    },
+    Completed {
+        replayed_count: u64,
+        skipped_count: u64,
+        duration_ms: u64,
     },
 }
 
@@ -617,6 +641,10 @@ impl JournalEvent for SystemEvent {
                 PipelineLifecycleEvent::Completed { .. } => "system.pipeline.completed",
                 PipelineLifecycleEvent::Failed { .. } => "system.pipeline.failed",
                 PipelineLifecycleEvent::Cancelled { .. } => "system.pipeline.cancelled",
+            },
+            SystemEventType::ReplayLifecycle(event) => match event {
+                ReplayLifecycleEvent::Started { .. } => "system.replay.started",
+                ReplayLifecycleEvent::Completed { .. } => "system.replay.completed",
             },
             SystemEventType::MetricsCoordination(event) => match event {
                 MetricsCoordinationEvent::Ready => "system.metrics.ready",

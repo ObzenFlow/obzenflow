@@ -6,6 +6,7 @@
 
 pub mod contracts;
 pub mod control_middleware;
+pub mod build_info;
 pub mod error;
 pub mod event;
 pub mod http_client;
@@ -34,6 +35,10 @@ pub use id::{FlowId, JournalId, StageId, SystemId};
 
 // Re-export Ulid for convenience since it's used in many IDs
 pub use ulid::Ulid;
+
+// Re-export chrono so macro expansions can reference timestamps without
+// requiring downstream crates to depend on chrono directly (FLOWIP-095a).
+pub use chrono;
 
 // Re-export core contract types (FLOWIP-090c)
 pub use contracts::{

@@ -5,7 +5,9 @@
 //! start emitting events until the pipeline is ready.
 
 use obzenflow_core::event::context::{FlowContext, StageType};
-use obzenflow_core::event::{ChainEventFactory, SystemEvent};
+use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
+use obzenflow_core::event::types::{Count, SeqNo};
+use obzenflow_core::event::{ChainEventContent, ChainEventFactory, SystemEvent};
 use obzenflow_core::journal::journal::Journal;
 use obzenflow_core::{ChainEvent, EventId, FlowId, StageId, WriterId};
 use obzenflow_fsm::{EventVariant, FsmAction, FsmContext, StateMachine, StateVariant};
@@ -18,6 +20,7 @@ use std::time::Duration;
 use crate::backpressure::BackpressureWriter;
 use crate::metrics::instrumentation::{snapshot_stage_metrics, StageInstrumentation};
 use crate::metrics::tail_read;
+use crate::replay::ReplayArchive;
 use crate::stages::common::backpressure_activity_pulse::BackpressureActivityPulse;
 use crate::stages::common::stage_handle::{
     FORCE_SHUTDOWN_MESSAGE, STOP_REASON_TIMEOUT, STOP_REASON_USER_STOP,
@@ -225,6 +228,12 @@ pub enum InfiniteSourceAction<H> {
 // FSM Context
 // ============================================================================
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InfiniteSourceCompletionReason {
+    ExternalDrain,
+    ArchiveExhausted,
+}
+
 /// Context for infinite source handlers - contains everything actions need
 #[derive(Clone)]
 pub struct InfiniteSourceContext<H> {
@@ -249,6 +258,9 @@ pub struct InfiniteSourceContext<H> {
     /// System journal for writing lifecycle events
     pub system_journal: Arc<dyn Journal<SystemEvent>>,
 
+    /// Optional replay archive injection (FLOWIP-095a).
+    pub replay_archive: Option<Arc<dyn ReplayArchive>>,
+
     /// Message bus for pipeline communication
     pub bus: Arc<crate::message_bus::FsmMessageBus>,
 
@@ -260,6 +272,9 @@ pub struct InfiniteSourceContext<H> {
 
     /// Flag to track if shutdown was requested
     pub shutdown_requested: bool,
+
+    /// Why the source is shutting down (affects EOF semantics).
+    pub completion_reason: InfiniteSourceCompletionReason,
 
     /// Stage instrumentation for metrics tracking
     pub instrumentation: Arc<StageInstrumentation>,
@@ -295,6 +310,7 @@ impl<H> InfiniteSourceContext<H> {
         data_journal: Arc<dyn Journal<ChainEvent>>,
         error_journal: Arc<dyn Journal<ChainEvent>>,
         system_journal: Arc<dyn Journal<SystemEvent>>,
+        replay_archive: Option<Arc<dyn ReplayArchive>>,
         bus: Arc<crate::message_bus::FsmMessageBus>,
         instrumentation: Arc<StageInstrumentation>,
         control_strategy: Arc<dyn SourceControlStrategy>,
@@ -308,10 +324,12 @@ impl<H> InfiniteSourceContext<H> {
             data_journal,
             error_journal,
             system_journal,
+            replay_archive,
             bus,
             writer_id: None,
             can_emit: false,
             shutdown_requested: false,
+            completion_reason: InfiniteSourceCompletionReason::ExternalDrain,
             instrumentation,
             control_strategy,
             control_context: SourceControlContext::new(),
@@ -384,10 +402,19 @@ impl<H: Send + Sync + 'static> FsmAction for InfiniteSourceAction<H> {
             }
 
             InfiniteSourceAction::SendEOF => {
-                // Consult the source control strategy (FLOWIP-081a / 051b).
-                let decision = ctx
-                    .control_strategy
-                    .on_begin_drain(&mut ctx.control_context);
+                let emitted = ctx
+                    .instrumentation
+                    .events_processed_total
+                    .load(std::sync::atomic::Ordering::Relaxed);
+
+                let decision = match ctx.completion_reason {
+                    InfiniteSourceCompletionReason::ArchiveExhausted => ctx
+                        .control_strategy
+                        .on_natural_completion(&mut ctx.control_context),
+                    InfiniteSourceCompletionReason::ExternalDrain => {
+                        ctx.control_strategy.on_begin_drain(&mut ctx.control_context)
+                    }
+                };
 
                 let writer_id = ctx.writer_id.as_ref().ok_or_else(|| {
                     obzenflow_fsm::FsmError::HandlerError(
@@ -395,21 +422,24 @@ impl<H: Send + Sync + 'static> FsmAction for InfiniteSourceAction<H> {
                     )
                 })?;
 
-                // Infinite sources already use non-natural EOF for shutdown; a breaker
-                // can still influence semantics via additional Drain or downstream
-                // interpretation, but we keep `natural = false` here.
-                let _is_poison = matches!(
-                    decision,
-                    crate::stages::source::strategies::SourceShutdownDecision::PoisonEof
-                );
+                let natural = match ctx.completion_reason {
+                    InfiniteSourceCompletionReason::ExternalDrain => false,
+                    InfiniteSourceCompletionReason::ArchiveExhausted => match decision {
+                        crate::stages::source::strategies::SourceShutdownDecision::PoisonEof => false,
+                        _ => true,
+                    },
+                };
 
                 // Take a final runtime snapshot for wide-event semantics
                 let runtime_context = ctx.instrumentation.snapshot_with_control();
 
-                let mut eof_event = ChainEventFactory::eof_event(
-                    writer_id.clone(),
-                    false, // not natural for shutdown
-                );
+                let mut eof_event = ChainEventFactory::eof_event(writer_id.clone(), natural);
+                if let ChainEventContent::FlowControl(FlowControlPayload::Eof { writer_id: writer_id_field, writer_seq, .. }) =
+                    &mut eof_event.content
+                {
+                    *writer_id_field = Some(writer_id.clone());
+                    *writer_seq = Some(SeqNo(emitted));
+                }
 
                 // Attach flow/runtime context so the final journal record is a wide snapshot
                 eof_event.flow_context = FlowContext {
@@ -428,9 +458,42 @@ impl<H: Send + Sync + 'static> FsmAction for InfiniteSourceAction<H> {
                         obzenflow_fsm::FsmError::HandlerError(format!("Failed to send EOF: {e}"))
                     })?;
 
+                let mut final_event = ChainEventFactory::consumption_final_event(
+                    writer_id.clone(),
+                    true,
+                    Count(emitted),
+                    None,
+                    true,
+                    None,
+                    SeqNo(emitted),
+                    Some(SeqNo(emitted)),
+                    None,
+                    None,
+                );
+                final_event.flow_context = FlowContext {
+                    flow_name: ctx.flow_name.clone(),
+                    flow_id: ctx.flow_id.to_string(),
+                    stage_name: ctx.stage_name.clone(),
+                    stage_id: ctx.stage_id,
+                    stage_type: StageType::InfiniteSource,
+                };
+                final_event.runtime_context = Some(ctx.instrumentation.snapshot_with_control());
+
+                ctx.data_journal
+                    .append(final_event, None)
+                    .await
+                    .map_err(|e| {
+                        obzenflow_fsm::FsmError::HandlerError(format!(
+                            "Failed to send source consumption_final: {e}"
+                        ))
+                    })?;
+
                 tracing::info!(
                     stage_name = %ctx.stage_name,
-                    "Infinite source sent EOF event"
+                    emitted,
+                    natural,
+                    reason = ?ctx.completion_reason,
+                    "Infinite source sent EOF and consumption_final"
                 );
                 Ok(())
             }

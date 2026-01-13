@@ -91,6 +91,7 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> S
             self.resources.data_journal.clone(),
             self.resources.error_journal.clone(),
             self.resources.system_journal.clone(),
+            self.resources.replay_archive.clone(),
             self.resources.message_bus.clone(),
             instrumentation,
             control_strategy,
@@ -113,6 +114,9 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> S
                 Duration::from_millis(1),
                 Duration::from_millis(10),
             ),
+            replay_driver: None,
+            replay_started_at: None,
+            replay_completed_emitted: false,
         };
 
         // Clone what we need for the task

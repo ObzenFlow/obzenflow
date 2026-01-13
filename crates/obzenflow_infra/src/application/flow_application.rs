@@ -392,6 +392,41 @@ impl FlowApplication {
             ));
         }
 
+        if config.allow_incomplete_archive && config.replay_from.is_none() {
+            return Err(ApplicationError::InvalidConfiguration(
+                "--allow-incomplete-archive requires --replay-from".to_string(),
+            ));
+        }
+
+        if let Some(path) = &config.replay_from {
+            if !path.is_dir() {
+                return Err(ApplicationError::InvalidConfiguration(format!(
+                    "--replay-from must be a directory: {}",
+                    path.display()
+                )));
+            }
+            let manifest_path = path.join(obzenflow_core::journal::RUN_MANIFEST_FILENAME);
+            if !manifest_path.exists() {
+                return Err(ApplicationError::InvalidConfiguration(format!(
+                    "Replay archive is missing {} at {}",
+                    obzenflow_core::journal::RUN_MANIFEST_FILENAME,
+                    manifest_path.display()
+                )));
+            }
+        }
+
+        // Export replay options to environment so infra can inject a replay archive
+        // implementation into runtime services during flow build (FLOWIP-095a).
+        match &config.replay_from {
+            Some(path) => std::env::set_var("OBZENFLOW_REPLAY_FROM", path),
+            None => std::env::remove_var("OBZENFLOW_REPLAY_FROM"),
+        }
+        if config.allow_incomplete_archive {
+            std::env::set_var("OBZENFLOW_ALLOW_INCOMPLETE_ARCHIVE", "1");
+        } else {
+            std::env::remove_var("OBZENFLOW_ALLOW_INCOMPLETE_ARCHIVE");
+        }
+
         // Export startup mode to environment so lower layers (runtime_services)
         // can adjust behaviour (e.g. disable auto-Run in manual mode).
         // This is primarily used by the pipeline supervisor (FLOWIP-059).
@@ -409,12 +444,29 @@ impl FlowApplication {
         // Note: Logging/console-subscriber should be initialized in main() before
         // the tokio runtime is created for console_subscriber to work properly
 
+        // Clear any stale run-dir hint from prior FlowApplication runs (OT-17).
+        let _ = crate::journal::factory::take_last_run_dir();
+
         tracing::info!("🚀 Starting FlowApplication");
         
         // Build the flow (this executes the flow! macro)
-        let flow_handle = flow
-            .await
-            .map_err(|e| ApplicationError::FlowBuildFailed(e.to_string()))?;
+        let flow_handle = match flow.await {
+            Ok(handle) => handle,
+            Err(e) => {
+                let _ = crate::journal::factory::take_last_run_dir();
+                return Err(ApplicationError::FlowBuildFailed(e.to_string()));
+            }
+        };
+
+        // If disk journals were used, this is the on-disk run directory path (OT-17).
+        let run_dir = crate::journal::factory::take_last_run_dir();
+
+        let print_replay_hint = |run_dir: &std::path::Path| {
+            println!("FlowApplication complete!");
+            println!("To replay, add: --replay-from {}", run_dir.display());
+            println!("(Source config env vars are ignored during replay)");
+        };
+
         let flow_handle = Arc::new(flow_handle);
 
         let _hook_tasks: Vec<JoinHandle<()>> =
@@ -456,10 +508,16 @@ impl FlowApplication {
                                     "Failed to unwrap FlowHandle for non-server execution".to_string(),
                                 )
                             })?;
-                        return handle
+                        let result = handle
                             .run()
                             .await
                             .map_err(|e| ApplicationError::FlowExecutionFailed(e.to_string()));
+                        if result.is_ok() {
+                            if let Some(run_dir_path) = run_dir.as_deref() {
+                                print_replay_hint(run_dir_path);
+                            }
+                        }
+                        return result;
                     }
                 }
             }
@@ -626,10 +684,16 @@ impl FlowApplication {
                         "Failed to unwrap FlowHandle for non-server execution".to_string(),
                     )
                 })?;
-            handle
+            let result = handle
                 .run()
                 .await
-                .map_err(|e| ApplicationError::FlowExecutionFailed(e.to_string()))
+                .map_err(|e| ApplicationError::FlowExecutionFailed(e.to_string()));
+            if result.is_ok() {
+                if let Some(run_dir_path) = run_dir.as_deref() {
+                    print_replay_hint(run_dir_path);
+                }
+            }
+            result
         }
     }
     

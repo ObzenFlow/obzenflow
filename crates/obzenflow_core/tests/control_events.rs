@@ -157,6 +157,7 @@ fn test_direct_chain_event_construction() {
         intent: None,
         correlation_id: None,
         correlation_payload: None,
+        replay_context: None,
         runtime_context: None,
         observability: None,
     };

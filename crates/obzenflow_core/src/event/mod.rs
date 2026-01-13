@@ -27,7 +27,7 @@ pub use event_envelope::EventEnvelope;
 pub use journal_event::JournalEvent;
 pub use system_event::{
     MetricsCoordinationEvent, PipelineLifecycleEvent, StageLifecycleEvent, SystemEvent,
-    SystemEventFactory, SystemEventType,
+    ReplayLifecycleEvent, SystemEventFactory, SystemEventType,
 };
 pub use types::{CorrelationId, EventId, JournalWriterId, WriterId};
 

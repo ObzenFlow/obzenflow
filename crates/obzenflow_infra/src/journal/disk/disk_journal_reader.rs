@@ -101,6 +101,40 @@ impl<T: JournalEvent> DiskJournalReader<T> {
         })
     }
 
+    /// Open an existing journal for read-only sequential access.
+    ///
+    /// Unlike `new()`, this never creates the file if missing.
+    pub async fn open_existing(
+        path: PathBuf,
+        journal_id: JournalId,
+        read_write_lock: Arc<RwLock<()>>,
+    ) -> Result<Self, JournalError> {
+        let std_file = StdFile::open(&path).map_err(|e| {
+            tracing::error!(
+                path = %path.display(),
+                os_error = %e,
+                "DiskJournalReader failed to open existing journal file"
+            );
+            JournalError::Implementation {
+                message: format!("Failed to open existing journal file: {}", path.display()),
+                source: Box::new(e),
+            }
+        })?;
+        let file = File::from_std(std_file);
+
+        Ok(Self {
+            reader: BufReader::new(file),
+            position: 0,
+            partial_retries: 0,
+            last_partial_position: None,
+            path,
+            journal_id,
+            at_end: false,
+            read_write_lock,
+            _phantom: std::marker::PhantomData,
+        })
+    }
+
     /// Create a new reader starting from a specific position
     pub async fn from_position(
         path: PathBuf,

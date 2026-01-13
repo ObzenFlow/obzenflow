@@ -3,12 +3,13 @@
 use crate::stages::common::handlers::AsyncInfiniteSourceHandler;
 use crate::supervised_base::base::Supervisor;
 use crate::supervised_base::{EventLoopDirective, EventReceiver, HandlerSupervised, StateWatcher};
+use crate::replay::{ReplayContextTemplate, ReplayDriver};
 use obzenflow_core::event::context::FlowContext;
 use obzenflow_core::event::payloads::observability_payload::{
     MiddlewareLifecycle, ObservabilityPayload,
 };
 use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
-use obzenflow_core::event::{ChainEventFactory, SystemEvent};
+use obzenflow_core::event::{ChainEventFactory, ReplayLifecycleEvent, SystemEvent, SystemEventType};
 use obzenflow_core::journal::journal::Journal;
 use obzenflow_core::{ChainEvent, StageId, WriterId};
 use obzenflow_fsm::{fsm, EventVariant, StateVariant, Transition};
@@ -16,7 +17,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use super::fsm::{
-    InfiniteSourceAction, InfiniteSourceContext, InfiniteSourceEvent, InfiniteSourceState,
+    InfiniteSourceAction, InfiniteSourceCompletionReason, InfiniteSourceContext, InfiniteSourceEvent,
+    InfiniteSourceState,
 };
 
 /// Supervisor for async infinite source stages.
@@ -49,6 +51,15 @@ pub(crate) struct AsyncInfiniteSourceSupervisor<
 
     /// Last published state (avoid waking watchers every loop) (FLOWIP-086i).
     pub(crate) last_state: Option<InfiniteSourceState<H>>,
+
+    /// Replay driver for `--replay-from` mode (FLOWIP-095a).
+    pub(crate) replay_driver: Option<ReplayDriver>,
+
+    /// Replay lifecycle started timestamp for duration tracking (FLOWIP-095a).
+    pub(crate) replay_started_at: Option<Instant>,
+
+    /// Whether we've emitted ReplayLifecycle::Completed for this stage.
+    pub(crate) replay_completed_emitted: bool,
 }
 
 impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
@@ -509,25 +520,171 @@ impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
                     .event_loops_total
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-                let tick_started_at = Instant::now();
-                let next_result = tokio::select! {
-                    biased;
-                    maybe_event = self.external_events.recv() => {
-                        match maybe_event {
-                            Some(event) => return Ok(EventLoopDirective::Transition(event)),
-                            None => {
-                                return Ok(EventLoopDirective::Transition(InfiniteSourceEvent::Error(
-                                    "External control channel closed".to_string(),
-                                )));
+                if let Some(replay_archive) = ctx.replay_archive.as_deref() {
+                    if self.replay_driver.is_none() {
+                        let stage_key = ctx.stage_name.as_str();
+                        let journal_path = replay_archive
+                            .source_data_journal_path(stage_key)
+                            .map_err(|e| format!("Failed to locate archived journal: {e}"))?;
+                        let reader = replay_archive
+                            .open_source_reader(stage_key, obzenflow_core::event::context::StageType::InfiniteSource)
+                            .await
+                            .map_err(|e| format!("Failed to open archived journal reader: {e}"))?;
+                        let replay_context = ReplayContextTemplate {
+                            original_flow_id: replay_archive.archive_flow_id().to_string(),
+                            original_stage_id: replay_archive
+                                .archived_stage_id(stage_key)
+                                .map_err(|e| format!("Failed to resolve archived stage id: {e}"))?,
+                            archive_path: replay_archive.archive_path().to_path_buf(),
+                        };
+                        self.replay_driver = Some(ReplayDriver::new(reader, journal_path, replay_context));
+
+                        if self.replay_started_at.is_none() {
+                            self.replay_started_at = Some(Instant::now());
+                            let started_event = SystemEvent::new(
+                                WriterId::from(self.stage_id),
+                                SystemEventType::ReplayLifecycle(ReplayLifecycleEvent::Started {
+                                    archive_path: replay_archive.archive_path().to_path_buf(),
+                                    archive_flow_id: replay_archive.archive_flow_id().to_string(),
+                                    archive_status: replay_archive.archive_status(),
+                                    archive_status_derivation: replay_archive.status_derivation(),
+                                    allow_incomplete: replay_archive.allow_incomplete_archive(),
+                                    source_stages: replay_archive.source_stage_keys(),
+                                }),
+                            );
+                            if let Err(e) = self.system_journal.append(started_event, None).await {
+                                tracing::error!(
+                                    stage_name = %ctx.stage_name,
+                                    journal_error = %e,
+                                    "Failed to append ReplayLifecycle::Started system event"
+                                );
                             }
                         }
                     }
-                    result = self.handler.next() => result,
-                };
-                let tick_duration = tick_started_at.elapsed();
 
-                match next_result {
-                    Ok(events) if !events.is_empty() => {
+                    let flow_context = FlowContext {
+                        flow_name: ctx.flow_name.clone(),
+                        flow_id: ctx.flow_id.to_string(),
+                        stage_name: ctx.stage_name.clone(),
+                        stage_id: self.stage_id.clone(),
+                        stage_type: obzenflow_core::event::context::StageType::InfiniteSource,
+                    };
+
+                    let tick_started_at = Instant::now();
+                    let next_result = tokio::select! {
+                        biased;
+                        maybe_event = self.external_events.recv() => {
+                            match maybe_event {
+                                Some(event) => return Ok(EventLoopDirective::Transition(event)),
+                                None => {
+                                    return Ok(EventLoopDirective::Transition(InfiniteSourceEvent::Error(
+                                        "External control channel closed".to_string(),
+                                    )));
+                                }
+                            }
+                        }
+                        result = self.replay_driver.as_mut().expect("replay_driver is initialized").next_replayed_event(
+                            WriterId::from(self.stage_id),
+                            &ctx.stage_name,
+                            flow_context,
+                        ) => result,
+                    };
+                    let tick_duration = tick_started_at.elapsed();
+
+                    match next_result {
+                        Ok(Some(event)) => {
+                            ctx.instrumentation
+                                .event_loops_with_work_total
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+                            let per_data_event_duration = if event.is_data() {
+                                tick_duration
+                            } else {
+                                Duration::from_nanos(0)
+                            };
+
+                            if let ProcessingStatus::Error { kind, .. } = &event.processing_info.status {
+                                let k = kind.clone().unwrap_or(ErrorKind::Unknown);
+                                ctx.instrumentation.record_error(k);
+                            }
+
+                            let events_to_write = self.run_if_not_error(event, |e| vec![e]);
+                            for event_to_write in events_to_write {
+                                if event_to_write.is_data() {
+                                    ctx.instrumentation.record_output_event(&event_to_write);
+                                    ctx.instrumentation
+                                        .events_processed_total
+                                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                    ctx.instrumentation
+                                        .record_processing_time(per_data_event_duration);
+                                }
+                                ctx.pending_outputs.push_back(event_to_write);
+                            }
+
+                            Ok(EventLoopDirective::Continue)
+                        }
+                        Ok(None) => {
+                            if !self.replay_completed_emitted {
+                                self.replay_completed_emitted = true;
+                                let duration_ms = self
+                                    .replay_started_at
+                                    .map(|started| {
+                                        let ms = started.elapsed().as_millis();
+                                        u64::try_from(ms).unwrap_or(u64::MAX)
+                                    })
+                                    .unwrap_or(0);
+                                let (replayed_count, skipped_count) =
+                                    self.replay_driver.as_ref().map_or((0, 0), |d| {
+                                        (d.replayed_events(), d.skipped_events())
+                                    });
+                                let completed_event = SystemEvent::new(
+                                    WriterId::from(self.stage_id),
+                                    SystemEventType::ReplayLifecycle(
+                                        ReplayLifecycleEvent::Completed {
+                                            replayed_count,
+                                            skipped_count,
+                                            duration_ms,
+                                        },
+                                    ),
+                                );
+                                if let Err(e) =
+                                    self.system_journal.append(completed_event, None).await
+                                {
+                                    tracing::error!(
+                                        stage_name = %ctx.stage_name,
+                                        journal_error = %e,
+                                        "Failed to append ReplayLifecycle::Completed system event"
+                                    );
+                                }
+                            }
+
+                            ctx.completion_reason = InfiniteSourceCompletionReason::ArchiveExhausted;
+                            Ok(EventLoopDirective::Transition(InfiniteSourceEvent::BeginDrain))
+                        }
+                        Err(e) => Ok(EventLoopDirective::Transition(InfiniteSourceEvent::Error(
+                            e.to_string(),
+                        ))),
+                    }
+                } else {
+                    let tick_started_at = Instant::now();
+                    let next_result = tokio::select! {
+                        biased;
+                        maybe_event = self.external_events.recv() => {
+                            match maybe_event {
+                                Some(event) => return Ok(EventLoopDirective::Transition(event)),
+                                None => {
+                                    return Ok(EventLoopDirective::Transition(InfiniteSourceEvent::Error(
+                                        "External control channel closed".to_string(),
+                                    )));
+                                }
+                            }
+                        }
+                        result = self.handler.next() => result,
+                    };
+                    let tick_duration = tick_started_at.elapsed();
+
+                    match next_result {
+                        Ok(events) if !events.is_empty() => {
                         ctx.instrumentation
                             .event_loops_with_work_total
                             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -589,6 +746,7 @@ impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
                         Ok(EventLoopDirective::Transition(InfiniteSourceEvent::Error(
                             e.to_string(),
                         )))
+                    }
                     }
                 }
             }

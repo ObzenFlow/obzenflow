@@ -19,6 +19,13 @@ pub enum FlowBuildError {
 
     #[error("Pipeline build failed: {0}")]
     PipelineBuildFailed(String),
+
+    #[error("Duplicate stage descriptor name '{name}' (used by '{first_var}' and '{second_var}')")]
+    DuplicateStageName {
+        name: String,
+        first_var: String,
+        second_var: String,
+    },
 }
 
 impl From<FlowBuildError> for String {

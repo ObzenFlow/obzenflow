@@ -12,12 +12,30 @@ use obzenflow_core::{
     },
     event::{JournalEvent, ChainEvent, SystemEvent},
 };
-use std::sync::Arc;
+use obzenflow_core::journal::run_manifest::{RunManifest, RUN_MANIFEST_FILENAME};
+use obzenflow_runtime_services::replay::{ReplayArchive, ReplayError};
+use obzenflow_runtime_services::journal::FlowJournalFactory;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::path::PathBuf;
 use std::collections::HashMap;
 
 use super::disk::disk_journal::DiskJournal;
+use super::disk::replay_archive::DiskReplayArchive;
 use super::memory::memory_journal::MemoryJournal;
+
+static LAST_RUN_DIR: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
+
+fn set_last_run_dir(path: PathBuf) {
+    let cell = LAST_RUN_DIR.get_or_init(|| Mutex::new(None));
+    let mut guard = cell.lock().unwrap_or_else(|e| e.into_inner());
+    *guard = Some(path);
+}
+
+pub(crate) fn take_last_run_dir() -> Option<PathBuf> {
+    let cell = LAST_RUN_DIR.get_or_init(|| Mutex::new(None));
+    let mut guard = cell.lock().unwrap_or_else(|e| e.into_inner());
+    guard.take()
+}
 
 /// Simple disk journal factory that creates files immediately
 pub struct DiskJournalFactory {
@@ -37,6 +55,9 @@ impl DiskJournalFactory {
                 message: format!("Failed to create flow directory: {}", flow_path.display()),
             source: Box::new(e),
         })?;
+
+        // Stash the run directory so FlowApplication can print a replay hint on completion (OT-17).
+        set_last_run_dir(flow_path.clone());
         
         Ok(Self { 
             base_path, 
@@ -87,6 +108,39 @@ impl DiskJournalFactory {
         self.system_journals.insert(name, journal.clone());
         Ok(journal)
     }
+
+    /// Path to this flow run directory (e.g., `<base>/flows/<flow_id>/`).
+    pub fn run_dir(&self) -> Option<PathBuf> {
+        Some(self.base_path.join("flows").join(self.flow_id.to_string()))
+    }
+
+    /// Write `run_manifest.json` into the run directory (FLOWIP-095a).
+    pub fn write_run_manifest(&self, manifest: &RunManifest) -> Result<(), JournalError> {
+        let Some(run_dir) = self.run_dir() else {
+            return Ok(());
+        };
+        let path = run_dir.join(RUN_MANIFEST_FILENAME);
+        let body = serde_json::to_string_pretty(manifest).map_err(|e| JournalError::Implementation {
+            message: format!("Failed to serialize run manifest: {}", path.display()),
+            source: Box::new(e),
+        })?;
+        std::fs::write(&path, body).map_err(|e| JournalError::Implementation {
+            message: format!("Failed to write run manifest: {}", path.display()),
+            source: Box::new(e),
+        })?;
+
+        // Also refresh the run directory hint here in case the factory was reused across runs.
+        set_last_run_dir(run_dir);
+
+        Ok(())
+    }
+
+    /// Build a replay archive implementation from env vars (FLOWIP-095a).
+    pub async fn replay_archive_from_env(
+        &self,
+    ) -> Result<Option<Arc<dyn ReplayArchive>>, ReplayError> {
+        replay_archive_from_env().await
+    }
 }
 
 /// Simple memory journal factory
@@ -129,6 +183,37 @@ impl MemoryJournalFactory {
             .or_insert_with(|| Arc::new(MemoryJournal::<SystemEvent>::with_owner(owner)))
             .clone())
     }
+
+    /// Memory journals do not have a run directory.
+    pub fn run_dir(&self) -> Option<PathBuf> {
+        None
+    }
+
+    /// Memory journals do not write manifests; this is a no-op.
+    pub fn write_run_manifest(&self, _manifest: &RunManifest) -> Result<(), JournalError> {
+        Ok(())
+    }
+
+    /// Build a replay archive implementation from env vars (FLOWIP-095a).
+    pub async fn replay_archive_from_env(
+        &self,
+    ) -> Result<Option<Arc<dyn ReplayArchive>>, ReplayError> {
+        replay_archive_from_env().await
+    }
+}
+
+async fn replay_archive_from_env() -> Result<Option<Arc<dyn ReplayArchive>>, ReplayError> {
+    let Some(path) = std::env::var_os("OBZENFLOW_REPLAY_FROM") else {
+        return Ok(None);
+    };
+
+    let allow_incomplete_archive = std::env::var("OBZENFLOW_ALLOW_INCOMPLETE_ARCHIVE")
+        .ok()
+        .is_some_and(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"));
+
+    let archive_path = PathBuf::from(path);
+    let archive = DiskReplayArchive::open(archive_path, allow_incomplete_archive).await?;
+    Ok(Some(Arc::new(archive)))
 }
 
 
@@ -139,4 +224,62 @@ pub fn disk_journals(base_path: PathBuf) -> impl Fn(FlowId) -> Result<DiskJourna
 
 pub fn memory_journals() -> impl Fn(FlowId) -> Result<MemoryJournalFactory, JournalError> {
     move |flow_id| Ok(MemoryJournalFactory::new(flow_id))
+}
+
+#[async_trait::async_trait]
+impl FlowJournalFactory for DiskJournalFactory {
+    fn create_chain_journal(
+        &mut self,
+        name: JournalName,
+        owner: JournalOwner,
+    ) -> Result<Arc<dyn Journal<ChainEvent>>, JournalError> {
+        DiskJournalFactory::create_chain_journal(self, name, owner)
+    }
+
+    fn create_system_journal(
+        &mut self,
+        name: JournalName,
+        owner: JournalOwner,
+    ) -> Result<Arc<dyn Journal<SystemEvent>>, JournalError> {
+        DiskJournalFactory::create_system_journal(self, name, owner)
+    }
+
+    fn write_run_manifest(&self, manifest: &RunManifest) -> Result<(), JournalError> {
+        DiskJournalFactory::write_run_manifest(self, manifest)
+    }
+
+    async fn replay_archive_from_env(
+        &mut self,
+    ) -> Result<Option<Arc<dyn ReplayArchive>>, ReplayError> {
+        DiskJournalFactory::replay_archive_from_env(self).await
+    }
+}
+
+#[async_trait::async_trait]
+impl FlowJournalFactory for MemoryJournalFactory {
+    fn create_chain_journal(
+        &mut self,
+        name: JournalName,
+        owner: JournalOwner,
+    ) -> Result<Arc<dyn Journal<ChainEvent>>, JournalError> {
+        MemoryJournalFactory::create_chain_journal(self, name, owner)
+    }
+
+    fn create_system_journal(
+        &mut self,
+        name: JournalName,
+        owner: JournalOwner,
+    ) -> Result<Arc<dyn Journal<SystemEvent>>, JournalError> {
+        MemoryJournalFactory::create_system_journal(self, name, owner)
+    }
+
+    fn write_run_manifest(&self, manifest: &RunManifest) -> Result<(), JournalError> {
+        MemoryJournalFactory::write_run_manifest(self, manifest)
+    }
+
+    async fn replay_archive_from_env(
+        &mut self,
+    ) -> Result<Option<Arc<dyn ReplayArchive>>, ReplayError> {
+        MemoryJournalFactory::replay_archive_from_env(self).await
+    }
 }

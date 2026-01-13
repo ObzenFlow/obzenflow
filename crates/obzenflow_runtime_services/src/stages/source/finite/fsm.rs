@@ -20,6 +20,7 @@ use std::time::Duration;
 use crate::backpressure::BackpressureWriter;
 use crate::metrics::instrumentation::{snapshot_stage_metrics, StageInstrumentation};
 use crate::metrics::tail_read;
+use crate::replay::ReplayArchive;
 use crate::stages::common::backpressure_activity_pulse::BackpressureActivityPulse;
 use crate::stages::common::stage_handle::{
     FORCE_SHUTDOWN_MESSAGE, STOP_REASON_TIMEOUT, STOP_REASON_USER_STOP,
@@ -252,6 +253,9 @@ pub struct FiniteSourceContext<H> {
     /// System journal for writing lifecycle events
     pub system_journal: Arc<dyn Journal<SystemEvent>>,
 
+    /// Optional replay archive injection (FLOWIP-095a).
+    pub replay_archive: Option<Arc<dyn ReplayArchive>>,
+
     /// Message bus for pipeline communication
     pub bus: Arc<crate::message_bus::FsmMessageBus>,
 
@@ -292,6 +296,7 @@ impl<H> FiniteSourceContext<H> {
         data_journal: Arc<dyn Journal<ChainEvent>>,
         error_journal: Arc<dyn Journal<ChainEvent>>,
         system_journal: Arc<dyn Journal<SystemEvent>>,
+        replay_archive: Option<Arc<dyn ReplayArchive>>,
         bus: Arc<crate::message_bus::FsmMessageBus>,
         instrumentation: Arc<StageInstrumentation>,
         control_strategy: Arc<dyn SourceControlStrategy>,
@@ -305,6 +310,7 @@ impl<H> FiniteSourceContext<H> {
             data_journal,
             error_journal,
             system_journal,
+            replay_archive,
             bus,
             writer_id: None,
             instrumentation,
@@ -818,6 +824,7 @@ mod tests {
                 data_journal.clone(),
                 error_journal.clone(),
                 system_journal.clone(),
+                None,
                 bus.clone(),
                 instrumentation.clone(),
                 control_strategy,

@@ -341,6 +341,7 @@ mod tests {
             error_journals: Vec::new(),
             backpressure_writer: Default::default(),
             backpressure_readers: Default::default(),
+            replay_archive: None,
         };
 
         let descriptor = FiniteSourceDescriptor {
