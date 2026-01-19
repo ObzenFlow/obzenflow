@@ -22,7 +22,7 @@ default-members = [
 [dependencies]
 # Internal workspace dependencies
 obzenflow_core = { path = "crates/obzenflow_core" }
-obzenflow-topology = { path = "../obzenflow-topology", version = "0.2" }
+obzenflow-topology = "0.2"
 obzenflow_runtime_services = { path = "crates/obzenflow_runtime_services" }
 obzenflow_adapters = { path = "crates/obzenflow_adapters" }
 obzenflow_dsl_infra = { path = "crates/obzenflow_dsl_infra" }

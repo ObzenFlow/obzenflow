@@ -9,7 +9,7 @@ publish = false
 [dependencies]
 # Internal dependencies - depends on all layers
 obzenflow_core = { path = "../obzenflow_core" }
-obzenflow-topology = { path = "../../../obzenflow-topology", version = "0.2" }
+obzenflow-topology = "0.2"
 obzenflow_runtime_services = { path = "../obzenflow_runtime_services" }
 obzenflow_adapters = { path = "../obzenflow_adapters" }
 obzenflow_dsl_infra = { path = "../obzenflow_dsl_infra" }
