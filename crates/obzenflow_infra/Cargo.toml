@@ -30,7 +30,6 @@ ring = "0.17"
 subtle = "2"
 
 # Monitoring backends
-prometheus = { version = "0.13", optional = true }
 statsd = { version = "0.16", optional = true }
 
 # Web frameworks (optional)
@@ -49,7 +48,7 @@ reqwest = { version = "0.12", features = ["rustls-tls"], optional = true }
 
 [features]
 default = []
-prometheus = ["dep:prometheus"]
+prometheus = []
 statsd = ["dep:statsd"]
 warp-server = ["dep:warp", "dep:bytes", "dep:tokio-stream"]
 axum-server = ["dep:axum", "dep:tower", "dep:hyper"]
