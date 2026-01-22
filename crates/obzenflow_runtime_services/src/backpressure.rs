@@ -66,7 +66,6 @@ struct EdgeState {
 
 #[derive(Debug)]
 struct StageState {
-    stage_id: StageId,
     writer_seq: AtomicU64,
     reserved: AtomicU64,
     wait_nanos_total: AtomicU64,
@@ -125,7 +124,6 @@ impl BackpressureRegistry {
             stages.insert(
                 stage_id,
                 Arc::new(StageState {
-                    stage_id,
                     writer_seq: AtomicU64::new(0),
                     reserved: AtomicU64::new(0),
                     wait_nanos_total: AtomicU64::new(0),

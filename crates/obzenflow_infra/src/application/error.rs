@@ -32,14 +32,14 @@ pub enum ApplicationError {
 impl fmt::Display for ApplicationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::FlowBuildFailed(msg) => write!(f, "Flow build failed: {}", msg),
-            Self::FlowExecutionFailed(msg) => write!(f, "Flow execution failed: {}", msg),
-            Self::ServerStartFailed(msg) => write!(f, "Server start failed: {}", msg),
-            Self::RuntimeCreationFailed(msg) => write!(f, "Runtime creation failed: {}", msg),
-            Self::FeatureNotEnabled(feature) => write!(f, "Feature not enabled: {}", feature),
-            Self::InvalidConfiguration(msg) => write!(f, "Invalid configuration: {}", msg),
-            Self::IoError(err) => write!(f, "IO error: {}", err),
-            Self::Other(err) => write!(f, "Application error: {}", err),
+            Self::FlowBuildFailed(msg) => write!(f, "Flow build failed: {msg}"),
+            Self::FlowExecutionFailed(msg) => write!(f, "Flow execution failed: {msg}"),
+            Self::ServerStartFailed(msg) => write!(f, "Server start failed: {msg}"),
+            Self::RuntimeCreationFailed(msg) => write!(f, "Runtime creation failed: {msg}"),
+            Self::FeatureNotEnabled(feature) => write!(f, "Feature not enabled: {feature}"),
+            Self::InvalidConfiguration(msg) => write!(f, "Invalid configuration: {msg}"),
+            Self::IoError(err) => write!(f, "IO error: {err}"),
+            Self::Other(err) => write!(f, "Application error: {err}"),
         }
     }
 }

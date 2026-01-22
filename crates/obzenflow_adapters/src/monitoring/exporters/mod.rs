@@ -129,6 +129,9 @@ impl Default for ExporterRegistry {
 #[cfg(feature = "metrics-statsd")]
 pub mod statsd;
 
+#[cfg(feature = "metrics-otel")]
+pub mod otel;
+
 // Always available for testing
 pub mod test;
 
@@ -147,6 +150,9 @@ pub use self::test::TestExporter;
 
 #[cfg(feature = "metrics-statsd")]
 pub use self::statsd::StatsDExporter;
+
+#[cfg(feature = "metrics-otel")]
+pub use self::otel::OtelExporter;
 
 #[cfg(test)]
 mod tests {
@@ -215,7 +221,7 @@ mod tests {
 
     #[test]
     fn test_batch_export() {
-        let metrics = vec![
+        let metrics = [
             MockMetric::new("counter1".to_string(), MetricValue::Counter(10)),
             MockMetric::new("counter2".to_string(), MetricValue::Counter(20)),
         ];

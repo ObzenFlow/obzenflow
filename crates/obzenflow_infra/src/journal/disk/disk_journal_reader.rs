@@ -184,10 +184,7 @@ impl<T: JournalEvent> DiskJournalReader<T> {
                 }
                 Err(e) => {
                     return Err(JournalError::Implementation {
-                        message: format!(
-                            "Failed to skip to position {} in journal",
-                            start_position
-                        ),
+                        message: format!("Failed to skip to position {start_position} in journal"),
                         source: Box::new(e),
                     });
                 }
@@ -425,21 +422,18 @@ impl<T: JournalEvent> JournalReader<T> for DiskJournalReader<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Utc;
-    use obzenflow_core::event::chain_event::ChainEventFactory;
-    use obzenflow_core::event::JournalEvent;
-    use obzenflow_core::event::vector_clock::VectorClock;
-    use obzenflow_core::{ChainEvent, EventId, JournalId, StageId, WriterId};
-    use crc32fast::Hasher;
     use crate::journal::disk::log_record::LogRecord;
+    use chrono::Utc;
+    use crc32fast::Hasher;
+    use obzenflow_core::event::chain_event::ChainEventFactory;
+    use obzenflow_core::event::vector_clock::VectorClock;
+    use obzenflow_core::event::JournalEvent;
+    use obzenflow_core::{ChainEvent, JournalId, StageId, WriterId};
     use std::io::Write;
     use tempfile::NamedTempFile;
     use ulid::Ulid;
 
-    fn write_framed_record<T: JournalEvent>(
-        file: &mut NamedTempFile,
-        record: &LogRecord<T>,
-    ) {
+    fn write_framed_record<T: JournalEvent>(file: &mut NamedTempFile, record: &LogRecord<T>) {
         let json_body = serde_json::to_vec(record).unwrap();
         let mut hasher = Hasher::new();
         hasher.update(&json_body);

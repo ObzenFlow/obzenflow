@@ -1,5 +1,8 @@
-use super::domain::{PaymentCommand, TrafficPhase};
+use super::domain::PaymentCommand;
+#[cfg(not(test))]
+use super::domain::TrafficPhase;
 use super::fixtures;
+#[cfg(not(test))]
 use async_trait::async_trait;
 use obzenflow_core::{
     event::chain_event::{ChainEvent, ChainEventFactory},
@@ -7,12 +10,14 @@ use obzenflow_core::{
     TypedPayload, WriterId,
 };
 use obzenflow_runtime_services::stages::common::handlers::source::traits::SourceError;
-use obzenflow_runtime_services::stages::common::handlers::{
-    AsyncFiniteSourceHandler, FiniteSourceHandler,
-};
+#[cfg(not(test))]
+use obzenflow_runtime_services::stages::common::handlers::AsyncFiniteSourceHandler;
+use obzenflow_runtime_services::stages::common::handlers::FiniteSourceHandler;
 use serde_json::json;
+#[cfg(not(test))]
 use std::time::{Duration, Instant};
 
+#[cfg(not(test))]
 fn blocking_sleep(duration: Duration) {
     if duration.is_zero() {
         return;
@@ -29,9 +34,11 @@ fn blocking_sleep(duration: Duration) {
     }
 }
 
+#[cfg(not(test))]
 #[derive(Clone, Copy, Debug)]
 struct XorShift64(u64);
 
+#[cfg(not(test))]
 impl XorShift64 {
     fn new(seed: u64) -> Self {
         // xorshift cannot have a zero state.
@@ -75,6 +82,7 @@ impl XorShift64 {
     }
 }
 
+#[cfg(not(test))]
 #[derive(Clone, Debug)]
 struct ExponentialBackoff {
     base: Duration,
@@ -83,6 +91,7 @@ struct ExponentialBackoff {
     next_attempt_at: Option<Instant>,
 }
 
+#[cfg(not(test))]
 impl ExponentialBackoff {
     fn new(base: Duration, max: Duration) -> Self {
         Self {
@@ -144,6 +153,7 @@ impl ExponentialBackoff {
     }
 }
 
+#[cfg(not(test))]
 #[derive(Clone, Debug)]
 struct SemiReliableFeed {
     rng: XorShift64,
@@ -152,9 +162,10 @@ struct SemiReliableFeed {
     backoff: ExponentialBackoff,
 }
 
+#[cfg(not(test))]
 impl SemiReliableFeed {
     fn new(seed: u64) -> Self {
-        let mut rng = XorShift64::new(seed);
+        let rng = XorShift64::new(seed);
         Self {
             rng,
             offline_until: None,
@@ -213,14 +224,10 @@ impl SemiReliableFeed {
             self.backoff.reset();
             let _ = self.backoff.schedule_next(now, &mut self.rng);
 
-            println!(
-                "📡 payments feed glitch: offline for {}s (simulated MQTT outage)",
-                outage_secs
-            );
+            println!("📡 payments feed glitch: offline for {outage_secs}s (simulated MQTT outage)");
 
             return Err(SourceError::Transport(format!(
-                "mqtt feed glitch: offline_for={}s",
-                outage_secs
+                "mqtt feed glitch: offline_for={outage_secs}s"
             )));
         }
 
@@ -274,14 +281,10 @@ impl SemiReliableFeed {
             self.backoff.reset();
             let _ = self.backoff.schedule_next(now, &mut self.rng);
 
-            println!(
-                "📡 payments feed glitch: offline for {}s (simulated MQTT outage)",
-                outage_secs
-            );
+            println!("📡 payments feed glitch: offline for {outage_secs}s (simulated MQTT outage)");
 
             return Err(SourceError::Transport(format!(
-                "mqtt feed glitch: offline_for={}s",
-                outage_secs
+                "mqtt feed glitch: offline_for={outage_secs}s"
             )));
         }
 
@@ -314,12 +317,7 @@ impl PaymentCommandSource {
 }
 
 impl FiniteSourceHandler for PaymentCommandSource {
-    fn next(
-        &mut self,
-    ) -> Result<
-        Option<Vec<ChainEvent>>,
-        obzenflow_runtime_services::stages::common::handlers::source::traits::SourceError,
-    > {
+    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
         if self.current_index >= self.commands.len() {
             return Ok(None);
         }
@@ -328,113 +326,7 @@ impl FiniteSourceHandler for PaymentCommandSource {
         self.current_index += 1;
 
         Ok(Some(vec![ChainEventFactory::data_event(
-            self.writer_id.clone(),
-            PaymentCommand::EVENT_TYPE,
-            json!(cmd),
-        )]))
-    }
-}
-
-/// High-volume source that generates a large number of payment commands with
-/// periodic "glitch" windows (Outage) to exercise circuit breaker behaviour.
-///
-/// Intended for runs similar to `prometheus_100k_demo` where you want:
-/// - enough volume to make rates interesting
-/// - repeated breaker open/close cycles over time
-#[derive(Clone, Debug)]
-pub struct GlitchyPaymentCommandSource {
-    total_events: usize,
-    current_index: usize,
-    writer_id: WriterId,
-    warmup_events: usize,
-    outage_events: usize,
-    recovery_events: usize,
-}
-
-impl GlitchyPaymentCommandSource {
-    /// Create a new glitchy source with a default 10k-event cycle:
-    /// - 8k healthy (Warmup)
-    /// - 1k outage (Outage)
-    /// - 1k healthy (Recovery)
-    ///
-    /// At 1000 events/sec (like `prometheus_100k_demo`) this yields a ~10s cycle
-    /// that lines up well with the circuit breaker's default 5s cooldown.
-    pub fn new(total_events: usize) -> Self {
-        Self::with_cycle(total_events, 8_000, 1_000, 1_000)
-    }
-
-    pub fn with_cycle(
-        total_events: usize,
-        warmup_events: usize,
-        outage_events: usize,
-        recovery_events: usize,
-    ) -> Self {
-        Self {
-            total_events,
-            current_index: 0,
-            writer_id: WriterId::from(StageId::new()),
-            warmup_events: warmup_events.max(1),
-            outage_events,
-            recovery_events,
-        }
-    }
-
-    fn phase_for_index(&self, index: usize) -> TrafficPhase {
-        let cycle_len = self.warmup_events + self.outage_events + self.recovery_events;
-        if cycle_len == 0 {
-            return TrafficPhase::Warmup;
-        }
-
-        let pos = index % cycle_len;
-        if pos < self.warmup_events {
-            TrafficPhase::Warmup
-        } else if pos < self.warmup_events + self.outage_events {
-            TrafficPhase::Outage
-        } else {
-            TrafficPhase::Recovery
-        }
-    }
-}
-
-impl FiniteSourceHandler for GlitchyPaymentCommandSource {
-    fn next(
-        &mut self,
-    ) -> Result<
-        Option<Vec<ChainEvent>>,
-        obzenflow_runtime_services::stages::common::handlers::source::traits::SourceError,
-    > {
-        if self.current_index >= self.total_events {
-            return Ok(None);
-        }
-
-        let idx = self.current_index;
-        self.current_index += 1;
-
-        if self.current_index % 10_000 == 0 {
-            println!("📊 Generated {} payment commands...", self.current_index);
-        }
-
-        let phase = self.phase_for_index(idx);
-
-        // Inject a small number of validation failures so the demo can show:
-        // - Validation errors contribute to `obzenflow_errors_total`
-        // - Validation errors do NOT open the circuit breaker (ErrorKind::Validation)
-        let (card_ok, amount_cents) = match idx % 1_000 {
-            0 => (false, 10_00), // bad card
-            1 => (true, 0),      // zero amount
-            _ => (true, 10_00),
-        };
-
-        let cmd = PaymentCommand {
-            request_id: format!("cmd-{}", idx),
-            customer_id: format!("cust-{}", idx % 10_000),
-            amount_cents,
-            card_ok,
-            phase,
-        };
-
-        Ok(Some(vec![ChainEventFactory::data_event(
-            self.writer_id.clone(),
+            self.writer_id,
             PaymentCommand::EVENT_TYPE,
             json!(cmd),
         )]))
@@ -448,6 +340,7 @@ impl FiniteSourceHandler for GlitchyPaymentCommandSource {
 /// - We don't need perfect replay; we simply back off and resume once it's back.
 /// - A circuit breaker on the source prevents hot-looping and makes outages
 ///   scrape-visible via `obzenflow_circuit_breaker_*` metrics on the source stage.
+#[cfg(not(test))]
 #[derive(Clone, Debug)]
 pub struct ScrapedGlitchyPaymentCommandSource {
     total_events: usize,
@@ -459,6 +352,7 @@ pub struct ScrapedGlitchyPaymentCommandSource {
     feed: SemiReliableFeed,
 }
 
+#[cfg(not(test))]
 impl ScrapedGlitchyPaymentCommandSource {
     pub fn with_cycle(
         total_events: usize,
@@ -502,6 +396,7 @@ impl ScrapedGlitchyPaymentCommandSource {
     }
 }
 
+#[cfg(not(test))]
 impl FiniteSourceHandler for ScrapedGlitchyPaymentCommandSource {
     fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
         if self.current_index >= self.total_events {
@@ -517,7 +412,7 @@ impl FiniteSourceHandler for ScrapedGlitchyPaymentCommandSource {
         let idx = self.current_index;
         self.current_index += 1;
 
-        if self.current_index % 10_000 == 0 {
+        if self.current_index.is_multiple_of(10_000) {
             println!("📊 Scraped {} payment commands...", self.current_index);
         }
 
@@ -530,7 +425,7 @@ impl FiniteSourceHandler for ScrapedGlitchyPaymentCommandSource {
         };
 
         let cmd = PaymentCommand {
-            request_id: format!("cmd-{}", idx),
+            request_id: format!("cmd-{idx}"),
             customer_id: format!("cust-{}", idx % 10_000),
             amount_cents,
             card_ok,
@@ -538,7 +433,7 @@ impl FiniteSourceHandler for ScrapedGlitchyPaymentCommandSource {
         };
 
         Ok(Some(vec![ChainEventFactory::data_event(
-            self.writer_id.clone(),
+            self.writer_id,
             PaymentCommand::EVENT_TYPE,
             json!(cmd),
         )]))
@@ -549,6 +444,7 @@ impl FiniteSourceHandler for ScrapedGlitchyPaymentCommandSource {
 ///
 /// Key difference vs the sync source:
 /// - Backoff uses `tokio::time::sleep(...).await` instead of `block_in_place` / `thread::sleep`.
+#[cfg(not(test))]
 #[derive(Clone, Debug)]
 pub struct AsyncScrapedGlitchyPaymentCommandSource {
     total_events: usize,
@@ -560,6 +456,7 @@ pub struct AsyncScrapedGlitchyPaymentCommandSource {
     feed: SemiReliableFeed,
 }
 
+#[cfg(not(test))]
 impl AsyncScrapedGlitchyPaymentCommandSource {
     pub fn with_cycle(
         total_events: usize,
@@ -601,6 +498,7 @@ impl AsyncScrapedGlitchyPaymentCommandSource {
     }
 }
 
+#[cfg(not(test))]
 #[async_trait]
 impl AsyncFiniteSourceHandler for AsyncScrapedGlitchyPaymentCommandSource {
     async fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
@@ -613,7 +511,7 @@ impl AsyncFiniteSourceHandler for AsyncScrapedGlitchyPaymentCommandSource {
         let idx = self.current_index;
         self.current_index += 1;
 
-        if self.current_index % 10_000 == 0 {
+        if self.current_index.is_multiple_of(10_000) {
             println!("📊 Scraped {} payment commands...", self.current_index);
         }
 
@@ -626,7 +524,7 @@ impl AsyncFiniteSourceHandler for AsyncScrapedGlitchyPaymentCommandSource {
         };
 
         let cmd = PaymentCommand {
-            request_id: format!("cmd-{}", idx),
+            request_id: format!("cmd-{idx}"),
             customer_id: format!("cust-{}", idx % 10_000),
             amount_cents,
             card_ok,
@@ -634,7 +532,7 @@ impl AsyncFiniteSourceHandler for AsyncScrapedGlitchyPaymentCommandSource {
         };
 
         Ok(Some(vec![ChainEventFactory::data_event(
-            self.writer_id.clone(),
+            self.writer_id,
             PaymentCommand::EVENT_TYPE,
             json!(cmd),
         )]))

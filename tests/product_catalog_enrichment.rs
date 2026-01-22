@@ -1,4 +1,4 @@
-#[path = "../examples/product_catalog_enrichment/lib.rs"]
+#[path = "../examples/product_catalog_enrichment/support.rs"]
 mod product_catalog_enrichment;
 
 #[test]

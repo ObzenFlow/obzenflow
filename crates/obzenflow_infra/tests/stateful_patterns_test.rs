@@ -39,7 +39,7 @@ impl FiniteSourceHandler for NumberSource {
             let num = self.current;
             self.current += 1;
             Ok(Some(vec![ChainEventFactory::data_event(
-                self.writer_id.clone(),
+                self.writer_id,
                 "number",
                 json!({ "value": num }),
             )]))
@@ -50,15 +50,11 @@ impl FiniteSourceHandler for NumberSource {
 }
 
 #[derive(Clone, Debug)]
-struct EmptySource {
-    writer_id: WriterId,
-}
+struct EmptySource;
 
 impl EmptySource {
     fn new() -> Self {
-        Self {
-            writer_id: WriterId::from(StageId::new()),
-        }
+        Self
     }
 }
 
@@ -142,7 +138,7 @@ impl StatefulHandler for CounterHandler {
         state: &Self::State,
     ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
         Ok(vec![ChainEventFactory::data_event(
-            self.writer_id.clone(),
+            self.writer_id,
             "count_result",
             json!({ "total_count": state.count }),
         )])
@@ -184,7 +180,7 @@ impl StatefulHandler for AccumulatorHandler {
             .iter()
             .map(|&value| {
                 ChainEventFactory::data_event(
-                    self.writer_id.clone(),
+                    self.writer_id,
                     "collected_value",
                     json!({ "value": value }),
                 )
@@ -224,7 +220,7 @@ impl StatefulHandler for SumHandler {
         state: &Self::State,
     ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
         Ok(vec![ChainEventFactory::data_event(
-            self.writer_id.clone(),
+            self.writer_id,
             "sum_result",
             json!({ "total_sum": *state }),
         )])
@@ -258,7 +254,7 @@ impl StatefulHandler for ImmediateEmitter {
 
     fn emit(&self, state: &mut Self::State) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
         Ok(vec![ChainEventFactory::data_event(
-            self.writer_id.clone(),
+            self.writer_id,
             "progress_update",
             json!({ "current_count": *state }),
         )])

@@ -46,7 +46,6 @@
 use crate::stages::common::handler_error::HandlerError;
 use crate::stages::common::handlers::TransformHandler;
 use async_trait::async_trait;
-use obzenflow_core::event::ChainEventFactory;
 use obzenflow_core::ChainEvent;
 use serde::de::DeserializeOwned;
 use std::marker::PhantomData;
@@ -287,7 +286,7 @@ mod tests {
     use super::*;
     use obzenflow_core::event::ChainEventFactory;
     use obzenflow_core::id::StageId;
-    use obzenflow_core::{EventId, WriterId};
+    use obzenflow_core::WriterId;
     use serde_json::json;
 
     #[tokio::test]

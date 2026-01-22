@@ -1,5 +1,5 @@
 //! Application framework for ObzenFlow
-//! 
+//!
 //! Provides Spring Boot-style lifecycle management for flows with automatic
 //! CLI parsing, server management, and graceful shutdown handling.
 

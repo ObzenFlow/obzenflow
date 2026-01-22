@@ -52,7 +52,7 @@ impl FiniteSourceHandler for TimestampedSource {
         let current = self.emitted.fetch_add(1, Ordering::Relaxed);
         if current < self.total_events {
             Ok(Some(vec![ChainEventFactory::data_event(
-                self.writer_id.clone(),
+                self.writer_id,
                 "TimestampedEvent",
                 json!({
                     "event_id": current,
@@ -70,15 +70,11 @@ impl FiniteSourceHandler for TimestampedSource {
 
 /// Passthrough stage
 #[derive(Clone, Debug)]
-struct PassthroughStage {
-    name: String,
-}
+struct PassthroughStage;
 
 impl PassthroughStage {
-    fn new(name: &str) -> Self {
-        Self {
-            name: name.to_string(),
-        }
+    fn new(_name: &str) -> Self {
+        Self
     }
 }
 
@@ -96,7 +92,6 @@ impl TransformHandler for PassthroughStage {
 /// Sink that collects latencies
 #[derive(Clone, Debug)]
 struct LatencySink {
-    expected_count: u64,
     received: Arc<AtomicU64>,
     latencies: Arc<tokio::sync::Mutex<Vec<Duration>>>,
 }
@@ -108,7 +103,6 @@ impl LatencySink {
         )));
         (
             Self {
-                expected_count,
                 received: Arc::new(AtomicU64::new(0)),
                 latencies: latencies.clone(),
             },
@@ -365,13 +359,13 @@ async fn run_100_stage_pipeline_memory() -> anyhow::Result<Duration> {
         }
     }
     .await
-    .map_err(|e| anyhow::anyhow!("Failed to create flow: {:?}", e))?;
+    .map_err(|e| anyhow::anyhow!("Failed to create flow: {e:?}"))?;
 
     // Start the pipeline
     handle
         .run()
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to run pipeline: {:?}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to run pipeline: {e:?}"))?;
 
     // Wait for completion
     let timeout = Duration::from_secs(300); // Extended timeout for true 100 stages

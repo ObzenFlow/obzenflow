@@ -72,7 +72,7 @@ impl Middleware for SystemEnrichmentMiddleware {
                 flow_name: self.flow_name.clone(),
                 flow_id: self.flow_id.clone(),
                 stage_name: self.stage_name.clone(),
-                stage_id: self.stage_id.clone(),
+                stage_id: self.stage_id,
                 stage_type: self.stage_type,
             };
 
@@ -93,7 +93,7 @@ impl Middleware for SystemEnrichmentMiddleware {
                     self.stage_name
                 );
                 event.flow_context.stage_name = self.stage_name.clone();
-                event.flow_context.stage_id = self.stage_id.clone();
+                event.flow_context.stage_id = self.stage_id;
                 event.flow_context.stage_type = self.stage_type;
             }
         }
@@ -107,7 +107,7 @@ impl Middleware for SystemEnrichmentMiddleware {
                     if event.correlation_id.is_none() {
                         let correlation_id = CorrelationId::new();
                         let mut correlation_payload =
-                            CorrelationPayload::new(&self.stage_name, event.id.clone());
+                            CorrelationPayload::new(&self.stage_name, event.id);
 
                         // Add flow metadata
                         correlation_payload.metadata = Some(serde_json::json!({
@@ -116,7 +116,7 @@ impl Middleware for SystemEnrichmentMiddleware {
                             "source_event_id": event.id.to_string(),
                         }));
 
-                        event.correlation_id = Some(correlation_id.clone());
+                        event.correlation_id = Some(correlation_id);
                         event.correlation_payload = Some(correlation_payload);
 
                         tracing::trace!(
@@ -146,10 +146,64 @@ impl Middleware for SystemEnrichmentMiddleware {
         if event.is_lifecycle() {
             // Control events should always have the context of the stage that generated them
             event.flow_context.stage_name = self.stage_name.clone();
-            event.flow_context.stage_id = self.stage_id.clone();
+            event.flow_context.stage_id = self.stage_id;
             event.flow_context.stage_type = self.stage_type;
         }
     }
+}
+
+/// Factory for creating SystemEnrichmentMiddleware instances with flow/stage context
+pub struct SystemEnrichmentMiddlewareFactory {
+    flow_name: String,
+    flow_id: String,
+    stage_type: StageType,
+}
+
+impl SystemEnrichmentMiddlewareFactory {
+    pub fn new(
+        flow_name: impl Into<String>,
+        flow_id: impl Into<String>,
+        stage_type: StageType,
+    ) -> Self {
+        Self {
+            flow_name: flow_name.into(),
+            flow_id: flow_id.into(),
+            stage_type,
+        }
+    }
+}
+
+impl MiddlewareFactory for SystemEnrichmentMiddlewareFactory {
+    fn create(
+        &self,
+        config: &StageConfig,
+        _control_middleware: std::sync::Arc<
+            crate::middleware::control::ControlMiddlewareAggregator,
+        >,
+    ) -> Box<dyn Middleware> {
+        Box::new(SystemEnrichmentMiddleware::new(
+            &self.flow_name,
+            &self.flow_id,
+            &config.name,
+            config.stage_id,
+            self.stage_type,
+        ))
+    }
+
+    fn name(&self) -> &str {
+        "system_enrichment"
+    }
+}
+
+/// Convenience function to create a system enrichment middleware factory
+pub fn system_enrichment(
+    flow_name: impl Into<String>,
+    flow_id: impl Into<String>,
+    stage_type: StageType,
+) -> Box<dyn MiddlewareFactory> {
+    Box::new(SystemEnrichmentMiddlewareFactory::new(
+        flow_name, flow_id, stage_type,
+    ))
 }
 
 #[cfg(test)]
@@ -241,7 +295,7 @@ mod tests {
 
         // Set existing correlation
         let correlation_id = CorrelationId::new();
-        event.correlation_id = Some(correlation_id.clone());
+        event.correlation_id = Some(correlation_id);
 
         // Pre-write should preserve correlation ID
         middleware.pre_write(&mut event, &ctx);
@@ -302,7 +356,7 @@ mod tests {
             "flow_name": "test_flow",
             "source_event_id": "src-123"
         }));
-        event.correlation_id = Some(correlation_id.clone());
+        event.correlation_id = Some(correlation_id);
         event.correlation_payload = Some(correlation_payload.clone());
 
         // Pre-write should preserve everything
@@ -315,58 +369,4 @@ mod tests {
             "http_source"
         );
     }
-}
-
-/// Factory for creating SystemEnrichmentMiddleware instances with flow/stage context
-pub struct SystemEnrichmentMiddlewareFactory {
-    flow_name: String,
-    flow_id: String,
-    stage_type: StageType,
-}
-
-impl SystemEnrichmentMiddlewareFactory {
-    pub fn new(
-        flow_name: impl Into<String>,
-        flow_id: impl Into<String>,
-        stage_type: StageType,
-    ) -> Self {
-        Self {
-            flow_name: flow_name.into(),
-            flow_id: flow_id.into(),
-            stage_type,
-        }
-    }
-}
-
-impl MiddlewareFactory for SystemEnrichmentMiddlewareFactory {
-    fn create(
-        &self,
-        config: &StageConfig,
-        _control_middleware: std::sync::Arc<
-            crate::middleware::control::ControlMiddlewareAggregator,
-        >,
-    ) -> Box<dyn Middleware> {
-        Box::new(SystemEnrichmentMiddleware::new(
-            &self.flow_name,
-            &self.flow_id,
-            &config.name,
-            config.stage_id,
-            self.stage_type,
-        ))
-    }
-
-    fn name(&self) -> &str {
-        "system_enrichment"
-    }
-}
-
-/// Convenience function to create a system enrichment middleware factory
-pub fn system_enrichment(
-    flow_name: impl Into<String>,
-    flow_id: impl Into<String>,
-    stage_type: StageType,
-) -> Box<dyn MiddlewareFactory> {
-    Box::new(SystemEnrichmentMiddlewareFactory::new(
-        flow_name, flow_id, stage_type,
-    ))
 }

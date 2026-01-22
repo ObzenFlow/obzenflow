@@ -4,8 +4,8 @@ use std::time::{Duration, Instant};
 
 use obzenflow_core::event::ChainEventFactory;
 use obzenflow_core::event::SystemEvent;
-use obzenflow_core::journal::journal::Journal;
 use obzenflow_core::journal::journal_owner::JournalOwner;
+use obzenflow_core::journal::Journal;
 use obzenflow_core::{ChainEvent, FlowId, StageId, SystemId, WriterId};
 use obzenflow_infra::journal::MemoryJournal;
 use obzenflow_runtime_services::id_conversions::StageIdExt;
@@ -57,7 +57,7 @@ impl StatefulHandler for TimerEmitHandler {
 
     fn create_events(&self, state: &Self::State) -> Result<Vec<ChainEvent>, HandlerError> {
         Ok(vec![ChainEventFactory::data_event(
-            self.writer_id.clone(),
+            self.writer_id,
             "test.timer.emit",
             json!({ "buffered": state.buffered }),
         )])
@@ -147,7 +147,7 @@ async fn stateful_emit_interval_emits_while_idle() {
     // Seed one upstream data event to establish the baseline.
     let upstream_writer = WriterId::from(src);
     let input_event =
-        ChainEventFactory::data_event(upstream_writer.clone(), "test.input", json!({ "seq": 1 }));
+        ChainEventFactory::data_event(upstream_writer, "test.input", json!({ "seq": 1 }));
     src_journal
         .append(input_event, None)
         .await

@@ -53,9 +53,9 @@ impl TransformHandler for TicketTriage {
             serde_json::to_value(&triaged).map_err(|e| HandlerError::Other(e.to_string()))?;
 
         Ok(vec![ChainEventFactory::derived_data_event(
-            event.writer_id.clone(),
+            event.writer_id,
             &event,
-            &TriagedTicket::versioned_event_type(),
+            TriagedTicket::versioned_event_type(),
             payload,
         )])
     }

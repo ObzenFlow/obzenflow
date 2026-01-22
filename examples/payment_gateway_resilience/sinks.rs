@@ -51,6 +51,7 @@ impl PaymentSummarySink {
         Self::default()
     }
 
+    #[cfg(not(test))]
     pub fn new_compact(progress_every: usize) -> Self {
         Self {
             verbose_events: false,
@@ -80,7 +81,7 @@ impl PaymentSummarySink {
             return;
         }
 
-        if self.total_seen % self.progress_every != 0 {
+        if !self.total_seen.is_multiple_of(self.progress_every) {
             return;
         }
 
@@ -174,7 +175,7 @@ impl SinkHandler for PaymentSummarySink {
                     .map(|v| v.request_id.as_str())
                     .or_else(|| authorized.as_ref().map(|a| a.request_id.as_str()))
                     .unwrap_or("<unknown>");
-                println!("⏳ Gateway timeout for request {} (simulated)", request_id);
+                println!("⏳ Gateway timeout for request {request_id} (simulated)");
             }
         } else if let Some(authorized) = authorized {
             let is_degraded =

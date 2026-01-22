@@ -6,17 +6,15 @@
 use obzenflow_core::event::context::{FlowContext, StageType};
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::types::SeqNo;
-use obzenflow_core::event::JournalEvent;
 use obzenflow_core::event::{ChainEventFactory, SystemEvent};
-use obzenflow_core::journal::journal::Journal;
+use obzenflow_core::journal::Journal;
 use obzenflow_core::StageId;
-use obzenflow_core::{ChainEvent, EventEnvelope, EventId, FlowId, WriterId};
+use obzenflow_core::{ChainEvent, EventEnvelope, FlowId, WriterId};
 use obzenflow_fsm::{EventVariant, FsmAction, FsmContext, StateVariant};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::marker::PhantomData;
 use std::sync::Arc;
-use std::time::Duration;
 
 use crate::backpressure::{BackpressureReader, BackpressureWriter};
 use crate::messaging::upstream_subscription::{ContractConfig, ReaderProgress};
@@ -84,7 +82,7 @@ impl<H> std::fmt::Debug for TransformState<H> {
             Self::Running => write!(f, "Running"),
             Self::Draining => write!(f, "Draining"),
             Self::Drained => write!(f, "Drained"),
-            Self::Failed(msg) => write!(f, "Failed({:?})", msg),
+            Self::Failed(msg) => write!(f, "Failed({msg:?})"),
             Self::_Phantom(_) => write!(f, "_Phantom"),
         }
     }
@@ -169,7 +167,7 @@ impl<H> std::fmt::Debug for TransformEvent<H> {
             Self::ReceivedEOF => write!(f, "ReceivedEOF"),
             Self::BeginDrain => write!(f, "BeginDrain"),
             Self::DrainComplete => write!(f, "DrainComplete"),
-            Self::Error(msg) => write!(f, "Error({:?})", msg),
+            Self::Error(msg) => write!(f, "Error({msg:?})"),
             Self::_Phantom(_) => write!(f, "_Phantom"),
         }
     }
@@ -194,7 +192,7 @@ impl<H: Send + Sync + 'static> EventVariant for TransformEvent<H> {
 // ============================================================================
 
 /// Actions that transform FSM transitions can emit
-pub enum TransformAction<H> {
+pub(crate) enum TransformAction<H> {
     /// Allocate resources (writer ID, subscriptions)
     AllocateResources,
 
@@ -246,7 +244,7 @@ impl<H> std::fmt::Debug for TransformAction<H> {
             Self::ForwardEOF => write!(f, "ForwardEOF"),
             Self::DrainHandler => write!(f, "DrainHandler"),
             Self::SendCompletion => write!(f, "SendCompletion"),
-            Self::SendFailure { message } => write!(f, "SendFailure({:?})", message),
+            Self::SendFailure { message } => write!(f, "SendFailure({message:?})"),
             Self::Cleanup => write!(f, "Cleanup"),
             Self::_Phantom(_) => write!(f, "_Phantom"),
         }
@@ -258,7 +256,7 @@ impl<H> std::fmt::Debug for TransformAction<H> {
 // ============================================================================
 
 /// Context for transform handlers - contains everything actions need
-pub struct TransformContext<H: UnifiedTransformHandler> {
+pub(crate) struct TransformContext<H: UnifiedTransformHandler> {
     /// The handler instance (owned - allows `drain(&mut self)` without locks)
     pub handler: H,
 
@@ -282,9 +280,6 @@ pub struct TransformContext<H: UnifiedTransformHandler> {
 
     /// System journal for writing lifecycle events
     pub system_journal: Arc<dyn Journal<SystemEvent>>,
-
-    /// Message bus for pipeline communication
-    pub bus: Arc<crate::message_bus::FsmMessageBus>,
 
     /// Writer ID for this transform (initialized during setup)
     pub writer_id: Option<WriterId>,
@@ -329,55 +324,6 @@ pub struct TransformContext<H: UnifiedTransformHandler> {
     pub(crate) backpressure_backoff: IdleBackoff,
 }
 
-impl<H: UnifiedTransformHandler> TransformContext<H> {
-    pub fn new(
-        handler: H,
-        stage_id: obzenflow_core::StageId,
-        stage_name: String,
-        flow_name: String,
-        flow_id: FlowId,
-        data_journal: Arc<dyn Journal<ChainEvent>>,
-        error_journal: Arc<dyn Journal<ChainEvent>>,
-        system_journal: Arc<dyn Journal<SystemEvent>>,
-        bus: Arc<crate::message_bus::FsmMessageBus>,
-        control_strategy: Arc<dyn ControlEventStrategy>,
-        instrumentation: Arc<StageInstrumentation>,
-        upstream_subscription_factory: BoundSubscriptionFactory,
-        backpressure_writer: BackpressureWriter,
-        backpressure_readers: HashMap<StageId, BackpressureReader>,
-    ) -> Self {
-        Self {
-            handler,
-            stage_id,
-            stage_name,
-            flow_name,
-            flow_id,
-            data_journal,
-            error_journal,
-            system_journal,
-            bus,
-            writer_id: None,
-            subscription: None,
-            // Initialized during AllocateResources based on upstream_subscription_factory
-            contract_state: Vec::new(),
-            control_strategy,
-            buffered_eof: None,
-            instrumentation,
-            upstream_subscription_factory,
-            backpressure_writer,
-            backpressure_readers,
-            pending_outputs: VecDeque::new(),
-            pending_parent: None,
-            pending_ack_upstream: None,
-            backpressure_pulse: BackpressureActivityPulse::new(),
-            backpressure_backoff: IdleBackoff::exponential_with_cap(
-                Duration::from_millis(1),
-                Duration::from_millis(50),
-            ),
-        }
-    }
-}
-
 impl<H: UnifiedTransformHandler + 'static> FsmContext for TransformContext<H> {}
 
 // ============================================================================
@@ -392,8 +338,8 @@ impl<H: UnifiedTransformHandler + Send + Sync + 'static> FsmAction for Transform
         match self {
             TransformAction::AllocateResources => {
                 // Create WriterId from our StageId
-                let writer_id = WriterId::from(ctx.stage_id.clone());
-                ctx.writer_id = Some(writer_id.clone());
+                let writer_id = WriterId::from(ctx.stage_id);
+                ctx.writer_id = Some(writer_id);
 
                 // Initialize FSM-owned contract state for each upstream reader
                 let upstream_ids = ctx.upstream_subscription_factory.upstream_stage_ids();
@@ -457,7 +403,7 @@ impl<H: UnifiedTransformHandler + Send + Sync + 'static> FsmAction for Transform
             }
 
             TransformAction::ForwardEOF => {
-                let writer_id = ctx.writer_id.as_ref().ok_or_else(|| {
+                let writer_id = ctx.writer_id.ok_or_else(|| {
                     obzenflow_fsm::FsmError::HandlerError(
                         "No writer ID available to forward EOF".to_string(),
                     )
@@ -475,7 +421,7 @@ impl<H: UnifiedTransformHandler + Send + Sync + 'static> FsmAction for Transform
                     if let obzenflow_core::event::ChainEventContent::FlowControl(
                         FlowControlPayload::Eof {
                             natural: n,
-                            writer_seq,
+                            writer_seq: _,
                             vector_clock,
                             last_event_id,
                             ..
@@ -490,7 +436,7 @@ impl<H: UnifiedTransformHandler + Send + Sync + 'static> FsmAction for Transform
                     }
                 }
 
-                let mut eof_event = ChainEventFactory::eof_event(writer_id.clone(), natural);
+                let mut eof_event = ChainEventFactory::eof_event(writer_id, natural);
 
                 if let obzenflow_core::event::ChainEventContent::FlowControl(
                     FlowControlPayload::Eof {
@@ -502,13 +448,12 @@ impl<H: UnifiedTransformHandler + Send + Sync + 'static> FsmAction for Transform
                     },
                 ) = &mut eof_event.content
                 {
-                    *eof_writer = Some(writer_id.clone());
+                    *eof_writer = Some(writer_id);
                     *writer_seq = Some(SeqNo(runtime_context.writer_seq));
                     if let Some(vc) = upstream_vector_clock {
                         *vector_clock = Some(vc);
                     }
-                    *last_event_id = upstream_last_event
-                        .or_else(|| runtime_context.last_emitted_event_id.clone());
+                    *last_event_id = upstream_last_event.or(runtime_context.last_emitted_event_id);
                 }
 
                 // Attach flow/runtime context for downstream contract tracking

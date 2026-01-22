@@ -71,14 +71,11 @@ impl Metric for ErrorMetric {
     }
 
     fn update(&self, value: MetricValue) {
-        match value {
-            MetricValue::Counter(count) => {
-                // Record individual errors - no bulk operations
-                for _ in 0..count {
-                    self.record_error();
-                }
+        if let MetricValue::Counter(count) = value {
+            // Record individual errors - no bulk operations
+            for _ in 0..count {
+                self.record_error();
             }
-            _ => {}
         }
     }
 

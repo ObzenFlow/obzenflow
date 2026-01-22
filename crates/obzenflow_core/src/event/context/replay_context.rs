@@ -14,4 +14,3 @@ pub struct ReplayContext {
     pub archive_path: PathBuf,
     pub replayed_at: DateTime<Utc>,
 }
-

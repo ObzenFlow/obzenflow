@@ -214,13 +214,13 @@ async fn main() -> Result<()> {
             }
         }
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to create flow: {:?}", e))?
+        .map_err(|e| anyhow::anyhow!("Failed to create flow: {e:?}"))?
     };
 
     flow_handle
         .start()
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to start flow: {:?}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to start flow: {e:?}"))?;
 
     // Let sources emit their bounded demo events before requesting a stop.
     tokio::time::sleep(Duration::from_millis(250)).await;
@@ -228,12 +228,12 @@ async fn main() -> Result<()> {
     flow_handle
         .stop_graceful(Duration::from_secs(5))
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to request graceful stop: {:?}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to request graceful stop: {e:?}"))?;
 
     flow_handle
         .wait_for_completion()
         .await
-        .map_err(|e| anyhow::anyhow!("Flow did not complete: {:?}", e))?;
+        .map_err(|e| anyhow::anyhow!("Flow did not complete: {e:?}"))?;
 
     drop(tx);
 

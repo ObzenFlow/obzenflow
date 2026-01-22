@@ -10,7 +10,7 @@ use crate::stages::stateful::strategies::emissions::{
 };
 use obzenflow_core::event::ChainEventFactory;
 use obzenflow_core::id::StageId;
-use obzenflow_core::{ChainEvent, EventId, TypedPayload, WriterId};
+use obzenflow_core::{ChainEvent, TypedPayload, WriterId};
 use serde::Serialize;
 use serde_json::json;
 use std::fmt::Debug;
@@ -107,7 +107,7 @@ where
 
     fn emit(&self, state: &Self::State) -> Vec<ChainEvent> {
         vec![ChainEventFactory::data_event(
-            self.writer_id.clone(),
+            self.writer_id,
             "reduced",
             json!({
                 "result": state,
@@ -412,7 +412,7 @@ where
     fn emit(&self, state: &Self::State) -> Vec<ChainEvent> {
         let payload = serde_json::to_value(state).expect("ReduceTyped failed to serialize state");
         vec![ChainEventFactory::data_event(
-            self.writer_id.clone(),
+            self.writer_id,
             S::EVENT_TYPE,
             payload,
         )]

@@ -24,6 +24,10 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use tokio::sync::Mutex as TokioMutex;
 
+type BoxedFallibleBatchFuture<T> =
+    Pin<Box<dyn Future<Output = Result<Option<Vec<T>>, SourceError>> + Send>>;
+type BoxedFallibleVecFuture<T> = Pin<Box<dyn Future<Output = Result<Vec<T>, SourceError>> + Send>>;
+
 /// Typed finite source for synchronous producers (use with `source!`).
 ///
 /// The producer returns:
@@ -511,14 +515,8 @@ where
         mut producer: G,
     ) -> FallibleAsyncFiniteSourceTyped<
         T,
-        impl FnMut(
-                usize,
-            )
-                -> Pin<Box<dyn Future<Output = Result<Option<Vec<T>>, SourceError>> + Send>>
-            + Send
-            + Sync
-            + Clone,
-        Pin<Box<dyn Future<Output = Result<Option<Vec<T>>, SourceError>> + Send>>,
+        impl FnMut(usize) -> BoxedFallibleBatchFuture<T> + Send + Sync + Clone,
+        BoxedFallibleBatchFuture<T>,
     >
     where
         G: FnMut(usize) -> FutItem + Send + Sync + Clone + 'static,
@@ -527,7 +525,7 @@ where
         FallibleAsyncFiniteSourceTyped::new(move |index| {
             let fut = producer(index);
             Box::pin(async move { fut.await.map(|opt| opt.map(|item| vec![item])) })
-                as Pin<Box<dyn Future<Output = Result<Option<Vec<T>>, SourceError>> + Send>>
+                as BoxedFallibleBatchFuture<T>
         })
     }
 }
@@ -557,14 +555,8 @@ where
         producer: G,
     ) -> FallibleAsyncFiniteSourceTyped<
         T,
-        impl FnMut(
-                usize,
-            )
-                -> Pin<Box<dyn Future<Output = Result<Option<Vec<T>>, SourceError>> + Send>>
-            + Send
-            + Sync
-            + Clone,
-        Pin<Box<dyn Future<Output = Result<Option<Vec<T>>, SourceError>> + Send>>,
+        impl FnMut(usize) -> BoxedFallibleBatchFuture<T> + Send + Sync + Clone,
+        BoxedFallibleBatchFuture<T>,
     >
     where
         G: FnMut(usize) -> FutItem + Send + Sync + Clone + 'static,
@@ -968,11 +960,8 @@ where
         stream: S,
     ) -> FallibleAsyncInfiniteSourceTyped<
         T,
-        impl FnMut(usize) -> Pin<Box<dyn Future<Output = Result<Vec<T>, SourceError>> + Send>>
-            + Send
-            + Sync
-            + Clone,
-        Pin<Box<dyn Future<Output = Result<Vec<T>, SourceError>> + Send>>,
+        impl FnMut(usize) -> BoxedFallibleVecFuture<T> + Send + Sync + Clone,
+        BoxedFallibleVecFuture<T>,
     >
     where
         S: Stream<Item = T> + Send + Unpin + 'static,
@@ -986,7 +975,7 @@ where
                     Some(item) => Ok(vec![item]),
                     None => Err(SourceError::Other("stream ended".to_string())),
                 }
-            }) as Pin<Box<dyn Future<Output = Result<Vec<T>, SourceError>> + Send>>
+            }) as BoxedFallibleVecFuture<T>
         })
     }
 
@@ -998,11 +987,8 @@ where
         receiver: tokio::sync::mpsc::Receiver<T>,
     ) -> FallibleAsyncInfiniteSourceTyped<
         T,
-        impl FnMut(usize) -> Pin<Box<dyn Future<Output = Result<Vec<T>, SourceError>> + Send>>
-            + Send
-            + Sync
-            + Clone,
-        Pin<Box<dyn Future<Output = Result<Vec<T>, SourceError>> + Send>>,
+        impl FnMut(usize) -> BoxedFallibleVecFuture<T> + Send + Sync + Clone,
+        BoxedFallibleVecFuture<T>,
     > {
         let shared = Arc::new(TokioMutex::new(receiver));
         FallibleAsyncInfiniteSourceTyped::new(move |_index| {
@@ -1013,7 +999,7 @@ where
                     Some(item) => Ok(vec![item]),
                     None => Err(SourceError::Other("channel closed".to_string())),
                 }
-            }) as Pin<Box<dyn Future<Output = Result<Vec<T>, SourceError>> + Send>>
+            }) as BoxedFallibleVecFuture<T>
         })
     }
 }
@@ -1327,7 +1313,7 @@ mod tests {
         let err = src.next().expect_err("expected error");
         match err {
             SourceError::Timeout(msg) => assert_eq!(msg, "simulated timeout"),
-            other => panic!("expected Timeout, got {:?}", other),
+            other => panic!("expected Timeout, got {other:?}"),
         }
     }
 
@@ -1440,7 +1426,7 @@ mod tests {
         let err = src.next().await.expect_err("expected error");
         match err {
             SourceError::Deserialization(msg) => assert_eq!(msg, "bad data"),
-            other => panic!("expected Deserialization, got {:?}", other),
+            other => panic!("expected Deserialization, got {other:?}"),
         }
     }
 
@@ -1563,7 +1549,7 @@ mod tests {
         let err = src.next().expect_err("expected channel closed error");
         match err {
             SourceError::Other(msg) => assert_eq!(msg, "channel closed"),
-            other => panic!("expected Other(\"channel closed\"), got {:?}", other),
+            other => panic!("expected Other(\"channel closed\"), got {other:?}"),
         }
     }
 
@@ -1637,7 +1623,7 @@ mod tests {
         let err = src.next().await.expect_err("expected channel closed error");
         match err {
             SourceError::Other(msg) => assert_eq!(msg, "channel closed"),
-            other => panic!("expected Other(\"channel closed\"), got {:?}", other),
+            other => panic!("expected Other(\"channel closed\"), got {other:?}"),
         }
     }
 
@@ -1657,7 +1643,7 @@ mod tests {
         let err = src.next().await.expect_err("expected stream ended error");
         match err {
             SourceError::Other(msg) => assert_eq!(msg, "stream ended"),
-            other => panic!("expected Other(\"stream ended\"), got {:?}", other),
+            other => panic!("expected Other(\"stream ended\"), got {other:?}"),
         }
     }
 

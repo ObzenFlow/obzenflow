@@ -7,17 +7,15 @@
 use obzenflow_core::event::context::{FlowContext, StageType};
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::types::SeqNo;
-use obzenflow_core::event::JournalEvent;
 use obzenflow_core::event::{ChainEventFactory, SystemEvent};
-use obzenflow_core::journal::journal::Journal;
+use obzenflow_core::journal::Journal;
 use obzenflow_core::StageId;
-use obzenflow_core::{ChainEvent, EventId, FlowId, WriterId};
+use obzenflow_core::{ChainEvent, FlowId, WriterId};
 use obzenflow_fsm::{EventVariant, FsmAction, FsmContext, StateVariant};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::marker::PhantomData;
 use std::sync::Arc;
-use std::time::Duration;
 
 use super::config::JoinReferenceMode;
 use crate::backpressure::{BackpressureReader, BackpressureWriter};
@@ -38,9 +36,10 @@ use crate::supervised_base::idle_backoff::IdleBackoff;
 // ============================================================================
 
 /// FSM states for join stages
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Default)]
 pub enum JoinState<H> {
     /// Initial state - join stage created but not initialized
+    #[default]
     Created,
 
     /// Resources allocated, ready to start processing
@@ -108,15 +107,9 @@ impl<H> std::fmt::Debug for JoinState<H> {
             Self::Enriching => write!(f, "Enriching"),
             Self::Draining => write!(f, "Draining"),
             Self::Drained => write!(f, "Drained"),
-            Self::Failed(msg) => write!(f, "Failed({:?})", msg),
+            Self::Failed(msg) => write!(f, "Failed({msg:?})"),
             Self::_Phantom(_) => write!(f, "_Phantom"),
         }
-    }
-}
-
-impl<H> Default for JoinState<H> {
-    fn default() -> Self {
-        Self::Created
     }
 }
 
@@ -193,7 +186,7 @@ impl<H> std::fmt::Debug for JoinEvent<H> {
             Self::ReferenceComplete => write!(f, "ReferenceComplete"),
             Self::BeginDrain => write!(f, "BeginDrain"),
             Self::DrainComplete => write!(f, "DrainComplete"),
-            Self::Error(msg) => write!(f, "Error({:?})", msg),
+            Self::Error(msg) => write!(f, "Error({msg:?})"),
             Self::_Phantom(_) => write!(f, "_Phantom"),
         }
     }
@@ -262,7 +255,7 @@ impl<H> std::fmt::Debug for JoinAction<H> {
             Self::EnrichEvent => write!(f, "EnrichEvent"),
             Self::ForwardEOF => write!(f, "ForwardEOF"),
             Self::SendCompletion => write!(f, "SendCompletion"),
-            Self::SendFailure { message } => write!(f, "SendFailure({:?})", message),
+            Self::SendFailure { message } => write!(f, "SendFailure({message:?})"),
             Self::Cleanup => write!(f, "Cleanup"),
             Self::_Phantom(_) => write!(f, "_Phantom"),
         }
@@ -377,69 +370,6 @@ pub struct JoinContext<H: JoinHandler> {
     pub(crate) backpressure_backoff: IdleBackoff,
 }
 
-impl<H: JoinHandler> JoinContext<H> {
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        handler: H,
-        stage_id: StageId,
-        stage_name: String,
-        flow_name: String,
-        flow_id: FlowId,
-        reference_stage_id: StageId,
-        data_journal: Arc<dyn Journal<ChainEvent>>,
-        error_journal: Arc<dyn Journal<ChainEvent>>,
-        system_journal: Arc<dyn Journal<SystemEvent>>,
-        bus: Arc<crate::message_bus::FsmMessageBus>,
-        control_strategy: Arc<dyn crate::stages::common::control_strategies::ControlEventStrategy>,
-        instrumentation: Arc<StageInstrumentation>,
-        reference_subscription_factory: BoundSubscriptionFactory,
-        stream_subscription_factory: BoundSubscriptionFactory,
-        reference_mode: JoinReferenceMode,
-        reference_batch_cap: Option<usize>,
-        backpressure_writer: BackpressureWriter,
-        backpressure_readers: HashMap<StageId, BackpressureReader>,
-    ) -> Self {
-        let handler_state = handler.initial_state();
-        Self {
-            handler: Arc::new(handler),
-            handler_state,
-            stage_id,
-            stage_name,
-            flow_name,
-            flow_id,
-            reference_stage_id,
-            data_journal,
-            error_journal,
-            system_journal,
-            bus,
-            writer_id: None,
-            reference_subscription: None,
-            stream_subscription: None,
-            reference_contract_state: Vec::new(),
-            stream_contract_state: Vec::new(),
-            buffered_eof: None,
-            control_strategy,
-            instrumentation,
-            reference_subscription_factory,
-            stream_subscription_factory,
-            reference_mode,
-            reference_batch_cap,
-            reference_since_last_stream: 0,
-            events_since_last_heartbeat: 0,
-            backpressure_writer,
-            backpressure_readers,
-            pending_outputs: VecDeque::new(),
-            pending_transition: None,
-            pending_ack_upstream: None,
-            backpressure_pulse: BackpressureActivityPulse::new(),
-            backpressure_backoff: IdleBackoff::exponential_with_cap(
-                Duration::from_millis(1),
-                Duration::from_millis(50),
-            ),
-        }
-    }
-}
-
 impl<H: JoinHandler + 'static> FsmContext for JoinContext<H> {}
 
 // ============================================================================
@@ -454,8 +384,8 @@ impl<H: JoinHandler + Send + Sync + 'static> FsmAction for JoinAction<H> {
         match self {
             JoinAction::AllocateResources => {
                 // Create WriterId from our StageId
-                let writer_id = WriterId::from(ctx.stage_id.clone());
-                ctx.writer_id = Some(writer_id.clone());
+                let writer_id = WriterId::from(ctx.stage_id);
+                ctx.writer_id = Some(writer_id);
 
                 tracing::info!(
                     stage_name = %ctx.stage_name,
@@ -477,7 +407,7 @@ impl<H: JoinHandler + Send + Sync + 'static> FsmAction for JoinAction<H> {
                 let ref_subscription = ctx
                     .reference_subscription_factory
                     .build_with_contracts(
-                        writer_id.clone(),
+                        writer_id,
                         ctx.data_journal.clone(),
                         ContractConfig::default(),
                         Some(ctx.system_journal.clone()),
@@ -587,7 +517,7 @@ impl<H: JoinHandler + Send + Sync + 'static> FsmAction for JoinAction<H> {
             }
 
             JoinAction::ForwardEOF => {
-                let writer_id = ctx.writer_id.as_ref().ok_or_else(|| {
+                let writer_id = ctx.writer_id.ok_or_else(|| {
                     obzenflow_fsm::FsmError::HandlerError(
                         "No writer ID available to forward EOF".to_string(),
                     )
@@ -605,7 +535,7 @@ impl<H: JoinHandler + Send + Sync + 'static> FsmAction for JoinAction<H> {
                     if let obzenflow_core::event::ChainEventContent::FlowControl(
                         FlowControlPayload::Eof {
                             natural: n,
-                            writer_seq,
+                            writer_seq: _writer_seq,
                             vector_clock,
                             last_event_id,
                             ..
@@ -620,7 +550,7 @@ impl<H: JoinHandler + Send + Sync + 'static> FsmAction for JoinAction<H> {
                     }
                 }
 
-                let mut eof_event = ChainEventFactory::eof_event(writer_id.clone(), natural);
+                let mut eof_event = ChainEventFactory::eof_event(writer_id, natural);
 
                 if let obzenflow_core::event::ChainEventContent::FlowControl(
                     FlowControlPayload::Eof {
@@ -632,13 +562,12 @@ impl<H: JoinHandler + Send + Sync + 'static> FsmAction for JoinAction<H> {
                     },
                 ) = &mut eof_event.content
                 {
-                    *eof_writer = Some(writer_id.clone());
+                    *eof_writer = Some(writer_id);
                     *writer_seq = Some(SeqNo(runtime_context.writer_seq));
                     if let Some(vc) = upstream_vector_clock {
                         *vector_clock = Some(vc);
                     }
-                    *last_event_id = upstream_last_event
-                        .or_else(|| runtime_context.last_emitted_event_id.clone());
+                    *last_event_id = upstream_last_event.or(runtime_context.last_emitted_event_id);
                 }
 
                 // Attach flow/runtime context for downstream contract tracking

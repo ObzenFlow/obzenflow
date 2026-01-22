@@ -5,8 +5,8 @@ use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::types::SeqNo;
 use obzenflow_core::event::SystemEvent;
 use obzenflow_core::event::{ChainEvent, ChainEventContent};
-use obzenflow_core::journal::journal::Journal;
 use obzenflow_core::journal::journal_owner::JournalOwner;
+use obzenflow_core::journal::Journal;
 use obzenflow_core::Ulid;
 use obzenflow_core::{FlowId, StageId, SystemId, TypedPayload, WriterId};
 use obzenflow_infra::journal::disk::disk_journal::DiskJournal;
@@ -21,7 +21,7 @@ use obzenflow_runtime_services::stages::join::{
 };
 use obzenflow_runtime_services::stages::resources_builder::StageResourcesBuilder;
 use obzenflow_runtime_services::stages::stateful::{
-    StatefulBuilder, StatefulConfig, StatefulHandleExt, StatefulState,
+    StatefulBuilder, StatefulConfig, StatefulHandleExt,
 };
 use obzenflow_runtime_services::stages::JoinHandler;
 use obzenflow_runtime_services::supervised_base::{SupervisorBuilder, SupervisorHandle};
@@ -31,14 +31,14 @@ use serde_json::json;
 
 /// Helper: create a FlowControl EOF event with advertised writer_seq.
 fn make_eof_event(writer: WriterId, seq: u64) -> ChainEvent {
-    let mut eof = ChainEventFactory::eof_event(writer.clone(), true);
+    let mut eof = ChainEventFactory::eof_event(writer, true);
     if let ChainEventContent::FlowControl(FlowControlPayload::Eof {
         ref mut writer_id,
         ref mut writer_seq,
         ..
     }) = eof.content
     {
-        *writer_id = Some(writer.clone());
+        *writer_id = Some(writer);
         *writer_seq = Some(SeqNo(seq));
     }
     eof
@@ -87,7 +87,7 @@ impl SimpleStateful for CountingHandler {
             Vec::new()
         } else {
             vec![ChainEventFactory::data_event(
-                self.writer_id.clone(),
+                self.writer_id,
                 "test.stateful.count",
                 json!({ "count": *state }),
             )]
@@ -96,7 +96,7 @@ impl SimpleStateful for CountingHandler {
 }
 
 async fn run_stateful_fold_once(
-    upstream_stage: StageId,
+    _upstream_stage: StageId,
     upstream_journal: Arc<MemoryJournal<ChainEvent>>,
 ) -> Vec<serde_json::Value> {
     let writer_id = WriterId::from(StageId::new());
@@ -139,18 +139,15 @@ async fn stateful_replay_produces_identical_aggregates() {
 
     // Write a small deterministic input stream: 3 data events + EOF.
     for i in 0..3 {
-        let event = ChainEventFactory::data_event(
-            upstream_writer.clone(),
-            "test.input",
-            json!({ "seq": i }),
-        );
+        let event =
+            ChainEventFactory::data_event(upstream_writer, "test.input", json!({ "seq": i }));
         upstream_journal
             .append(event, None)
             .await
             .expect("append data");
     }
     upstream_journal
-        .append(make_eof_event(upstream_writer.clone(), 3), None)
+        .append(make_eof_event(upstream_writer, 3), None)
         .await
         .expect("append eof");
 
@@ -222,9 +219,9 @@ async fn run_strict_join_once() -> Vec<JoinedRow> {
         },
     ];
     for row in &ref_rows {
-        let event = row.clone().to_event(writer.clone());
+        let event = row.clone().to_event(writer);
         let _ = handler
-            .process_event(&mut state, event, StageId::new(), writer.clone())
+            .process_event(&mut state, event, StageId::new(), writer)
             .expect("Reference catalog hydration should not fail");
     }
 
@@ -237,7 +234,7 @@ async fn run_strict_join_once() -> Vec<JoinedRow> {
     );
 
     // Stream side: one hit, one miss.
-    let stream_rows = vec![
+    let stream_rows = [
         StreamRow { key: "k1".into() },
         StreamRow {
             key: "missing".into(),
@@ -246,9 +243,9 @@ async fn run_strict_join_once() -> Vec<JoinedRow> {
 
     let mut joined = Vec::new();
     for (idx, row) in stream_rows.iter().enumerate() {
-        let event = row.clone().to_event(writer.clone());
+        let event = row.clone().to_event(writer);
         let out = handler
-            .process_event(&mut state, event, StageId::new(), writer.clone())
+            .process_event(&mut state, event, StageId::new(), writer)
             .expect("Join handler in replay_determinism test should not fail");
         if idx == 0 {
             assert!(
@@ -320,7 +317,7 @@ impl StatefulHandler for SupervisorCountingHandler {
             Ok(Vec::new())
         } else {
             Ok(vec![ChainEventFactory::data_event(
-                self.writer_id.clone(),
+                self.writer_id,
                 "test.stateful.count.supervisor",
                 json!({ "count": *state }),
             )])
@@ -396,15 +393,12 @@ async fn run_stateful_supervisor_once() -> Vec<serde_json::Value> {
     // Write deterministic upstream events into src journal.
     let upstream_writer = WriterId::from(src);
     for i in 0..3 {
-        let event = ChainEventFactory::data_event(
-            upstream_writer.clone(),
-            "test.input",
-            json!({ "seq": i }),
-        );
+        let event =
+            ChainEventFactory::data_event(upstream_writer, "test.input", json!({ "seq": i }));
         src_journal.append(event, None).await.expect("append data");
     }
     src_journal
-        .append(make_eof_event(upstream_writer.clone(), 3), None)
+        .append(make_eof_event(upstream_writer, 3), None)
         .await
         .expect("append eof");
 
@@ -584,13 +578,13 @@ async fn run_join_supervisor_once() -> Vec<JoinedRow> {
     ];
     for row in &ref_rows {
         reference_journal
-            .append(row.clone().to_event(reference_writer.clone()), None)
+            .append(row.clone().to_event(reference_writer), None)
             .await
             .expect("append reference");
     }
     reference_journal
         .append(
-            make_eof_event(reference_writer.clone(), ref_rows.len() as u64),
+            make_eof_event(reference_writer, ref_rows.len() as u64),
             None,
         )
         .await
@@ -606,13 +600,13 @@ async fn run_join_supervisor_once() -> Vec<JoinedRow> {
     ];
     for row in &stream_rows {
         stream_journal
-            .append(row.clone().to_event(stream_writer.clone()), None)
+            .append(row.clone().to_event(stream_writer), None)
             .await
             .expect("append stream");
     }
     stream_journal
         .append(
-            make_eof_event(stream_writer.clone(), stream_rows.len() as u64),
+            make_eof_event(stream_writer, stream_rows.len() as u64),
             None,
         )
         .await

@@ -14,7 +14,7 @@ use obzenflow_core::event::payloads::observability_payload::{
 use obzenflow_core::event::vector_clock::CausalOrderingService;
 use obzenflow_core::event::ChainEventFactory;
 use obzenflow_core::event::SystemEvent;
-use obzenflow_core::journal::journal::Journal;
+use obzenflow_core::journal::Journal;
 use obzenflow_core::EventEnvelope;
 use obzenflow_core::{ChainEvent, StageId, WriterId};
 use obzenflow_fsm::{fsm, EventVariant, StateVariant, Transition};
@@ -32,9 +32,6 @@ pub(crate) struct StatefulSupervisor<
 > {
     /// Supervisor name (for logging)
     pub(crate) name: String,
-
-    /// Data journal for chain events
-    pub(crate) data_journal: Arc<dyn Journal<ChainEvent>>,
 
     /// System journal for lifecycle events
     pub(crate) system_journal: Arc<dyn Journal<SystemEvent>>,
@@ -426,7 +423,7 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                                                 flow_name: ctx.flow_name.clone(),
                                                 flow_id: ctx.flow_id.to_string(),
                                                 stage_name: ctx.stage_name.clone(),
-                                                stage_id: self.stage_id.clone(),
+                                                stage_id: self.stage_id,
                                                 stage_type: StageType::Stateful,
                                             };
 
@@ -481,7 +478,7 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                                         flow_name: ctx.flow_name.clone(),
                                         flow_id: ctx.flow_id.to_string(),
                                         stage_name: ctx.stage_name.clone(),
-                                        stage_id: self.stage_id.clone(),
+                                        stage_id: self.stage_id,
                                         stage_type: StageType::Stateful,
                                     };
 
@@ -522,7 +519,7 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                                 flow_name: ctx.flow_name.clone(),
                                 flow_id: ctx.flow_id.to_string(),
                                 stage_name: ctx.stage_name.clone(),
-                                stage_id: self.stage_id.clone(),
+                                stage_id: self.stage_id,
                                 stage_type: StageType::Stateful,
                             };
 
@@ -539,7 +536,7 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                                 .data_journal
                                 .append(enriched, ctx.last_consumed_envelope.as_ref())
                                 .await
-                                .map_err(|e| format!("Failed to write pending output: {}", e))?;
+                                .map_err(|e| format!("Failed to write pending output: {e}"))?;
                             reservation.commit(1);
                             ctx.backpressure_backoff.reset();
                             crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
@@ -552,7 +549,7 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                                 flow_name: ctx.flow_name.clone(),
                                 flow_id: ctx.flow_id.to_string(),
                                 stage_name: ctx.stage_name.clone(),
-                                stage_id: self.stage_id.clone(),
+                                stage_id: self.stage_id,
                                 stage_type: StageType::Stateful,
                             };
 
@@ -564,7 +561,7 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                                 .data_journal
                                 .append(enriched, ctx.last_consumed_envelope.as_ref())
                                 .await
-                                .map_err(|e| format!("Failed to write pending output: {}", e))?;
+                                .map_err(|e| format!("Failed to write pending output: {e}"))?;
                             crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
                                 &written,
                                 &self.system_journal,
@@ -604,7 +601,7 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                                         &envelope.vector_clock,
                                     );
                                     merged.journal_writer_id = envelope.journal_writer_id;
-                                    merged.timestamp = envelope.timestamp.clone();
+                                    merged.timestamp = envelope.timestamp;
                                     merged.event = envelope.event.clone();
                                 }
                                 None => ctx.last_consumed_envelope = Some(envelope.clone()),
@@ -899,7 +896,7 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                                 "stateful: poll_next returned Error"
                             );
                             directive = Ok(EventLoopDirective::Transition(StatefulEvent::Error(
-                                format!("Subscription error: {}", e),
+                                format!("Subscription error: {e}"),
                             )));
                         }
                     }
@@ -949,7 +946,7 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                                                 flow_name: ctx.flow_name.clone(),
                                                 flow_id: ctx.flow_id.to_string(),
                                                 stage_name: ctx.stage_name.clone(),
-                                                stage_id: self.stage_id.clone(),
+                                                stage_id: self.stage_id,
                                                 stage_type: StageType::Stateful,
                                             };
 
@@ -1004,7 +1001,7 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                                         flow_name: ctx.flow_name.clone(),
                                         flow_id: ctx.flow_id.to_string(),
                                         stage_name: ctx.stage_name.clone(),
-                                        stage_id: self.stage_id.clone(),
+                                        stage_id: self.stage_id,
                                         stage_type: StageType::Stateful,
                                     };
 
@@ -1043,7 +1040,7 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                                 flow_name: ctx.flow_name.clone(),
                                 flow_id: ctx.flow_id.to_string(),
                                 stage_name: ctx.stage_name.clone(),
-                                stage_id: self.stage_id.clone(),
+                                stage_id: self.stage_id,
                                 stage_type: StageType::Stateful,
                             };
 
@@ -1062,7 +1059,7 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                                 .data_journal
                                 .append(enriched, ctx.last_consumed_envelope.as_ref())
                                 .await
-                                .map_err(|e| format!("Failed to write pending output: {}", e))?;
+                                .map_err(|e| format!("Failed to write pending output: {e}"))?;
                             reservation.commit(1);
                             ctx.backpressure_backoff.reset();
                             crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
@@ -1075,7 +1072,7 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                                 flow_name: ctx.flow_name.clone(),
                                 flow_id: ctx.flow_id.to_string(),
                                 stage_name: ctx.stage_name.clone(),
-                                stage_id: self.stage_id.clone(),
+                                stage_id: self.stage_id,
                                 stage_type: StageType::Stateful,
                             };
 
@@ -1087,7 +1084,7 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                                 .data_journal
                                 .append(enriched, ctx.last_consumed_envelope.as_ref())
                                 .await
-                                .map_err(|e| format!("Failed to write pending output: {}", e))?;
+                                .map_err(|e| format!("Failed to write pending output: {e}"))?;
                             crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
                                 &written,
                                 &self.system_journal,
@@ -1121,8 +1118,8 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
 
                 // Emit aggregated events. If downstream credits are exhausted, queue the output
                 // events and complete the transition once they are fully written.
-                let mut current_state = &mut ctx.current_state;
-                let mut handler = (*ctx.handler).clone();
+                let current_state = &mut ctx.current_state;
+                let handler = (*ctx.handler).clone();
                 let instrumentation = ctx.instrumentation.clone();
 
                 let emit_result =
@@ -1138,15 +1135,10 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
 
                 match emit_result {
                     Ok(events) if !events.is_empty() => {
-                        let stage_writer_id = ctx
-                            .writer_id
-                            .as_ref()
-                            .ok_or_else(|| "No writer ID available")?
-                            .clone();
+                        let stage_writer_id = ctx.writer_id.ok_or("No writer ID available")?;
 
                         for mut event in events {
-                            use obzenflow_core::event::JournalEvent;
-                            event.writer_id = stage_writer_id.clone();
+                            event.writer_id = stage_writer_id;
                             ctx.pending_outputs.push_back(event);
                         }
 
@@ -1171,7 +1163,7 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                             "Failed to emit aggregated event, transitioning to Failed"
                         );
                         Ok(EventLoopDirective::Transition(StatefulEvent::Error(
-                            format!("Emit error: {}", e),
+                            format!("Emit error: {e}"),
                         )))
                     }
                 }
@@ -1198,7 +1190,7 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                                             flow_name: ctx.flow_name.clone(),
                                             flow_id: ctx.flow_id.to_string(),
                                             stage_name: ctx.stage_name.clone(),
-                                            stage_id: self.stage_id.clone(),
+                                            stage_id: self.stage_id,
                                             stage_type: StageType::Stateful,
                                         };
 
@@ -1253,7 +1245,7 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                                     flow_name: ctx.flow_name.clone(),
                                     flow_id: ctx.flow_id.to_string(),
                                     stage_name: ctx.stage_name.clone(),
-                                    stage_id: self.stage_id.clone(),
+                                    stage_id: self.stage_id,
                                     stage_type: StageType::Stateful,
                                 };
 
@@ -1290,7 +1282,7 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                             flow_name: ctx.flow_name.clone(),
                             flow_id: ctx.flow_id.to_string(),
                             stage_name: ctx.stage_name.clone(),
-                            stage_id: self.stage_id.clone(),
+                            stage_id: self.stage_id,
                             stage_type: StageType::Stateful,
                         };
 
@@ -1309,7 +1301,7 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                             .data_journal
                             .append(enriched, ctx.last_consumed_envelope.as_ref())
                             .await
-                            .map_err(|e| format!("Failed to write pending output: {}", e))?;
+                            .map_err(|e| format!("Failed to write pending output: {e}"))?;
                         reservation.commit(1);
                         ctx.backpressure_backoff.reset();
                         crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
@@ -1322,7 +1314,7 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                             flow_name: ctx.flow_name.clone(),
                             flow_id: ctx.flow_id.to_string(),
                             stage_name: ctx.stage_name.clone(),
-                            stage_id: self.stage_id.clone(),
+                            stage_id: self.stage_id,
                             stage_type: StageType::Stateful,
                         };
 
@@ -1334,7 +1326,7 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                             .data_journal
                             .append(enriched, ctx.last_consumed_envelope.as_ref())
                             .await
-                            .map_err(|e| format!("Failed to write pending output: {}", e))?;
+                            .map_err(|e| format!("Failed to write pending output: {e}"))?;
                         crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
                             &written,
                             &self.system_journal,
@@ -1368,7 +1360,7 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                     EventLoopDirective<Self::Event>,
                     Box<dyn std::error::Error + Send + Sync>,
                 > = Ok(EventLoopDirective::Continue);
-                let mut should_drain = false;
+                let should_drain: bool;
 
                 if let Some(ref mut subscription) = maybe_subscription {
                     // Poll for remaining events without timeout hacks
@@ -1387,7 +1379,7 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                                         &envelope.vector_clock,
                                     );
                                     merged.journal_writer_id = envelope.journal_writer_id;
-                                    merged.timestamp = envelope.timestamp.clone();
+                                    merged.timestamp = envelope.timestamp;
                                     merged.event = envelope.event.clone();
                                 }
                                 None => ctx.last_consumed_envelope = Some(envelope.clone()),
@@ -1445,13 +1437,10 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                                             if !events_to_emit.is_empty() {
                                                 let stage_writer_id = ctx
                                                     .writer_id
-                                                    .as_ref()
-                                                    .ok_or_else(|| "No writer ID available")?
-                                                    .clone();
+                                                    .ok_or("No writer ID available")?;
 
                                                 for mut out in events_to_emit {
-                                                    use obzenflow_core::event::JournalEvent;
-                                                    out.writer_id = stage_writer_id.clone();
+                                                    out.writer_id = stage_writer_id;
                                                     ctx.pending_outputs.push_back(out);
                                                 }
 
@@ -1475,10 +1464,9 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                                             // input into an error-marked event and route it using
                                             // the ErrorKind policy instead of failing the stage.
                                             let reason = format!(
-                                                "Stateful handler emit error during drain: {:?}",
-                                                err
+                                                "Stateful handler emit error during drain: {err:?}"
                                             );
-                                            let mut error_event = envelope
+                                            let error_event = envelope
                                                 .event
                                                 .clone()
                                                 .mark_as_error(reason, err.kind());
@@ -1524,8 +1512,7 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                                                     .await
                                                     .map_err(|e| {
                                                         format!(
-                                                            "Failed to write stateful drain error event: {}",
-                                                            e
+                                                            "Failed to write stateful drain error event: {e}"
                                                         )
                                                     })?;
                                             } else {
@@ -1537,8 +1524,6 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
 
                                             // Keep draining; do not transition to Failed on
                                             // per-record handler errors.
-                                            directive = Ok(EventLoopDirective::Continue);
-                                            should_drain = false;
                                         }
                                     }
                                 }
@@ -1591,7 +1576,7 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                                 "Error during draining"
                             );
                             directive = Ok(EventLoopDirective::Transition(StatefulEvent::Error(
-                                format!("Drain error: {}", e),
+                                format!("Drain error: {e}"),
                             )));
                             should_drain = false;
                         }
@@ -1642,15 +1627,10 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
 
                     match drain_result {
                         Ok(drain_events) => {
-                            let stage_writer_id = ctx
-                                .writer_id
-                                .as_ref()
-                                .ok_or_else(|| "No writer ID available")?
-                                .clone();
+                            let stage_writer_id = ctx.writer_id.ok_or("No writer ID available")?;
 
                             for mut event in drain_events {
-                                use obzenflow_core::event::JournalEvent;
-                                event.writer_id = stage_writer_id.clone();
+                                event.writer_id = stage_writer_id;
                                 ctx.pending_outputs.push_back(event);
                             }
 
@@ -1664,7 +1644,7 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
                                 "Drain error"
                             );
                             Ok(EventLoopDirective::Transition(StatefulEvent::Error(
-                                format!("Drain error: {}", e),
+                                format!("Drain error: {e}"),
                             )))
                         }
                     }
@@ -1715,7 +1695,7 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> State
         ctx.data_journal
             .append(forward_event, Some(envelope))
             .await
-            .map_err(|e| format!("Failed to forward control event: {}", e))?;
+            .map_err(|e| format!("Failed to forward control event: {e}"))?;
         Ok(())
     }
 
@@ -1745,12 +1725,9 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> State
             return Ok(());
         }
 
-        let writer_id = match ctx.writer_id.as_ref() {
-            Some(id) => id.clone(),
-            None => {
-                // Writer not initialized yet; skip heartbeat rather than failing.
-                return Ok(());
-            }
+        let Some(writer_id) = ctx.writer_id else {
+            // Writer not initialized yet; skip heartbeat rather than failing.
+            return Ok(());
         };
 
         // Capture a fresh runtime context snapshot for the heartbeat.

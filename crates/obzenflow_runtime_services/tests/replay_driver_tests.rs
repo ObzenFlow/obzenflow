@@ -1,3 +1,4 @@
+use async_trait::async_trait;
 use obzenflow_core::event::context::{FlowContext, IntentContext, StageType};
 use obzenflow_core::event::event_envelope::EventEnvelope;
 use obzenflow_core::event::ChainEventFactory;
@@ -5,7 +6,6 @@ use obzenflow_core::journal::journal_error::JournalError;
 use obzenflow_core::journal::journal_reader::JournalReader;
 use obzenflow_core::{ChainEvent, JournalWriterId, StageId, WriterId};
 use obzenflow_runtime_services::replay::{ReplayContextTemplate, ReplayDriver, ReplayError};
-use async_trait::async_trait;
 use std::path::PathBuf;
 
 struct TestReader {
@@ -49,11 +49,8 @@ async fn replay_driver_rewrites_ids_and_sets_replay_context() {
         fact: "should_be_skipped".to_string(),
     });
 
-    let mut data = ChainEventFactory::data_event(
-        archived_writer,
-        "test.event",
-        serde_json::json!({"k": "v"}),
-    );
+    let mut data =
+        ChainEventFactory::data_event(archived_writer, "test.event", serde_json::json!({"k": "v"}));
     data = data.with_new_correlation("archived_stage");
     data.intent = Some(IntentContext::Event {
         fact: "keep_me".to_string(),
@@ -102,7 +99,10 @@ async fn replay_driver_rewrites_ids_and_sets_replay_context() {
     let replay_ctx = replayed.replay_context.expect("replay_context set");
     assert_eq!(replay_ctx.original_event_id, data.id);
     assert_eq!(replay_ctx.original_flow_id, replay_context.original_flow_id);
-    assert_eq!(replay_ctx.original_stage_id, replay_context.original_stage_id);
+    assert_eq!(
+        replay_ctx.original_stage_id,
+        replay_context.original_stage_id
+    );
     assert_eq!(replay_ctx.archive_path, replay_context.archive_path);
 
     match (&replayed.intent, &data.intent) {
@@ -114,8 +114,14 @@ async fn replay_driver_rewrites_ids_and_sets_replay_context() {
 
     match (&replayed.content, &data.content) {
         (
-            obzenflow_core::event::ChainEventContent::Data { event_type: a, payload: pa },
-            obzenflow_core::event::ChainEventContent::Data { event_type: b, payload: pb },
+            obzenflow_core::event::ChainEventContent::Data {
+                event_type: a,
+                payload: pa,
+            },
+            obzenflow_core::event::ChainEventContent::Data {
+                event_type: b,
+                payload: pb,
+            },
         ) => {
             assert_eq!(a, b);
             assert_eq!(pa, pb);

@@ -6,7 +6,6 @@
 use super::{Middleware, MiddlewareAction, MiddlewareContext};
 use async_trait::async_trait;
 use obzenflow_core::event::status::processing_status::ProcessingStatus;
-use obzenflow_core::event::ChainEventFactory;
 use obzenflow_core::ChainEvent;
 use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
 use obzenflow_runtime_services::stages::common::handlers::{
@@ -364,6 +363,7 @@ impl<H: AsyncTransformHandler> AsyncTransformMiddlewareBuilder<H> {
 mod tests {
     use super::*;
     use async_trait::async_trait;
+    use obzenflow_core::event::ChainEventFactory;
     use serde_json::json;
     use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -376,7 +376,7 @@ mod tests {
             payload["processed"] = json!(true);
 
             let mut new_event =
-                ChainEventFactory::data_event(event.writer_id.clone(), event.event_type(), payload);
+                ChainEventFactory::data_event(event.writer_id, event.event_type(), payload);
             // Copy over metadata
             new_event.flow_context = event.flow_context.clone();
             new_event.processing_info = event.processing_info.clone();
@@ -410,7 +410,7 @@ mod tests {
             println!("Post-handle: {} - {} results", self.tag, results.len());
             // Check if we can see events from earlier middleware
             let events_count = ctx.events.len();
-            println!("Context has {} events", events_count);
+            println!("Context has {events_count} events");
 
             // Emit a post-processing event
             ctx.emit_event(
@@ -653,7 +653,7 @@ mod tests {
             // Write control event then skip
             let writer_id = obzenflow_core::WriterId::from(obzenflow_core::StageId::new());
             ctx.write_control_event(ChainEventFactory::metrics_state_snapshot(
-                writer_id.clone(),
+                writer_id,
                 json!({
                     "middleware": "skip_test",
                     "action": "skipped"

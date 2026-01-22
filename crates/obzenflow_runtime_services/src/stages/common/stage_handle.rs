@@ -40,15 +40,17 @@ impl fmt::Display for StageError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             StageError::InitializationFailed(msg) => {
-                write!(f, "Stage initialization failed: {}", msg)
+                write!(f, "Stage initialization failed: {msg}")
             }
-            StageError::EventSendFailed(msg) => write!(f, "Failed to send event to stage: {}", msg),
-            StageError::InvalidState(msg) => write!(f, "Invalid stage state: {}", msg),
+            StageError::EventSendFailed(msg) => {
+                write!(f, "Failed to send event to stage: {msg}")
+            }
+            StageError::InvalidState(msg) => write!(f, "Invalid stage state: {msg}"),
             StageError::Timeout => write!(f, "Stage operation timed out"),
             StageError::HandlerFailure(err) => {
-                write!(f, "Stage handler failure: {:?}", err)
+                write!(f, "Stage handler failure: {err:?}")
             }
-            StageError::Other(msg) => write!(f, "Stage error: {}", msg),
+            StageError::Other(msg) => write!(f, "Stage error: {msg}"),
         }
     }
 }

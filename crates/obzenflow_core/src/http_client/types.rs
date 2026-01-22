@@ -48,4 +48,3 @@ impl RequestSpec {
         self
     }
 }
-

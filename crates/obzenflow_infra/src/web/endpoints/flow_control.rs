@@ -82,11 +82,13 @@ impl HttpEndpoint for FlowControlEndpoint {
             Err(e) => {
                 let resp = FlowControlResponse {
                     status: FlowControlStatus::Rejected,
-                    message: format!("Invalid request body: {}", e),
+                    message: format!("Invalid request body: {e}"),
                 };
-                return Response::new(400).with_json(&resp).map_err(|err| WebError::RequestHandlingFailed {
-                    message: err.to_string(),
-                    source: None,
+                return Response::new(400).with_json(&resp).map_err(|err| {
+                    WebError::RequestHandlingFailed {
+                        message: err.to_string(),
+                        source: None,
+                    }
                 });
             }
         };
@@ -115,14 +117,13 @@ impl HttpEndpoint for FlowControlEndpoint {
             }
             FlowControlAction::Stop => {
                 let mode = req.stop_mode.or_else(|| {
-                    request
-                        .query_params
-                        .get("mode")
-                        .and_then(|s| match s.to_ascii_lowercase().as_str() {
+                    request.query_params.get("mode").and_then(|s| {
+                        match s.to_ascii_lowercase().as_str() {
                             "cancel" => Some(FlowStopMode::Cancel),
                             "graceful" => Some(FlowStopMode::Graceful),
                             _ => None,
-                        })
+                        }
+                    })
                 });
                 let timeout_secs = req.timeout_secs.or_else(|| {
                     request
@@ -167,8 +168,10 @@ impl HttpEndpoint for FlowControlEndpoint {
 }
 
 fn ok_json_response(body: FlowControlResponse) -> Result<Response, WebError> {
-    Response::ok().with_json(&body).map_err(|e| WebError::RequestHandlingFailed {
-        message: e.to_string(),
-        source: None,
-    })
+    Response::ok()
+        .with_json(&body)
+        .map_err(|e| WebError::RequestHandlingFailed {
+            message: e.to_string(),
+            source: None,
+        })
 }

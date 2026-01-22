@@ -11,10 +11,10 @@
 
 use async_trait::async_trait;
 use obzenflow_core::event::{ChainEvent, SystemEvent};
-use obzenflow_core::journal::journal::Journal;
 use obzenflow_core::journal::journal_error::JournalError;
 use obzenflow_core::journal::journal_name::JournalName;
 use obzenflow_core::journal::journal_owner::JournalOwner;
+use obzenflow_core::journal::Journal;
 use obzenflow_core::journal::RunManifest;
 use std::sync::Arc;
 
@@ -44,8 +44,9 @@ pub trait FlowJournalFactory: Send {
     /// Build a replay archive implementation from environment variables, when supported.
     ///
     /// Default is `Ok(None)` so most backends don't need to implement replay for P0.
-    async fn replay_archive_from_env(&mut self) -> Result<Option<Arc<dyn ReplayArchive>>, ReplayError> {
+    async fn replay_archive_from_env(
+        &mut self,
+    ) -> Result<Option<Arc<dyn ReplayArchive>>, ReplayError> {
         Ok(None)
     }
 }
-

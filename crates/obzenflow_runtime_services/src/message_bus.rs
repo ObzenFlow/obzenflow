@@ -12,6 +12,12 @@ pub struct FsmMessageBus {
     stage_commands: broadcast::Sender<StageCommand>,
 }
 
+impl Default for FsmMessageBus {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl FsmMessageBus {
     /// Create a new message bus
     pub fn new() -> Self {
@@ -26,7 +32,6 @@ impl FsmMessageBus {
     }
 
     /// Send a command to all stages
-    #[track_caller]
     pub async fn send_stage_command(&self, command: StageCommand) -> Result<(), MessageBusError> {
         self.stage_commands.send(command).map_err(|_| {
             tracing::error!(

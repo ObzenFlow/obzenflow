@@ -331,8 +331,7 @@ impl CsvSinkInner {
 
         let Value::Object(obj) = payload else {
             return Err(HandlerError::Validation(format!(
-                "CsvSink requires object payloads, got {}",
-                payload
+                "CsvSink requires object payloads, got {payload}"
             )));
         };
 
@@ -358,7 +357,7 @@ impl CsvSinkInner {
         self.row_count = self.row_count.saturating_add(1);
 
         if let Some(flush_every) = self.flush_every {
-            if flush_every > 0 && self.row_count % flush_every == 0 {
+            if flush_every > 0 && self.row_count.is_multiple_of(flush_every) {
                 self.flush_buffer()?;
             }
         }

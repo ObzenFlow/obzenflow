@@ -55,13 +55,12 @@ impl EventFilter {
         }
 
         // Check writer IDs
-        if !self.journal_writer_ids.is_empty() {
-            if !self
+        if !self.journal_writer_ids.is_empty()
+            && !self
                 .journal_writer_ids
                 .contains(&envelope.journal_writer_id)
-            {
-                return false;
-            }
+        {
+            return false;
         }
 
         true

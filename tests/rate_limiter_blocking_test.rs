@@ -1,4 +1,4 @@
-#![cfg(skip)] // Disabled: superseded by focused rate limiter metrics tests
+#![cfg(any())] // Disabled: superseded by focused rate limiter metrics tests
 
 //! Integration test for blocking rate limiter
 //!

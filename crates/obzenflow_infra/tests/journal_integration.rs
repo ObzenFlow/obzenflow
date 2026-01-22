@@ -3,10 +3,7 @@
 //! These tests demonstrate how the journal trait works with
 //! proper vector clocks and causal ordering.
 
-use obzenflow_core::event::{
-    chain_event::{ChainEvent, ChainEventFactory},
-    EventId,
-};
+use obzenflow_core::event::chain_event::ChainEventFactory;
 use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::Journal;
 use obzenflow_core::{StageId, WriterId};

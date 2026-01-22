@@ -6,7 +6,7 @@ use obzenflow_core::{
     event::chain_event::{ChainEvent, ChainEventFactory},
     event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload},
     id::StageId,
-    Result as CoreResult, WriterId,
+    WriterId,
 };
 use obzenflow_dsl_infra::{flow, sink, source, stateful};
 use obzenflow_infra::application::FlowApplication;
@@ -47,7 +47,7 @@ impl FiniteSourceHandler for TransactionSource {
         } else {
             self.count -= 1;
 
-            let products = vec!["laptop", "phone"];
+            let products = ["laptop", "phone"];
             let product = products[self.count % products.len()];
             let quantity = (self.count % 3) + 1;
             let base_price = match product {
@@ -58,7 +58,7 @@ impl FiniteSourceHandler for TransactionSource {
             let revenue = base_price * quantity as f64;
 
             Ok(Some(vec![ChainEventFactory::data_event(
-                self.writer_id.clone(),
+                self.writer_id,
                 "transaction",
                 json!({
                     "product_id": product,

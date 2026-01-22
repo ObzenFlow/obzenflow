@@ -10,9 +10,9 @@ use crate::stages::stateful::strategies::emissions::{
 };
 use obzenflow_core::event::ChainEventFactory;
 use obzenflow_core::id::StageId;
-use obzenflow_core::{ChainEvent, EventId, TypedPayload, WriterId};
+use obzenflow_core::{ChainEvent, TypedPayload, WriterId};
 use serde::{de::DeserializeOwned, Serialize};
-use serde_json::{json, Value};
+use serde_json::json;
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::hash::Hash;
@@ -106,7 +106,7 @@ where
         if let Some(key_value) = event.payload().get(&self.key_field) {
             if let Some(key) = key_value.as_str() {
                 // Get or create group state
-                let group_state = state.entry(key.to_string()).or_insert_with(S::default);
+                let group_state = state.entry(key.to_string()).or_default();
                 // Apply reduce function
                 (self.reduce_fn)(&event, group_state);
             }
@@ -125,7 +125,7 @@ where
             .iter()
             .map(|(key, group_state)| {
                 ChainEventFactory::data_event(
-                    self.writer_id.clone(),
+                    self.writer_id,
                     "aggregated",
                     json!({
                         "key": key,
@@ -461,7 +461,7 @@ where
         let key = (self.key_fn)(&input);
 
         // Step 3: Update state using typed function (CORRECTED: state first, value second)
-        let group_state = state.entry(key).or_insert_with(S::default);
+        let group_state = state.entry(key).or_default();
         (self.update_fn)(group_state, &input);
     }
 
@@ -473,10 +473,10 @@ where
         state
             .iter()
             .map(|(key, group_state)| {
-                let key_json = serde_json::to_value(key).unwrap_or_else(|_| json!(null));
+                let key_json = serde_json::to_value(key).unwrap_or(serde_json::Value::Null);
 
                 ChainEventFactory::data_event(
-                    self.writer_id.clone(),
+                    self.writer_id,
                     S::EVENT_TYPE,
                     json!({
                         "key": key_json,

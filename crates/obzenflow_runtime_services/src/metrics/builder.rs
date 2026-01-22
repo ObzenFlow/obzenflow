@@ -14,14 +14,13 @@ use crate::supervised_base::{
     SupervisorBuilder, SupervisorTaskBuilder,
 };
 use obzenflow_core::{
-    event::{ChainEvent, SystemEvent},
-    journal::journal::Journal,
+    event::SystemEvent,
+    journal::Journal,
     metrics::{MetricsExporter, StageMetadata},
     StageId,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::RwLock;
 
 /// Builder for creating a metrics aggregator with proper FSM lifecycle
 pub struct MetricsAggregatorBuilder {

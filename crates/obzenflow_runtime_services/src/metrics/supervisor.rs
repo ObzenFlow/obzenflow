@@ -8,12 +8,11 @@ use crate::supervised_base::base::Supervisor;
 use crate::supervised_base::{EventLoopDirective, SelfSupervised};
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::SystemEvent;
-use obzenflow_core::event::{ChainEventFactory, JournalEvent, WriterId};
+use obzenflow_core::event::{JournalEvent, WriterId};
 use obzenflow_core::id::SystemId;
-use obzenflow_core::journal::journal::Journal;
+use obzenflow_core::journal::Journal;
 use obzenflow_core::ChainEvent;
 use obzenflow_fsm::StateVariant;
-use serde_json::json;
 use std::sync::Arc;
 
 use super::fsm::{
@@ -105,7 +104,7 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                     .append(event, None)
                     .await
                     .map(|_| ())
-                    .map_err(|e| format!("Failed to write ready event: {}", e))?;
+                    .map_err(|e| format!("Failed to write ready event: {e}"))?;
 
                 tracing::info!("Metrics aggregator published ready event");
 
@@ -149,10 +148,10 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                     )
                 };
 
-                let mut directive: Result<
+                let directive: Result<
                     EventLoopDirective<Self::Event>,
                     Box<dyn std::error::Error + Send + Sync>,
-                > = Ok(EventLoopDirective::Continue);
+                >;
 
                 // Build futures that operate on local subscriptions and timer only.
                 let data_recv = async {
@@ -169,7 +168,7 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                         match sub.poll_next_with_state(state.variant_name(), None).await {
                             PollResult::Event(envelope) => Ok(Some(envelope)),
                             PollResult::NoEvents => Ok(None),
-                            PollResult::Error(e) => Err(format!("Error: {}", e)),
+                            PollResult::Error(e) => Err(format!("Error: {e}")),
                         }
                     } else {
                         // If no error subscription, wait forever
@@ -187,7 +186,7 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                             PollResult::Event(envelope) => Ok(Some(envelope)),
                             PollResult::NoEvents => Ok(None),
                             PollResult::Error(e) => {
-                                Err(format!("Error reading system events: {}", e))
+                                Err(format!("Error reading system events: {e}"))
                             }
                         }
                     } else {
@@ -234,7 +233,9 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                                 }
                                 // Process system event through FSM event
                                 directive = Ok(EventLoopDirective::Transition(
-                                    MetricsAggregatorEvent::ProcessSystemEvent { envelope }
+                                    MetricsAggregatorEvent::ProcessSystemEvent {
+                                        envelope: Box::new(envelope),
+                                    }
                                 ))
                             }
                             Ok(None) => {
@@ -251,10 +252,10 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                                     error = %e,
                                     "Metrics aggregator emitting Error event from system subscription"
                                 );
-                                directive = Ok(EventLoopDirective::Transition(MetricsAggregatorEvent::Error(format!(
-                                    "system subscription error: {}",
-                                    e
-                                ))))
+                                directive =
+                                    Ok(EventLoopDirective::Transition(MetricsAggregatorEvent::Error(
+                                        format!("system subscription error: {e}"),
+                                    )))
                             }
                         }
                     }
@@ -310,7 +311,7 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                                 directive = Ok(EventLoopDirective::Continue)
                             }
                             PollResult::Error(e) => {
-                                let err_msg = format!("Data journal read error: {}", e);
+                                let err_msg = format!("Data journal read error: {e}");
                                 if err_msg.contains("Partial read retries exceeded") {
                                     tracing::warn!(
                                         error = %err_msg,
@@ -371,7 +372,7 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                                 directive = Ok(EventLoopDirective::Continue)
                             }
                             Err(e) => {
-                                let err_msg = format!("Error journal read error: {}", e);
+                                let err_msg = format!("Error journal read error: {e}");
                                 if err_msg.contains("Partial read retries exceeded") {
                                     tracing::warn!(
                                         error = %err_msg,
@@ -432,13 +433,15 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                             ctx.error_subscription = error_subscription;
                             ctx.system_subscription = system_subscription;
                             return Ok(EventLoopDirective::Transition(
-                                MetricsAggregatorEvent::ProcessSystemEvent { envelope },
+                                MetricsAggregatorEvent::ProcessSystemEvent {
+                                    envelope: Box::new(envelope),
+                                },
                             ));
                         }
                         PollResult::NoEvents => {}
                         PollResult::Error(e) => {
                             let err_msg =
-                                format!("Error reading system events during draining: {}", e);
+                                format!("Error reading system events during draining: {e}");
                             tracing::error!(error = %err_msg, "Metrics aggregator draining system subscription errored");
                             ctx.data_subscription = data_subscription;
                             ctx.error_subscription = error_subscription;
@@ -490,7 +493,7 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                         }
                         PollResult::NoEvents => {}
                         PollResult::Error(e) => {
-                            let err_msg = format!("Data journal read error during draining: {}", e);
+                            let err_msg = format!("Data journal read error during draining: {e}");
                             ctx.data_subscription = data_subscription;
                             ctx.error_subscription = error_subscription;
                             ctx.system_subscription = system_subscription;
@@ -543,8 +546,7 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                         }
                         PollResult::NoEvents => {}
                         PollResult::Error(e) => {
-                            let err_msg =
-                                format!("Error journal read error during draining: {}", e);
+                            let err_msg = format!("Error journal read error during draining: {e}");
                             ctx.data_subscription = data_subscription;
                             ctx.error_subscription = error_subscription;
                             ctx.system_subscription = system_subscription;

@@ -13,7 +13,7 @@ pub enum CorsModeArg {
 }
 
 /// Configuration for FlowApplication
-/// 
+///
 /// This struct is automatically populated from CLI arguments when
 /// FlowApplication::run() is called.
 #[derive(Parser, Debug, Clone)]
@@ -22,7 +22,7 @@ pub struct FlowConfig {
     /// Start HTTP server for metrics and topology visualization
     #[arg(long)]
     pub server: bool,
-    
+
     /// Port for HTTP server
     #[arg(long, default_value = "9090")]
     pub server_port: u16,
@@ -57,10 +57,9 @@ pub struct FlowConfig {
     /// This is intended for debugging; outputs may be partial and not suitable for regression comparison.
     #[arg(long)]
     pub allow_incomplete_archive: bool,
-    
     // Future fields will be added here:
     // - debug flag
-    // - journal overrides  
+    // - journal overrides
     // - checkpoint intervals
     // - distributed mode settings
 }

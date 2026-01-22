@@ -5,7 +5,7 @@
 
 use super::{
     fsm::{PipelineAction, PipelineContext, PipelineEvent, PipelineState},
-    handle::{FlowHandle, MiddlewareStackConfig},
+    handle::{FlowHandle, FlowHandleExtras, MiddlewareStackConfig},
     supervisor::PipelineSupervisor,
 };
 use crate::{
@@ -21,7 +21,7 @@ use crate::{
 use obzenflow_core::event::WriterId;
 use obzenflow_core::event::{ChainEvent, SystemEvent};
 use obzenflow_core::id::{FlowId, SystemId};
-use obzenflow_core::journal::journal::Journal;
+use obzenflow_core::journal::Journal;
 use obzenflow_core::journal::JournalStorageKind;
 use obzenflow_core::metrics::MetricsExporter;
 use obzenflow_core::StageId;
@@ -31,6 +31,8 @@ use std::{
     sync::Arc,
 };
 
+type StageJournalList = Vec<(StageId, Arc<dyn Journal<ChainEvent>>)>;
+
 /// Builder for creating a pipeline with proper FSM lifecycle
 pub struct PipelineBuilder {
     topology: Arc<Topology>,
@@ -39,8 +41,8 @@ pub struct PipelineBuilder {
     stages: Vec<BoxedStageHandle>,
     sources: Vec<BoxedStageHandle>,
     metrics_exporter: Option<Arc<dyn MetricsExporter>>,
-    stage_journals: Option<Vec<(StageId, Arc<dyn Journal<ChainEvent>>)>>,
-    error_journals: Option<Vec<(StageId, Arc<dyn Journal<ChainEvent>>)>>,
+    stage_journals: Option<StageJournalList>,
+    error_journals: Option<StageJournalList>,
     flow_name: Option<String>,
     middleware_stacks: Option<HashMap<StageId, MiddlewareStackConfig>>,
     contract_attachments: Option<HashMap<(StageId, StageId), Vec<String>>>,
@@ -91,19 +93,13 @@ impl PipelineBuilder {
     }
 
     /// Add stage journals for metrics aggregator
-    pub fn with_stage_journals(
-        mut self,
-        journals: Vec<(StageId, Arc<dyn Journal<ChainEvent>>)>,
-    ) -> Self {
+    pub fn with_stage_journals(mut self, journals: StageJournalList) -> Self {
         self.stage_journals = Some(journals);
         self
     }
 
     /// Add error journals for error sink
-    pub fn with_error_journals(
-        mut self,
-        journals: Vec<(StageId, Arc<dyn Journal<ChainEvent>>)>,
-    ) -> Self {
+    pub fn with_error_journals(mut self, journals: StageJournalList) -> Self {
         self.error_journals = Some(journals);
         self
     }
@@ -248,8 +244,8 @@ impl SupervisorBuilder for PipelineBuilder {
         let stages: Vec<_> = self.topology.stages().collect();
         tracing::info!("Topology stages count: {}", stages.len());
         for stage in stages {
-            let upstreams = self.topology.upstream_stages(stage.id.clone());
-            let downstreams = self.topology.downstream_stages(stage.id.clone());
+            let upstreams = self.topology.upstream_stages(stage.id);
+            let downstreams = self.topology.downstream_stages(stage.id);
             tracing::info!(
                 "Stage '{}' (id={:?}): upstreams={:?}, downstreams={:?}",
                 stage.name,
@@ -264,7 +260,7 @@ impl SupervisorBuilder for PipelineBuilder {
         let expected_sources: Vec<StageId> = self
             .topology
             .stages()
-            .filter(|stage| self.topology.upstream_stages(stage.id.clone()).is_empty())
+            .filter(|stage| self.topology.upstream_stages(stage.id).is_empty())
             .map(|stage| StageId::from_topology_id(stage.id))
             .collect();
 
@@ -293,10 +289,8 @@ impl SupervisorBuilder for PipelineBuilder {
             if !entry.iter().any(|n| n == "TransportContract") {
                 entry.push("TransportContract".to_string());
             }
-            if expected_sources.contains(upstream) {
-                if !entry.iter().any(|n| n == "SourceContract") {
-                    entry.push("SourceContract".to_string());
-                }
+            if expected_sources.contains(upstream) && !entry.iter().any(|n| n == "SourceContract") {
+                entry.push("SourceContract".to_string());
             }
         }
 
@@ -311,18 +305,14 @@ impl SupervisorBuilder for PipelineBuilder {
             bus: message_bus.clone(),
             topology: self.topology.clone(),
             flow_name: flow_name.clone(),
-            flow_id: self.flow_id.clone(),
+            flow_id: self.flow_id,
             system_journal: self.system_journal.clone(),
             stage_supervisors: stage_map,
             source_supervisors: source_map,
             completed_stages: Vec::new(),
             running_stages: std::collections::HashSet::new(),
-            stage_data_journals: self
-                .stage_journals
-                .unwrap_or_else(|| Vec::<(StageId, Arc<dyn Journal<ChainEvent>>)>::new()),
-            stage_error_journals: self
-                .error_journals
-                .unwrap_or_else(|| Vec::<(StageId, Arc<dyn Journal<ChainEvent>>)>::new()),
+            stage_data_journals: self.stage_journals.unwrap_or_default(),
+            stage_error_journals: self.error_journals.unwrap_or_default(),
             backpressure_registry: self.backpressure_registry.clone(),
             completion_subscription: None,
             metrics_exporter: self.metrics_exporter.clone(),
@@ -428,12 +418,14 @@ impl SupervisorBuilder for PipelineBuilder {
         Ok(FlowHandle::new(
             standard_handle,
             metrics_exporter,
-            topology,
-            flow_name,
-            middleware_stacks,
-            contract_attachments,
-            Some(self.system_journal.clone()),
-            join_metadata,
+            FlowHandleExtras {
+                topology,
+                flow_name,
+                middleware_stacks,
+                contract_attachments,
+                join_metadata,
+                system_journal: Some(self.system_journal.clone()),
+            },
         ))
     }
 }

@@ -1,4 +1,4 @@
-#![cfg(skip)] // Disabled manual harness; kept as reference but not compiled as part of test suite
+#![cfg(any())] // Disabled manual harness; kept as reference but not compiled as part of test suite
 
 //! Manual harness for char_transform to verify graceful completion and contract evidence.
 //! Run with: `cargo test --test char_transform_harness -- --ignored`

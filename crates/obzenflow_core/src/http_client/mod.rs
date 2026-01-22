@@ -20,4 +20,3 @@ pub use crate::web::HttpMethod;
 pub use bytes::Bytes;
 pub use http::HeaderMap;
 pub use url::Url;
-

@@ -71,9 +71,9 @@ fn even_filter() -> Filter<impl Fn(&ChainEvent) -> bool + Send + Sync + Clone> {
         if let Some(value) = event.payload()["value"].as_u64() {
             let is_even = value % 2 == 0;
             if is_even {
-                println!("  ✓ Transform passed (even): {}", value);
+                println!("  ✓ Transform passed (even): {value}");
             } else {
-                println!("  ✗ Transform filtered (odd): {}", value);
+                println!("  ✗ Transform filtered (odd): {value}");
             }
             is_even
         } else {
@@ -137,11 +137,11 @@ impl StatefulHandler for CounterHandler {
 
         if state.count > 0 {
             let avg = state.sum as f64 / state.count as f64;
-            println!("       Average: {:.2}", avg);
+            println!("       Average: {avg:.2}");
 
             // Emit final aggregated result
             let result_event = ChainEventFactory::data_event(
-                self.writer_id.clone(),
+                self.writer_id,
                 "aggregation",
                 json!({
                     "count": state.count,
@@ -169,7 +169,7 @@ async fn main() -> Result<()> {
     println!("🚀 Stateful Counter Demo (FLOWIP-080b)");
     println!("========================================");
     println!("Pipeline: Source(1-10) → Transform(even) → Stateful(count+sum) → Sink");
-    println!("");
+    println!();
 
     // Use FlowApplication to handle everything
     use obzenflow_infra::application::FlowApplication;
@@ -187,7 +187,7 @@ async fn main() -> Result<()> {
                         return None;
                     }
 
-                    println!("📤 Source emitting: {}", value);
+                    println!("📤 Source emitting: {value}");
                     Some(NumberEvent { value })
                 }));
                 // ✨ FLOWIP-080h: Using Filter helper instead of EvenFilter struct

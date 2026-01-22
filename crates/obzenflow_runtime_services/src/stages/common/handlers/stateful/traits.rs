@@ -4,7 +4,6 @@
 
 use crate::stages::common::handler_error::HandlerError;
 use async_trait::async_trait;
-use obzenflow_core::event::ChainEventContent;
 use obzenflow_core::ChainEvent;
 
 /// Handler for stateful processing stages

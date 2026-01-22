@@ -16,7 +16,6 @@ use obzenflow_runtime_services::stages::common::handlers::{
 };
 use serde_json::json;
 use std::sync::{Arc, Mutex};
-use tokio::time::{sleep, Duration};
 
 /// Source that emits events with correlations
 #[derive(Clone, Debug)]
@@ -50,7 +49,7 @@ impl FiniteSourceHandler for CorrelatedSource {
         self.current += 1;
 
         let event = ChainEventFactory::data_event(
-            self.writer_id.clone(),
+            self.writer_id,
             "test.data",
             json!({
                 "index": self.current,
@@ -167,7 +166,7 @@ async fn test_dropped_events_detection() -> Result<()> {
         }
     }
     .await
-    .map_err(|e| anyhow::anyhow!("Flow creation failed: {:?}", e))?;
+    .map_err(|e| anyhow::anyhow!("Flow creation failed: {e:?}"))?;
 
     println!("Running flow...");
 
@@ -175,18 +174,18 @@ async fn test_dropped_events_detection() -> Result<()> {
     let metrics_exporter = flow_handle
         .run_with_metrics()
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to run flow: {:?}", e))?
+        .map_err(|e| anyhow::anyhow!("Failed to run flow: {e:?}"))?
         .expect("Metrics should be enabled by default");
 
     // Get metrics
     let metrics_text = metrics_exporter
         .render_metrics()
-        .map_err(|e| anyhow::anyhow!("Failed to render metrics: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to render metrics: {e}"))?;
 
     println!("\n=== Metrics Output ===");
     for line in metrics_text.lines() {
         if line.contains("dropped_events") || line.contains("# HELP obzenflow_dropped_events") {
-            println!("{}", line);
+            println!("{line}");
         }
     }
 
@@ -214,7 +213,7 @@ async fn test_dropped_events_detection() -> Result<()> {
 
     // Check dropped events metric (optional - may not be wired in all builds)
     let has_dropped_metric = metrics_text.contains("obzenflow_dropped_events");
-    println!("Dropped events metric present: {}", has_dropped_metric);
+    println!("Dropped events metric present: {has_dropped_metric}");
 
     // If the metric is present, validate its value
     if has_dropped_metric {
@@ -224,7 +223,7 @@ async fn test_dropped_events_detection() -> Result<()> {
         {
             if let Some(value_str) = line.split_whitespace().last() {
                 if let Ok(value) = value_str.parse::<i64>() {
-                    println!("\nDropped events: {}", value);
+                    println!("\nDropped events: {value}");
                     assert_eq!(value, 3, "Should have 3 dropped events");
 
                     println!("\n✅ Dropped event metric correctly reports 3 dropped events!");

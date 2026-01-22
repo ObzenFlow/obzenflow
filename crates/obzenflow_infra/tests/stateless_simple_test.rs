@@ -3,7 +3,7 @@ use obzenflow_core::{
     event::chain_event::{ChainEvent, ChainEventFactory},
     event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload},
     id::StageId,
-    Result as CoreResult, WriterId,
+    WriterId,
 };
 use obzenflow_dsl_infra::{flow, sink, source, transform};
 use obzenflow_infra::application::FlowApplication;
@@ -37,7 +37,7 @@ impl FiniteSourceHandler for SimpleSource {
             self.count -= 1;
 
             Ok(Some(vec![ChainEventFactory::data_event(
-                self.writer_id.clone(),
+                self.writer_id,
                 "number",
                 json!({
                     "value": self.count + 1,

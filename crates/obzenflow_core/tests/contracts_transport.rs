@@ -5,7 +5,7 @@ use obzenflow_core::{
         payloads::flow_control_payload::FlowControlPayload, ChainEvent, ChainEventContent,
         ChainEventFactory,
     },
-    ChainEvent as _, Contract, StageId, TransportContract, WriterId,
+    Contract, StageId, TransportContract, WriterId,
 };
 
 fn make_data_event(writer: WriterId) -> ChainEvent {
@@ -13,7 +13,7 @@ fn make_data_event(writer: WriterId) -> ChainEvent {
 }
 
 fn make_eof_with_seq(writer: WriterId, seq: u64) -> ChainEvent {
-    let mut eof = ChainEventFactory::eof_event(writer.clone(), true);
+    let mut eof = ChainEventFactory::eof_event(writer, true);
     if let ChainEventContent::FlowControl(FlowControlPayload::Eof {
         writer_id,
         writer_seq,
@@ -41,7 +41,7 @@ fn transport_contract_passes_when_counts_match() {
     //
     // Writer-side count is derived from EOF writer_seq, not per-event writes.
     for _ in 0..3 {
-        let event = make_data_event(writer_id.clone());
+        let event = make_data_event(writer_id);
         contract.on_read(&event, &mut read_ctx);
     }
 
@@ -63,7 +63,7 @@ fn transport_contract_passes_when_counts_match() {
             assert_eq!(evidence.upstream_stage, writer_stage);
             assert_eq!(evidence.downstream_stage, reader_stage);
         }
-        other => panic!("expected Passed, got {:?}", other),
+        other => panic!("expected Passed, got {other:?}"),
     }
 }
 
@@ -78,7 +78,7 @@ fn transport_contract_fails_when_counts_diverge() {
     let mut read_ctx = ContractReadContext::new(reader_stage, writer_stage);
 
     // Writer advertises two events written via EOF.
-    let eof = make_eof_with_seq(writer_id.clone(), 2);
+    let eof = make_eof_with_seq(writer_id, 2);
     contract.on_write(&eof, &mut write_ctx);
 
     // Downstream only reads one data event.
@@ -97,6 +97,6 @@ fn transport_contract_fails_when_counts_diverge() {
         obzenflow_core::contracts::ContractResult::Failed(violation) => {
             assert_eq!(violation.contract_name, "TransportContract");
         }
-        other => panic!("expected Failed, got {:?}", other),
+        other => panic!("expected Failed, got {other:?}"),
     }
 }

@@ -78,9 +78,8 @@ impl Metric for SaturationMetric {
     }
 
     fn update(&self, value: MetricValue) {
-        match value {
-            MetricValue::Gauge(v) => self.set_ratio(v),
-            _ => {} // Saturation only accepts gauge values
+        if let MetricValue::Gauge(v) = value {
+            self.set_ratio(v);
         }
     }
 
@@ -246,7 +245,7 @@ mod tests {
         };
 
         for i in 0..8 {
-            queue.add_item(format!("item{}", i));
+            queue.add_item(format!("item{i}"));
         }
 
         assert!((queue.saturation_metric().current_ratio() - 0.8).abs() < 0.0001);

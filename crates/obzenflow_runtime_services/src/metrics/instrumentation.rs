@@ -13,7 +13,6 @@ use obzenflow_core::metrics::StageMetricsSnapshot;
 use obzenflow_core::EventId;
 use obzenflow_core::StageId;
 use obzenflow_core::WriterId;
-use serde::{Deserialize, Serialize}; // <‑‑ canonical path
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{OnceLock, RwLock};
 use std::time::{Duration, Instant};
@@ -117,6 +116,12 @@ pub struct StageInstrumentation {
 
     /// Cached circuit breaker state for control strategies (set once during stage construction).
     cb_state: Option<Arc<std::sync::atomic::AtomicU8>>,
+}
+
+impl Default for StageInstrumentation {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl StageInstrumentation {
@@ -270,11 +275,11 @@ impl StageInstrumentation {
             // Observability positions
             reader_seq: self.reader_seq.load(Ordering::Relaxed),
             writer_seq: self.writer_seq.load(Ordering::Relaxed),
-            last_consumed_event_id: self.last_consumed_event_id.read().unwrap().clone(),
-            last_consumed_writer: self.last_consumed_writer.read().unwrap().clone(),
+            last_consumed_event_id: *self.last_consumed_event_id.read().unwrap(),
+            last_consumed_writer: *self.last_consumed_writer.read().unwrap(),
             last_consumed_vector_clock: self.last_consumed_vector_clock.read().unwrap().clone(),
-            last_emitted_event_id: self.last_emitted_event_id.read().unwrap().clone(),
-            last_emitted_writer: self.last_emitted_writer.read().unwrap().clone(),
+            last_emitted_event_id: *self.last_emitted_event_id.read().unwrap(),
+            last_emitted_writer: *self.last_emitted_writer.read().unwrap(),
             errors_by_kind: self
                 .errors_by_kind
                 .read()
@@ -355,7 +360,7 @@ impl StageInstrumentation {
     /// Note a consumed envelope so downstream events capture reader position and origin.
     pub fn record_consumed<T: JournalEvent>(&self, envelope: &EventEnvelope<T>) {
         self.reader_seq.fetch_add(1, Ordering::Relaxed);
-        *self.last_consumed_event_id.write().unwrap() = Some(envelope.event.id().clone());
+        *self.last_consumed_event_id.write().unwrap() = Some(*envelope.event.id());
         *self.last_consumed_writer.write().unwrap() = Some(envelope.journal_writer_id);
         *self.last_consumed_vector_clock.write().unwrap() = Some(envelope.vector_clock.clone());
     }
@@ -363,8 +368,8 @@ impl StageInstrumentation {
     /// Note an emitted event for wide-event observability.
     pub fn record_emitted<T: JournalEvent>(&self, event: &T) {
         self.writer_seq.fetch_add(1, Ordering::Relaxed);
-        *self.last_emitted_event_id.write().unwrap() = Some(event.id().clone());
-        *self.last_emitted_writer.write().unwrap() = Some(event.writer_id().clone());
+        *self.last_emitted_event_id.write().unwrap() = Some(*event.id());
+        *self.last_emitted_writer.write().unwrap() = Some(*event.writer_id());
     }
 
     /// Note an emitted output event and increment the emitted counter.
@@ -392,7 +397,7 @@ impl StageInstrumentation {
         }
 
         let duration_ms = duration.as_millis() as u64;
-        let clamped = duration_ms.max(HISTOGRAM_MIN_MS).min(HISTOGRAM_MAX_MS);
+        let clamped = duration_ms.clamp(HISTOGRAM_MIN_MS, HISTOGRAM_MAX_MS);
 
         if let Ok(mut histogram) = self.processing_time_histogram.write() {
             histogram
@@ -488,13 +493,10 @@ where
     }
 
     // Track success/error
-    match &result {
-        Ok(_) => {
-            instrumentation
-                .events_processed_total
-                .fetch_add(1, Ordering::Relaxed);
-        }
-        Err(_) => {}
+    if result.is_ok() {
+        instrumentation
+            .events_processed_total
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     result

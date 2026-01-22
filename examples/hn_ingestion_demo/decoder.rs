@@ -1,4 +1,4 @@
-use crate::lib::domain::HnStory;
+use super::domain::HnStory;
 use obzenflow::sources::{DecodeError, DecodeResult, HttpResponse, PullDecoder, RequestSpec, Url};
 use obzenflow_core::TypedPayload;
 use std::collections::VecDeque;
@@ -119,4 +119,3 @@ impl PullDecoder for HnStoryDecoder {
         }
     }
 }
-

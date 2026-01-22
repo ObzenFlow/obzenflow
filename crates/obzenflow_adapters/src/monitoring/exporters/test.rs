@@ -87,13 +87,12 @@ impl TestExporter {
     pub fn assert_counter_value(&self, name: &str, expected: u64) {
         let metric = self
             .get_metric(name)
-            .unwrap_or_else(|| panic!("Metric '{}' not found", name));
+            .unwrap_or_else(|| panic!("Metric '{name}' not found"));
 
         match metric.value.as_counter() {
             Some(actual) => assert_eq!(
                 actual, expected,
-                "Counter '{}' expected {}, but was {}",
-                name, expected, actual
+                "Counter '{name}' expected {expected}, but was {actual}"
             ),
             None => panic!(
                 "Metric '{}' is not a counter, it's a {:?}",
@@ -107,19 +106,14 @@ impl TestExporter {
     pub fn assert_gauge_value(&self, name: &str, expected: f64, tolerance: f64) {
         let metric = self
             .get_metric(name)
-            .unwrap_or_else(|| panic!("Metric '{}' not found", name));
+            .unwrap_or_else(|| panic!("Metric '{name}' not found"));
 
         match metric.value.as_gauge() {
             Some(actual) => {
                 let diff = (actual - expected).abs();
                 assert!(
                     diff <= tolerance,
-                    "Gauge '{}' expected {:.3} ± {:.3}, but was {:.3} (diff: {:.3})",
-                    name,
-                    expected,
-                    tolerance,
-                    actual,
-                    diff
+                    "Gauge '{name}' expected {expected:.3} ± {tolerance:.3}, but was {actual:.3} (diff: {diff:.3})"
                 );
             }
             None => panic!(

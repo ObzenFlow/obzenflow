@@ -2,48 +2,75 @@
 //!
 //! Provides a simple way to start a web server with topology, metrics, and health endpoints
 
-use obzenflow_core::web::{HttpEndpoint, ServerConfig, WebError, WebServer};
 use obzenflow_core::metrics::MetricsExporter;
+use obzenflow_core::web::{HttpEndpoint, ServerConfig, WebError, WebServer};
 use obzenflow_core::StageId;
-use obzenflow_topology::Topology;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::collections::HashMap;
-use obzenflow_runtime_services::pipeline::FlowHandle;
 use obzenflow_runtime_services::pipeline::fsm::PipelineState;
+use obzenflow_runtime_services::pipeline::FlowHandle;
+use obzenflow_topology::Topology;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
+pub type MiddlewareStacks =
+    Arc<HashMap<StageId, obzenflow_runtime_services::pipeline::MiddlewareStackConfig>>;
+pub type ContractAttachments = Arc<HashMap<(StageId, StageId), Vec<String>>>;
+pub type JoinMetadataMap =
+    Arc<HashMap<StageId, obzenflow_runtime_services::pipeline::JoinMetadata>>;
+
+pub struct WebServerResources {
+    pub topology: Arc<Topology>,
+    pub flow_name: String,
+    pub middleware_stacks: Option<MiddlewareStacks>,
+    pub contract_attachments: Option<ContractAttachments>,
+    pub join_metadata: Option<JoinMetadataMap>,
+    pub metrics_exporter: Option<Arc<dyn MetricsExporter>>,
+    pub flow_handle: Option<Arc<FlowHandle>>,
+    pub extra_endpoints: Vec<Box<dyn HttpEndpoint>>,
+}
 
 /// Start a web server with all flow endpoints
-/// 
+///
 /// This function creates a single server with all endpoints:
 /// - `/api/topology` - Flow structure and stage information
 /// - `/metrics` - Prometheus metrics (if metrics_exporter provided)
 /// - `/health` - Health check endpoint
 /// - `/ready` - Readiness check endpoint
-/// 
+///
 /// # Example
 /// ```ignore
 /// use obzenflow_infra::web::start_web_server;
-/// 
+///
 /// // Start server with topology and metrics
-/// let handle = start_web_server(
-///     flow_topology,
-///     Some(metrics_exporter),
-///     9090
-/// ).await?;
+/// let handle = start_web_server(WebServerResources {
+///     topology: flow_topology,
+///     flow_name: "my_flow".to_string(),
+///     middleware_stacks: None,
+///     contract_attachments: None,
+///     join_metadata: None,
+///     metrics_exporter: Some(metrics_exporter),
+///     flow_handle: None,
+///     extra_endpoints: vec![],
+/// }, 9090).await?;
 /// ```
 #[cfg(feature = "warp-server")]
 pub async fn start_web_server(
-    topology: Arc<Topology>,
-    flow_name: String,
-    middleware_stacks: Option<Arc<HashMap<StageId, obzenflow_runtime_services::pipeline::MiddlewareStackConfig>>>,
-    contract_attachments: Option<Arc<HashMap<(StageId, StageId), Vec<String>>>>,
-    join_metadata: Option<Arc<HashMap<StageId, obzenflow_runtime_services::pipeline::JoinMetadata>>>,
-    metrics_exporter: Option<Arc<dyn MetricsExporter>>,
-    flow_handle: Option<Arc<FlowHandle>>,
-    extra_endpoints: Vec<Box<dyn HttpEndpoint>>,
+    resources: WebServerResources,
     port: u16,
 ) -> Result<tokio::task::JoinHandle<()>, WebError> {
-    start_web_server_with_config(
+    start_web_server_with_config(resources, ServerConfig::localhost(port)).await
+}
+
+/// Start a web server with all flow endpoints using an explicit `ServerConfig`.
+#[cfg(feature = "warp-server")]
+pub async fn start_web_server_with_config(
+    resources: WebServerResources,
+    server_config: ServerConfig,
+) -> Result<tokio::task::JoinHandle<()>, WebError> {
+    use super::endpoints::topology::{StageMetadata, StageStatus, StageType};
+    use super::endpoints::{FlowControlEndpoint, MetricsHttpEndpoint, TopologyHttpEndpoint};
+
+    let WebServerResources {
         topology,
         flow_name,
         middleware_stacks,
@@ -52,33 +79,14 @@ pub async fn start_web_server(
         metrics_exporter,
         flow_handle,
         extra_endpoints,
-        ServerConfig::localhost(port),
-    )
-    .await
-}
+    } = resources;
 
-/// Start a web server with all flow endpoints using an explicit `ServerConfig`.
-#[cfg(feature = "warp-server")]
-pub async fn start_web_server_with_config(
-    topology: Arc<Topology>,
-    flow_name: String,
-    middleware_stacks: Option<Arc<HashMap<StageId, obzenflow_runtime_services::pipeline::MiddlewareStackConfig>>>,
-    contract_attachments: Option<Arc<HashMap<(StageId, StageId), Vec<String>>>>,
-    join_metadata: Option<Arc<HashMap<StageId, obzenflow_runtime_services::pipeline::JoinMetadata>>>,
-    metrics_exporter: Option<Arc<dyn MetricsExporter>>,
-    flow_handle: Option<Arc<FlowHandle>>,
-    extra_endpoints: Vec<Box<dyn HttpEndpoint>>,
-    server_config: ServerConfig,
-) -> Result<tokio::task::JoinHandle<()>, WebError> {
-    use super::endpoints::topology::{StageMetadata, StageType, StageStatus};
-    use super::endpoints::{FlowControlEndpoint, MetricsHttpEndpoint, TopologyHttpEndpoint};
-    
     let mut server = super::warp::WarpServer::new();
     let pipeline_ready = flow_handle.as_ref().map(|handle| {
         let ready = Arc::new(AtomicBool::new(false));
         let ready_for_task = ready.clone();
         let mut state_rx = handle.state_receiver();
-        let _ = tokio::spawn(async move {
+        tokio::spawn(async move {
             let initial_running = matches!(state_rx.borrow().clone(), PipelineState::Running);
             ready_for_task.store(initial_running, Ordering::Release);
             loop {
@@ -91,7 +99,7 @@ pub async fn start_web_server_with_config(
         });
         ready
     });
-    
+
     // Create stage metadata for topology endpoint
     let mut stages_metadata = HashMap::new();
     for stage_info in topology.stages() {
@@ -100,9 +108,9 @@ pub async fn start_web_server_with_config(
         stages_metadata.insert(
             core_stage_id,
             StageMetadata {
-                stage_type: if topology.source_stages().iter().any(|s| *s == stage_info.id) {
+                stage_type: if topology.source_stages().contains(&stage_info.id) {
                     StageType::Source
-                } else if topology.sink_stages().iter().any(|s| *s == stage_info.id) {
+                } else if topology.sink_stages().contains(&stage_info.id) {
                     StageType::Sink
                 } else {
                     StageType::Transform
@@ -111,7 +119,7 @@ pub async fn start_web_server_with_config(
             },
         );
     }
-    
+
     // Always add topology endpoint
     server.register_endpoint(Box::new(TopologyHttpEndpoint::new(
         topology.clone(),
@@ -121,7 +129,7 @@ pub async fn start_web_server_with_config(
         contract_attachments,
         join_metadata,
     )))?;
-    
+
     let has_metrics_endpoint = metrics_exporter.is_some();
     if let Some(exporter) = metrics_exporter {
         server.register_endpoint(Box::new(MetricsHttpEndpoint::new(exporter)))?;
@@ -147,7 +155,7 @@ pub async fn start_web_server_with_config(
     } else {
         server.register_endpoint(Box::new(SimpleReadyEndpoint))?;
     }
-    
+
     // Start server in background
     let addr = server_config.address();
     let handle = tokio::spawn(async move {
@@ -155,7 +163,7 @@ pub async fn start_web_server_with_config(
             tracing::error!("Web server failed: {}", e);
         }
     });
-    
+
     // Log available endpoints
     tracing::info!("📊 Web server started on http://{}", addr);
     tracing::info!("   /api/topology  - Flow structure");
@@ -164,13 +172,13 @@ pub async fn start_web_server_with_config(
     }
     tracing::info!("   /health        - Health check");
     tracing::info!("   /ready         - Readiness check");
-    
+
     Ok(handle)
 }
 
 // Reuse simple endpoints from metrics_server module
-use obzenflow_core::web::{HttpMethod, Request, Response};
 use async_trait::async_trait;
+use obzenflow_core::web::{HttpMethod, Request, Response};
 
 /// Simple health endpoint
 struct SimpleHealthEndpoint;
@@ -180,11 +188,11 @@ impl HttpEndpoint for SimpleHealthEndpoint {
     fn path(&self) -> &str {
         "/health"
     }
-    
+
     fn methods(&self) -> &[HttpMethod] {
         &[HttpMethod::Get]
     }
-    
+
     async fn handle(&self, _request: Request) -> Result<Response, WebError> {
         Ok(Response::ok().with_text("OK"))
     }
@@ -198,11 +206,11 @@ impl HttpEndpoint for SimpleReadyEndpoint {
     fn path(&self) -> &str {
         "/ready"
     }
-    
+
     fn methods(&self) -> &[HttpMethod] {
         &[HttpMethod::Get]
     }
-    
+
     async fn handle(&self, _request: Request) -> Result<Response, WebError> {
         Ok(Response::ok().with_text("READY"))
     }

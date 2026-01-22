@@ -48,13 +48,11 @@ impl TypedPayload for CounterEvent {
 
 /// Simple passthrough transform
 #[derive(Debug, Clone)]
-struct PassthroughTransform {
-    processed: usize,
-}
+struct PassthroughTransform;
 
 impl PassthroughTransform {
     fn new() -> Self {
-        Self { processed: 0 }
+        Self
     }
 }
 
@@ -87,7 +85,7 @@ impl SinkHandler for CountingSink {
         self.received += 1;
 
         // Log progress every 20 events
-        if self.received % 20 == 0 {
+        if self.received.is_multiple_of(20) {
             let payload = event.payload();
             println!(
                 "[SINK] Received {} events (current: #{})",
@@ -151,7 +149,7 @@ async fn main() -> Result<()> {
 
                     // Log progress every 20 events
                     if count % 20 == 0 {
-                        println!("[SOURCE] Generated {} events", count);
+                        println!("[SOURCE] Generated {count} events");
                     }
 
                     Some(CounterEvent { count })

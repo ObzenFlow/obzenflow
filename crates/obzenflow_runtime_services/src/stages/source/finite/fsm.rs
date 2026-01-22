@@ -7,9 +7,12 @@
 use obzenflow_core::event::context::{FlowContext, StageType};
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::types::{Count, JournalIndex, JournalPath, SeqNo};
-use obzenflow_core::event::{ChainEventContent, ChainEventFactory, SystemEvent};
-use obzenflow_core::journal::journal::Journal;
-use obzenflow_core::{ChainEvent, EventId, FlowId, StageId, WriterId};
+use obzenflow_core::event::{
+    ChainEventContent, ChainEventFactory, ConsumptionFinalEventParams, SourceContractEventParams,
+    SystemEvent,
+};
+use obzenflow_core::journal::Journal;
+use obzenflow_core::{ChainEvent, FlowId, WriterId};
 use obzenflow_fsm::{EventVariant, FsmAction, FsmContext, StateVariant};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
@@ -86,7 +89,7 @@ impl<H> std::fmt::Debug for FiniteSourceState<H> {
             Self::Running => write!(f, "Running"),
             Self::Draining => write!(f, "Draining"),
             Self::Drained => write!(f, "Drained"),
-            Self::Failed(msg) => write!(f, "Failed({:?})", msg),
+            Self::Failed(msg) => write!(f, "Failed({msg:?})"),
             Self::_Phantom(_) => write!(f, "_Phantom"),
         }
     }
@@ -175,7 +178,7 @@ impl<H> std::fmt::Debug for FiniteSourceEvent<H> {
             Self::Start => write!(f, "Start"),
             Self::BeginDrain => write!(f, "BeginDrain"),
             Self::Completed => write!(f, "Completed"),
-            Self::Error(msg) => write!(f, "Error({:?})", msg),
+            Self::Error(msg) => write!(f, "Error({msg:?})"),
             Self::_Phantom(_) => write!(f, "_Phantom"),
         }
     }
@@ -287,36 +290,38 @@ pub struct FiniteSourceContext<H> {
     _marker: PhantomData<H>,
 }
 
+pub struct FiniteSourceContextInit {
+    pub stage_id: obzenflow_core::StageId,
+    pub stage_name: String,
+    pub flow_name: String,
+    pub flow_id: FlowId,
+    pub data_journal: Arc<dyn Journal<ChainEvent>>,
+    pub error_journal: Arc<dyn Journal<ChainEvent>>,
+    pub system_journal: Arc<dyn Journal<SystemEvent>>,
+    pub replay_archive: Option<Arc<dyn ReplayArchive>>,
+    pub bus: Arc<crate::message_bus::FsmMessageBus>,
+    pub instrumentation: Arc<StageInstrumentation>,
+    pub control_strategy: Arc<dyn SourceControlStrategy>,
+    pub backpressure_writer: BackpressureWriter,
+}
+
 impl<H> FiniteSourceContext<H> {
-    pub fn new(
-        stage_id: obzenflow_core::StageId,
-        stage_name: String,
-        flow_name: String,
-        flow_id: FlowId,
-        data_journal: Arc<dyn Journal<ChainEvent>>,
-        error_journal: Arc<dyn Journal<ChainEvent>>,
-        system_journal: Arc<dyn Journal<SystemEvent>>,
-        replay_archive: Option<Arc<dyn ReplayArchive>>,
-        bus: Arc<crate::message_bus::FsmMessageBus>,
-        instrumentation: Arc<StageInstrumentation>,
-        control_strategy: Arc<dyn SourceControlStrategy>,
-        backpressure_writer: BackpressureWriter,
-    ) -> Self {
+    pub fn new(init: FiniteSourceContextInit) -> Self {
         Self {
-            stage_id,
-            stage_name,
-            flow_name,
-            flow_id,
-            data_journal,
-            error_journal,
-            system_journal,
-            replay_archive,
-            bus,
+            stage_id: init.stage_id,
+            stage_name: init.stage_name,
+            flow_name: init.flow_name,
+            flow_id: init.flow_id,
+            data_journal: init.data_journal,
+            error_journal: init.error_journal,
+            system_journal: init.system_journal,
+            replay_archive: init.replay_archive,
+            bus: init.bus,
             writer_id: None,
-            instrumentation,
-            control_strategy,
+            instrumentation: init.instrumentation,
+            control_strategy: init.control_strategy,
             control_context: SourceControlContext::new(),
-            backpressure_writer,
+            backpressure_writer: init.backpressure_writer,
             pending_outputs: VecDeque::new(),
             backpressure_pulse: BackpressureActivityPulse::new(),
             backpressure_backoff: IdleBackoff::exponential_with_cap(
@@ -356,7 +361,7 @@ impl<H> std::fmt::Debug for FiniteSourceAction<H> {
         match self {
             Self::AllocateResources => write!(f, "AllocateResources"),
             Self::SendEOF => write!(f, "SendEOF"),
-            Self::SendError { message } => write!(f, "SendError({:?})", message),
+            Self::SendError { message } => write!(f, "SendError({message:?})"),
             Self::PublishRunning => write!(f, "PublishRunning"),
             Self::WriteStageCompleted => write!(f, "WriteStageCompleted"),
             Self::Cleanup => write!(f, "Cleanup"),
@@ -373,8 +378,8 @@ impl<H: Send + Sync + 'static> FsmAction for FiniteSourceAction<H> {
         match self {
             FiniteSourceAction::AllocateResources => {
                 // Create WriterId from our StageId
-                let writer_id = WriterId::from(ctx.stage_id.clone());
-                ctx.writer_id = Some(writer_id.clone());
+                let writer_id = WriterId::from(ctx.stage_id);
+                ctx.writer_id = Some(writer_id);
 
                 tracing::info!(
                     stage_name = %ctx.stage_name,
@@ -390,7 +395,7 @@ impl<H: Send + Sync + 'static> FsmAction for FiniteSourceAction<H> {
                     .control_strategy
                     .on_natural_completion(&mut ctx.control_context);
 
-                let writer_id = ctx.writer_id.as_ref().ok_or_else(|| {
+                let writer_id = ctx.writer_id.ok_or_else(|| {
                     obzenflow_fsm::FsmError::HandlerError(
                         "No writer ID available to send EOF".to_string(),
                     )
@@ -403,23 +408,23 @@ impl<H: Send + Sync + 'static> FsmAction for FiniteSourceAction<H> {
                     .load(std::sync::atomic::Ordering::Relaxed);
 
                 // Determine whether EOF should be natural or "poison"
-                let natural = match decision {
-                    crate::stages::source::strategies::SourceShutdownDecision::PoisonEof => false,
-                    _ => true,
-                };
+                let natural = !matches!(
+                    decision,
+                    crate::stages::source::strategies::SourceShutdownDecision::PoisonEof
+                );
 
                 // Take a final runtime snapshot for wide-event semantics
                 let runtime_context = ctx.instrumentation.snapshot_with_control();
 
                 // Emit EOF with writer positions populated
-                let mut eof_event = ChainEventFactory::eof_event(writer_id.clone(), natural);
+                let mut eof_event = ChainEventFactory::eof_event(writer_id, natural);
                 if let ChainEventContent::FlowControl(FlowControlPayload::Eof {
                     writer_id: writer_id_field,
                     writer_seq,
                     ..
                 }) = &mut eof_event.content
                 {
-                    *writer_id_field = Some(writer_id.clone());
+                    *writer_id_field = Some(writer_id);
                     *writer_seq = Some(SeqNo(emitted));
                 }
 
@@ -435,16 +440,18 @@ impl<H: Send + Sync + 'static> FsmAction for FiniteSourceAction<H> {
 
                 // Emit consumption_final for the source itself (writer-side contract)
                 let mut final_event = ChainEventFactory::consumption_final_event(
-                    writer_id.clone(),
-                    true, // pass because sources are authoritative on what they wrote
-                    Count(emitted),
-                    None, // expected_count unknown until config plumbing (010)
-                    true, // eof_seen
-                    None, // last_event_id unknown here
-                    SeqNo(emitted),
-                    Some(SeqNo(emitted)), // advertised writer seq = what we wrote
-                    None,                 // vector clock unavailable here
-                    None,                 // no failure reason
+                    writer_id,
+                    ConsumptionFinalEventParams {
+                        pass: true, // sources are authoritative on what they wrote
+                        consumed_count: Count(emitted),
+                        expected_count: None, // unknown until config plumbing (010)
+                        eof_seen: true,
+                        last_event_id: None, // unknown here
+                        reader_seq: SeqNo(emitted),
+                        advertised_writer_seq: Some(SeqNo(emitted)), // = what we wrote
+                        advertised_vector_clock: None,               // unavailable here
+                        failure_reason: None,
+                    },
                 );
 
                 final_event.flow_context = FlowContext {
@@ -545,15 +552,12 @@ impl<H: Send + Sync + 'static> FsmAction for FiniteSourceAction<H> {
             }
 
             FiniteSourceAction::PublishRunning => {
-                let writer_id = match ctx.writer_id.as_ref() {
-                    Some(id) => id.clone(),
-                    None => {
-                        tracing::warn!(
-                            stage_name = %ctx.stage_name,
-                            "No writer ID available to publish running event; skipping running event and source_contract"
-                        );
-                        return Ok(());
-                    }
+                let Some(writer_id) = ctx.writer_id else {
+                    tracing::warn!(
+                        stage_name = %ctx.stage_name,
+                        "No writer ID available to publish running event; skipping running event and source_contract"
+                    );
+                    return Ok(());
                 };
 
                 // Write running event to system journal
@@ -569,14 +573,16 @@ impl<H: Send + Sync + 'static> FsmAction for FiniteSourceAction<H> {
 
                 // Emit writer-side source contract with runtime defaults (expected_count unknown)
                 let contract = ChainEventFactory::source_contract_event(
-                    writer_id.clone(),
-                    None, // expected_count unknown until 010 config plumbing
-                    ctx.stage_id,
-                    None, // route not available here
-                    JournalPath(ctx.stage_id.to_string()),
-                    JournalIndex(0),
-                    None, // writer_seq unknown at start
-                    None, // vector clock not captured at start
+                    writer_id,
+                    SourceContractEventParams {
+                        expected_count: None, // unknown until 010 config plumbing
+                        source_id: ctx.stage_id,
+                        route: None, // not available here
+                        journal_path: JournalPath(ctx.stage_id.to_string()),
+                        journal_index: JournalIndex(0),
+                        writer_seq: None,   // unknown at start
+                        vector_clock: None, // not captured at start
+                    },
                 );
 
                 ctx.data_journal.append(contract, None).await.map_err(|e| {
@@ -651,10 +657,10 @@ mod tests {
     use obzenflow_core::event::journal_event::JournalEvent;
     use obzenflow_core::event::system_event::SystemEvent;
     use obzenflow_core::id::JournalId;
-    use obzenflow_core::journal::journal::Journal;
     use obzenflow_core::journal::journal_error::JournalError;
     use obzenflow_core::journal::journal_owner::JournalOwner;
     use obzenflow_core::journal::journal_reader::JournalReader;
+    use obzenflow_core::journal::Journal;
     use obzenflow_core::StageId as CoreStageId;
     use std::sync::atomic::AtomicU8;
     use std::sync::{Arc, Mutex};
@@ -816,20 +822,20 @@ mod tests {
 
         // Helper to build a fresh context with a given control strategy
         let build_ctx = |control_strategy: Arc<dyn SourceControlStrategy>| {
-            FiniteSourceContext::<DummySource>::new(
+            FiniteSourceContext::<DummySource>::new(FiniteSourceContextInit {
                 stage_id,
-                stage_name.clone(),
-                flow_name.clone(),
+                stage_name: stage_name.clone(),
+                flow_name: flow_name.clone(),
                 flow_id,
-                data_journal.clone(),
-                error_journal.clone(),
-                system_journal.clone(),
-                None,
-                bus.clone(),
-                instrumentation.clone(),
+                data_journal: data_journal.clone(),
+                error_journal: error_journal.clone(),
+                system_journal: system_journal.clone(),
+                replay_archive: None,
+                bus: bus.clone(),
+                instrumentation: instrumentation.clone(),
                 control_strategy,
-                crate::backpressure::BackpressureWriter::disabled(),
-            )
+                backpressure_writer: crate::backpressure::BackpressureWriter::disabled(),
+            })
         };
 
         // Case 1: breaker closed -> natural EOF

@@ -12,6 +12,12 @@ pub struct ContractChain {
     read_contexts: Vec<ContractReadContext>,
 }
 
+impl Default for ContractChain {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ContractChain {
     /// Create an empty contract chain.
     pub fn new() -> Self {

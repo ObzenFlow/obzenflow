@@ -60,7 +60,7 @@ impl FiniteSourceHandler for TimestampedSource {
                 .as_nanos() as u64;
 
             Ok(Some(vec![ChainEventFactory::data_event(
-                self.writer_id.clone(),
+                self.writer_id,
                 "TimestampedEvent",
                 json!({
                     "index": current,
@@ -75,15 +75,11 @@ impl FiniteSourceHandler for TimestampedSource {
 
 /// Passthrough stage that just forwards events
 #[derive(Clone, Debug)]
-struct PassthroughStage {
-    name: String,
-}
+struct PassthroughStage {}
 
 impl PassthroughStage {
-    fn new(name: &str) -> Self {
-        Self {
-            name: name.to_string(),
-        }
+    fn new(_name: &str) -> Self {
+        Self {}
     }
 }
 
@@ -101,7 +97,6 @@ impl TransformHandler for PassthroughStage {
 /// Sink that records latencies
 #[derive(Clone, Debug)]
 struct TimestampedSink {
-    expected_count: u64,
     received: Arc<AtomicU64>,
     latencies: Arc<tokio::sync::Mutex<Vec<Duration>>>,
 }
@@ -114,7 +109,6 @@ impl TimestampedSink {
         let received = Arc::new(AtomicU64::new(0));
         (
             Self {
-                expected_count,
                 received: received.clone(),
                 latencies: latencies.clone(),
             },
@@ -190,7 +184,7 @@ async fn build_pipeline(
             }
         }
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to create 1-stage flow: {:?}", e))?,
+        .map_err(|e| anyhow::anyhow!("Failed to create 1-stage flow: {e:?}"))?,
         3 => flow! {
             journals: disk_journals(journals_base_path.clone()),
             middleware: [],
@@ -209,7 +203,7 @@ async fn build_pipeline(
             }
         }
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to create 3-stage flow: {:?}", e))?,
+        .map_err(|e| anyhow::anyhow!("Failed to create 3-stage flow: {e:?}"))?,
         5 => flow! {
             journals: disk_journals(journals_base_path.clone()),
             middleware: [],
@@ -232,7 +226,7 @@ async fn build_pipeline(
             }
         }
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to create 5-stage flow: {:?}", e))?,
+        .map_err(|e| anyhow::anyhow!("Failed to create 5-stage flow: {e:?}"))?,
         10 => {
             // For larger pipelines, build stages programmatically
             let handle = flow! {
@@ -267,24 +261,24 @@ async fn build_pipeline(
                 }
             }
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to create 10-stage flow: {:?}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to create 10-stage flow: {e:?}"))?;
             handle
         }
-        _ => return Err(anyhow::anyhow!("Unsupported stage count: {}", stage_count)),
+        _ => return Err(anyhow::anyhow!("Unsupported stage count: {stage_count}")),
     };
 
     handle
         .start()
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to start pipeline: {:?}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to start pipeline: {e:?}"))?;
 
     Ok(handle)
 }
 
 /// Run throughput test for a specific pipeline depth
 async fn run_throughput_test(stage_count: usize) -> anyhow::Result<f64> {
-    let (journals_base_path, _temp_dir) =
-        create_temp_journals_base(&format!("throughput_{}_stages", stage_count))?;
+    let test_name = format!("throughput_{stage_count}_stages");
+    let (journals_base_path, _temp_dir) = create_temp_journals_base(&test_name)?;
 
     let total_events = THROUGHPUT_WARMUP + THROUGHPUT_EVENT_COUNT;
     let source = TimestampedSource::new(total_events);
@@ -351,7 +345,7 @@ fn bench_throughput(c: &mut Criterion) {
 
     for &stage_count in STAGE_COUNTS {
         group.bench_with_input(
-            BenchmarkId::new("events_per_second", format!("{}_stages", stage_count)),
+            BenchmarkId::new("events_per_second", format!("{stage_count}_stages")),
             &stage_count,
             |b, &stage_count| {
                 b.to_async(&rt)
@@ -373,7 +367,7 @@ fn bench_time_per_event(c: &mut Criterion) {
 
     for &stage_count in STAGE_COUNTS {
         group.bench_with_input(
-            BenchmarkId::from_parameter(format!("{}_stages", stage_count)),
+            BenchmarkId::from_parameter(format!("{stage_count}_stages")),
             &stage_count,
             |b, &stage_count| {
                 b.to_async(&rt).iter_custom(|iters| async move {
@@ -408,7 +402,7 @@ fn bench_relative_throughput(c: &mut Criterion) {
 
     for &stage_count in STAGE_COUNTS {
         group.bench_with_input(
-            BenchmarkId::new("percentage_of_baseline", format!("{}_stages", stage_count)),
+            BenchmarkId::new("percentage_of_baseline", format!("{stage_count}_stages")),
             &stage_count,
             |b, &stage_count| {
                 b.to_async(&rt).iter_custom(|iters| async move {

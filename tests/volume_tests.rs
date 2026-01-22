@@ -1,4 +1,4 @@
-#![cfg(skip)] // Disabled: legacy throughput/backpressure harness, not part of safety cluster focused tests
+#![cfg(any())] // Disabled: legacy throughput/backpressure harness, not part of safety cluster focused tests
 
 // tests/volume_tests.rs
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};

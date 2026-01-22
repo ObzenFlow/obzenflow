@@ -410,7 +410,7 @@ impl Middleware for RateLimiterMiddleware {
             return MiddlewareAction::Continue;
         }
 
-        let event_id = event.id.clone();
+        let event_id = event.id;
         let event_type = event.event_type();
         trace!(event_id = %event_id, event_type = %event_type, "Rate limiter processing event");
 
@@ -675,7 +675,7 @@ mod tests {
     use super::*;
     use crate::middleware::control::ControlMiddlewareAggregator;
     use obzenflow_core::event::chain_event::ChainEventContent;
-    use obzenflow_core::event::{ChainEventFactory, EventId, WriterId};
+    use obzenflow_core::event::{ChainEventFactory, WriterId};
 
     #[test]
     fn test_token_bucket_basic() {
@@ -727,7 +727,7 @@ mod tests {
 
             match middleware.pre_handle(&event, &mut ctx) {
                 MiddlewareAction::Continue => {}
-                other => panic!("Expected Continue for event {}, got {:?}", i, other),
+                other => panic!("Expected Continue for event {i}, got {other:?}"),
             }
         }
 
@@ -759,7 +759,7 @@ mod tests {
 
         match middleware.pre_handle(&eof, &mut ctx) {
             MiddlewareAction::Continue => {}
-            other => panic!("Expected Continue for EOF, got {:?}", other),
+            other => panic!("Expected Continue for EOF, got {other:?}"),
         }
     }
 
@@ -793,7 +793,7 @@ mod tests {
 
         match middleware.pre_handle(&lifecycle_event, &mut ctx) {
             MiddlewareAction::Continue => {}
-            other => panic!("Expected Continue for lifecycle event, got {:?}", other),
+            other => panic!("Expected Continue for lifecycle event, got {other:?}"),
         }
     }
 
@@ -843,7 +843,7 @@ mod tests {
                 assert_eq!(mode_to, "limiting");
                 assert!((limit_rate - 100.0).abs() < 1e-6);
             }
-            other => panic!("Expected mode change event, got {:?}", other),
+            other => panic!("Expected mode change event, got {other:?}"),
         }
 
         match &ctx.control_events[1].content {
@@ -858,7 +858,7 @@ mod tests {
                 assert_eq!(*events_in_window, 1200);
                 assert!(*window_size_ms >= 10_000);
             }
-            other => panic!("Expected window utilization event, got {:?}", other),
+            other => panic!("Expected window utilization event, got {other:?}"),
         }
 
         // ---- Window 2: utilization 70% -> Limiting (hold=1) ----
@@ -876,7 +876,7 @@ mod tests {
             ChainEventContent::Observability(ObservabilityPayload::Middleware(
                 MiddlewareLifecycle::RateLimiter(RateLimiterEvent::WindowUtilization { .. }),
             )) => {}
-            other => panic!("Expected window utilization event, got {:?}", other),
+            other => panic!("Expected window utilization event, got {other:?}"),
         }
 
         // ---- Window 3: utilization 70% -> Limiting -> Normal (hold=2) ----
@@ -901,7 +901,7 @@ mod tests {
                 assert_eq!(mode_from, "limiting");
                 assert_eq!(mode_to, "normal");
             }
-            other => panic!("Expected mode change event, got {:?}", other),
+            other => panic!("Expected mode change event, got {other:?}"),
         }
 
         let stats = middleware.stats.lock().unwrap();
@@ -947,7 +947,7 @@ mod tests {
                 assert_eq!(*delay_ms_max, 200);
                 assert!((limit_rate - 5.0).abs() < 1e-6);
             }
-            other => panic!("Expected activity pulse event, got {:?}", other),
+            other => panic!("Expected activity pulse event, got {other:?}"),
         }
 
         let stats = middleware.stats.lock().unwrap();

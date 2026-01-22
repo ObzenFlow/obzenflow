@@ -4,7 +4,7 @@
 //! storage policies, and deployment modes. They belong in the
 //! infrastructure layer because they deal with external resources.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Configuration for the journal storage backend
 #[derive(Debug, Clone)]
@@ -22,13 +22,13 @@ impl Default for JournalStorageConfig {
         Self {
             path: PathBuf::from("./journal"),
             max_segment_size: 10 * 1024 * 1024, // 10MB default
-            sync_on_write: true, // Safe default
+            sync_on_write: true,                // Safe default
         }
     }
 }
 
 /// Retention policy for journal storage
-/// 
+///
 /// Controls how long events are kept and when cleanup occurs
 #[derive(Debug, Clone)]
 pub struct RetentionPolicy {
@@ -54,7 +54,7 @@ impl Default for RetentionPolicy {
 }
 
 /// Isolation mode for testing vs production
-/// 
+///
 /// This is an infrastructure concern about how storage is deployed
 #[derive(Debug, Clone)]
 pub enum IsolationMode {
@@ -71,21 +71,17 @@ pub enum IsolationMode {
 
 impl IsolationMode {
     /// Get the effective path for this isolation mode
-    pub fn effective_path(&self, base_path: &PathBuf) -> PathBuf {
+    pub fn effective_path(&self, base_path: &Path) -> PathBuf {
         match self {
-            IsolationMode::Shared => base_path.clone(),
+            IsolationMode::Shared => base_path.to_path_buf(),
             IsolationMode::Isolated { test_id } => {
                 // Use temp directory for tests
-                std::env::temp_dir()
-                    .join("flowstate_test")
-                    .join(test_id)
+                std::env::temp_dir().join("flowstate_test").join(test_id)
             }
-            IsolationMode::Named(name) => {
-                base_path.join(format!("named_{}", name))
-            }
+            IsolationMode::Named(name) => base_path.join(format!("named_{name}")),
         }
     }
-    
+
     /// Should this mode clean up on drop?
     pub fn cleanup_on_drop(&self) -> bool {
         matches!(self, IsolationMode::Isolated { .. })

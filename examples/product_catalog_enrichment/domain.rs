@@ -34,7 +34,7 @@ impl TypedPayload for Product {
 
 /// SKU dimension (bottom of hierarchy - actual sellable items)
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct SKU {
+pub struct Sku {
     pub sku_id: String,
     pub product_id: String, // FK to Product
     pub variant: String,    // e.g., "16GB/512GB"
@@ -42,7 +42,7 @@ pub struct SKU {
     pub current_price: f64,
 }
 
-impl TypedPayload for SKU {
+impl TypedPayload for Sku {
     const EVENT_TYPE: &'static str = "catalog.sku";
     const SCHEMA_VERSION: u32 = 1;
 }

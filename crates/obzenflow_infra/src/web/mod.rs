@@ -6,11 +6,8 @@
 #[cfg(feature = "warp-server")]
 pub mod warp;
 
-#[cfg(feature = "axum-server")]
-pub mod axum;
-
-pub mod factory;
 pub mod endpoints;
+pub mod factory;
 
 #[cfg(feature = "warp-server")]
 pub mod web_server;
@@ -19,11 +16,7 @@ pub mod web_server;
 #[cfg(feature = "warp-server")]
 pub use self::warp::WarpServer;
 
-#[cfg(feature = "axum-server")]
-pub use self::axum::AxumServer;
-
 // Re-export factory functions
-pub use factory::*;
 
 // THE ONE AND ONLY web server function
 #[cfg(feature = "warp-server")]

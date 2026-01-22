@@ -12,15 +12,15 @@ use obzenflow_core::event::identity::{EventId, JournalWriterId, WriterId};
 use obzenflow_core::event::vector_clock::{CausalOrderingService, VectorClock};
 use obzenflow_core::event::JournalEvent;
 use obzenflow_core::id::JournalId;
-use obzenflow_core::journal::journal::Journal;
 use obzenflow_core::journal::journal_error::JournalError;
 use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::journal::journal_reader::JournalReader;
+use obzenflow_core::journal::Journal;
 use std::collections::HashMap;
 use std::fs::File as StdFile;
 use std::io::SeekFrom;
 use std::io::{BufRead, BufReader};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -36,12 +36,12 @@ static JOURNAL_LOCKS: OnceLock<
     std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, Arc<RwLock<()>>>>,
 > = OnceLock::new();
 
-fn shared_lock_for_path(path: &PathBuf) -> Arc<RwLock<()>> {
+fn shared_lock_for_path(path: &Path) -> Arc<RwLock<()>> {
     let registry =
         JOURNAL_LOCKS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
     let mut guard = registry.lock().unwrap();
     guard
-        .entry(path.clone())
+        .entry(path.to_path_buf())
         .or_insert_with(|| Arc::new(RwLock::new(())))
         .clone()
 }
@@ -81,7 +81,7 @@ impl<T: JournalEvent> DiskJournal<T> {
             message: "Failed to create directory".to_string(),
             source: Box::new(e),
         })?;
-        let log_path = base_path.join(format!("{}.log", flow_id));
+        let log_path = base_path.join(format!("{flow_id}.log"));
 
         // Get current file size if it exists
         let write_offset = std::fs::metadata(&log_path).map(|m| m.len()).unwrap_or(0);
@@ -134,10 +134,7 @@ impl<T: JournalEvent> DiskJournal<T> {
             .append(true)
             .open(&log_path)
             .map_err(|e| JournalError::Implementation {
-                message: format!(
-                    "Failed to open log file for append: {}",
-                    log_path.display()
-                ),
+                message: format!("Failed to open log file for append: {}", log_path.display()),
                 source: Box::new(e),
             })?;
         let write_file = std_file;
@@ -204,10 +201,7 @@ impl<T: JournalEvent> DiskJournal<T> {
             .append(true)
             .open(&log_path)
             .map_err(|e| JournalError::Implementation {
-                message: format!(
-                    "Failed to open log file for append: {}",
-                    log_path.display()
-                ),
+                message: format!("Failed to open log file for append: {}", log_path.display()),
                 source: Box::new(e),
             })?;
         let write_file = std_file;
@@ -267,7 +261,7 @@ impl<T: JournalEvent> DiskJournal<T> {
                 ParseOutcome::Partial => continue,
                 ParseOutcome::Corrupt(e) => {
                     return Err(JournalError::Implementation {
-                        message: format!("Failed to parse record: {}", e),
+                        message: format!("Failed to parse record: {e}"),
                         source: Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, e)),
                     });
                 }
@@ -313,7 +307,7 @@ pub(super) fn parse_framed_record<R: JournalEvent>(line: &str) -> ParseOutcome<R
             match serde_json::from_slice::<LogRecord<R>>(body) {
                 Ok(rec) => return ParseOutcome::Complete(rec),
                 // CRC matched, so this is truly malformed JSON rather than a torn read
-                Err(e) => return ParseOutcome::Corrupt(format!("json parse error: {}", e)),
+                Err(e) => return ParseOutcome::Corrupt(format!("json parse error: {e}")),
             }
         } else {
             // Header present but not parseable - likely read mid-line
@@ -378,7 +372,7 @@ impl<T: JournalEvent + 'static> Journal<T> for DiskJournal<T> {
             });
         }
         // Get writer_id from the event
-        let writer_id = event.writer_id().clone();
+        let writer_id = *event.writer_id();
 
         // Get or create vector clock for this writer
         let mut vector_clock = {
@@ -411,7 +405,7 @@ impl<T: JournalEvent + 'static> Journal<T> for DiskJournal<T> {
         // Create log record
         let record = LogRecord::<T> {
             event_id: event.id().as_ulid(),
-            writer_id: writer_id.clone(),
+            writer_id,
             journal_id: self.journal_id,
             vector_clock: vector_clock.clone(),
             timestamp: envelope.timestamp,
@@ -448,17 +442,14 @@ impl<T: JournalEvent + 'static> Journal<T> for DiskJournal<T> {
         let write_bytes = bytes.clone();
 
         tokio::task::spawn_blocking(move || -> Result<(), JournalError> {
-            use std::io::{Error, ErrorKind, Write};
+            use std::io::{Error, Write};
 
             let mut file = match write_file.lock() {
                 Ok(guard) => guard,
                 Err(e) => {
                     return Err(JournalError::Implementation {
                         message: format!("Failed to lock journal file: {}", path.display()),
-                        source: Box::new(Error::new(
-                            ErrorKind::Other,
-                            format!("Mutex poisoned: {}", e),
-                        )),
+                        source: Box::new(Error::other(format!("Mutex poisoned: {e}"))),
                     });
                 }
             };
@@ -609,11 +600,8 @@ impl<T: JournalEvent + 'static> Journal<T> for DiskJournal<T> {
                 })),
                 ParseOutcome::Partial => Ok(None),
                 ParseOutcome::Corrupt(e) => Err(JournalError::Implementation {
-                    message: format!("Failed to parse record: {}", e),
-                    source: Box::new(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        e,
-                    )),
+                    message: format!("Failed to parse record: {e}"),
+                    source: Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, e)),
                 }),
             }
         } else {
@@ -662,13 +650,13 @@ impl<T: JournalEvent + 'static> Journal<T> for DiskJournal<T> {
             })?;
 
         // Get file size
-        let file_len = file
-            .seek(SeekFrom::End(0))
-            .await
-            .map_err(|e| JournalError::Implementation {
-                message: "Failed to seek to end".to_string(),
-                source: Box::new(e),
-            })?;
+        let file_len =
+            file.seek(SeekFrom::End(0))
+                .await
+                .map_err(|e| JournalError::Implementation {
+                    message: "Failed to seek to end".to_string(),
+                    source: Box::new(e),
+                })?;
 
         if file_len == 0 {
             return Ok(Vec::new());
@@ -682,22 +670,22 @@ impl<T: JournalEvent + 'static> Journal<T> for DiskJournal<T> {
             let chunk_start = pos.saturating_sub(BACKWARD_READ_BUFFER_SIZE as u64);
             let chunk_size = (pos - chunk_start) as usize;
 
-            file.seek(SeekFrom::Start(chunk_start))
-                .await
-                .map_err(|e| JournalError::Implementation {
+            file.seek(SeekFrom::Start(chunk_start)).await.map_err(|e| {
+                JournalError::Implementation {
                     message: "Failed to seek backwards".to_string(),
                     source: Box::new(e),
-                })?;
+                }
+            })?;
 
             let mut buffer = vec![0u8; chunk_size];
             use tokio::io::AsyncReadExt;
-            let bytes_read = file
-                .read(&mut buffer)
-                .await
-                .map_err(|e| JournalError::Implementation {
-                    message: "Failed to read chunk".to_string(),
-                    source: Box::new(e),
-                })?;
+            let bytes_read =
+                file.read(&mut buffer)
+                    .await
+                    .map_err(|e| JournalError::Implementation {
+                        message: "Failed to read chunk".to_string(),
+                        source: Box::new(e),
+                    })?;
             buffer.truncate(bytes_read);
 
             // Process lines in this chunk from end to start
@@ -757,16 +745,15 @@ impl<T: JournalEvent + 'static> Journal<T> for DiskJournal<T> {
 mod tests {
     use super::*;
     use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
-    use obzenflow_core::id::{StageId, SystemId};
-    use obzenflow_core::journal::journal_owner::JournalOwner;
+    use obzenflow_core::id::StageId;
+
     use uuid::Uuid;
 
     #[tokio::test]
     async fn test_basic_append_and_read() {
         let test_id = Uuid::new_v4();
         let test_dir = std::path::PathBuf::from(format!(
-            "target/test-logs/test_basic_append_and_read_{}",
-            test_id
+            "target/test-logs/test_basic_append_and_read_{test_id}"
         ));
         std::fs::create_dir_all(&test_dir).unwrap();
         // Create a test journal with a proper owner
@@ -804,7 +791,7 @@ mod tests {
     async fn test_causal_ordering() {
         let test_id = Uuid::new_v4();
         let test_dir =
-            std::path::PathBuf::from(format!("target/test-logs/test_causal_ordering_{}", test_id));
+            std::path::PathBuf::from(format!("target/test-logs/test_causal_ordering_{test_id}"));
         std::fs::create_dir_all(&test_dir).unwrap();
         // Create a test journal with a proper owner
         let test_system_id = obzenflow_core::SystemId::new();
@@ -847,8 +834,7 @@ mod tests {
     async fn test_concurrent_writers() {
         let test_id = Uuid::new_v4();
         let test_dir = std::path::PathBuf::from(format!(
-            "target/test-logs/test_concurrent_writers_{}",
-            test_id
+            "target/test-logs/test_concurrent_writers_{test_id}"
         ));
         std::fs::create_dir_all(&test_dir).unwrap();
         // Create a test journal with a proper owner

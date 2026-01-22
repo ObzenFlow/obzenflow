@@ -12,4 +12,3 @@ pub enum HttpClientError {
     #[error("transport error: {0}")]
     Transport(String),
 }
-

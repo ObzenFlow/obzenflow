@@ -8,11 +8,12 @@ use tokio::sync::broadcast;
 const DEFAULT_METRIC_CHANNEL_CAPACITY: usize = 1024;
 
 /// Predefined bucket configurations for different use cases
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub enum DurationBuckets {
     /// For sub-second operations: 100μs to 1s
     Microseconds,
     /// For typical API calls: 1ms to 10s  
+    #[default]
     Milliseconds,
     /// For batch operations: 100ms to 5min
     Seconds,
@@ -31,12 +32,6 @@ impl DurationBuckets {
             Self::Minutes => &[1.0, 5.0, 10.0, 30.0, 60.0, 300.0, 600.0, 1800.0, 3600.0],
             Self::Custom(buckets) => buckets,
         }
-    }
-}
-
-impl Default for DurationBuckets {
-    fn default() -> Self {
-        Self::Milliseconds
     }
 }
 
@@ -93,7 +88,7 @@ impl DurationMetric {
         });
     }
 
-    pub fn start_timer(&self) -> Timer {
+    pub fn start_timer(&self) -> Timer<'_> {
         Timer {
             start: Instant::now(),
             metric: self,
@@ -173,17 +168,14 @@ impl Metric for DurationMetric {
     }
 
     fn update(&self, value: MetricValue) {
-        match value {
-            MetricValue::Histogram { sum, count, .. } => {
-                // Record individual observations to maintain histogram integrity
-                if count > 0 {
-                    let avg_duration = sum / count as f64;
-                    for _ in 0..count {
-                        self.histogram.observe(avg_duration);
-                    }
+        if let MetricValue::Histogram { sum, count, .. } = value {
+            // Record individual observations to maintain histogram integrity
+            if count > 0 {
+                let avg_duration = sum / count as f64;
+                for _ in 0..count {
+                    self.histogram.observe(avg_duration);
                 }
             }
-            _ => {}
         }
     }
 

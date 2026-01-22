@@ -14,9 +14,9 @@ use obzenflow_core::event::payloads::observability_payload::{
     CircuitBreakerEvent, MiddlewareLifecycle, ObservabilityPayload,
 };
 use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
-use obzenflow_core::event::ChainEventFactory;
+use obzenflow_core::event::{ChainEventFactory, CircuitBreakerSummaryEventParams};
 use obzenflow_core::TypedPayload;
-use obzenflow_core::{EventId, StageId, WriterId};
+use obzenflow_core::{StageId, WriterId};
 use obzenflow_runtime_services::pipeline::config::StageConfig;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -27,6 +27,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 type FailureClassifier = Arc<dyn Fn(&ChainEvent, &[ChainEvent]) -> bool + Send + Sync>;
+type FallbackFn = Arc<dyn Fn(&ChainEvent) -> Vec<ChainEvent> + Send + Sync>;
 
 /// Policy for how the breaker should treat errors whose `ErrorKind` is
 /// `Unknown` or `None` (legacy/unclassified cases).
@@ -55,22 +56,20 @@ enum CircuitBreakerFailureMode {
 
 /// Sliding window shape for rate-based failure detection.
 #[derive(Debug, Clone)]
-enum FailureWindow {
+pub(crate) enum FailureWindow {
     /// Sliding window over the last `size` calls.
     Count { size: u32 },
-    /// Time-based window over the last `duration`, with a minimum number of calls.
-    Time {
-        duration: Duration,
-        minimum_calls: u32,
-    },
+    /// Time-based window over the last `duration`.
+    Time { duration: Duration },
 }
 
 /// Behaviour while the circuit breaker is in the Open state.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub enum OpenPolicy {
     /// Emit degraded responses via fallback when configured; otherwise behave
     /// like a simple rejection/skip. This matches the existing default
     /// behaviour from 051b‑part‑2.
+    #[default]
     EmitFallback,
     /// Fail fast with an explicit rejection instead of attempting to
     /// synthesize degraded responses.
@@ -79,12 +78,6 @@ pub enum OpenPolicy {
     /// scenarios). This is powerful but should be used with care when
     /// contracts are strict.
     Skip,
-}
-
-impl Default for OpenPolicy {
-    fn default() -> Self {
-        OpenPolicy::EmitFallback
-    }
 }
 
 /// Behaviour while the circuit breaker is in the HalfOpen state.
@@ -248,7 +241,7 @@ pub struct CircuitBreakerMiddleware {
     /// This keeps the handler itself unaware of circuit breaker policy while
     /// allowing flows to provide domain‑specific degraded responses purely
     /// via circuit breaker configuration.
-    fallback: Option<Arc<dyn Fn(&ChainEvent) -> Vec<ChainEvent> + Send + Sync>>,
+    fallback: Option<FallbackFn>,
     /// Optional classifier that decides whether a given call should be counted
     /// as a failure for breaker purposes based on the input event and the
     /// outputs produced by the handler.
@@ -297,7 +290,7 @@ impl CircuitBreakerMiddleware {
     pub fn with_cooldown_and_fallback(
         threshold: usize,
         cooldown: Duration,
-        fallback: Option<Arc<dyn Fn(&ChainEvent) -> Vec<ChainEvent> + Send + Sync>>,
+        fallback: Option<FallbackFn>,
         failure_classifier: Option<FailureClassifier>,
         stage_id: Option<StageId>,
     ) -> Self {
@@ -530,23 +523,25 @@ impl CircuitBreakerMiddleware {
             // Emit a circuit breaker summary event
             let event = ChainEventFactory::circuit_breaker_summary(
                 self.writer_id,
-                stats.last_summary.elapsed().as_secs(),
-                stats.requests_processed,
-                stats.requests_rejected,
-                format!("{:?}", self.current_state()),
-                self.failure_count.load(Ordering::SeqCst),
-                if stats.requests_processed + stats.requests_rejected > 0 {
-                    stats.requests_rejected as f64
-                        / (stats.requests_processed + stats.requests_rejected) as f64
-                } else {
-                    0.0
+                CircuitBreakerSummaryEventParams {
+                    window_duration_s: stats.last_summary.elapsed().as_secs(),
+                    requests_processed: stats.requests_processed,
+                    requests_rejected: stats.requests_rejected,
+                    state: format!("{:?}", self.current_state()),
+                    consecutive_failures: self.failure_count.load(Ordering::SeqCst),
+                    rejection_rate: if stats.requests_processed + stats.requests_rejected > 0 {
+                        stats.requests_rejected as f64
+                            / (stats.requests_processed + stats.requests_rejected) as f64
+                    } else {
+                        0.0
+                    },
+                    successes_total,
+                    failures_total,
+                    opened_total,
+                    time_in_closed_seconds,
+                    time_in_open_seconds,
+                    time_in_half_open_seconds,
                 },
-                successes_total,
-                failures_total,
-                opened_total,
-                time_in_closed_seconds,
-                time_in_open_seconds,
-                time_in_half_open_seconds,
             );
             ctx.write_control_event(event);
 
@@ -634,7 +629,7 @@ impl Middleware for CircuitBreakerMiddleware {
 
             CircuitState::HalfOpen => {
                 // Allow up to `permitted_probes` concurrent probe requests.
-                let permitted = self.half_open_policy.permitted_probes.get() as u32;
+                let permitted = self.half_open_policy.permitted_probes.get();
                 let mut current = self.probe_in_flight.load(Ordering::SeqCst);
 
                 loop {
@@ -805,11 +800,7 @@ impl Middleware for CircuitBreakerMiddleware {
                                         let max = (*size as usize).min(state.capacity());
                                         // For count-based windows we just consider the
                                         // most recent `max` samples.
-                                        let mut idx = 0usize;
-                                        for sample in state.iter() {
-                                            if idx >= max {
-                                                break;
-                                            }
+                                        for sample in state.iter().take(max) {
                                             observed += 1;
                                             if sample.is_failure {
                                                 failures += 1;
@@ -817,10 +808,9 @@ impl Middleware for CircuitBreakerMiddleware {
                                             if sample.is_slow {
                                                 slow_calls += 1;
                                             }
-                                            idx += 1;
                                         }
                                     }
-                                    FailureWindow::Time { duration, .. } => {
+                                    FailureWindow::Time { duration } => {
                                         for sample in state.iter() {
                                             if now.duration_since(sample.timestamp) <= *duration {
                                                 observed += 1;
@@ -923,7 +913,7 @@ fn copy_metadata_from(target: &mut ChainEvent, source: &ChainEvent) {
     target.flow_context = source.flow_context.clone();
     target.processing_info = source.processing_info.clone();
     target.causality = source.causality.clone();
-    target.correlation_id = source.correlation_id.clone();
+    target.correlation_id = source.correlation_id;
     target.correlation_payload = source.correlation_payload.clone();
     target.runtime_context = source.runtime_context.clone();
     target.observability = source.observability.clone();
@@ -964,7 +954,7 @@ where
     };
 
     // 4. Wrap into a ChainEvent, copying metadata
-    let mut ev = ChainEventFactory::data_event(event.writer_id.clone(), Out::EVENT_TYPE, out_value);
+    let mut ev = ChainEventFactory::data_event(event.writer_id, Out::EVENT_TYPE, out_value);
     copy_metadata_from(&mut ev, event);
 
     vec![ev]
@@ -974,7 +964,7 @@ where
 pub struct CircuitBreakerBuilder {
     threshold: usize,
     cooldown: Duration,
-    fallback: Option<Arc<dyn Fn(&ChainEvent) -> Vec<ChainEvent> + Send + Sync>>,
+    fallback: Option<FallbackFn>,
     contract_mode: Option<CircuitBreakerContractMode>,
     failure_classifier: Option<FailureClassifier>,
     failure_mode: Option<CircuitBreakerFailureMode>,
@@ -1115,8 +1105,7 @@ impl CircuitBreakerBuilder {
         );
         assert!(
             (0.0..=1.0).contains(&failure_rate_threshold) && failure_rate_threshold > 0.0,
-            "CircuitBreaker rate_based_over_last_n_calls: failure_rate_threshold must be in (0.0, 1.0], got {}",
-            failure_rate_threshold
+            "CircuitBreaker rate_based_over_last_n_calls: failure_rate_threshold must be in (0.0, 1.0], got {failure_rate_threshold}"
         );
 
         self.failure_mode_rate_based_internal(
@@ -1142,8 +1131,7 @@ impl CircuitBreakerBuilder {
         );
         assert!(
             (0.0..=1.0).contains(&failure_rate_threshold) && failure_rate_threshold > 0.0,
-            "CircuitBreaker rate_based_over_duration: failure_rate_threshold must be in (0.0, 1.0], got {}",
-            failure_rate_threshold
+            "CircuitBreaker rate_based_over_duration: failure_rate_threshold must be in (0.0, 1.0], got {failure_rate_threshold}"
         );
 
         // Default minimum_calls for time windows; can be overridden via `minimum_calls`.
@@ -1152,7 +1140,6 @@ impl CircuitBreakerBuilder {
         self.failure_mode_rate_based_internal(
             FailureWindow::Time {
                 duration: window_duration,
-                minimum_calls: DEFAULT_MIN_CALLS,
             },
             failure_rate_threshold,
             DEFAULT_MIN_CALLS,
@@ -1188,8 +1175,7 @@ impl CircuitBreakerBuilder {
         );
         assert!(
             (0.0..=1.0).contains(&rate_threshold) && rate_threshold > 0.0,
-            "CircuitBreaker slow_call: rate_threshold must be in (0.0, 1.0], got {}",
-            rate_threshold
+            "CircuitBreaker slow_call: rate_threshold must be in (0.0, 1.0], got {rate_threshold}"
         );
 
         match &mut self.failure_mode {
@@ -1232,7 +1218,7 @@ impl CircuitBreakerBuilder {
 pub struct CircuitBreakerFactory {
     threshold: usize,
     cooldown: Duration,
-    fallback: Option<Arc<dyn Fn(&ChainEvent) -> Vec<ChainEvent> + Send + Sync>>,
+    fallback: Option<FallbackFn>,
     contract_mode: Option<CircuitBreakerContractMode>,
     failure_classifier: Option<FailureClassifier>,
     failure_mode: Option<CircuitBreakerFailureMode>,
@@ -1355,8 +1341,7 @@ impl CircuitBreakerFactory {
         );
         assert!(
             (0.0..=1.0).contains(&failure_rate_threshold) && failure_rate_threshold > 0.0,
-            "CircuitBreaker rate_based_over_last_n_calls: failure_rate_threshold must be in (0.0, 1.0], got {}",
-            failure_rate_threshold
+            "CircuitBreaker rate_based_over_last_n_calls: failure_rate_threshold must be in (0.0, 1.0], got {failure_rate_threshold}"
         );
 
         self.failure_mode_rate_based_internal(
@@ -1378,8 +1363,7 @@ impl CircuitBreakerFactory {
         );
         assert!(
             (0.0..=1.0).contains(&failure_rate_threshold) && failure_rate_threshold > 0.0,
-            "CircuitBreaker rate_based_over_duration: failure_rate_threshold must be in (0.0, 1.0], got {}",
-            failure_rate_threshold
+            "CircuitBreaker rate_based_over_duration: failure_rate_threshold must be in (0.0, 1.0], got {failure_rate_threshold}"
         );
 
         const DEFAULT_MIN_CALLS: u32 = 10;
@@ -1387,7 +1371,6 @@ impl CircuitBreakerFactory {
         self.failure_mode_rate_based_internal(
             FailureWindow::Time {
                 duration: window_duration,
-                minimum_calls: DEFAULT_MIN_CALLS,
             },
             failure_rate_threshold,
             DEFAULT_MIN_CALLS,
@@ -1408,8 +1391,7 @@ impl CircuitBreakerFactory {
         );
         assert!(
             (0.0..=1.0).contains(&rate_threshold) && rate_threshold > 0.0,
-            "CircuitBreaker slow_call: rate_threshold must be in (0.0, 1.0], got {}",
-            rate_threshold
+            "CircuitBreaker slow_call: rate_threshold must be in (0.0, 1.0], got {rate_threshold}"
         );
 
         match &mut self.failure_mode {
@@ -1483,11 +1465,8 @@ impl MiddlewareFactory for CircuitBreakerFactory {
 
         // Determine Open / HalfOpen policies, defaulting to the legacy
         // behaviour when not explicitly configured.
-        let open_policy = self.open_policy.clone().unwrap_or_else(OpenPolicy::default);
-        let half_open_policy = self
-            .half_open_policy
-            .clone()
-            .unwrap_or_else(HalfOpenPolicy::default);
+        let open_policy = self.open_policy.clone().unwrap_or_default();
+        let half_open_policy = self.half_open_policy.clone().unwrap_or_default();
 
         let unknown_error_kind_policy = self.unknown_error_kind_policy;
 
@@ -1686,7 +1665,7 @@ mod tests {
                 cb.pre_handle(&event, &mut ctx),
                 MiddlewareAction::Continue
             ));
-            cb.post_handle(&event, &vec![], &mut ctx);
+            cb.post_handle(&event, &[], &mut ctx);
         }
 
         // Still closed
@@ -1715,12 +1694,11 @@ mod tests {
                 }
                 assert!(
                     (failure_rate_threshold - 0.5).abs() < f32::EPSILON,
-                    "unexpected failure_rate_threshold: {}",
-                    failure_rate_threshold
+                    "unexpected failure_rate_threshold: {failure_rate_threshold}"
                 );
                 assert_eq!(minimum_calls.get(), 100);
             }
-            other => panic!("expected rate-based mode, got {:?}", other),
+            other => panic!("expected rate-based mode, got {other:?}"),
         }
     }
 
@@ -1734,7 +1712,7 @@ mod tests {
 
         match builder.open_policy {
             Some(OpenPolicy::FailFast) => {}
-            other => panic!("expected FailFast open policy, got {:?}", other),
+            other => panic!("expected FailFast open policy, got {other:?}"),
         }
 
         match builder.half_open_policy {
@@ -1759,23 +1737,18 @@ mod tests {
                 ..
             }) => {
                 match window {
-                    FailureWindow::Time {
-                        duration: win_dur,
-                        minimum_calls: win_min,
-                    } => {
+                    FailureWindow::Time { duration: win_dur } => {
                         assert_eq!(win_dur, duration);
-                        assert_eq!(win_min, 10);
                     }
                     _ => panic!("expected time-based window"),
                 }
                 assert!(
                     (failure_rate_threshold - 0.5).abs() < f32::EPSILON,
-                    "unexpected failure_rate_threshold: {}",
-                    failure_rate_threshold
+                    "unexpected failure_rate_threshold: {failure_rate_threshold}"
                 );
                 assert_eq!(minimum_calls.get(), 10);
             }
-            other => panic!("expected rate-based mode, got {:?}", other),
+            other => panic!("expected rate-based mode, got {other:?}"),
         }
     }
 
@@ -1814,7 +1787,7 @@ mod tests {
             let output = if *is_failure {
                 let mut failed = create_test_event();
                 failed.processing_info.status =
-                    ProcessingStatus::error(format!("simulated_failure_{}", idx));
+                    ProcessingStatus::error(format!("simulated_failure_{idx}"));
                 vec![failed]
             } else {
                 vec![create_test_event()]
@@ -1920,7 +1893,7 @@ mod tests {
 
         match action {
             MiddlewareAction::Skip(results) => assert!(results.is_empty()),
-            other => panic!("expected Skip action while Open, got {:?}", other),
+            other => panic!("expected Skip action while Open, got {other:?}"),
         }
         assert!(ctx.has_event("circuit_breaker", "rejected"));
     }
@@ -1942,10 +1915,7 @@ mod tests {
 
         match action {
             MiddlewareAction::Skip(results) => assert!(results.is_empty()),
-            other => panic!(
-                "expected Skip action for HalfOpen non-probe, got {:?}",
-                other
-            ),
+            other => panic!("expected Skip action for HalfOpen non-probe, got {other:?}"),
         }
         assert!(ctx.has_event("circuit_breaker", "rejected"));
     }

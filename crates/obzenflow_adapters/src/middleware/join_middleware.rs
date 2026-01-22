@@ -328,26 +328,25 @@ mod tests {
         let source_id = StageId::new();
 
         // Normal event should be processed
-        let event1 = ChainEventFactory::data_event(writer_id.clone(), "test", json!({"data": 1}));
+        let event1 = ChainEventFactory::data_event(writer_id, "test", json!({"data": 1}));
         let results1 = handler
-            .process_event(&mut state, event1, source_id, writer_id.clone())
+            .process_event(&mut state, event1, source_id, writer_id)
             .expect("Join middleware should succeed for normal event");
         assert_eq!(process_count.load(Ordering::Relaxed), 1);
         assert_eq!(results1.len(), 1);
 
         // Event with "skip" should be skipped
-        let event2 =
-            ChainEventFactory::data_event(writer_id.clone(), "test", json!({"skip": true}));
+        let event2 = ChainEventFactory::data_event(writer_id, "test", json!({"skip": true}));
         let results2 = handler
-            .process_event(&mut state, event2, source_id, writer_id.clone())
+            .process_event(&mut state, event2, source_id, writer_id)
             .expect("Join middleware should succeed for skipped event");
         assert_eq!(process_count.load(Ordering::Relaxed), 1); // Still 1
         assert_eq!(results2.len(), 0);
 
         // Another normal event from stream side (same middleware applies)
-        let event3 = ChainEventFactory::data_event(writer_id.clone(), "test", json!({"data": 3}));
+        let event3 = ChainEventFactory::data_event(writer_id, "test", json!({"data": 3}));
         let results3 = handler
-            .process_event(&mut state, event3, source_id, writer_id.clone())
+            .process_event(&mut state, event3, source_id, writer_id)
             .expect("Join middleware should succeed for second normal event");
         assert_eq!(process_count.load(Ordering::Relaxed), 2);
         assert_eq!(results3.len(), 1);

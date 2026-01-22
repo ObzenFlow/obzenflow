@@ -165,9 +165,7 @@ fn hn_decoder_parses_topstories_and_seeds_cursor() {
     assert!(out.items.is_empty());
 
     let cursor = out.next_cursor.expect("cursor expected");
-    let HnFetchState::FetchItems { pending } = cursor else {
-        panic!("expected FetchItems cursor");
-    };
+    let HnFetchState::FetchItems { pending } = cursor;
 
     let pending = pending.into_iter().collect::<Vec<_>>();
     assert_eq!(pending, vec![101, 102, 103]);
@@ -209,9 +207,7 @@ fn hn_decoder_parses_item_and_advances_cursor() {
     assert_eq!(out.items[0].id, 42);
 
     let next = out.next_cursor.expect("cursor expected");
-    let HnFetchState::FetchItems { pending } = next else {
-        panic!("expected FetchItems cursor");
-    };
+    let HnFetchState::FetchItems { pending } = next;
     let pending = pending.into_iter().collect::<Vec<_>>();
     assert_eq!(pending, vec![43]);
 }
@@ -231,9 +227,7 @@ fn hn_decoder_skips_null_items() {
     assert!(out.items.is_empty());
 
     let next = out.next_cursor.expect("cursor expected");
-    let HnFetchState::FetchItems { pending } = next else {
-        panic!("expected FetchItems cursor");
-    };
+    let HnFetchState::FetchItems { pending } = next;
     let pending = pending.into_iter().collect::<Vec<_>>();
     assert_eq!(pending, vec![43]);
 }
@@ -242,11 +236,17 @@ fn hn_decoder_skips_null_items() {
 fn hn_decoder_builds_expected_urls() {
     let decoder = HnStoryDecoder::new(1);
     let req = decoder.request_spec(None);
-    assert_eq!(req.url.as_str(), "https://hacker-news.firebaseio.com/v0/topstories.json");
+    assert_eq!(
+        req.url.as_str(),
+        "https://hacker-news.firebaseio.com/v0/topstories.json"
+    );
 
     let cursor = HnFetchState::FetchItems {
         pending: VecDeque::from([123_u64]),
     };
     let req = decoder.request_spec(Some(&cursor));
-    assert_eq!(req.url.as_str(), "https://hacker-news.firebaseio.com/v0/item/123.json");
+    assert_eq!(
+        req.url.as_str(),
+        "https://hacker-news.firebaseio.com/v0/item/123.json"
+    );
 }

@@ -6,7 +6,7 @@
 
 use criterion::{criterion_group, criterion_main, Criterion};
 use obzenflow_benchmarks::prelude::*;
-use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
+use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::event::ChainEventContent;
 use obzenflow_dsl_infra::{flow, sink, source, transform};
@@ -19,7 +19,6 @@ use obzenflow_runtime_services::stages::SourceError;
 use obzenflow_runtime_services::supervised_base::SupervisorHandle;
 // Monitoring removed per FLOWIP-056-666
 use async_trait::async_trait;
-use serde_json::json;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -53,7 +52,6 @@ impl FiniteSourceHandler for IdleSource {
 /// Sink that records latencies
 #[derive(Clone, Debug)]
 struct TimestampedSink {
-    expected_count: u64,
     received: Arc<AtomicU64>,
     latencies: Arc<tokio::sync::Mutex<Vec<Duration>>>,
 }
@@ -66,7 +64,6 @@ impl TimestampedSink {
         let received = Arc::new(AtomicU64::new(0));
         (
             Self {
-                expected_count,
                 received: received.clone(),
                 latencies: latencies.clone(),
             },
@@ -108,15 +105,11 @@ impl SinkHandler for TimestampedSink {
 
 /// Passthrough stage that just forwards events
 #[derive(Clone, Debug)]
-struct PassthroughStage {
-    name: String,
-}
+struct PassthroughStage {}
 
 impl PassthroughStage {
-    fn new(name: &str) -> Self {
-        Self {
-            name: name.to_string(),
-        }
+    fn new(_name: &str) -> Self {
+        Self {}
     }
 }
 
@@ -134,7 +127,7 @@ impl TransformHandler for PassthroughStage {
 /// Create a temporary journal for benchmarking
 fn create_temp_journals_base(test_name: &str) -> anyhow::Result<(std::path::PathBuf, TempDir)> {
     let temp_dir = tempdir()?;
-    let journal_path = temp_dir.path().join(format!("bench_{}", test_name));
+    let journal_path = temp_dir.path().join(format!("bench_{test_name}"));
     std::fs::create_dir_all(&journal_path)?;
     Ok((journal_path, temp_dir))
 }
@@ -161,7 +154,7 @@ async fn build_pipeline(
             }
         }
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to create flow: {:?}", e))?,
+        .map_err(|e| anyhow::anyhow!("Failed to create flow: {e:?}"))?,
         10 => flow! {
             journals: disk_journals(journals_base_path.clone()),
             middleware: [],
@@ -194,7 +187,7 @@ async fn build_pipeline(
             }
         }
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to create flow: {:?}", e))?,
+        .map_err(|e| anyhow::anyhow!("Failed to create flow: {e:?}"))?,
         20 => flow! {
             journals: disk_journals(journals_base_path.clone()),
             middleware: [],
@@ -247,7 +240,7 @@ async fn build_pipeline(
             }
         }
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to create flow: {:?}", e))?,
+        .map_err(|e| anyhow::anyhow!("Failed to create flow: {e:?}"))?,
         100 => {
             // For 100 stages, simplify to 10 stages for maintainability
             flow! {
@@ -282,9 +275,9 @@ async fn build_pipeline(
                 }
             }
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to create flow: {:?}", e))?
+            .map_err(|e| anyhow::anyhow!("Failed to create flow: {e:?}"))?
         }
-        _ => return Err(anyhow::anyhow!("Unsupported stage count: {}", stage_count)),
+        _ => return Err(anyhow::anyhow!("Unsupported stage count: {stage_count}")),
     };
 
     Ok(handle)
@@ -312,13 +305,13 @@ async fn measure_idle_cpu() -> anyhow::Result<f64> {
         }
     }
     .await
-    .map_err(|e| anyhow::anyhow!("Failed to create flow: {:?}", e))?;
+    .map_err(|e| anyhow::anyhow!("Failed to create flow: {e:?}"))?;
 
     // Start the pipeline (do not await completion; we want to measure idle CPU while running)
     handle
         .start()
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to start pipeline: {:?}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to start pipeline: {e:?}"))?;
 
     // Let pipeline stabilize
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -388,7 +381,7 @@ fn bench_idle_cpu_by_depth(c: &mut Criterion) {
     let stage_counts = vec![1, 10, 20, 100];
 
     for stage_count in stage_counts {
-        group.bench_function(&format!("{}_stages", stage_count), |b| {
+        group.bench_function(format!("{stage_count}_stages"), |b| {
             b.to_async(&rt).iter(|| async {
                 // Let Criterion measure the actual function execution time
                 let cpu_percentage = measure_idle_cpu_with_stages(stage_count).await.unwrap();
@@ -402,8 +395,8 @@ fn bench_idle_cpu_by_depth(c: &mut Criterion) {
 
 /// Measure idle CPU with a specific number of stages
 async fn measure_idle_cpu_with_stages(stage_count: usize) -> anyhow::Result<f64> {
-    let (journals_base_path, _temp_dir) =
-        create_temp_journals_base(&format!("idle_cpu_{}_stages", stage_count))?;
+    let test_name = format!("idle_cpu_{stage_count}_stages");
+    let (journals_base_path, _temp_dir) = create_temp_journals_base(&test_name)?;
 
     let idle_source = IdleSource::new();
     let (sink, _) = TimestampedSink::new(0);
@@ -414,7 +407,7 @@ async fn measure_idle_cpu_with_stages(stage_count: usize) -> anyhow::Result<f64>
     handle
         .start()
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to start pipeline: {:?}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to start pipeline: {e:?}"))?;
 
     // Let stabilize
     tokio::time::sleep(Duration::from_millis(500)).await;

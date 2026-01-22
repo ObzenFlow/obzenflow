@@ -15,7 +15,7 @@ pub use reqwest_client::ReqwestHttpClient;
 pub fn default_http_client() -> Result<Arc<dyn HttpClient>, HttpClientFactoryError> {
     #[cfg(feature = "reqwest-client")]
     {
-        return Ok(Arc::new(ReqwestHttpClient::new()));
+        Ok(Arc::new(ReqwestHttpClient::new()))
     }
 
     #[cfg(not(feature = "reqwest-client"))]
@@ -31,4 +31,3 @@ pub enum HttpClientFactoryError {
     #[error("Feature not enabled: {0}")]
     FeatureNotEnabled(String),
 }
-

@@ -84,7 +84,7 @@ impl CycleGuardMiddleware {
 }
 
 impl Middleware for CycleGuardMiddleware {
-    fn pre_handle(&self, event: &ChainEvent, ctx: &mut MiddlewareContext) -> MiddlewareAction {
+    fn pre_handle(&self, event: &ChainEvent, _ctx: &mut MiddlewareContext) -> MiddlewareAction {
         // Only track events with correlation IDs (skip control events)
         let Some(correlation_id) = &event.correlation_id else {
             return MiddlewareAction::Continue;
@@ -92,7 +92,7 @@ impl Middleware for CycleGuardMiddleware {
 
         // Check if we should run cleanup (every 60 seconds)
         {
-            let mut last_cleanup = self.last_cleanup.lock().unwrap();
+            let last_cleanup = self.last_cleanup.lock().unwrap();
             let now = Instant::now();
             if now.duration_since(*last_cleanup) > Duration::from_secs(60) {
                 debug!("CycleGuard[{}]: Running periodic cleanup", self.stage_name);

@@ -3,7 +3,9 @@
 
 use crate::event::context::causality_context::CausalityContext;
 use crate::event::context::observability_context::ObservabilityContext;
-use crate::event::context::{FlowContext, IntentContext, ProcessingContext, ReplayContext, RuntimeContext};
+use crate::event::context::{
+    FlowContext, IntentContext, ProcessingContext, ReplayContext, RuntimeContext,
+};
 use crate::event::status::processing_status::{ErrorKind, ProcessingStatus};
 use crate::event::types::{CorrelationId, EventId, WriterId};
 use crate::id::StageId;
@@ -90,67 +92,6 @@ pub enum ChainEventContent {
 }
 
 impl ChainEvent {
-    /// Create a new ChainEvent
-    fn new(id: EventId, writer_id: WriterId, content: ChainEventContent) -> Self {
-        ChainEvent {
-            id,
-            writer_id,
-            content,
-            causality: CausalityContext::new(),
-            flow_context: FlowContext::default(),
-            processing_info: ProcessingContext::default(),
-            intent: None,
-            correlation_id: None,
-            correlation_payload: None,
-            replay_context: None,
-            runtime_context: None,
-            observability: None,
-        }
-    }
-
-    /// Create a data event
-    fn data(
-        id: EventId,
-        writer_id: WriterId,
-        event_type: impl Into<String>,
-        payload: Value,
-    ) -> Self {
-        Self::new(
-            id,
-            writer_id,
-            ChainEventContent::Data {
-                event_type: event_type.into(),
-                payload,
-            },
-        )
-    }
-
-    /// Create an EOF signal
-    fn eof(id: EventId, writer_id: WriterId, natural: bool) -> Self {
-        Self::new(
-            id,
-            writer_id.clone(),
-            ChainEventContent::FlowControl(FlowControlPayload::Eof {
-                natural,
-                timestamp: current_timestamp(),
-                writer_id: Some(writer_id),
-                writer_seq: None,
-                vector_clock: None,
-                last_event_id: None,
-            }),
-        )
-    }
-
-    /// Create a sink delivery event
-    fn delivery(id: EventId, writer_id: WriterId, payload: DeliveryPayload) -> Self {
-        Self::new(id, writer_id, ChainEventContent::Delivery(payload))
-    }
-
-    /// Create an observability event
-    fn observability(id: EventId, writer_id: WriterId, payload: ObservabilityPayload) -> Self {
-        Self::new(id, writer_id, ChainEventContent::Observability(payload))
-    }
-
     /// Attach observability context to any event (wide events pattern)
     pub fn with_observability_context(mut self, observability: ObservabilityContext) -> Self {
         self.observability = Some(observability);
@@ -246,7 +187,7 @@ impl ChainEvent {
         kind: ErrorKind,
     ) -> ChainEvent {
         let reason_str = reason.into();
-        ChainEventFactory::derived_data_event(self.writer_id.clone(), self, event_type, payload)
+        ChainEventFactory::derived_data_event(self.writer_id, self, event_type, payload)
             .mark_as_error(reason_str, kind)
     }
 
@@ -424,6 +365,59 @@ impl JournalEvent for ChainEvent {
 /// Stateless factory for creating ChainEvents with consistent patterns
 pub struct ChainEventFactory;
 
+#[derive(Debug, Clone)]
+pub struct SourceContractEventParams {
+    pub expected_count: Option<crate::event::types::Count>,
+    pub source_id: StageId,
+    pub route: Option<crate::event::types::RouteKey>,
+    pub journal_path: crate::event::types::JournalPath,
+    pub journal_index: crate::event::types::JournalIndex,
+    pub writer_seq: Option<crate::event::types::SeqNo>,
+    pub vector_clock: Option<crate::event::vector_clock::VectorClock>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ConsumptionProgressEventParams {
+    pub reader_seq: crate::event::types::SeqNo,
+    pub last_event_id: Option<crate::event::types::EventId>,
+    pub vector_clock: Option<crate::event::vector_clock::VectorClock>,
+    pub eof_seen: bool,
+    pub reader_path: crate::event::types::JournalPath,
+    pub reader_index: crate::event::types::JournalIndex,
+    pub advertised_writer_seq: Option<crate::event::types::SeqNo>,
+    pub advertised_vector_clock: Option<crate::event::vector_clock::VectorClock>,
+    pub stalled_since: Option<crate::event::types::DurationMs>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ConsumptionFinalEventParams {
+    pub pass: bool,
+    pub consumed_count: crate::event::types::Count,
+    pub expected_count: Option<crate::event::types::Count>,
+    pub eof_seen: bool,
+    pub last_event_id: Option<crate::event::types::EventId>,
+    pub reader_seq: crate::event::types::SeqNo,
+    pub advertised_writer_seq: Option<crate::event::types::SeqNo>,
+    pub advertised_vector_clock: Option<crate::event::vector_clock::VectorClock>,
+    pub failure_reason: Option<crate::event::types::ViolationCause>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CircuitBreakerSummaryEventParams {
+    pub window_duration_s: u64,
+    pub requests_processed: u64,
+    pub requests_rejected: u64,
+    pub state: String,
+    pub consecutive_failures: usize,
+    pub rejection_rate: f64,
+    pub successes_total: u64,
+    pub failures_total: u64,
+    pub opened_total: u64,
+    pub time_in_closed_seconds: f64,
+    pub time_in_open_seconds: f64,
+    pub time_in_half_open_seconds: f64,
+}
+
 impl ChainEventFactory {
     /// Create a data event
     pub fn data_event(
@@ -453,7 +447,7 @@ impl ChainEventFactory {
     /// Create an EOF signal
     pub fn eof_event(writer_id: WriterId, natural: bool) -> ChainEvent {
         Self::create_event(
-            writer_id.clone(),
+            writer_id,
             ChainEventContent::FlowControl(FlowControlPayload::Eof {
                 natural,
                 timestamp: current_timestamp(),
@@ -515,14 +509,17 @@ impl ChainEventFactory {
     /// Create a source contract event
     pub fn source_contract_event(
         writer_id: WriterId,
-        expected_count: Option<crate::event::types::Count>,
-        source_id: crate::StageId,
-        route: Option<crate::event::types::RouteKey>,
-        journal_path: crate::event::types::JournalPath,
-        journal_index: crate::event::types::JournalIndex,
-        writer_seq: Option<crate::event::types::SeqNo>,
-        vector_clock: Option<crate::event::vector_clock::VectorClock>,
+        params: SourceContractEventParams,
     ) -> ChainEvent {
+        let SourceContractEventParams {
+            expected_count,
+            source_id,
+            route,
+            journal_path,
+            journal_index,
+            writer_seq,
+            vector_clock,
+        } = params;
         Self::create_event(
             writer_id,
             ChainEventContent::FlowControl(FlowControlPayload::SourceContract {
@@ -540,16 +537,19 @@ impl ChainEventFactory {
     /// Create a consumption progress event
     pub fn consumption_progress_event(
         writer_id: WriterId,
-        reader_seq: crate::event::types::SeqNo,
-        last_event_id: Option<crate::event::types::EventId>,
-        vector_clock: Option<crate::event::vector_clock::VectorClock>,
-        eof_seen: bool,
-        reader_path: crate::event::types::JournalPath,
-        reader_index: crate::event::types::JournalIndex,
-        advertised_writer_seq: Option<crate::event::types::SeqNo>,
-        advertised_vector_clock: Option<crate::event::vector_clock::VectorClock>,
-        stalled_since: Option<crate::event::types::DurationMs>,
+        params: ConsumptionProgressEventParams,
     ) -> ChainEvent {
+        let ConsumptionProgressEventParams {
+            reader_seq,
+            last_event_id,
+            vector_clock,
+            eof_seen,
+            reader_path,
+            reader_index,
+            advertised_writer_seq,
+            advertised_vector_clock,
+            stalled_since,
+        } = params;
         Self::create_event(
             writer_id,
             ChainEventContent::FlowControl(FlowControlPayload::ConsumptionProgress {
@@ -586,16 +586,19 @@ impl ChainEventFactory {
     /// Create a consumption final event
     pub fn consumption_final_event(
         writer_id: WriterId,
-        pass: bool,
-        consumed_count: crate::event::types::Count,
-        expected_count: Option<crate::event::types::Count>,
-        eof_seen: bool,
-        last_event_id: Option<crate::event::types::EventId>,
-        reader_seq: crate::event::types::SeqNo,
-        advertised_writer_seq: Option<crate::event::types::SeqNo>,
-        advertised_vector_clock: Option<crate::event::vector_clock::VectorClock>,
-        failure_reason: Option<crate::event::types::ViolationCause>,
+        params: ConsumptionFinalEventParams,
     ) -> ChainEvent {
+        let ConsumptionFinalEventParams {
+            pass,
+            consumed_count,
+            expected_count,
+            eof_seen,
+            last_event_id,
+            reader_seq,
+            advertised_writer_seq,
+            advertised_vector_clock,
+            failure_reason,
+        } = params;
         Self::create_event(
             writer_id,
             ChainEventContent::FlowControl(FlowControlPayload::ConsumptionFinal {
@@ -790,19 +793,22 @@ impl ChainEventFactory {
     /// Create a circuit breaker summary event
     pub fn circuit_breaker_summary(
         writer_id: WriterId,
-        window_duration_s: u64,
-        requests_processed: u64,
-        requests_rejected: u64,
-        state: String,
-        consecutive_failures: usize,
-        rejection_rate: f64,
-        successes_total: u64,
-        failures_total: u64,
-        opened_total: u64,
-        time_in_closed_seconds: f64,
-        time_in_open_seconds: f64,
-        time_in_half_open_seconds: f64,
+        params: CircuitBreakerSummaryEventParams,
     ) -> ChainEvent {
+        let CircuitBreakerSummaryEventParams {
+            window_duration_s,
+            requests_processed,
+            requests_rejected,
+            state,
+            consecutive_failures,
+            rejection_rate,
+            successes_total,
+            failures_total,
+            opened_total,
+            time_in_closed_seconds,
+            time_in_open_seconds,
+            time_in_half_open_seconds,
+        } = params;
         Self::observability_event(
             writer_id,
             ObservabilityPayload::Middleware(MiddlewareLifecycle::CircuitBreaker(
@@ -948,10 +954,8 @@ impl ChainEventFactory {
             event.causality = event.causality.add_parent(*ancestor);
         }
 
-        // TODO: Log warning if we're truncating (requires tracing dependency)
-        // Currently we silently truncate at max_depth
-        #[allow(unused_variables)]
-        let truncated = parent.causality.parent_ids.len() >= max_depth;
+        // TODO: Log warning if we're truncating (requires tracing dependency).
+        // Currently we silently truncate at max_depth.
 
         event
     }

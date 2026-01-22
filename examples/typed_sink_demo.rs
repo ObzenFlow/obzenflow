@@ -57,15 +57,15 @@ async fn main() -> Result<()> {
                 FiniteSourceTyped::new(items)
             });
 
-            ok_sink = sink!("ok_sink" => SinkTyped::new(|foo: Foo| async move {
-                println!("ok_sink saw Foo {{ index: {} }}", foo.index);
+            ok_sink = sink!("ok_sink" => SinkTyped::new(|item: Foo| async move {
+                println!("ok_sink saw Foo {{ index: {} }}", item.index);
             }).allow_skip());
 
-            fallible_sink = sink!("fallible_sink" => SinkTyped::fallible(|foo: Foo| async move {
-                if foo.index == 2 {
+            fallible_sink = sink!("fallible_sink" => SinkTyped::fallible(|item: Foo| async move {
+                if item.index == 2 {
                     return Err(HandlerError::Remote("simulated remote failure".to_string()));
                 }
-                println!("fallible_sink saw Foo {{ index: {} }}", foo.index);
+                println!("fallible_sink saw Foo {{ index: {} }}", item.index);
                 Ok(())
             }));
         },

@@ -36,7 +36,7 @@ impl FiniteSourceHandler for TestSource {
         let current = self.emitted.fetch_add(1, Ordering::Relaxed);
         if current < self.total_events {
             Ok(Some(vec![ChainEventFactory::data_event(
-                self.writer_id.clone(),
+                self.writer_id,
                 "TestEvent",
                 json!({ "n": current }),
             )]))

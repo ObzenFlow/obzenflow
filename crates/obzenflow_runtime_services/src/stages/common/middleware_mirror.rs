@@ -3,7 +3,7 @@ use obzenflow_core::event::payloads::observability_payload::{
     RateLimiterEvent,
 };
 use obzenflow_core::event::{ChainEventContent, SystemEvent, SystemEventType, WriterId};
-use obzenflow_core::journal::journal::Journal;
+use obzenflow_core::journal::Journal;
 use obzenflow_core::{ChainEvent, EventEnvelope};
 use std::sync::Arc;
 
@@ -53,7 +53,7 @@ pub async fn mirror_middleware_event_to_system_journal(
 
     let writer_key = envelope.event.writer_id.to_string();
     let origin = obzenflow_core::event::system_event::MiddlewareEventOrigin {
-        event_id: envelope.event.id.clone(),
+        event_id: envelope.event.id,
         writer_key: writer_key.clone(),
         seq: envelope.vector_clock.get(&writer_key),
     };

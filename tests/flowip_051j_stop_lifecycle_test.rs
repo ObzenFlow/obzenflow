@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::event::{PipelineLifecycleEvent, SystemEvent, SystemEventType};
-use obzenflow_core::journal::journal::Journal;
+use obzenflow_core::journal::Journal;
 use obzenflow_core::{StageId, WriterId};
 use obzenflow_dsl_infra::{flow, infinite_source, sink, source};
 use obzenflow_infra::journal::disk_journals;
@@ -89,7 +89,7 @@ impl InfiniteSourceHandler for SlowInfiniteSource {
         std::thread::sleep(self.sleep);
         self.counter += 1;
         Ok(vec![ChainEventFactory::data_event(
-            self.writer_id.clone(),
+            self.writer_id,
             "tick",
             serde_json::json!({ "n": self.counter }),
         )])
@@ -131,7 +131,7 @@ impl FiniteSourceHandler for SlowFiniteSource {
         self.emitted += 1;
 
         Ok(Some(vec![ChainEventFactory::data_event(
-            self.writer_id.clone(),
+            self.writer_id,
             "tick",
             serde_json::json!({ "n": idx }),
         )]))
@@ -215,7 +215,7 @@ async fn stop_infinite_source_reports_cancelled() -> Result<()> {
         }
     }
     .await
-    .map_err(|e| anyhow!("Failed to create flow: {:?}", e))?;
+    .map_err(|e| anyhow!("Failed to create flow: {e:?}"))?;
 
     let system_journal = handle
         .system_journal()
@@ -269,7 +269,7 @@ async fn stop_finite_source_reports_cancelled() -> Result<()> {
         }
     }
     .await
-    .map_err(|e| anyhow!("Failed to create flow: {:?}", e))?;
+    .map_err(|e| anyhow!("Failed to create flow: {e:?}"))?;
 
     let system_journal = handle
         .system_journal()
@@ -322,7 +322,7 @@ async fn stop_cancel_timeout_overrides_cancel_reason() -> Result<()> {
         }
     }
     .await
-    .map_err(|e| anyhow!("Failed to create flow: {:?}", e))?;
+    .map_err(|e| anyhow!("Failed to create flow: {e:?}"))?;
 
     let system_journal = handle
         .system_journal()

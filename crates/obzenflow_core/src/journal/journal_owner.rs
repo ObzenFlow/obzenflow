@@ -29,7 +29,7 @@ impl JournalOwner {
     /// Get a unique string representation for file/directory naming
     pub fn as_path_component(&self) -> String {
         match self {
-            Self::System { system_id } => format!("{}", system_id),
+            Self::System { system_id } => system_id.to_string(),
             Self::Stage { stage_id } => format!("stage_{}", stage_id.as_u64()),
         }
     }
@@ -38,8 +38,8 @@ impl JournalOwner {
 impl std::fmt::Display for JournalOwner {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::System { system_id } => write!(f, "System({})", system_id),
-            Self::Stage { stage_id } => write!(f, "Stage({})", stage_id),
+            Self::System { system_id } => write!(f, "System({system_id})"),
+            Self::Stage { stage_id } => write!(f, "Stage({stage_id})"),
         }
     }
 }

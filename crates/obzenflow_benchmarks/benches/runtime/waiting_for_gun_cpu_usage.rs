@@ -55,7 +55,7 @@ impl SinkHandler for NoopSink {
 
 fn create_temp_journals_base(test_name: &str) -> anyhow::Result<(std::path::PathBuf, TempDir)> {
     let temp_dir = tempdir()?;
-    let journal_path = temp_dir.path().join(format!("bench_{}", test_name));
+    let journal_path = temp_dir.path().join(format!("bench_{test_name}"));
     std::fs::create_dir_all(&journal_path)?;
     Ok((journal_path, temp_dir))
 }
@@ -80,7 +80,7 @@ async fn measure_waiting_for_gun_cpu() -> anyhow::Result<f64> {
         }
     }
     .await
-    .map_err(|e| anyhow::anyhow!("Failed to create flow: {:?}", e))?;
+    .map_err(|e| anyhow::anyhow!("Failed to create flow: {e:?}"))?;
 
     // Wait until the pipeline is materialized (but not started).
     let mut state_rx = handle.state_receiver();

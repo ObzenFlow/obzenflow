@@ -194,6 +194,15 @@ pub struct ChannelBuilder<E, S> {
     _phantom: std::marker::PhantomData<(E, S)>,
 }
 
+impl<E, S> Default for ChannelBuilder<E, S> {
+    fn default() -> Self {
+        Self {
+            event_buffer: 100,
+            _phantom: std::marker::PhantomData,
+        }
+    }
+}
+
 impl<E, S> ChannelBuilder<E, S>
 where
     E: Debug + Send + 'static,
@@ -201,10 +210,7 @@ where
 {
     /// Create a new channel builder with default buffer size
     pub fn new() -> Self {
-        Self {
-            event_buffer: 100,
-            _phantom: std::marker::PhantomData,
-        }
+        Self::default()
     }
 
     /// Set the event channel buffer size

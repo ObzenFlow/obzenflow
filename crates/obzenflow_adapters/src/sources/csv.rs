@@ -122,7 +122,7 @@ where
             bail!("chunk_size must be > 0");
         }
 
-        if !self.has_headers && self.headers.as_ref().map_or(true, |h| h.is_empty()) {
+        if !self.has_headers && self.headers.as_ref().is_none_or(|h| h.is_empty()) {
             bail!("headers must be provided when has_headers=false");
         }
 
@@ -205,7 +205,7 @@ where
     fn clone(&self) -> Self {
         Self {
             state: Arc::clone(&self.state),
-            writer_id: self.writer_id.clone(),
+            writer_id: self.writer_id,
             _phantom: PhantomData,
         }
     }
@@ -270,11 +270,10 @@ where
     }
 
     fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
-        let writer_id = self
+        let writer_id = *self
             .writer_id
             .as_ref()
-            .ok_or_else(|| SourceError::Other("WriterId not bound".to_string()))?
-            .clone();
+            .ok_or_else(|| SourceError::Other("WriterId not bound".to_string()))?;
 
         let items = {
             let mut locked = self
@@ -295,13 +294,13 @@ where
         let event_type = T::versioned_event_type();
         let mut events = Vec::with_capacity(items.len());
         for item in items {
-            let event = ChainEventFactory::data_event_from(writer_id.clone(), &event_type, &item)
-                .map_err(|e| {
-                SourceError::Other(format!(
-                    "CsvSource failed to serialize {}: {e}",
-                    std::any::type_name::<T>()
-                ))
-            })?;
+            let event =
+                ChainEventFactory::data_event_from(writer_id, &event_type, &item).map_err(|e| {
+                    SourceError::Other(format!(
+                        "CsvSource failed to serialize {}: {e}",
+                        std::any::type_name::<T>()
+                    ))
+                })?;
             events.push(event);
         }
 

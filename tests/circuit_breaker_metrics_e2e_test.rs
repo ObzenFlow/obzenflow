@@ -60,8 +60,7 @@ impl TransformHandler for ControlledFailureTransform {
             let mut payload = event.payload().clone();
             payload["processed"] = json!(true);
             payload["count"] = json!(count);
-            event =
-                ChainEventFactory::data_event(event.writer_id.clone(), event.event_type(), payload);
+            event = ChainEventFactory::data_event(event.writer_id, event.event_type(), payload);
         }
 
         Ok(vec![event])
@@ -128,8 +127,8 @@ impl FiniteSourceHandler for TimedEventSource {
         }
 
         let event = ChainEventFactory::data_event(
-            self.writer_id.clone(),
-            &format!("test.{}", event_type),
+            self.writer_id,
+            format!("test.{event_type}"),
             json!({
                 "sequence": self.index,
                 "type": event_type
@@ -216,7 +215,7 @@ async fn test_circuit_breaker_metrics_end_to_end() -> Result<()> {
         }
     }
     .await
-    .map_err(|e| anyhow::anyhow!("Flow creation failed: {:?}", e))?;
+    .map_err(|e| anyhow::anyhow!("Flow creation failed: {e:?}"))?;
 
     println!("Running flow to trigger circuit breaker state transitions...");
 
@@ -224,7 +223,7 @@ async fn test_circuit_breaker_metrics_end_to_end() -> Result<()> {
     let metrics_exporter = flow_handle
         .run_with_metrics()
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to run flow: {:?}", e))?
+        .map_err(|e| anyhow::anyhow!("Failed to run flow: {e:?}"))?
         .expect("Metrics should be enabled");
 
     // Wait a bit to allow metrics aggregator to process events
@@ -235,7 +234,7 @@ async fn test_circuit_breaker_metrics_end_to_end() -> Result<()> {
     // Get metrics
     let metrics_text = metrics_exporter
         .render_metrics()
-        .map_err(|e| anyhow::anyhow!("Failed to render metrics: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to render metrics: {e}"))?;
 
     // Debug output
     println!("\n=== Circuit Breaker Metrics ===");
@@ -245,7 +244,7 @@ async fn test_circuit_breaker_metrics_end_to_end() -> Result<()> {
             || line.contains("events_total")
             || line.contains("errors_total")
         {
-            println!("{}", line);
+            println!("{line}");
         }
     }
 
@@ -275,7 +274,7 @@ async fn test_circuit_breaker_metrics_end_to_end() -> Result<()> {
 
         println!("\nCircuit Breaker State Values:");
         for line in &state_lines {
-            println!("  {}", line);
+            println!("  {line}");
         }
 
         // Should see state = 1.0 (open) at some point
@@ -287,44 +286,47 @@ async fn test_circuit_breaker_metrics_end_to_end() -> Result<()> {
         );
     }
 
-    // Verify events processing
-    let events = collected_events
-        .lock()
-        .map_err(|e| anyhow::anyhow!("Failed to lock events: {:?}", e))?;
+    // Verify events processing (drop the lock before awaiting).
+    let (events_len, success_count) = {
+        let events = collected_events
+            .lock()
+            .map_err(|e| anyhow::anyhow!("Failed to lock events: {e:?}"))?;
+
+        let events_len = events.len();
+        let success_count = events
+            .iter()
+            .filter(|e| {
+                e.payload()
+                    .get("processed")
+                    .map(|v| v == &json!(true))
+                    .unwrap_or(false)
+            })
+            .count();
+
+        (events_len, success_count)
+    };
 
     println!("\nFlow Processing Results:");
     println!("  Total events sent: 15");
-    println!("  Events reached sink: {}", events.len());
-    println!("  Events rejected/failed: {}", 15 - events.len());
+    println!("  Events reached sink: {events_len}");
+    println!("  Events rejected/failed: {}", 15 - events_len);
 
     // We expect fewer events due to circuit breaker rejections
     assert!(
-        events.len() < 15,
+        events_len < 15,
         "Circuit breaker should have rejected some events"
     );
 
-    // Verify we saw at least 3 successful events (processed=true)
-    let success_count = events
-        .iter()
-        .filter(|e| {
-            e.payload()
-                .get("processed")
-                .map(|v| v == &json!(true))
-                .unwrap_or(false)
-        })
-        .count();
-
     assert!(
         success_count >= 3,
-        "Expected at least 3 successful events before breaker effects; got {}",
-        success_count
+        "Expected at least 3 successful events before breaker effects; got {success_count}"
     );
 
     // Final metrics check
     sleep(Duration::from_millis(500)).await;
-    let final_metrics = metrics_exporter
+    metrics_exporter
         .render_metrics()
-        .map_err(|e| anyhow::anyhow!("Failed to render final metrics: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to render final metrics: {e}"))?;
 
     println!("\n✅ Circuit Breaker Metrics E2E Test PASSED!");
     println!("   - Circuit breaker limited downstream traffic (sink saw < 15 events)");
@@ -352,7 +354,7 @@ async fn test_circuit_breaker_summary_events() -> Result<()> {
             self.count += 1;
 
             Ok(Some(vec![ChainEventFactory::data_event(
-                self.writer_id.clone(),
+                self.writer_id,
                 "test.rapid",
                 json!({"id": self.count}),
             )]))
@@ -395,17 +397,17 @@ async fn test_circuit_breaker_summary_events() -> Result<()> {
         }
     }
     .await
-    .map_err(|e| anyhow::anyhow!("Flow creation failed: {:?}", e))?;
+    .map_err(|e| anyhow::anyhow!("Flow creation failed: {e:?}"))?;
 
     let metrics_exporter = flow_handle
         .run_with_metrics()
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to run flow: {:?}", e))?
+        .map_err(|e| anyhow::anyhow!("Failed to run flow: {e:?}"))?
         .expect("Metrics should be enabled");
     sleep(Duration::from_secs(2)).await;
     let metrics = metrics_exporter
         .render_metrics()
-        .map_err(|e| anyhow::anyhow!("Failed to render metrics: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to render metrics: {e}"))?;
 
     // Should have circuit breaker metrics from summary events
     assert!(

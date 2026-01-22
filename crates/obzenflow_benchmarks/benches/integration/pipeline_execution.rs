@@ -58,7 +58,7 @@ impl FiniteSourceHandler for TimestampedSource {
                 .as_nanos() as u64;
 
             Ok(Some(vec![ChainEventFactory::data_event(
-                self.writer_id.clone(),
+                self.writer_id,
                 "TimestampedEvent",
                 json!({
                     "index": current,
@@ -73,15 +73,11 @@ impl FiniteSourceHandler for TimestampedSource {
 
 /// Passthrough stage that just forwards events
 #[derive(Clone, Debug)]
-struct PassthroughStage {
-    name: String,
-}
+struct PassthroughStage {}
 
 impl PassthroughStage {
-    fn new(name: &str) -> Self {
-        Self {
-            name: name.to_string(),
-        }
+    fn new(_name: &str) -> Self {
+        Self {}
     }
 }
 
@@ -99,7 +95,6 @@ impl TransformHandler for PassthroughStage {
 /// Sink that records latencies
 #[derive(Clone, Debug)]
 struct TimestampedSink {
-    expected_count: u64,
     received: Arc<AtomicU64>,
     latencies: Arc<tokio::sync::Mutex<Vec<Duration>>>,
 }
@@ -112,7 +107,6 @@ impl TimestampedSink {
         let received = Arc::new(AtomicU64::new(0));
         (
             Self {
-                expected_count,
                 received: received.clone(),
                 latencies: latencies.clone(),
             },
@@ -188,7 +182,7 @@ async fn build_pipeline(
             }
         }
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to create 1-stage flow: {:?}", e))?,
+        .map_err(|e| anyhow::anyhow!("Failed to create 1-stage flow: {e:?}"))?,
         3 => flow! {
             journals: disk_journals(journals_base_path.clone()),
             middleware: [],
@@ -207,7 +201,7 @@ async fn build_pipeline(
             }
         }
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to create 3-stage flow: {:?}", e))?,
+        .map_err(|e| anyhow::anyhow!("Failed to create 3-stage flow: {e:?}"))?,
         5 => flow! {
             journals: disk_journals(journals_base_path.clone()),
             middleware: [],
@@ -230,7 +224,7 @@ async fn build_pipeline(
             }
         }
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to create 5-stage flow: {:?}", e))?,
+        .map_err(|e| anyhow::anyhow!("Failed to create 5-stage flow: {e:?}"))?,
         10 => flow! {
             journals: disk_journals(journals_base_path.clone()),
             middleware: [],
@@ -263,16 +257,16 @@ async fn build_pipeline(
             }
         }
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to create 10-stage flow: {:?}", e))?,
-        _ => return Err(anyhow::anyhow!("Unsupported stage count: {}", stage_count)),
+        .map_err(|e| anyhow::anyhow!("Failed to create 10-stage flow: {e:?}"))?,
+        _ => return Err(anyhow::anyhow!("Unsupported stage count: {stage_count}")),
     };
     Ok(handle)
 }
 
 /// Run a complete pipeline execution and measure total time
 async fn run_execution_test(stage_count: usize) -> anyhow::Result<Duration> {
-    let (journals_base_path, _temp_dir) =
-        create_temp_journals_base(&format!("execution_{}_stages", stage_count))?;
+    let test_name = format!("execution_{stage_count}_stages");
+    let (journals_base_path, _temp_dir) = create_temp_journals_base(&test_name)?;
 
     let source = TimestampedSource::new(WARMUP_EVENT_COUNT + TEST_EVENT_COUNT);
     let (sink, _latencies) = TimestampedSink::new(WARMUP_EVENT_COUNT + TEST_EVENT_COUNT);
@@ -285,7 +279,7 @@ async fn run_execution_test(stage_count: usize) -> anyhow::Result<Duration> {
     handle
         .run()
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to run pipeline: {:?}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to run pipeline: {e:?}"))?;
 
     let elapsed = start.elapsed();
 
@@ -305,7 +299,7 @@ fn bench_total_execution_time(c: &mut Criterion) {
 
     for &stage_count in STAGE_COUNTS {
         group.bench_with_input(
-            BenchmarkId::from_parameter(format!("{}_stages", stage_count)),
+            BenchmarkId::from_parameter(format!("{stage_count}_stages")),
             &stage_count,
             |b, &stage_count| {
                 // Use iter() to let Criterion handle the timing
@@ -329,7 +323,7 @@ fn bench_execution_time_per_event(c: &mut Criterion) {
 
     for &stage_count in STAGE_COUNTS {
         group.bench_with_input(
-            BenchmarkId::from_parameter(format!("{}_stages", stage_count)),
+            BenchmarkId::from_parameter(format!("{stage_count}_stages")),
             &stage_count,
             |b, &stage_count| {
                 b.to_async(&rt).iter_custom(|iters| async move {

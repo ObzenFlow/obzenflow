@@ -21,7 +21,7 @@ fn processing_status_error_round_trips_with_kind() {
             assert_eq!(message, "boom");
             assert!(matches!(kind, Some(ErrorKind::Timeout)));
         }
-        other => panic!("expected Error variant, got {:?}", other),
+        other => panic!("expected Error variant, got {other:?}"),
     }
 }
 
@@ -33,7 +33,7 @@ fn processing_status_error_helpers_set_kind() {
             assert_eq!(message, "oops");
             assert!(kind.is_none());
         }
-        other => panic!("expected Error variant, got {:?}", other),
+        other => panic!("expected Error variant, got {other:?}"),
     }
 
     let typed = ProcessingStatus::error_with_kind("validation failed", Some(ErrorKind::Validation));
@@ -42,7 +42,7 @@ fn processing_status_error_helpers_set_kind() {
             assert_eq!(message, "validation failed");
             assert!(matches!(kind, Some(ErrorKind::Validation)));
         }
-        other => panic!("expected Error variant, got {:?}", other),
+        other => panic!("expected Error variant, got {other:?}"),
     }
 }
 
@@ -75,7 +75,7 @@ fn chain_event_mark_as_error_sets_status_and_hop_budget() {
             assert_eq!(message, "deser failed");
             assert!(matches!(kind, Some(ErrorKind::Deserialization)));
         }
-        ref other => panic!("expected Error status, got {:?}", other),
+        ref other => panic!("expected Error status, got {other:?}"),
     }
     assert_eq!(err.processing_info.error_hops_remaining, Some(1));
 }
@@ -83,8 +83,7 @@ fn chain_event_mark_as_error_sets_status_and_hop_budget() {
 #[test]
 fn chain_event_validation_and_infra_helpers_set_expected_kinds() {
     let writer_id = WriterId::from(StageId::new());
-    let base: ChainEvent =
-        ChainEventFactory::data_event(writer_id.clone(), "flight", json!({ "id": 1 }));
+    let base: ChainEvent = ChainEventFactory::data_event(writer_id, "flight", json!({ "id": 1 }));
 
     let validation = base.clone().mark_as_validation_error("bad input");
     match validation.processing_info.status {
@@ -95,7 +94,7 @@ fn chain_event_validation_and_infra_helpers_set_expected_kinds() {
             assert_eq!(message, "bad input");
             assert!(matches!(kind, Some(ErrorKind::Validation)));
         }
-        ref other => panic!("expected Error status, got {:?}", other),
+        ref other => panic!("expected Error status, got {other:?}"),
     }
     assert_eq!(validation.processing_info.error_hops_remaining, Some(1));
 
@@ -108,7 +107,7 @@ fn chain_event_validation_and_infra_helpers_set_expected_kinds() {
             assert_eq!(message, "remote timeout");
             assert!(matches!(kind, Some(ErrorKind::Remote)));
         }
-        ref other => panic!("expected Error status, got {:?}", other),
+        ref other => panic!("expected Error status, got {other:?}"),
     }
     assert_eq!(infra.processing_info.error_hops_remaining, Some(1));
 }

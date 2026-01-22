@@ -5,9 +5,7 @@
 
 use super::subscription_poller::{PollResult, SubscriptionPoller};
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
-use obzenflow_core::event::{
-    ChainEvent, ChainEventContent, JournalEvent, SystemEvent, SystemEventType,
-};
+use obzenflow_core::event::{ChainEvent, ChainEventContent, JournalEvent};
 use obzenflow_core::journal::journal_reader::JournalReader;
 use obzenflow_core::EventEnvelope;
 use std::any::Any;

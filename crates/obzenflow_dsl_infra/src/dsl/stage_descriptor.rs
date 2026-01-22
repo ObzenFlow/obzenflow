@@ -178,202 +178,6 @@ pub trait StageDescriptor: Send + Sync {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use obzenflow_adapters::middleware::control::circuit_breaker::circuit_breaker;
-    use obzenflow_core::event::{JournalEvent, SystemEvent};
-    use obzenflow_core::ControlMiddlewareProvider;
-    use obzenflow_core::{ChainEvent, EventEnvelope, FlowId};
-    use obzenflow_runtime_services::message_bus::FsmMessageBus;
-    use obzenflow_runtime_services::stages::resources_builder::SubscriptionFactory;
-
-    #[derive(Clone, Debug)]
-    struct DummyFiniteSource;
-
-    impl FiniteSourceHandler for DummyFiniteSource {
-        fn next(
-            &mut self,
-        ) -> Result<Option<Vec<ChainEvent>>, obzenflow_runtime_services::stages::SourceError>
-        {
-            // This dummy source never emits data; it's used only to verify that the
-            // circuit breaker middleware wires up a CircuitBreakerSourceStrategy.
-            Ok(None)
-        }
-    }
-
-    #[tokio::test]
-    async fn finite_source_with_circuit_breaker_uses_cb_strategy() {
-        let stage_id = StageId::new();
-        let config = StageConfig {
-            stage_id,
-            name: "cb_source".to_string(),
-            flow_name: "test_flow".to_string(),
-        };
-
-        // Minimal StageResources: journals are never actually written in this unit test.
-        use obzenflow_core::id::JournalId;
-        use obzenflow_core::journal::journal::Journal;
-        use obzenflow_core::journal::journal_error::JournalError;
-        use obzenflow_core::journal::journal_owner::JournalOwner;
-        use obzenflow_core::journal::journal_reader::JournalReader;
-
-        struct NoopJournal<T: JournalEvent> {
-            id: JournalId,
-            owner: Option<JournalOwner>,
-            _marker: std::marker::PhantomData<T>,
-        }
-
-        impl<T: JournalEvent> NoopJournal<T> {
-            fn new(owner: JournalOwner) -> Self {
-                Self {
-                    id: JournalId::new(),
-                    owner: Some(owner),
-                    _marker: std::marker::PhantomData,
-                }
-            }
-        }
-
-        struct NoopReader;
-
-        #[async_trait]
-        impl<T: JournalEvent + 'static> Journal<T> for NoopJournal<T> {
-            fn id(&self) -> &JournalId {
-                &self.id
-            }
-
-            fn owner(&self) -> Option<&JournalOwner> {
-                self.owner.as_ref()
-            }
-
-            async fn append(
-                &self,
-                _event: T,
-                _parent: Option<&EventEnvelope<T>>,
-            ) -> Result<EventEnvelope<T>, JournalError> {
-                Err(JournalError::Implementation {
-                    message: "noop journal".to_string(),
-                    source: "noop".into(),
-                })
-            }
-
-            async fn read_causally_ordered(&self) -> Result<Vec<EventEnvelope<T>>, JournalError> {
-                Ok(Vec::new())
-            }
-
-            async fn read_causally_after(
-                &self,
-                _after_event_id: &obzenflow_core::EventId,
-            ) -> Result<Vec<EventEnvelope<T>>, JournalError> {
-                Ok(Vec::new())
-            }
-
-            async fn read_event(
-                &self,
-                _event_id: &obzenflow_core::EventId,
-            ) -> Result<Option<EventEnvelope<T>>, JournalError> {
-                Ok(None)
-            }
-
-            async fn reader(&self) -> Result<Box<dyn JournalReader<T>>, JournalError> {
-                Ok(Box::new(NoopReader))
-            }
-
-            async fn reader_from(
-                &self,
-                _position: u64,
-            ) -> Result<Box<dyn JournalReader<T>>, JournalError> {
-                Ok(Box::new(NoopReader))
-            }
-
-            async fn read_last_n(
-                &self,
-                _count: usize,
-            ) -> Result<Vec<EventEnvelope<T>>, JournalError> {
-                // NoopJournal never stores events; always return empty.
-                Ok(Vec::new())
-            }
-        }
-
-        #[async_trait]
-        impl<T: JournalEvent + 'static> JournalReader<T> for NoopReader {
-            async fn next(&mut self) -> Result<Option<EventEnvelope<T>>, JournalError> {
-                Ok(None)
-            }
-
-            async fn skip(&mut self, _n: u64) -> Result<u64, JournalError> {
-                Ok(0)
-            }
-
-            fn position(&self) -> u64 {
-                0
-            }
-
-            fn is_at_end(&self) -> bool {
-                true
-            }
-        }
-
-        let system_owner = JournalOwner::system(obzenflow_core::SystemId::new());
-        let stage_owner = JournalOwner::stage(stage_id);
-
-        let data_journal: Arc<dyn Journal<ChainEvent>> =
-            Arc::new(NoopJournal::new(stage_owner.clone()));
-        let error_journal: Arc<dyn Journal<ChainEvent>> =
-            Arc::new(NoopJournal::new(stage_owner.clone()));
-        let system_journal: Arc<dyn Journal<SystemEvent>> =
-            Arc::new(NoopJournal::new(system_owner));
-
-        let resources = StageResources {
-            flow_id: FlowId::new(),
-            data_journal,
-            error_journal,
-            system_journal,
-            upstream_journals: Vec::new(),
-            upstream_stage_names: std::collections::HashMap::new(),
-            subscription_factory: SubscriptionFactory::new(std::collections::HashMap::new()),
-            upstream_subscription_factory: SubscriptionFactory::new(
-                std::collections::HashMap::new(),
-            )
-            .bind(&[]),
-            message_bus: Arc::new(FsmMessageBus::new()),
-            upstream_stages: Vec::new(),
-            error_journals: Vec::new(),
-            backpressure_writer: Default::default(),
-            backpressure_readers: Default::default(),
-            replay_archive: None,
-        };
-
-        let descriptor = FiniteSourceDescriptor {
-            name: "cb_source".to_string(),
-            handler: DummyFiniteSource,
-            middleware: vec![circuit_breaker(1)],
-        };
-
-        let control_middleware = Arc::new(ControlMiddlewareAggregator::new());
-        let mut boxed: Box<dyn StageDescriptor> = Box::new(descriptor);
-        let handle = boxed
-            .create_handle_with_flow_middleware(
-                config,
-                resources,
-                vec![],
-                control_middleware.clone(),
-            )
-            .await
-            .expect("handle creation should succeed");
-
-        // Ensure the breaker state is registered via the flow-scoped provider.
-        let cb_state = control_middleware.circuit_breaker_state(&stage_id);
-        assert!(
-            cb_state.is_some(),
-            "circuit breaker state should be registered for source with circuit_breaker middleware"
-        );
-
-        // Avoid unused variable warning
-        drop(handle);
-    }
-}
-
 /// Descriptor for finite source stages
 pub struct FiniteSourceDescriptor<H: FiniteSourceHandler + 'static> {
     pub name: String,
@@ -474,7 +278,7 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> S
         handler.bind_writer_id(writer_id);
 
         // Apply all middleware
-        let mut builder = handler.middleware(writer_id.clone());
+        let mut builder = handler.middleware(writer_id);
         for mw in all_middleware {
             builder = builder.with(mw);
         }
@@ -500,7 +304,7 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> S
             .with_instrumentation(instrumentation)
             .build()
             .await
-            .map_err(|e| format!("Failed to build finite source: {:?}", e))?;
+            .map_err(|e| format!("Failed to build finite source: {e:?}"))?;
 
         // Create adapter to bridge to StageHandle
         let adapter = StageHandleAdapter::new(
@@ -508,8 +312,8 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> S
             config.stage_id,
             config.name,
             StageType::FiniteSource,
-            move |event| translate_stage_event_to_finite_source(event),
-            |state| check_finite_source_state(state),
+            translate_stage_event_to_finite_source,
+            check_finite_source_state,
         );
 
         Ok(Box::new(adapter) as BoxedStageHandle)
@@ -642,7 +446,7 @@ impl<H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
 
         // Apply all middleware.
         let mut builder = handler
-            .middleware(writer_id.clone())
+            .middleware(writer_id)
             .with_poll_timeout(poll_timeout);
         for mw in all_middleware {
             builder = builder.with(mw);
@@ -670,15 +474,15 @@ impl<H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
                 .with_instrumentation(instrumentation)
                 .build()
                 .await
-                .map_err(|e| format!("Failed to build async finite source: {:?}", e))?;
+                .map_err(|e| format!("Failed to build async finite source: {e:?}"))?;
 
         let adapter = StageHandleAdapter::new(
             handle,
             config.stage_id,
             config.name,
             StageType::FiniteSource,
-            move |event| translate_stage_event_to_finite_source(event),
-            |state| check_finite_source_state(state),
+            translate_stage_event_to_finite_source,
+            check_finite_source_state,
         );
 
         Ok(Box::new(adapter) as BoxedStageHandle)
@@ -785,7 +589,7 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
         handler.bind_writer_id(writer_id);
 
         // Apply all middleware
-        let mut builder = handler.middleware(writer_id.clone());
+        let mut builder = handler.middleware(writer_id);
         for mw in all_middleware {
             builder = builder.with(mw);
         }
@@ -811,7 +615,7 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
             .with_instrumentation(instrumentation)
             .build()
             .await
-            .map_err(|e| format!("Failed to build infinite source: {:?}", e))?;
+            .map_err(|e| format!("Failed to build infinite source: {e:?}"))?;
 
         // Create adapter to bridge to StageHandle
         let adapter = StageHandleAdapter::new(
@@ -819,8 +623,8 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
             config.stage_id,
             config.name,
             StageType::InfiniteSource,
-            move |event| translate_stage_event_to_infinite_source(event),
-            |state| check_infinite_source_state(state),
+            translate_stage_event_to_infinite_source,
+            check_infinite_source_state,
         );
 
         Ok(Box::new(adapter) as BoxedStageHandle)
@@ -952,7 +756,7 @@ impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
         handler.bind_writer_id(writer_id);
 
         let mut builder = handler
-            .middleware(writer_id.clone())
+            .middleware(writer_id)
             .with_poll_timeout(poll_timeout);
         for mw in all_middleware {
             builder = builder.with(mw);
@@ -978,15 +782,15 @@ impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
                 .with_instrumentation(instrumentation)
                 .build()
                 .await
-                .map_err(|e| format!("Failed to build async infinite source: {:?}", e))?;
+                .map_err(|e| format!("Failed to build async infinite source: {e:?}"))?;
 
         let adapter = StageHandleAdapter::new(
             handle,
             config.stage_id,
             config.name,
             StageType::InfiniteSource,
-            move |event| translate_stage_event_to_infinite_source(event),
-            |state| check_infinite_source_state(state),
+            translate_stage_event_to_infinite_source,
+            check_infinite_source_state,
         );
 
         Ok(Box::new(adapter) as BoxedStageHandle)
@@ -1113,7 +917,7 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stag
             .with_instrumentation(instrumentation)
             .build()
             .await
-            .map_err(|e| format!("Failed to build transform: {:?}", e))?;
+            .map_err(|e| format!("Failed to build transform: {e:?}"))?;
 
         // Create adapter to bridge to StageHandle
         let adapter = StageHandleAdapter::new(
@@ -1121,8 +925,8 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stag
             config.stage_id,
             config.name,
             StageType::Transform,
-            move |event| translate_stage_event_to_transform(event),
-            |state| check_transform_state(state),
+            translate_stage_event_to_transform,
+            check_transform_state,
         );
 
         Ok(Box::new(adapter) as BoxedStageHandle)
@@ -1248,7 +1052,7 @@ impl<H: AsyncTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
                 .with_instrumentation(instrumentation)
                 .build()
                 .await
-                .map_err(|e| format!("Failed to build async transform: {:?}", e))?;
+                .map_err(|e| format!("Failed to build async transform: {e:?}"))?;
 
         // Create adapter to bridge to StageHandle
         let adapter = StageHandleAdapter::new(
@@ -1256,8 +1060,8 @@ impl<H: AsyncTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
             config.stage_id,
             config.name,
             StageType::Transform,
-            move |event| translate_stage_event_to_transform(event),
-            |state| check_transform_state(state),
+            translate_stage_event_to_transform,
+            check_transform_state,
         );
 
         Ok(Box::new(adapter) as BoxedStageHandle)
@@ -1385,7 +1189,7 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
             .with_instrumentation(instrumentation)
             .build()
             .await
-            .map_err(|e| format!("Failed to build sink: {:?}", e))?;
+            .map_err(|e| format!("Failed to build sink: {e:?}"))?;
 
         // Create adapter to bridge to StageHandle
         let adapter = StageHandleAdapter::new(
@@ -1393,8 +1197,8 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
             config.stage_id,
             config.name,
             StageType::Sink,
-            move |event| translate_stage_event_to_sink(event),
-            |state| check_sink_state(state),
+            translate_stage_event_to_sink,
+            check_sink_state,
         );
 
         Ok(Box::new(adapter) as BoxedStageHandle)
@@ -1415,8 +1219,7 @@ fn translate_stage_event_to_finite_source<H>(
             Ok(FiniteSourceEvent::Error(FORCE_SHUTDOWN_MESSAGE.to_string()))
         }
         _ => Err(format!(
-            "Unsupported stage event for finite source: {:?}",
-            event
+            "Unsupported stage event for finite source: {event:?}"
         )),
     }
 }
@@ -1448,8 +1251,7 @@ fn translate_stage_event_to_infinite_source<H>(
             FORCE_SHUTDOWN_MESSAGE.to_string(),
         )),
         _ => Err(format!(
-            "Unsupported stage event for infinite source: {:?}",
-            event
+            "Unsupported stage event for infinite source: {event:?}"
         )),
     }
 }
@@ -1475,10 +1277,7 @@ fn translate_stage_event_to_transform<H>(event: StageEvent) -> Result<TransformE
         StageEvent::Ready | StageEvent::Start => Ok(TransformEvent::Ready), // Transforms don't have Start, they use Ready
         StageEvent::BeginDrain => Ok(TransformEvent::BeginDrain),
         StageEvent::ForceShutdown => Ok(TransformEvent::Error(FORCE_SHUTDOWN_MESSAGE.to_string())),
-        _ => Err(format!(
-            "Unsupported stage event for transform: {:?}",
-            event
-        )),
+        _ => Err(format!("Unsupported stage event for transform: {event:?}")),
     }
 }
 
@@ -1503,7 +1302,7 @@ fn translate_stage_event_to_sink<H>(event: StageEvent) -> Result<JournalSinkEven
         StageEvent::ForceShutdown => {
             Ok(JournalSinkEvent::Error(FORCE_SHUTDOWN_MESSAGE.to_string()))
         }
-        _ => Err(format!("Unsupported stage event for sink: {:?}", event)),
+        _ => Err(format!("Unsupported stage event for sink: {event:?}")),
     }
 }
 
@@ -1673,7 +1472,7 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stage
             .with_instrumentation(instrumentation)
             .build()
             .await
-            .map_err(|e| format!("Failed to build stateful stage: {:?}", e))?;
+            .map_err(|e| format!("Failed to build stateful stage: {e:?}"))?;
 
         // Create adapter to bridge to StageHandle
         let adapter = StageHandleAdapter::new(
@@ -1681,8 +1480,8 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stage
             config.stage_id,
             config.name,
             StageType::Stateful,
-            move |event| translate_stage_event_to_stateful(event),
-            |state| check_stateful_state(state),
+            translate_stage_event_to_stateful,
+            check_stateful_state,
         );
 
         Ok(Box::new(adapter) as BoxedStageHandle)
@@ -1695,7 +1494,7 @@ fn translate_stage_event_to_stateful<H>(event: StageEvent) -> Result<StatefulEve
         StageEvent::Ready | StageEvent::Start => Ok(StatefulEvent::Ready), // Stateful stages use Ready like transforms
         StageEvent::BeginDrain => Ok(StatefulEvent::BeginDrain),
         StageEvent::ForceShutdown => Ok(StatefulEvent::Error(FORCE_SHUTDOWN_MESSAGE.to_string())),
-        _ => Err(format!("Unsupported stage event for stateful: {:?}", event)),
+        _ => Err(format!("Unsupported stage event for stateful: {event:?}")),
     }
 }
 
@@ -1854,7 +1653,7 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
 
         // For now, we support single stream source
         let stream_source_id = stream_sources
-            .get(0)
+            .first()
             .copied()
             .ok_or_else(|| "Join stage requires at least one stream source".to_string())?;
 
@@ -1890,11 +1689,11 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
             stream_journals,
             control_strategy,
         )
-        .map_err(|e| format!("Failed to create join builder: {}", e))?
+        .map_err(|e| format!("Failed to create join builder: {e}"))?
         .with_instrumentation(instrumentation)
         .build()
         .await
-        .map_err(|e| format!("Failed to build join stage: {:?}", e))?;
+        .map_err(|e| format!("Failed to build join stage: {e:?}"))?;
 
         // Create adapter to bridge to StageHandle
         let adapter = StageHandleAdapter::new(
@@ -1902,8 +1701,8 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
             config.stage_id,
             config.name,
             StageType::Join,
-            move |event| translate_stage_event_to_join(event),
-            |state| check_join_state(state),
+            translate_stage_event_to_join,
+            check_join_state,
         );
 
         Ok(Box::new(adapter) as BoxedStageHandle)
@@ -1916,7 +1715,7 @@ fn translate_stage_event_to_join<H>(event: StageEvent) -> Result<JoinEvent<H>, S
         StageEvent::Ready | StageEvent::Start => Ok(JoinEvent::Ready), // Join stages use Ready like transforms
         StageEvent::BeginDrain => Ok(JoinEvent::BeginDrain),
         StageEvent::ForceShutdown => Ok(JoinEvent::Error(FORCE_SHUTDOWN_MESSAGE.to_string())),
-        _ => Err(format!("Unsupported stage event for join: {:?}", event)),
+        _ => Err(format!("Unsupported stage event for join: {event:?}")),
     }
 }
 
@@ -1930,6 +1729,202 @@ fn check_join_state<H>(state: &JoinState<H>) -> crate::stage_handle_adapter::Sta
         JoinState::Drained => StageStatus::Drained,
         JoinState::Failed(_) => StageStatus::Failed,
         _ => StageStatus::Created,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use obzenflow_adapters::middleware::control::circuit_breaker::circuit_breaker;
+    use obzenflow_core::event::{JournalEvent, SystemEvent};
+    use obzenflow_core::ControlMiddlewareProvider;
+    use obzenflow_core::{ChainEvent, EventEnvelope, FlowId};
+    use obzenflow_runtime_services::message_bus::FsmMessageBus;
+    use obzenflow_runtime_services::stages::resources_builder::SubscriptionFactory;
+
+    #[derive(Clone, Debug)]
+    struct DummyFiniteSource;
+
+    impl FiniteSourceHandler for DummyFiniteSource {
+        fn next(
+            &mut self,
+        ) -> Result<Option<Vec<ChainEvent>>, obzenflow_runtime_services::stages::SourceError>
+        {
+            // This dummy source never emits data; it's used only to verify that the
+            // circuit breaker middleware wires up a CircuitBreakerSourceStrategy.
+            Ok(None)
+        }
+    }
+
+    #[tokio::test]
+    async fn finite_source_with_circuit_breaker_uses_cb_strategy() {
+        let stage_id = StageId::new();
+        let config = StageConfig {
+            stage_id,
+            name: "cb_source".to_string(),
+            flow_name: "test_flow".to_string(),
+        };
+
+        // Minimal StageResources: journals are never actually written in this unit test.
+        use obzenflow_core::id::JournalId;
+        use obzenflow_core::journal::journal_error::JournalError;
+        use obzenflow_core::journal::journal_owner::JournalOwner;
+        use obzenflow_core::journal::journal_reader::JournalReader;
+        use obzenflow_core::journal::Journal;
+
+        struct NoopJournal<T: JournalEvent> {
+            id: JournalId,
+            owner: Option<JournalOwner>,
+            _marker: std::marker::PhantomData<T>,
+        }
+
+        impl<T: JournalEvent> NoopJournal<T> {
+            fn new(owner: JournalOwner) -> Self {
+                Self {
+                    id: JournalId::new(),
+                    owner: Some(owner),
+                    _marker: std::marker::PhantomData,
+                }
+            }
+        }
+
+        struct NoopReader;
+
+        #[async_trait]
+        impl<T: JournalEvent + 'static> Journal<T> for NoopJournal<T> {
+            fn id(&self) -> &JournalId {
+                &self.id
+            }
+
+            fn owner(&self) -> Option<&JournalOwner> {
+                self.owner.as_ref()
+            }
+
+            async fn append(
+                &self,
+                _event: T,
+                _parent: Option<&EventEnvelope<T>>,
+            ) -> Result<EventEnvelope<T>, JournalError> {
+                Err(JournalError::Implementation {
+                    message: "noop journal".to_string(),
+                    source: "noop".into(),
+                })
+            }
+
+            async fn read_causally_ordered(&self) -> Result<Vec<EventEnvelope<T>>, JournalError> {
+                Ok(Vec::new())
+            }
+
+            async fn read_causally_after(
+                &self,
+                _after_event_id: &obzenflow_core::EventId,
+            ) -> Result<Vec<EventEnvelope<T>>, JournalError> {
+                Ok(Vec::new())
+            }
+
+            async fn read_event(
+                &self,
+                _event_id: &obzenflow_core::EventId,
+            ) -> Result<Option<EventEnvelope<T>>, JournalError> {
+                Ok(None)
+            }
+
+            async fn reader(&self) -> Result<Box<dyn JournalReader<T>>, JournalError> {
+                Ok(Box::new(NoopReader))
+            }
+
+            async fn reader_from(
+                &self,
+                _position: u64,
+            ) -> Result<Box<dyn JournalReader<T>>, JournalError> {
+                Ok(Box::new(NoopReader))
+            }
+
+            async fn read_last_n(
+                &self,
+                _count: usize,
+            ) -> Result<Vec<EventEnvelope<T>>, JournalError> {
+                // NoopJournal never stores events; always return empty.
+                Ok(Vec::new())
+            }
+        }
+
+        #[async_trait]
+        impl<T: JournalEvent + 'static> JournalReader<T> for NoopReader {
+            async fn next(&mut self) -> Result<Option<EventEnvelope<T>>, JournalError> {
+                Ok(None)
+            }
+
+            async fn skip(&mut self, _n: u64) -> Result<u64, JournalError> {
+                Ok(0)
+            }
+
+            fn position(&self) -> u64 {
+                0
+            }
+
+            fn is_at_end(&self) -> bool {
+                true
+            }
+        }
+
+        let system_owner = JournalOwner::system(obzenflow_core::SystemId::new());
+        let stage_owner = JournalOwner::stage(stage_id);
+
+        let data_journal: Arc<dyn Journal<ChainEvent>> =
+            Arc::new(NoopJournal::new(stage_owner.clone()));
+        let error_journal: Arc<dyn Journal<ChainEvent>> =
+            Arc::new(NoopJournal::new(stage_owner.clone()));
+        let system_journal: Arc<dyn Journal<SystemEvent>> =
+            Arc::new(NoopJournal::new(system_owner));
+
+        let resources = StageResources {
+            flow_id: FlowId::new(),
+            data_journal,
+            error_journal,
+            system_journal,
+            upstream_journals: Vec::new(),
+            upstream_stage_names: std::collections::HashMap::new(),
+            subscription_factory: SubscriptionFactory::new(std::collections::HashMap::new()),
+            upstream_subscription_factory: SubscriptionFactory::new(
+                std::collections::HashMap::new(),
+            )
+            .bind(&[]),
+            message_bus: Arc::new(FsmMessageBus::new()),
+            upstream_stages: Vec::new(),
+            error_journals: Vec::new(),
+            backpressure_writer: Default::default(),
+            backpressure_readers: Default::default(),
+            replay_archive: None,
+        };
+
+        let descriptor = FiniteSourceDescriptor {
+            name: "cb_source".to_string(),
+            handler: DummyFiniteSource,
+            middleware: vec![circuit_breaker(1)],
+        };
+
+        let control_middleware = Arc::new(ControlMiddlewareAggregator::new());
+        let boxed: Box<dyn StageDescriptor> = Box::new(descriptor);
+        let handle = boxed
+            .create_handle_with_flow_middleware(
+                config,
+                resources,
+                vec![],
+                control_middleware.clone(),
+            )
+            .await
+            .expect("handle creation should succeed");
+
+        // Ensure the breaker state is registered via the flow-scoped provider.
+        let cb_state = control_middleware.circuit_breaker_state(&stage_id);
+        assert!(
+            cb_state.is_some(),
+            "circuit breaker state should be registered for source with circuit_breaker middleware"
+        );
+
+        // Avoid unused variable warning
+        drop(handle);
     }
 }
 

@@ -62,7 +62,7 @@ where
     S: Send + Sync + 'static,
 {
     fn stage_id(&self) -> StageId {
-        self.stage_id.clone()
+        self.stage_id
     }
 
     fn stage_name(&self) -> &str {
@@ -75,43 +75,45 @@ where
 
     async fn initialize(&self) -> Result<(), StageError> {
         let event = (self.event_translator)(StageEvent::Initialize)
-            .map_err(|e| StageError::InitializationFailed(e))?;
+            .map_err(StageError::InitializationFailed)?;
         self.inner.send_event(event).await.map_err(|e| {
-            StageError::InitializationFailed(format!("Failed to send initialize event: {:?}", e))
+            StageError::InitializationFailed(format!("Failed to send initialize event: {e:?}"))
         })
     }
 
     async fn ready(&self) -> Result<(), StageError> {
-        let event = (self.event_translator)(StageEvent::Ready)
-            .map_err(|e| StageError::EventSendFailed(e))?;
-        self.inner.send_event(event).await.map_err(|e| {
-            StageError::EventSendFailed(format!("Failed to send ready event: {:?}", e))
-        })
+        let event =
+            (self.event_translator)(StageEvent::Ready).map_err(StageError::EventSendFailed)?;
+        self.inner
+            .send_event(event)
+            .await
+            .map_err(|e| StageError::EventSendFailed(format!("Failed to send ready event: {e:?}")))
     }
 
     async fn start(&self) -> Result<(), StageError> {
-        let event = (self.event_translator)(StageEvent::Start)
-            .map_err(|e| StageError::EventSendFailed(e))?;
-        self.inner.send_event(event).await.map_err(|e| {
-            StageError::EventSendFailed(format!("Failed to send start event: {:?}", e))
-        })
+        let event =
+            (self.event_translator)(StageEvent::Start).map_err(StageError::EventSendFailed)?;
+        self.inner
+            .send_event(event)
+            .await
+            .map_err(|e| StageError::EventSendFailed(format!("Failed to send start event: {e:?}")))
     }
 
     async fn send_event(&self, event: StageEvent) -> Result<(), StageError> {
-        let translated =
-            (self.event_translator)(event).map_err(|e| StageError::EventSendFailed(e))?;
+        let translated = (self.event_translator)(event).map_err(StageError::EventSendFailed)?;
         self.inner
             .send_event(translated)
             .await
-            .map_err(|e| StageError::EventSendFailed(format!("Failed to send event: {:?}", e)))
+            .map_err(|e| StageError::EventSendFailed(format!("Failed to send event: {e:?}")))
     }
 
     async fn begin_drain(&self) -> Result<(), StageError> {
-        let event = (self.event_translator)(StageEvent::BeginDrain)
-            .map_err(|e| StageError::EventSendFailed(e))?;
-        self.inner.send_event(event).await.map_err(|e| {
-            StageError::EventSendFailed(format!("Failed to send drain event: {:?}", e))
-        })
+        let event =
+            (self.event_translator)(StageEvent::BeginDrain).map_err(StageError::EventSendFailed)?;
+        self.inner
+            .send_event(event)
+            .await
+            .map_err(|e| StageError::EventSendFailed(format!("Failed to send drain event: {e:?}")))
     }
 
     fn is_ready(&self) -> bool {
@@ -130,11 +132,11 @@ where
 
     async fn force_shutdown(&self) -> Result<(), StageError> {
         let event = (self.event_translator)(StageEvent::ForceShutdown)
-            .map_err(|e| StageError::EventSendFailed(e))?;
+            .map_err(StageError::EventSendFailed)?;
         self.inner
             .send_event(event)
             .await
-            .map_err(|e| StageError::EventSendFailed(format!("Failed to force shutdown: {:?}", e)))
+            .map_err(|e| StageError::EventSendFailed(format!("Failed to force shutdown: {e:?}")))
     }
 
     async fn wait_for_completion(&self) -> Result<(), StageError> {

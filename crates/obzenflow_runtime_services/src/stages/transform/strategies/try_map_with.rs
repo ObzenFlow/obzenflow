@@ -70,10 +70,12 @@ use obzenflow_core::event::{status::processing_status::ProcessingStatus, ChainEv
 use obzenflow_core::ChainEvent;
 use obzenflow_core::TypedPayload;
 use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::json;
 use std::marker::PhantomData;
 use std::sync::Arc;
+
+type ErrorPayloadFn = Arc<dyn Fn(&ChainEvent, &str) -> serde_json::Value + Send + Sync>;
 
 /// Strategy for handling conversion errors in TryMapWith
 ///
@@ -115,10 +117,7 @@ pub enum ErrorStrategy {
     /// //     json!({"validation_errors": {"missing_fields": parse_error(error)}})
     /// // })
     /// ```
-    ToEventTypeWith(
-        String,
-        Arc<dyn Fn(&ChainEvent, &str) -> serde_json::Value + Send + Sync>,
-    ),
+    ToEventTypeWith(String, ErrorPayloadFn),
 
     /// Custom error handler function
     ///
@@ -134,9 +133,9 @@ impl std::fmt::Debug for ErrorStrategy {
         match self {
             ErrorStrategy::ToErrorJournal => write!(f, "ToErrorJournal"),
             ErrorStrategy::Drop => write!(f, "Drop"),
-            ErrorStrategy::ToEventType(event_type) => write!(f, "ToEventType({})", event_type),
+            ErrorStrategy::ToEventType(event_type) => write!(f, "ToEventType({event_type})"),
             ErrorStrategy::ToEventTypeWith(event_type, _) => {
-                write!(f, "ToEventTypeWith({}, <closure>)", event_type)
+                write!(f, "ToEventTypeWith({event_type}, <closure>)")
             }
             ErrorStrategy::Custom(_) => write!(f, "Custom(<closure>)"),
         }
@@ -449,7 +448,7 @@ where
                         // Mark event with error status for error journal routing
                         let mut error_event = event;
                         error_event.processing_info.status =
-                            ProcessingStatus::error(format!("Conversion failed: {}", error_msg));
+                            ProcessingStatus::error(format!("Conversion failed: {error_msg}"));
                         vec![error_event]
                     }
                     ErrorStrategy::ToEventType(event_type) => {
@@ -458,7 +457,7 @@ where
                         payload["validation_error"] = json!(error_msg);
 
                         vec![ChainEventFactory::derived_data_event(
-                            event.writer_id.clone(),
+                            event.writer_id,
                             &event,
                             event_type,
                             payload,
@@ -479,7 +478,7 @@ where
                         }
 
                         vec![ChainEventFactory::derived_data_event(
-                            event.writer_id.clone(),
+                            event.writer_id,
                             &event,
                             event_type,
                             payload,
@@ -679,7 +678,7 @@ where
                         // FLOWIP-082a: Use TypedPayload::EVENT_TYPE (compile-time constant)
                         let event_type = O::versioned_event_type();
                         Ok(vec![ChainEventFactory::derived_data_event(
-                            event.writer_id.clone(),
+                            event.writer_id,
                             &event,
                             &event_type,
                             payload,
@@ -726,7 +725,7 @@ where
                 let mut payload = event.payload();
                 payload["validation_error"] = json!(error_msg);
                 vec![ChainEventFactory::derived_data_event(
-                    event.writer_id.clone(),
+                    event.writer_id,
                     &event,
                     event_type,
                     payload,
@@ -741,7 +740,7 @@ where
                     }
                 }
                 vec![ChainEventFactory::derived_data_event(
-                    event.writer_id.clone(),
+                    event.writer_id,
                     &event,
                     event_type,
                     payload,
@@ -795,7 +794,7 @@ mod tests {
     use super::*;
     use obzenflow_core::event::ChainEventFactory;
     use obzenflow_core::id::StageId;
-    use obzenflow_core::{EventId, WriterId};
+    use obzenflow_core::WriterId;
     use serde_json::json;
 
     #[tokio::test]
@@ -808,7 +807,7 @@ mod tests {
                 .to_string();
 
             Ok(ChainEventFactory::data_event(
-                event.writer_id.clone(),
+                event.writer_id,
                 "user_id_extracted",
                 json!({"user_id": user_id}),
             ))
@@ -903,7 +902,7 @@ mod tests {
             payload["validated"] = json!(true);
 
             Ok(ChainEventFactory::data_event(
-                event.writer_id.clone(),
+                event.writer_id,
                 event.event_type(),
                 payload,
             ))
@@ -925,7 +924,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_try_map_with_clone() {
-        let try_mapper = TryMapWith::new(|event| Ok(event));
+        let try_mapper = TryMapWith::new(Ok);
         let _cloned = try_mapper.clone();
         // Should compile and not panic
     }
@@ -1067,7 +1066,7 @@ mod tests {
             payload["retry_count"] = json!(payload["retry_count"].as_u64().unwrap_or(0) + 1);
 
             Some(ChainEventFactory::derived_data_event(
-                event.writer_id.clone(),
+                event.writer_id,
                 &event,
                 "Transaction.failed",
                 payload,
@@ -1099,7 +1098,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_on_error_with_custom_handler_can_drop() {
-        let try_mapper = TryMapWith::new(|event| Err("Always fail".to_string())).on_error_with(
+        let try_mapper = TryMapWith::new(|_event| Err("Always fail".to_string())).on_error_with(
             |_event, _error| {
                 None // Drop the event
             },
@@ -1118,13 +1117,13 @@ mod tests {
     // Typed TryMapWith Tests
     // ========================================================================
 
-    #[derive(Debug, Clone, Deserialize, PartialEq)]
+    #[derive(Debug, Clone, serde::Deserialize, PartialEq)]
     struct TestInput {
         value: i32,
         name: String,
     }
 
-    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+    #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
     struct TestOutput {
         value: i32,
         name: String,
@@ -1384,7 +1383,7 @@ mod tests {
             })
         });
 
-        let debug_str = format!("{:?}", validator);
+        let debug_str = format!("{validator:?}");
         assert!(debug_str.contains("TryMapWithTyped"));
         assert!(debug_str.contains("TestInput"));
         assert!(debug_str.contains("TestOutput"));

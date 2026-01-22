@@ -55,7 +55,7 @@ impl FiniteSourceHandler for BurstSource {
         self.current += 1;
 
         Ok(Some(vec![ChainEventFactory::data_event(
-            self.writer_id.clone(),
+            self.writer_id,
             "test.burst",
             json!({ "index": idx }),
         )]))
@@ -241,8 +241,7 @@ async fn run_with_metrics_timeout(
             .map_err(|e| anyhow!("Failed to run flow: {e:?}"))?
             .ok_or_else(|| anyhow!("Metrics exporter was not configured")),
         Err(_) => Err(anyhow!(
-            "flow did not complete within {:?} (timeout)",
-            timeout
+            "flow did not complete within {timeout:?} (timeout)"
         )),
     }
 }
@@ -423,8 +422,7 @@ async fn flowip_059a_processing_time_sum_tracks_actual_work() -> Result<()> {
 
     assert_eq!(
         prev, count,
-        "expected +Inf bucket count to equal _count ({} != {})",
-        prev, count
+        "expected +Inf bucket count to equal _count ({prev} != {count})"
     );
 
     Ok(())
@@ -468,7 +466,7 @@ async fn flowip_059a_circuit_breaker_counters_are_exported_with_joinable_labels(
 
     let exporter = run_with_metrics_timeout(flow_handle, timeout_flow).await?;
 
-    let cb_stage_label = format!("stage_id=\"{}\"", cb_stage_id);
+    let cb_stage_label = format!("stage_id=\"{cb_stage_id}\"");
     let flow_label = "flow=\"flowip_059a_cb_phase3\"".to_string();
     let debug_patterns = vec![
         "obzenflow_circuit_breaker".to_string(),
@@ -543,7 +541,7 @@ async fn flowip_059a_circuit_breaker_cumulative_metrics_are_exported_and_trippab
 
     let exporter = run_with_metrics_timeout(flow_handle, timeout_flow).await?;
 
-    let cb_stage_label = format!("stage_id=\"{}\"", cb_stage_id);
+    let cb_stage_label = format!("stage_id=\"{cb_stage_id}\"");
     let flow_label = "flow=\"flowip_059a_cb_cumulative\"".to_string();
     let debug_patterns = vec![
         "obzenflow_circuit_breaker_opened_total".to_string(),
@@ -676,7 +674,7 @@ async fn flowip_059a_rate_limiter_metrics_are_exported_with_joinable_labels() ->
 
     let exporter = run_with_metrics_timeout(flow_handle, timeout_flow).await?;
 
-    let rl_stage_label = format!("stage_id=\"{}\"", rl_stage_id);
+    let rl_stage_label = format!("stage_id=\"{rl_stage_id}\"");
     let flow_label = "flow=\"flowip_059a_rl_phase3\"".to_string();
     let debug_patterns = vec![
         "obzenflow_rate_limiter".to_string(),
@@ -830,7 +828,7 @@ async fn flowip_059a2_circuit_breaker_requests_total_is_accurate_without_summari
 
     let exporter = run_with_metrics_timeout(flow_handle, timeout_flow).await?;
 
-    let cb_stage_label = format!("stage_id=\"{}\"", cb_stage_id);
+    let cb_stage_label = format!("stage_id=\"{cb_stage_id}\"");
     let flow_label = "flow=\"flowip_059a2_cb_no_summary\"".to_string();
     let debug_patterns = vec![
         "obzenflow_circuit_breaker_requests_total".to_string(),
@@ -855,8 +853,7 @@ async fn flowip_059a2_circuit_breaker_requests_total_is_accurate_without_summari
     .ok_or_else(|| anyhow!("missing circuit_breaker_requests_total for {cb_stage_label}"))?;
     assert!(
         (requests_total - total_events as f64).abs() < f64::EPSILON,
-        "expected circuit_breaker_requests_total={}, got {requests_total}",
-        total_events
+        "expected circuit_breaker_requests_total={total_events}, got {requests_total}"
     );
 
     Ok(())
@@ -901,7 +898,7 @@ async fn flowip_059a2_rate_limiter_events_total_is_accurate_without_summaries() 
 
     let exporter = run_with_metrics_timeout(flow_handle, timeout_flow).await?;
 
-    let rl_stage_label = format!("stage_id=\"{}\"", rl_stage_id);
+    let rl_stage_label = format!("stage_id=\"{rl_stage_id}\"");
     let flow_label = "flow=\"flowip_059a2_rl_no_summary\"".to_string();
     let debug_patterns = vec![
         "obzenflow_rate_limiter_events_total".to_string(),
@@ -930,8 +927,7 @@ async fn flowip_059a2_rate_limiter_events_total_is_accurate_without_summaries() 
     .ok_or_else(|| anyhow!("missing rate_limiter_events_total for {rl_stage_label}"))?;
     assert!(
         (events_total - total_events as f64).abs() < f64::EPSILON,
-        "expected rate_limiter_events_total={}, got {events_total}",
-        total_events
+        "expected rate_limiter_events_total={total_events}, got {events_total}"
     );
 
     let utilization = metric_line_value(
@@ -1019,9 +1015,9 @@ async fn flowip_059a_contract_metrics_are_exported_and_joinable_to_topology() ->
     // with ID-first labels for joinability.
     for ((upstream, downstream), contracts) in contract_attachments.iter() {
         for contract in contracts {
-            let upstream_label = format!("upstream_stage_id=\"{}\"", upstream);
-            let downstream_label = format!("downstream_stage_id=\"{}\"", downstream);
-            let contract_label = format!("contract=\"{}\"", contract);
+            let upstream_label = format!("upstream_stage_id=\"{upstream}\"");
+            let downstream_label = format!("downstream_stage_id=\"{downstream}\"");
+            let contract_label = format!("contract=\"{contract}\"");
 
             assert!(
                 metrics_text.lines().any(|l| {

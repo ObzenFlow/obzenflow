@@ -12,6 +12,3 @@ pub mod mock_server;
 
 #[path = "util.rs"]
 pub mod util;
-
-pub use flow::run_example;
-

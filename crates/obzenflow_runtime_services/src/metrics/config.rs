@@ -3,9 +3,7 @@
 //! This module provides the default configuration for metrics collection,
 //! reading from environment variables to allow runtime configuration.
 
-use obzenflow_core::metrics::MetricsExporter;
 use std::env;
-use std::sync::Arc;
 
 /// Default metrics configuration that reads from environment variables
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -74,7 +72,7 @@ mod tests {
         env::remove_var("OBZENFLOW_METRICS_ENABLED");
 
         let config = DefaultMetricsConfig::default();
-        assert_eq!(config.enabled, true);
+        assert!(config.enabled);
         assert_eq!(config.stage_taxonomy, "RED");
         assert_eq!(config.flow_taxonomy, "GoldenSignals");
 
@@ -87,7 +85,7 @@ mod tests {
     #[test]
     fn test_disabled_config() {
         let config = DefaultMetricsConfig::disabled();
-        assert_eq!(config.enabled, false);
+        assert!(!config.enabled);
         assert_eq!(config.stage_taxonomy, "RED");
         assert_eq!(config.flow_taxonomy, "GoldenSignals");
     }
@@ -102,17 +100,17 @@ mod tests {
         // Test with enabled=false
         env::set_var("OBZENFLOW_METRICS_ENABLED", "false");
         let config = DefaultMetricsConfig::default();
-        assert_eq!(config.enabled, false);
+        assert!(!config.enabled);
 
         // Test with enabled=true
         env::set_var("OBZENFLOW_METRICS_ENABLED", "true");
         let config = DefaultMetricsConfig::default();
-        assert_eq!(config.enabled, true);
+        assert!(config.enabled);
 
         // Test with invalid value (should default to true)
         env::set_var("OBZENFLOW_METRICS_ENABLED", "invalid");
         let config = DefaultMetricsConfig::default();
-        assert_eq!(config.enabled, true);
+        assert!(config.enabled);
 
         // Restore original value or remove
         match saved {

@@ -282,18 +282,17 @@ mod tests {
         let writer_id = WriterId::from(StageId::new());
 
         // Normal event should be accumulated
-        let event1 = ChainEventFactory::data_event(writer_id.clone(), "test", json!({"data": 1}));
+        let event1 = ChainEventFactory::data_event(writer_id, "test", json!({"data": 1}));
         handler.accumulate(&mut state, event1);
         assert_eq!(accumulated_count.load(Ordering::Relaxed), 1);
 
         // Event with "skip" should be skipped
-        let event2 =
-            ChainEventFactory::data_event(writer_id.clone(), "test", json!({"skip": true}));
+        let event2 = ChainEventFactory::data_event(writer_id, "test", json!({"skip": true}));
         handler.accumulate(&mut state, event2);
         assert_eq!(accumulated_count.load(Ordering::Relaxed), 1); // Still 1
 
         // Another normal event
-        let event3 = ChainEventFactory::data_event(writer_id.clone(), "test", json!({"data": 3}));
+        let event3 = ChainEventFactory::data_event(writer_id, "test", json!({"data": 3}));
         handler.accumulate(&mut state, event3);
         assert_eq!(accumulated_count.load(Ordering::Relaxed), 2);
     }

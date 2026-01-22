@@ -19,6 +19,12 @@ impl ReqwestHttpClient {
     }
 }
 
+impl Default for ReqwestHttpClient {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 fn map_method(method: HttpMethod) -> reqwest::Method {
     match method {
         HttpMethod::Get => reqwest::Method::GET,
@@ -63,4 +69,3 @@ impl HttpClient for ReqwestHttpClient {
         Ok(HttpResponse::new(status, headers, body))
     }
 }
-

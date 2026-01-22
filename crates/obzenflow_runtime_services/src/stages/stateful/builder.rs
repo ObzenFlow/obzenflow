@@ -2,7 +2,6 @@
 
 use std::sync::Arc;
 
-use crate::message_bus::FsmMessageBus;
 use crate::metrics::instrumentation::StageInstrumentation;
 use crate::stages::common::control_strategies::{ControlEventStrategy, JonestownStrategy};
 use crate::stages::common::handlers::StatefulHandler;
@@ -13,9 +12,6 @@ use crate::supervised_base::{
     HandlerSupervised, HandlerSupervisedExt, StateWatcher, SupervisorBuilder,
     SupervisorTaskBuilder,
 };
-use obzenflow_core::event::SystemEvent;
-use obzenflow_core::journal::journal::Journal;
-use obzenflow_core::{ChainEvent, StageId};
 
 use super::config::StatefulConfig;
 use super::fsm::{StatefulAction, StatefulContext, StatefulEvent, StatefulState};
@@ -78,28 +74,47 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Super
             .unwrap_or_else(|| Arc::new(StageInstrumentation::new()));
 
         // Create context with subscription factory from resources
-        let context = StatefulContext::new(
-            self.handler,
-            self.config.stage_id,
-            self.config.stage_name.clone(),
-            self.config.flow_name.clone(),
-            self.resources.flow_id.clone(),
-            self.resources.data_journal.clone(),
-            self.resources.error_journal.clone(),
-            self.resources.system_journal.clone(),
-            self.resources.message_bus.clone(),
+        let handler = self.handler;
+        let initial_state = handler.initial_state();
+        let context = StatefulContext {
+            handler: Arc::new(handler),
+            stage_id: self.config.stage_id,
+            stage_name: self.config.stage_name.clone(),
+            flow_name: self.config.flow_name.clone(),
+            flow_id: self.resources.flow_id,
+            current_state: initial_state,
+            data_journal: self.resources.data_journal.clone(),
+            error_journal: self.resources.error_journal.clone(),
+            system_journal: self.resources.system_journal.clone(),
+            bus: self.resources.message_bus.clone(),
+            writer_id: None,
+            subscription: None,
+            contract_state: Vec::new(),
             control_strategy,
+            buffered_eof: None,
+            last_consumed_envelope: None,
             instrumentation,
-            self.resources.upstream_subscription_factory,
-            self.config.emit_interval,
-            self.resources.backpressure_writer.clone(),
-            self.resources.backpressure_readers.clone(),
-        );
+            upstream_subscription_factory: self.resources.upstream_subscription_factory,
+            events_since_last_heartbeat: 0,
+            last_data_event_time: None,
+            emit_interval: self.config.emit_interval,
+            backpressure_writer: self.resources.backpressure_writer.clone(),
+            backpressure_readers: self.resources.backpressure_readers.clone(),
+            pending_outputs: std::collections::VecDeque::new(),
+            pending_transition: None,
+            pending_ack_upstream: None,
+            backpressure_pulse:
+                crate::stages::common::backpressure_activity_pulse::BackpressureActivityPulse::new(),
+            backpressure_backoff:
+                crate::supervised_base::idle_backoff::IdleBackoff::exponential_with_cap(
+                    std::time::Duration::from_millis(1),
+                    std::time::Duration::from_millis(50),
+                ),
+        };
 
         // Create supervisor (private - not exposed)
         let supervisor = StatefulSupervisor {
             name: format!("stateful_{}", self.config.stage_name),
-            data_journal: self.resources.data_journal.clone(),
             system_journal: self.resources.system_journal.clone(),
             stage_id: self.config.stage_id,
             _marker: std::marker::PhantomData,

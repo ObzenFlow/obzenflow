@@ -135,6 +135,12 @@ impl Middleware for OutcomeEnrichmentMiddleware {
 // ==========================================================================
 pub struct OutcomeEnrichmentMiddlewareFactory;
 
+impl Default for OutcomeEnrichmentMiddlewareFactory {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl OutcomeEnrichmentMiddlewareFactory {
     pub fn new() -> Self {
         Self

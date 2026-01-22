@@ -4,7 +4,6 @@ use super::sources::*;
 use anyhow::Result;
 use obzenflow_adapters::middleware::rate_limit;
 use obzenflow_dsl_infra::{flow, join, sink, source, stateful, with_ref};
-use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime_services::stages::join::{
     InnerJoinBuilder, LeftJoinBuilder, StrictJoinBuilder,
@@ -28,10 +27,10 @@ fn build_flow() -> obzenflow_dsl_infra::FlowDefinition {
 
             sku_products = join!("sku_products" =>
                 with_ref!(products,
-                    InnerJoinBuilder::<Product, SKU, SKUWithProduct>::new()
+                    InnerJoinBuilder::<Product, Sku, SKUWithProduct>::new()
                         .catalog_key(|p: &Product| p.product_id.clone())
-                        .stream_key(|s: &SKU| s.product_id.clone())
-                        .build(|product: Product, sku: SKU| SKUWithProduct {
+                        .stream_key(|s: &Sku| s.product_id.clone())
+                        .build(|product: Product, sku: Sku| SKUWithProduct {
                             sku_id: sku.sku_id,
                             variant: sku.variant,
                             unit_cost: sku.unit_cost,
@@ -198,6 +197,7 @@ fn build_flow() -> obzenflow_dsl_infra::FlowDefinition {
     }
 }
 
+#[cfg(not(test))]
 pub fn run_example() -> Result<()> {
     println!("🛒 FlowState RS - Product Catalog Enrichment");
     println!("{}", "=".repeat(60));
@@ -216,7 +216,7 @@ pub fn run_example() -> Result<()> {
 
     println!("\n📂 Loading Reference Data (Dimensions)...\n");
 
-    FlowApplication::builder()
+    obzenflow_infra::application::FlowApplication::builder()
         .with_console_subscriber()
         .with_log_level(obzenflow_infra::application::LogLevel::Info)
         .run_blocking(build_flow())?;
@@ -229,18 +229,19 @@ pub fn run_example() -> Result<()> {
 }
 
 /// Test-friendly runner that bypasses CLI parsing (clap would otherwise read cargo test args)
+#[cfg(test)]
 pub fn run_example_in_tests() -> Result<()> {
     let _ = tracing_subscriber::fmt::try_init();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .map_err(|e| anyhow::anyhow!("Failed to create runtime: {:?}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to create runtime: {e:?}"))?;
 
     runtime.block_on(async {
         let handle = build_flow().await?;
         handle
             .run()
             .await
-            .map_err(|e| anyhow::anyhow!("Flow execution failed: {:?}", e))
+            .map_err(|e| anyhow::anyhow!("Flow execution failed: {e:?}"))
     })
 }

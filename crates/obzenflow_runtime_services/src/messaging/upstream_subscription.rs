@@ -16,10 +16,13 @@ use obzenflow_core::event::types::{
     Count, DurationMs, JournalIndex, JournalPath, SeqNo, ViolationCause as EventViolationCause,
 };
 use obzenflow_core::event::vector_clock::VectorClock;
-use obzenflow_core::event::{ChainEvent, ChainEventContent, ChainEventFactory, JournalEvent};
-use obzenflow_core::journal::journal::Journal;
+use obzenflow_core::event::{
+    ChainEvent, ChainEventContent, ChainEventFactory, ConsumptionFinalEventParams,
+    ConsumptionProgressEventParams, JournalEvent,
+};
 use obzenflow_core::journal::journal_error::JournalError;
 use obzenflow_core::journal::journal_reader::JournalReader;
+use obzenflow_core::journal::Journal;
 use obzenflow_core::ContractResult;
 use obzenflow_core::EventEnvelope;
 use obzenflow_core::Result;
@@ -454,7 +457,7 @@ where
                 }
                 Err(e) => {
                     return Err(
-                        format!("Failed to create reader for stage {:?}: {}", stage_id, e).into(),
+                        format!("Failed to create reader for stage {stage_id:?}: {e}").into(),
                     );
                 }
             };
@@ -514,9 +517,9 @@ where
         // journals, setting this baseline would incorrectly allow "logical EOF"
         // termination before new events are observed.
         let mut baseline_count = 0usize;
-        for i in 0..sub.readers.len().min(tail_positions.len()) {
-            if tail_positions[i] > 0 {
-                sub.state.mark_reader_baseline_at_tail(i);
+        for (idx, tail_position) in tail_positions.iter().take(sub.readers.len()).enumerate() {
+            if *tail_position > 0 {
+                sub.state.mark_reader_baseline_at_tail(idx);
                 baseline_count += 1;
             }
         }
@@ -536,7 +539,7 @@ where
     pub async fn new(upstream_journals: &[(StageId, Arc<dyn Journal<T>>)]) -> Result<Self> {
         let with_names: Vec<(StageId, String, Arc<dyn Journal<T>>)> = upstream_journals
             .iter()
-            .map(|(id, journal)| (*id, format!("{:?}", id), journal.clone()))
+            .map(|(id, journal)| (*id, format!("{id:?}"), journal.clone()))
             .collect();
         Self::new_with_names("unknown_owner", &with_names).await
     }
@@ -611,10 +614,7 @@ where
 
         if self.readers.is_empty() {
             tracing::error!("poll_next() called with no upstream readers");
-            return PollResult::Error(Box::new(io::Error::new(
-                io::ErrorKind::Other,
-                "No upstream readers configured",
-            )));
+            return PollResult::Error(Box::new(io::Error::other("No upstream readers configured")));
         }
 
         let total_readers = self.readers.len();
@@ -787,13 +787,13 @@ where
                                         };
 
                                         if authored_by_upstream {
-                                            progress.advertised_writer_seq = writer_seq.clone();
+                                            progress.advertised_writer_seq = *writer_seq;
                                             progress.last_vector_clock = vector_clock.clone();
                                         }
                                     }
                                 }
 
-                                progress.last_event_id = Some(envelope.event.id().clone());
+                                progress.last_event_id = Some(*envelope.event.id());
                                 if (&envelope.event as &dyn Any)
                                     .downcast_ref::<ChainEvent>()
                                     .is_some()
@@ -1023,23 +1023,25 @@ where
                     .map(|s| DurationMs(now.duration_since(s).as_millis() as u64));
 
                 let progress_event = ChainEventFactory::consumption_progress_event(
-                    tracker.writer_id.clone(),
-                    progress.reader_seq,
-                    progress.last_event_id.clone(),
-                    progress.last_vector_clock.clone(),
-                    self.state.is_reader_eof(index),
-                    JournalPath(progress.stage_id.to_string()),
-                    JournalIndex(index as u64),
-                    progress.advertised_writer_seq,
-                    progress.last_vector_clock.clone(),
-                    stalled_duration,
+                    tracker.writer_id,
+                    ConsumptionProgressEventParams {
+                        reader_seq: progress.reader_seq,
+                        last_event_id: progress.last_event_id,
+                        vector_clock: progress.last_vector_clock.clone(),
+                        eof_seen: self.state.is_reader_eof(index),
+                        reader_path: JournalPath(progress.stage_id.to_string()),
+                        reader_index: JournalIndex(index as u64),
+                        advertised_writer_seq: progress.advertised_writer_seq,
+                        advertised_vector_clock: progress.last_vector_clock.clone(),
+                        stalled_since: stalled_duration,
+                    },
                 );
 
                 tracker
                     .journal
                     .append(progress_event, None)
                     .await
-                    .map_err(|e| format!("Failed to append progress event: {}", e))?;
+                    .map_err(|e| format!("Failed to append progress event: {e}"))?;
 
                 progress.last_progress_seq = progress.reader_seq;
                 progress.last_progress_instant = Some(now);
@@ -1110,7 +1112,7 @@ where
                                     .append(result_event, None)
                                     .await
                                     .map_err(|e| {
-                                        format!("Failed to append contract result event: {}", e)
+                                        format!("Failed to append contract result event: {e}")
                                     })?;
                             }
                         }
@@ -1175,8 +1177,7 @@ where
                                         system_journal.append(override_event, None).await.map_err(
                                             |e| {
                                                 format!(
-                                                    "Failed to append contract override event: {}",
-                                                    e
+                                                    "Failed to append contract override event: {e}"
                                                 )
                                             },
                                         )?;
@@ -1200,13 +1201,13 @@ where
                                         if advertised.0 > reader.0 {
                                             let gap_event =
                                                 ChainEventFactory::consumption_gap_event(
-                                                    tracker.writer_id.clone(),
+                                                    tracker.writer_id,
                                                     SeqNo(reader.0 + 1),
                                                     advertised,
                                                     progress.stage_id,
                                                 );
                                             tracker.journal.append(gap_event, None).await.map_err(
-                                                |e| format!("Failed to append gap event: {}", e),
+                                                |e| format!("Failed to append gap event: {e}"),
                                             )?;
                                         }
                                     }
@@ -1226,7 +1227,7 @@ where
                             if advertised.0 > progress.reader_seq.0 {
                                 // Missing events
                                 let gap_event = ChainEventFactory::consumption_gap_event(
-                                    tracker.writer_id.clone(),
+                                    tracker.writer_id,
                                     SeqNo(progress.reader_seq.0 + 1),
                                     advertised,
                                     progress.stage_id,
@@ -1235,7 +1236,7 @@ where
                                     .journal
                                     .append(gap_event, None)
                                     .await
-                                    .map_err(|e| format!("Failed to append gap event: {}", e))?;
+                                    .map_err(|e| format!("Failed to append gap event: {e}"))?;
                             }
 
                             status = ContractStatus::Violated {
@@ -1257,7 +1258,7 @@ where
                             failure_reason.clone()
                         {
                             let violation_event = ChainEventFactory::at_least_once_violation_event(
-                                tracker.writer_id.clone(),
+                                tracker.writer_id,
                                 progress.stage_id,
                                 EventViolationCause::SeqDivergence { advertised, reader },
                                 progress.reader_seq,
@@ -1269,30 +1270,32 @@ where
                                 .append(violation_event, None)
                                 .await
                                 .map_err(|e| {
-                                    format!("Failed to append at_least_once_violation event: {}", e)
+                                    format!("Failed to append at_least_once_violation event: {e}")
                                 })?;
                         }
                     }
 
                     // Emit final event
                     let final_event = ChainEventFactory::consumption_final_event(
-                        tracker.writer_id.clone(),
-                        pass,
-                        Count(progress.reader_seq.0),
-                        None,
-                        true,
-                        progress.last_event_id.clone(),
-                        progress.reader_seq,
-                        progress.advertised_writer_seq,
-                        progress.last_vector_clock.clone(),
-                        failure_reason,
+                        tracker.writer_id,
+                        ConsumptionFinalEventParams {
+                            pass,
+                            consumed_count: Count(progress.reader_seq.0),
+                            expected_count: None,
+                            eof_seen: true,
+                            last_event_id: progress.last_event_id,
+                            reader_seq: progress.reader_seq,
+                            advertised_writer_seq: progress.advertised_writer_seq,
+                            advertised_vector_clock: progress.last_vector_clock.clone(),
+                            failure_reason,
+                        },
                     );
 
                     tracker
                         .journal
                         .append(final_event, None)
                         .await
-                        .map_err(|e| format!("Failed to append final event: {}", e))?;
+                        .map_err(|e| format!("Failed to append final event: {e}"))?;
 
                     // Emit contract status to system journal (if available)
                     if let (Some(system_journal), Some(reader_stage)) =
@@ -1312,7 +1315,7 @@ where
                         system_journal
                             .append(status_event, None)
                             .await
-                            .map_err(|e| format!("Failed to append contract status: {}", e))?;
+                            .map_err(|e| format!("Failed to append contract status: {e}"))?;
                     }
 
                     progress.final_emitted = true;
@@ -1333,55 +1336,54 @@ where
                     progress.consecutive_stall_checks += 1;
 
                     if progress.consecutive_stall_checks >= tracker.config.stall_checks_before_emit
+                        && progress.stalled_since.is_none()
                     {
-                        if progress.stalled_since.is_none() {
-                            progress.stalled_since = progress.last_progress_instant;
+                        progress.stalled_since = progress.last_progress_instant;
 
-                            let stalled_duration = DurationMs(
-                                now.duration_since(progress.last_progress_instant.unwrap())
-                                    .as_millis() as u64,
+                        let stalled_duration = DurationMs(
+                            now.duration_since(progress.last_progress_instant.unwrap())
+                                .as_millis() as u64,
+                        );
+
+                        let stalled_event = ChainEventFactory::reader_stalled_event(
+                            tracker.writer_id,
+                            progress.stage_id,
+                            stalled_duration,
+                        );
+
+                        tracker
+                            .journal
+                            .append(stalled_event, None)
+                            .await
+                            .map_err(|e| format!("Failed to append stalled event: {e}"))?;
+
+                        // Emit stalled contract status fail to system journal (if available)
+                        if let (Some(system_journal), Some(reader_stage)) =
+                            (&tracker.system_journal, tracker.reader_stage)
+                        {
+                            let status_event = SystemEvent::new(
+                                tracker.writer_id,
+                                SystemEventType::ContractStatus {
+                                    upstream: progress.stage_id,
+                                    reader: reader_stage,
+                                    pass: false,
+                                    reader_seq: Some(progress.reader_seq),
+                                    advertised_writer_seq: progress.advertised_writer_seq,
+                                    reason: Some(EventViolationCause::Other(
+                                        "reader_stalled".into(),
+                                    )),
+                                },
                             );
-
-                            let stalled_event = ChainEventFactory::reader_stalled_event(
-                                tracker.writer_id.clone(),
-                                progress.stage_id,
-                                stalled_duration,
-                            );
-
-                            tracker
-                                .journal
-                                .append(stalled_event, None)
+                            system_journal
+                                .append(status_event, None)
                                 .await
-                                .map_err(|e| format!("Failed to append stalled event: {}", e))?;
-
-                            // Emit stalled contract status fail to system journal (if available)
-                            if let (Some(system_journal), Some(reader_stage)) =
-                                (&tracker.system_journal, tracker.reader_stage)
-                            {
-                                let status_event = SystemEvent::new(
-                                    tracker.writer_id,
-                                    SystemEventType::ContractStatus {
-                                        upstream: progress.stage_id,
-                                        reader: reader_stage,
-                                        pass: false,
-                                        reader_seq: Some(progress.reader_seq),
-                                        advertised_writer_seq: progress.advertised_writer_seq,
-                                        reason: Some(EventViolationCause::Other(
-                                            "reader_stalled".into(),
-                                        )),
-                                    },
-                                );
-                                system_journal
-                                    .append(status_event, None)
-                                    .await
-                                    .map_err(|e| {
-                                        format!("Failed to append stalled contract status: {}", e)
-                                    })?;
-                            }
-
-                            status = ContractStatus::Stalled(progress.stage_id);
-                            progress.contract_violated = true;
+                                .map_err(|e| {
+                                    format!("Failed to append stalled contract status: {e}")
+                                })?;
                         }
+
+                        status = ContractStatus::Stalled(progress.stage_id);
+                        progress.contract_violated = true;
                     }
                 } else {
                     progress.consecutive_stall_checks = 0;
@@ -1403,7 +1405,7 @@ where
         }
     }
 
-    /// Query methods for FSM decision-making
+    // Query methods for FSM decision-making
 
     /// Check if there are pending buffered events
     pub fn has_pending(&self) -> bool {
@@ -1485,10 +1487,10 @@ mod tests {
     use obzenflow_core::event::journal_event::JournalEvent;
     use obzenflow_core::event::system_event::SystemEvent;
     use obzenflow_core::id::JournalId;
-    use obzenflow_core::journal::journal::Journal;
     use obzenflow_core::journal::journal_error::JournalError;
     use obzenflow_core::journal::journal_owner::JournalOwner;
     use obzenflow_core::journal::journal_reader::JournalReader;
+    use obzenflow_core::journal::Journal;
     use obzenflow_core::{CircuitBreakerContractInfo, CircuitBreakerContractMode};
     use serde_json::json;
     use std::collections::HashMap;
@@ -1778,7 +1780,7 @@ mod tests {
         let upstream_journal: Arc<dyn Journal<ChainEvent>> =
             Arc::new(EmfileJournal::new(upstream_owner));
 
-        let upstreams = vec![(upstream_stage, "upstream".to_string(), upstream_journal)];
+        let upstreams = [(upstream_stage, "upstream".to_string(), upstream_journal)];
 
         let err = UpstreamSubscription::<ChainEvent>::new_with_names_from_positions(
             "downstream",
@@ -1817,10 +1819,10 @@ mod tests {
 
         // One data event followed by EOF that advertises more events than read.
         let writer_id = WriterId::Stage(upstream_stage);
-        let data_event = ChainEventFactory::data_event(writer_id.clone(), "test.event", json!({}));
+        let data_event = ChainEventFactory::data_event(writer_id, "test.event", json!({}));
         upstream_journal.append(data_event, None).await.unwrap();
 
-        let mut eof_event = ChainEventFactory::eof_event(writer_id.clone(), true);
+        let mut eof_event = ChainEventFactory::eof_event(writer_id, true);
         if let ChainEventContent::FlowControl(FlowControlPayload::Eof {
             writer_id: writer_id_field,
             writer_seq,
@@ -1832,11 +1834,7 @@ mod tests {
         }
         upstream_journal.append(eof_event, None).await.unwrap();
 
-        let upstreams: Vec<(StageId, String, Arc<dyn Journal<ChainEvent>>)> = vec![(
-            upstream_stage,
-            "upstream".to_string(),
-            upstream_journal.clone(),
-        )];
+        let upstreams = [(upstream_stage, "upstream".to_string(), upstream_journal)];
 
         let mut subscription = UpstreamSubscription::new_with_names("test_owner", &upstreams)
             .await
@@ -1874,7 +1872,7 @@ mod tests {
                 PollResult::Event(_env) => continue,
                 PollResult::NoEvents => break,
                 PollResult::Error(e) => {
-                    panic!("poll_next_with_state returned error: {:?}", e);
+                    panic!("poll_next_with_state returned error: {e:?}");
                 }
             }
         }
@@ -1885,11 +1883,11 @@ mod tests {
         let (mut subscription, contract_journal, system_journal, upstream_stage, reader_stage) =
             build_upstream_with_seq_divergence(Arc::new(NoControlMiddleware)).await;
 
-        let mut reader_progress = vec![ReaderProgress::new(upstream_stage)];
-        drive_subscription_to_eof(&mut subscription, &mut reader_progress[..]).await;
+        let mut reader_progress = [ReaderProgress::new(upstream_stage)];
+        drive_subscription_to_eof(&mut subscription, &mut reader_progress).await;
 
         let status = subscription
-            .check_contracts(&mut reader_progress[..])
+            .check_contracts(&mut reader_progress)
             .await
             .unwrap();
 
@@ -1901,10 +1899,10 @@ mod tests {
                         assert_eq!(advertised, Some(SeqNo(3)));
                         assert_eq!(reader, SeqNo(1));
                     }
-                    other => panic!("expected SeqDivergence cause, got {:?}", other),
+                    other => panic!("expected SeqDivergence cause, got {other:?}"),
                 }
             }
-            other => panic!("expected violated status, got {:?}", other),
+            other => panic!("expected violated status, got {other:?}"),
         }
 
         let events = contract_journal.read_causally_ordered().await.unwrap();
@@ -1931,7 +1929,7 @@ mod tests {
                             assert_eq!(*advertised, Some(SeqNo(3)));
                             assert_eq!(*reader, SeqNo(1));
                         }
-                        other => panic!("expected SeqDivergence failure_reason, got {:?}", other),
+                        other => panic!("expected SeqDivergence failure_reason, got {other:?}"),
                     }
                 }
                 ChainEventContent::FlowControl(FlowControlPayload::ConsumptionGap {
@@ -1960,8 +1958,7 @@ mod tests {
                             assert_eq!(*reader, SeqNo(1));
                         }
                         other => panic!(
-                            "expected SeqDivergence reason in AtLeastOnceViolation, got {:?}",
-                            other
+                            "expected SeqDivergence reason in AtLeastOnceViolation, got {other:?}"
                         ),
                     }
                 }
@@ -1995,10 +1992,9 @@ mod tests {
                     assert!(!pass);
                     match reason {
                         Some(EventViolationCause::SeqDivergence { .. }) => {}
-                        other => panic!(
-                            "expected SeqDivergence reason in ContractStatus, got {:?}",
-                            other
-                        ),
+                        other => {
+                            panic!("expected SeqDivergence reason in ContractStatus, got {other:?}")
+                        }
                     }
                 }
                 SystemEventType::ContractOverrideByPolicy { .. } => {
@@ -2042,21 +2038,18 @@ mod tests {
             })
             .collect();
 
-        let mut reader_progress = vec![ReaderProgress::new(upstream_stage)];
-        drive_subscription_to_eof(&mut subscription, &mut reader_progress[..]).await;
+        let mut reader_progress = [ReaderProgress::new(upstream_stage)];
+        drive_subscription_to_eof(&mut subscription, &mut reader_progress).await;
 
         let status = subscription
-            .check_contracts(&mut reader_progress[..])
+            .check_contracts(&mut reader_progress)
             .await
             .unwrap();
 
         // With breaker-aware contracts, the SeqDivergence should be treated as pass.
         match status {
             ContractStatus::ProgressEmitted | ContractStatus::Healthy => {}
-            other => panic!(
-                "expected non-violated status under BreakerAware, got {:?}",
-                other
-            ),
+            other => panic!("expected non-violated status under BreakerAware, got {other:?}"),
         }
 
         let events = contract_journal.read_causally_ordered().await.unwrap();
@@ -2156,22 +2149,14 @@ mod tests {
         // transport draining; they should be skipped at the subscription layer.
         upstream_journal
             .append(
-                ChainEventFactory::stage_running(writer_id.clone(), upstream_stage),
+                ChainEventFactory::stage_running(writer_id, upstream_stage),
                 None,
             )
             .await
             .unwrap();
         upstream_journal
             .append(
-                ChainEventFactory::stage_running(writer_id.clone(), upstream_stage),
-                None,
-            )
-            .await
-            .unwrap();
-
-        upstream_journal
-            .append(
-                ChainEventFactory::data_event(writer_id.clone(), "test.event", json!({"n": 1})),
+                ChainEventFactory::stage_running(writer_id, upstream_stage),
                 None,
             )
             .await
@@ -2179,29 +2164,33 @@ mod tests {
 
         upstream_journal
             .append(
-                ChainEventFactory::stage_running(writer_id.clone(), upstream_stage),
+                ChainEventFactory::data_event(writer_id, "test.event", json!({"n": 1})),
                 None,
             )
             .await
             .unwrap();
 
         upstream_journal
-            .append(ChainEventFactory::eof_event(writer_id.clone(), true), None)
+            .append(
+                ChainEventFactory::stage_running(writer_id, upstream_stage),
+                None,
+            )
             .await
             .unwrap();
 
-        let upstreams: Vec<(StageId, String, Arc<dyn Journal<ChainEvent>>)> = vec![(
-            upstream_stage,
-            "upstream".to_string(),
-            upstream_journal.clone(),
-        )];
+        upstream_journal
+            .append(ChainEventFactory::eof_event(writer_id, true), None)
+            .await
+            .unwrap();
+
+        let upstreams = [(upstream_stage, "upstream".to_string(), upstream_journal)];
 
         let mut subscription = UpstreamSubscription::new_with_names("test_owner", &upstreams)
             .await
             .unwrap()
             .transport_only();
 
-        let mut reader_progress = vec![ReaderProgress::new(upstream_stage)];
+        let mut reader_progress = [ReaderProgress::new(upstream_stage)];
 
         let first = subscription
             .poll_next_with_state("test_fsm", Some(&mut reader_progress[..]))
@@ -2209,9 +2198,9 @@ mod tests {
         match first {
             PollResult::Event(env) => match env.event.content {
                 ChainEventContent::Data { .. } => {}
-                other => panic!("expected first delivered event to be Data, got {:?}", other),
+                other => panic!("expected first delivered event to be Data, got {other:?}"),
             },
-            other => panic!("expected PollResult::Event, got {:?}", other),
+            other => panic!("expected PollResult::Event, got {other:?}"),
         }
 
         let second = subscription
@@ -2220,9 +2209,9 @@ mod tests {
         match second {
             PollResult::Event(env) => match env.event.content {
                 ChainEventContent::FlowControl(FlowControlPayload::Eof { .. }) => {}
-                other => panic!("expected second delivered event to be EOF, got {:?}", other),
+                other => panic!("expected second delivered event to be EOF, got {other:?}"),
             },
-            other => panic!("expected PollResult::Event, got {:?}", other),
+            other => panic!("expected PollResult::Event, got {other:?}"),
         }
 
         let outcome = subscription

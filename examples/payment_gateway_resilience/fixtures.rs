@@ -15,8 +15,8 @@ pub fn scripted_commands() -> Vec<PaymentCommand> {
     // Warmup: healthy dependency, all good cards.
     for i in 0..8 {
         commands.push(PaymentCommand {
-            request_id: format!("warmup-{}", i),
-            customer_id: format!("cust-{}", i),
+            request_id: format!("warmup-{i}"),
+            customer_id: format!("cust-{i}"),
             amount_cents: 10_00,
             card_ok: true,
             phase: TrafficPhase::Warmup,
@@ -26,7 +26,7 @@ pub fn scripted_commands() -> Vec<PaymentCommand> {
     // Outage: dependency begins to fail even for good cards.
     for i in 0..10 {
         commands.push(PaymentCommand {
-            request_id: format!("outage-{}", i),
+            request_id: format!("outage-{i}"),
             customer_id: format!("cust-{}", 100 + i),
             amount_cents: 20_00,
             card_ok: true,
@@ -49,7 +49,7 @@ pub fn scripted_commands() -> Vec<PaymentCommand> {
 
     for (idx, (card_ok, amount_cents)) in recovery_pattern.into_iter().enumerate() {
         commands.push(PaymentCommand {
-            request_id: format!("recovery-{}", idx),
+            request_id: format!("recovery-{idx}"),
             customer_id: format!("cust-{}", 200 + idx),
             amount_cents,
             card_ok,

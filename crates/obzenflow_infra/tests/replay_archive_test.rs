@@ -1,19 +1,19 @@
 use chrono::Utc;
+use crc32fast::Hasher;
 use obzenflow_core::build_info::OBZENFLOW_VERSION;
 use obzenflow_core::event::context::StageType;
-use obzenflow_core::event::{PipelineLifecycleEvent, SystemEvent, SystemEventType};
 use obzenflow_core::event::vector_clock::VectorClock;
+use obzenflow_core::event::{PipelineLifecycleEvent, SystemEvent, SystemEventType};
 use obzenflow_core::id::{JournalId, SystemId};
-use obzenflow_core::journal::ArchiveStatus;
 use obzenflow_core::journal::run_manifest::{
     RunManifest, RunManifestStage, RUN_MANIFEST_FILENAME, RUN_MANIFEST_VERSION,
 };
+use obzenflow_core::journal::ArchiveStatus;
 use obzenflow_core::WriterId;
 use obzenflow_infra::journal::disk::log_record::LogRecord;
 use obzenflow_infra::journal::disk::replay_archive::DiskReplayArchive;
-use obzenflow_runtime_services::replay::ReplayError;
 use obzenflow_runtime_services::replay::ReplayArchive;
-use crc32fast::Hasher;
+use obzenflow_runtime_services::replay::ReplayError;
 use std::collections::HashMap;
 use std::path::Path;
 use tempfile::tempdir;
@@ -27,9 +27,10 @@ fn write_manifest(dir: &Path) {
             dsl_var: "source".to_string(),
             stage_type: StageType::FiniteSource,
             stage_id: "stage_01H000000000000000000000000".to_string(),
-            data_journal_file: "FiniteSource_returns_stage_01H000000000000000000000000.log".to_string(),
-            error_journal_file:
-                "FiniteSource_returns_error_stage_01H000000000000000000000000.log".to_string(),
+            data_journal_file: "FiniteSource_returns_stage_01H000000000000000000000000.log"
+                .to_string(),
+            error_journal_file: "FiniteSource_returns_error_stage_01H000000000000000000000000.log"
+                .to_string(),
         },
     );
 

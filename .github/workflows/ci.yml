@@ -1,0 +1,105 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.93.0
+          components: rustfmt
+      - name: Verify lockfile
+        run: cargo fetch --locked
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --all --check
+
+  clippy:
+    needs: fmt
+    runs-on: ubuntu-latest
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: default
+            cargo_args: ""
+          - name: all-features
+            cargo_args: "--all-features"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.93.0
+          components: clippy
+      - name: Verify lockfile
+        run: cargo fetch --locked
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Clippy (${{ matrix.name }})
+        run: cargo clippy --workspace --all-targets --locked ${{ matrix.cargo_args }} -- -D warnings
+
+  test:
+    needs: fmt
+    runs-on: ubuntu-latest
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: default
+            cargo_args: ""
+            cargo_jobs: ""
+          - name: all-features
+            cargo_args: "--all-features"
+            cargo_jobs: "--jobs 1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.93.0
+      - name: Verify lockfile
+        run: cargo fetch --locked
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Tests (${{ matrix.name }})
+        run: cargo test --workspace --locked ${{ matrix.cargo_args }} ${{ matrix.cargo_jobs }}
+
+  policy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.93.0
+      - name: Verify lockfile
+        run: cargo fetch --locked
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+
+      - name: Install cargo-machete
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-machete
+
+      - name: cargo-deny
+        run: cargo deny --all-features check
+
+      - name: cargo-machete
+        run: cargo machete --skip-target-dir

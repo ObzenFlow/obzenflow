@@ -2,13 +2,13 @@
 //!
 //! Shared between DiskJournal and DiskJournalReader for efficient file-based operations.
 
-use obzenflow_core::event::{JournalEvent, ChainEvent};
-use obzenflow_core::event::vector_clock::VectorClock;
 use chrono::{DateTime, Utc};
-use serde::{Serialize, Deserialize};
-use ulid::Ulid;
-use obzenflow_core::id::JournalId;
 use obzenflow_core::event::identity::WriterId;
+use obzenflow_core::event::vector_clock::VectorClock;
+use obzenflow_core::event::JournalEvent;
+use obzenflow_core::id::JournalId;
+use serde::{Deserialize, Serialize};
+use ulid::Ulid;
 
 /// Compact log record format for disk storage
 #[derive(Debug)]
@@ -24,7 +24,7 @@ pub struct LogRecord<T: JournalEvent> {
 // Manual implementations to avoid serde trait bound issues
 impl<T> Serialize for LogRecord<T>
 where
-    T: JournalEvent
+    T: JournalEvent,
 {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -44,7 +44,7 @@ where
 
 impl<'de, T> Deserialize<'de> for LogRecord<T>
 where
-    T: JournalEvent
+    T: JournalEvent,
 {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -59,7 +59,7 @@ where
             timestamp: DateTime<Utc>,
             event: T,
         }
-        
+
         let data = LogRecordData::<T>::deserialize(deserializer)?;
         Ok(LogRecord {
             event_id: data.event_id,

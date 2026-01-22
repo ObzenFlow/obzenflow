@@ -6,7 +6,7 @@
 //! - Breaker-aware flow (CB + typed fallback + policies) is expected
 //!   to complete successfully under the same scripted outage pattern.
 
-#[path = "../examples/payment_gateway_resilience/lib.rs"]
+#[path = "../examples/payment_gateway_resilience/support.rs"]
 mod payment_gateway_resilience;
 
 #[test]

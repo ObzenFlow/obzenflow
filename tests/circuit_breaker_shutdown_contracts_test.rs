@@ -13,8 +13,8 @@ use obzenflow_adapters::middleware::circuit_breaker;
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventContent, ChainEventFactory};
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
-use obzenflow_core::journal::journal::Journal;
 use obzenflow_core::journal::journal_owner::JournalOwner;
+use obzenflow_core::journal::Journal;
 use obzenflow_core::{StageId, WriterId};
 use obzenflow_dsl_infra::{flow, sink, source, transform};
 use obzenflow_infra::journal::disk_journals;
@@ -56,7 +56,7 @@ impl FiniteSourceHandler for FiniteTestSource {
         self.emitted += 1;
 
         let event = ChainEventFactory::data_event(
-            self.writer_id.clone(),
+            self.writer_id,
             "breaker.test",
             json!({
                 "index": index,
@@ -176,13 +176,13 @@ async fn breaker_driven_shutdown_emits_poison_eof_and_contract() -> Result<()> {
         }
     }
     .await
-    .map_err(|e| anyhow::anyhow!("Failed to create flow: {:?}", e))?;
+    .map_err(|e| anyhow::anyhow!("Failed to create flow: {e:?}"))?;
 
     // Run with metrics so we know the flow completed cleanly.
     let metrics_exporter = flow_handle
         .run_with_metrics()
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to run flow: {:?}", e))?
+        .map_err(|e| anyhow::anyhow!("Failed to run flow: {e:?}"))?
         .expect("Metrics should be enabled for breaker_shutdown_contracts");
 
     // Give metrics and contract writers a brief moment to flush.
@@ -190,12 +190,12 @@ async fn breaker_driven_shutdown_emits_poison_eof_and_contract() -> Result<()> {
 
     let metrics_text = metrics_exporter
         .render_metrics()
-        .map_err(|e| anyhow::anyhow!("Failed to render metrics: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to render metrics: {e}"))?;
 
     println!("\n=== Breaker Shutdown Metrics (filtered) ===");
     for line in metrics_text.lines() {
         if line.contains("breaker_shutdown_contracts") {
-            println!("{}", line);
+            println!("{line}");
         }
     }
 
@@ -203,8 +203,7 @@ async fn breaker_driven_shutdown_emits_poison_eof_and_contract() -> Result<()> {
     let delivered = delivered_count.load(Ordering::Relaxed);
     assert!(
         delivered < 20,
-        "expected breaker-driven shutdown to stop before all events were delivered, got {}",
-        delivered
+        "expected breaker-driven shutdown to stop before all events were delivered, got {delivered}"
     );
 
     // Inspect the source data journal for FlowControl EOF events and contract evidence.
@@ -216,15 +215,15 @@ async fn breaker_driven_shutdown_emits_poison_eof_and_contract() -> Result<()> {
     let mut source_journal_paths = Vec::new();
     if base_path.exists() {
         for entry in std::fs::read_dir(&base_path)
-            .map_err(|e| anyhow::anyhow!("Failed to read flows dir: {:?}", e))?
+            .map_err(|e| anyhow::anyhow!("Failed to read flows dir: {e:?}"))?
         {
-            let entry = entry.map_err(|e| anyhow::anyhow!("Dir entry error: {:?}", e))?;
+            let entry = entry.map_err(|e| anyhow::anyhow!("Dir entry error: {e:?}"))?;
             let path = entry.path();
             if path.is_dir() {
                 for file in std::fs::read_dir(&path)
-                    .map_err(|e| anyhow::anyhow!("Failed to read flow dir: {:?}", e))?
+                    .map_err(|e| anyhow::anyhow!("Failed to read flow dir: {e:?}"))?
                 {
-                    let file = file.map_err(|e| anyhow::anyhow!("Dir entry error: {:?}", e))?;
+                    let file = file.map_err(|e| anyhow::anyhow!("Dir entry error: {e:?}"))?;
                     let file_path = file.path();
                     if let Some(name) = file_path.file_name().and_then(|n| n.to_str()) {
                         if name.starts_with("FiniteSource_source_") && name.ends_with(".log") {
@@ -253,13 +252,13 @@ async fn breaker_driven_shutdown_emits_poison_eof_and_contract() -> Result<()> {
                 JournalOwner::stage(StageId::new()),
             )
             .map_err(|e| {
-                anyhow::anyhow!("Failed to open source journal {:?}: {:?}", journal_path, e)
+                anyhow::anyhow!("Failed to open source journal {journal_path:?}: {e:?}")
             })?;
 
         let envelopes = journal
             .read_causally_ordered()
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to read source journal: {:?}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to read source journal: {e:?}"))?;
 
         for env in envelopes {
             match env.event.content {

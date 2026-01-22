@@ -35,17 +35,16 @@ impl Eq for AggregatedItem {}
 
 impl PartialOrd for AggregatedItem {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        // Compare by total_score first, then by key for stability
-        match self.total_score.partial_cmp(&other.total_score) {
-            Some(Ordering::Equal) => Some(self.key.cmp(&other.key)),
-            other => other,
-        }
+        Some(self.cmp(other))
     }
 }
 
 impl Ord for AggregatedItem {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.partial_cmp(other).unwrap_or(Ordering::Equal)
+        self.total_score
+            .partial_cmp(&other.total_score)
+            .unwrap_or(Ordering::Equal)
+            .then_with(|| self.key.cmp(&other.key))
     }
 }
 
@@ -179,7 +178,7 @@ where
             n: self.n,
             key_extractor: self.key_extractor.clone(),
             score_extractor: self.score_extractor.clone(),
-            writer_id: self.writer_id.clone(),
+            writer_id: self.writer_id,
         }
     }
 }
@@ -229,7 +228,7 @@ impl Accumulator for TopNBy<FieldExtractor, FieldExtractor> {
     }
 
     fn emit(&self, state: &Self::State) -> Vec<ChainEvent> {
-        emit_top_n(state, self.writer_id.clone())
+        emit_top_n(state, self.writer_id)
     }
 
     fn reset(&self, state: &mut Self::State) {
@@ -277,7 +276,7 @@ where
     }
 
     fn emit(&self, state: &Self::State) -> Vec<ChainEvent> {
-        emit_top_n(state, self.writer_id.clone())
+        emit_top_n(state, self.writer_id)
     }
 
     fn reset(&self, state: &mut Self::State) {
@@ -746,7 +745,7 @@ where
 
         // Create result event
         vec![ChainEventFactory::data_event(
-            self.writer_id.clone(),
+            self.writer_id,
             T::EVENT_TYPE,
             json!({
                 "top_n": top_n.iter().enumerate().map(|(idx, item)| {
@@ -795,7 +794,7 @@ mod tests_typed {
         let mut state = accumulator.initial_state();
 
         // Add multiple orders for same products
-        for (product, amount) in vec![
+        for (product, amount) in [
             ("laptop", 1000.0),
             ("phone", 500.0),
             ("laptop", 1200.0), // Second laptop sale
@@ -839,7 +838,7 @@ mod tests_typed {
         let mut state = accumulator.initial_state();
 
         // Add orders for 3 products
-        for (product, amount) in vec![("a", 100.0), ("b", 200.0), ("c", 300.0)] {
+        for (product, amount) in [("a", 100.0), ("b", 200.0), ("c", 300.0)] {
             let event = ChainEventFactory::data_event(
                 WriterId::from(StageId::new()),
                 "test",

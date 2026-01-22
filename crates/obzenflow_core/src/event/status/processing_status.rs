@@ -23,9 +23,10 @@ pub enum ErrorKind {
 }
 
 /// The outcome of processing an event
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub enum ProcessingStatus {
     /// Event was processed successfully
+    #[default]
     Success,
 
     /// Event was filtered out (intentionally not processed)
@@ -87,11 +88,5 @@ impl ProcessingStatus {
     /// Check if processing was successful
     pub fn is_success(&self) -> bool {
         matches!(self, Self::Success)
-    }
-}
-
-impl Default for ProcessingStatus {
-    fn default() -> Self {
-        Self::Success
     }
 }

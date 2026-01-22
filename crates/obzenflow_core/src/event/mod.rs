@@ -22,12 +22,15 @@ pub mod status;
 pub mod utils;
 
 // Re-export main types at root level for convenience
-pub use chain_event::{ChainEvent, ChainEventContent, ChainEventFactory};
+pub use chain_event::{
+    ChainEvent, ChainEventContent, ChainEventFactory, CircuitBreakerSummaryEventParams,
+    ConsumptionFinalEventParams, ConsumptionProgressEventParams, SourceContractEventParams,
+};
 pub use event_envelope::EventEnvelope;
 pub use journal_event::JournalEvent;
 pub use system_event::{
-    MetricsCoordinationEvent, PipelineLifecycleEvent, StageLifecycleEvent, SystemEvent,
-    ReplayLifecycleEvent, SystemEventFactory, SystemEventType,
+    MetricsCoordinationEvent, PipelineLifecycleEvent, ReplayLifecycleEvent, StageLifecycleEvent,
+    SystemEvent, SystemEventFactory, SystemEventType,
 };
 pub use types::{CorrelationId, EventId, JournalWriterId, WriterId};
 

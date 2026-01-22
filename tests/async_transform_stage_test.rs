@@ -7,8 +7,8 @@ use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, Delivery
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
 use obzenflow_core::event::ChainEventContent;
-use obzenflow_core::journal::journal::Journal;
 use obzenflow_core::journal::journal_owner::JournalOwner;
+use obzenflow_core::journal::Journal;
 use obzenflow_core::StageId;
 use obzenflow_core::WriterId;
 use obzenflow_dsl_infra::{async_transform, flow, sink, source};
@@ -58,7 +58,7 @@ impl FiniteSourceHandler for TestEventSource {
             let index = self.emitted;
             self.emitted += 1;
             Ok(Some(vec![ChainEventFactory::data_event(
-                self.writer_id.clone(),
+                self.writer_id,
                 "TestEvent",
                 json!({ "index": index }),
             )]))
@@ -288,7 +288,7 @@ async fn async_transform_routes_error_kinds_to_correct_journal() -> Result<()> {
         }
     }
     .await
-    .map_err(|e| anyhow::anyhow!("Failed to create flow: {:?}", e))?;
+    .map_err(|e| anyhow::anyhow!("Failed to create flow: {e:?}"))?;
 
     handle.run().await?;
 
@@ -445,7 +445,7 @@ async fn async_transform_applies_stage_middleware() -> Result<()> {
         }
     }
     .await
-    .map_err(|e| anyhow::anyhow!("Failed to create flow: {:?}", e))?;
+    .map_err(|e| anyhow::anyhow!("Failed to create flow: {e:?}"))?;
 
     handle.run().await?;
 
@@ -453,8 +453,8 @@ async fn async_transform_applies_stage_middleware() -> Result<()> {
         .lock()
         .unwrap()
         .iter()
+        .filter(|event| event.is_data())
         .cloned()
-        .filter(|e| e.is_data())
         .collect();
 
     assert_eq!(
@@ -497,7 +497,7 @@ async fn async_transform_drain_failure_is_stage_level_failure() -> Result<()> {
         }
     }
     .await
-    .map_err(|e| anyhow::anyhow!("Failed to create flow: {:?}", e))?;
+    .map_err(|e| anyhow::anyhow!("Failed to create flow: {e:?}"))?;
 
     let run_result = tokio::time::timeout(Duration::from_secs(10), handle.run()).await;
     let err = match run_result {

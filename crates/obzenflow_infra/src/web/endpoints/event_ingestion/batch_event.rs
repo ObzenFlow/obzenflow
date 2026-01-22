@@ -1,6 +1,6 @@
 use super::shared::join_path;
-use super::{authorize_request, validate_submission};
 use super::IngestionState;
+use super::{authorize_request, validate_submission};
 use async_trait::async_trait;
 use obzenflow_core::event::ingestion::{
     BatchSubmission, IngestionRejectionReason, SubmissionResponse,
@@ -47,10 +47,9 @@ impl HttpEndpoint for BatchEventEndpoint {
                     message: e.to_string(),
                     source: None,
                 })?;
-            self.state.telemetry.observe_rejected(
-                IngestionRejectionReason::PayloadTooLarge,
-                1,
-            );
+            self.state
+                .telemetry
+                .observe_rejected(IngestionRejectionReason::PayloadTooLarge, 1);
             return Ok(response);
         }
 
@@ -91,9 +90,9 @@ impl HttpEndpoint for BatchEventEndpoint {
                 let response = Response::new(400)
                     .with_json(&json!({"error": format!("invalid request body: {e}")}))
                     .map_err(|err| WebError::RequestHandlingFailed {
-                            message: err.to_string(),
-                            source: None,
-                        })?;
+                        message: err.to_string(),
+                        source: None,
+                    })?;
                 self.state
                     .telemetry
                     .observe_rejected(IngestionRejectionReason::InvalidJson, 1);

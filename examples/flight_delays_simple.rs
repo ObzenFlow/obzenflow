@@ -194,9 +194,9 @@ impl TransformHandler for DelayCalculator {
 
                 // ✨ FLOWIP-082a: Use EVENT_TYPE constant
                 return Ok(vec![ChainEventFactory::derived_data_event(
-                    event.writer_id.clone(),
+                    event.writer_id,
                     &event,
-                    &FlightRecord::versioned_event_type(),
+                    FlightRecord::versioned_event_type(),
                     payload,
                 )]);
             }
@@ -287,8 +287,8 @@ impl StatefulHandler for CarrierAggregator {
 
                 // Use TypedPayload's EVENT_TYPE
                 ChainEventFactory::data_event(
-                    self.writer_id.clone(),
-                    &CarrierStatistics::versioned_event_type(),
+                    self.writer_id,
+                    CarrierStatistics::versioned_event_type(),
                     serde_json::to_value(&stats)
                         .expect("CarrierStatistics should always serialize"),
                 )
@@ -311,7 +311,7 @@ pub async fn main() -> Result<()> {
     println!("========================================");
     println!("✨ FLOWIP-082a: TypedPayload Event Schemas");
     println!("✨ FLOWIP-080l: Typed Join Helpers");
-    println!("");
+    println!();
 
     println!("Features demonstrated:");
     println!("  • TypedPayload trait for compile-time event types");

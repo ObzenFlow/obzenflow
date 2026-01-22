@@ -72,18 +72,16 @@ fn check_dangerous_patterns(
     let hints = factory.hints();
 
     // Pattern 1: Skip control events on sinks
-    if hints.drops_control_events
-        || (factory.name().contains("skip") && factory.name().contains("control"))
+    if (hints.drops_control_events
+        || (factory.name().contains("skip") && factory.name().contains("control")))
+        && stage_type == StageType::Sink
     {
-        if stage_type == StageType::Sink {
-            let message = format!(
-                "❌ CRITICAL: Never skip control events on sink '{}'! \
-                 This will prevent proper draining and cause data loss!",
-                stage_name
-            );
-            error!("{}", message);
-            result.errors.push(message);
-        }
+        let message = format!(
+            "❌ CRITICAL: Never skip control events on sink '{stage_name}'! \
+                 This will prevent proper draining and cause data loss!"
+        );
+        error!("{}", message);
+        result.errors.push(message);
     }
 
     // Pattern 2: Infinite retry on sources
@@ -93,9 +91,8 @@ fn check_dangerous_patterns(
             match stage_type {
                 StageType::FiniteSource | StageType::InfiniteSource => {
                     let message = format!(
-                        "❌ CRITICAL: Infinite retry on source '{}' makes no sense! \
-                         Sources generate data, they don't retry receiving it!",
-                        stage_name
+                        "❌ CRITICAL: Infinite retry on source '{stage_name}' makes no sense! \
+                         Sources generate data, they don't retry receiving it!"
                     );
                     error!("{}", message);
                     result.errors.push(message);
@@ -124,9 +121,8 @@ fn check_dangerous_patterns(
     if let Some(batch) = &hints.batching {
         if !batch.bounded && stage_type == StageType::Sink {
             let message = format!(
-                "⚠️  WARNING: Unbounded batching on sink '{}' can cause data to be stuck! \
-                 Make sure you have a timeout configured!",
-                stage_name
+                "⚠️  WARNING: Unbounded batching on sink '{stage_name}' can cause data to be stuck! \
+                 Make sure you have a timeout configured!"
             );
             warn!("{}", message);
             result.warnings.push(message);
@@ -135,9 +131,8 @@ fn check_dangerous_patterns(
         // Fallback heuristic
         if stage_type == StageType::Sink {
             let message = format!(
-                "⚠️  WARNING: Unbounded batching on sink '{}' can cause data to be stuck! \
-                 Make sure you have a timeout configured!",
-                stage_name
+                "⚠️  WARNING: Unbounded batching on sink '{stage_name}' can cause data to be stuck! \
+                 Make sure you have a timeout configured!"
             );
             warn!("{}", message);
             result.warnings.push(message);
@@ -147,18 +142,16 @@ fn check_dangerous_patterns(
     // Pattern 4: Rate limiting on sinks
     if hints.rate_limits && stage_type == StageType::Sink {
         let message = format!(
-            "⚠️  WARNING: Rate limiting on sink '{}' can cause severe backpressure! \
-             Make sure upstream stages can handle this!",
-            stage_name
+            "⚠️  WARNING: Rate limiting on sink '{stage_name}' can cause severe backpressure! \
+             Make sure upstream stages can handle this!"
         );
         warn!("{}", message);
         result.warnings.push(message);
     } else if factory.name().contains("rate_limit") && stage_type == StageType::Sink {
         // Fallback heuristic
         let message = format!(
-            "⚠️  WARNING: Rate limiting on sink '{}' can cause severe backpressure! \
-             Make sure upstream stages can handle this!",
-            stage_name
+            "⚠️  WARNING: Rate limiting on sink '{stage_name}' can cause severe backpressure! \
+             Make sure upstream stages can handle this!"
         );
         warn!("{}", message);
         result.warnings.push(message);

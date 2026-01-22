@@ -47,7 +47,7 @@ impl EmissionStrategy for EveryN {
     fn should_emit(&mut self, events_seen: u64, _last_emit: Option<Instant>) -> bool {
         // Emit at boundaries: events_seen is divisible by count
         // This handles both the initial emission and subsequent ones
-        events_seen > 0 && events_seen % self.count == 0
+        events_seen > 0 && events_seen.is_multiple_of(self.count)
     }
 
     fn reset(&mut self) {

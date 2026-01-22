@@ -43,22 +43,22 @@ impl fmt::Display for WebError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             WebError::StartupFailed { message, .. } => {
-                write!(f, "Server startup failed: {}", message)
+                write!(f, "Server startup failed: {message}")
             }
             WebError::BindFailed { address, .. } => {
-                write!(f, "Failed to bind to address {}", address)
+                write!(f, "Failed to bind to address {address}")
             }
             WebError::EndpointRegistrationFailed { path, message } => {
-                write!(f, "Failed to register endpoint at {}: {}", path, message)
+                write!(f, "Failed to register endpoint at {path}: {message}")
             }
             WebError::RequestHandlingFailed { message, .. } => {
-                write!(f, "Request handling failed: {}", message)
+                write!(f, "Request handling failed: {message}")
             }
             WebError::ShutdownFailed { message, .. } => {
-                write!(f, "Server shutdown failed: {}", message)
+                write!(f, "Server shutdown failed: {message}")
             }
             WebError::Implementation { message, .. } => {
-                write!(f, "Implementation error: {}", message)
+                write!(f, "Implementation error: {message}")
             }
         }
     }

@@ -1,7 +1,4 @@
-use obzenflow_core::{
-    event::chain_event::{ChainEvent, ChainEventFactory},
-    StageId, WriterId,
-};
+use obzenflow_core::{event::chain_event::ChainEventFactory, StageId, WriterId};
 use serde_json::json;
 
 #[test]
@@ -9,28 +6,16 @@ fn test_full_lineage_propagation() {
     let writer_id = WriterId::from(StageId::new());
 
     // Create chain: A -> B -> C -> D
-    let event_a = ChainEventFactory::data_event(writer_id.clone(), "test", json!({"level": "A"}));
+    let event_a = ChainEventFactory::data_event(writer_id, "test", json!({"level": "A"}));
 
-    let event_b = ChainEventFactory::derived_data_event(
-        writer_id.clone(),
-        &event_a,
-        "test",
-        json!({"level": "B"}),
-    );
+    let event_b =
+        ChainEventFactory::derived_data_event(writer_id, &event_a, "test", json!({"level": "B"}));
 
-    let event_c = ChainEventFactory::derived_data_event(
-        writer_id.clone(),
-        &event_b,
-        "test",
-        json!({"level": "C"}),
-    );
+    let event_c =
+        ChainEventFactory::derived_data_event(writer_id, &event_b, "test", json!({"level": "C"}));
 
-    let event_d = ChainEventFactory::derived_data_event(
-        writer_id.clone(),
-        &event_c,
-        "test",
-        json!({"level": "D"}),
-    );
+    let event_d =
+        ChainEventFactory::derived_data_event(writer_id, &event_c, "test", json!({"level": "D"}));
 
     // Event A should have no parents (root)
     assert_eq!(event_a.causality.parent_ids.len(), 0);
@@ -69,7 +54,7 @@ fn test_lineage_depth_limit() {
 
     // Create first event
     events.push(ChainEventFactory::data_event(
-        writer_id.clone(),
+        writer_id,
         "test",
         json!({"index": 0}),
     ));
@@ -78,7 +63,7 @@ fn test_lineage_depth_limit() {
     for i in 1..=10 {
         let parent = &events[i - 1].clone();
         events.push(ChainEventFactory::derived_data_event(
-            writer_id.clone(),
+            writer_id,
             parent,
             "test",
             json!({"index": i}),
@@ -109,14 +94,10 @@ fn test_cycle_detection() {
     let writer_id = WriterId::from(StageId::new());
 
     // Create a simple chain
-    let event_a = ChainEventFactory::data_event(writer_id.clone(), "test", json!({"name": "A"}));
+    let event_a = ChainEventFactory::data_event(writer_id, "test", json!({"name": "A"}));
 
-    let event_b = ChainEventFactory::derived_data_event(
-        writer_id.clone(),
-        &event_a,
-        "test",
-        json!({"name": "B"}),
-    );
+    let event_b =
+        ChainEventFactory::derived_data_event(writer_id, &event_a, "test", json!({"name": "B"}));
 
     // B should not contain a cycle with itself
     assert!(!event_b.causality.contains_cycle(&event_b.id));
@@ -141,21 +122,13 @@ fn test_cycle_detection() {
 fn test_full_lineage_helper() {
     let writer_id = WriterId::from(StageId::new());
 
-    let event_a = ChainEventFactory::data_event(writer_id.clone(), "test", json!({"name": "A"}));
+    let event_a = ChainEventFactory::data_event(writer_id, "test", json!({"name": "A"}));
 
-    let event_b = ChainEventFactory::derived_data_event(
-        writer_id.clone(),
-        &event_a,
-        "test",
-        json!({"name": "B"}),
-    );
+    let event_b =
+        ChainEventFactory::derived_data_event(writer_id, &event_a, "test", json!({"name": "B"}));
 
-    let event_c = ChainEventFactory::derived_data_event(
-        writer_id.clone(),
-        &event_b,
-        "test",
-        json!({"name": "C"}),
-    );
+    let event_c =
+        ChainEventFactory::derived_data_event(writer_id, &event_b, "test", json!({"name": "C"}));
 
     // Get full lineage of C
     let lineage = event_c.causality.full_lineage(event_c.id);

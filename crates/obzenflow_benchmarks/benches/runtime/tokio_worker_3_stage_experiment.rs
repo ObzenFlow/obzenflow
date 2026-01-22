@@ -11,7 +11,6 @@
 //! the tokio scheduler's behavior with small task counts.
 
 use criterion::{criterion_group, criterion_main, Criterion};
-use obzenflow_benchmarks::prelude::*;
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::event::ChainEventContent;
@@ -58,7 +57,7 @@ impl FiniteSourceHandler for TimestampedSource {
         let current = self.emitted.fetch_add(1, Ordering::Relaxed);
         if current < self.total_events {
             Ok(Some(vec![ChainEventFactory::data_event(
-                self.writer_id.clone(),
+                self.writer_id,
                 "TimestampedEvent",
                 json!({
                     "event_id": current,
@@ -76,15 +75,11 @@ impl FiniteSourceHandler for TimestampedSource {
 
 /// Passthrough stage
 #[derive(Clone, Debug)]
-struct PassthroughStage {
-    name: String,
-}
+struct PassthroughStage;
 
 impl PassthroughStage {
-    fn new(name: &str) -> Self {
-        Self {
-            name: name.to_string(),
-        }
+    fn new(_name: &str) -> Self {
+        Self
     }
 }
 
@@ -102,7 +97,6 @@ impl TransformHandler for PassthroughStage {
 /// Sink that collects latencies
 #[derive(Clone, Debug)]
 struct LatencySink {
-    expected_count: u64,
     received: Arc<AtomicU64>,
     latencies: Arc<tokio::sync::Mutex<Vec<Duration>>>,
 }
@@ -114,7 +108,6 @@ impl LatencySink {
         )));
         (
             Self {
-                expected_count,
                 received: Arc::new(AtomicU64::new(0)),
                 latencies: latencies.clone(),
             },
@@ -163,9 +156,7 @@ async fn run_3_stage_pipeline_with_runtime(
     Ok(handle
         .spawn(async move {
             let temp_dir = tempdir().unwrap();
-            let journals_base_path = temp_dir
-                .path()
-                .join(format!("three_stage_{}", runtime_name));
+            let journals_base_path = temp_dir.path().join(format!("three_stage_{runtime_name}"));
             std::fs::create_dir_all(&journals_base_path).unwrap();
 
             let source = TimestampedSource::new(WARMUP_EVENT_COUNT + TEST_EVENT_COUNT);

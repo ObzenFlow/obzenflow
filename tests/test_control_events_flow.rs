@@ -2,8 +2,8 @@
 //! This is for FLOWIP-056-666 Phase 4.0 Task 4
 
 use async_trait::async_trait;
+use obzenflow_adapters::middleware::MiddlewareTransform;
 use obzenflow_adapters::middleware::{Middleware, MiddlewareAction, MiddlewareContext};
-use obzenflow_adapters::middleware::{MiddlewareTransform, TransformMiddlewareBuilder};
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::{StageId, WriterId};
 use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
@@ -18,7 +18,7 @@ impl Middleware for TestControlMiddleware {
         // Emit a metrics state snapshot control event
         let writer_id = WriterId::from(StageId::new());
         ctx.write_control_event(ChainEventFactory::metrics_state_snapshot(
-            writer_id.clone(),
+            writer_id,
             json!({
                 "queue_depth": 10,
                 "in_flight": 3,

@@ -62,7 +62,7 @@ async fn main() -> Result<()> {
     println!("🛒 FlowState RS - E-commerce Top Products Analytics");
     println!("===================================================");
     println!("✨ Using FLOWIP-080j TopNByTyped & FLOWIP-082a TypedPayload");
-    println!("");
+    println!();
     println!("This demo shows real-time tracking of best-selling");
     println!("products by total revenue, accumulating multiple");
     println!("orders for the same product throughout the day.\n");
@@ -226,13 +226,10 @@ async fn main() -> Result<()> {
                     let order_number = index + 1;
                     let total_value = unit_price * (*quantity as f64);
 
-                    println!(
-                        "📦 Order #{}: {} x{} ({}) = ${:.2}",
-                        order_number, product_name, quantity, product_id, total_value
-                    );
+                    println!("📦 Order #{order_number}: {product_name} x{quantity} ({product_id}) = ${total_value:.2}");
 
                     Some(OrderEvent {
-                        order_id: format!("ORD-{:04}", order_number),
+                        order_id: format!("ORD-{order_number:04}"),
                         product_id: product_id.clone(),
                         product_name: product_name.clone(),
                         category: category.clone(),
@@ -284,7 +281,7 @@ async fn main() -> Result<()> {
                     }
 
                     println!("------------------------------------");
-                    println!("Top 5 Products Revenue: ${:.2}", total_revenue);
+                    println!("Top 5 Products Revenue: ${total_revenue:.2}");
                     println!("====================================\n");
                 });
             },
@@ -302,7 +299,7 @@ async fn main() -> Result<()> {
     println!("   • OrderEvent::EVENT_TYPE instead of \"order.placed\"");
     println!("   • SCHEMA_VERSION for evolution tracking");
     println!("   • Strongly-typed event structs");
-    println!("");
+    println!();
     println!("   FLOWIP-080j TopNByTyped:");
     println!("   • Type-safe key and score extraction");
     println!("   • No ChainEvent manipulation - work with OrderEvent directly");

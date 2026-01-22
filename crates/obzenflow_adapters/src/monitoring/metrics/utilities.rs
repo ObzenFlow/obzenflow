@@ -51,6 +51,12 @@ pub struct SimpleHistogram {
     sorted: Arc<Mutex<bool>>,
 }
 
+impl Default for SimpleHistogram {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SimpleHistogram {
     pub fn new() -> Self {
         Self {
@@ -119,6 +125,10 @@ impl<T> CircularBuffer<T> {
 
     pub fn len(&self) -> usize {
         self.buffer.lock().unwrap().len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.buffer.lock().unwrap().is_empty()
     }
 
     pub fn iter_recent<F, R>(&self, f: F) -> R

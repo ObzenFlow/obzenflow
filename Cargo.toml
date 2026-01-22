@@ -1,13 +1,16 @@
 [package]
 name = "obzenflow"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
 description = "High-performance event streaming and processing framework"
-license = "MIT OR Apache-2.0"
-repository = "https://github.com/obzenflow/obzenflow"
+license.workspace = true
+repository.workspace = true
 keywords = ["event-streaming", "event-sourcing", "async", "pipeline"]
+publish = false
 
 [workspace]
+resolver = "2"
 members = ["crates/*"]
 # Build all workspace members by default (excluding the root package)
 # Note: obzenflow_benchmarks is excluded from default-members as it's only for benchmarking
@@ -19,37 +22,114 @@ default-members = [
     "crates/obzenflow_infra"
 ]
 
-[dependencies]
-# Internal workspace dependencies
-obzenflow_core = { path = "crates/obzenflow_core" }
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.93.0"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/obzenflow/obzenflow"
+
+[workspace.dependencies]
+# Workspace crates (kept `publish = false` to prevent accidental publishing)
+obzenflow_core = { version = "0.1.0", path = "crates/obzenflow_core" }
+obzenflow_runtime_services = { version = "0.1.0", path = "crates/obzenflow_runtime_services" }
+obzenflow_adapters = { version = "0.1.0", path = "crates/obzenflow_adapters" }
+obzenflow_dsl_infra = { version = "0.1.0", path = "crates/obzenflow_dsl_infra" }
+obzenflow_infra = { version = "0.1.0", path = "crates/obzenflow_infra" }
+obzenflow_benchmarks = { version = "0.1.0", path = "crates/obzenflow_benchmarks" }
+obzenflow_sketches = { version = "0.1.0", path = "crates/obzenflow_sketches" }
+
+# External ObzenFlow crates
 obzenflow-topology = "0.2"
-obzenflow_runtime_services = { path = "crates/obzenflow_runtime_services" }
-obzenflow_adapters = { path = "crates/obzenflow_adapters" }
-obzenflow_dsl_infra = { path = "crates/obzenflow_dsl_infra" }
-obzenflow_infra = { path = "crates/obzenflow_infra" }
+obzenflow-fsm = "0.3"
 
-# Re-export some commonly needed dependencies
-tokio = { version = "1", features = ["full", "tracing"] }
-async-trait = { version = "0.1" }
-serde = { version = "1", features = ["derive"] }
-serde_json = { version = "1" }
-tracing = { version = "0.1" }
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-anyhow = { version = "1.0" }
-console-subscriber = { version = "0.5", optional = true }
-
-[dev-dependencies]
-# Testing utilities
+# Async/runtime + utilities
+tokio = "1"
 tokio-test = "0.4"
-proptest = "1.0"
-criterion = { version = "0.5", features = ["async_tokio"] }
-fastrand = "2.0"
-sysinfo = "0.29"
-tempfile = "3.8"
+tokio-stream = "0.1"
+async-trait = "0.1"
 futures = "0.3"
 
+# Observability
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+console-subscriber = "0.5"
+
+# Serialization / IDs / time
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ulid = { version = "1", features = ["serde"] }
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+
+# Errors
+thiserror = "1"
+anyhow = "1"
+
+# Core types
+url = "2"
+http = "1"
+bytes = "1"
+
+# Data structures
+indexmap = "2"
+
+# Metrics / profiling
+hdrhistogram = "7.5"
+
+# Randomness / system
+rand = "0.8"
+sysinfo = "0.29"
+
+# I/O and formats
+csv = "1"
+
+# Security / hashing
+crc32fast = "1.3"
+ring = "0.17"
+subtle = "2"
+
+# Web / networking (optional in crates that use them)
+warp = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["charset", "http2", "rustls-tls-native-roots", "system-proxy"] }
+
+# Benchmarking / testing
+criterion = "0.5"
+proptest = "1.0"
+fastrand = "2.0"
+tempfile = "3.8"
+libc = "0.2"
+clap = { version = "4.5", features = ["derive"] }
+
+[dependencies]
+# Internal workspace dependencies
+obzenflow_core = { workspace = true }
+obzenflow_runtime_services = { workspace = true }
+obzenflow_adapters = { workspace = true }
+obzenflow_dsl_infra = { workspace = true }
+obzenflow_infra = { workspace = true }
+
+[dev-dependencies]
+# Used by examples/tests/benchmarks in this crate
+tokio = { workspace = true, features = ["full", "tracing"] }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+obzenflow-topology = { workspace = true }
+
+tokio-test = { workspace = true }
+proptest = { workspace = true }
+criterion = { workspace = true, features = ["async_tokio"] }
+fastrand = { workspace = true }
+sysinfo = { workspace = true }
+tempfile = { workspace = true }
+futures = { workspace = true }
+
 [features]
-console = ["obzenflow_infra/console", "dep:console-subscriber"]
+console = ["obzenflow_infra/console"]
 http-pull = ["obzenflow_infra/reqwest-client"]
 
 [profile.release]

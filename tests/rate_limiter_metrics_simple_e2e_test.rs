@@ -1,4 +1,4 @@
-#![cfg(skip)]
+#![cfg(any())]
 // Disabled for now: rate limiter + finite source drain semantics need a dedicated flowip; kept as a manual harness
 
 //! Simplified end-to-end test for Rate Limiter metrics in FLOWIP-056-666

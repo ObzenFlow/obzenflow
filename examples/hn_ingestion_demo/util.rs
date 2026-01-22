@@ -35,4 +35,3 @@ pub fn truncate_chars(s: &str, max_chars: usize) -> String {
     out.push_str("...");
     out
 }
-

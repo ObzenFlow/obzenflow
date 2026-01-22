@@ -50,7 +50,7 @@ impl FiniteSourceHandler for TimestampedSource {
         let current = self.emitted.fetch_add(1, Ordering::Relaxed);
         if current < self.total_events {
             Ok(Some(vec![ChainEventFactory::data_event(
-                self.writer_id.clone(),
+                self.writer_id,
                 "TimestampedEvent",
                 json!({
                     "event_id": current,
@@ -147,13 +147,13 @@ async fn run_1_stage_pipeline() -> anyhow::Result<Duration> {
         }
     }
     .await
-    .map_err(|e| anyhow::anyhow!("Failed to create flow: {:?}", e))?;
+    .map_err(|e| anyhow::anyhow!("Failed to create flow: {e:?}"))?;
 
     // Start the pipeline
     handle
         .run()
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to run pipeline: {:?}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to run pipeline: {e:?}"))?;
 
     // Wait for completion
     let timeout = Duration::from_secs(30);

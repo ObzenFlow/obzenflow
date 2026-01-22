@@ -112,7 +112,6 @@ impl HttpSource {
     fn submission_to_event(&self, submission: EventSubmission) -> ChainEvent {
         let writer_id = self
             .writer_id
-            .clone()
             .expect("WriterId must be bound before next() is called");
         let EventSubmission {
             event_type, data, ..
@@ -126,7 +125,6 @@ impl HttpSource {
     ) -> Result<ChainEvent, SourceError> {
         let writer_id = self
             .writer_id
-            .clone()
             .expect("WriterId must be bound before next() is called");
         let value = serde_json::to_value(snapshot).map_err(|e| {
             SourceError::Other(format!(

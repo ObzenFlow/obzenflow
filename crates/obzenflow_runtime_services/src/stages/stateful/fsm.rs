@@ -7,18 +7,16 @@ use obzenflow_core::event::context::{FlowContext, StageType};
 use obzenflow_core::event::event_envelope::EventEnvelope;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::types::SeqNo;
-use obzenflow_core::event::JournalEvent;
 use obzenflow_core::event::{ChainEventFactory, SystemEvent};
-use obzenflow_core::journal::journal::Journal;
+use obzenflow_core::journal::Journal;
 use obzenflow_core::StageId;
-use obzenflow_core::{ChainEvent, EventId, FlowId, WriterId};
+use obzenflow_core::{ChainEvent, FlowId, WriterId};
 use obzenflow_fsm::{EventVariant, FsmAction, FsmContext, StateVariant};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::marker::PhantomData;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::RwLock;
 
 use crate::backpressure::{BackpressureReader, BackpressureWriter};
 use crate::messaging::upstream_subscription::{ContractConfig, ReaderProgress};
@@ -91,7 +89,7 @@ impl<H> std::fmt::Debug for StatefulState<H> {
             Self::Emitting => write!(f, "Emitting"),
             Self::Draining => write!(f, "Draining"),
             Self::Drained => write!(f, "Drained"),
-            Self::Failed(msg) => write!(f, "Failed({:?})", msg),
+            Self::Failed(msg) => write!(f, "Failed({msg:?})"),
             Self::_Phantom(_) => write!(f, "_Phantom"),
         }
     }
@@ -193,7 +191,7 @@ impl<H> std::fmt::Debug for StatefulEvent<H> {
             Self::ReceivedEOF => write!(f, "ReceivedEOF"),
             Self::BeginDrain => write!(f, "BeginDrain"),
             Self::DrainComplete => write!(f, "DrainComplete"),
-            Self::Error(msg) => write!(f, "Error({:?})", msg),
+            Self::Error(msg) => write!(f, "Error({msg:?})"),
             Self::_Phantom(_) => write!(f, "_Phantom"),
         }
     }
@@ -283,7 +281,7 @@ impl<H> std::fmt::Debug for StatefulAction<H> {
             Self::EmitResults => write!(f, "EmitResults"),
             Self::ForwardEOF => write!(f, "ForwardEOF"),
             Self::SendCompletion => write!(f, "SendCompletion"),
-            Self::SendFailure { message } => write!(f, "SendFailure({:?})", message),
+            Self::SendFailure { message } => write!(f, "SendFailure({message:?})"),
             Self::Cleanup => write!(f, "Cleanup"),
             Self::_Phantom(_) => write!(f, "_Phantom"),
         }
@@ -393,62 +391,6 @@ pub struct StatefulContext<H: StatefulHandler> {
     pub(crate) backpressure_backoff: IdleBackoff,
 }
 
-impl<H: StatefulHandler> StatefulContext<H> {
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        handler: H,
-        stage_id: obzenflow_core::StageId,
-        stage_name: String,
-        flow_name: String,
-        flow_id: FlowId,
-        data_journal: Arc<dyn Journal<ChainEvent>>,
-        error_journal: Arc<dyn Journal<ChainEvent>>,
-        system_journal: Arc<dyn Journal<SystemEvent>>,
-        bus: Arc<crate::message_bus::FsmMessageBus>,
-        control_strategy: Arc<dyn ControlEventStrategy>,
-        instrumentation: Arc<StageInstrumentation>,
-        upstream_subscription_factory: BoundSubscriptionFactory,
-        emit_interval: Option<Duration>,
-        backpressure_writer: BackpressureWriter,
-        backpressure_readers: HashMap<StageId, BackpressureReader>,
-    ) -> Self {
-        let initial_state = handler.initial_state();
-        Self {
-            handler: Arc::new(handler),
-            stage_id,
-            stage_name,
-            flow_name,
-            flow_id,
-            current_state: initial_state,
-            data_journal,
-            error_journal,
-            system_journal,
-            bus,
-            writer_id: None,
-            subscription: None, // Created lazily using factory
-            contract_state: Vec::new(),
-            control_strategy,
-            buffered_eof: None,
-            last_consumed_envelope: None,
-            instrumentation,
-            upstream_subscription_factory,
-            events_since_last_heartbeat: 0,
-            last_data_event_time: None,
-            emit_interval,
-            backpressure_writer,
-            backpressure_readers,
-            pending_outputs: VecDeque::new(),
-            pending_transition: None,
-            pending_ack_upstream: None,
-            backpressure_pulse: BackpressureActivityPulse::new(),
-            backpressure_backoff: IdleBackoff::exponential_with_cap(
-                Duration::from_millis(1),
-                Duration::from_millis(50),
-            ),
-        }
-    }
-}
-
 impl<H: StatefulHandler + 'static> FsmContext for StatefulContext<H> {}
 
 // ============================================================================
@@ -463,8 +405,8 @@ impl<H: StatefulHandler + Send + Sync + 'static> FsmAction for StatefulAction<H>
         match self {
             StatefulAction::AllocateResources => {
                 // Create WriterId from our StageId
-                let writer_id = WriterId::from(ctx.stage_id.clone());
-                ctx.writer_id = Some(writer_id.clone());
+                let writer_id = WriterId::from(ctx.stage_id);
+                ctx.writer_id = Some(writer_id);
 
                 // Initialize FSM-owned contract state for each upstream reader
                 let upstream_ids = ctx.upstream_subscription_factory.upstream_stage_ids();
@@ -511,7 +453,7 @@ impl<H: StatefulHandler + Send + Sync + 'static> FsmAction for StatefulAction<H>
             }
 
             StatefulAction::InitializeState => {
-                // State already initialized in StatefulContext::new()
+                // State is initialized when building StatefulContext.
                 // This action is a placeholder for future checkpoint/resume functionality
                 tracing::debug!(
                     stage_name = %ctx.stage_name,
@@ -556,7 +498,7 @@ impl<H: StatefulHandler + Send + Sync + 'static> FsmAction for StatefulAction<H>
             }
 
             StatefulAction::ForwardEOF => {
-                let writer_id = ctx.writer_id.as_ref().ok_or_else(|| {
+                let writer_id = ctx.writer_id.ok_or_else(|| {
                     obzenflow_fsm::FsmError::HandlerError(
                         "No writer ID available to forward EOF".to_string(),
                     )
@@ -574,7 +516,7 @@ impl<H: StatefulHandler + Send + Sync + 'static> FsmAction for StatefulAction<H>
                     if let obzenflow_core::event::ChainEventContent::FlowControl(
                         FlowControlPayload::Eof {
                             natural: n,
-                            writer_seq,
+                            writer_seq: _,
                             vector_clock,
                             last_event_id,
                             ..
@@ -589,7 +531,7 @@ impl<H: StatefulHandler + Send + Sync + 'static> FsmAction for StatefulAction<H>
                     }
                 }
 
-                let mut eof_event = ChainEventFactory::eof_event(writer_id.clone(), natural);
+                let mut eof_event = ChainEventFactory::eof_event(writer_id, natural);
 
                 if let obzenflow_core::event::ChainEventContent::FlowControl(
                     FlowControlPayload::Eof {
@@ -601,13 +543,12 @@ impl<H: StatefulHandler + Send + Sync + 'static> FsmAction for StatefulAction<H>
                     },
                 ) = &mut eof_event.content
                 {
-                    *eof_writer = Some(writer_id.clone());
+                    *eof_writer = Some(writer_id);
                     *writer_seq = Some(SeqNo(runtime_context.writer_seq));
                     if let Some(vc) = upstream_vector_clock {
                         *vector_clock = Some(vc);
                     }
-                    *last_event_id = upstream_last_event
-                        .or_else(|| runtime_context.last_emitted_event_id.clone());
+                    *last_event_id = upstream_last_event.or(runtime_context.last_emitted_event_id);
                 }
 
                 // Attach flow/runtime context for downstream contract tracking

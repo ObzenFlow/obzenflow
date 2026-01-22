@@ -20,6 +20,10 @@ use tokio::time::Instant;
 
 pub use obzenflow_core::http_client::{HttpResponse, RequestSpec};
 
+type RequestSpecFn<C> = Arc<dyn Fn(Option<&C>) -> RequestSpec + Send + Sync>;
+type DecodeSuccessFn<C, T> =
+    Arc<dyn Fn(Option<&C>, &HttpResponse) -> Result<DecodeResult<C, T>, DecodeError> + Send + Sync>;
+
 pub struct DecodeResult<C, T> {
     pub items: Vec<T>,
     pub next_cursor: Option<C>,
@@ -198,10 +202,8 @@ where
 /// Closure-based decoder to minimize boilerplate in demos/examples.
 pub struct FnPullDecoder<C, T> {
     event_type: String,
-    request_spec: Arc<dyn Fn(Option<&C>) -> RequestSpec + Send + Sync>,
-    decode_success: Arc<
-        dyn Fn(Option<&C>, &HttpResponse) -> Result<DecodeResult<C, T>, DecodeError> + Send + Sync,
-    >,
+    request_spec: RequestSpecFn<C>,
+    decode_success: DecodeSuccessFn<C, T>,
 }
 
 impl<C, T> Clone for FnPullDecoder<C, T> {
@@ -633,7 +635,10 @@ async fn fetch_decode_once<D: PullDecoder>(
     let mut request = decoder.request_spec(cursor);
     apply_default_headers(&mut request, default_headers);
 
-    let http_response = client.execute(request).await.map_err(map_http_client_error)?;
+    let http_response = client
+        .execute(request)
+        .await
+        .map_err(map_http_client_error)?;
     let status = http_response.status;
 
     match decoder.decode(cursor, &http_response) {
@@ -996,7 +1001,7 @@ impl<D: PullDecoder> HttpPullSource<D> {
             &error_payload,
         )
         .expect("error payload serialization")
-        .mark_as_validation_error(format!("HTTP {}: {}", status, message))
+        .mark_as_validation_error(format!("HTTP {status}: {message}"))
     }
 
     fn handle_transient_error(
@@ -1041,7 +1046,7 @@ impl<D: PullDecoder> HttpPollSource<D> {
             &error_payload,
         )
         .expect("error payload serialization")
-        .mark_as_validation_error(format!("HTTP {}: {}", status, message))
+        .mark_as_validation_error(format!("HTTP {status}: {message}"))
     }
 
     fn handle_transient_error(

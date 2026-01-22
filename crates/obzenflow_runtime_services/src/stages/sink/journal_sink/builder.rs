@@ -2,7 +2,6 @@
 
 use std::sync::Arc;
 
-use crate::message_bus::FsmMessageBus;
 use crate::metrics::instrumentation::StageInstrumentation;
 use crate::stages::common::control_strategies::{ControlEventStrategy, JonestownStrategy};
 use crate::stages::common::handlers::SinkHandler;
@@ -13,9 +12,7 @@ use crate::supervised_base::{
     HandlerSupervised, HandlerSupervisedExt, StateWatcher, SupervisorBuilder,
     SupervisorTaskBuilder,
 };
-use obzenflow_core::event::SystemEvent;
-use obzenflow_core::journal::journal::Journal;
-use obzenflow_core::{ChainEvent, StageId};
+use obzenflow_core::StageId;
 use obzenflow_fsm::{EventVariant, StateVariant};
 
 use super::config::JournalSinkConfig;
@@ -72,22 +69,25 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
             .control_strategy
             .unwrap_or_else(|| Arc::new(JonestownStrategy));
 
-        let context = JournalSinkContext::new(
-            self.handler,
-            self.config.stage_id,
-            self.config.stage_name.clone(),
-            self.config.flow_name.clone(),
-            self.resources.flow_id.clone(),
-            self.resources.data_journal.clone(),
-            self.resources.error_journal.clone(),
-            self.resources.system_journal.clone(),
-            self.resources.message_bus.clone(),
-            control_strategy,
+        let context = JournalSinkContext {
+            handler: self.handler,
+            stage_id: self.config.stage_id,
+            stage_name: self.config.stage_name.clone(),
+            flow_name: self.config.flow_name.clone(),
+            flow_id: self.resources.flow_id,
+            data_journal: self.resources.data_journal.clone(),
+            error_journal: self.resources.error_journal.clone(),
+            system_journal: self.resources.system_journal.clone(),
+            bus: self.resources.message_bus.clone(),
+            writer_id: None,
+            subscription: None,
+            contract_state: Vec::new(),
             instrumentation,
-            self.resources.upstream_subscription_factory,
-            self.resources.backpressure_writer.clone(),
-            self.resources.backpressure_readers.clone(),
-        );
+            upstream_subscription_factory: self.resources.upstream_subscription_factory,
+            control_strategy,
+            backpressure_writer: self.resources.backpressure_writer.clone(),
+            backpressure_readers: self.resources.backpressure_readers.clone(),
+        };
 
         // Create supervisor (private - not exposed)
         let supervisor = JournalSinkSupervisor {

@@ -7,9 +7,11 @@
 use obzenflow_core::event::context::{FlowContext, StageType};
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::types::{Count, SeqNo};
-use obzenflow_core::event::{ChainEventContent, ChainEventFactory, SystemEvent};
-use obzenflow_core::journal::journal::Journal;
-use obzenflow_core::{ChainEvent, EventId, FlowId, StageId, WriterId};
+use obzenflow_core::event::{
+    ChainEventContent, ChainEventFactory, ConsumptionFinalEventParams, SystemEvent,
+};
+use obzenflow_core::journal::Journal;
+use obzenflow_core::{ChainEvent, FlowId, WriterId};
 use obzenflow_fsm::{EventVariant, FsmAction, FsmContext, StateMachine, StateVariant};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
@@ -86,7 +88,7 @@ impl<H> std::fmt::Debug for InfiniteSourceState<H> {
             Self::Running => write!(f, "Running"),
             Self::Draining => write!(f, "Draining"),
             Self::Drained => write!(f, "Drained"),
-            Self::Failed(msg) => write!(f, "Failed({:?})", msg),
+            Self::Failed(msg) => write!(f, "Failed({msg:?})"),
             Self::_Phantom(_) => write!(f, "_Phantom"),
         }
     }
@@ -174,7 +176,7 @@ impl<H> std::fmt::Debug for InfiniteSourceEvent<H> {
             Self::Start => write!(f, "Start"),
             Self::BeginDrain => write!(f, "BeginDrain"),
             Self::Completed => write!(f, "Completed"),
-            Self::Error(msg) => write!(f, "Error({:?})", msg),
+            Self::Error(msg) => write!(f, "Error({msg:?})"),
             Self::_Phantom(_) => write!(f, "_Phantom"),
         }
     }
@@ -301,39 +303,41 @@ pub struct InfiniteSourceContext<H> {
     _marker: PhantomData<H>,
 }
 
+pub struct InfiniteSourceContextInit {
+    pub stage_id: obzenflow_core::StageId,
+    pub stage_name: String,
+    pub flow_name: String,
+    pub flow_id: FlowId,
+    pub data_journal: Arc<dyn Journal<ChainEvent>>,
+    pub error_journal: Arc<dyn Journal<ChainEvent>>,
+    pub system_journal: Arc<dyn Journal<SystemEvent>>,
+    pub replay_archive: Option<Arc<dyn ReplayArchive>>,
+    pub bus: Arc<crate::message_bus::FsmMessageBus>,
+    pub instrumentation: Arc<StageInstrumentation>,
+    pub control_strategy: Arc<dyn SourceControlStrategy>,
+    pub backpressure_writer: BackpressureWriter,
+}
+
 impl<H> InfiniteSourceContext<H> {
-    pub fn new(
-        stage_id: obzenflow_core::StageId,
-        stage_name: String,
-        flow_name: String,
-        flow_id: FlowId,
-        data_journal: Arc<dyn Journal<ChainEvent>>,
-        error_journal: Arc<dyn Journal<ChainEvent>>,
-        system_journal: Arc<dyn Journal<SystemEvent>>,
-        replay_archive: Option<Arc<dyn ReplayArchive>>,
-        bus: Arc<crate::message_bus::FsmMessageBus>,
-        instrumentation: Arc<StageInstrumentation>,
-        control_strategy: Arc<dyn SourceControlStrategy>,
-        backpressure_writer: BackpressureWriter,
-    ) -> Self {
+    pub fn new(init: InfiniteSourceContextInit) -> Self {
         Self {
-            stage_id,
-            stage_name,
-            flow_name,
-            flow_id,
-            data_journal,
-            error_journal,
-            system_journal,
-            replay_archive,
-            bus,
+            stage_id: init.stage_id,
+            stage_name: init.stage_name,
+            flow_name: init.flow_name,
+            flow_id: init.flow_id,
+            data_journal: init.data_journal,
+            error_journal: init.error_journal,
+            system_journal: init.system_journal,
+            replay_archive: init.replay_archive,
+            bus: init.bus,
             writer_id: None,
             can_emit: false,
             shutdown_requested: false,
             completion_reason: InfiniteSourceCompletionReason::ExternalDrain,
-            instrumentation,
-            control_strategy,
+            instrumentation: init.instrumentation,
+            control_strategy: init.control_strategy,
             control_context: SourceControlContext::new(),
-            backpressure_writer,
+            backpressure_writer: init.backpressure_writer,
             pending_outputs: VecDeque::new(),
             backpressure_pulse: BackpressureActivityPulse::new(),
             backpressure_backoff: IdleBackoff::exponential_with_cap(
@@ -373,7 +377,7 @@ impl<H> std::fmt::Debug for InfiniteSourceAction<H> {
         match self {
             Self::AllocateResources => write!(f, "AllocateResources"),
             Self::SendEOF => write!(f, "SendEOF"),
-            Self::SendError { message } => write!(f, "SendError({:?})", message),
+            Self::SendError { message } => write!(f, "SendError({message:?})"),
             Self::PublishRunning => write!(f, "PublishRunning"),
             Self::WriteStageCompleted => write!(f, "WriteStageCompleted"),
             Self::Cleanup => write!(f, "Cleanup"),
@@ -390,8 +394,8 @@ impl<H: Send + Sync + 'static> FsmAction for InfiniteSourceAction<H> {
         match self {
             InfiniteSourceAction::AllocateResources => {
                 // Create WriterId from our StageId
-                let writer_id = WriterId::from(ctx.stage_id.clone());
-                ctx.writer_id = Some(writer_id.clone());
+                let writer_id = WriterId::from(ctx.stage_id);
+                ctx.writer_id = Some(writer_id);
 
                 tracing::info!(
                     stage_name = %ctx.stage_name,
@@ -411,12 +415,12 @@ impl<H: Send + Sync + 'static> FsmAction for InfiniteSourceAction<H> {
                     InfiniteSourceCompletionReason::ArchiveExhausted => ctx
                         .control_strategy
                         .on_natural_completion(&mut ctx.control_context),
-                    InfiniteSourceCompletionReason::ExternalDrain => {
-                        ctx.control_strategy.on_begin_drain(&mut ctx.control_context)
-                    }
+                    InfiniteSourceCompletionReason::ExternalDrain => ctx
+                        .control_strategy
+                        .on_begin_drain(&mut ctx.control_context),
                 };
 
-                let writer_id = ctx.writer_id.as_ref().ok_or_else(|| {
+                let writer_id = ctx.writer_id.ok_or_else(|| {
                     obzenflow_fsm::FsmError::HandlerError(
                         "No writer ID available to send EOF".to_string(),
                     )
@@ -424,20 +428,23 @@ impl<H: Send + Sync + 'static> FsmAction for InfiniteSourceAction<H> {
 
                 let natural = match ctx.completion_reason {
                     InfiniteSourceCompletionReason::ExternalDrain => false,
-                    InfiniteSourceCompletionReason::ArchiveExhausted => match decision {
-                        crate::stages::source::strategies::SourceShutdownDecision::PoisonEof => false,
-                        _ => true,
-                    },
+                    InfiniteSourceCompletionReason::ArchiveExhausted => !matches!(
+                        decision,
+                        crate::stages::source::strategies::SourceShutdownDecision::PoisonEof
+                    ),
                 };
 
                 // Take a final runtime snapshot for wide-event semantics
                 let runtime_context = ctx.instrumentation.snapshot_with_control();
 
-                let mut eof_event = ChainEventFactory::eof_event(writer_id.clone(), natural);
-                if let ChainEventContent::FlowControl(FlowControlPayload::Eof { writer_id: writer_id_field, writer_seq, .. }) =
-                    &mut eof_event.content
+                let mut eof_event = ChainEventFactory::eof_event(writer_id, natural);
+                if let ChainEventContent::FlowControl(FlowControlPayload::Eof {
+                    writer_id: writer_id_field,
+                    writer_seq,
+                    ..
+                }) = &mut eof_event.content
                 {
-                    *writer_id_field = Some(writer_id.clone());
+                    *writer_id_field = Some(writer_id);
                     *writer_seq = Some(SeqNo(emitted));
                 }
 
@@ -459,16 +466,18 @@ impl<H: Send + Sync + 'static> FsmAction for InfiniteSourceAction<H> {
                     })?;
 
                 let mut final_event = ChainEventFactory::consumption_final_event(
-                    writer_id.clone(),
-                    true,
-                    Count(emitted),
-                    None,
-                    true,
-                    None,
-                    SeqNo(emitted),
-                    Some(SeqNo(emitted)),
-                    None,
-                    None,
+                    writer_id,
+                    ConsumptionFinalEventParams {
+                        pass: true,
+                        consumed_count: Count(emitted),
+                        expected_count: None,
+                        eof_seen: true,
+                        last_event_id: None,
+                        reader_seq: SeqNo(emitted),
+                        advertised_writer_seq: Some(SeqNo(emitted)),
+                        advertised_vector_clock: None,
+                        failure_reason: None,
+                    },
                 );
                 final_event.flow_context = FlowContext {
                     flow_name: ctx.flow_name.clone(),

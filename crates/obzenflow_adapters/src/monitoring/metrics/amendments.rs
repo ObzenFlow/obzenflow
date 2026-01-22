@@ -119,14 +119,11 @@ impl Metric for AmendmentMetric {
     }
 
     fn update(&self, value: MetricValue) {
-        match value {
-            MetricValue::Counter(count) => {
-                // Record multiple amendments
-                for _ in 0..count {
-                    self.record_amendment();
-                }
+        if let MetricValue::Counter(count) = value {
+            // Record multiple amendments
+            for _ in 0..count {
+                self.record_amendment();
             }
-            _ => {} // Amendments only accept counter values
         }
     }
 
@@ -239,7 +236,7 @@ mod tests {
         assert_eq!(metric.total_amendments(), 3);
 
         // Non-counter values should be ignored
-        metric.update(MetricValue::Gauge(3.14));
+        metric.update(MetricValue::Gauge(std::f64::consts::PI));
         assert_eq!(metric.total_amendments(), 3);
     }
 

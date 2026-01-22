@@ -15,11 +15,10 @@ use crate::stages::common::stage_handle::{
     FORCE_SHUTDOWN_MESSAGE, STOP_REASON_TIMEOUT, STOP_REASON_USER_STOP,
 };
 use crate::stages::resources_builder::BoundSubscriptionFactory;
-use futures::TryFutureExt;
 use obzenflow_core::event::context::{FlowContext, StageType};
 use obzenflow_core::event::{ChainEventFactory, SystemEvent};
-use obzenflow_core::journal::journal::Journal;
-use obzenflow_core::{ChainEvent, EventId, FlowId, StageId, WriterId};
+use obzenflow_core::journal::Journal;
+use obzenflow_core::{ChainEvent, FlowId, StageId, WriterId};
 use obzenflow_fsm::{EventVariant, FsmAction, FsmContext, StateVariant};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -84,7 +83,7 @@ impl<H> std::fmt::Debug for JournalSinkState<H> {
             Self::Flushing => write!(f, "Flushing"),
             Self::Draining => write!(f, "Draining"),
             Self::Drained => write!(f, "Drained"),
-            Self::Failed(msg) => write!(f, "Failed({:?})", msg),
+            Self::Failed(msg) => write!(f, "Failed({msg:?})"),
             Self::_Phantom(_) => write!(f, "_Phantom"),
         }
     }
@@ -177,7 +176,7 @@ impl<H> std::fmt::Debug for JournalSinkEvent<H> {
             Self::BeginFlush => write!(f, "BeginFlush"),
             Self::FlushComplete => write!(f, "FlushComplete"),
             Self::BeginDrain => write!(f, "BeginDrain"),
-            Self::Error(msg) => write!(f, "Error({:?})", msg),
+            Self::Error(msg) => write!(f, "Error({msg:?})"),
             Self::_Phantom(_) => write!(f, "_Phantom"),
         }
     }
@@ -251,7 +250,7 @@ impl<H> std::fmt::Debug for JournalSinkAction<H> {
             Self::AllocateResources => write!(f, "AllocateResources"),
             Self::PublishRunning => write!(f, "PublishRunning"),
             Self::SendCompletion => write!(f, "SendCompletion"),
-            Self::SendFailure { message } => write!(f, "SendFailure({:?})", message),
+            Self::SendFailure { message } => write!(f, "SendFailure({message:?})"),
             Self::FlushBuffers => write!(f, "FlushBuffers"),
             Self::Cleanup => write!(f, "Cleanup"),
             Self::_Phantom(_) => write!(f, "_Phantom"),
@@ -317,45 +316,6 @@ pub struct JournalSinkContext<H: SinkHandler> {
     pub backpressure_readers: HashMap<StageId, BackpressureReader>,
 }
 
-impl<H: SinkHandler> JournalSinkContext<H> {
-    pub fn new(
-        handler: H,
-        stage_id: obzenflow_core::StageId,
-        stage_name: String,
-        flow_name: String,
-        flow_id: FlowId,
-        data_journal: Arc<dyn Journal<ChainEvent>>,
-        error_journal: Arc<dyn Journal<ChainEvent>>,
-        system_journal: Arc<dyn Journal<SystemEvent>>,
-        bus: Arc<crate::message_bus::FsmMessageBus>,
-        control_strategy: Arc<dyn ControlEventStrategy>,
-        instrumentation: Arc<StageInstrumentation>,
-        upstream_subscription_factory: BoundSubscriptionFactory,
-        backpressure_writer: BackpressureWriter,
-        backpressure_readers: HashMap<StageId, BackpressureReader>,
-    ) -> Self {
-        Self {
-            handler,
-            stage_id,
-            stage_name,
-            flow_name,
-            flow_id,
-            data_journal,
-            error_journal,
-            system_journal,
-            bus,
-            writer_id: None,
-            subscription: None,
-            contract_state: Vec::new(),
-            upstream_subscription_factory,
-            control_strategy,
-            instrumentation,
-            backpressure_writer,
-            backpressure_readers,
-        }
-    }
-}
-
 impl<H: SinkHandler + 'static> FsmContext for JournalSinkContext<H> {}
 
 // ============================================================================
@@ -370,8 +330,8 @@ impl<H: SinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAction<H> 
         match self {
             JournalSinkAction::AllocateResources => {
                 // Create WriterId from our StageId
-                let writer_id = WriterId::from(ctx.stage_id.clone());
-                ctx.writer_id = Some(writer_id.clone());
+                let writer_id = WriterId::from(ctx.stage_id);
+                ctx.writer_id = Some(writer_id);
 
                 // Initialize FSM-owned contract state for each upstream reader
                 let upstream_ids = ctx.upstream_subscription_factory.upstream_stage_ids();
@@ -572,17 +532,13 @@ impl<H: SinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAction<H> 
                             "sink: FlushBuffers action - flush returned payload, writing delivery"
                         );
                         // grab a copy of the WriterId or crash; this should never be None after init
-                        let writer_id = ctx
-                            .writer_id
-                            .as_ref()
-                            .expect("writer_id not initialised")
-                            .clone();
+                        let writer_id = ctx.writer_id.expect("writer_id not initialised");
 
                         let flow_ctx = FlowContext {
                             flow_name: ctx.flow_name.clone(),
                             flow_id: ctx.flow_id.to_string(),
                             stage_name: ctx.stage_name.clone(),
-                            stage_id: ctx.stage_id.clone(),
+                            stage_id: ctx.stage_id,
                             stage_type: StageType::Sink, // or whatever enum case
                         };
 

@@ -1,9 +1,6 @@
 //! Simple parity test to ensure DiskJournal and MemoryJournal behave identically
 
-use obzenflow_core::event::{
-    chain_event::{ChainEvent, ChainEventFactory},
-    EventId,
-};
+use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::Journal;
 use obzenflow_core::{StageId, WriterId};
@@ -62,21 +59,18 @@ async fn test_journal_parity() {
         assert_eq!(
             disk_event.event.event_type(),
             memory_event.event.event_type(),
-            "Event type mismatch at index {}",
-            i
+            "Event type mismatch at index {i}"
         );
 
         assert_eq!(
             disk_event.event.payload(),
             memory_event.event.payload(),
-            "Payload mismatch at index {}",
-            i
+            "Payload mismatch at index {i}"
         );
 
         assert_eq!(
             disk_event.event.writer_id, memory_event.event.writer_id,
-            "Writer ID mismatch at index {}",
-            i
+            "Writer ID mismatch at index {i}"
         );
     }
 

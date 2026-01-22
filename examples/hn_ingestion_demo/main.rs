@@ -16,9 +16,8 @@
 //! - `HN_LIVE=1` (default 0)
 //! - `HN_POLL_TIMEOUT_SECS=120` (default 120)
 
-mod lib;
+mod support;
 
 fn main() -> anyhow::Result<()> {
-    lib::run_example()
+    support::flow::run_example()
 }
-

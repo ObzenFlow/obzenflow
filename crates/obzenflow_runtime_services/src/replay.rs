@@ -4,13 +4,13 @@
 //! provides concrete implementations (e.g., disk-backed archive readers).
 
 use async_trait::async_trait;
-use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::context::FlowContext;
+use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::ChainEventFactory;
-use obzenflow_core::journal::{ArchiveStatus, StatusDerivation};
 use obzenflow_core::journal::journal_reader::JournalReader;
+use obzenflow_core::journal::{ArchiveStatus, StatusDerivation};
+use obzenflow_core::WriterId;
 use obzenflow_core::{ChainEvent, StageId};
-use obzenflow_core::{WriterId};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
@@ -141,13 +141,15 @@ impl ReplayDriver {
         flow_context: FlowContext,
     ) -> Result<Option<ChainEvent>, ReplayError> {
         loop {
-            let next = self.archive_reader.next().await.map_err(|e| {
-                ReplayError::CorruptedArchive {
-                    path: self.journal_path.clone(),
-                    record_position: self.archive_reader.position(),
-                    message: e.to_string(),
-                }
-            })?;
+            let next =
+                self.archive_reader
+                    .next()
+                    .await
+                    .map_err(|e| ReplayError::CorruptedArchive {
+                        path: self.journal_path.clone(),
+                        record_position: self.archive_reader.position(),
+                        message: e.to_string(),
+                    })?;
 
             let Some(envelope) = next else {
                 if self.archive_reader.is_at_end() {
@@ -166,8 +168,11 @@ impl ReplayDriver {
                 continue;
             }
 
-            let mut new_event =
-                ChainEventFactory::source_event(writer_id, stage_name.to_string(), original_event.content.clone());
+            let mut new_event = ChainEventFactory::source_event(
+                writer_id,
+                stage_name.to_string(),
+                original_event.content.clone(),
+            );
             new_event.flow_context = flow_context;
             new_event.intent = original_event.intent.clone();
             new_event.replay_context = Some(obzenflow_core::event::context::ReplayContext {

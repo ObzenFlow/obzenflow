@@ -82,7 +82,7 @@ impl AsyncInfiniteSourceHandler for TestAsyncInfiniteSource {
             .ok_or_else(|| SourceError::Transport("test channel closed".to_string()))?;
 
         let mut out = vec![ChainEventFactory::data_event(
-            self.writer_id.clone(),
+            self.writer_id,
             "TestEvent",
             json!({ "n": first }),
         )];
@@ -90,7 +90,7 @@ impl AsyncInfiniteSourceHandler for TestAsyncInfiniteSource {
         while out.len() < self.max_batch_size {
             match rx.try_recv() {
                 Ok(n) => out.push(ChainEventFactory::data_event(
-                    self.writer_id.clone(),
+                    self.writer_id,
                     "TestEvent",
                     json!({ "n": n }),
                 )),
@@ -195,7 +195,7 @@ async fn async_infinite_source_stop_interrupts_blocked_next_and_calls_drain() ->
         }
     }
     .await
-    .map_err(|e| anyhow!("Failed to create flow: {:?}", e))?;
+    .map_err(|e| anyhow!("Failed to create flow: {e:?}"))?;
 
     handle.start().await?;
     wait_for_running(&handle).await?;
@@ -216,8 +216,8 @@ async fn async_infinite_source_stop_interrupts_blocked_next_and_calls_drain() ->
         .lock()
         .unwrap()
         .iter()
+        .filter(|event| event.is_data())
         .cloned()
-        .filter(|e| e.is_data())
         .collect();
     assert!(
         data_events.is_empty(),
@@ -251,7 +251,7 @@ async fn async_infinite_source_emits_events_and_applies_stage_middleware() -> Re
         }
     }
     .await
-    .map_err(|e| anyhow!("Failed to create flow: {:?}", e))?;
+    .map_err(|e| anyhow!("Failed to create flow: {e:?}"))?;
 
     handle.start().await?;
     wait_for_running(&handle).await?;
@@ -273,8 +273,8 @@ async fn async_infinite_source_emits_events_and_applies_stage_middleware() -> Re
         .lock()
         .unwrap()
         .iter()
+        .filter(|event| event.is_data())
         .cloned()
-        .filter(|e| e.is_data())
         .collect();
     assert!(
         data_events.len() >= 2,

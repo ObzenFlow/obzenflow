@@ -9,7 +9,6 @@ use obzenflow_core::metrics::{
     AppMetricsSnapshot, InfraMetricsSnapshot, MetricsExporter, Percentile, PercentileExt,
     StageMetadata,
 };
-use std::collections::HashMap;
 use std::error::Error;
 use std::sync::RwLock;
 
@@ -66,12 +65,12 @@ impl ConsoleSummaryExporter {
             }
 
             // Count total errors
-            for (_stage_id, errors) in &snapshot.error_counts {
+            for errors in snapshot.error_counts.values() {
                 total_errors += errors;
             }
 
             // Calculate processing times
-            for (_stage_id, hist) in &snapshot.processing_times {
+            for hist in snapshot.processing_times.values() {
                 total_time_ms += hist.sum / 1_000_000.0; // Convert nanoseconds to ms
                 total_event_count += hist.count;
             }
@@ -82,13 +81,13 @@ impl ConsoleSummaryExporter {
             // Format duration helper
             let format_duration = |ms: f64| -> String {
                 if ms < 0.01 {
-                    format!("{:.3}ms", ms) // Show 3 decimal places for < 0.01ms
+                    format!("{ms:.3}ms") // Show 3 decimal places for < 0.01ms
                 } else if ms < 1.0 {
-                    format!("{:.2}ms", ms) // Show 2 decimal places for < 1ms
+                    format!("{ms:.2}ms") // Show 2 decimal places for < 1ms
                 } else if ms < 10.0 {
-                    format!("{:.1}ms", ms) // Show 1 decimal place for < 10ms
+                    format!("{ms:.1}ms") // Show 1 decimal place for < 10ms
                 } else {
-                    format!("{:.0}ms", ms) // No decimal places for >= 10ms
+                    format!("{ms:.0}ms") // No decimal places for >= 10ms
                 }
             };
 
@@ -104,7 +103,7 @@ impl ConsoleSummaryExporter {
                     0.0
                 };
 
-                summary.push_str(&format!("  Rate:              {:.1} events/sec\n", rate));
+                summary.push_str(&format!("  Rate:              {rate:.1} events/sec\n"));
                 summary.push_str(&format!(
                     "  Events In:         {} (from sources)\n",
                     flow_metrics.events_in
@@ -123,6 +122,14 @@ impl ConsoleSummaryExporter {
                     }
                 ));
 
+                if total_event_count > 0 {
+                    let avg_ms = total_time_ms / total_event_count as f64;
+                    summary.push_str(&format!(
+                        "  Avg Stage Duration: {}\n",
+                        format_duration(avg_ms)
+                    ));
+                }
+
                 // Utilization
                 let utilization = if flow_metrics.event_loops_total > 0 {
                     flow_metrics.event_loops_with_work_total as f64
@@ -131,7 +138,7 @@ impl ConsoleSummaryExporter {
                 } else {
                     0.0
                 };
-                summary.push_str(&format!("\nUtilization:     {:.1}%", utilization));
+                summary.push_str(&format!("\nUtilization:     {utilization:.1}%"));
                 if utilization > 90.0 {
                     summary.push_str(" (WARNING)");
                 }
@@ -139,8 +146,8 @@ impl ConsoleSummaryExporter {
             } else {
                 // Fallback to stage-based calculations
                 let rate_str = "N/A";
-                summary.push_str(&format!("  Rate:        {} events/sec", rate_str));
-                summary.push_str(&format!("  Total Events: {}", total_events));
+                summary.push_str(&format!("  Rate:        {rate_str} events/sec"));
+                summary.push_str(&format!("  Total Events: {total_events}"));
                 summary.push_str(&format!(
                     "  Total Errors: {} ({:.1}%)\n\n",
                     total_errors,
@@ -181,7 +188,7 @@ impl ConsoleSummaryExporter {
                     metadata.name,
                     metadata.stage_type.as_str()
                 );
-                summary.push_str(&format!("\n  {}\n", stage_display));
+                summary.push_str(&format!("\n  {stage_display}\n"));
 
                 // Rate (calculate from stage-specific timestamps)
                 if let (Some(first_time), Some(last_time)) = (
@@ -192,7 +199,7 @@ impl ConsoleSummaryExporter {
                     let duration_secs = duration.num_milliseconds() as f64 / 1000.0;
                     if duration_secs > 0.0 && *events > 0 {
                         let stage_rate = *events as f64 / duration_secs;
-                        summary.push_str(&format!("    Rate:     {:.1} events/sec\n", stage_rate));
+                        summary.push_str(&format!("    Rate:     {stage_rate:.1} events/sec\n"));
                     }
                 } else {
                     summary.push_str("    Rate:     N/A\n");
@@ -204,7 +211,7 @@ impl ConsoleSummaryExporter {
                 } else {
                     0.0
                 };
-                summary.push_str(&format!("    Errors:   {} ({:.1}%)\n", errors, error_pct));
+                summary.push_str(&format!("    Errors:   {errors} ({error_pct:.1}%)\n"));
 
                 // Duration percentiles
                 if let Some(hist) = snapshot.processing_times.get(stage_id) {
@@ -226,11 +233,11 @@ impl ConsoleSummaryExporter {
                         if p99 > 100.0 {
                             summary.push_str(" (WARNING: slow)");
                         }
-                        summary.push_str("\n");
+                        summary.push('\n');
                     }
                 }
             }
-            summary.push_str("\n");
+            summary.push('\n');
 
             // Runtime State (from FSM instrumentation)
             let total_in_flight: f64 = snapshot.in_flight.values().sum();
@@ -254,7 +261,7 @@ impl ConsoleSummaryExporter {
             let loops_with_work: u64 = snapshot.event_loops_with_work_total.values().sum();
             if total_loops > 0 {
                 let utilization = (loops_with_work as f64 / total_loops as f64) * 100.0;
-                summary.push_str(&format!("\n  Utilization: {:.1}%", utilization));
+                summary.push_str(&format!("\n  Utilization: {utilization:.1}%"));
                 if utilization > 90.0 {
                     summary.push_str(" (WARNING)");
                 }
@@ -263,11 +270,11 @@ impl ConsoleSummaryExporter {
 
             // Event flow
             summary.push_str("Event Flow:\n");
-            summary.push_str(&format!("  Source → {} events\n", source_events));
+            summary.push_str(&format!("  Source → {source_events} events\n"));
             if transform_events > 0 {
-                summary.push_str(&format!("  Transform → {} events\n", transform_events));
+                summary.push_str(&format!("  Transform → {transform_events} events\n"));
             }
-            summary.push_str(&format!("  Sink → {} events", sink_events));
+            summary.push_str(&format!("  Sink → {sink_events} events"));
 
             if sink_events < source_events {
                 summary.push_str(&format!(
@@ -275,7 +282,7 @@ impl ConsoleSummaryExporter {
                     source_events - sink_events
                 ));
             }
-            summary.push_str("\n");
+            summary.push('\n');
 
             // Errors, failures and drops
             if total_errors > 0
@@ -284,10 +291,10 @@ impl ConsoleSummaryExporter {
             {
                 summary.push_str("\nIssues:\n");
                 if total_errors > 0 {
-                    summary.push_str(&format!("  Errors: {}\n", total_errors));
+                    summary.push_str(&format!("  Errors: {total_errors}\n"));
                 }
                 if total_failures > 0 {
-                    summary.push_str(&format!("  Failures: {} (critical)\n", total_failures));
+                    summary.push_str(&format!("  Failures: {total_failures} (critical)\n"));
                 }
                 let total_dropped: f64 = snapshot.dropped_events.values().sum();
                 if total_dropped > 0.0 {

@@ -40,13 +40,15 @@ pub fn authorize_request(auth: &AuthConfig, request: &Request) -> Result<(), Aut
     match auth {
         AuthConfig::None => Ok(()),
         AuthConfig::ApiKey { header, keys } => {
-            let provided = header_value(request, header)
-                .ok_or_else(|| AuthError::MissingHeader { header: header.clone() })?;
+            let provided =
+                header_value(request, header).ok_or_else(|| AuthError::MissingHeader {
+                    header: header.clone(),
+                })?;
             validate_api_key(provided, keys)
         }
         AuthConfig::BearerToken { tokens } => {
-            let auth_header = header_value(request, "authorization")
-                .ok_or_else(|| AuthError::MissingHeader {
+            let auth_header =
+                header_value(request, "authorization").ok_or_else(|| AuthError::MissingHeader {
                     header: "Authorization".to_string(),
                 })?;
             let token = parse_bearer_token(auth_header)?;
@@ -57,14 +59,11 @@ pub fn authorize_request(auth: &AuthConfig, request: &Request) -> Result<(), Aut
             header,
             replay_window_secs,
         } => {
-            let signature_header = header_value(request, header)
-                .ok_or_else(|| AuthError::MissingHeader { header: header.clone() })?;
-            validate_webhook_signature(
-                &request.body,
-                signature_header,
-                secret,
-                replay_window_secs,
-            )
+            let signature_header =
+                header_value(request, header).ok_or_else(|| AuthError::MissingHeader {
+                    header: header.clone(),
+                })?;
+            validate_webhook_signature(&request.body, signature_header, secret, replay_window_secs)
         }
     }
 }
@@ -139,8 +138,12 @@ fn validate_webhook_signature(
 
     let key = hmac::Key::new(hmac::HMAC_SHA256, secret.as_bytes());
     let expected = if let Some(ts_str) = parsed.timestamp_string.as_deref() {
-        let mut signed =
-            Vec::with_capacity(ts_str.as_bytes().len().saturating_add(1).saturating_add(raw_body.len()));
+        let mut signed = Vec::with_capacity(
+            ts_str
+                .len()
+                .saturating_add(1)
+                .saturating_add(raw_body.len()),
+        );
         signed.extend_from_slice(ts_str.as_bytes());
         signed.push(b'.');
         signed.extend_from_slice(raw_body);
@@ -209,7 +212,7 @@ fn parse_signature_header(value: &str) -> Result<ParsedSignatureHeader, AuthErro
 
 fn decode_hex(value: &str) -> Result<Vec<u8>, AuthError> {
     let value = value.trim();
-    if value.len() % 2 != 0 {
+    if !value.len().is_multiple_of(2) {
         return Err(AuthError::InvalidSignatureHeader);
     }
 
@@ -261,10 +264,8 @@ mod tests {
         tokens.insert("token123".to_string());
         let auth = AuthConfig::BearerToken { tokens };
 
-        let request = Request::new(HttpMethod::Post, "/".to_string()).with_header(
-            "Authorization".to_string(),
-            "Bearer token123".to_string(),
-        );
+        let request = Request::new(HttpMethod::Post, "/".to_string())
+            .with_header("Authorization".to_string(), "Bearer token123".to_string());
         authorize_request(&auth, &request).unwrap();
     }
 
@@ -281,7 +282,11 @@ mod tests {
         let body = br#"{"a":1}"#;
         let key = hmac::Key::new(hmac::HMAC_SHA256, b"secret");
         let sig = hmac::sign(&key, body);
-        let sig_hex = sig.as_ref().iter().map(|b| format!("{:02x}", b)).collect::<String>();
+        let sig_hex = sig
+            .as_ref()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>();
 
         let request = Request::new(HttpMethod::Post, "/".to_string())
             .with_header("x-sig".to_string(), sig_hex)
@@ -289,4 +294,3 @@ mod tests {
         authorize_request(&auth, &request).unwrap();
     }
 }
-

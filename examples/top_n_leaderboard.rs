@@ -55,7 +55,7 @@ async fn main() -> Result<()> {
     println!("🎮 FlowState RS - TopN Leaderboard Demo");
     println!("=======================================");
     println!("✨ Using FLOWIP-080j TopNTyped & FLOWIP-082a TypedPayload");
-    println!("");
+    println!();
     println!("This demo shows how TopNTyped maintains a leaderboard");
     println!("of the top 5 players by score with type-safe operations,");
     println!("automatically evicting lower scores as new high scores arrive.\n");
@@ -90,10 +90,7 @@ async fn main() -> Result<()> {
                 scores = source!("scores" => FiniteSourceTyped::from_item_fn(move |index| {
                     let (player, score, game_mode) = score_events.get(index)?;
 
-                    println!(
-                        "📊 Score Update: {} scored {:.0} points in {} mode",
-                        player, score, game_mode
-                    );
+                    println!("📊 Score Update: {player} scored {score:.0} points in {game_mode} mode");
 
                     Some(GameScore {
                         player: player.clone(),
@@ -152,7 +149,7 @@ async fn main() -> Result<()> {
     println!("   FLOWIP-082a TypedPayload:");
     println!("   • GameScore::EVENT_TYPE instead of \"game.score\"");
     println!("   • SCHEMA_VERSION for evolution tracking");
-    println!("");
+    println!();
     println!("   FLOWIP-080j TopNTyped:");
     println!("   • Maintains exactly N items in memory");
     println!("   • Automatically evicts lowest scores");

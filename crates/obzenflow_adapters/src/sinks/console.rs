@@ -160,11 +160,11 @@ fn render_table(columns: &[String], rows: &[Vec<String>], max_col_width: usize) 
     // Data rows
     for row in rows {
         out.push('│');
-        for col_idx in 0..col_count {
+        for (col_idx, width) in widths.iter().enumerate().take(col_count) {
             let cell = row.get(col_idx).map(String::as_str).unwrap_or("-");
-            let truncated = truncate_with_ellipsis(cell, widths[col_idx]);
+            let truncated = truncate_with_ellipsis(cell, *width);
             out.push(' ');
-            out.push_str(&pad_right(&truncated, widths[col_idx]));
+            out.push_str(&pad_right(&truncated, *width));
             out.push(' ');
             out.push('│');
         }

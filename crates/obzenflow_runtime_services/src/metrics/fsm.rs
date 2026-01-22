@@ -12,7 +12,7 @@ use obzenflow_core::event::payloads::observability_payload::{
     CircuitBreakerEvent, MetricsLifecycle, MiddlewareLifecycle, ObservabilityPayload,
 };
 use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
-use obzenflow_core::event::{CorrelationId, JournalEvent, WriterId};
+use obzenflow_core::event::{JournalEvent, WriterId};
 use obzenflow_core::id::{FlowId, StageId, SystemId};
 use obzenflow_core::metrics::{ContractMetricsSnapshot, Percentile, StageMetadata};
 use obzenflow_core::time::MetricsDuration;
@@ -24,16 +24,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::time::Instant;
 
 use crate::metrics::tail_read;
-
-// Histogram configuration constants (in microseconds for precision)
-const HISTOGRAM_MIN_US: u64 = 1; // 1 microsecond minimum
-const HISTOGRAM_MAX_US: u64 = 60_000_000; // 60 seconds maximum
-const HISTOGRAM_SIGFIGS: u8 = 3; // 3 significant figures
-
-// Percentile constants - now using the Percentile enum
 
 /// FSM states for metrics aggregator lifecycle
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -79,7 +71,7 @@ pub enum MetricsAggregatorEvent {
 
     /// Process a system event (FLOWIP-059b)
     ProcessSystemEvent {
-        envelope: obzenflow_core::EventEnvelope<obzenflow_core::event::SystemEvent>,
+        envelope: Box<obzenflow_core::EventEnvelope<obzenflow_core::event::SystemEvent>>,
     },
 
     /// Time to export metrics
@@ -117,12 +109,12 @@ pub enum MetricsAggregatorAction {
 
     /// Update metrics from an event
     UpdateMetrics {
-        envelope: obzenflow_core::EventEnvelope<obzenflow_core::ChainEvent>,
+        envelope: Box<obzenflow_core::EventEnvelope<obzenflow_core::ChainEvent>>,
     },
 
     /// Process system events from the system journal (FLOWIP-059b)
     ProcessSystemEvent {
-        envelope: obzenflow_core::EventEnvelope<obzenflow_core::event::SystemEvent>,
+        envelope: Box<obzenflow_core::EventEnvelope<obzenflow_core::event::SystemEvent>>,
     },
 
     /// Export metrics snapshot
@@ -173,6 +165,7 @@ pub struct MetricsAggregatorContext {
 }
 
 /// Simple metrics storage
+#[derive(Default)]
 pub struct MetricsStore {
     pub stage_metrics: std::collections::HashMap<StageId, StageMetrics>,
     pub last_event_id: Option<EventId>,
@@ -228,7 +221,7 @@ pub struct MetricsStore {
     pub pipeline_state: String,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct StageMetrics {
     pub errors_by_kind: HashMap<ErrorKind, u64>,
     // Runtime context metrics (FLOWIP-056c / FLOWIP-059 Phase 6)
@@ -256,68 +249,6 @@ pub struct StageMetrics {
     pub last_event_time: Option<std::time::Instant>,
 }
 
-impl Default for MetricsStore {
-    fn default() -> Self {
-        Self {
-            stage_metrics: HashMap::new(),
-            last_event_id: None,
-            flow_start_time: None,
-            first_event_time: None,
-            last_event_time: None,
-            total_events_processed: 0,
-            stage_vector_clocks: HashMap::new(),
-            system_vector_clocks: HashMap::new(),
-            circuit_breaker_state: HashMap::new(),
-            circuit_breaker_rejection_rate: HashMap::new(),
-            circuit_breaker_consecutive_failures: HashMap::new(),
-            circuit_breaker_requests_total: HashMap::new(),
-            circuit_breaker_rejections_total: HashMap::new(),
-            circuit_breaker_opened_total: HashMap::new(),
-            circuit_breaker_successes_total: HashMap::new(),
-            circuit_breaker_failures_total: HashMap::new(),
-            circuit_breaker_time_in_state_seconds_total: HashMap::new(),
-            circuit_breaker_state_transitions_total: HashMap::new(),
-            circuit_breaker_last_state: HashMap::new(),
-            rate_limiter_events_total: HashMap::new(),
-            rate_limiter_delayed_total: HashMap::new(),
-            rate_limiter_tokens_consumed_total: HashMap::new(),
-            rate_limiter_delay_seconds_total: HashMap::new(),
-            rate_limiter_bucket_tokens: HashMap::new(),
-            rate_limiter_bucket_capacity: HashMap::new(),
-            contract_metrics: ContractMetricsSnapshot::default(),
-            ingestion_metrics: HashMap::new(),
-            http_pull_metrics: HashMap::new(),
-            stage_lifecycle_states: HashMap::new(),
-            pipeline_state: String::new(),
-        }
-    }
-}
-
-impl Default for StageMetrics {
-    fn default() -> Self {
-        Self {
-            errors_by_kind: HashMap::new(),
-            last_in_flight: None,
-            last_failures_total: None,
-            join_reference_since_last_stream: None,
-            latest_events_processed_total: None,
-            latest_events_accumulated_total: None,
-            latest_events_emitted_total: None,
-            latest_errors_total: None,
-            event_loops_total: 0,
-            event_loops_with_work_total: 0,
-            snapshot_p50_ms: None,
-            snapshot_p90_ms: None,
-            snapshot_p95_ms: None,
-            snapshot_p99_ms: None,
-            snapshot_p999_ms: None,
-            processing_time_sum_nanos: None,
-            first_event_time: None,
-            last_event_time: None,
-        }
-    }
-}
-
 impl MetricsAggregatorContext {
     pub async fn new(
         inputs: crate::metrics::inputs::MetricsInputs,
@@ -339,7 +270,7 @@ impl MetricsAggregatorContext {
                     let name = stage_metadata
                         .get(id)
                         .map(|m| m.name.clone())
-                        .unwrap_or_else(|| format!("{:?}", id));
+                        .unwrap_or_else(|| format!("{id:?}"));
                     (*id, name, journal.clone())
                 })
                 .collect::<Vec<_>>()
@@ -429,7 +360,7 @@ impl MetricsAggregatorContext {
                 }
 
                 // Seed per-stage vector clock watermark from the last envelope
-                let writer_id = envelope.event.writer_id().clone();
+                let writer_id = *envelope.event.writer_id();
                 let writer_key = writer_id.to_string();
                 let seq = envelope.vector_clock.get(&writer_key);
                 let entry = metrics_store
@@ -504,7 +435,7 @@ impl MetricsAggregatorContext {
                 &data_start_positions,
             )
             .await
-            .map_err(|e| format!("Failed to create data subscription: {}", e))?;
+            .map_err(|e| format!("Failed to create data subscription: {e}"))?;
 
         // Also seed wide-event snapshots from error journals (late error snapshots),
         // using the same tail-aware helper. This keeps StageMetrics consistent even
@@ -575,7 +506,7 @@ impl MetricsAggregatorContext {
                             );
                         }
 
-                        let writer_id = envelope.event.writer_id().clone();
+                        let writer_id = *envelope.event.writer_id();
                         let writer_key = writer_id.to_string();
                         let seq = envelope.vector_clock.get(&writer_key);
                         let entry = metrics_store
@@ -671,7 +602,7 @@ impl MetricsAggregatorContext {
                     &error_start_positions,
                 )
                 .await
-                .map_err(|e| format!("Failed to create error subscription: {}", e))?,
+                .map_err(|e| format!("Failed to create error subscription: {e}"))?,
             )
         } else {
             None
@@ -681,7 +612,7 @@ impl MetricsAggregatorContext {
         let system_reader = system_journal
             .reader()
             .await
-            .map_err(|e| format!("Failed to create system journal reader: {:?}", e))?;
+            .map_err(|e| format!("Failed to create system journal reader: {e:?}"))?;
 
         // Wrap in SystemSubscription for consistent polling interface
         let system_subscription = crate::messaging::system_subscription::SystemSubscription::new(
@@ -1382,14 +1313,14 @@ impl FsmAction for MetricsAggregatorAction {
                 let store = &mut ctx.metrics_store;
 
                 // Update last event ID
-                store.last_event_id = Some(envelope.event.id.clone());
+                store.last_event_id = Some(envelope.event.id);
 
                 let event = &envelope.event;
 
                 // Update per-stage vector clock watermark (FLOWIP-059c).
                 // We use the event writer_id component from the envelope's vector clock.
                 let stage_id = event.flow_context.stage_id;
-                let writer_id = event.writer_id().clone();
+                let writer_id = *event.writer_id();
                 let writer_key = writer_id.to_string();
                 let seq = envelope.vector_clock.get(&writer_key);
                 let entry = store.stage_vector_clocks.entry(stage_id).or_insert(0);
@@ -1476,10 +1407,7 @@ impl FsmAction for MetricsAggregatorAction {
                     } else if name == "http_pull.snapshot" {
                         match serde_json::from_value::<HttpPullTelemetry>(value.clone()) {
                             Ok(snapshot) => {
-                                let entry = store
-                                    .http_pull_metrics
-                                    .entry(stage_id)
-                                    .or_insert_with(HttpPullTelemetry::default);
+                                let entry = store.http_pull_metrics.entry(stage_id).or_default();
 
                                 // State/gauges: overwrite with latest.
                                 entry.state = snapshot.state.clone();
@@ -1533,107 +1461,104 @@ impl FsmAction for MetricsAggregatorAction {
 
                 // Consume middleware observability events (FLOWIP-059a).
                 if let ChainEventContent::Observability(ObservabilityPayload::Middleware(
-                    middleware_event,
+                    MiddlewareLifecycle::CircuitBreaker(cb),
                 )) = &event.content
                 {
-                    match middleware_event {
-                        MiddlewareLifecycle::CircuitBreaker(cb) => match cb {
-                            CircuitBreakerEvent::Opened {
-                                error_rate: _,
-                                failure_count,
-                                ..
-                            } => {
-                                store.record_circuit_breaker_transition(stage_id, "open");
-                                store.circuit_breaker_state.insert(stage_id, 1.0);
-                                store
-                                    .circuit_breaker_consecutive_failures
-                                    .insert(stage_id, *failure_count as f64);
+                    match cb {
+                        CircuitBreakerEvent::Opened {
+                            error_rate: _,
+                            failure_count,
+                            ..
+                        } => {
+                            store.record_circuit_breaker_transition(stage_id, "open");
+                            store.circuit_breaker_state.insert(stage_id, 1.0);
+                            store
+                                .circuit_breaker_consecutive_failures
+                                .insert(stage_id, *failure_count as f64);
+                        }
+                        CircuitBreakerEvent::Closed { .. } => {
+                            store.record_circuit_breaker_transition(stage_id, "closed");
+                            store.circuit_breaker_state.insert(stage_id, 0.0);
+                            store
+                                .circuit_breaker_consecutive_failures
+                                .insert(stage_id, 0.0);
+                        }
+                        CircuitBreakerEvent::HalfOpen { .. } => {
+                            store.record_circuit_breaker_transition(stage_id, "half_open");
+                            store.circuit_breaker_state.insert(stage_id, 0.5);
+                        }
+                        CircuitBreakerEvent::Summary {
+                            requests_processed: _,
+                            requests_rejected: _,
+                            state,
+                            consecutive_failures,
+                            rejection_rate,
+                            successes_total,
+                            failures_total,
+                            opened_total,
+                            time_in_closed_seconds,
+                            time_in_open_seconds,
+                            time_in_half_open_seconds,
+                            ..
+                        } => {
+                            store.set_circuit_breaker_last_state(stage_id, state);
+
+                            store
+                                .circuit_breaker_rejection_rate
+                                .insert(stage_id, *rejection_rate);
+                            store
+                                .circuit_breaker_consecutive_failures
+                                .insert(stage_id, *consecutive_failures as f64);
+
+                            // Cumulative breaker stats (FLOWIP-059a-2). These are emitted
+                            // as monotonic totals in the Summary wide event.
+                            let opened = store
+                                .circuit_breaker_opened_total
+                                .entry(stage_id)
+                                .or_insert(0);
+                            *opened = (*opened).max(*opened_total);
+
+                            let successes = store
+                                .circuit_breaker_successes_total
+                                .entry(stage_id)
+                                .or_insert(0);
+                            *successes = (*successes).max(*successes_total);
+
+                            let failures = store
+                                .circuit_breaker_failures_total
+                                .entry(stage_id)
+                                .or_insert(0);
+                            *failures = (*failures).max(*failures_total);
+
+                            store
+                                .circuit_breaker_time_in_state_seconds_total
+                                .entry((stage_id, "closed".to_string()))
+                                .and_modify(|v| *v = (*v).max(*time_in_closed_seconds))
+                                .or_insert(*time_in_closed_seconds);
+                            store
+                                .circuit_breaker_time_in_state_seconds_total
+                                .entry((stage_id, "open".to_string()))
+                                .and_modify(|v| *v = (*v).max(*time_in_open_seconds))
+                                .or_insert(*time_in_open_seconds);
+                            store
+                                .circuit_breaker_time_in_state_seconds_total
+                                .entry((stage_id, "half_open".to_string()))
+                                .and_modify(|v| *v = (*v).max(*time_in_half_open_seconds))
+                                .or_insert(*time_in_half_open_seconds);
+
+                            // State string is Debug-formatted in the middleware
+                            // (e.g. "Closed", "Open", "HalfOpen"); be liberal in parsing.
+                            let state_norm = state.to_ascii_lowercase();
+                            let state_value = match state_norm.as_str() {
+                                "closed" => Some(0.0),
+                                "open" => Some(1.0),
+                                "halfopen" | "half_open" | "half-open" => Some(0.5),
+                                _ => None,
+                            };
+                            if let Some(val) = state_value {
+                                store.circuit_breaker_state.insert(stage_id, val);
                             }
-                            CircuitBreakerEvent::Closed { .. } => {
-                                store.record_circuit_breaker_transition(stage_id, "closed");
-                                store.circuit_breaker_state.insert(stage_id, 0.0);
-                                store
-                                    .circuit_breaker_consecutive_failures
-                                    .insert(stage_id, 0.0);
-                            }
-                            CircuitBreakerEvent::HalfOpen { .. } => {
-                                store.record_circuit_breaker_transition(stage_id, "half_open");
-                                store.circuit_breaker_state.insert(stage_id, 0.5);
-                            }
-                            CircuitBreakerEvent::Summary {
-                                requests_processed: _,
-                                requests_rejected: _,
-                                state,
-                                consecutive_failures,
-                                rejection_rate,
-                                successes_total,
-                                failures_total,
-                                opened_total,
-                                time_in_closed_seconds,
-                                time_in_open_seconds,
-                                time_in_half_open_seconds,
-                                ..
-                            } => {
-                                store.set_circuit_breaker_last_state(stage_id, state);
-
-                                store
-                                    .circuit_breaker_rejection_rate
-                                    .insert(stage_id, *rejection_rate);
-                                store
-                                    .circuit_breaker_consecutive_failures
-                                    .insert(stage_id, *consecutive_failures as f64);
-
-                                // Cumulative breaker stats (FLOWIP-059a-2). These are emitted
-                                // as monotonic totals in the Summary wide event.
-                                let opened = store
-                                    .circuit_breaker_opened_total
-                                    .entry(stage_id)
-                                    .or_insert(0);
-                                *opened = (*opened).max(*opened_total);
-
-                                let successes = store
-                                    .circuit_breaker_successes_total
-                                    .entry(stage_id)
-                                    .or_insert(0);
-                                *successes = (*successes).max(*successes_total);
-
-                                let failures = store
-                                    .circuit_breaker_failures_total
-                                    .entry(stage_id)
-                                    .or_insert(0);
-                                *failures = (*failures).max(*failures_total);
-
-                                store
-                                    .circuit_breaker_time_in_state_seconds_total
-                                    .entry((stage_id, "closed".to_string()))
-                                    .and_modify(|v| *v = (*v).max(*time_in_closed_seconds))
-                                    .or_insert(*time_in_closed_seconds);
-                                store
-                                    .circuit_breaker_time_in_state_seconds_total
-                                    .entry((stage_id, "open".to_string()))
-                                    .and_modify(|v| *v = (*v).max(*time_in_open_seconds))
-                                    .or_insert(*time_in_open_seconds);
-                                store
-                                    .circuit_breaker_time_in_state_seconds_total
-                                    .entry((stage_id, "half_open".to_string()))
-                                    .and_modify(|v| *v = (*v).max(*time_in_half_open_seconds))
-                                    .or_insert(*time_in_half_open_seconds);
-
-                                // State string is Debug-formatted in the middleware
-                                // (e.g. "Closed", "Open", "HalfOpen"); be liberal in parsing.
-                                let state_norm = state.to_ascii_lowercase();
-                                let state_value = match state_norm.as_str() {
-                                    "closed" => Some(0.0),
-                                    "open" => Some(1.0),
-                                    "halfopen" | "half_open" | "half-open" => Some(0.5),
-                                    _ => None,
-                                };
-                                if let Some(val) = state_value {
-                                    store.circuit_breaker_state.insert(stage_id, val);
-                                }
-                            }
-                            _ => {}
-                        },
+                        }
                         _ => {}
                     }
                 }
@@ -1658,10 +1583,7 @@ impl FsmAction for MetricsAggregatorAction {
 
                 // First handle stage metrics (data + control wide events)
                 {
-                    let metrics = store
-                        .stage_metrics
-                        .entry(stage_id)
-                        .or_insert_with(StageMetrics::default);
+                    let metrics = store.stage_metrics.entry(stage_id).or_default();
 
                     // Track stage timing
                     let now = std::time::Instant::now();
@@ -1759,7 +1681,7 @@ impl FsmAction for MetricsAggregatorAction {
                             .metrics_store
                             .stage_metrics
                             .entry(*stage_id)
-                            .or_insert_with(StageMetrics::default);
+                            .or_default();
 
                         metrics.latest_events_processed_total = Some(
                             metrics
@@ -1908,8 +1830,7 @@ impl FsmAction for MetricsAggregatorAction {
                     .map(|_| ())
                     .map_err(|e| {
                         obzenflow_fsm::FsmError::HandlerError(format!(
-                            "Failed to publish drain complete event: {}",
-                            e
+                            "Failed to publish drain complete event: {e}"
                         ))
                     })?;
 
@@ -1982,7 +1903,7 @@ pub fn build_metrics_aggregator_fsm() -> MetricsAggregatorFsm {
 
                 on MetricsAggregatorEvent::ProcessSystemEvent => |_state: &MetricsAggregatorState, event: &MetricsAggregatorEvent, ctx: &mut MetricsAggregatorContext| {
                     let event = event.clone();
-                    let last_event_id = ctx.metrics_store.last_event_id.clone();
+                    let last_event_id = ctx.metrics_store.last_event_id;
                     Box::pin(async move {
                         match event {
                             MetricsAggregatorEvent::ProcessSystemEvent { envelope } => {
@@ -2011,7 +1932,7 @@ pub fn build_metrics_aggregator_fsm() -> MetricsAggregatorFsm {
                                 );
 
                                 if should_finalize {
-                                    let publish_last_event_id = last_event_id.clone();
+                                    let publish_last_event_id = last_event_id;
                                     return Ok(Transition {
                                         next_state: MetricsAggregatorState::Drained { last_event_id },
                                         actions: vec![
@@ -2060,7 +1981,9 @@ pub fn build_metrics_aggregator_fsm() -> MetricsAggregatorFsm {
                             let actions = events
                                 .iter()
                                 .cloned()
-                                .map(|envelope| MetricsAggregatorAction::UpdateMetrics { envelope })
+                                .map(|envelope| MetricsAggregatorAction::UpdateMetrics {
+                                    envelope: Box::new(envelope),
+                                })
                                 .collect::<Vec<_>>();
                             Ok(Transition {
                                 next_state: MetricsAggregatorState::Running,
@@ -2104,8 +2027,8 @@ pub fn build_metrics_aggregator_fsm() -> MetricsAggregatorFsm {
             state MetricsAggregatorState::Draining {
             on MetricsAggregatorEvent::FlowTerminal => |_state: &MetricsAggregatorState, _event: &MetricsAggregatorEvent, ctx: &mut MetricsAggregatorContext| {
                 Box::pin(async move {
-                    let last_event_id = ctx.metrics_store.last_event_id.clone();
-                    let publish_last_event_id = last_event_id.clone();
+                    let last_event_id = ctx.metrics_store.last_event_id;
+                    let publish_last_event_id = last_event_id;
                     Ok(Transition {
                         next_state: MetricsAggregatorState::Drained { last_event_id },
                         actions: vec![
@@ -2120,7 +2043,7 @@ pub fn build_metrics_aggregator_fsm() -> MetricsAggregatorFsm {
 
                 on MetricsAggregatorEvent::ProcessSystemEvent => |_state: &MetricsAggregatorState, event: &MetricsAggregatorEvent, ctx: &mut MetricsAggregatorContext| {
                     let event = event.clone();
-                    let last_event_id = ctx.metrics_store.last_event_id.clone();
+                    let last_event_id = ctx.metrics_store.last_event_id;
                     Box::pin(async move {
                         match event {
                             MetricsAggregatorEvent::ProcessSystemEvent { envelope } => {
@@ -2149,7 +2072,7 @@ pub fn build_metrics_aggregator_fsm() -> MetricsAggregatorFsm {
                                 );
 
                                 if should_finalize {
-                                    let publish_last_event_id = last_event_id.clone();
+                                    let publish_last_event_id = last_event_id;
                                     return Ok(Transition {
                                         next_state: MetricsAggregatorState::Drained { last_event_id },
                                         actions: vec![
@@ -2191,7 +2114,9 @@ pub fn build_metrics_aggregator_fsm() -> MetricsAggregatorFsm {
                             let actions = events
                                 .iter()
                                 .cloned()
-                                .map(|envelope| MetricsAggregatorAction::UpdateMetrics { envelope })
+                                .map(|envelope| MetricsAggregatorAction::UpdateMetrics {
+                                    envelope: Box::new(envelope),
+                                })
                                 .collect::<Vec<_>>();
                             Ok(Transition {
                                 next_state: MetricsAggregatorState::Draining,
@@ -2242,10 +2167,10 @@ mod tests {
     use obzenflow_core::event::ChainEventFactory;
     use obzenflow_core::event::CorrelationId;
     use obzenflow_core::event::JournalEvent;
-    use obzenflow_core::journal::journal::Journal;
     use obzenflow_core::journal::journal_error::JournalError;
     use obzenflow_core::journal::journal_owner::JournalOwner;
     use obzenflow_core::journal::journal_reader::JournalReader;
+    use obzenflow_core::journal::Journal;
     use obzenflow_core::metrics::StageMetadata;
     use std::marker::PhantomData;
 
@@ -2255,12 +2180,12 @@ mod tests {
         let writer_id = WriterId::from(StageId::new());
         let correlation_id = CorrelationId::new();
         let mut event = ChainEventFactory::data_event(
-            writer_id.clone(),
+            writer_id,
             "test.event",
             serde_json::json!({"data": "test"}),
         );
-        event.correlation_id = Some(correlation_id.clone());
-        event.correlation_payload = Some(CorrelationPayload::new("test_source", event.id.clone()));
+        event.correlation_id = Some(correlation_id);
+        event.correlation_payload = Some(CorrelationPayload::new("test_source", event.id));
 
         // Simulate what the sink supervisor does when creating a delivery event
         let payload = DeliveryPayload::success("test_sink", DeliveryMethod::Noop, Some(1));
@@ -2286,13 +2211,15 @@ mod tests {
 
         // Seed MetricsStore with a single stage entry.
         let mut store = MetricsStore::default();
-        let mut stage_metrics = StageMetrics::default();
-        stage_metrics.latest_events_processed_total = Some(42);
-        stage_metrics.latest_errors_total = Some(3);
-        stage_metrics.errors_by_kind.insert(ErrorKind::Domain, 2);
-        stage_metrics.errors_by_kind.insert(ErrorKind::Remote, 1);
-        stage_metrics.event_loops_total = 10;
-        stage_metrics.event_loops_with_work_total = 7;
+        let errors_by_kind = HashMap::from([(ErrorKind::Domain, 2), (ErrorKind::Remote, 1)]);
+        let stage_metrics = StageMetrics {
+            errors_by_kind,
+            latest_events_processed_total: Some(42),
+            latest_errors_total: Some(3),
+            event_loops_total: 10,
+            event_loops_with_work_total: 7,
+            ..Default::default()
+        };
         store.stage_metrics.insert(stage_id, stage_metrics);
 
         // Minimal stage metadata so flow aggregation can classify the stage.
@@ -2441,6 +2368,6 @@ mod tests {
         assert_eq!(by_kind.get(&ErrorKind::Remote), Some(&1));
 
         // Stage metadata should be carried through.
-        assert!(snapshot.stage_metadata.get(&stage_id).is_some());
+        assert!(snapshot.stage_metadata.contains_key(&stage_id));
     }
 }

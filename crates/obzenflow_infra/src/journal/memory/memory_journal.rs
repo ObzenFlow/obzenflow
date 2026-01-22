@@ -3,19 +3,19 @@
 //! This provides a simple, thread-safe in-memory implementation
 //! of the Journal trait for use in tests.
 
-use obzenflow_core::journal::journal::Journal;
+use async_trait::async_trait;
+use chrono::Utc;
+use obzenflow_core::event::event_envelope::EventEnvelope;
+use obzenflow_core::event::identity::{EventId, JournalWriterId, WriterId};
+use obzenflow_core::event::vector_clock::{CausalOrderingService, VectorClock};
+use obzenflow_core::event::JournalEvent;
+use obzenflow_core::id::JournalId;
 use obzenflow_core::journal::journal_error::JournalError;
 use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::journal::journal_reader::JournalReader;
-use obzenflow_core::event::JournalEvent;
-use obzenflow_core::event::event_envelope::EventEnvelope;
-use obzenflow_core::event::identity::{JournalWriterId, WriterId, EventId};
-use obzenflow_core::id::JournalId;
-use obzenflow_core::event::vector_clock::{VectorClock, CausalOrderingService};
-use async_trait::async_trait;
-use std::sync::{Arc, Mutex};
+use obzenflow_core::journal::Journal;
 use std::collections::HashMap;
-use chrono::Utc;
+use std::sync::{Arc, Mutex};
 
 /// In-memory journal for testing
 #[derive(Clone)]
@@ -45,6 +45,12 @@ impl<T: JournalEvent> MemoryJournalReader<T> {
             events,
             position: clamped,
         }
+    }
+}
+
+impl<T: JournalEvent> Default for MemoryJournal<T> {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -97,22 +103,23 @@ impl<T: JournalEvent + 'static> Journal<T> for MemoryJournal<T> {
     }
 
     async fn append(
-        &self,  // Note: &self, not &mut self
+        &self, // Note: &self, not &mut self
         event: T,
-        parent: Option<&EventEnvelope<T>>
+        parent: Option<&EventEnvelope<T>>,
     ) -> Result<EventEnvelope<T>, JournalError> {
         // Safety check: Ensure journal has an owner before allowing writes
         if self.owner.is_none() {
             return Err(JournalError::Implementation {
-                message: "Cannot write to an unowned journal. Journal must have an owner.".to_string(),
+                message: "Cannot write to an unowned journal. Journal must have an owner."
+                    .to_string(),
                 source: "Unowned journal write attempt".into(),
             });
         }
         // Get writer_id from the event
-        let writer_id = event.writer_id().clone();
-        
+        let writer_id = *event.writer_id();
+
         let mut clocks = self.writer_clocks.lock().unwrap();
-        
+
         // Get or create vector clock for this writer
         let mut vector_clock = clocks
             .get(&writer_id)
@@ -121,14 +128,17 @@ impl<T: JournalEvent + 'static> Journal<T> for MemoryJournal<T> {
 
         // Update vector clock based on parent
         if let Some(parent_envelope) = parent {
-            CausalOrderingService::update_with_parent(&mut vector_clock, &parent_envelope.vector_clock);
+            CausalOrderingService::update_with_parent(
+                &mut vector_clock,
+                &parent_envelope.vector_clock,
+            );
         }
 
         // Increment for this writer
         CausalOrderingService::increment(&mut vector_clock, &writer_id.to_string());
 
         // Update stored clock
-        clocks.insert(writer_id.clone(), vector_clock.clone());
+        clocks.insert(writer_id, vector_clock.clone());
         drop(clocks);
 
         // Create envelope with proper vector clock
@@ -153,21 +163,26 @@ impl<T: JournalEvent + 'static> Journal<T> for MemoryJournal<T> {
 
         // Sort by vector clock for causal ordering
         events_copy.sort_by(|a, b| {
-            CausalOrderingService::causal_compare(&a.vector_clock, &b.vector_clock)
-                .unwrap_or_else(|| {
+            CausalOrderingService::causal_compare(&a.vector_clock, &b.vector_clock).unwrap_or_else(
+                || {
                     // For concurrent events, use timestamp as tiebreaker
                     a.timestamp.cmp(&b.timestamp)
-                })
+                },
+            )
         });
 
         Ok(events_copy)
     }
 
-    async fn read_causally_after(&self, after_event_id: &EventId) -> Result<Vec<EventEnvelope<T>>, JournalError> {
+    async fn read_causally_after(
+        &self,
+        after_event_id: &EventId,
+    ) -> Result<Vec<EventEnvelope<T>>, JournalError> {
         let all_events = self.read_causally_ordered().await?;
 
         // Find the position of the reference event
-        let position = all_events.iter()
+        let position = all_events
+            .iter()
             .position(|e| e.event.id() == after_event_id);
 
         match position {
@@ -176,17 +191,18 @@ impl<T: JournalEvent + 'static> Journal<T> for MemoryJournal<T> {
         }
     }
 
-    async fn read_event(&self, event_id: &EventId) -> Result<Option<EventEnvelope<T>>, JournalError> {
+    async fn read_event(
+        &self,
+        event_id: &EventId,
+    ) -> Result<Option<EventEnvelope<T>>, JournalError> {
         let events = self.events.lock().unwrap();
-        Ok(events.iter()
-            .find(|e| e.event.id() == event_id)
-            .cloned())
+        Ok(events.iter().find(|e| e.event.id() == event_id).cloned())
     }
-    
+
     async fn reader(&self) -> Result<Box<dyn JournalReader<T>>, JournalError> {
         Ok(Box::new(MemoryJournalReader::new(self.events.clone(), 0)))
     }
-    
+
     async fn reader_from(&self, position: u64) -> Result<Box<dyn JournalReader<T>>, JournalError> {
         Ok(Box::new(MemoryJournalReader::new(
             self.events.clone(),
@@ -204,7 +220,7 @@ impl<T: JournalEvent + 'static> Journal<T> for MemoryJournal<T> {
         let start = len.saturating_sub(count);
 
         // Return events in reverse order (most recent first)
-        let mut result: Vec<_> = events[start..].iter().cloned().collect();
+        let mut result: Vec<_> = events[start..].to_vec();
         result.reverse();
         Ok(result)
     }
@@ -249,9 +265,9 @@ impl<T: JournalEvent + 'static> JournalReader<T> for MemoryJournalReader<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
     use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
     use obzenflow_core::id::StageId;
+    use serde_json::json;
 
     #[tokio::test]
     async fn test_memory_journal_basic_operations() {
@@ -263,19 +279,13 @@ mod tests {
         let writer2 = WriterId::from(StageId::new());
 
         // First event from writer1
-        let event1 = ChainEventFactory::data_event(
-            writer1,
-            "test.event.1",
-            json!({"data": "first"})
-        );
+        let event1 =
+            ChainEventFactory::data_event(writer1, "test.event.1", json!({"data": "first"}));
         let envelope1 = journal.append(event1, None).await.unwrap();
 
         // Second event from writer2, with parent
-        let event2 = ChainEventFactory::data_event(
-            writer2,
-            "test.event.2",
-            json!({"data": "second"})
-        );
+        let event2 =
+            ChainEventFactory::data_event(writer2, "test.event.2", json!({"data": "second"}));
         let envelope2 = journal.append(event2, Some(&envelope1)).await.unwrap();
 
         // Verify causal relationship
@@ -289,7 +299,10 @@ mod tests {
         assert_eq!(all_events.len(), 2);
 
         // Read after first event
-        let after_first = journal.read_causally_after(&envelope1.event.id).await.unwrap();
+        let after_first = journal
+            .read_causally_after(&envelope1.event.id)
+            .await
+            .unwrap();
         assert_eq!(after_first.len(), 1);
         assert_eq!(after_first[0].event.id, envelope2.event.id);
 
@@ -322,25 +335,13 @@ mod tests {
         let writer = WriterId::from(StageId::new());
 
         // Create a chain of events
-        let event1 = ChainEventFactory::data_event(
-            writer,
-            "event.1",
-            json!({"seq": 1})
-        );
+        let event1 = ChainEventFactory::data_event(writer, "event.1", json!({"seq": 1}));
         let envelope1 = journal.append(event1, None).await.unwrap();
 
-        let event2 = ChainEventFactory::data_event(
-            writer,
-            "event.2",
-            json!({"seq": 2})
-        );
+        let event2 = ChainEventFactory::data_event(writer, "event.2", json!({"seq": 2}));
         let envelope2 = journal.append(event2, Some(&envelope1)).await.unwrap();
 
-        let event3 = ChainEventFactory::data_event(
-            writer,
-            "event.3",
-            json!({"seq": 3})
-        );
+        let event3 = ChainEventFactory::data_event(writer, "event.3", json!({"seq": 3}));
         journal.append(event3, Some(&envelope2)).await.unwrap();
 
         // Verify causal ordering
@@ -360,16 +361,8 @@ mod tests {
         let writer = WriterId::from(StageId::new());
 
         // Append a small sequence of events
-        let e1 = ChainEventFactory::data_event(
-            writer.clone(),
-            "reader.test.1",
-            json!({"seq": 1}),
-        );
-        let e2 = ChainEventFactory::data_event(
-            writer.clone(),
-            "reader.test.2",
-            json!({"seq": 2}),
-        );
+        let e1 = ChainEventFactory::data_event(writer, "reader.test.1", json!({"seq": 1}));
+        let e2 = ChainEventFactory::data_event(writer, "reader.test.2", json!({"seq": 2}));
         journal.append(e1, None).await.unwrap();
         journal.append(e2, None).await.unwrap();
 
@@ -380,10 +373,10 @@ mod tests {
         let mut reader = journal.reader().await.unwrap();
         let mut seen = Vec::new();
         while let Some(env) = reader.next().await.unwrap() {
-            seen.push(env.event.id().clone());
+            seen.push(*env.event.id());
         }
 
-        let all_ids: Vec<_> = all.iter().map(|e| e.event.id().clone()).collect();
+        let all_ids: Vec<_> = all.iter().map(|e| *e.event.id()).collect();
         assert_eq!(seen, all_ids);
         assert!(reader.is_at_end());
     }

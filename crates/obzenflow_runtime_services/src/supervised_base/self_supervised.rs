@@ -40,6 +40,7 @@ pub trait SelfSupervised: Supervisor {
 }
 
 /// Extension trait to add run functionality to any SelfSupervised type
+#[async_trait::async_trait]
 pub trait SelfSupervisedExt: SelfSupervised {
     /// Run the supervision loop
     async fn run(

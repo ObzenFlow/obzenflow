@@ -1,5 +1,5 @@
-mod lib;
+mod support;
 
 fn main() -> anyhow::Result<()> {
-    lib::run_example()
+    support::flow::run_example()
 }

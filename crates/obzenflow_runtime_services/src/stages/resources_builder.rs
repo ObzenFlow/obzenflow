@@ -12,7 +12,7 @@ use crate::messaging::upstream_subscription::{ContractConfig, UpstreamSubscripti
 use crate::replay::ReplayArchive;
 use obzenflow_core::control_middleware::ControlMiddlewareProvider;
 use obzenflow_core::event::SystemEvent;
-use obzenflow_core::journal::journal::Journal;
+use obzenflow_core::journal::Journal;
 use obzenflow_core::{ChainEvent, FlowId, StageId, SystemId, WriterId};
 use obzenflow_topology::Topology;
 use std::collections::HashMap;
@@ -55,14 +55,14 @@ impl SubscriptionFactory {
                     .stage_names
                     .get(id)
                     .cloned()
-                    .unwrap_or_else(|| format!("{:?}", id));
+                    .unwrap_or_else(|| format!("{id:?}"));
                 (*id, name, journal.clone())
             })
             .collect();
 
         UpstreamSubscription::new_with_names("unknown_owner", &journals_with_names)
             .await
-            .map_err(|e| format!("Failed to create subscription: {:?}", e))
+            .map_err(|e| format!("Failed to create subscription: {e:?}"))
     }
 
     /// Bind this factory to a concrete set of journals (capturing stage IDs/names)
@@ -77,7 +77,7 @@ impl SubscriptionFactory {
                     .stage_names
                     .get(id)
                     .cloned()
-                    .unwrap_or_else(|| format!("{:?}", id));
+                    .unwrap_or_else(|| format!("{id:?}"));
                 (*id, name, journal.clone())
             })
             .collect();
@@ -87,28 +87,6 @@ impl SubscriptionFactory {
             journals_with_names,
         }
     }
-
-    /// Create a subscription with contracts configured
-    pub async fn create_subscription_with_contracts(
-        &self,
-        journals: &[(StageId, Arc<dyn Journal<ChainEvent>>)],
-        writer_id: WriterId,
-        data_journal: Arc<dyn Journal<ChainEvent>>,
-        contract_config: ContractConfig,
-        system_journal: Option<Arc<dyn Journal<SystemEvent>>>,
-        reader_stage: Option<StageId>,
-        control_middleware: Arc<dyn ControlMiddlewareProvider>,
-    ) -> Result<UpstreamSubscription<ChainEvent>, String> {
-        let subscription = self.create_subscription(journals).await?;
-        Ok(subscription.with_contracts(
-            writer_id,
-            data_journal,
-            contract_config,
-            system_journal,
-            reader_stage,
-            control_middleware,
-        ))
-    }
 }
 
 impl BoundSubscriptionFactory {
@@ -117,7 +95,7 @@ impl BoundSubscriptionFactory {
         UpstreamSubscription::new_with_names(&self.owner_label, &self.journals_with_names)
             .await
             .map(|sub| sub.transport_only())
-            .map_err(|e| format!("Failed to create subscription: {:?}", e))
+            .map_err(|e| format!("Failed to create subscription: {e:?}"))
     }
 
     /// Build a subscription with contracts configured from the bound journals
@@ -133,7 +111,7 @@ impl BoundSubscriptionFactory {
         let subscription =
             UpstreamSubscription::new_with_names(&self.owner_label, &self.journals_with_names)
                 .await
-                .map_err(|e| format!("Failed to create subscription: {:?}", e))?
+                .map_err(|e| format!("Failed to create subscription: {e:?}"))?
                 .with_contracts(
                     writer_id,
                     data_journal,
@@ -282,14 +260,14 @@ impl StageResourcesBuilder {
             let data_journal = self
                 .stage_journals
                 .get(&stage_id)
-                .ok_or_else(|| format!("No journal found for stage {:?}", stage_id))?
+                .ok_or_else(|| format!("No journal found for stage {stage_id:?}"))?
                 .clone();
 
             // Get the stage's error journal
             let error_journal = self
                 .error_journals
                 .get(&stage_id)
-                .ok_or_else(|| format!("No error journal found for stage {:?}", stage_id))?
+                .ok_or_else(|| format!("No error journal found for stage {stage_id:?}"))?
                 .clone();
 
             // Keep a reference for metrics aggregator
@@ -415,7 +393,7 @@ impl StageResourcesBuilder {
             upstream_subscription_factory.owner_label = stage_info.name.clone();
 
             let resources = StageResources {
-                flow_id: self.flow_id.clone(),
+                flow_id: self.flow_id,
                 data_journal,
                 error_journal,
                 system_journal: self.system_journal.clone(),

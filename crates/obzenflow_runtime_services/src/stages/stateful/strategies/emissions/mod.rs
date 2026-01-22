@@ -4,9 +4,8 @@
 // Emission strategies define the "when" which can be combined with accumulators that
 // define the "what" to create flexible stateful processing patterns.
 
-use obzenflow_core::ChainEvent;
 use std::fmt::Debug;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 // Re-export concrete strategies
 mod emit_always;

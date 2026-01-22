@@ -81,6 +81,6 @@ mod tests {
     fn test_flow_id_display() {
         let ulid = Ulid::new();
         let id = FlowId::from_ulid(ulid);
-        assert_eq!(format!("{}", id), format!("flow_{}", ulid));
+        assert_eq!(format!("{id}"), format!("flow_{ulid}"));
     }
 }

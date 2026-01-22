@@ -34,7 +34,10 @@ impl HttpClient for MockHttpClient {
             .lock()
             .unwrap()
             .pop_front()
-            .unwrap_or_else(|| Err(HttpClientError::Transport("MockHttpClient: no outcomes queued".into())))
+            .unwrap_or_else(|| {
+                Err(HttpClientError::Transport(
+                    "MockHttpClient: no outcomes queued".into(),
+                ))
+            })
     }
 }
-

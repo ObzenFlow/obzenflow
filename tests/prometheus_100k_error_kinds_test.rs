@@ -56,11 +56,11 @@ impl FiniteSourceHandler for HighVolumeSource {
         let current_id = self.count;
         self.count += 1;
 
-        let should_fail = current_id % 100 == 0;
+        let should_fail = current_id.is_multiple_of(100);
 
         Ok(Some(vec![ChainEventFactory::data_event(
-            self.writer_id.clone(),
-            &DataRequest::versioned_event_type(),
+            self.writer_id,
+            DataRequest::versioned_event_type(),
             json!({
                 "id": current_id,
                 "should_fail": should_fail,
@@ -123,7 +123,7 @@ fn error_prone_transform() -> Map<impl Fn(ChainEvent) -> ChainEvent + Send + Syn
             payload["error_code"] = json!(500);
 
             event.derive_error_event(
-                &ErrorEvent::versioned_event_type(),
+                ErrorEvent::versioned_event_type(),
                 payload,
                 "Simulated processing error",
                 ErrorKind::Domain,
@@ -133,9 +133,9 @@ fn error_prone_transform() -> Map<impl Fn(ChainEvent) -> ChainEvent + Send + Syn
             payload["processing_stage"] = json!("error_prone_transform");
 
             ChainEventFactory::derived_data_event(
-                event.writer_id.clone(),
+                event.writer_id,
                 &event,
-                &ProcessedEvent::versioned_event_type(),
+                ProcessedEvent::versioned_event_type(),
                 payload,
             )
         }
@@ -194,13 +194,13 @@ async fn prometheus_100k_error_processor_error_kinds_are_domain_only() -> Result
         }
     }
     .await
-    .map_err(|e| anyhow::anyhow!("Flow creation failed: {:?}", e))?;
+    .map_err(|e| anyhow::anyhow!("Flow creation failed: {e:?}"))?;
 
     // Run the flow and obtain the metrics exporter.
     let metrics_exporter = flow_handle
         .run_with_metrics()
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to run flow: {:?}", e))?
+        .map_err(|e| anyhow::anyhow!("Failed to run flow: {e:?}"))?
         .expect("Metrics exporter should be configured");
 
     // Give the metrics aggregator a brief moment to perform its final export
@@ -209,7 +209,7 @@ async fn prometheus_100k_error_processor_error_kinds_are_domain_only() -> Result
 
     let metrics_text = metrics_exporter
         .render_metrics()
-        .map_err(|e| anyhow::anyhow!("Failed to render metrics: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to render metrics: {e}"))?;
 
     // Extract obzenflow_errors_total for stage="error_processor" by error_kind.
     let mut domain_errors: Option<u64> = None;
@@ -250,8 +250,7 @@ async fn prometheus_100k_error_processor_error_kinds_are_domain_only() -> Result
     // Unknown errors should not be present (regression check for the old 'unknown' bucket bug).
     assert!(
         unknown_errors.unwrap_or(0) == 0,
-        "error_processor should not report any unknown errors, found {:?}",
-        unknown_errors
+        "error_processor should not report any unknown errors, found {unknown_errors:?}"
     );
 
     Ok(())

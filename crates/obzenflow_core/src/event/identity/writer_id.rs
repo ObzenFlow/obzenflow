@@ -53,8 +53,8 @@ impl WriterId {
 impl fmt::Display for WriterId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            WriterId::Stage(id) => write!(f, "writer_{}", id),
-            WriterId::System(id) => write!(f, "writer_{}", id),
+            WriterId::Stage(id) => write!(f, "writer_{id}"),
+            WriterId::System(id) => write!(f, "writer_{id}"),
         }
     }
 }

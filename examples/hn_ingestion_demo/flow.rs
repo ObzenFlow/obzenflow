@@ -1,7 +1,7 @@
-use crate::lib::decoder::HnStoryDecoder;
-use crate::lib::domain::{FormattedStory, HnStory};
-use crate::lib::mock_server::spawn_mock_hn_server;
-use crate::lib::util::{env_bool, env_usize, truncate_chars};
+use super::decoder::HnStoryDecoder;
+use super::domain::{FormattedStory, HnStory};
+use super::mock_server::spawn_mock_hn_server;
+use super::util::{env_bool, env_usize, truncate_chars};
 use anyhow::{anyhow, Result};
 use obzenflow::sinks::ConsoleSink;
 use obzenflow::sources::{HeaderMap, HttpPullConfig, HttpPullSource, Url};
@@ -68,10 +68,8 @@ async fn run_example_async() -> Result<()> {
         retry: Default::default(),
     };
 
-    let formatter =
-        TryMapWith::new(format_story_event).on_error_with(|event, err| {
-            Some(event.mark_as_error(err, ErrorKind::Deserialization))
-        });
+    let formatter = TryMapWith::new(format_story_event)
+        .on_error_with(|event, err| Some(event.mark_as_error(err, ErrorKind::Deserialization)));
 
     FlowApplication::builder()
         .with_console_subscriber()
@@ -113,7 +111,9 @@ async fn run_example_async() -> Result<()> {
     Ok(())
 }
 
-fn format_story_event(event: obzenflow_core::ChainEvent) -> std::result::Result<obzenflow_core::ChainEvent, String> {
+fn format_story_event(
+    event: obzenflow_core::ChainEvent,
+) -> std::result::Result<obzenflow_core::ChainEvent, String> {
     if !HnStory::event_type_matches(&event.event_type()) {
         return Ok(event);
     }
@@ -135,10 +135,9 @@ fn format_story_event(event: obzenflow_core::ChainEvent) -> std::result::Result<
 
     let payload = serde_json::to_value(&formatted).map_err(|e| e.to_string())?;
     Ok(ChainEventFactory::derived_data_event(
-        event.writer_id.clone(),
+        event.writer_id,
         &event,
-        &FormattedStory::versioned_event_type(),
+        FormattedStory::versioned_event_type(),
         payload,
     ))
 }
-

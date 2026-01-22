@@ -34,7 +34,11 @@ use single_event::SingleEventEndpoint;
 /// - `state`: call `state.watch_pipeline_state(flow_handle.state_receiver())` (optional)
 pub fn create_ingestion_endpoints(
     config: IngestionConfig,
-) -> (Vec<Box<dyn HttpEndpoint>>, mpsc::Receiver<EventSubmission>, IngestionState) {
+) -> (
+    Vec<Box<dyn HttpEndpoint>>,
+    mpsc::Receiver<EventSubmission>,
+    IngestionState,
+) {
     let (state, rx) = IngestionState::new(config);
 
     let endpoints: Vec<Box<dyn HttpEndpoint>> = vec![
@@ -55,7 +59,8 @@ mod tests {
     use std::sync::Arc;
 
     fn json_request(path: &str, body: serde_json::Value) -> Request {
-        Request::new(HttpMethod::Post, path.to_string()).with_body(serde_json::to_vec(&body).unwrap())
+        Request::new(HttpMethod::Post, path.to_string())
+            .with_body(serde_json::to_vec(&body).unwrap())
     }
 
     fn event_body(event_type: &str) -> serde_json::Value {
@@ -77,7 +82,10 @@ mod tests {
             .unwrap();
 
         assert_eq!(resp.status, 503);
-        assert_eq!(resp.headers.get("Retry-After").map(String::as_str), Some("1"));
+        assert_eq!(
+            resp.headers.get("Retry-After").map(String::as_str),
+            Some("1")
+        );
         assert!(rx.try_recv().is_err());
 
         let snapshot = telemetry.snapshot();
@@ -90,7 +98,9 @@ mod tests {
     async fn single_event_accepts_when_ready_and_enqueues() {
         let (state, mut rx) = IngestionState::new(IngestionConfig::default());
         let telemetry = state.telemetry();
-        state.ready.store(true, std::sync::atomic::Ordering::Release);
+        state
+            .ready
+            .store(true, std::sync::atomic::Ordering::Release);
         let endpoint = SingleEventEndpoint::new(state.clone());
 
         let resp = endpoint
@@ -110,11 +120,15 @@ mod tests {
 
     #[tokio::test]
     async fn single_event_returns_503_when_buffer_full() {
-        let mut config = IngestionConfig::default();
-        config.buffer_capacity = 1;
+        let config = IngestionConfig {
+            buffer_capacity: 1,
+            ..Default::default()
+        };
         let (state, _rx) = IngestionState::new(config);
         let telemetry = state.telemetry();
-        state.ready.store(true, std::sync::atomic::Ordering::Release);
+        state
+            .ready
+            .store(true, std::sync::atomic::Ordering::Release);
         let endpoint = SingleEventEndpoint::new(state.clone());
 
         state
@@ -132,7 +146,10 @@ mod tests {
             .unwrap();
 
         assert_eq!(resp.status, 503);
-        assert_eq!(resp.headers.get("Retry-After").map(String::as_str), Some("1"));
+        assert_eq!(
+            resp.headers.get("Retry-After").map(String::as_str),
+            Some("1")
+        );
 
         let snapshot = telemetry.snapshot();
         assert_eq!(snapshot.requests_total, 1);
@@ -146,7 +163,9 @@ mod tests {
         let telemetry = state.telemetry();
         drop(rx);
 
-        state.ready.store(true, std::sync::atomic::Ordering::Release);
+        state
+            .ready
+            .store(true, std::sync::atomic::Ordering::Release);
         let endpoint = SingleEventEndpoint::new(state);
 
         let resp = endpoint
@@ -162,10 +181,14 @@ mod tests {
 
     #[tokio::test]
     async fn batch_rejects_when_buffer_insufficient() {
-        let mut config = IngestionConfig::default();
-        config.buffer_capacity = 1;
+        let config = IngestionConfig {
+            buffer_capacity: 1,
+            ..Default::default()
+        };
         let (state, _rx) = IngestionState::new(config);
-        state.ready.store(true, std::sync::atomic::Ordering::Release);
+        state
+            .ready
+            .store(true, std::sync::atomic::Ordering::Release);
         let endpoint = BatchEventEndpoint::new(state);
 
         let body = json!({
@@ -175,17 +198,27 @@ mod tests {
             ]
         });
 
-        let resp = endpoint.handle(json_request(endpoint.path(), body)).await.unwrap();
+        let resp = endpoint
+            .handle(json_request(endpoint.path(), body))
+            .await
+            .unwrap();
         assert_eq!(resp.status, 503);
-        assert_eq!(resp.headers.get("Retry-After").map(String::as_str), Some("1"));
+        assert_eq!(
+            resp.headers.get("Retry-After").map(String::as_str),
+            Some("1")
+        );
     }
 
     #[tokio::test]
     async fn health_reports_depth_and_readiness() {
-        let mut config = IngestionConfig::default();
-        config.buffer_capacity = 2;
+        let config = IngestionConfig {
+            buffer_capacity: 2,
+            ..Default::default()
+        };
         let (state, _rx) = IngestionState::new(config);
-        state.ready.store(true, std::sync::atomic::Ordering::Release);
+        state
+            .ready
+            .store(true, std::sync::atomic::Ordering::Release);
         state
             .tx
             .try_send(obzenflow_core::event::ingestion::EventSubmission {
@@ -212,11 +245,13 @@ mod tests {
     async fn single_event_requires_api_key_when_configured() {
         let mut keys = HashSet::new();
         keys.insert("secret".to_string());
-        let mut config = IngestionConfig::default();
-        config.auth = Some(AuthConfig::ApiKey {
-            header: "x-api-key".to_string(),
-            keys,
-        });
+        let config = IngestionConfig {
+            auth: Some(AuthConfig::ApiKey {
+                header: "x-api-key".to_string(),
+                keys,
+            }),
+            ..Default::default()
+        };
         let (state, _rx) = IngestionState::new(config);
         let endpoint = SingleEventEndpoint::new(state);
 
@@ -241,12 +276,16 @@ mod tests {
             const EVENT_TYPE: &'static str = "test.event";
         }
 
-        let mut config = IngestionConfig::default();
-        config.validation = Some(ValidationConfig::Single {
-            validator: Arc::new(TypedValidator::<TestPayload>::new()),
-        });
+        let config = IngestionConfig {
+            validation: Some(ValidationConfig::Single {
+                validator: Arc::new(TypedValidator::<TestPayload>::new()),
+            }),
+            ..Default::default()
+        };
         let (state, mut rx) = IngestionState::new(config);
-        state.ready.store(true, std::sync::atomic::Ordering::Release);
+        state
+            .ready
+            .store(true, std::sync::atomic::Ordering::Release);
         let endpoint = BatchEventEndpoint::new(state);
 
         let body = json!({
@@ -256,7 +295,10 @@ mod tests {
             ]
         });
 
-        let resp = endpoint.handle(json_request(endpoint.path(), body)).await.unwrap();
+        let resp = endpoint
+            .handle(json_request(endpoint.path(), body))
+            .await
+            .unwrap();
         assert_eq!(resp.status, 200);
         let response: obzenflow_core::event::ingestion::SubmissionResponse =
             serde_json::from_slice(&resp.body).unwrap();
@@ -285,14 +327,18 @@ mod tests {
             Arc::new(TypedValidator::<Known>::new()),
         );
 
-        let mut config = IngestionConfig::default();
-        config.validation = Some(ValidationConfig::Registry {
-            validators,
-            reject_unknown: true,
-        });
+        let config = IngestionConfig {
+            validation: Some(ValidationConfig::Registry {
+                validators,
+                reject_unknown: true,
+            }),
+            ..Default::default()
+        };
 
         let (state, _rx) = IngestionState::new(config);
-        state.ready.store(true, std::sync::atomic::Ordering::Release);
+        state
+            .ready
+            .store(true, std::sync::atomic::Ordering::Release);
         let endpoint = SingleEventEndpoint::new(state);
 
         let resp = endpoint
@@ -307,15 +353,19 @@ mod tests {
         use ring::hmac;
 
         let secret = "secret";
-        let mut config = IngestionConfig::default();
-        config.auth = Some(AuthConfig::WebhookSignature {
-            secret: secret.to_string(),
-            header: "stripe-signature".to_string(),
-            replay_window_secs: None,
-        });
+        let config = IngestionConfig {
+            auth: Some(AuthConfig::WebhookSignature {
+                secret: secret.to_string(),
+                header: "stripe-signature".to_string(),
+                replay_window_secs: None,
+            }),
+            ..Default::default()
+        };
 
         let (state, mut rx) = IngestionState::new(config);
-        state.ready.store(true, std::sync::atomic::Ordering::Release);
+        state
+            .ready
+            .store(true, std::sync::atomic::Ordering::Release);
         let endpoint = SingleEventEndpoint::new(state);
 
         let body_json = event_body("order.created");
@@ -331,7 +381,7 @@ mod tests {
         let sig_hex = sig
             .as_ref()
             .iter()
-            .map(|b| format!("{:02x}", b))
+            .map(|b| format!("{b:02x}"))
             .collect::<String>();
 
         let request = Request::new(HttpMethod::Post, endpoint.path().to_string())

@@ -3,11 +3,8 @@
 //! This provides a simple but real LoggingMiddleware that can be used to verify
 //! that our middleware adapters work correctly.
 
-use crate::middleware::{
-    ErrorAction, Middleware, MiddlewareAction, MiddlewareContext, MiddlewareSink,
-};
+use crate::middleware::{ErrorAction, Middleware, MiddlewareAction, MiddlewareContext};
 use obzenflow_core::event::chain_event::ChainEvent;
-use obzenflow_runtime_services::stages::SinkHandler;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 

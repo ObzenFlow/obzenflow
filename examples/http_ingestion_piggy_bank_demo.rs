@@ -10,12 +10,12 @@
 //! `cargo run -p obzenflow --example http_ingestion_piggy_bank_demo --features obzenflow_infra/warp-server -- --server --server-port 9090`
 //!
 //! 1) Create accounts (reference side; required before transactions):
-//! `curl -XPOST http://127.0.0.1:9090/api/bank/accounts/events -H 'content-type: application/json' -d '{"event_type":"bank.account","data":{"account_id":"acct-1","owner":"Alice","initial_balance_cents":1000}}'`
-//! `curl -XPOST http://127.0.0.1:9090/api/bank/accounts/events -H 'content-type: application/json' -d '{"event_type":"bank.account","data":{"account_id":"acct-2","owner":"Bob","initial_balance_cents":0}}'`
+//!    `curl -XPOST http://127.0.0.1:9090/api/bank/accounts/events -H 'content-type: application/json' -d '{"event_type":"bank.account","data":{"account_id":"acct-1","owner":"Alice","initial_balance_cents":1000}}'`
+//!    `curl -XPOST http://127.0.0.1:9090/api/bank/accounts/events -H 'content-type: application/json' -d '{"event_type":"bank.account","data":{"account_id":"acct-2","owner":"Bob","initial_balance_cents":0}}'`
 //!
 //! 2) Post transactions (stream side):
-//! `curl -XPOST http://127.0.0.1:9090/api/bank/tx/events -H 'content-type: application/json' -d '{"event_type":"bank.tx","data":{"account_id":"acct-1","delta_cents":250,"note":"paycheck"}}'`
-//! `curl -XPOST http://127.0.0.1:9090/api/bank/tx/events -H 'content-type: application/json' -d '{"event_type":"bank.tx","data":{"account_id":"acct-1","delta_cents":-99,"note":"coffee"}}'`
+//!    `curl -XPOST http://127.0.0.1:9090/api/bank/tx/events -H 'content-type: application/json' -d '{"event_type":"bank.tx","data":{"account_id":"acct-1","delta_cents":250,"note":"paycheck"}}'`
+//!    `curl -XPOST http://127.0.0.1:9090/api/bank/tx/events -H 'content-type: application/json' -d '{"event_type":"bank.tx","data":{"account_id":"acct-1","delta_cents":-99,"note":"coffee"}}'`
 //!
 //! Notes:
 //! - Transactions for unknown accounts are dropped until the account exists.
@@ -114,7 +114,6 @@ struct CheckbookState {
 #[derive(Clone, Debug, Default)]
 struct AccountLedger {
     owner: String,
-    initial_balance_cents: i64,
     current_balance_cents: i64,
     total_credits_cents: i64,
     total_debits_cents: i64,
@@ -148,7 +147,6 @@ impl StatefulHandler for Checkbook {
             .entry(tx.account_id.clone())
             .or_insert_with(|| AccountLedger {
                 owner: tx.owner.clone(),
-                initial_balance_cents: tx.initial_balance_cents,
                 current_balance_cents: tx.initial_balance_cents,
                 total_credits_cents: 0,
                 total_debits_cents: 0,
@@ -197,14 +195,14 @@ impl StatefulHandler for Checkbook {
         let Some(snapshot) = state.last_snapshot.as_ref() else {
             return Ok(Vec::new());
         };
-        Ok(vec![snapshot.clone().to_event(self.writer_id.clone())])
+        Ok(vec![snapshot.clone().to_event(self.writer_id)])
     }
 
     fn emit(&self, state: &mut Self::State) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
         let Some(snapshot) = state.last_snapshot.take() else {
             return Ok(Vec::new());
         };
-        Ok(vec![snapshot.to_event(self.writer_id.clone())])
+        Ok(vec![snapshot.to_event(self.writer_id)])
     }
 }
 
@@ -219,21 +217,25 @@ async fn main() -> Result<()> {
     // Required for --server mode (FlowApplication enforces metrics for extra endpoints).
     std::env::set_var("OBZENFLOW_METRICS_EXPORTER", "prometheus");
 
-    let mut accounts_config = IngestionConfig::default();
-    accounts_config.base_path = "/api/bank/accounts".to_string();
-    accounts_config.validation = Some(ValidationConfig::Single {
-        validator: Arc::new(TypedValidator::<BankAccount>::new()),
-    });
+    let accounts_config = IngestionConfig {
+        base_path: "/api/bank/accounts".to_string(),
+        validation: Some(ValidationConfig::Single {
+            validator: Arc::new(TypedValidator::<BankAccount>::new()),
+        }),
+        ..Default::default()
+    };
     let (accounts_endpoints, accounts_rx, accounts_state) =
         create_ingestion_endpoints(accounts_config);
     let accounts_hook_state = accounts_state.clone();
     let accounts_source = HttpSource::with_telemetry(accounts_rx, accounts_state.telemetry());
 
-    let mut tx_config = IngestionConfig::default();
-    tx_config.base_path = "/api/bank/tx".to_string();
-    tx_config.validation = Some(ValidationConfig::Single {
-        validator: Arc::new(TypedValidator::<BankTransaction>::new()),
-    });
+    let tx_config = IngestionConfig {
+        base_path: "/api/bank/tx".to_string(),
+        validation: Some(ValidationConfig::Single {
+            validator: Arc::new(TypedValidator::<BankTransaction>::new()),
+        }),
+        ..Default::default()
+    };
     let (tx_endpoints, tx_rx, tx_state) = create_ingestion_endpoints(tx_config);
     let tx_hook_state = tx_state.clone();
     let tx_source = HttpSource::with_telemetry(tx_rx, tx_state.telemetry());

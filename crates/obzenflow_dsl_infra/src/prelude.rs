@@ -10,7 +10,7 @@ pub use obzenflow_core::WriterId;
 pub use obzenflow_runtime_services::pipeline::{FlowHandle, PipelineBuilder};
 
 // Core journal interface
-pub use obzenflow_core::journal::journal::Journal;
+pub use obzenflow_core::journal::Journal;
 
 // Topology types
 pub use obzenflow_core::id::StageId;

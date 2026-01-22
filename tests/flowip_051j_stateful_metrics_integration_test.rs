@@ -49,7 +49,7 @@ impl FiniteSourceHandler for BurstSource {
         self.current += 1;
 
         Ok(Some(vec![ChainEventFactory::data_event(
-            self.writer_id.clone(),
+            self.writer_id,
             "test.burst",
             json!({ "index": idx }),
         )]))
@@ -94,7 +94,7 @@ impl StatefulHandler for SlowAccumulator {
         state: &Self::State,
     ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
         Ok(vec![ChainEventFactory::data_event(
-            self.writer_id.clone(),
+            self.writer_id,
             "test.stateful.aggregate",
             json!({ "count": state.count }),
         )])
@@ -148,7 +148,7 @@ impl JoinHandler for NoopJoin {
     type State = ();
 
     fn initial_state(&self) -> Self::State {
-        ()
+        {}
     }
 
     fn process_event(
@@ -280,7 +280,7 @@ async fn flowip_051j_stateful_metrics_accumulate_is_instrumented() -> Result<()>
 
     let exporter = tokio::time::timeout(timeout_flow, flow_handle.run_with_metrics())
         .await
-        .map_err(|_| anyhow!("flow did not complete within {:?} (timeout)", timeout_flow))?
+        .map_err(|_| anyhow!("flow did not complete within {timeout_flow:?} (timeout)"))?
         .map_err(|e| anyhow!("Failed to run flow: {e:?}"))?
         .ok_or_else(|| anyhow!("Metrics exporter was not configured"))?;
 
@@ -465,7 +465,7 @@ async fn flowip_051j_join_metrics_counts_hydration_as_accumulation() -> Result<(
         stages: {
             ref_src = source!("ref_src" => BurstSource::new(reference_events));
             stream_src = source!("stream_src" => BurstSource::new(stream_events));
-            joiner = join!("joiner" => with_ref!(ref_src, NoopJoin::default()));
+            joiner = join!("joiner" => with_ref!(ref_src, NoopJoin));
             snk = sink!("snk" => CollectingSink::new().0);
         },
 
@@ -479,7 +479,7 @@ async fn flowip_051j_join_metrics_counts_hydration_as_accumulation() -> Result<(
 
     let exporter = tokio::time::timeout(timeout_flow, flow_handle.run_with_metrics())
         .await
-        .map_err(|_| anyhow!("flow did not complete within {:?} (timeout)", timeout_flow))?
+        .map_err(|_| anyhow!("flow did not complete within {timeout_flow:?} (timeout)"))?
         .map_err(|e| anyhow!("Failed to run flow: {e:?}"))?
         .ok_or_else(|| anyhow!("Metrics exporter was not configured"))?;
 

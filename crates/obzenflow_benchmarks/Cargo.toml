@@ -1,46 +1,46 @@
 [package]
 name = "obzenflow_benchmarks"
 description = "Performance benchmarks for ObzenFlow event streaming framework"
-version = "0.1.0"
-edition = "2021"
-license = "MIT OR Apache-2.0"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
 publish = false
 
 [dependencies]
 # ObzenFlow dependencies - we need all layers for integration benchmarks
-obzenflow_core = { path = "../obzenflow_core" }
-obzenflow-topology = "0.2"
-obzenflow_runtime_services = { path = "../obzenflow_runtime_services" }
-obzenflow_adapters = { path = "../obzenflow_adapters" }
-obzenflow_dsl_infra = { path = "../obzenflow_dsl_infra" }
-obzenflow_infra = { path = "../obzenflow_infra" }
+obzenflow_core = { workspace = true }
+obzenflow_runtime_services = { workspace = true }
+obzenflow_adapters = { workspace = true }
+obzenflow_dsl_infra = { workspace = true }
+obzenflow_infra = { workspace = true }
 
 # Async runtime
-tokio = { version = "1", features = ["full"] }
-async-trait = "0.1"
+tokio = { workspace = true, features = ["full"] }
+async-trait = { workspace = true }
 
 # Benchmarking
-criterion = { version = "0.5", features = ["async_tokio", "html_reports"] }
+criterion = { workspace = true, features = ["async_tokio", "html_reports"] }
 
 # Data structures and serialization
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { workspace = true }
 
 # Utilities
-tempfile = "3.8"
-ulid = "1.0"
-anyhow = "1.0"
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-libc = "0.2"
+tempfile = { workspace = true }
+anyhow = { workspace = true }
+tracing-subscriber = { workspace = true }
+libc = { workspace = true }
 
 # System information for CPU usage benchmarks
-sysinfo = "0.29"
+sysinfo = { workspace = true }
 
 [dev-dependencies]
 # Additional test utilities
-futures = "0.3"
-fastrand = "2.0"
+futures = { workspace = true }
+fastrand = { workspace = true }
+obzenflow-topology = { workspace = true }
+tracing = { workspace = true }
 
 # Latency benchmarks
 [[bench]]

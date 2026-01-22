@@ -6,7 +6,7 @@
 //! configuration (name, ID, upstream stages) when creating middleware
 //! instances during supervisor initialization.
 
-#![cfg(skip)] // Disabled until monitoring middleware is redesigned
+#![cfg(any())] // Disabled until monitoring middleware is redesigned
 
 use obzenflow_adapters::middleware::MiddlewareFactory;
 // FLOWIP-056-666: Monitoring middleware temporarily disabled pending redesign

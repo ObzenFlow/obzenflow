@@ -132,7 +132,7 @@ pub fn resolve_middleware(
 }
 
 /// Format factory configuration for display
-fn format_factory_config(factory: &Box<dyn MiddlewareFactory>) -> String {
+fn format_factory_config(factory: &dyn MiddlewareFactory) -> String {
     // This will need to be implemented based on the actual MiddlewareFactory trait
     // For now, we'll use a placeholder
     match factory.name() {
@@ -150,8 +150,8 @@ fn format_factory_config(factory: &Box<dyn MiddlewareFactory>) -> String {
 
 /// Check if an override might cause operational issues
 fn check_override_safety(
-    flow_mw: &Box<dyn MiddlewareFactory>,
-    stage_mw: &Box<dyn MiddlewareFactory>,
+    flow_mw: &dyn MiddlewareFactory,
+    stage_mw: &dyn MiddlewareFactory,
 ) -> Option<ConfigWarning> {
     match (flow_mw.name(), stage_mw.name()) {
         ("rate_limiter", "rate_limiter") => {
@@ -189,12 +189,12 @@ fn validate_middleware_combination(
 
     // Check for missing critical middleware
     let has_timeout = resolved.contains_key("timeout");
-    let has_rate_limit = resolved.contains_key("rate_limiter");
+    let _has_rate_limit = resolved.contains_key("rate_limiter");
 
     if !has_timeout {
         warnings.push(ConfigWarning {
             level: WarnLevel::Medium,
-            message: format!("Stage '{}' has no timeout middleware", stage_name),
+            message: format!("Stage '{stage_name}' has no timeout middleware"),
             suggestion: Some("Consider adding timeout middleware to prevent hanging".to_string()),
         });
     }
@@ -270,7 +270,6 @@ pub fn log_resolved_middleware(stage_name: &str, resolved: &ResolvedMiddleware) 
 
 #[cfg(test)]
 mod tests {
-    use super::*;
 
     // TODO: Add tests once we have mock MiddlewareFactory implementations
 }

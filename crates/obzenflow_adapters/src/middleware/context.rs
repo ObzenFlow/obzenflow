@@ -3,9 +3,7 @@
 //! This module provides a separate context that flows through middleware
 //! during event processing, preserving the immutability of ChainEvent.
 
-use obzenflow_core::event::ChainEventFactory;
 use obzenflow_core::ChainEvent;
-use obzenflow_core::WriterId;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -129,6 +127,8 @@ impl MiddlewareContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use obzenflow_core::event::ChainEventFactory;
+    use obzenflow_core::WriterId;
     use serde_json::json;
 
     #[test]
@@ -221,8 +221,7 @@ mod tests {
 
         // Write a circuit breaker opened event
         ctx.write_control_event(ChainEventFactory::circuit_breaker_opened(
-            writer_id.clone(),
-            0.75, // error_rate
+            writer_id, 0.75, // error_rate
             10,   // failure_count
         ));
 

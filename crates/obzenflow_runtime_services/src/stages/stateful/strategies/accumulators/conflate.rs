@@ -10,8 +10,7 @@ use crate::stages::stateful::strategies::emissions::{
 };
 use obzenflow_core::event::ChainEventFactory;
 use obzenflow_core::id::StageId;
-use obzenflow_core::{ChainEvent, EventId, TypedPayload, WriterId};
-use serde_json::json;
+use obzenflow_core::{ChainEvent, TypedPayload, WriterId};
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::time::Duration;
@@ -124,6 +123,7 @@ impl Conflate {
 mod tests {
     use super::*;
     use obzenflow_core::event::chain_event::ChainEventFactory;
+    use serde_json::json;
 
     #[test]
     fn test_conflate_empty_state() {
@@ -401,8 +401,8 @@ where
         state
             .values()
             .map(|value| {
-                let payload = serde_json::to_value(value).unwrap_or_else(|_| json!(null));
-                ChainEventFactory::data_event(self.writer_id.clone(), T::EVENT_TYPE, payload)
+                let payload = serde_json::to_value(value).unwrap_or(serde_json::Value::Null);
+                ChainEventFactory::data_event(self.writer_id, T::EVENT_TYPE, payload)
             })
             .collect()
     }
@@ -491,6 +491,7 @@ mod typed_tests {
     use super::*;
     use obzenflow_core::event::chain_event::ChainEventFactory;
     use serde::Deserialize;
+    use serde_json::json;
 
     #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
     struct SensorReading {

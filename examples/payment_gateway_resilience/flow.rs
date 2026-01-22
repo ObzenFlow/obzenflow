@@ -15,10 +15,9 @@
 
 use super::domain::{AuthorizedPayment, PaymentCommand, TrafficPhase, ValidatedPayment};
 use super::sinks::PaymentSummarySink;
-use super::sources::{
-    AsyncScrapedGlitchyPaymentCommandSource, PaymentCommandSource,
-    ScrapedGlitchyPaymentCommandSource,
-};
+use super::sources::PaymentCommandSource;
+#[cfg(not(test))]
+use super::sources::{AsyncScrapedGlitchyPaymentCommandSource, ScrapedGlitchyPaymentCommandSource};
 use anyhow::Result;
 use async_trait::async_trait;
 use obzenflow_adapters::middleware::circuit_breaker::{HalfOpenPolicy, OpenPolicy};
@@ -28,9 +27,7 @@ use obzenflow_core::{
     event::chain_event::{ChainEvent, ChainEventFactory},
     CircuitBreakerContractMode, TypedPayload,
 };
-use obzenflow_dsl_infra::dsl::stage_descriptor::AsyncFiniteSourceDescriptor;
 use obzenflow_dsl_infra::{async_transform, flow, sink, source, transform};
-use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
 use obzenflow_runtime_services::stages::common::handlers::{
@@ -41,18 +38,21 @@ use std::num::NonZeroU32;
 
 const BACKPRESSURE_WINDOW: u64 = 1_000;
 
+#[cfg(not(test))]
 fn env_usize(key: &str) -> Option<usize> {
     std::env::var(key)
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
 }
 
+#[cfg(not(test))]
 fn env_f64(key: &str) -> Option<f64> {
     std::env::var(key)
         .ok()
         .and_then(|value| value.parse::<f64>().ok())
 }
 
+#[cfg(not(test))]
 fn env_bool(key: &str) -> Option<bool> {
     let raw = std::env::var(key).ok()?;
     match raw.trim().to_ascii_lowercase().as_str() {
@@ -110,14 +110,14 @@ impl TransformHandler for ValidationTransform {
         };
 
         let mut out = ChainEventFactory::data_event(
-            event.writer_id.clone(),
+            event.writer_id,
             ValidatedPayment::EVENT_TYPE,
             json!(validated),
         );
         out.flow_context = event.flow_context.clone();
         out.processing_info = event.processing_info.clone();
         out.causality = event.causality.clone();
-        out.correlation_id = event.correlation_id.clone();
+        out.correlation_id = event.correlation_id;
         out.correlation_payload = event.correlation_payload.clone();
         out.runtime_context = event.runtime_context.clone();
         out.observability = event.observability.clone();
@@ -179,7 +179,7 @@ impl AsyncTransformHandler for GatewayTransform {
                 };
 
                 let mut out = ChainEventFactory::derived_data_event(
-                    event.writer_id.clone(),
+                    event.writer_id,
                     &event,
                     AuthorizedPayment::EVENT_TYPE,
                     json!(authorized),
@@ -187,7 +187,7 @@ impl AsyncTransformHandler for GatewayTransform {
                 out.flow_context = event.flow_context.clone();
                 out.processing_info = event.processing_info.clone();
                 out.causality = event.causality.clone();
-                out.correlation_id = event.correlation_id.clone();
+                out.correlation_id = event.correlation_id;
                 out.correlation_payload = event.correlation_payload.clone();
                 out.runtime_context = event.runtime_context.clone();
                 out.observability = event.observability.clone();
@@ -301,7 +301,8 @@ fn build_flow() -> obzenflow_dsl_infra::FlowDefinition {
     }
 }
 
-fn build_glitchy_flow(
+#[cfg(not(test))]
+struct GlitchyFlowConfig {
     total_events: usize,
     rate_limit_events_per_sec: f64,
     warmup_events: usize,
@@ -310,9 +311,23 @@ fn build_glitchy_flow(
     summary_progress_every: usize,
     use_async_source: bool,
     async_poll_timeout: Option<std::time::Duration>,
-) -> obzenflow_dsl_infra::FlowDefinition {
+}
+
+#[cfg(not(test))]
+fn build_glitchy_flow(config: GlitchyFlowConfig) -> obzenflow_dsl_infra::FlowDefinition {
+    let GlitchyFlowConfig {
+        total_events,
+        rate_limit_events_per_sec,
+        warmup_events,
+        outage_events,
+        recovery_events,
+        summary_progress_every,
+        use_async_source,
+        async_poll_timeout,
+    } = config;
+
     let payments_stage = if use_async_source {
-        AsyncFiniteSourceDescriptor::new(
+        obzenflow_dsl_infra::dsl::stage_descriptor::AsyncFiniteSourceDescriptor::new(
             "payments",
             AsyncScrapedGlitchyPaymentCommandSource::with_cycle(
                 total_events,
@@ -397,12 +412,13 @@ fn build_glitchy_flow(
     }
 }
 
+#[cfg(not(test))]
 pub fn run_example() -> Result<()> {
     println!("💳 FlowState RS - Payment Gateway Resilience Demo");
     println!("{}", "=".repeat(60));
     println!("This example shows how circuit breakers and rate limits");
     println!("work together to protect an unreliable dependency.");
-    println!("");
+    println!();
     println!("Highlights:");
     println!("  • Local validation errors still show up in obzenflow_errors_total");
     println!("  • The payments source simulates a semi-reliable upstream feed (MQTT/IOT style)");
@@ -509,8 +525,8 @@ pub fn run_example() -> Result<()> {
     }
 
     let flow = match total_events {
-        Some(total) => build_glitchy_flow(
-            total,
+        Some(total) => build_glitchy_flow(GlitchyFlowConfig {
+            total_events: total,
             rate_limit_events_per_sec,
             warmup_events,
             outage_events,
@@ -518,11 +534,11 @@ pub fn run_example() -> Result<()> {
             summary_progress_every,
             use_async_source,
             async_poll_timeout,
-        ),
+        }),
         None => build_flow(),
     };
 
-    FlowApplication::builder()
+    obzenflow_infra::application::FlowApplication::builder()
         .with_console_subscriber()
         .with_log_level(obzenflow_infra::application::LogLevel::Info)
         .run_blocking(flow)?;
@@ -536,19 +552,20 @@ pub fn run_example() -> Result<()> {
 
 /// Test-friendly runner so we can execute the flow from integration tests
 /// without invoking the CLI argument parser.
+#[cfg(test)]
 pub fn run_example_in_tests() -> Result<()> {
     let _ = tracing_subscriber::fmt::try_init();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .map_err(|e| anyhow::anyhow!("Failed to create runtime: {:?}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to create runtime: {e:?}"))?;
 
     runtime.block_on(async {
         let handle = build_flow().await?;
         handle
             .run()
             .await
-            .map_err(|e| anyhow::anyhow!("Flow execution failed: {:?}", e))
+            .map_err(|e| anyhow::anyhow!("Flow execution failed: {e:?}"))
     })
 }
 
@@ -558,6 +575,7 @@ pub fn run_example_in_tests() -> Result<()> {
 /// contracts see the raw effects of a flaky gateway. Under the scripted
 /// outage pattern, the `gateway → summary` edge should eventually fail
 /// with a SeqDivergence transport violation.
+#[cfg(test)]
 fn build_strict_flow() -> obzenflow_dsl_infra::FlowDefinition {
     flow! {
         name: "payment_gateway_resilience_strict_demo",
@@ -587,18 +605,19 @@ fn build_strict_flow() -> obzenflow_dsl_infra::FlowDefinition {
 }
 
 /// Test-only runner for the strict flow; expected to fail with a contract violation.
+#[cfg(test)]
 pub fn run_strict_example_in_tests() -> Result<()> {
     let _ = tracing_subscriber::fmt::try_init();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .map_err(|e| anyhow::anyhow!("Failed to create runtime: {:?}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to create runtime: {e:?}"))?;
 
     runtime.block_on(async {
         let handle = build_strict_flow().await?;
         handle
             .run()
             .await
-            .map_err(|e| anyhow::anyhow!("Flow execution failed (strict mode): {:?}", e))
+            .map_err(|e| anyhow::anyhow!("Flow execution failed (strict mode): {e:?}"))
     })
 }

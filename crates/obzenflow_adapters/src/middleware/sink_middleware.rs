@@ -5,9 +5,7 @@
 
 use super::{ErrorAction, Middleware, MiddlewareAction, MiddlewareContext};
 use async_trait::async_trait;
-use obzenflow_core::event::payloads::delivery_payload::{
-    DeliveryMethod, DeliveryPayload, DeliveryResult,
-};
+use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::time::MetricsDuration;
 use obzenflow_core::ChainEvent;
 use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
@@ -231,9 +229,7 @@ mod tests {
         }
     }
 
-    struct RetryMiddleware {
-        max_retries: usize,
-    }
+    struct RetryMiddleware;
 
     impl Middleware for RetryMiddleware {
         fn on_error(&self, _event: &ChainEvent, _ctx: &mut MiddlewareContext) -> ErrorAction {
@@ -251,7 +247,7 @@ mod tests {
             fail_count: fail_count.clone(),
         }
         .middleware()
-        .with(RetryMiddleware { max_retries: 2 })
+        .with(RetryMiddleware)
         .build();
 
         let event = ChainEventFactory::data_event(

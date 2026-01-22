@@ -156,7 +156,7 @@ mod tests {
         assert_eq!(metric.total_events(), 3);
 
         // Non-counter values should be ignored
-        metric.update(MetricValue::Gauge(3.14));
+        metric.update(MetricValue::Gauge(std::f64::consts::PI));
         assert_eq!(metric.total_events(), 3);
     }
 

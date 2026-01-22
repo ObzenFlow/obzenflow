@@ -50,29 +50,25 @@ impl RED {
             (
                 "Request Rate (req/s)",
                 format!(
-                    "rate(obzenflow_events_total{{flow=\"{}\",stage=\"{}\"}}[5m])",
-                    flow_name, stage_name
+                    "rate(obzenflow_events_total{{flow=\"{flow_name}\",stage=\"{stage_name}\"}}[5m])"
                 )
             ),
             (
                 "Error Rate (%)",
                 format!(
-                    "rate(obzenflow_errors_total{{flow=\"{}\",stage=\"{}\"}}[5m]) / rate(obzenflow_events_total{{flow=\"{}\",stage=\"{}\"}}[5m]) * 100",
-                    flow_name, stage_name, flow_name, stage_name
+                    "rate(obzenflow_errors_total{{flow=\"{flow_name}\",stage=\"{stage_name}\"}}[5m]) / rate(obzenflow_events_total{{flow=\"{flow_name}\",stage=\"{stage_name}\"}}[5m]) * 100"
                 )
             ),
             (
                 "P50 Latency",
                 format!(
-                    "histogram_quantile(0.5, rate(obzenflow_duration_seconds_bucket{{flow=\"{}\",stage=\"{}\"}}[5m]))",
-                    flow_name, stage_name
+                    "histogram_quantile(0.5, rate(obzenflow_duration_seconds_bucket{{flow=\"{flow_name}\",stage=\"{stage_name}\"}}[5m]))"
                 )
             ),
             (
                 "P99 Latency", 
                 format!(
-                    "histogram_quantile(0.99, rate(obzenflow_duration_seconds_bucket{{flow=\"{}\",stage=\"{}\"}}[5m]))",
-                    flow_name, stage_name
+                    "histogram_quantile(0.99, rate(obzenflow_duration_seconds_bucket{{flow=\"{flow_name}\",stage=\"{stage_name}\"}}[5m]))"
                 )
             ),
         ]

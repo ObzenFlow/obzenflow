@@ -56,6 +56,7 @@ pub trait HandlerSupervised: Supervisor {
 }
 
 /// Extension trait to add run functionality to any HandlerSupervised type
+#[async_trait::async_trait]
 pub trait HandlerSupervisedExt: HandlerSupervised {
     /// Run the supervision loop
     async fn run(

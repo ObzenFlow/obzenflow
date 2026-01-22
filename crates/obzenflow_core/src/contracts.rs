@@ -196,6 +196,12 @@ struct ReaderCount(pub u64);
 /// number of data events read, as defined in FLOWIP-080o.
 pub struct TransportContract;
 
+impl Default for TransportContract {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TransportContract {
     pub fn new() -> Self {
         Self
@@ -217,17 +223,15 @@ impl Contract for TransportContract {
         // as the final writer count for the edge.
         if let crate::event::ChainEventContent::FlowControl(
             crate::event::payloads::flow_control_payload::FlowControlPayload::Eof {
-                writer_seq,
+                writer_seq: Some(seq),
                 ..
             },
         ) = &event.content
         {
-            if let Some(seq) = writer_seq {
-                let counter = ctx
-                    .state
-                    .get_or_insert_with::<WriterCount, _>(WriterCount::default);
-                counter.0 = seq.0;
-            }
+            let counter = ctx
+                .state
+                .get_or_insert_with::<WriterCount, _>(WriterCount::default);
+            counter.0 = seq.0;
         }
     }
 
@@ -314,6 +318,12 @@ struct SourceWriterState {
 ///   it fails only when the two disagree.
 pub struct SourceContract;
 
+impl Default for SourceContract {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SourceContract {
     pub fn new() -> Self {
         Self
@@ -330,21 +340,23 @@ impl Contract for SourceContract {
 
         if let crate::event::ChainEventContent::FlowControl(payload) = &event.content {
             match payload {
-                FlowControlPayload::SourceContract { expected_count, .. } => {
-                    if let Some(count) = expected_count {
-                        let state = ctx
-                            .state
-                            .get_or_insert_with::<SourceWriterState, _>(SourceWriterState::default);
-                        state.expected_count = Some(count.0);
-                    }
+                FlowControlPayload::SourceContract {
+                    expected_count: Some(count),
+                    ..
+                } => {
+                    let state = ctx
+                        .state
+                        .get_or_insert_with::<SourceWriterState, _>(SourceWriterState::default);
+                    state.expected_count = Some(count.0);
                 }
-                FlowControlPayload::Eof { writer_seq, .. } => {
-                    if let Some(seq) = writer_seq {
-                        let state = ctx
-                            .state
-                            .get_or_insert_with::<SourceWriterState, _>(SourceWriterState::default);
-                        state.eof_writer_seq = Some(seq.0);
-                    }
+                FlowControlPayload::Eof {
+                    writer_seq: Some(seq),
+                    ..
+                } => {
+                    let state = ctx
+                        .state
+                        .get_or_insert_with::<SourceWriterState, _>(SourceWriterState::default);
+                    state.eof_writer_seq = Some(seq.0);
                 }
                 _ => {}
             }

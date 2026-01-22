@@ -14,7 +14,6 @@ use async_trait::async_trait;
 use serde_json::json;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use tempfile::tempdir;
 
 /// Simple test sink that counts events
 #[derive(Clone, Debug)]
@@ -80,7 +79,7 @@ impl FiniteSourceHandler for TestEventSource {
             let index = self.emitted;
             self.emitted += 1;
             Ok(Some(vec![ChainEventFactory::data_event(
-                self.writer_id.clone(),
+                self.writer_id,
                 "TestEvent",
                 json!({ "index": index }),
             )]))
@@ -110,7 +109,7 @@ async fn test_basic_flow() -> Result<()> {
         }
     }
     .await
-    .map_err(|e| anyhow::anyhow!("Failed to create flow: {:?}", e))?;
+    .map_err(|e| anyhow::anyhow!("Failed to create flow: {e:?}"))?;
 
     // Run the flow
     handle.run().await?;
@@ -119,11 +118,10 @@ async fn test_basic_flow() -> Result<()> {
     let final_count = counter.load(Ordering::Relaxed);
     assert_eq!(
         final_count, 10,
-        "Expected exactly 10 events to be processed, but got {}",
-        final_count
+        "Expected exactly 10 events to be processed, but got {final_count}"
     );
 
-    // Cleanup handled by tempdir
+    // Journals left under target/ for inspection.
     Ok(())
 }
 
@@ -169,7 +167,7 @@ async fn test_multi_stage_flow() -> Result<()> {
         }
     }
     .await
-    .map_err(|e| anyhow::anyhow!("Failed to create flow: {:?}", e))?;
+    .map_err(|e| anyhow::anyhow!("Failed to create flow: {e:?}"))?;
 
     // Run the flow
     handle.run().await?;
@@ -178,11 +176,10 @@ async fn test_multi_stage_flow() -> Result<()> {
     let final_count = counter.load(Ordering::Relaxed);
     assert_eq!(
         final_count, 10,
-        "Expected exactly 10 events (5 * 2), but got {}",
-        final_count
+        "Expected exactly 10 events (5 * 2), but got {final_count}"
     );
 
-    // Cleanup handled by tempdir
+    // Journals left under target/ for inspection.
     Ok(())
 }
 
@@ -215,7 +212,7 @@ impl FiniteSourceHandler for NumberSource {
             let value = self.emitted + 1;
             self.emitted += 1;
             Ok(Some(vec![ChainEventFactory::data_event(
-                self.writer_id.clone(),
+                self.writer_id,
                 "Number",
                 json!({ "value": value }),
             )]))
@@ -240,7 +237,7 @@ impl TransformHandler for NumberDoubler {
     fn process(&self, event: ChainEvent) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
         if let Some(value) = event.payload().get("value").and_then(|v| v.as_u64()) {
             Ok(vec![ChainEventFactory::data_event(
-                event.writer_id.clone(),
+                event.writer_id,
                 "DoubledNumber",
                 json!({ "value": value * 2 }),
             )])
@@ -310,23 +307,22 @@ async fn test_pipeline_topology() -> Result<()> {
         }
     }
     .await
-    .map_err(|e| anyhow::anyhow!("Failed to create flow: {:?}", e))?;
+    .map_err(|e| anyhow::anyhow!("Failed to create flow: {e:?}"))?;
 
     // Run the flow
     handle.run().await?;
 
     // Check the sum
     let final_sum = sum.load(Ordering::Relaxed);
-    println!("Final sum: {}", final_sum);
+    println!("Final sum: {final_sum}");
 
     // With proper topology: 2 + 4 + 6 = 12
     // Without topology (broadcast): 1 + 2 + 3 + 2 + 4 + 6 = 18
     assert_eq!(
         final_sum, 12,
-        "Expected sum of doubled values (2+4+6=12), but got {}",
-        final_sum
+        "Expected sum of doubled values (2+4+6=12), but got {final_sum}"
     );
 
-    // Cleanup handled by tempdir
+    // Journals left under target/ for inspection.
     Ok(())
 }

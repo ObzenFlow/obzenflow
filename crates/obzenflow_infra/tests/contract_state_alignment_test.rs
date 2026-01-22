@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use obzenflow_core::event::types::{Count, DurationMs, SeqNo, ViolationCause};
 use obzenflow_core::event::{ChainEvent, ChainEventContent, ChainEventFactory};
-use obzenflow_core::journal::journal::Journal;
+use obzenflow_core::journal::Journal;
 use obzenflow_core::{JournalOwner, NoControlMiddleware, StageId, WriterId};
 use obzenflow_infra::journal::{DiskJournal, MemoryJournal};
 use obzenflow_runtime_services::messaging::upstream_subscription::{
@@ -19,17 +19,17 @@ fn make_data_event(writer: WriterId, seq: u64) -> ChainEvent {
 
 /// Helper to create a simple EOF event for a given writer
 fn make_eof_event(writer: WriterId, seq: u64) -> ChainEvent {
-    let mut eof = ChainEventFactory::eof_event(writer.clone(), true);
-    if let ChainEventContent::FlowControl(ref mut payload) = eof.content {
-        if let obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload::Eof {
-            ref mut writer_id,
-            ref mut writer_seq,
+    let mut eof = ChainEventFactory::eof_event(writer, true);
+    if let ChainEventContent::FlowControl(
+        obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload::Eof {
+            writer_id,
+            writer_seq,
             ..
-        } = payload
-        {
-            *writer_id = Some(writer.clone());
-            *writer_seq = Some(SeqNo(seq));
-        }
+        },
+    ) = &mut eof.content
+    {
+        *writer_id = Some(writer);
+        *writer_seq = Some(SeqNo(seq));
     }
     eof
 }
@@ -99,10 +99,10 @@ async fn contract_state_tracks_seq_and_emits_final() {
     let consumer_stage = StageId::new();
     let consumer_writer = WriterId::from(consumer_stage);
     let (mut subscription, contract_journal, upstream_journal, upstream_stage) =
-        build_subscription_with_contracts(consumer_writer.clone()).await;
+        build_subscription_with_contracts(consumer_writer).await;
 
     // FSM-owned contract state for a single reader (upstream side)
-    let mut progress = vec![ReaderProgress {
+    let mut progress = [ReaderProgress {
         stage_id: upstream_stage,
         reader_seq: SeqNo(0),
         advertised_writer_seq: None,
@@ -120,15 +120,15 @@ async fn contract_state_tracks_seq_and_emits_final() {
 
     // Append two data events then EOF to the upstream journal
     upstream_journal
-        .append(make_data_event(upstream_writer.clone(), 1), None)
+        .append(make_data_event(upstream_writer, 1), None)
         .await
         .expect("append data 1");
     upstream_journal
-        .append(make_data_event(upstream_writer.clone(), 2), None)
+        .append(make_data_event(upstream_writer, 2), None)
         .await
         .expect("append data 2");
     upstream_journal
-        .append(make_eof_event(upstream_writer.clone(), 2), None)
+        .append(make_eof_event(upstream_writer, 2), None)
         .await
         .expect("append eof");
 
@@ -167,7 +167,7 @@ async fn contract_state_tracks_seq_and_emits_final() {
         | obzenflow_runtime_services::messaging::upstream_subscription::ContractStatus::Healthy => {
             // OK – final emission is part of progress path
         }
-        other => panic!("unexpected contract status: {:?}", other),
+        other => panic!("unexpected contract status: {other:?}"),
     }
 
     // Inspect the contract journal and ensure we see a ConsumptionFinal event
@@ -213,9 +213,9 @@ async fn contract_seq_divergence_missing_events_emits_gap_and_violation() {
     let consumer_stage = StageId::new();
     let consumer_writer = WriterId::from(consumer_stage);
     let (mut subscription, contract_journal, upstream_journal, upstream_stage) =
-        build_subscription_with_contracts(consumer_writer.clone()).await;
+        build_subscription_with_contracts(consumer_writer).await;
 
-    let mut progress = vec![ReaderProgress {
+    let mut progress = [ReaderProgress {
         stage_id: upstream_stage,
         reader_seq: SeqNo(0),
         advertised_writer_seq: None,
@@ -233,15 +233,15 @@ async fn contract_seq_divergence_missing_events_emits_gap_and_violation() {
 
     // Append two data events, but EOF advertises 3 events (missing one).
     upstream_journal
-        .append(make_data_event(upstream_writer.clone(), 1), None)
+        .append(make_data_event(upstream_writer, 1), None)
         .await
         .expect("append data 1");
     upstream_journal
-        .append(make_data_event(upstream_writer.clone(), 2), None)
+        .append(make_data_event(upstream_writer, 2), None)
         .await
         .expect("append data 2");
     upstream_journal
-        .append(make_eof_event(upstream_writer.clone(), 3), None)
+        .append(make_eof_event(upstream_writer, 3), None)
         .await
         .expect("append eof");
 
@@ -278,10 +278,10 @@ async fn contract_seq_divergence_missing_events_emits_gap_and_violation() {
                     assert_eq!(advertised, Some(SeqNo(3)));
                     assert_eq!(reader, SeqNo(2));
                 }
-                other => panic!("unexpected violation cause: {:?}", other),
+                other => panic!("unexpected violation cause: {other:?}"),
             }
         }
-        other => panic!("expected ContractStatus::Violated, got {:?}", other),
+        other => panic!("expected ContractStatus::Violated, got {other:?}"),
     }
 
     assert!(
@@ -376,7 +376,7 @@ async fn contract_seq_divergence_missing_events_emits_gap_and_violation() {
                 assert_eq!(*advertised, Some(SeqNo(3)));
                 assert_eq!(*reader, SeqNo(2));
             }
-            other => panic!("unexpected failure_reason: {:?}", other),
+            other => panic!("unexpected failure_reason: {other:?}"),
         }
     } else {
         panic!("expected ConsumptionFinal payload in final event");
@@ -388,9 +388,9 @@ async fn contract_seq_divergence_overconsumption_sets_violation_without_gap() {
     let consumer_stage = StageId::new();
     let consumer_writer = WriterId::from(consumer_stage);
     let (mut subscription, contract_journal, upstream_journal, upstream_stage) =
-        build_subscription_with_contracts(consumer_writer.clone()).await;
+        build_subscription_with_contracts(consumer_writer).await;
 
-    let mut progress = vec![ReaderProgress {
+    let mut progress = [ReaderProgress {
         stage_id: upstream_stage,
         reader_seq: SeqNo(0),
         advertised_writer_seq: None,
@@ -410,15 +410,15 @@ async fn contract_seq_divergence_overconsumption_sets_violation_without_gap() {
     // This simulates an over-consumption divergence where the reader
     // has observed more data events than the upstream claims via EOF.
     upstream_journal
-        .append(make_data_event(upstream_writer.clone(), 1), None)
+        .append(make_data_event(upstream_writer, 1), None)
         .await
         .expect("append data 1");
     upstream_journal
-        .append(make_data_event(upstream_writer.clone(), 2), None)
+        .append(make_data_event(upstream_writer, 2), None)
         .await
         .expect("append data 2");
     upstream_journal
-        .append(make_eof_event(upstream_writer.clone(), 1), None)
+        .append(make_eof_event(upstream_writer, 1), None)
         .await
         .expect("append eof");
 
@@ -454,12 +454,11 @@ async fn contract_seq_divergence_overconsumption_sets_violation_without_gap() {
                     assert_eq!(advertised, Some(SeqNo(1)));
                     assert_eq!(reader, SeqNo(2));
                 }
-                other => panic!("unexpected violation cause: {:?}", other),
+                other => panic!("unexpected violation cause: {other:?}"),
             }
         }
         other => panic!(
-            "expected ContractStatus::Violated for over-consumption path, got {:?}",
-            other
+            "expected ContractStatus::Violated for over-consumption path, got {other:?}"
         ),
     }
 
@@ -531,7 +530,7 @@ async fn contract_seq_divergence_overconsumption_sets_violation_without_gap() {
                 assert_eq!(*advertised, Some(SeqNo(1)));
                 assert_eq!(*reader, SeqNo(2));
             }
-            other => panic!("unexpected failure_reason: {:?}", other),
+            other => panic!("unexpected failure_reason: {other:?}"),
         }
     } else {
         panic!("expected ConsumptionFinal payload in final event");

@@ -1,8 +1,8 @@
 use obzenflow_core::event::ingestion::EventSubmission;
 use obzenflow_core::event::ingestion::IngestionTelemetry;
 use obzenflow_runtime_services::pipeline::fsm::PipelineState;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use tokio::sync::{mpsc, watch};
 
 use super::{AuthConfig, ValidationConfig};
@@ -65,9 +65,8 @@ impl IngestionState {
         let (tx, rx) = mpsc::channel(buffer_capacity);
         let tx_for_depth = tx.clone();
         let capacity_for_depth = buffer_capacity;
-        let depth_fn: Arc<dyn Fn() -> usize + Send + Sync> = Arc::new(move || {
-            capacity_for_depth.saturating_sub(tx_for_depth.capacity())
-        });
+        let depth_fn: Arc<dyn Fn() -> usize + Send + Sync> =
+            Arc::new(move || capacity_for_depth.saturating_sub(tx_for_depth.capacity()));
         let telemetry = Arc::new(IngestionTelemetry::new(
             config.base_path.clone(),
             buffer_capacity,

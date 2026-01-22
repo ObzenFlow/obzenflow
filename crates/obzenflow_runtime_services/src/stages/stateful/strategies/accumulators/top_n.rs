@@ -34,17 +34,17 @@ impl Eq for ScoredItem {}
 
 impl PartialOrd for ScoredItem {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        // Compare by score first, then by key for stability
-        match self.score.partial_cmp(&other.score) {
-            Some(Ordering::Equal) => Some(self.key.cmp(&other.key)),
-            other => other,
-        }
+        Some(self.cmp(other))
     }
 }
 
 impl Ord for ScoredItem {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.partial_cmp(other).unwrap_or(Ordering::Equal)
+        // Compare by score first, then by key for stability
+        match self.score.total_cmp(&other.score) {
+            Ordering::Equal => self.key.cmp(&other.key),
+            other => other,
+        }
     }
 }
 
@@ -83,7 +83,7 @@ impl<F> TopN<F> {
     ///
     /// * `n` - Maximum number of items to track
     /// * `extractor` - Function to extract (key, score, metadata) from events.
-    ///                 Returns None to skip the event.
+    ///   Returns None to skip the event.
     pub fn new(n: usize, extractor: F) -> Self {
         assert!(n > 0, "TopN must track at least 1 item");
         Self {
@@ -111,7 +111,7 @@ where
         Self {
             n: self.n,
             extractor: self.extractor.clone(),
-            writer_id: self.writer_id.clone(),
+            writer_id: self.writer_id,
         }
     }
 }
@@ -170,7 +170,7 @@ where
 
         // Create a single event with the top N list
         vec![ChainEventFactory::data_event(
-            self.writer_id.clone(),
+            self.writer_id,
             "top_n_result",
             json!({
                 "top_n": items.into_iter().map(|item| {
@@ -570,7 +570,7 @@ where
 
         // Create result event
         vec![ChainEventFactory::data_event(
-            self.writer_id.clone(),
+            self.writer_id,
             T::EVENT_TYPE,
             json!({
                 "top_n": items.iter().enumerate().map(|(idx, (score, key_value, metadata))| {

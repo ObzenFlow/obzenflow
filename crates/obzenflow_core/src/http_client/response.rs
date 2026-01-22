@@ -30,4 +30,3 @@ impl HttpResponse {
         (200..300).contains(&self.status)
     }
 }
-

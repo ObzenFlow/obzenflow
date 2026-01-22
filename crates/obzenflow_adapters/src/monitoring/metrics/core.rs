@@ -130,13 +130,13 @@ impl std::fmt::Display for MetricType {
 impl std::fmt::Display for MetricValue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            MetricValue::Counter(v) => write!(f, "{}", v),
-            MetricValue::Gauge(v) => write!(f, "{:.2}", v),
+            MetricValue::Counter(v) => write!(f, "{v}"),
+            MetricValue::Gauge(v) => write!(f, "{v:.2}"),
             MetricValue::Histogram { count, sum, .. } => {
-                write!(f, "count={}, sum={:.2}", count, sum)
+                write!(f, "count={count}, sum={sum:.2}")
             }
             MetricValue::Summary { count, sum, .. } => {
-                write!(f, "count={}, sum={:.2}", count, sum)
+                write!(f, "count={count}, sum={sum:.2}")
             }
         }
     }
@@ -173,6 +173,7 @@ pub trait MetricSupport<M: Metric> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::f64::consts::PI;
 
     #[test]
     fn test_metric_value_types() {
@@ -181,16 +182,16 @@ mod tests {
         assert_eq!(counter.as_counter(), Some(42));
         assert_eq!(counter.as_gauge(), None);
 
-        let gauge = MetricValue::Gauge(3.14);
+        let gauge = MetricValue::Gauge(PI);
         assert_eq!(gauge.metric_type(), MetricType::Gauge);
-        assert_eq!(gauge.as_gauge(), Some(3.14));
+        assert_eq!(gauge.as_gauge(), Some(PI));
         assert_eq!(gauge.as_counter(), None);
     }
 
     #[test]
     fn test_metric_value_display() {
         assert_eq!(MetricValue::Counter(100).to_string(), "100");
-        assert_eq!(MetricValue::Gauge(3.14159).to_string(), "3.14");
+        assert_eq!(MetricValue::Gauge(PI).to_string(), "3.14");
 
         let histogram = MetricValue::Histogram {
             buckets: vec![(1.0, 10), (5.0, 25)],

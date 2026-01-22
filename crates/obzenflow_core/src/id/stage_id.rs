@@ -86,7 +86,7 @@ mod tests {
     fn test_stage_id_display() {
         let ulid = Ulid::new();
         let id = StageId::from_ulid(ulid);
-        assert_eq!(format!("{}", id), format!("stage_{}", ulid));
+        assert_eq!(format!("{id}"), format!("stage_{ulid}"));
     }
 
     #[test]

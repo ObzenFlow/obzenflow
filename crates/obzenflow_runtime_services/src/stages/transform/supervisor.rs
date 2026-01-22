@@ -13,7 +13,7 @@ use obzenflow_core::event::payloads::observability_payload::{
 };
 use obzenflow_core::event::ChainEventFactory;
 use obzenflow_core::event::SystemEvent;
-use obzenflow_core::journal::journal::Journal;
+use obzenflow_core::journal::Journal;
 use obzenflow_core::EventEnvelope;
 use obzenflow_core::{ChainEvent, StageId, WriterId};
 use obzenflow_fsm::{fsm, EventVariant, StateVariant, Transition};
@@ -408,7 +408,7 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
                                                 flow_name: ctx.flow_name.clone(),
                                                 flow_id: ctx.flow_id.to_string(),
                                                 stage_name: ctx.stage_name.clone(),
-                                                stage_id: self.stage_id.clone(),
+                                                stage_id: self.stage_id,
                                                 stage_type:
                                                     obzenflow_core::event::context::StageType::Transform,
                                             };
@@ -464,7 +464,7 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
                                         flow_name: ctx.flow_name.clone(),
                                         flow_id: ctx.flow_id.to_string(),
                                         stage_name: ctx.stage_name.clone(),
-                                        stage_id: self.stage_id.clone(),
+                                        stage_id: self.stage_id,
                                         stage_type:
                                             obzenflow_core::event::context::StageType::Transform,
                                     };
@@ -506,7 +506,7 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
                                 flow_name: ctx.flow_name.clone(),
                                 flow_id: ctx.flow_id.to_string(),
                                 stage_name: ctx.stage_name.clone(),
-                                stage_id: self.stage_id.clone(),
+                                stage_id: self.stage_id,
                                 stage_type: obzenflow_core::event::context::StageType::Transform,
                             };
 
@@ -522,7 +522,7 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
                                 .data_journal
                                 .append(enriched, ctx.pending_parent.as_ref())
                                 .await
-                                .map_err(|e| format!("Failed to write pending output: {}", e))?;
+                                .map_err(|e| format!("Failed to write pending output: {e}"))?;
                             reservation.commit(1);
                             ctx.backpressure_backoff.reset();
                             crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
@@ -535,7 +535,7 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
                                 flow_name: ctx.flow_name.clone(),
                                 flow_id: ctx.flow_id.to_string(),
                                 stage_name: ctx.stage_name.clone(),
-                                stage_id: self.stage_id.clone(),
+                                stage_id: self.stage_id,
                                 stage_type: obzenflow_core::event::context::StageType::Transform,
                             };
 
@@ -547,7 +547,7 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
                                 .data_journal
                                 .append(enriched, ctx.pending_parent.as_ref())
                                 .await
-                                .map_err(|e| format!("Failed to write pending output: {}", e))?;
+                                .map_err(|e| format!("Failed to write pending output: {e}"))?;
                             crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
                                 &written,
                                 &ctx.system_journal,
@@ -763,7 +763,8 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
                                                 Ok(outputs) => Ok(outputs),
                                                 Err(err) => {
                                                     // Per-record handler failure: turn input into an error-marked event
-                                                    let reason = format!("Transform handler error: {:?}", err);
+                                                    let reason =
+                                                        format!("Transform handler error: {err:?}");
                                                     let error_event = envelope_clone
                                                         .event
                                                         .clone()
@@ -829,8 +830,7 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
                                                         .await
                                                         .map_err(|e| {
                                                             format!(
-                                                                "Failed to write error event: {}",
-                                                                e
+                                                                "Failed to write error event: {e}"
                                                             )
                                                         })?;
                                                     // Error events are isolated to the stage's error journal and
@@ -865,7 +865,7 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
                                                                         flow_name: ctx.flow_name.clone(),
                                                                         flow_id: ctx.flow_id.to_string(),
                                                                         stage_name: ctx.stage_name.clone(),
-                                                                        stage_id: self.stage_id.clone(),
+                                                                        stage_id: self.stage_id,
                                                                         stage_type: obzenflow_core::event::context::StageType::Transform,
                                                                     };
 
@@ -933,7 +933,7 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
                                                                 flow_name: ctx.flow_name.clone(),
                                                                 flow_id: ctx.flow_id.to_string(),
                                                                 stage_name: ctx.stage_name.clone(),
-                                                                stage_id: self.stage_id.clone(),
+                                                                stage_id: self.stage_id,
                                                                 stage_type: obzenflow_core::event::context::StageType::Transform,
                                                             };
 
@@ -975,7 +975,7 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
                                                         flow_name: ctx.flow_name.clone(),
                                                         flow_id: ctx.flow_id.to_string(),
                                                         stage_name: ctx.stage_name.clone(),
-                                                        stage_id: self.stage_id.clone(),
+                                                        stage_id: self.stage_id,
                                                         stage_type: obzenflow_core::event::context::StageType::Transform,
                                                     };
 
@@ -997,10 +997,7 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
                                                         .append(enriched_event, Some(&envelope))
                                                         .await
                                                         .map_err(|e| {
-                                                            format!(
-                                                                "Failed to write transformed event: {}",
-                                                                e
-                                                            )
+                                                            format!("Failed to write transformed event: {e}")
                                                         })?;
                                                     reservation.commit(1);
                                                     ctx.backpressure_backoff.reset();
@@ -1015,7 +1012,7 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
                                                         flow_name: ctx.flow_name.clone(),
                                                         flow_id: ctx.flow_id.to_string(),
                                                         stage_name: ctx.stage_name.clone(),
-                                                        stage_id: self.stage_id.clone(),
+                                                        stage_id: self.stage_id,
                                                         stage_type: obzenflow_core::event::context::StageType::Transform,
                                                     };
 
@@ -1031,10 +1028,7 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
                                                         .append(enriched_event, Some(&envelope))
                                                         .await
                                                         .map_err(|e| {
-                                                            format!(
-                                                                "Failed to write transformed event: {}",
-                                                                e
-                                                            )
+                                                            format!("Failed to write transformed event: {e}")
                                                         })?;
                                                     crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
                                                         &written,
@@ -1136,8 +1130,7 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
                                 "Subscription error"
                             );
                             EventLoopDirective::Transition(TransformEvent::Error(format!(
-                                "Subscription error: {}",
-                                e
+                                "Subscription error: {e}"
                             )))
                         }
                     }
@@ -1181,7 +1174,7 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
                                                 flow_name: ctx.flow_name.clone(),
                                                 flow_id: ctx.flow_id.to_string(),
                                                 stage_name: ctx.stage_name.clone(),
-                                                stage_id: self.stage_id.clone(),
+                                                stage_id: self.stage_id,
                                                 stage_type:
                                                     obzenflow_core::event::context::StageType::Transform,
                                             };
@@ -1237,7 +1230,7 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
                                         flow_name: ctx.flow_name.clone(),
                                         flow_id: ctx.flow_id.to_string(),
                                         stage_name: ctx.stage_name.clone(),
-                                        stage_id: self.stage_id.clone(),
+                                        stage_id: self.stage_id,
                                         stage_type:
                                             obzenflow_core::event::context::StageType::Transform,
                                     };
@@ -1279,7 +1272,7 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
                                 flow_name: ctx.flow_name.clone(),
                                 flow_id: ctx.flow_id.to_string(),
                                 stage_name: ctx.stage_name.clone(),
-                                stage_id: self.stage_id.clone(),
+                                stage_id: self.stage_id,
                                 stage_type: obzenflow_core::event::context::StageType::Transform,
                             };
 
@@ -1295,7 +1288,7 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
                                 .data_journal
                                 .append(enriched, ctx.pending_parent.as_ref())
                                 .await
-                                .map_err(|e| format!("Failed to write pending output: {}", e))?;
+                                .map_err(|e| format!("Failed to write pending output: {e}"))?;
                             reservation.commit(1);
                             ctx.backpressure_backoff.reset();
                             crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
@@ -1308,7 +1301,7 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
                                 flow_name: ctx.flow_name.clone(),
                                 flow_id: ctx.flow_id.to_string(),
                                 stage_name: ctx.stage_name.clone(),
-                                stage_id: self.stage_id.clone(),
+                                stage_id: self.stage_id,
                                 stage_type: obzenflow_core::event::context::StageType::Transform,
                             };
 
@@ -1320,7 +1313,7 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
                                 .data_journal
                                 .append(enriched, ctx.pending_parent.as_ref())
                                 .await
-                                .map_err(|e| format!("Failed to write pending output: {}", e))?;
+                                .map_err(|e| format!("Failed to write pending output: {e}"))?;
                             crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
                                 &written,
                                 &ctx.system_journal,
@@ -1391,7 +1384,9 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
                                         match handler.process(event).await {
                                             Ok(outputs) => Ok(outputs),
                                             Err(err) => {
-                                                let reason = format!("Transform handler error during drain: {:?}", err);
+                                                let reason = format!(
+                                                    "Transform handler error during drain: {err:?}"
+                                                );
                                                 let error_event = envelope_clone
                                                     .event
                                                     .clone()
@@ -1449,8 +1444,7 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
                                             .await
                                             .map_err(|e| {
                                                 format!(
-                                                    "Failed to write error event during drain: {}",
-                                                    e
+                                                    "Failed to write error event during drain: {e}"
                                                 )
                                             })?;
                                         // Error events are isolated to the stage's error journal and
@@ -1479,7 +1473,7 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
                                                             flow_name: ctx.flow_name.clone(),
                                                             flow_id: ctx.flow_id.to_string(),
                                                             stage_name: ctx.stage_name.clone(),
-                                                            stage_id: self.stage_id.clone(),
+                                                            stage_id: self.stage_id,
                                                             stage_type:
                                                                 obzenflow_core::event::context::StageType::Transform,
                                                         };
@@ -1542,7 +1536,7 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
                                                     flow_name: ctx.flow_name.clone(),
                                                     flow_id: ctx.flow_id.to_string(),
                                                     stage_name: ctx.stage_name.clone(),
-                                                    stage_id: self.stage_id.clone(),
+                                                    stage_id: self.stage_id,
                                                     stage_type:
                                                         obzenflow_core::event::context::StageType::Transform,
                                                 };
@@ -1581,7 +1575,7 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
                                             flow_name: ctx.flow_name.clone(),
                                             flow_id: ctx.flow_id.to_string(),
                                             stage_name: ctx.stage_name.clone(),
-                                            stage_id: self.stage_id.clone(),
+                                            stage_id: self.stage_id,
                                             stage_type:
                                                 obzenflow_core::event::context::StageType::Transform,
                                         };
@@ -1603,7 +1597,7 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
                                             .append(enriched_event, Some(&envelope))
                                             .await
                                             .map_err(|e| {
-                                                format!("Failed to write transformed event: {}", e)
+                                                format!("Failed to write transformed event: {e}")
                                             })?;
                                         reservation.commit(1);
                                         ctx.backpressure_backoff.reset();
@@ -1617,7 +1611,7 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
                                             flow_name: ctx.flow_name.clone(),
                                             flow_id: ctx.flow_id.to_string(),
                                             stage_name: ctx.stage_name.clone(),
-                                            stage_id: self.stage_id.clone(),
+                                            stage_id: self.stage_id,
                                             stage_type:
                                                 obzenflow_core::event::context::StageType::Transform,
                                         };
@@ -1633,7 +1627,7 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
                                             .append(enriched_event, Some(&envelope))
                                             .await
                                             .map_err(|e| {
-                                                format!("Failed to write transformed event: {}", e)
+                                                format!("Failed to write transformed event: {e}")
                                             })?;
                                         crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
                                             &written,
@@ -1689,7 +1683,7 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
                                 "Error during draining"
                             );
                             Ok(EventLoopDirective::Transition(TransformEvent::Error(
-                                format!("Drain error: {}", e),
+                                format!("Drain error: {e}"),
                             )))
                         }
                     }
@@ -1753,7 +1747,7 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
         self.data_journal
             .append(forward_event, Some(envelope))
             .await
-            .map_err(|e| format!("Failed to forward control event: {}", e))?;
+            .map_err(|e| format!("Failed to forward control event: {e}"))?;
         Ok(())
     }
 }
@@ -1763,7 +1757,6 @@ mod tests {
     use super::*;
     use crate::backpressure::{BackpressurePlan, BackpressureRegistry};
     use crate::id_conversions::StageIdExt;
-    use crate::message_bus::FsmMessageBus;
     use crate::stages::common::control_strategies::JonestownStrategy;
     use crate::stages::common::handler_error::HandlerError;
     use crate::stages::common::handlers::TransformHandler;
@@ -1776,10 +1769,10 @@ mod tests {
     use obzenflow_core::event::vector_clock::CausalOrderingService;
     use obzenflow_core::event::{ChainEventFactory, SystemEvent};
     use obzenflow_core::id::JournalId;
-    use obzenflow_core::journal::journal::Journal;
     use obzenflow_core::journal::journal_error::JournalError;
     use obzenflow_core::journal::journal_owner::JournalOwner;
     use obzenflow_core::journal::journal_reader::JournalReader;
+    use obzenflow_core::journal::Journal;
     use obzenflow_core::{ChainEvent, FlowId, StageId, WriterId};
     use obzenflow_fsm::FsmAction;
     use obzenflow_topology::TopologyBuilder;
@@ -1933,12 +1926,12 @@ mod tests {
         fn process(&self, _event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
             Ok(vec![
                 ChainEventFactory::data_event(
-                    self.writer_id.clone(),
+                    self.writer_id,
                     "bp_test.expand_out",
                     json!({ "n": 1 }),
                 ),
                 ChainEventFactory::data_event(
-                    self.writer_id.clone(),
+                    self.writer_id,
                     "bp_test.expand_out",
                     json!({ "n": 2 }),
                 ),
@@ -2022,7 +2015,6 @@ mod tests {
 
         let instrumentation =
             Arc::new(crate::metrics::instrumentation::StageInstrumentation::new());
-        let bus = Arc::new(FsmMessageBus::new());
         let control_strategy: Arc<
             dyn crate::stages::common::control_strategies::ControlEventStrategy,
         > = Arc::new(JonestownStrategy);
@@ -2031,22 +2023,35 @@ mod tests {
         backpressure_readers.insert(s, registry.reader(s, t));
 
         let handler = handler_factory(t);
-        let mut ctx = TransformContext::new(
+        let mut ctx = TransformContext {
             handler,
-            t,
-            "t".to_string(),
-            "bp_test_flow".to_string(),
-            FlowId::new(),
-            data_journal.clone(),
+            stage_id: t,
+            stage_name: "t".to_string(),
+            flow_name: "bp_test_flow".to_string(),
+            flow_id: FlowId::new(),
+            data_journal: data_journal.clone(),
             error_journal,
-            system_journal.clone(),
-            bus,
+            system_journal: system_journal.clone(),
+            writer_id: None,
+            subscription: None,
+            contract_state: Vec::new(),
             control_strategy,
+            buffered_eof: None,
             instrumentation,
             upstream_subscription_factory,
-            registry.writer(t),
+            backpressure_writer: registry.writer(t),
             backpressure_readers,
-        );
+            pending_outputs: std::collections::VecDeque::new(),
+            pending_parent: None,
+            pending_ack_upstream: None,
+            backpressure_pulse:
+                crate::stages::common::backpressure_activity_pulse::BackpressureActivityPulse::new(),
+            backpressure_backoff:
+                crate::supervised_base::idle_backoff::IdleBackoff::exponential_with_cap(
+                    std::time::Duration::from_millis(1),
+                    std::time::Duration::from_millis(50),
+                ),
+        };
 
         TransformAction::AllocateResources
             .execute(&mut ctx)

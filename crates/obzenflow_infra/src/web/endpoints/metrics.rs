@@ -2,10 +2,10 @@
 //!
 //! Re-exports the metrics endpoint from metrics_server.rs
 
-use obzenflow_core::web::{HttpEndpoint, HttpMethod, Request, Response, WebError};
-use obzenflow_core::metrics::MetricsExporter;
-use std::sync::Arc;
 use async_trait::async_trait;
+use obzenflow_core::metrics::MetricsExporter;
+use obzenflow_core::web::{HttpEndpoint, HttpMethod, Request, Response, WebError};
+use std::sync::Arc;
 
 /// HTTP endpoint for Prometheus metrics
 pub struct MetricsHttpEndpoint {
@@ -23,11 +23,11 @@ impl HttpEndpoint for MetricsHttpEndpoint {
     fn path(&self) -> &str {
         "/metrics"
     }
-    
+
     fn methods(&self) -> &[HttpMethod] {
         &[HttpMethod::Get]
     }
-    
+
     async fn handle(&self, _request: Request) -> Result<Response, WebError> {
         match self.exporter.render_metrics() {
             Ok(metrics) => {
@@ -39,8 +39,9 @@ impl HttpEndpoint for MetricsHttpEndpoint {
                 response.body = metrics.into_bytes();
                 Ok(response)
             }
-            Err(e) => Ok(Response::internal_error()
-                .with_text(&format!("Failed to render metrics: {}", e))),
+            Err(e) => {
+                Ok(Response::internal_error().with_text(&format!("Failed to render metrics: {e}")))
+            }
         }
     }
 }

@@ -13,10 +13,21 @@ use std::hash::Hash;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
+type LeftJoinBuildResult<C, S, E, K, CatalogKeyFn, StreamKeyFn, J> =
+    (StageId, LeftJoin<C, S, E, K, CatalogKeyFn, StreamKeyFn, J>);
+
 /// Builder for LeftJoin
 /// Type parameters: <CatalogType, StreamType, EnrichedType>
 pub struct LeftJoinBuilder<C, S, E> {
     _phantom: PhantomData<(C, S, E)>,
+}
+
+impl<C, S, E> Default for LeftJoinBuilder<C, S, E> {
+    fn default() -> Self {
+        Self {
+            _phantom: PhantomData,
+        }
+    }
 }
 
 impl<C, S, E> LeftJoinBuilder<C, S, E>
@@ -26,9 +37,7 @@ where
     E: TypedPayload + Clone + Send + Sync,
 {
     pub fn new() -> Self {
-        Self {
-            _phantom: PhantomData,
-        }
+        Self::default()
     }
 
     /// Set the reference stage handle (for programmatic use)
@@ -239,7 +248,7 @@ where
     pub fn join<J>(
         self,
         join_fn: J,
-    ) -> (StageId, LeftJoin<C, S, E, K, CatalogKeyFn, StreamKeyFn, J>)
+    ) -> LeftJoinBuildResult<C, S, E, K, CatalogKeyFn, StreamKeyFn, J>
     where
         J: Fn(Option<C>, S) -> E + Send + Sync + Clone,
     {
@@ -360,9 +369,9 @@ mod tests {
                 StreamRow {
                     key: "missing".into(),
                 }
-                .to_event(w.clone()),
+                .to_event(w),
                 StageId::new(),
-                w.clone(),
+                w,
             )
             .expect("process_event should succeed for left join miss case");
 

@@ -1,7 +1,6 @@
-use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
-use obzenflow_core::event::EventId;
-use obzenflow_core::journal::journal::Journal;
+use obzenflow_core::event::chain_event::ChainEventFactory;
 use obzenflow_core::journal::journal_owner::JournalOwner;
+use obzenflow_core::journal::Journal;
 use obzenflow_core::{StageId, WriterId};
 use obzenflow_infra::journal::disk::disk_journal::DiskJournal;
 use serde_json::json;
@@ -12,7 +11,7 @@ use uuid::Uuid;
 async fn debug_flight_delays_issue() {
     // Test the same setup as flight_delays.rs
     let test_id = Uuid::new_v4();
-    let journal_dir = PathBuf::from(format!("target/debug-journal-test-{}", test_id));
+    let journal_dir = PathBuf::from(format!("target/debug-journal-test-{test_id}"));
     std::fs::create_dir_all(&journal_dir).unwrap();
     let journal_path = journal_dir.join("test_journal.log");
 
@@ -27,8 +26,8 @@ async fn debug_flight_delays_issue() {
     match journal.append(event, None).await {
         Ok(_) => println!("✅ Journal append successful!"),
         Err(e) => {
-            println!("❌ Journal append failed: {}", e);
-            panic!("Single append failed: {}", e);
+            println!("❌ Journal append failed: {e}");
+            panic!("Single append failed: {e}");
         }
     }
 
@@ -57,10 +56,10 @@ async fn debug_flight_delays_issue() {
 
     for (i, handle) in handles.into_iter().enumerate() {
         match handle.await.unwrap() {
-            Ok(_) => println!("✅ Concurrent append {} successful!", i),
+            Ok(_) => println!("✅ Concurrent append {i} successful!"),
             Err(e) => {
-                println!("❌ Concurrent append {} failed: {}", i, e);
-                panic!("Concurrent append {} failed: {}", i, e);
+                println!("❌ Concurrent append {i} failed: {e}");
+                panic!("Concurrent append {i} failed: {e}");
             }
         }
     }

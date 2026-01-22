@@ -87,12 +87,14 @@ impl FlowBoundaryTracker {
 
     /// Record flow entry
     pub async fn record_entry(&self, event: &ChainEvent) {
+        let _ = (&self.flow_id, &self.flow_name, &self.config);
         // Record entry metric - new correlation-based tracking
         self.metrics.on_event_start(event);
     }
 
     /// Record flow exit and calculate end-to-end metrics
     pub async fn record_exit(&self, event: &ChainEvent) {
+        let _ = (&self.flow_id, &self.flow_name, &self.config);
         // Record exit metric - correlation-based latency calculation
         self.metrics
             .on_event_complete(event, &[], Duration::default());
@@ -182,10 +184,10 @@ impl FlowMetrics {
     pub fn new(flow_name: &str) -> Self {
         Self {
             flow_name: flow_name.to_string(),
-            entry_counter: RateMetric::new(format!("{}_entries", flow_name)),
-            exit_counter: RateMetric::new(format!("{}_exits", flow_name)),
-            latency_metric: DurationMetric::new(format!("{}_latency", flow_name)),
-            error_counter: ErrorMetric::new(format!("{}_errors", flow_name)),
+            entry_counter: RateMetric::new(format!("{flow_name}_entries")),
+            exit_counter: RateMetric::new(format!("{flow_name}_exits")),
+            latency_metric: DurationMetric::new(format!("{flow_name}_latency")),
+            error_counter: ErrorMetric::new(format!("{flow_name}_errors")),
             active_correlations: Arc::new(RwLock::new(HashMap::new())),
             correlation_timeout: Duration::from_secs(300), // 5 minutes default
         }
@@ -265,7 +267,7 @@ impl FlowMetrics {
         let mut snapshots = vec![];
 
         // Add flow-level labels
-        let mut add_flow_labels = |mut snapshot: MetricSnapshot| -> MetricSnapshot {
+        let add_flow_labels = |mut snapshot: MetricSnapshot| -> MetricSnapshot {
             snapshot
                 .labels
                 .insert("level".to_string(), "flow".to_string());

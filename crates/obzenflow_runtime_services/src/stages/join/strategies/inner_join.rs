@@ -13,10 +13,21 @@ use std::hash::Hash;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
+type InnerJoinBuildResult<C, S, E, K, CatalogKeyFn, StreamKeyFn, J> =
+    (StageId, InnerJoin<C, S, E, K, CatalogKeyFn, StreamKeyFn, J>);
+
 /// Builder for InnerJoin
 /// Type parameters: <CatalogType, StreamType, EnrichedType>
 pub struct InnerJoinBuilder<C, S, E> {
     _phantom: PhantomData<(C, S, E)>,
+}
+
+impl<C, S, E> Default for InnerJoinBuilder<C, S, E> {
+    fn default() -> Self {
+        Self {
+            _phantom: PhantomData,
+        }
+    }
 }
 
 impl<C, S, E> InnerJoinBuilder<C, S, E>
@@ -26,9 +37,7 @@ where
     E: TypedPayload + Clone + Send + Sync,
 {
     pub fn new() -> Self {
-        Self {
-            _phantom: PhantomData,
-        }
+        Self::default()
     }
 
     /// Set the reference stage handle (for programmatic use)
@@ -239,7 +248,7 @@ where
     pub fn join<J>(
         self,
         join_fn: J,
-    ) -> (StageId, InnerJoin<C, S, E, K, CatalogKeyFn, StreamKeyFn, J>)
+    ) -> InnerJoinBuildResult<C, S, E, K, CatalogKeyFn, StreamKeyFn, J>
     where
         J: Fn(C, S) -> E + Send + Sync + Clone,
     {
@@ -355,24 +364,26 @@ mod tests {
         let writer = WriterId::from(StageId::new());
 
         // hydrate
-        handler.process_event(
-            &mut state,
-            CatalogRow {
-                key: "k1".into(),
-                value: "v1".into(),
-            }
-            .to_event(writer.clone()),
-            StageId::new(),
-            writer.clone(),
-        );
+        handler
+            .process_event(
+                &mut state,
+                CatalogRow {
+                    key: "k1".into(),
+                    value: "v1".into(),
+                }
+                .to_event(writer),
+                StageId::new(),
+                writer,
+            )
+            .expect("process_event should succeed for inner join hydrate case");
 
         // hit
         let hit = handler
             .process_event(
                 &mut state,
-                StreamRow { key: "k1".into() }.to_event(writer.clone()),
+                StreamRow { key: "k1".into() }.to_event(writer),
                 StageId::new(),
-                writer.clone(),
+                writer,
             )
             .expect("process_event should succeed for inner join hit case");
         let joined =
@@ -392,9 +403,9 @@ mod tests {
                 StreamRow {
                     key: "missing".into(),
                 }
-                .to_event(writer.clone()),
+                .to_event(writer),
                 StageId::new(),
-                writer.clone(),
+                writer,
             )
             .expect("process_event should succeed for inner join miss case");
         assert!(miss.is_empty());

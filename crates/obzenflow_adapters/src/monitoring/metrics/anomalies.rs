@@ -90,14 +90,11 @@ impl Metric for AnomalyMetric {
     }
 
     fn update(&self, value: MetricValue) {
-        match value {
-            MetricValue::Counter(count) => {
-                // Record multiple anomalies
-                for _ in 0..count {
-                    self.record_anomaly();
-                }
+        if let MetricValue::Counter(count) = value {
+            // Record multiple anomalies
+            for _ in 0..count {
+                self.record_anomaly();
             }
-            _ => {}
         }
     }
 
@@ -211,7 +208,7 @@ mod tests {
         assert_eq!(metric.anomaly_count(), 3);
 
         // Non-counter values should be ignored
-        metric.update(MetricValue::Gauge(3.14));
+        metric.update(MetricValue::Gauge(std::f64::consts::PI));
         assert_eq!(metric.anomaly_count(), 3);
     }
 

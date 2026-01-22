@@ -2,7 +2,7 @@
 
 use crate::stages::common::handler_error::HandlerError;
 use crate::stages::common::handlers::JoinHandler;
-use crate::stages::join::config::{JoinReferenceMode, DEFAULT_REFERENCE_BATCH_CAP};
+use crate::stages::join::config::JoinReferenceMode;
 use obzenflow_core::event::context::causality_context::CausalityContext;
 use obzenflow_core::event::schema::TypedPayload;
 use obzenflow_core::StageId;
@@ -317,6 +317,7 @@ fn propagate_stream_lineage(parent: &ChainEvent, outputs: &mut [ChainEvent]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::stages::join::config::DEFAULT_REFERENCE_BATCH_CAP;
     use obzenflow_core::event::schema::TypedPayload;
     use obzenflow_core::id::StageId;
     use obzenflow_core::WriterId;
@@ -363,7 +364,7 @@ mod tests {
         fn match_stream_event(
             &self,
             catalog: &HashMap<Self::Key, Self::CatalogType>,
-            stream_data: Self::StreamType,
+            _stream_data: Self::StreamType,
             stream_key: Self::Key,
             writer_id: WriterId,
         ) -> Vec<ChainEvent> {
@@ -400,7 +401,7 @@ mod tests {
             key: "k1".into(),
             value: "v1".into(),
         }
-        .to_event(writer.clone());
+        .to_event(writer);
 
         let out = handler
             .process_event(&mut state, catalog_event, StageId::new(), writer)
@@ -421,15 +422,15 @@ mod tests {
             key: "k1".into(),
             value: "v1".into(),
         }
-        .to_event(writer.clone());
+        .to_event(writer);
         handler
-            .process_event(&mut state, catalog_event, StageId::new(), writer.clone())
+            .process_event(&mut state, catalog_event, StageId::new(), writer)
             .expect("process_event should succeed while hydrating catalog");
 
         // enrich
         let stream_event = StreamRow { key: "k1".into() }.to_event(WriterId::from(StageId::new()));
         let out = handler
-            .process_event(&mut state, stream_event, StageId::new(), writer.clone())
+            .process_event(&mut state, stream_event, StageId::new(), writer)
             .expect("process_event should succeed in stream_hit_emits_joined_row");
         assert_eq!(out.len(), 1);
 
@@ -454,7 +455,7 @@ mod tests {
         }
         .to_event(WriterId::from(StageId::new()));
         let out = handler
-            .process_event(&mut state, stream_event, StageId::new(), writer.clone())
+            .process_event(&mut state, stream_event, StageId::new(), writer)
             .expect("process_event should succeed in stream_miss_passes_none_catalog");
         assert_eq!(out.len(), 1);
         let joined = JoinedRow::from_event(&out[0]).expect("should deserialize joined row");
@@ -473,7 +474,9 @@ mod tests {
         let mut state = handler.initial_state();
         let writer = WriterId::from(StageId::new());
 
-        handler.on_source_eof(&mut state, StageId::new(), writer.clone());
+        handler
+            .on_source_eof(&mut state, StageId::new(), writer)
+            .expect("on_source_eof should succeed in on_source_eof_marks_reference_complete");
         assert!(state.reference_complete);
 
         state.stream_complete = true;
@@ -487,16 +490,22 @@ mod tests {
         let writer = WriterId::from(StageId::new());
 
         // first EOF sets reference complete
-        handler.on_source_eof(&mut state, StageId::new(), writer.clone());
+        handler
+            .on_source_eof(&mut state, StageId::new(), writer)
+            .expect("on_source_eof should succeed while marking reference complete");
         assert!(state.reference_eof_seen);
         assert!(state.reference_complete);
 
         // second EOF sets stream complete
-        handler.on_source_eof(&mut state, StageId::new(), writer.clone());
+        handler
+            .on_source_eof(&mut state, StageId::new(), writer)
+            .expect("on_source_eof should succeed while marking stream complete");
         assert!(state.stream_eof_seen);
         assert!(state.stream_complete);
 
         // third EOF ignored (no panic/changes)
-        handler.on_source_eof(&mut state, StageId::new(), writer.clone());
+        handler
+            .on_source_eof(&mut state, StageId::new(), writer)
+            .expect("on_source_eof should succeed while ignoring duplicate EOF");
     }
 }

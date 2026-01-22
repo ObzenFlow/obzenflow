@@ -143,7 +143,7 @@ fn source_error_event(
             name: "source.poll_error".to_string(),
             value: json!({
                 "source_type": source_type,
-                "error_type": format!("{:?}", err).split('(').next().unwrap_or("unknown"),
+                "error_type": format!("{err:?}").split('(').next().unwrap_or("unknown"),
                 "message": err.to_string(),
                 "timestamp_ms": timestamp_ms,
             }),
@@ -214,7 +214,7 @@ impl<H: AsyncFiniteSourceHandler> AsyncFiniteSourceHandler for MiddlewareAsyncFi
 
     async fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
         let synthetic_event = ChainEventFactory::data_event(
-            self.writer_id.clone(),
+            self.writer_id,
             "system.source.next",
             json!({
                 "source_type": "async_finite",
@@ -347,11 +347,7 @@ impl<H: AsyncFiniteSourceHandler> AsyncFiniteSourceHandler for MiddlewareAsyncFi
         let mut results = match inner_result {
             Ok(Some(events)) => events,
             Ok(None) => unreachable!("handled in completion short-circuit above"),
-            Err(err) => vec![source_error_event(
-                self.writer_id.clone(),
-                "async_finite",
-                &err,
-            )],
+            Err(err) => vec![source_error_event(self.writer_id, "async_finite", &err)],
         };
 
         // Post-processing phase (observation)
@@ -456,7 +452,7 @@ impl<H: AsyncInfiniteSourceHandler> AsyncInfiniteSourceHandler
 
     async fn next(&mut self) -> Result<Vec<ChainEvent>, SourceError> {
         let synthetic_event = ChainEventFactory::data_event(
-            self.writer_id.clone(),
+            self.writer_id,
             "system.source.next",
             json!({
                 "source_type": "async_infinite",
@@ -564,11 +560,7 @@ impl<H: AsyncInfiniteSourceHandler> AsyncInfiniteSourceHandler
 
         let mut results = match inner_result {
             Ok(events) => events,
-            Err(err) => vec![source_error_event(
-                self.writer_id.clone(),
-                "async_infinite",
-                &err,
-            )],
+            Err(err) => vec![source_error_event(self.writer_id, "async_infinite", &err)],
         };
 
         // Post-processing phase (observation)
@@ -661,7 +653,7 @@ impl<H: FiniteSourceHandler> FiniteSourceHandler for MiddlewareFiniteSource<H> {
         // poll, we intentionally avoid running non-CB middleware (especially rate limiting)
         // so we don't delay shutdown or skew counters (see FLOWIP-059a phase-3 tests).
         let synthetic_event = ChainEventFactory::data_event(
-            self.writer_id.clone(),
+            self.writer_id,
             "system.source.next",
             json!({
                 "source_type": "finite",
@@ -768,7 +760,7 @@ impl<H: FiniteSourceHandler> FiniteSourceHandler for MiddlewareFiniteSource<H> {
         let mut results = match inner_result {
             Ok(Some(events)) => events,
             Ok(None) => unreachable!("handled above"),
-            Err(err) => vec![source_error_event(self.writer_id.clone(), "finite", &err)],
+            Err(err) => vec![source_error_event(self.writer_id, "finite", &err)],
         };
 
         // Post-processing phase (observation)
@@ -845,7 +837,7 @@ impl<H: InfiniteSourceHandler> InfiniteSourceHandler for MiddlewareInfiniteSourc
     > {
         // Create a synthetic event for middleware to process
         let synthetic_event = ChainEventFactory::data_event(
-            self.writer_id.clone(),
+            self.writer_id,
             "system.source.next",
             json!({
                 "source_type": "infinite",
@@ -892,7 +884,7 @@ impl<H: InfiniteSourceHandler> InfiniteSourceHandler for MiddlewareInfiniteSourc
         // Get next batch from inner source
         let mut results = match self.inner.next() {
             Ok(events) => events,
-            Err(err) => vec![source_error_event(self.writer_id.clone(), "infinite", &err)],
+            Err(err) => vec![source_error_event(self.writer_id, "infinite", &err)],
         };
 
         // Post-processing phase (observation)

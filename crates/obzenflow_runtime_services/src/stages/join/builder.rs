@@ -2,7 +2,6 @@
 
 use std::sync::Arc;
 
-use crate::message_bus::FsmMessageBus;
 use crate::metrics::instrumentation::StageInstrumentation;
 use crate::stages::common::handlers::JoinHandler;
 use crate::stages::resources_builder::StageResources;
@@ -12,8 +11,7 @@ use crate::supervised_base::{
     HandlerSupervised, HandlerSupervisedExt, StateWatcher, SupervisorBuilder,
     SupervisorTaskBuilder,
 };
-use obzenflow_core::event::SystemEvent;
-use obzenflow_core::journal::journal::Journal;
+use obzenflow_core::journal::Journal;
 use obzenflow_core::{ChainEvent, StageId};
 
 use super::config::JoinConfig;
@@ -91,7 +89,7 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
             .unwrap_or_else(|| Arc::new(StageInstrumentation::new()));
 
         // Bind factories for reference and stream subscriptions (after DSL split)
-        let reference_subscription_factory = self.resources.subscription_factory.bind(&vec![(
+        let reference_subscription_factory = self.resources.subscription_factory.bind(&[(
             self.config.reference_source_id,
             self.reference_journal.clone(),
         )]);
@@ -102,26 +100,47 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
             .bind(&self.stream_journals);
 
         // Create context with subscription factory from resources
-        let context = JoinContext::new(
-            self.handler,
-            self.config.stage_id,
-            self.config.stage_name.clone(),
-            self.config.flow_name.clone(),
-            self.resources.flow_id.clone(),
-            self.config.reference_source_id,
-            self.resources.data_journal.clone(),
-            self.resources.error_journal.clone(),
-            self.resources.system_journal.clone(),
-            self.resources.message_bus.clone(),
-            self.control_strategy.clone(),
-            instrumentation.clone(),
+        let handler = self.handler;
+        let handler_state = handler.initial_state();
+        let context = JoinContext {
+            handler: Arc::new(handler),
+            handler_state,
+            stage_id: self.config.stage_id,
+            stage_name: self.config.stage_name.clone(),
+            flow_name: self.config.flow_name.clone(),
+            flow_id: self.resources.flow_id,
+            reference_stage_id: self.config.reference_source_id,
+            data_journal: self.resources.data_journal.clone(),
+            error_journal: self.resources.error_journal.clone(),
+            system_journal: self.resources.system_journal.clone(),
+            bus: self.resources.message_bus.clone(),
+            writer_id: None,
+            reference_subscription: None,
+            stream_subscription: None,
+            reference_contract_state: Vec::new(),
+            stream_contract_state: Vec::new(),
+            buffered_eof: None,
+            instrumentation: instrumentation.clone(),
+            control_strategy: self.control_strategy.clone(),
             reference_subscription_factory,
             stream_subscription_factory,
-            self.config.reference_mode,
-            self.config.reference_batch_cap,
-            self.resources.backpressure_writer.clone(),
-            self.resources.backpressure_readers.clone(),
-        );
+            reference_mode: self.config.reference_mode,
+            reference_batch_cap: self.config.reference_batch_cap,
+            reference_since_last_stream: 0,
+            events_since_last_heartbeat: 0,
+            backpressure_writer: self.resources.backpressure_writer.clone(),
+            backpressure_readers: self.resources.backpressure_readers.clone(),
+            pending_outputs: std::collections::VecDeque::new(),
+            pending_transition: None,
+            pending_ack_upstream: None,
+            backpressure_pulse:
+                crate::stages::common::backpressure_activity_pulse::BackpressureActivityPulse::new(),
+            backpressure_backoff:
+                crate::supervised_base::idle_backoff::IdleBackoff::exponential_with_cap(
+                    std::time::Duration::from_millis(1),
+                    std::time::Duration::from_millis(50),
+                ),
+        };
 
         // Create supervisor
         let supervisor = JoinSupervisor {

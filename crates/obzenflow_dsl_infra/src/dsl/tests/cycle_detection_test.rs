@@ -44,10 +44,10 @@ mod tests {
         for (from_name, to_name, kind) in connections {
             let from = *name_to_id
                 .get(&from_name)
-                .unwrap_or_else(|| panic!("Unknown from stage: {}", from_name));
+                .unwrap_or_else(|| panic!("Unknown from stage: {from_name}"));
             let to = *name_to_id
                 .get(&to_name)
-                .unwrap_or_else(|| panic!("Unknown to stage: {}", to_name));
+                .unwrap_or_else(|| panic!("Unknown to stage: {to_name}"));
 
             match kind {
                 EdgeKind::Forward => builder.add_edge(from, to),

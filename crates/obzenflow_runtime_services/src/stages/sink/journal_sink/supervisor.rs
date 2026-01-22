@@ -6,17 +6,14 @@ use crate::stages::common::control_strategies::{ControlEventAction, ProcessingCo
 use crate::stages::common::handlers::SinkHandler;
 use crate::supervised_base::base::Supervisor;
 use crate::supervised_base::{EventLoopDirective, HandlerSupervised};
-use futures::TryFutureExt;
 use obzenflow_core::event::context::causality_context::CausalityContext;
 use obzenflow_core::event::context::{FlowContext, StageType};
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::{ChainEventFactory, EventEnvelope, SystemEvent};
-use obzenflow_core::journal::journal::Journal;
-use obzenflow_core::time::MetricsDuration;
+use obzenflow_core::journal::Journal;
 use obzenflow_core::ChainEvent;
 use obzenflow_core::{StageId, WriterId};
-use obzenflow_fsm::FsmAction;
 use obzenflow_fsm::{fsm, EventVariant, StateVariant, Transition};
 use std::sync::Arc;
 
@@ -70,7 +67,7 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> JournalSi
         self.data_journal
             .append(forward_event, Some(envelope))
             .await
-            .map_err(|e| format!("Failed to forward control event: {}", e))?;
+            .map_err(|e| format!("Failed to forward control event: {e}"))?;
         Ok(())
     }
 }
@@ -440,7 +437,7 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
 
                 // Take ownership of subscription and contract state so we never hold
                 // a borrow of ctx across await while operating on them.
-                let mut maybe_subscription = ctx.subscription.take();
+                let maybe_subscription = ctx.subscription.take();
                 let mut contract_state = std::mem::take(&mut ctx.contract_state);
 
                 // Default directive is to continue; branches below may override it.
@@ -664,7 +661,7 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                                 flow_name: ctx.flow_name.clone(),
                                                 flow_id: ctx.flow_id.to_string(),
                                                 stage_name: ctx.stage_name.clone(),
-                                                stage_id: self.stage_id.clone(),
+                                                stage_id: self.stage_id,
                                                 stage_type:
                                                     obzenflow_core::event::context::StageType::Sink,
                                             };
@@ -717,11 +714,9 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                                 // even though they are not stage-fatal.
                                                 ctx.instrumentation
                                                     .record_error(handler_err.kind());
-                                                let reason = format!(
-                                                    "Sink handler error: {:?}",
-                                                    handler_err
-                                                );
-                                                let mut error_event = envelope
+                                                let reason =
+                                                    format!("Sink handler error: {handler_err:?}");
+                                                let error_event = envelope
                                                     .event
                                                     .clone()
                                                     .mark_as_error(reason, handler_err.kind());
@@ -764,13 +759,11 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                                             )
                                                         })?;
                                                 } else {
-                                                    use obzenflow_core::event::JournalEvent;
-
                                                     let flow_ctx = FlowContext {
                                                         flow_name: ctx.flow_name.clone(),
                                                         flow_id: ctx.flow_id.to_string(),
                                                         stage_name: ctx.stage_name.clone(),
-                                                        stage_id: self.stage_id.clone(),
+                                                        stage_id: self.stage_id,
                                                         stage_type: StageType::Sink,
                                                     };
 
@@ -815,7 +808,7 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                                 flow_name: ctx.flow_name.clone(),
                                                 flow_id: ctx.flow_id.to_string(),
                                                 stage_name: ctx.stage_name.clone(),
-                                                stage_id: self.stage_id.clone(),
+                                                stage_id: self.stage_id,
                                                 stage_type: StageType::Sink,
                                             };
 
@@ -904,7 +897,7 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                 "sink: poll_next returned Error"
                             );
                             directive = Ok(EventLoopDirective::Transition(
-                                JournalSinkEvent::Error(format!("Subscription error: {}", e)),
+                                JournalSinkEvent::Error(format!("Subscription error: {e}")),
                             ));
                         }
                     }

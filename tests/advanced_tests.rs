@@ -53,7 +53,7 @@ async fn test_dsl_pipeline() -> Result<()> {
                 let (event_type, payload) = &self.events[self.emitted];
                 self.emitted += 1;
                 Ok(Some(vec![ChainEventFactory::data_event(
-                    self.writer_id.clone(),
+                    self.writer_id,
                     event_type.clone(),
                     payload.clone(),
                 )]))
@@ -77,7 +77,7 @@ async fn test_dsl_pipeline() -> Result<()> {
         fn process(&self, event: ChainEvent) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
             if let Some(value) = event.payload().get("value").and_then(|v| v.as_u64()) {
                 Ok(vec![ChainEventFactory::data_event(
-                    event.writer_id.clone(),
+                    event.writer_id,
                     "Doubled",
                     json!({
                         "value": value,
@@ -144,7 +144,7 @@ async fn test_dsl_pipeline() -> Result<()> {
         }
     }
     .await
-    .map_err(|e| anyhow::anyhow!("Failed to create flow: {:?}", e))?;
+    .map_err(|e| anyhow::anyhow!("Failed to create flow: {e:?}"))?;
 
     // Run the pipeline
     handle.run().await?;

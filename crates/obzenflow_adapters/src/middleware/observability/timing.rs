@@ -106,11 +106,47 @@ impl Middleware for TimingMiddleware {
     }
 }
 
+/// Factory for creating TimingMiddleware instances with stage context
+pub struct TimingMiddlewareFactory;
+
+impl Default for TimingMiddlewareFactory {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl TimingMiddlewareFactory {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl MiddlewareFactory for TimingMiddlewareFactory {
+    fn create(
+        &self,
+        config: &StageConfig,
+        _control_middleware: std::sync::Arc<
+            crate::middleware::control::ControlMiddlewareAggregator,
+        >,
+    ) -> Box<dyn Middleware> {
+        Box::new(TimingMiddleware::new(&config.name))
+    }
+
+    fn name(&self) -> &str {
+        "timing"
+    }
+}
+
+/// Convenience function to create a timing middleware factory
+pub fn timing() -> Box<dyn MiddlewareFactory> {
+    Box::new(TimingMiddlewareFactory::new())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use obzenflow_core::event::ChainEventFactory;
-    use obzenflow_core::{EventId, StageId, WriterId};
+    use obzenflow_core::{StageId, WriterId};
     use serde_json::json;
     use std::thread;
 
@@ -161,34 +197,4 @@ mod tests {
         // Processing time should remain at default (ZERO)
         assert_eq!(event.processing_info.processing_time, MetricsDuration::ZERO);
     }
-}
-
-/// Factory for creating TimingMiddleware instances with stage context
-pub struct TimingMiddlewareFactory;
-
-impl TimingMiddlewareFactory {
-    pub fn new() -> Self {
-        Self
-    }
-}
-
-impl MiddlewareFactory for TimingMiddlewareFactory {
-    fn create(
-        &self,
-        config: &StageConfig,
-        _control_middleware: std::sync::Arc<
-            crate::middleware::control::ControlMiddlewareAggregator,
-        >,
-    ) -> Box<dyn Middleware> {
-        Box::new(TimingMiddleware::new(&config.name))
-    }
-
-    fn name(&self) -> &str {
-        "timing"
-    }
-}
-
-/// Convenience function to create a timing middleware factory
-pub fn timing() -> Box<dyn MiddlewareFactory> {
-    Box::new(TimingMiddlewareFactory::new())
 }

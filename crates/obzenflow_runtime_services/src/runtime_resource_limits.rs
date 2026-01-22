@@ -121,8 +121,8 @@ fn get_nofile_limit() -> io::Result<NofileLimit> {
         }
 
         Ok(NofileLimit {
-            soft: current.rlim_cur as u64,
-            hard: current.rlim_max as u64,
+            soft: current.rlim_cur,
+            hard: current.rlim_max,
         })
     }
 }

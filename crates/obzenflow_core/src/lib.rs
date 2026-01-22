@@ -4,9 +4,9 @@
 //! Everything here is pure types and traits with no knowledge
 //! of infrastructure, I/O, or external systems.
 
+pub mod build_info;
 pub mod contracts;
 pub mod control_middleware;
-pub mod build_info;
 pub mod error;
 pub mod event;
 pub mod http_client;
@@ -23,9 +23,9 @@ pub use event::context::runtime_context;
 pub use event::event_envelope::EventEnvelope;
 pub use event::EventId;
 pub use event::{JournalWriterId, WriterId};
-pub use journal::journal::Journal;
 pub use journal::journal_error::JournalError;
 pub use journal::journal_owner::JournalOwner;
+pub use journal::Journal;
 
 // Re-export schema types (FLOWIP-082a)
 pub use event::schema::TypedPayload;

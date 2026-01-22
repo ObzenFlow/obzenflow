@@ -14,7 +14,7 @@ use obzenflow_core::WriterId;
 
 use super::async_supervisor::AsyncInfiniteSourceSupervisor;
 use super::config::InfiniteSourceConfig;
-use super::fsm::{InfiniteSourceContext, InfiniteSourceState};
+use super::fsm::{InfiniteSourceContext, InfiniteSourceContextInit, InfiniteSourceState};
 use super::handle::InfiniteSourceHandle;
 
 /// Builder for creating async infinite source stages.
@@ -70,20 +70,20 @@ impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
             .instrumentation
             .unwrap_or_else(|| Arc::new(StageInstrumentation::new()));
 
-        let context = InfiniteSourceContext::<H>::new(
-            self.config.stage_id,
-            self.config.stage_name.clone(),
-            self.config.flow_name.clone(),
-            self.resources.flow_id,
-            self.resources.data_journal.clone(),
-            self.resources.error_journal.clone(),
-            self.resources.system_journal.clone(),
-            self.resources.replay_archive.clone(),
-            self.resources.message_bus.clone(),
+        let context = InfiniteSourceContext::<H>::new(InfiniteSourceContextInit {
+            stage_id: self.config.stage_id,
+            stage_name: self.config.stage_name.clone(),
+            flow_name: self.config.flow_name.clone(),
+            flow_id: self.resources.flow_id,
+            data_journal: self.resources.data_journal.clone(),
+            error_journal: self.resources.error_journal.clone(),
+            system_journal: self.resources.system_journal.clone(),
+            replay_archive: self.resources.replay_archive.clone(),
+            bus: self.resources.message_bus.clone(),
             instrumentation,
             control_strategy,
-            self.resources.backpressure_writer.clone(),
-        );
+            backpressure_writer: self.resources.backpressure_writer.clone(),
+        });
 
         // Ensure the handler (and any wrappers) receive the stage writer id before running (FLOWIP-081d).
         let mut handler = self.handler;
@@ -92,8 +92,6 @@ impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
         let supervisor = AsyncInfiniteSourceSupervisor {
             name: format!("async_infinite_source_{}", self.config.stage_name),
             handler,
-            context: Arc::new(context.clone()),
-            data_journal: self.resources.data_journal.clone(),
             system_journal: self.resources.system_journal.clone(),
             stage_id: self.config.stage_id,
             external_events: event_receiver,

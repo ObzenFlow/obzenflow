@@ -50,10 +50,12 @@ impl HttpEndpoint for IngestionHealthEndpoint {
             Response::new(503).with_header("Retry-After".to_string(), "1".to_string())
         };
 
-        let response = response.with_json(&body).map_err(|e| WebError::RequestHandlingFailed {
-            message: e.to_string(),
-            source: None,
-        })?;
+        let response = response
+            .with_json(&body)
+            .map_err(|e| WebError::RequestHandlingFailed {
+                message: e.to_string(),
+                source: None,
+            })?;
         Ok(response)
     }
 }

@@ -253,10 +253,7 @@ mod tests {
                 // Should preserve millisecond precision
                 assert_eq!(ms, 1_234);
             }
-            _ => panic!(
-                "Expected milliseconds for this duration, got {:?}",
-                time_unit
-            ),
+            _ => panic!("Expected milliseconds for this duration, got {time_unit:?}"),
         }
     }
 

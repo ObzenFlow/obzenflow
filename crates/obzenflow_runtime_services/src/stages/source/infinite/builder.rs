@@ -3,7 +3,6 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::message_bus::FsmMessageBus;
 use crate::metrics::instrumentation::StageInstrumentation;
 use crate::stages::common::handlers::InfiniteSourceHandler;
 use crate::stages::resources_builder::StageResources;
@@ -14,13 +13,12 @@ use crate::supervised_base::{
     HandlerSupervised, HandlerSupervisedExt, StateWatcher, SupervisorBuilder,
     SupervisorTaskBuilder,
 };
-use obzenflow_core::event::SystemEvent;
-use obzenflow_core::journal::journal::Journal;
-use obzenflow_core::{ChainEvent, StageId, WriterId};
+use obzenflow_core::{StageId, WriterId};
 
 use super::config::InfiniteSourceConfig;
 use super::fsm::{
-    InfiniteSourceAction, InfiniteSourceContext, InfiniteSourceEvent, InfiniteSourceState,
+    InfiniteSourceAction, InfiniteSourceContext, InfiniteSourceContextInit, InfiniteSourceEvent,
+    InfiniteSourceState,
 };
 use super::handle::InfiniteSourceHandle;
 use super::supervisor::InfiniteSourceSupervisor;
@@ -85,20 +83,20 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
             .unwrap_or_else(|| Arc::new(StageInstrumentation::new()));
 
         // Create context
-        let context = InfiniteSourceContext::<H>::new(
-            self.config.stage_id,
-            self.config.stage_name.clone(),
-            self.config.flow_name.clone(),
-            self.resources.flow_id,
-            self.resources.data_journal.clone(),
-            self.resources.error_journal.clone(),
-            self.resources.system_journal.clone(),
-            self.resources.replay_archive.clone(),
-            self.resources.message_bus.clone(),
+        let context = InfiniteSourceContext::<H>::new(InfiniteSourceContextInit {
+            stage_id: self.config.stage_id,
+            stage_name: self.config.stage_name.clone(),
+            flow_name: self.config.flow_name.clone(),
+            flow_id: self.resources.flow_id,
+            data_journal: self.resources.data_journal.clone(),
+            error_journal: self.resources.error_journal.clone(),
+            system_journal: self.resources.system_journal.clone(),
+            replay_archive: self.resources.replay_archive.clone(),
+            bus: self.resources.message_bus.clone(),
             instrumentation,
             control_strategy,
-            self.resources.backpressure_writer.clone(),
-        );
+            backpressure_writer: self.resources.backpressure_writer.clone(),
+        });
 
         // Ensure the handler (and any wrappers) receive the stage writer id before running (FLOWIP-081d).
         let mut handler = self.handler;
@@ -109,7 +107,6 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
             name: format!("infinite_source_{}", self.config.stage_name),
             handler,
             context: Arc::new(context.clone()),
-            data_journal: self.resources.data_journal.clone(),
             system_journal: self.resources.system_journal.clone(),
             stage_id: self.config.stage_id,
             idle_backoff: crate::supervised_base::idle_backoff::IdleBackoff::exponential_with_cap(

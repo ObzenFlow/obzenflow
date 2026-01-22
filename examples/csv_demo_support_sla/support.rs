@@ -5,6 +5,4 @@ mod domain;
 mod fixtures;
 
 #[path = "flow.rs"]
-mod flow;
-
-pub use flow::run_example;
+pub mod flow;

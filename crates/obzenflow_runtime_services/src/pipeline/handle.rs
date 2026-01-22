@@ -3,7 +3,7 @@ use crate::errors::FlowError;
 use crate::stages::common::stage_handle::STOP_REASON_TIMEOUT;
 use crate::supervised_base::{HandleError, StandardHandle, SupervisorHandle};
 use obzenflow_core::event::SystemEvent;
-use obzenflow_core::journal::journal::Journal;
+use obzenflow_core::journal::Journal;
 use obzenflow_core::StageId;
 use obzenflow_topology::Topology;
 use serde::{Deserialize, Serialize};
@@ -11,6 +11,19 @@ use std::collections::HashMap;
 use std::io;
 use std::sync::Arc;
 use std::time::Duration;
+
+type MiddlewareStacks = Arc<HashMap<StageId, MiddlewareStackConfig>>;
+type ContractAttachments = Arc<HashMap<(StageId, StageId), Vec<String>>>;
+type JoinMetadataMap = Arc<HashMap<StageId, crate::pipeline::JoinMetadata>>;
+
+pub(crate) struct FlowHandleExtras {
+    pub topology: Option<Arc<Topology>>,
+    pub flow_name: String,
+    pub middleware_stacks: Option<MiddlewareStacks>,
+    pub contract_attachments: Option<ContractAttachments>,
+    pub join_metadata: Option<JoinMetadataMap>,
+    pub system_journal: Option<Arc<dyn Journal<SystemEvent>>>,
+}
 
 /// Structural middleware configuration for a stage (FLOWIP-059).
 ///
@@ -69,13 +82,13 @@ pub struct FlowHandle {
     flow_name: String,
 
     /// Structural middleware stacks per stage (for topology observability, FLOWIP-059)
-    middleware_stacks: Option<Arc<HashMap<StageId, MiddlewareStackConfig>>>,
+    middleware_stacks: Option<MiddlewareStacks>,
 
     /// Structural contract names per edge (for topology observability)
-    contract_attachments: Option<Arc<HashMap<(StageId, StageId), Vec<String>>>>,
+    contract_attachments: Option<ContractAttachments>,
 
     /// Join metadata per stage (catalog vs stream sources) for topology export (FLOWIP-082a)
-    join_metadata: Option<Arc<HashMap<StageId, crate::pipeline::JoinMetadata>>>,
+    join_metadata: Option<JoinMetadataMap>,
 
     /// System journal for lifecycle events (for SSE / observability)
     system_journal: Option<Arc<dyn Journal<SystemEvent>>>,
@@ -86,13 +99,17 @@ impl FlowHandle {
     pub(crate) fn new(
         handle: StandardHandle<PipelineEvent, PipelineState>,
         metrics_exporter: Option<Arc<dyn obzenflow_core::metrics::MetricsExporter>>,
-        topology: Option<Arc<Topology>>,
-        flow_name: String,
-        middleware_stacks: Option<Arc<HashMap<StageId, MiddlewareStackConfig>>>,
-        contract_attachments: Option<Arc<HashMap<(StageId, StageId), Vec<String>>>>,
-        system_journal: Option<Arc<dyn Journal<SystemEvent>>>,
-        join_metadata: Option<Arc<HashMap<StageId, crate::pipeline::JoinMetadata>>>,
+        extras: FlowHandleExtras,
     ) -> Self {
+        let FlowHandleExtras {
+            topology,
+            flow_name,
+            middleware_stacks,
+            contract_attachments,
+            join_metadata,
+            system_journal,
+        } = extras;
+
         Self {
             handle,
             metrics_exporter,
@@ -136,7 +153,7 @@ impl FlowHandle {
         tracing::info!("FlowHandle::run() - Run event sent, waiting for completion");
 
         // Capture state receiver before consuming self so we can inspect the terminal state
-        let mut state_rx = self.state_receiver();
+        let state_rx = self.state_receiver();
 
         // Now wait for it to complete
         let result = self.wait_for_completion().await;
@@ -155,10 +172,10 @@ impl FlowHandle {
         let final_state = state_rx.borrow().clone();
         match final_state {
             PipelineState::Failed { reason, .. } => Err(FlowError::ExecutionFailed(Box::new(
-                io::Error::new(io::ErrorKind::Other, reason),
+                io::Error::other(reason),
             ))),
             PipelineState::AbortRequested { reason, .. } => Err(FlowError::ExecutionFailed(
-                Box::new(io::Error::new(io::ErrorKind::Other, format!("{reason:?}"))),
+                Box::new(io::Error::other(format!("{reason:?}"))),
             )),
             _ => Ok(()),
         }
@@ -286,7 +303,7 @@ impl FlowHandle {
     /// Force shutdown by sending Error event to FSM
     pub async fn abort(&self, reason: &str) -> Result<(), FlowError> {
         self.send_event(PipelineEvent::Error {
-            message: format!("Force abort: {}", reason),
+            message: format!("Force abort: {reason}"),
         })
         .await
     }
@@ -320,17 +337,17 @@ impl FlowHandle {
     }
 
     /// Get structural middleware stacks per stage (for topology endpoint, FLOWIP-059)
-    pub fn middleware_stacks(&self) -> Option<Arc<HashMap<StageId, MiddlewareStackConfig>>> {
+    pub fn middleware_stacks(&self) -> Option<MiddlewareStacks> {
         self.middleware_stacks.clone()
     }
 
     /// Get structural contract names per edge (for topology endpoint)
-    pub fn contract_attachments(&self) -> Option<Arc<HashMap<(StageId, StageId), Vec<String>>>> {
+    pub fn contract_attachments(&self) -> Option<ContractAttachments> {
         self.contract_attachments.clone()
     }
 
     /// Get join metadata per stage (for topology endpoint, FLOWIP-082a)
-    pub fn join_metadata(&self) -> Option<Arc<HashMap<StageId, crate::pipeline::JoinMetadata>>> {
+    pub fn join_metadata(&self) -> Option<JoinMetadataMap> {
         self.join_metadata.clone()
     }
 
@@ -351,14 +368,10 @@ impl FlowHandle {
     pub async fn render_metrics(&self) -> Result<String, FlowError> {
         if let Some(ref exporter) = self.metrics_exporter {
             exporter.render_metrics().map_err(|e| {
-                FlowError::ExecutionFailed(Box::new(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    e.to_string(),
-                )))
+                FlowError::ExecutionFailed(Box::new(std::io::Error::other(e.to_string())))
             })
         } else {
-            Err(FlowError::ExecutionFailed(Box::new(std::io::Error::new(
-                std::io::ErrorKind::Other,
+            Err(FlowError::ExecutionFailed(Box::new(std::io::Error::other(
                 "No metrics exporter configured",
             ))))
         }
@@ -380,16 +393,13 @@ impl SupervisorHandle for FlowHandle {
                     "Pipeline supervisor is not running",
                 )))
             }
-            HandleError::SupervisorFailed(msg) => FlowError::ExecutionFailed(Box::new(
-                std::io::Error::new(std::io::ErrorKind::Other, msg),
-            )),
+            HandleError::SupervisorFailed(msg) => {
+                FlowError::ExecutionFailed(Box::new(std::io::Error::other(msg)))
+            }
             HandleError::SupervisorPanicked(msg) => FlowError::ExecutionFailed(Box::new(
-                std::io::Error::new(std::io::ErrorKind::Other, format!("Task panicked: {}", msg)),
+                std::io::Error::other(format!("Task panicked: {msg}")),
             )),
-            _ => FlowError::ExecutionFailed(Box::new(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                e.to_string(),
-            ))),
+            _ => FlowError::ExecutionFailed(Box::new(std::io::Error::other(e.to_string()))),
         })
     }
 
@@ -408,19 +418,13 @@ impl SupervisorHandle for FlowHandle {
                         "Pipeline supervisor is not running",
                     )))
                 }
-                HandleError::SupervisorFailed(msg) => FlowError::ExecutionFailed(Box::new(
-                    std::io::Error::new(std::io::ErrorKind::Other, msg),
-                )),
-                HandleError::SupervisorPanicked(msg) => {
-                    FlowError::ExecutionFailed(Box::new(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        format!("Task panicked: {}", msg),
-                    )))
+                HandleError::SupervisorFailed(msg) => {
+                    FlowError::ExecutionFailed(Box::new(std::io::Error::other(msg)))
                 }
-                _ => FlowError::ExecutionFailed(Box::new(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    e.to_string(),
-                ))),
+                HandleError::SupervisorPanicked(msg) => FlowError::ExecutionFailed(Box::new(
+                    std::io::Error::other(format!("Task panicked: {msg}")),
+                )),
+                _ => FlowError::ExecutionFailed(Box::new(std::io::Error::other(e.to_string()))),
             })
     }
 }

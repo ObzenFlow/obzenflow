@@ -54,7 +54,7 @@ impl AsyncFiniteSourceHandler for TestAsyncEventSource {
             self.emitted += 1;
             tokio::time::sleep(Duration::from_millis(5)).await;
             Ok(Some(vec![ChainEventFactory::data_event(
-                self.writer_id.clone(),
+                self.writer_id,
                 "TestEvent",
                 json!({ "index": index }),
             )]))
@@ -157,7 +157,7 @@ async fn async_finite_source_emits_events_and_calls_drain() -> Result<()> {
         }
     }
     .await
-    .map_err(|e| anyhow::anyhow!("Failed to create flow: {:?}", e))?;
+    .map_err(|e| anyhow::anyhow!("Failed to create flow: {e:?}"))?;
 
     handle.run().await?;
 
@@ -165,8 +165,8 @@ async fn async_finite_source_emits_events_and_calls_drain() -> Result<()> {
         .lock()
         .unwrap()
         .iter()
+        .filter(|event| event.is_data())
         .cloned()
-        .filter(|e| e.is_data())
         .collect();
     assert_eq!(
         data_events.len(),
@@ -206,7 +206,7 @@ async fn async_finite_source_applies_stage_middleware() -> Result<()> {
         }
     }
     .await
-    .map_err(|e| anyhow::anyhow!("Failed to create flow: {:?}", e))?;
+    .map_err(|e| anyhow::anyhow!("Failed to create flow: {e:?}"))?;
 
     handle.run().await?;
 
@@ -214,8 +214,8 @@ async fn async_finite_source_applies_stage_middleware() -> Result<()> {
         .lock()
         .unwrap()
         .iter()
+        .filter(|event| event.is_data())
         .cloned()
-        .filter(|e| e.is_data())
         .collect();
 
     assert_eq!(

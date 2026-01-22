@@ -13,36 +13,38 @@ macro_rules! parse_topology {
 
     // Join tuple when only collecting connections (no join metadata collector)
     ($connections:expr, ($reference:ident, $stream:ident) |> $join:ident; $($rest:tt)*) => {
-        $connections.push((
-            stringify!($reference).to_string(),
-            stringify!($join).to_string(),
-            obzenflow_topology::EdgeKind::Forward,
-        ));
-        $connections.push((
-            stringify!($stream).to_string(),
-            stringify!($join).to_string(),
-            obzenflow_topology::EdgeKind::Forward,
-        ));
+        $connections.extend([
+            (
+                stringify!($reference).to_string(),
+                stringify!($join).to_string(),
+                obzenflow_topology::EdgeKind::Forward,
+            ),
+            (
+                stringify!($stream).to_string(),
+                stringify!($join).to_string(),
+                obzenflow_topology::EdgeKind::Forward,
+            ),
+        ]);
         $crate::parse_topology!($connections, $($rest)*);
     };
 
     // Forward edge: from |> to;
     ($connections:expr, $from:ident |> $to:ident; $($rest:tt)*) => {
-        $connections.push((
+        $connections.extend([(
             stringify!($from).to_string(),
             stringify!($to).to_string(),
             obzenflow_topology::EdgeKind::Forward,
-        ));
+        )]);
         $crate::parse_topology!($connections, $($rest)*);
     };
 
     // Backward edge: from <| to; (reversed)
     ($connections:expr, $from:ident <| $to:ident; $($rest:tt)*) => {
-        $connections.push((
+        $connections.extend([(
             stringify!($to).to_string(),    // Note: reversed!
             stringify!($from).to_string(),
             obzenflow_topology::EdgeKind::Backward,
-        ));
+        )]);
         $crate::parse_topology!($connections, $($rest)*);
     };
 }
@@ -55,43 +57,45 @@ macro_rules! parse_topology_with_joins {
 
     // Join tuple: (reference, stream) |> joiner; with join metadata collector
     ($connections:expr, $join_connections:expr, ($reference:ident, $stream:ident) |> $join:ident; $($rest:tt)*) => {
-        $join_connections.push((
+        $join_connections.extend([(
             stringify!($join).to_string(),
             (
                 stringify!($reference).to_string(),
                 stringify!($stream).to_string()
             )
-        ));
-        $connections.push((
-            stringify!($reference).to_string(),
-            stringify!($join).to_string(),
-            obzenflow_topology::EdgeKind::Forward,
-        ));
-        $connections.push((
-            stringify!($stream).to_string(),
-            stringify!($join).to_string(),
-            obzenflow_topology::EdgeKind::Forward,
-        ));
+        )]);
+        $connections.extend([
+            (
+                stringify!($reference).to_string(),
+                stringify!($join).to_string(),
+                obzenflow_topology::EdgeKind::Forward,
+            ),
+            (
+                stringify!($stream).to_string(),
+                stringify!($join).to_string(),
+                obzenflow_topology::EdgeKind::Forward,
+            ),
+        ]);
         $crate::parse_topology_with_joins!($connections, $join_connections, $($rest)*);
     };
 
     // Forward edge while tracking join connections separately
     ($connections:expr, $join_connections:expr, $from:ident |> $to:ident; $($rest:tt)*) => {
-        $connections.push((
+        $connections.extend([(
             stringify!($from).to_string(),
             stringify!($to).to_string(),
             obzenflow_topology::EdgeKind::Forward,
-        ));
+        )]);
         $crate::parse_topology_with_joins!($connections, $join_connections, $($rest)*);
     };
 
     // Backward edge while tracking join connections separately
     ($connections:expr, $join_connections:expr, $from:ident <| $to:ident; $($rest:tt)*) => {
-        $connections.push((
+        $connections.extend([(
             stringify!($to).to_string(),    // Note: reversed!
             stringify!($from).to_string(),
             obzenflow_topology::EdgeKind::Backward,
-        ));
+        )]);
         $crate::parse_topology_with_joins!($connections, $join_connections, $($rest)*);
     };
 }

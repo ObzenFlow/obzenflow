@@ -61,6 +61,12 @@ pub struct MetricSet {
     metrics: HashMap<String, Box<dyn Metric>>,
 }
 
+impl Default for MetricSet {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MetricSet {
     pub fn new() -> Self {
         Self {
@@ -68,7 +74,7 @@ impl MetricSet {
         }
     }
 
-    pub fn add<M: Metric + 'static>(mut self, metric: M) -> Self {
+    pub fn with<M: Metric + 'static>(mut self, metric: M) -> Self {
         self.metrics
             .insert(metric.name().to_string(), Box::new(metric));
         self
@@ -85,9 +91,23 @@ impl MetricSet {
     }
 }
 
+impl<M: Metric + 'static> std::ops::Add<M> for MetricSet {
+    type Output = Self;
+
+    fn add(self, metric: M) -> Self::Output {
+        MetricSet::with(self, metric)
+    }
+}
+
 /// Builder pattern for composing metrics into sets
 pub struct MetricSetBuilder {
     metrics: Vec<Box<dyn Metric>>,
+}
+
+impl Default for MetricSetBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl MetricSetBuilder {

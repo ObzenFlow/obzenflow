@@ -8,7 +8,6 @@ use crate::middleware::{
 };
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::event::context::StageType;
-use obzenflow_core::EventId;
 use obzenflow_core::{StageId, WriterId};
 use obzenflow_runtime_services::pipeline::config::StageConfig;
 use obzenflow_runtime_services::stages::common::control_strategies::{
@@ -175,15 +174,15 @@ impl WindowingMiddlewareFactory {
         match &self.aggregation_type {
             AggregationType::Count => Arc::new(|events: Vec<ChainEvent>| {
                 let count = events.len();
-                let result = ChainEventFactory::windowing_count_event(
+
+                ChainEventFactory::windowing_count_event(
                     WriterId::from(StageId::new()),
                     count,
                     std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap()
                         .as_millis(),
-                );
-                result
+                )
             }),
             AggregationType::Sum(field) => {
                 let field = field.clone();
@@ -198,7 +197,7 @@ impl WindowingMiddlewareFactory {
 
                     let sum: f64 = values.iter().sum();
 
-                    let result = ChainEventFactory::windowing_sum_event(
+                    ChainEventFactory::windowing_sum_event(
                         WriterId::from(StageId::new()),
                         sum,
                         field.clone(),
@@ -208,8 +207,7 @@ impl WindowingMiddlewareFactory {
                             .duration_since(std::time::UNIX_EPOCH)
                             .unwrap()
                             .as_millis(),
-                    );
-                    result
+                    )
                 })
             }
             AggregationType::Average(field) => {
@@ -229,7 +227,7 @@ impl WindowingMiddlewareFactory {
                         values.iter().sum::<f64>() / values.len() as f64
                     };
 
-                    let result = ChainEventFactory::windowing_average_event(
+                    ChainEventFactory::windowing_average_event(
                         WriterId::from(StageId::new()),
                         avg,
                         field.clone(),
@@ -239,8 +237,7 @@ impl WindowingMiddlewareFactory {
                             .duration_since(std::time::UNIX_EPOCH)
                             .unwrap()
                             .as_millis(),
-                    );
-                    result
+                    )
                 })
             }
             AggregationType::Custom(f) => f.clone(),
@@ -306,7 +303,7 @@ mod tests {
         ));
 
         let mut ctx = MiddlewareContext::new();
-        let mut event = ChainEventFactory::data_event(
+        let event = ChainEventFactory::data_event(
             WriterId::from(StageId::new()),
             "test.event",
             json!({"value": 42}),

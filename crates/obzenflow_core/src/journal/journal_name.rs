@@ -31,7 +31,7 @@ impl JournalName {
                 stage_type,
                 name,
             } => {
-                format!("{:?}_{}_{}.log", stage_type, name, id)
+                format!("{stage_type:?}_{name}_{id}.log")
             }
         }
     }

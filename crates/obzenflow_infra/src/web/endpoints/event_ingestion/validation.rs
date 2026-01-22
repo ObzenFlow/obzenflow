@@ -8,9 +8,7 @@ use std::sync::Arc;
 #[derive(Debug, Clone)]
 pub enum ValidationConfig {
     /// Single event type - all submissions must match this schema.
-    Single {
-        validator: Arc<dyn SchemaValidator>,
-    },
+    Single { validator: Arc<dyn SchemaValidator> },
     /// Multiple event types - lookup by event_type field (exact match).
     Registry {
         validators: HashMap<String, Arc<dyn SchemaValidator>>,
@@ -42,6 +40,12 @@ pub trait SchemaValidator: Send + Sync + std::fmt::Debug {
 #[derive(Debug)]
 pub struct TypedValidator<T: TypedPayload> {
     _phantom: PhantomData<T>,
+}
+
+impl<T: TypedPayload> Default for TypedValidator<T> {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl<T: TypedPayload> TypedValidator<T> {
@@ -94,12 +98,12 @@ pub fn validate_submission(
         },
     };
 
-    validator.validate(&submission.data).map_err(|message| {
-        ValidationError::ValidationFailed {
+    validator
+        .validate(&submission.data)
+        .map_err(|message| ValidationError::ValidationFailed {
             event_type: submission.event_type.clone(),
             message,
-        }
-    })
+        })
 }
 
 #[cfg(test)]

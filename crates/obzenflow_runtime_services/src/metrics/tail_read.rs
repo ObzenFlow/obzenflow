@@ -13,6 +13,12 @@ use obzenflow_core::Journal;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+type StageJournalEntry = (
+    StageId,
+    Arc<dyn Journal<ChainEvent>>,
+    Option<Arc<dyn Journal<ChainEvent>>>,
+);
+
 /// Read the most recent `RuntimeContext` from a journal's tail.
 ///
 /// Uses a graduated search to handle cases where the very last events may not
@@ -213,11 +219,7 @@ pub async fn read_stage_metrics_from_tail(
 /// - FlowLifecycleMetricsSnapshot: minimal view for lifecycle events.
 /// - FlowMetricsSnapshot: full view for Prometheus export.
 pub async fn read_flow_metrics_from_tails(
-    stage_journals: &[(
-        StageId,
-        Arc<dyn Journal<ChainEvent>>,
-        Option<Arc<dyn Journal<ChainEvent>>>,
-    )],
+    stage_journals: &[StageJournalEntry],
     stage_metadata: &HashMap<StageId, StageMetadata>,
 ) -> FlowLifecycleMetricsSnapshot {
     let mut events_in_total: u64 = 0;
@@ -253,12 +255,10 @@ pub async fn read_flow_metrics_from_tails(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate as obzenflow_runtime_services;
     use async_trait::async_trait;
     use obzenflow_core::event::event_envelope::EventEnvelope;
     use obzenflow_core::event::identity::journal_writer_id::JournalWriterId;
     use obzenflow_core::event::status::processing_status::ErrorKind;
-    use obzenflow_core::event::JournalEvent;
     use obzenflow_core::id::JournalId;
     use obzenflow_core::journal::journal_error::JournalError;
     use obzenflow_core::journal::journal_owner::JournalOwner;

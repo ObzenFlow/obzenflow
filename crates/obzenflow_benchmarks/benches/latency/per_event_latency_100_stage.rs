@@ -61,7 +61,7 @@ impl FiniteSourceHandler for TimestampedSource {
         let current = self.emitted.fetch_add(1, Ordering::Relaxed);
         if current < self.total_events {
             Ok(Some(vec![ChainEventFactory::data_event(
-                self.writer_id.clone(),
+                self.writer_id,
                 "TimestampedEvent",
                 json!({
                     "event_id": current,
@@ -398,13 +398,13 @@ async fn run_100_stage_pipeline() -> anyhow::Result<Duration> {
         }
     }
     .await
-    .map_err(|e| anyhow::anyhow!("Failed to create flow: {:?}", e))?;
+    .map_err(|e| anyhow::anyhow!("Failed to create flow: {e:?}"))?;
 
     // Start the pipeline (bounded wait so Criterion warmup doesn't hang forever).
     handle
         .start()
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to start pipeline: {:?}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to start pipeline: {e:?}"))?;
 
     let mut state_rx = handle.state_receiver();
     let deadline = Instant::now() + pipeline_timeout;

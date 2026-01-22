@@ -5,18 +5,13 @@
 use crate::id_conversions::StageIdExt;
 use crate::message_bus::FsmMessageBus;
 use crate::messaging::system_subscription::SystemSubscription;
-use crate::messaging::upstream_subscription::UpstreamSubscription;
 use crate::stages::common::stage_handle::{StageError, STOP_REASON_TIMEOUT, STOP_REASON_USER_STOP};
 use crate::supervised_base::SupervisorHandle;
-use obzenflow_core::event::payloads::observability_payload::{
-    MetricsLifecycle, ObservabilityPayload,
-};
 use obzenflow_core::event::{
-    constants, context::StageType, ChainEvent, ChainEventContent, ChainEventFactory, SystemEvent,
-    SystemEventFactory, WriterId,
+    ChainEvent, ChainEventFactory, SystemEvent, SystemEventFactory, WriterId,
 };
 use obzenflow_core::id::{FlowId, SystemId};
-use obzenflow_core::journal::journal::Journal;
+use obzenflow_core::journal::Journal;
 use obzenflow_core::metrics::{FlowLifecycleMetricsSnapshot, StageMetricsSnapshot};
 use obzenflow_core::StageId;
 use obzenflow_fsm::{
@@ -98,7 +93,7 @@ pub enum PipelineEvent {
         upstream: Option<StageId>,
     },
     StageCompleted {
-        envelope: obzenflow_core::EventEnvelope<SystemEvent>,
+        envelope: Box<obzenflow_core::EventEnvelope<SystemEvent>>,
     },
     AllStagesCompleted,
     Error {
@@ -151,7 +146,7 @@ pub enum PipelineAction {
     StartCompletionSubscription,
     ProcessCompletionEvents,
     HandleStageCompleted {
-        envelope: obzenflow_core::EventEnvelope<SystemEvent>,
+        envelope: Box<obzenflow_core::EventEnvelope<SystemEvent>>,
     },
 }
 
@@ -326,7 +321,7 @@ impl FsmAction for PipelineAction {
                 tracing::info!("Stage IDs count: {}", stage_ids.len());
 
                 for stage_id in stage_ids {
-                    if let Some(mut stage) = supervisors.remove(&stage_id) {
+                    if let Some(stage) = supervisors.remove(&stage_id) {
                         let stage_name = stage.stage_name().to_string();
 
                         tracing::info!("Initializing stage: {} (id: {:?})", stage_name, stage_id);
@@ -334,8 +329,7 @@ impl FsmAction for PipelineAction {
                         // Initialize the stage
                         stage.initialize().await.map_err(|e| {
                             obzenflow_fsm::FsmError::HandlerError(format!(
-                                "Failed to initialize stage {}: {}",
-                                stage_name, e
+                                "Failed to initialize stage {stage_name}: {e}"
                             ))
                         })?;
 
@@ -356,13 +350,12 @@ impl FsmAction for PipelineAction {
                 tracing::info!("Source supervisors count: {}", source_supers.len());
                 let source_ids: Vec<_> = source_supers.keys().cloned().collect();
                 for source_id in source_ids {
-                    if let Some(mut source) = source_supers.remove(&source_id) {
+                    if let Some(source) = source_supers.remove(&source_id) {
                         let stage_name = source.stage_name().to_string();
                         tracing::info!("Initializing source: {} (id: {:?})", stage_name, source_id);
                         source.initialize().await.map_err(|e| {
                             obzenflow_fsm::FsmError::HandlerError(format!(
-                                "Failed to initialize source {}: {}",
-                                stage_name, e
+                                "Failed to initialize source {stage_name}: {e}"
                             ))
                         })?;
                         source_supers.insert(source_id, source);
@@ -449,8 +442,7 @@ impl FsmAction for PipelineAction {
                     .await
                     .map_err(|e| {
                         obzenflow_fsm::FsmError::HandlerError(format!(
-                            "Failed to publish pipeline starting event: {}",
-                            e
+                            "Failed to publish pipeline starting event: {e}"
                         ))
                     })?;
 
@@ -470,8 +462,7 @@ impl FsmAction for PipelineAction {
                     .await
                     .map_err(|e| {
                         obzenflow_fsm::FsmError::HandlerError(format!(
-                            "Failed to publish pipeline running event: {}",
-                            e
+                            "Failed to publish pipeline running event: {e}"
                         ))
                     })?;
 
@@ -523,8 +514,7 @@ impl FsmAction for PipelineAction {
                     .await
                     .map_err(|e| {
                         obzenflow_fsm::FsmError::HandlerError(format!(
-                            "Failed to publish pipeline stop requested event: {}",
-                            e
+                            "Failed to publish pipeline stop requested event: {e}"
                         ))
                     })?;
             }
@@ -573,8 +563,7 @@ impl FsmAction for PipelineAction {
                     .await
                     .map_err(|e| {
                         obzenflow_fsm::FsmError::HandlerError(format!(
-                            "Failed to publish system drain event: {}",
-                            e
+                            "Failed to publish system drain event: {e}"
                         ))
                     })?;
                 tracing::info!("Published pipeline draining event to system journal");
@@ -650,11 +639,7 @@ impl FsmAction for PipelineAction {
                 // without code changes.
                 use std::time::{Duration, Instant};
 
-                let timeout = std::env::var("OBZENFLOW_SHUTDOWN_TIMEOUT_SECS")
-                    .ok()
-                    .and_then(|s| s.parse::<u64>().ok())
-                    .map(Duration::from_secs)
-                    .unwrap_or_else(|| Duration::from_secs(30));
+                let timeout = stop_drain_timeout();
 
                 let start = Instant::now();
 
@@ -744,7 +729,7 @@ impl FsmAction for PipelineAction {
                                 stage_type: stage_handle.stage_type(),
                                 reference_mode: None,
                                 flow_name: context.flow_name.clone(),
-                                flow_id: Some(context.flow_id.clone()),
+                                flow_id: Some(context.flow_id),
                             };
                             stage_metadata.insert(*stage_id, metadata);
                         }
@@ -761,7 +746,7 @@ impl FsmAction for PipelineAction {
                                 stage_type: stage_handle.stage_type(),
                                 reference_mode: None,
                                 flow_name: context.flow_name.clone(),
-                                flow_id: Some(context.flow_id.clone()),
+                                flow_id: Some(context.flow_id),
                             };
                             stage_metadata.insert(*stage_id, metadata);
                         }
@@ -778,9 +763,9 @@ impl FsmAction for PipelineAction {
                         tracing::info!("No error journals passed to metrics aggregator");
                     }
                     tracing::info!(
-                        stage_metadata = ?stage_metadata
-                            .iter()
-                            .map(|(id, meta)| (*id, meta.name.clone(), meta.stage_type.clone()))
+                            stage_metadata = ?stage_metadata
+                                .iter()
+                            .map(|(id, meta)| (*id, meta.name.clone(), meta.stage_type))
                             .collect::<Vec<_>>(),
                         "Stage metadata collected for metrics aggregator"
                     );
@@ -903,8 +888,7 @@ impl FsmAction for PipelineAction {
 
                 // 2. Publish drain request to ALL stage data journals
                 // (metrics aggregator reads from these journals)
-                let stage_journals = &context.stage_data_journals;
-                for (stage_id, journal) in stage_journals.iter() {
+                for (stage_id, journal) in &context.stage_data_journals {
                     if let Err(e) = journal.append(drain_event.clone(), None).await {
                         tracing::warn!(
                             stage_id = %stage_id,
@@ -913,7 +897,6 @@ impl FsmAction for PipelineAction {
                         );
                     }
                 }
-                drop(stage_journals);
 
                 // 3. Wait for drain completion event from system journal
                 // The metrics aggregator will publish MetricsCoordination::Drained when done.
@@ -985,8 +968,7 @@ impl FsmAction for PipelineAction {
                         .await
                         .map_err(|e| {
                             obzenflow_fsm::FsmError::HandlerError(format!(
-                                "Failed to write pipeline abort event to {:?}: {}",
-                                stage_id, e
+                                "Failed to write pipeline abort event to {stage_id:?}: {e}"
                             ))
                         })?;
                 }
@@ -1005,8 +987,7 @@ impl FsmAction for PipelineAction {
                 // Create reader for system journal - will receive system events
                 let reader = context.system_journal.reader().await.map_err(|e| {
                     obzenflow_fsm::FsmError::HandlerError(format!(
-                        "Failed to create system journal reader: {:?}",
-                        e
+                        "Failed to create system journal reader: {e:?}"
                     ))
                 })?;
 
@@ -1083,8 +1064,7 @@ impl FsmAction for PipelineAction {
                             .await
                             .map_err(|e| {
                                 obzenflow_fsm::FsmError::HandlerError(format!(
-                                    "Failed to write all stages completed event: {}",
-                                    e
+                                    "Failed to write all stages completed event: {e}"
                                 ))
                             })?;
                     }
@@ -1306,21 +1286,23 @@ pub fn build_pipeline_fsm() -> PipelineFsm {
                             ctx.stop_mode = Some(FlowStopMode::Cancel);
                             ctx.stop_deadline = None;
 
-                            let reason_label = ctx
-                                .stop_reason
-                                .clone()
-                                .unwrap_or_else(|| STOP_REASON_USER_STOP.to_string());
+                                let reason_label = ctx
+                                    .stop_reason
+                                    .clone()
+                                    .unwrap_or_else(|| STOP_REASON_USER_STOP.to_string());
+                                let failure_reason = reason_label.clone();
+                                let failure_cause = Some(
+                                    obzenflow_core::event::types::ViolationCause::Other(reason_label),
+                                );
 
-                            Ok(Transition {
-                                next_state: PipelineState::Failed {
-                                    reason: reason_label.clone(),
-                                    failure_cause: Some(obzenflow_core::event::types::ViolationCause::Other(
-                                        reason_label.into(),
-                                    )),
-                                },
-                                actions: vec![
-                                    PipelineAction::WritePipelineStopRequested { mode },
-                                    PipelineAction::Cleanup,
+                                Ok(Transition {
+                                    next_state: PipelineState::Failed {
+                                        reason: failure_reason,
+                                        failure_cause,
+                                    },
+                                    actions: vec![
+                                        PipelineAction::WritePipelineStopRequested { mode },
+                                        PipelineAction::Cleanup,
                                 ],
                             })
                         }
@@ -1414,21 +1396,23 @@ pub fn build_pipeline_fsm() -> PipelineFsm {
                             ctx.stop_mode = Some(FlowStopMode::Cancel);
                             ctx.stop_deadline = None;
 
-                            let reason_label = ctx
-                                .stop_reason
-                                .clone()
-                                .unwrap_or_else(|| STOP_REASON_USER_STOP.to_string());
+                                let reason_label = ctx
+                                    .stop_reason
+                                    .clone()
+                                    .unwrap_or_else(|| STOP_REASON_USER_STOP.to_string());
+                                let failure_reason = reason_label.clone();
+                                let failure_cause = Some(
+                                    obzenflow_core::event::types::ViolationCause::Other(reason_label),
+                                );
 
-                            Ok(Transition {
-                                next_state: PipelineState::Failed {
-                                    reason: reason_label.clone(),
-                                    failure_cause: Some(obzenflow_core::event::types::ViolationCause::Other(
-                                        reason_label.into(),
-                                    )),
-                                },
-                                actions: vec![
-                                    PipelineAction::WritePipelineStopRequested { mode },
-                                    PipelineAction::Cleanup,
+                                Ok(Transition {
+                                    next_state: PipelineState::Failed {
+                                        reason: failure_reason,
+                                        failure_cause,
+                                    },
+                                    actions: vec![
+                                        PipelineAction::WritePipelineStopRequested { mode },
+                                        PipelineAction::Cleanup,
                                 ],
                             })
                         }
@@ -1548,21 +1532,23 @@ pub fn build_pipeline_fsm() -> PipelineFsm {
                             ctx.stop_mode = Some(FlowStopMode::Cancel);
                             ctx.stop_deadline = None;
 
-                            let reason_label = ctx
-                                .stop_reason
-                                .clone()
-                                .unwrap_or_else(|| STOP_REASON_USER_STOP.to_string());
+                                let reason_label = ctx
+                                    .stop_reason
+                                    .clone()
+                                    .unwrap_or_else(|| STOP_REASON_USER_STOP.to_string());
+                                let failure_reason = reason_label.clone();
+                                let failure_cause = Some(
+                                    obzenflow_core::event::types::ViolationCause::Other(reason_label),
+                                );
 
-                            Ok(Transition {
-                                next_state: PipelineState::Failed {
-                                    reason: reason_label.clone(),
-                                    failure_cause: Some(obzenflow_core::event::types::ViolationCause::Other(
-                                        reason_label.into(),
-                                    )),
-                                },
-                                actions: vec![
-                                    PipelineAction::WritePipelineStopRequested { mode },
-                                    PipelineAction::Cleanup,
+                                Ok(Transition {
+                                    next_state: PipelineState::Failed {
+                                        reason: failure_reason,
+                                        failure_cause,
+                                    },
+                                    actions: vec![
+                                        PipelineAction::WritePipelineStopRequested { mode },
+                                        PipelineAction::Cleanup,
                                 ],
                             })
                         }

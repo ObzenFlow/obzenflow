@@ -52,23 +52,12 @@ impl TypedPayload for TransformedChar {
 }
 
 // FLOWIP-080j: Accumulated state for the reducer
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct TextAccumulator {
     transformed_text: String,
     sentence_count: usize,
     total_chars: usize,
     last_was_punctuation: bool, // Track consecutive punctuation to avoid double-counting
-}
-
-impl Default for TextAccumulator {
-    fn default() -> Self {
-        Self {
-            transformed_text: String::new(),
-            sentence_count: 0,
-            total_chars: 0,
-            last_was_punctuation: false,
-        }
-    }
 }
 
 impl TypedPayload for TextAccumulator {

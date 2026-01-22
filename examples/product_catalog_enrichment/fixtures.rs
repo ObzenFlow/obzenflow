@@ -63,44 +63,44 @@ pub fn products() -> Vec<Product> {
     ]
 }
 
-pub fn skus() -> Vec<SKU> {
+pub fn skus() -> Vec<Sku> {
     vec![
-        SKU {
+        Sku {
             sku_id: "LAPTOP-PRO-16-512".to_string(),
             product_id: "LAPTOP-PRO".to_string(),
             variant: "16GB/512GB SSD".to_string(),
             unit_cost: 900.00,
             current_price: 1299.99,
         },
-        SKU {
+        Sku {
             sku_id: "LAPTOP-PRO-32-1TB".to_string(),
             product_id: "LAPTOP-PRO".to_string(),
             variant: "32GB/1TB SSD".to_string(),
             unit_cost: 1100.00,
             current_price: 1599.99,
         },
-        SKU {
+        Sku {
             sku_id: "LAPTOP-BUS-8-256".to_string(),
             product_id: "LAPTOP-BUS".to_string(),
             variant: "8GB/256GB SSD".to_string(),
             unit_cost: 700.00,
             current_price: 999.99,
         },
-        SKU {
+        Sku {
             sku_id: "PHONE-SMART-128".to_string(),
             product_id: "PHONE-SMART".to_string(),
             variant: "128GB".to_string(),
             unit_cost: 600.00,
             current_price: 899.99,
         },
-        SKU {
+        Sku {
             sku_id: "CHAIR-ERGO-BLACK".to_string(),
             product_id: "CHAIR-ERGO".to_string(),
             variant: "Black".to_string(),
             unit_cost: 180.00,
             current_price: 299.99,
         },
-        SKU {
+        Sku {
             sku_id: "BOOK-RUST-PAPER".to_string(),
             product_id: "BOOK-RUST".to_string(),
             variant: "Paperback".to_string(),

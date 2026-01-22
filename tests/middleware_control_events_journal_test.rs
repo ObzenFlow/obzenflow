@@ -9,7 +9,7 @@ use obzenflow_adapters::middleware::{
     Middleware, MiddlewareAction, MiddlewareContext, TransformHandlerExt,
 };
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
-use obzenflow_core::journal::journal::Journal;
+use obzenflow_core::journal::Journal;
 use obzenflow_core::{JournalOwner, StageId, WriterId};
 use obzenflow_infra::journal::MemoryJournal;
 use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
@@ -36,7 +36,7 @@ impl Middleware for MetricsEmittingMiddleware {
         // Emit metrics state control event
         let writer_id = WriterId::from(StageId::new());
         ctx.write_control_event(ChainEventFactory::metrics_state_snapshot(
-            writer_id.clone(),
+            writer_id,
             json!({
                 "queue_depth": 10,
                 "in_flight": 5
@@ -83,7 +83,7 @@ async fn test_middleware_control_events_flow_to_journal() {
     let writer_id = WriterId::from(stage_id);
 
     // Create test event
-    let event = ChainEventFactory::data_event(writer_id.clone(), "test.data", json!({"value": 42}));
+    let event = ChainEventFactory::data_event(writer_id, "test.data", json!({"value": 42}));
 
     // Process event (simulating what TransformSupervisor does)
     let outputs = handler

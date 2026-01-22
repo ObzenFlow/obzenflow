@@ -29,10 +29,12 @@ pub enum SourceError {
 impl fmt::Display for SourceError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            SourceError::Timeout(msg) => write!(f, "source timeout: {}", msg),
-            SourceError::Transport(msg) => write!(f, "source transport error: {}", msg),
-            SourceError::Deserialization(msg) => write!(f, "source deserialization error: {}", msg),
-            SourceError::Other(msg) => write!(f, "source error: {}", msg),
+            SourceError::Timeout(msg) => write!(f, "source timeout: {msg}"),
+            SourceError::Transport(msg) => write!(f, "source transport error: {msg}"),
+            SourceError::Deserialization(msg) => {
+                write!(f, "source deserialization error: {msg}")
+            }
+            SourceError::Other(msg) => write!(f, "source error: {msg}"),
         }
     }
 }

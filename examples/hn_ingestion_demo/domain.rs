@@ -46,4 +46,3 @@ pub struct FormattedStory {
 impl TypedPayload for FormattedStory {
     const EVENT_TYPE: &'static str = "hn.story.formatted";
 }
-

@@ -12,11 +12,11 @@ use warp::{filters::BoxedFilter, Filter, Rejection, Reply};
 
 use obzenflow_core::event::event_envelope::SystemEventEnvelope;
 use obzenflow_core::event::SystemEvent;
-use obzenflow_core::journal::journal::Journal;
-	use obzenflow_core::web::{
-	    server::ServerShutdownHandle, CorsMode, HttpEndpoint, HttpMethod, Request, ServerConfig,
-	    WebError, WebServer,
-	};
+use obzenflow_core::journal::Journal;
+use obzenflow_core::web::{
+    server::ServerShutdownHandle, CorsMode, HttpEndpoint, HttpMethod, Request, ServerConfig,
+    WebError, WebServer,
+};
 use obzenflow_core::EventId;
 
 /// Warp-based web server implementation
@@ -119,7 +119,7 @@ impl WarpServer {
             .and(path_filter.clone())
             .and(
                 warp::filters::query::query::<HashMap<String, String>>()
-                    .or(warp::any().map(|| HashMap::new()))
+                    .or(warp::any().map(HashMap::new))
                     .unify(),
             )
             .and(warp::header::headers_cloned())
@@ -141,7 +141,7 @@ impl WarpServer {
             .and(path_filter.clone())
             .and(
                 warp::filters::query::query::<HashMap<String, String>>()
-                    .or(warp::any().map(|| HashMap::new()))
+                    .or(warp::any().map(HashMap::new))
                     .unify(),
             )
             .and(warp::header::headers_cloned())
@@ -163,7 +163,7 @@ impl WarpServer {
             .and(path_filter.clone())
             .and(
                 warp::filters::query::query::<HashMap<String, String>>()
-                    .or(warp::any().map(|| HashMap::new()))
+                    .or(warp::any().map(HashMap::new))
                     .unify(),
             )
             .and(warp::header::headers_cloned())
@@ -186,7 +186,7 @@ impl WarpServer {
             .and(path_filter.clone())
             .and(
                 warp::filters::query::query::<HashMap<String, String>>()
-                    .or(warp::any().map(|| HashMap::new()))
+                    .or(warp::any().map(HashMap::new))
                     .unify(),
             )
             .and(warp::header::headers_cloned())
@@ -213,7 +213,7 @@ impl WarpServer {
             .and(path_filter.clone())
             .and(
                 warp::filters::query::query::<HashMap<String, String>>()
-                    .or(warp::any().map(|| HashMap::new()))
+                    .or(warp::any().map(HashMap::new))
                     .unify(),
             )
             .and(warp::header::headers_cloned())
@@ -240,7 +240,7 @@ impl WarpServer {
             .and(path_filter.clone())
             .and(
                 warp::filters::query::query::<HashMap<String, String>>()
-                    .or(warp::any().map(|| HashMap::new()))
+                    .or(warp::any().map(HashMap::new))
                     .unify(),
             )
             .and(warp::header::headers_cloned())
@@ -643,7 +643,9 @@ impl WebServer for WarpServer {
             };
 
             cors = cors
-                .allow_methods(vec!["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"])
+                .allow_methods(vec![
+                    "GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS",
+                ])
                 .allow_headers(vec!["Content-Type", "Accept", "Authorization", "X-Api-Key"]);
 
             routes
@@ -1291,9 +1293,9 @@ fn last_pipeline_event_name(envelope: &SystemEventEnvelope) -> Option<&'static s
             obzenflow_core::event::system_event::PipelineLifecycleEvent::Running { .. } => {
                 "flow_running"
             }
-            obzenflow_core::event::system_event::PipelineLifecycleEvent::StopRequested { .. } => {
-                "flow_stop_requested"
-            }
+            obzenflow_core::event::system_event::PipelineLifecycleEvent::StopRequested {
+                ..
+            } => "flow_stop_requested",
             obzenflow_core::event::system_event::PipelineLifecycleEvent::Draining { .. } => {
                 "flow_draining"
             }
@@ -1347,33 +1349,33 @@ impl StageLifecycleSseState {
         // metrics-enriched completion event).
         let should_replace = match (self.latest_by_stage.get(stage_id), event) {
             (None, _) => true,
-            (Some(prev), StageLifecycleEvent::Completed { metrics: None }) => {
-                !matches!(
-                    prev.event.event,
-                    SystemEventType::StageLifecycle {
-                        event: StageLifecycleEvent::Completed { metrics: Some(_) },
+            (Some(prev), StageLifecycleEvent::Completed { metrics: None }) => !matches!(
+                prev.event.event,
+                SystemEventType::StageLifecycle {
+                    event: StageLifecycleEvent::Completed { metrics: Some(_) },
+                    ..
+                }
+            ),
+            (Some(prev), StageLifecycleEvent::Cancelled { metrics: None, .. }) => !matches!(
+                prev.event.event,
+                SystemEventType::StageLifecycle {
+                    event: StageLifecycleEvent::Cancelled {
+                        metrics: Some(_),
                         ..
-                    }
-                )
-            }
-            (Some(prev), StageLifecycleEvent::Cancelled { metrics: None, .. }) => {
-                !matches!(
-                    prev.event.event,
-                    SystemEventType::StageLifecycle {
-                        event: StageLifecycleEvent::Cancelled { metrics: Some(_), .. },
+                    },
+                    ..
+                }
+            ),
+            (Some(prev), StageLifecycleEvent::Failed { metrics: None, .. }) => !matches!(
+                prev.event.event,
+                SystemEventType::StageLifecycle {
+                    event: StageLifecycleEvent::Failed {
+                        metrics: Some(_),
                         ..
-                    }
-                )
-            }
-            (Some(prev), StageLifecycleEvent::Failed { metrics: None, .. }) => {
-                !matches!(
-                    prev.event.event,
-                    SystemEventType::StageLifecycle {
-                        event: StageLifecycleEvent::Failed { metrics: Some(_), .. },
-                        ..
-                    }
-                )
-            }
+                    },
+                    ..
+                }
+            ),
             _ => true,
         };
 
@@ -1469,7 +1471,11 @@ fn map_stage_lifecycle_to_sse_snapshot(envelope: &SystemEventEnvelope) -> Option
         data["recoverable"] = serde_json::Value::Bool(rec);
     }
 
-    Some(SseEvent::default().event("stage_lifecycle").data(data.to_string()))
+    Some(
+        SseEvent::default()
+            .event("stage_lifecycle")
+            .data(data.to_string()),
+    )
 }
 
 #[derive(Default)]

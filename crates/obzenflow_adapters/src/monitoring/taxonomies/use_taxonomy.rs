@@ -50,29 +50,25 @@ impl USE {
             (
                 "CPU Utilization (%)",
                 format!(
-                    "obzenflow_cpu_usage_ratio{{flow=\"{}\",stage=\"{}\"}} * 100",
-                    flow_name, stage_name
+                    "obzenflow_cpu_usage_ratio{{flow=\"{flow_name}\",stage=\"{stage_name}\"}} * 100"
                 ),
             ),
             (
                 "Memory Usage (MB)",
                 format!(
-                    "obzenflow_memory_bytes{{flow=\"{}\",stage=\"{}\"}} / 1024 / 1024",
-                    flow_name, stage_name
+                    "obzenflow_memory_bytes{{flow=\"{flow_name}\",stage=\"{stage_name}\"}} / 1024 / 1024"
                 ),
             ),
             (
                 "Saturation (In-Flight Events)",
                 format!(
-                    "obzenflow_in_flight_events{{flow=\"{}\",stage=\"{}\"}}",
-                    flow_name, stage_name
+                    "obzenflow_in_flight_events{{flow=\"{flow_name}\",stage=\"{stage_name}\"}}"
                 ),
             ),
             (
                 "Error Rate",
                 format!(
-                    "rate(obzenflow_errors_total{{flow=\"{}\",stage=\"{}\"}}[5m])",
-                    flow_name, stage_name
+                    "rate(obzenflow_errors_total{{flow=\"{flow_name}\",stage=\"{stage_name}\"}}[5m])"
                 ),
             ),
         ]

@@ -217,19 +217,19 @@ async fn main() -> Result<()> {
                     // Pattern repeats every 20 events to create ~40% cart-to-purchase conversion
                     Some(match index % 20 {
                         // Home page visits (30% of traffic)
-                        0 | 1 | 2 | 3 | 4 | 5 => UserEvent {
+                        0..=5 => UserEvent {
                             page: Some(PAGES[0].to_string()),
                             duration_ms: Some((3000 + (index * 17) % 2000) as u64),
                             ..base_event(user_id, "page_view")
                         },
                         // Product browsing (25% of traffic)
-                        6 | 7 | 8 | 9 => UserEvent {
+                        6..=9 => UserEvent {
                             page: Some(PAGES[1].to_string()),
                             duration_ms: Some((5000 + (index * 23) % 5000) as u64),
                             ..base_event(user_id, "page_view")
                         },
                         // Product interactions (15% of traffic)
-                        10 | 11 | 12 => UserEvent {
+                        10..=12 => UserEvent {
                             element: Some("product_card".to_string()),
                             page: Some(PAGES[1].to_string()),
                             ..base_event(user_id, "click")
@@ -340,7 +340,7 @@ async fn main() -> Result<()> {
                             (conversions as f64 / cart as f64) * 100.0
                         );
                     }
-                    println!("   Revenue: ${:.2}", total_revenue);
+                    println!("   Revenue: ${total_revenue:.2}");
                 });
 
                 metrics_sink = sink!("metrics" => |metrics: MetricsState| {
@@ -371,7 +371,7 @@ async fn main() -> Result<()> {
     println!("   • UserEvent::EVENT_TYPE instead of \"user_event\"");
     println!("   • SCHEMA_VERSION for all event types");
     println!("   • Strongly-typed event structs");
-    println!("");
+    println!();
     println!("   FLOWIP-080j Typed Accumulators:");
     println!("   • GroupByTyped: Type-safe per-user session tracking");
     println!("   • ReduceTyped: Type-safe funnel and metrics aggregation");

@@ -255,7 +255,7 @@ where
                         payload["validation_error"] = json!(error_msg);
 
                         vec![ChainEventFactory::derived_data_event(
-                            event.writer_id.clone(),
+                            event.writer_id,
                             &event,
                             event_type,
                             payload,
@@ -276,7 +276,7 @@ where
                         }
 
                         vec![ChainEventFactory::derived_data_event(
-                            event.writer_id.clone(),
+                            event.writer_id,
                             &event,
                             event_type,
                             payload,
@@ -302,7 +302,7 @@ mod tests {
     use super::*;
     use obzenflow_core::event::ChainEventFactory;
     use obzenflow_core::id::StageId;
-    use obzenflow_core::{EventId, WriterId};
+    use obzenflow_core::WriterId;
     use serde::{Deserialize, Serialize};
     use serde_json::json;
 
@@ -317,7 +317,7 @@ mod tests {
 
         fn try_from(event: ChainEvent) -> Result<Self, Self::Error> {
             serde_json::from_value(event.payload().clone())
-                .map_err(|e| format!("Failed to parse TestOrder: {}", e))
+                .map_err(|e| format!("Failed to parse TestOrder: {e}"))
         }
     }
 
@@ -387,7 +387,7 @@ mod tests {
     #[tokio::test]
     async fn test_try_map_debug() {
         let try_mapper = TryMap::<TestOrder>::new();
-        let debug_str = format!("{:?}", try_mapper);
+        let debug_str = format!("{try_mapper:?}");
         assert!(debug_str.contains("TryMap"));
     }
 }

@@ -38,7 +38,6 @@ use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, Delivery
 use obzenflow_runtime_services::stages::stateful::strategies::accumulators::ReduceTyped;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::time::{Duration, Instant};
 
 // ============================================================================
 // FLOWIP-082a: Strongly-Typed Domain Events
@@ -106,9 +105,9 @@ fn error_prone_transform() -> Map<impl Fn(ChainEvent) -> ChainEvent + Send + Syn
             error_payload["error_code"] = json!(500);
 
             ChainEventFactory::derived_data_event(
-                event.writer_id.clone(),
+                event.writer_id,
                 &event,
-                &ErrorEvent::versioned_event_type(),
+                ErrorEvent::versioned_event_type(),
                 error_payload,
             )
         } else {
@@ -118,9 +117,9 @@ fn error_prone_transform() -> Map<impl Fn(ChainEvent) -> ChainEvent + Send + Syn
             result_payload["processing_stage"] = json!("error_prone_transform");
 
             ChainEventFactory::derived_data_event(
-                event.writer_id.clone(),
+                event.writer_id,
                 &event,
-                &ProcessedEvent::versioned_event_type(),
+                ProcessedEvent::versioned_event_type(),
                 result_payload,
             )
         }
@@ -132,15 +131,9 @@ fn error_prone_transform() -> Map<impl Fn(ChainEvent) -> ChainEvent + Send + Syn
 // ============================================================================
 
 /// State for business-level event counting (FLOWIP-080j)
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct EventCountState {
     event_count: usize,
-}
-
-impl Default for EventCountState {
-    fn default() -> Self {
-        Self { event_count: 0 }
-    }
 }
 
 impl TypedPayload for EventCountState {
@@ -182,12 +175,12 @@ async fn main() -> Result<()> {
     println!("   • Fan-out topology (processor → counter + sink)");
     println!("   • StatefulHandler for business-level counting");
     println!("   • Framework Prometheus metrics");
-    println!("");
+    println!();
     println!("Usage:");
     println!("  Run with server:    cargo run -p obzenflow --example prometheus_1k_demo --features obzenflow_infra/warp-server -- --server");
     println!("  Custom port:        cargo run -p obzenflow --example prometheus_1k_demo --features obzenflow_infra/warp-server -- --server --server-port 8080");
     println!("  Without server:     cargo run -p obzenflow --example prometheus_1k_demo");
-    println!("");
+    println!();
 
     FlowApplication::run(flow! {
         name: "prometheus_1k_demo",
@@ -204,20 +197,20 @@ async fn main() -> Result<()> {
                     FiniteSourceTyped::from_item_fn(move |index| {
                         let total = 1_000usize;
                         if index >= total {
-                            println!("🏁 Source complete: Generated {} total events", index);
+                            println!("🏁 Source complete: Generated {index} total events");
                             return None;
                         }
 
                         let current_id = index;
                         let next_count = index + 1;
 
-                        if next_count % 100 == 0 {
-                            println!("📊 Generated {} events...", next_count);
+                        if next_count.is_multiple_of(100) {
+                            println!("📊 Generated {next_count} events...");
                         }
 
                         Some(DataRequest {
                             id: current_id,
-                            should_fail: current_id % 100 == 0,
+                            should_fail: current_id.is_multiple_of(100),
                             batch: current_id / 100,
                         })
                     })
@@ -236,7 +229,7 @@ async fn main() -> Result<()> {
                         |state: &mut EventCountState, _event: &ProcessedEvent| {
                             state.event_count += 1;
                             // Log progress every 100 events
-                            if state.event_count % 100 == 0 {
+                            if state.event_count.is_multiple_of(100) {
                                 println!("📊 Counted {} events so far...", state.event_count);
                             }
                         }
@@ -246,20 +239,19 @@ async fn main() -> Result<()> {
                     let count = summary.event_count;
                     let errors = 1_000usize.saturating_sub(count);
 
-                    println!("");
+                    println!();
                     println!("=====================================");
                     println!("📊 Business-Level Event Count (FLOWIP-080j):");
-                    println!("   Successfully processed: {} events", count);
+                    println!("   Successfully processed: {count} events");
                     println!(
-                        "   Note: 1000 generated - {} = {} errors (routed to error journal)",
-                        count, errors
+                        "   Note: 1000 generated - {count} = {errors} errors (routed to error journal)"
                     );
                     println!("=====================================");
-                    println!("");
+                    println!();
                     println!("💡 Key Improvement:");
                     println!("   59-line EventCounter StatefulHandler → ReduceTyped helper");
                     println!("   Type-safe accumulation with zero ChainEvent manipulation!");
-                    println!("");
+                    println!();
                     println!("📈 To view framework-level Prometheus metrics:");
                     println!("   1. Run with --server flag");
                     println!("   2. Visit http://localhost:3000/metrics");

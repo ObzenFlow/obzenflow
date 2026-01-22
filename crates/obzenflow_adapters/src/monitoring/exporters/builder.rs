@@ -120,12 +120,24 @@ impl MetricsExporterBuilder {
             #[cfg(feature = "metrics-statsd")]
             ExporterType::StatsD { host, port } => {
                 tracing::info!("Creating StatsD metrics exporter: {}:{}", host, port);
-                Arc::new(super::StatsDExporter::new(host, port))
+                let target = format!("{host}:{port}");
+                match super::StatsDExporter::new(target)
+                    .map(|exporter| exporter.with_prefix("obzenflow."))
+                {
+                    Ok(exporter) => Arc::new(exporter),
+                    Err(err) => {
+                        tracing::warn!(
+                            error = %err,
+                            "Failed to create StatsD exporter; falling back to Noop"
+                        );
+                        Arc::new(NoopExporter)
+                    }
+                }
             }
             #[cfg(feature = "metrics-otel")]
             ExporterType::OpenTelemetry { endpoint } => {
                 tracing::info!("Creating OpenTelemetry metrics exporter: {}", endpoint);
-                Arc::new(OtelExporter::new(endpoint))
+                Arc::new(super::OtelExporter::new(endpoint))
             }
         }
     }

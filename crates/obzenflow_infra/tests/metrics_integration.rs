@@ -9,8 +9,8 @@ use obzenflow_core::event::payloads::observability_payload::{
 use obzenflow_core::event::JournalWriterId;
 use obzenflow_core::event::{ChainEventFactory, SystemEvent, SystemEventType, WriterId};
 use obzenflow_core::id::{StageId, SystemId};
-use obzenflow_core::journal::journal::Journal;
 use obzenflow_core::journal::journal_owner::JournalOwner;
+use obzenflow_core::journal::Journal;
 use obzenflow_core::metrics::{AppMetricsSnapshot, MetricsExporter, StageMetadata};
 use obzenflow_core::EventEnvelope;
 use obzenflow_fsm::FsmAction;
@@ -99,12 +99,14 @@ async fn export_snapshot_sanity_from_metrics_store() {
     let mut ctx = make_empty_context(system_id, system_journal, exporter.clone(), stage_id);
 
     // Pre-populate the metrics store as if UpdateMetrics had run.
-    let mut stage_metrics = StageMetrics::default();
     // Wide-event snapshot counters that ExportMetrics and build_app_metrics_snapshot use.
-    stage_metrics.latest_events_processed_total = Some(10);
-    stage_metrics.latest_errors_total = Some(2);
-    stage_metrics.event_loops_total = 5;
-    stage_metrics.event_loops_with_work_total = 5;
+    let stage_metrics = StageMetrics {
+        latest_events_processed_total: Some(10),
+        latest_errors_total: Some(2),
+        event_loops_total: 5,
+        event_loops_with_work_total: 5,
+        ..Default::default()
+    };
     ctx.metrics_store
         .stage_metrics
         .insert(stage_id, stage_metrics);
@@ -126,7 +128,7 @@ async fn export_snapshot_sanity_from_metrics_store() {
     assert_eq!(last.event_counts.get(&stage_id).copied().unwrap_or(0), 10);
     assert_eq!(last.error_counts.get(&stage_id).copied().unwrap_or(0), 2);
     assert!(
-        last.stage_metadata.get(&stage_id).is_some(),
+        last.stage_metadata.contains_key(&stage_id),
         "expected stage metadata for stage"
     );
 }
@@ -149,7 +151,7 @@ async fn publish_drain_complete_writes_drained_event() {
     .id;
 
     MetricsAggregatorAction::PublishDrainComplete {
-        last_event_id: Some(last_event_id.clone()),
+        last_event_id: Some(last_event_id),
     }
     .execute(&mut ctx)
     .await
@@ -255,10 +257,12 @@ async fn http_ingestion_snapshot_wide_event_populates_app_metrics_snapshot() {
     );
     let envelope = EventEnvelope::new(JournalWriterId::new(), event);
 
-    MetricsAggregatorAction::UpdateMetrics { envelope }
-        .execute(&mut ctx)
-        .await
-        .unwrap();
+    MetricsAggregatorAction::UpdateMetrics {
+        envelope: Box::new(envelope),
+    }
+    .execute(&mut ctx)
+    .await
+    .unwrap();
     MetricsAggregatorAction::ExportMetrics
         .execute(&mut ctx)
         .await

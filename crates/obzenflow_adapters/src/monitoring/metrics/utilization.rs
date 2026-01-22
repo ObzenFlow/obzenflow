@@ -163,12 +163,9 @@ impl Metric for UtilizationMetric {
     }
 
     fn update(&self, value: MetricValue) {
-        match value {
-            MetricValue::Gauge(ratio) => {
-                // Accept external utilization ratio updates
-                self.set_utilization(ratio);
-            }
-            _ => {}
+        if let MetricValue::Gauge(ratio) = value {
+            // Accept external utilization ratio updates
+            self.set_utilization(ratio);
         }
     }
 

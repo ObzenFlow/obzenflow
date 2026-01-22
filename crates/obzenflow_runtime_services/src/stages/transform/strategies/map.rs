@@ -284,7 +284,7 @@ where
         // FLOWIP-082a: Use TypedPayload::EVENT_TYPE (compile-time constant)
         let event_type = O::versioned_event_type();
         Ok(vec![ChainEventFactory::derived_data_event(
-            event.writer_id.clone(),
+            event.writer_id,
             &event,
             &event_type,
             payload,
@@ -345,7 +345,7 @@ mod tests {
     use super::*;
     use obzenflow_core::event::ChainEventFactory;
     use obzenflow_core::id::StageId;
-    use obzenflow_core::{EventId, WriterId};
+    use obzenflow_core::WriterId;
     use serde_json::json;
 
     #[tokio::test]
@@ -354,7 +354,7 @@ mod tests {
             let mut payload = event.payload();
             payload["processed"] = json!(true);
 
-            ChainEventFactory::data_event(event.writer_id.clone(), event.event_type(), payload)
+            ChainEventFactory::data_event(event.writer_id, event.event_type(), payload)
         });
 
         let event = ChainEventFactory::data_event(
@@ -379,7 +379,7 @@ mod tests {
             let mut payload = event.payload();
             payload["total"] = json!(price * qty);
 
-            ChainEventFactory::data_event(event.writer_id.clone(), event.event_type(), payload)
+            ChainEventFactory::data_event(event.writer_id, event.event_type(), payload)
         });
 
         let event = ChainEventFactory::data_event(
@@ -398,7 +398,7 @@ mod tests {
     #[tokio::test]
     async fn test_map_event_type_change() {
         let map = Map::new(|event| {
-            ChainEventFactory::data_event(event.writer_id.clone(), "processed", event.payload())
+            ChainEventFactory::data_event(event.writer_id, "processed", event.payload())
         });
 
         let event =
@@ -417,7 +417,7 @@ mod tests {
             let mut payload = event.payload();
             payload["cloned"] = json!(true);
 
-            ChainEventFactory::data_event(event.writer_id.clone(), event.event_type(), payload)
+            ChainEventFactory::data_event(event.writer_id, event.event_type(), payload)
         });
 
         let _cloned = map.clone();
@@ -523,7 +523,7 @@ mod tests {
             doubled: input.value * 2,
         });
 
-        let debug_str = format!("{:?}", mapper);
+        let debug_str = format!("{mapper:?}");
         assert!(debug_str.contains("MapTyped"));
         assert!(debug_str.contains("TestInput"));
         assert!(debug_str.contains("TestOutput"));
@@ -547,6 +547,6 @@ mod tests {
             json!({"wrong_field": "value"}),
         );
 
-        mapper.process(event); // Should panic
+        let _ = mapper.process(event); // Should panic
     }
 }

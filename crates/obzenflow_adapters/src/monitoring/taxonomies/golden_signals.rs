@@ -54,43 +54,37 @@ impl GoldenSignals {
             (
                 "Traffic (req/s)",
                 format!(
-                    "rate(obzenflow_events_total{{flow=\"{}\",stage=\"{}\"}}[5m])",
-                    flow_name, stage_name
+                    "rate(obzenflow_events_total{{flow=\"{flow_name}\",stage=\"{stage_name}\"}}[5m])"
                 )
             ),
             (
                 "Latency P50",
                 format!(
-                    "histogram_quantile(0.5, rate(obzenflow_duration_seconds_bucket{{flow=\"{}\",stage=\"{}\"}}[5m]))",
-                    flow_name, stage_name
+                    "histogram_quantile(0.5, rate(obzenflow_duration_seconds_bucket{{flow=\"{flow_name}\",stage=\"{stage_name}\"}}[5m]))"
                 )
             ),
             (
                 "Latency P95",
                 format!(
-                    "histogram_quantile(0.95, rate(obzenflow_duration_seconds_bucket{{flow=\"{}\",stage=\"{}\"}}[5m]))",
-                    flow_name, stage_name
+                    "histogram_quantile(0.95, rate(obzenflow_duration_seconds_bucket{{flow=\"{flow_name}\",stage=\"{stage_name}\"}}[5m]))"
                 )
             ),
             (
                 "Latency P99",
                 format!(
-                    "histogram_quantile(0.99, rate(obzenflow_duration_seconds_bucket{{flow=\"{}\",stage=\"{}\"}}[5m]))",
-                    flow_name, stage_name
+                    "histogram_quantile(0.99, rate(obzenflow_duration_seconds_bucket{{flow=\"{flow_name}\",stage=\"{stage_name}\"}}[5m]))"
                 )
             ),
             (
                 "Error Rate (%)",
                 format!(
-                    "rate(obzenflow_errors_total{{flow=\"{}\",stage=\"{}\"}}[5m]) / rate(obzenflow_events_total{{flow=\"{}\",stage=\"{}\"}}[5m]) * 100",
-                    flow_name, stage_name, flow_name, stage_name
+                    "rate(obzenflow_errors_total{{flow=\"{flow_name}\",stage=\"{stage_name}\"}}[5m]) / rate(obzenflow_events_total{{flow=\"{flow_name}\",stage=\"{stage_name}\"}}[5m]) * 100"
                 )
             ),
             (
                 "Saturation (In-Flight)",
                 format!(
-                    "obzenflow_in_flight{{flow=\"{}\",stage=\"{}\"}}",
-                    flow_name, stage_name
+                    "obzenflow_in_flight{{flow=\"{flow_name}\",stage=\"{stage_name}\"}}"
                 )
             ),
         ]

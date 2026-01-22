@@ -2,8 +2,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use obzenflow_core::event::SystemEvent;
-use obzenflow_core::journal::journal::Journal;
 use obzenflow_core::journal::journal_owner::JournalOwner;
+use obzenflow_core::journal::Journal;
 use obzenflow_core::{ChainEvent, FlowId, StageId, SystemId};
 use obzenflow_infra::journal::MemoryJournal;
 use obzenflow_runtime_services::id_conversions::StageIdExt;

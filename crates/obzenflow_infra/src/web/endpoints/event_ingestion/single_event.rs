@@ -1,6 +1,6 @@
 use super::shared::join_path;
-use super::{authorize_request, validate_submission};
 use super::IngestionState;
+use super::{authorize_request, validate_submission};
 use async_trait::async_trait;
 use obzenflow_core::event::ingestion::{
     EventSubmission, IngestionRejectionReason, SubmissionResponse,
@@ -41,10 +41,9 @@ impl HttpEndpoint for SingleEventEndpoint {
                     message: e.to_string(),
                     source: None,
                 })?;
-            self.state.telemetry.observe_rejected(
-                IngestionRejectionReason::PayloadTooLarge,
-                1,
-            );
+            self.state
+                .telemetry
+                .observe_rejected(IngestionRejectionReason::PayloadTooLarge, 1);
             return Ok(response);
         }
 
@@ -83,9 +82,9 @@ impl HttpEndpoint for SingleEventEndpoint {
                 let response = Response::new(400)
                     .with_json(&json!({"error": format!("invalid request body: {e}")}))
                     .map_err(|err| WebError::RequestHandlingFailed {
-                            message: err.to_string(),
-                            source: None,
-                        })?;
+                        message: err.to_string(),
+                        source: None,
+                    })?;
                 self.state
                     .telemetry
                     .observe_rejected(IngestionRejectionReason::InvalidJson, 1);
@@ -98,9 +97,9 @@ impl HttpEndpoint for SingleEventEndpoint {
                 let response = Response::new(400)
                     .with_json(&json!({"error": e.to_message()}))
                     .map_err(|err| WebError::RequestHandlingFailed {
-                            message: err.to_string(),
-                            source: None,
-                        })?;
+                        message: err.to_string(),
+                        source: None,
+                    })?;
                 self.state
                     .telemetry
                     .observe_rejected(IngestionRejectionReason::Validation, 1);
@@ -111,26 +110,26 @@ impl HttpEndpoint for SingleEventEndpoint {
         match self.state.tx.try_send(submission) {
             Ok(()) => {
                 let response = Response::ok()
-                .with_json(&SubmissionResponse {
-                    accepted: 1,
-                    rejected: 0,
-                    errors: Vec::new(),
-                })
-                .map_err(|e| WebError::RequestHandlingFailed {
-                    message: e.to_string(),
-                    source: None,
-                })?;
+                    .with_json(&SubmissionResponse {
+                        accepted: 1,
+                        rejected: 0,
+                        errors: Vec::new(),
+                    })
+                    .map_err(|e| WebError::RequestHandlingFailed {
+                        message: e.to_string(),
+                        source: None,
+                    })?;
                 self.state.telemetry.observe_accepted(1);
                 Ok(response)
             }
             Err(TrySendError::Full(_)) => {
                 let response = Response::new(503)
-                .with_header("Retry-After".to_string(), "1".to_string())
-                .with_json(&json!({"error": "buffer full"}))
-                .map_err(|e| WebError::RequestHandlingFailed {
-                    message: e.to_string(),
-                    source: None,
-                })?;
+                    .with_header("Retry-After".to_string(), "1".to_string())
+                    .with_json(&json!({"error": "buffer full"}))
+                    .map_err(|e| WebError::RequestHandlingFailed {
+                        message: e.to_string(),
+                        source: None,
+                    })?;
                 self.state
                     .telemetry
                     .observe_rejected(IngestionRejectionReason::BufferFull, 1);
@@ -138,11 +137,11 @@ impl HttpEndpoint for SingleEventEndpoint {
             }
             Err(TrySendError::Closed(_)) => {
                 let response = Response::internal_error()
-                .with_json(&json!({"error": "ingestion channel closed"}))
-                .map_err(|e| WebError::RequestHandlingFailed {
-                    message: e.to_string(),
-                    source: None,
-                })?;
+                    .with_json(&json!({"error": "ingestion channel closed"}))
+                    .map_err(|e| WebError::RequestHandlingFailed {
+                        message: e.to_string(),
+                        source: None,
+                    })?;
                 self.state
                     .telemetry
                     .observe_rejected(IngestionRejectionReason::ChannelClosed, 1);

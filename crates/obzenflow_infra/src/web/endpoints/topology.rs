@@ -5,11 +5,17 @@
 
 use async_trait::async_trait;
 use obzenflow_core::web::{HttpEndpoint, HttpMethod, Request, Response, WebError};
+use obzenflow_core::StageId;
+use obzenflow_runtime_services::id_conversions::StageIdExt;
+use obzenflow_topology::EdgeKind;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use obzenflow_core::StageId;
-use obzenflow_topology::EdgeKind;
-use obzenflow_runtime_services::id_conversions::StageIdExt;
+
+type StageMetadataMap = std::collections::HashMap<StageId, StageMetadata>;
+type MiddlewareStacks = Arc<std::collections::HashMap<StageId, MiddlewareStackConfig>>;
+type ContractAttachments = Arc<std::collections::HashMap<(StageId, StageId), Vec<String>>>;
+type JoinMetadataMap =
+    Arc<std::collections::HashMap<StageId, obzenflow_runtime_services::pipeline::JoinMetadata>>;
 
 /// JSON representation of flow topology for the API
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -161,17 +167,13 @@ pub use obzenflow_runtime_services::pipeline::MiddlewareStackConfig;
 /// HTTP endpoint that serves flow topology
 pub struct TopologyHttpEndpoint {
     topology: Arc<obzenflow_topology::Topology>,
-    stages_metadata: Arc<std::collections::HashMap<StageId, StageMetadata>>,
+    stages_metadata: Arc<StageMetadataMap>,
     flow_name: String,
     /// Structural middleware config per stage (FLOWIP-059)
-    middleware_stacks: Option<Arc<std::collections::HashMap<StageId, MiddlewareStackConfig>>>,
-    contract_attachments: Option<
-        Arc<std::collections::HashMap<(StageId, StageId), Vec<String>>>,
-    >,
+    middleware_stacks: Option<MiddlewareStacks>,
+    contract_attachments: Option<ContractAttachments>,
     /// Join metadata per stage (FLOWIP-082a)
-    join_metadata: Option<
-        Arc<std::collections::HashMap<StageId, obzenflow_runtime_services::pipeline::JoinMetadata>>,
-    >,
+    join_metadata: Option<JoinMetadataMap>,
 }
 
 /// Additional metadata about stages (type and status)
@@ -186,11 +188,11 @@ pub struct StageMetadata {
 /// but tracked separately here for proper UI visualization
 #[derive(Debug, Clone)]
 pub enum StageType {
-    Source,      // Simplified - UI doesn't need to distinguish finite/infinite
-    Transform,   // Regular transform operations
+    Source,    // Simplified - UI doesn't need to distinguish finite/infinite
+    Transform, // Regular transform operations
     Sink,
-    Broadcast,   // One-to-many distribution (implemented as Transform)
-    Merge,       // Many-to-one aggregation (implemented as Transform)
+    Broadcast, // One-to-many distribution (implemented as Transform)
+    Merge,     // Many-to-one aggregation (implemented as Transform)
 }
 
 impl StageType {
@@ -231,7 +233,7 @@ struct IncludeFlags {
     contracts: bool,
 }
 
-fn parse_include_flags(request: &Request) -> IncludeFlags {
+fn parse_include_flags(_request: &Request) -> IncludeFlags {
     // FLOWIP-059 spec change:
     // The topology endpoint now includes all structural observability
     // sections (middleware + contracts) by default. The `include`
@@ -240,28 +242,21 @@ fn parse_include_flags(request: &Request) -> IncludeFlags {
     //
     // We still parse the parameter so existing clients that send it
     // don't break, but we treat the absence/presence as equivalent.
-    let mut flags = IncludeFlags::default();
-    flags.middleware = true;
-    flags.contracts = true;
-    flags
+    IncludeFlags {
+        middleware: true,
+        contracts: true,
+    }
 }
 
 impl TopologyHttpEndpoint {
     /// Create a new topology endpoint
     pub fn new(
         topology: Arc<obzenflow_topology::Topology>,
-        stages_metadata: Arc<std::collections::HashMap<StageId, StageMetadata>>,
+        stages_metadata: Arc<StageMetadataMap>,
         flow_name: String,
-        middleware_stacks: Option<Arc<std::collections::HashMap<StageId, MiddlewareStackConfig>>>,
-        contract_attachments: Option<
-            Arc<std::collections::HashMap<(StageId, StageId), Vec<String>>>,
-        >,
-        join_metadata: Option<
-            Arc<std::collections::HashMap<
-                StageId,
-                obzenflow_runtime_services::pipeline::JoinMetadata,
-            >>,
-        >,
+        middleware_stacks: Option<MiddlewareStacks>,
+        contract_attachments: Option<ContractAttachments>,
+        join_metadata: Option<JoinMetadataMap>,
     ) -> Self {
         Self {
             topology,
@@ -272,9 +267,10 @@ impl TopologyHttpEndpoint {
             join_metadata,
         }
     }
-    
+
     /// Convert internal topology to API response format
     fn build_response(&self, include: IncludeFlags) -> FlowTopologyResponse {
+        let _ = (include.middleware, include.contracts);
         let stages: Vec<StageApiInfo> = self
             .topology
             .stages()
@@ -282,33 +278,33 @@ impl TopologyHttpEndpoint {
                 // Convert topology StageId to core StageId for HashMap lookup
                 let core_stage_id = StageId::from_ulid(stage_info.id.ulid());
                 let metadata = self.stages_metadata.get(&core_stage_id);
-                let middleware = self
-                    .middleware_stacks
-                    .as_ref()
-                    .and_then(|stacks| stacks.get(&core_stage_id))
-                    .map(|config| {
-                        // Deserialize circuit breaker config from JSON snapshot
-                        let circuit_breaker = config.circuit_breaker.as_ref().and_then(|v| {
-                            serde_json::from_value::<CircuitBreakerApiInfo>(v.clone()).ok()
-                        });
+                let middleware =
+                    self.middleware_stacks
+                        .as_ref()
+                        .and_then(|stacks| stacks.get(&core_stage_id))
+                        .map(|config| {
+                            // Deserialize circuit breaker config from JSON snapshot
+                            let circuit_breaker = config.circuit_breaker.as_ref().and_then(|v| {
+                                serde_json::from_value::<CircuitBreakerApiInfo>(v.clone()).ok()
+                            });
 
-                        // Deserialize rate limiter config from JSON snapshot
-                        let rate_limiter = config.rate_limiter.as_ref().and_then(|v| {
-                            serde_json::from_value::<RateLimiterApiInfo>(v.clone()).ok()
-                        });
+                            // Deserialize rate limiter config from JSON snapshot
+                            let rate_limiter = config.rate_limiter.as_ref().and_then(|v| {
+                                serde_json::from_value::<RateLimiterApiInfo>(v.clone()).ok()
+                            });
 
-                        // Deserialize retry config from JSON snapshot
-                        let retry = config.retry.as_ref().and_then(|v| {
-                            serde_json::from_value::<RetryApiInfo>(v.clone()).ok()
-                        });
+                            // Deserialize retry config from JSON snapshot
+                            let retry = config.retry.as_ref().and_then(|v| {
+                                serde_json::from_value::<RetryApiInfo>(v.clone()).ok()
+                            });
 
-                        MiddlewareApiInfo {
-                            stack: config.stack.clone(),
-                            circuit_breaker,
-                            rate_limiter,
-                            retry,
-                        }
-                    });
+                            MiddlewareApiInfo {
+                                stack: config.stack.clone(),
+                                circuit_breaker,
+                                rate_limiter,
+                                retry,
+                            }
+                        });
 
                 let semantic_type_str = stage_info.stage_type.as_str().to_string();
                 let join_metadata = if semantic_type_str == "join" {
@@ -350,7 +346,7 @@ impl TopologyHttpEndpoint {
                 }
             })
             .collect();
-        
+
         let edges: Vec<EdgeApiInfo> = self
             .topology
             .edges()
@@ -362,15 +358,15 @@ impl TopologyHttpEndpoint {
 
                 let contracts = self
                     .contract_attachments
-                        .as_ref()
-                        .and_then(|map| map.get(&(from_core, to_core)))
-                        .map(|names| {
-                            names
-                                .iter()
-                                .cloned()
-                                .map(|name| ContractApiInfo { name, config: None })
-                                .collect::<Vec<_>>()
-                        });
+                    .as_ref()
+                    .and_then(|map| map.get(&(from_core, to_core)))
+                    .map(|names| {
+                        names
+                            .iter()
+                            .cloned()
+                            .map(|name| ContractApiInfo { name, config: None })
+                            .collect::<Vec<_>>()
+                    });
 
                 EdgeApiInfo {
                     from: edge.from.to_string(),
@@ -388,7 +384,7 @@ impl TopologyHttpEndpoint {
                 }
             })
             .collect();
-        
+
         FlowTopologyResponse {
             flow_name: self.flow_name.clone(),
             // FLOWIP-082a: Topology API schema version 0.3 includes join_metadata.
@@ -404,32 +400,31 @@ impl HttpEndpoint for TopologyHttpEndpoint {
     fn path(&self) -> &str {
         "/api/topology"
     }
-    
+
     fn methods(&self) -> &[HttpMethod] {
         &[HttpMethod::Get]
     }
-    
+
     async fn handle(&self, request: Request) -> Result<Response, WebError> {
         let include = parse_include_flags(&request);
         let topology_response = self.build_response(include);
-        
-        let json_body = serde_json::to_string(&topology_response)
-            .map_err(|e| WebError::RequestHandlingFailed {
-                message: format!("Failed to serialize topology: {}", e),
+
+        let json_body = serde_json::to_string(&topology_response).map_err(|e| {
+            WebError::RequestHandlingFailed {
+                message: format!("Failed to serialize topology: {e}"),
                 source: None,
-            })?;
-        
+            }
+        })?;
+
         let mut response = Response::ok();
-        response.headers.insert(
-            "Content-Type".to_string(),
-            "application/json".to_string(),
-        );
-        response.headers.insert(
-            "Cache-Control".to_string(),
-            "max-age=60".to_string(),
-        );
+        response
+            .headers
+            .insert("Content-Type".to_string(), "application/json".to_string());
+        response
+            .headers
+            .insert("Cache-Control".to_string(), "max-age=60".to_string());
         response.body = json_body.into_bytes();
-        
+
         Ok(response)
     }
 }

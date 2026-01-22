@@ -142,7 +142,7 @@ impl StatefulHandler for MultiSourceAggregator {
             });
 
             let aggregated_event = ChainEventFactory::derived_data_event(
-                self.writer_id.clone(),
+                self.writer_id,
                 &event,
                 "data.aggregated",
                 enriched,
@@ -175,10 +175,7 @@ impl StatefulHandler for MultiSourceAggregator {
         for (src, expected) in &state.expected_counts {
             let got = state.events_by_source.get(src).cloned().unwrap_or(0);
             if got != *expected {
-                println!(
-                    "⚠️  AUDIT MISMATCH source={} expected={} got={}",
-                    src, expected, got
-                );
+                println!("⚠️  AUDIT MISMATCH source={src} expected={expected} got={got}");
             }
         }
 
@@ -195,7 +192,7 @@ impl StatefulHandler for MultiSourceAggregator {
         println!("╠════════════════════════╬═════════════╣");
         for (source, count) in &state.events_by_source {
             let value = state.value_by_source.get(source).unwrap_or(&0);
-            println!("║ {:<22} ║ {:>4} events / {:>4} ║", source, count, value);
+            println!("║ {source:<22} ║ {count:>4} events / {value:>4} ║");
         }
         println!("╚════════════════════════╩═════════════╝");
 
@@ -203,10 +200,8 @@ impl StatefulHandler for MultiSourceAggregator {
         for (src, expected) in &state.expected_counts {
             let got = state.events_by_source.get(src).cloned().unwrap_or(0);
             if got != *expected {
-                panic!(
-                    "AUDIT FAILED: source={} expected={} got={} (eof_seen={})",
-                    src, expected, got, state.eof_seen
-                );
+                let eof_seen = state.eof_seen;
+                panic!("AUDIT FAILED: source={src} expected={expected} got={got} (eof_seen={eof_seen})");
             }
         }
 
@@ -256,8 +251,7 @@ fn smart_router() -> Map<impl Fn(ChainEvent) -> ChainEvent + Send + Sync + Clone
         };
 
         println!(
-            "[FAN-OUT] Router processing event from '{}' with value {} → route: {}",
-            source, value, route
+            "[FAN-OUT] Router processing event from '{source}' with value {value} → route: {route}"
         );
 
         // Enrich with routing info
@@ -266,12 +260,7 @@ fn smart_router() -> Map<impl Fn(ChainEvent) -> ChainEvent + Send + Sync + Clone
         enriched["route_source"] = json!(source);
         enriched["route_value"] = json!(value);
 
-        ChainEventFactory::derived_data_event(
-            event.writer_id.clone(),
-            &event,
-            "data.routed",
-            enriched,
-        )
+        ChainEventFactory::derived_data_event(event.writer_id, &event, "data.routed", enriched)
     })
 }
 
@@ -281,21 +270,9 @@ fn print_sink_summary(name: &str, route: &str, count: usize) {
     println!("┌──────────────────────────────────────────────┐");
     println!("│ FAN-OUT SINK SUMMARY {:>19} │", format!("({})", name));
     println!("├──────────────────────────────────────────────┤");
-    println!("│ Route handled : {:<25}│", route);
-    println!("│ Events seen   : {:<25}│", count);
+    println!("│ Route handled : {route:<25}│");
+    println!("│ Events seen   : {count:<25}│");
     println!("└──────────────────────────────────────────────┘");
-}
-
-fn print_sink_summary_with_sources(
-    name: &str,
-    route: &str,
-    count: usize,
-    per_source: &BTreeMap<String, usize>,
-) {
-    print_sink_summary(name, route, count);
-    if !per_source.is_empty() {
-        println!("    per-source: {:?}", per_source);
-    }
 }
 
 /// Sink that processes events for a specific priority

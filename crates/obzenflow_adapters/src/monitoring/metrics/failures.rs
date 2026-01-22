@@ -104,11 +104,8 @@ impl Metric for FailureMetric {
     }
 
     fn update(&self, value: MetricValue) {
-        match value {
-            MetricValue::Counter(_) => {
-                self.record_failure();
-            }
-            _ => {}
+        if let MetricValue::Counter(_) = value {
+            self.record_failure();
         }
     }
 

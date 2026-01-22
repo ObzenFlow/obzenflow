@@ -32,22 +32,19 @@ impl SAAFE {
             (
                 "Saturation (In-Flight Events)",
                 format!(
-                    "obzenflow_in_flight_events{{flow=\"{}\",stage=\"{}\"}}",
-                    flow_name, stage_name
+                    "obzenflow_in_flight_events{{flow=\"{flow_name}\",stage=\"{stage_name}\"}}"
                 )
             ),
             (
                 "Failure Rate",
                 format!(
-                    "rate(obzenflow_errors_total{{flow=\"{}\",stage=\"{}\"}}[5m])",
-                    flow_name, stage_name
+                    "rate(obzenflow_errors_total{{flow=\"{flow_name}\",stage=\"{stage_name}\"}}[5m])"
                 )
             ),
             (
                 "Error Percentage",
                 format!(
-                    "rate(obzenflow_errors_total{{flow=\"{}\",stage=\"{}\"}}[5m]) / rate(obzenflow_events_total{{flow=\"{}\",stage=\"{}\"}}[5m]) * 100",
-                    flow_name, stage_name, flow_name, stage_name
+                    "rate(obzenflow_errors_total{{flow=\"{flow_name}\",stage=\"{stage_name}\"}}[5m]) / rate(obzenflow_events_total{{flow=\"{flow_name}\",stage=\"{stage_name}\"}}[5m]) * 100"
                 )
             ),
             // Note: Amendments and Anomalies require custom metrics

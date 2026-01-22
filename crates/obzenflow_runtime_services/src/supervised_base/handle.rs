@@ -19,6 +19,17 @@ pub struct HandleBuilder<E, S> {
     _phantom: PhantomData<(E, S)>,
 }
 
+impl<E, S> Default for HandleBuilder<E, S> {
+    fn default() -> Self {
+        Self {
+            event_sender: None,
+            state_watcher: None,
+            supervisor_task: None,
+            _phantom: PhantomData,
+        }
+    }
+}
+
 impl<E, S> HandleBuilder<E, S>
 where
     E: Debug + Send + 'static,
@@ -26,12 +37,7 @@ where
 {
     /// Create a new handle builder
     pub fn new() -> Self {
-        Self {
-            event_sender: None,
-            state_watcher: None,
-            supervisor_task: None,
-            _phantom: PhantomData,
-        }
+        Self::default()
     }
 
     /// Set the event sender

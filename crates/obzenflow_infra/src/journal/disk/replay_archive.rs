@@ -11,9 +11,11 @@ use obzenflow_core::build_info::OBZENFLOW_VERSION;
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::SystemEvent;
 use obzenflow_core::id::JournalId;
-use obzenflow_core::journal::{ArchiveStatus, StatusDerivation};
-use obzenflow_core::journal::run_manifest::{RunManifest, RUN_MANIFEST_FILENAME, RUN_MANIFEST_VERSION};
+use obzenflow_core::journal::run_manifest::{
+    RunManifest, RUN_MANIFEST_FILENAME, RUN_MANIFEST_VERSION,
+};
 use obzenflow_core::journal::JournalReader;
+use obzenflow_core::journal::{ArchiveStatus, StatusDerivation};
 use obzenflow_core::{ChainEvent, StageId};
 use obzenflow_runtime_services::replay::{ReplayArchive, ReplayError};
 use std::fs::File;
@@ -50,13 +52,16 @@ impl DiskReplayArchive {
 
         let manifest_path = archive_path.join(RUN_MANIFEST_FILENAME);
         if !manifest_path.exists() {
-            return Err(ReplayError::MissingManifest { path: manifest_path });
+            return Err(ReplayError::MissingManifest {
+                path: manifest_path,
+            });
         }
 
-        let manifest_body = std::fs::read_to_string(&manifest_path).map_err(|e| ReplayError::Io {
-            message: format!("Failed to read run manifest: {}", manifest_path.display()),
-            source: e,
-        })?;
+        let manifest_body =
+            std::fs::read_to_string(&manifest_path).map_err(|e| ReplayError::Io {
+                message: format!("Failed to read run manifest: {}", manifest_path.display()),
+                source: e,
+            })?;
         let manifest: RunManifest =
             serde_json::from_str(&manifest_body).map_err(|e| ReplayError::Parse {
                 message: format!(
@@ -133,13 +138,13 @@ impl ReplayArchive for DiskReplayArchive {
         stage_key: &str,
         expected_type: StageType,
     ) -> Result<Box<dyn JournalReader<ChainEvent>>, ReplayError> {
-        let stage_info = self
-            .manifest
-            .stages
-            .get(stage_key)
-            .ok_or_else(|| ReplayError::StageNotInManifest {
-                stage_key: stage_key.to_string(),
-            })?;
+        let stage_info =
+            self.manifest
+                .stages
+                .get(stage_key)
+                .ok_or_else(|| ReplayError::StageNotInManifest {
+                    stage_key: stage_key.to_string(),
+                })?;
 
         if !stage_info.stage_type.is_source() || !expected_type.is_source() {
             return Err(ReplayError::StageTypeMismatch {
@@ -150,7 +155,9 @@ impl ReplayArchive for DiskReplayArchive {
         }
 
         if self.status != ArchiveStatus::Completed && !self.allow_incomplete_archive {
-            return Err(ReplayError::IncompleteArchive { status: self.status });
+            return Err(ReplayError::IncompleteArchive {
+                status: self.status,
+            });
         }
 
         let data_path = self.archive_path.join(&stage_info.data_journal_file);
@@ -166,20 +173,20 @@ impl ReplayArchive for DiskReplayArchive {
         .await
         .map_err(|e| ReplayError::Io {
             message: "Failed to open archived journal reader".to_string(),
-            source: std::io::Error::new(std::io::ErrorKind::Other, e.to_string()),
+            source: std::io::Error::other(e.to_string()),
         })?;
 
         Ok(Box::new(reader))
     }
 
     fn source_data_journal_path(&self, stage_key: &str) -> Result<PathBuf, ReplayError> {
-        let stage_info = self
-            .manifest
-            .stages
-            .get(stage_key)
-            .ok_or_else(|| ReplayError::StageNotInManifest {
-                stage_key: stage_key.to_string(),
-            })?;
+        let stage_info =
+            self.manifest
+                .stages
+                .get(stage_key)
+                .ok_or_else(|| ReplayError::StageNotInManifest {
+                    stage_key: stage_key.to_string(),
+                })?;
         Ok(self.archive_path.join(&stage_info.data_journal_file))
     }
 
@@ -188,13 +195,13 @@ impl ReplayArchive for DiskReplayArchive {
     }
 
     fn archived_stage_id(&self, stage_key: &str) -> Result<StageId, ReplayError> {
-        let stage_info = self
-            .manifest
-            .stages
-            .get(stage_key)
-            .ok_or_else(|| ReplayError::StageNotInManifest {
-                stage_key: stage_key.to_string(),
-            })?;
+        let stage_info =
+            self.manifest
+                .stages
+                .get(stage_key)
+                .ok_or_else(|| ReplayError::StageNotInManifest {
+                    stage_key: stage_key.to_string(),
+                })?;
 
         StageId::from_str(&stage_info.stage_id).map_err(|e| ReplayError::Parse {
             message: format!(
@@ -221,7 +228,13 @@ impl ReplayArchive for DiskReplayArchive {
             .manifest
             .stages
             .iter()
-            .filter_map(|(k, v)| if v.stage_type.is_source() { Some(k.clone()) } else { None })
+            .filter_map(|(k, v)| {
+                if v.stage_type.is_source() {
+                    Some(k.clone())
+                } else {
+                    None
+                }
+            })
             .collect::<Vec<_>>();
         keys.sort();
         keys
@@ -304,7 +317,10 @@ fn derive_status_derivation_from_system_log(path: &Path) -> Result<StatusDerivat
         terminal_events_found,
         chosen,
         warning: if terminal_events_found > 1 {
-            Some("Multiple pipeline terminal events found in system.log; derived status uses last".to_string())
+            Some(
+                "Multiple pipeline terminal events found in system.log; derived status uses last"
+                    .to_string(),
+            )
         } else {
             None
         },
@@ -327,7 +343,10 @@ fn parse_semver_triplet(version: &str) -> Option<(u64, u64, u64)> {
     let major = parts.next()?.parse().ok()?;
     let minor = parts.next()?.parse().ok()?;
     let patch_str = parts.next()?;
-    let patch_str = patch_str.split_once('-').map(|(p, _)| p).unwrap_or(patch_str);
+    let patch_str = patch_str
+        .split_once('-')
+        .map(|(p, _)| p)
+        .unwrap_or(patch_str);
     let patch = patch_str.parse().ok()?;
     Some((major, minor, patch))
 }

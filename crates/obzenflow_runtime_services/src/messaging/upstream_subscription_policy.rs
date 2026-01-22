@@ -69,7 +69,7 @@ impl ContractPolicy for TransportStrictPolicy {
     fn apply(
         &self,
         results: &[ContractResult],
-        edge: &EdgeContext,
+        _edge: &EdgeContext,
         _hints: &PolicyHints,
         _prior: EdgeContractDecision,
     ) -> EdgeContractDecision {
@@ -108,8 +108,8 @@ pub struct BreakerAwarePolicy;
 impl ContractPolicy for BreakerAwarePolicy {
     fn apply(
         &self,
-        results: &[ContractResult],
-        edge: &EdgeContext,
+        _results: &[ContractResult],
+        _edge: &EdgeContext,
         hints: &PolicyHints,
         prior: EdgeContractDecision,
     ) -> EdgeContractDecision {

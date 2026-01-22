@@ -114,7 +114,7 @@ async fn read_http_head(socket: &mut tokio::net::TcpStream) -> Result<String> {
 fn http_response(status: u16, body: &str) -> String {
     format!(
         "HTTP/1.1 {status} OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-        body.as_bytes().len()
+        body.len()
     )
 }
 
@@ -131,4 +131,3 @@ fn extract_item_id(path: &str) -> Option<u64> {
     let id_str = suffix.strip_suffix(".json")?;
     id_str.parse().ok()
 }
-

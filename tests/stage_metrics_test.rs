@@ -52,7 +52,7 @@ impl FiniteSourceHandler for TestSource {
         }
 
         let event = ChainEventFactory::data_event(
-            self.writer_id.clone(),
+            self.writer_id,
             "test.data",
             json!({
                 "data": self.events[self.index].clone(),
@@ -148,14 +148,14 @@ async fn test_stage_level_metrics_automatic() -> Result<()> {
         }
     }
     .await
-    .map_err(|e| anyhow::anyhow!("Flow creation failed: {:?}", e))?;
+    .map_err(|e| anyhow::anyhow!("Flow creation failed: {e:?}"))?;
 
     println!("Running flow...");
     // Run the flow and capture metrics exporter
     let metrics_exporter = flow_handle
         .run_with_metrics()
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to run flow: {:?}", e))?
+        .map_err(|e| anyhow::anyhow!("Failed to run flow: {e:?}"))?
         .expect("Metrics should be enabled by default");
 
     // Give the metrics aggregator a brief moment to flush snapshots
@@ -164,13 +164,13 @@ async fn test_stage_level_metrics_automatic() -> Result<()> {
     // Get metrics
     let metrics_text = metrics_exporter
         .render_metrics()
-        .map_err(|e| anyhow::anyhow!("Failed to render metrics: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to render metrics: {e}"))?;
 
     println!("\n=== Stage Metrics Output ===");
     for line in metrics_text.lines() {
         if line.contains("stage_metrics_test") || line.contains("# HELP") || line.contains("# TYPE")
         {
-            println!("{}", line);
+            println!("{line}");
         }
     }
 

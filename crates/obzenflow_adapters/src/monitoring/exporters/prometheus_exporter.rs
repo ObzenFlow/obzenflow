@@ -1910,18 +1910,15 @@ impl PrometheusExporter {
 
                     writeln!(
                         output,
-                        "http_pull_waiting{{{},reason=\"rate_limit\"}} {}",
-                        stage_labels, rate_limit
+                        "http_pull_waiting{{{stage_labels},reason=\"rate_limit\"}} {rate_limit}"
                     )?;
                     writeln!(
                         output,
-                        "http_pull_waiting{{{},reason=\"poll_interval\"}} {}",
-                        stage_labels, poll_interval
+                        "http_pull_waiting{{{stage_labels},reason=\"poll_interval\"}} {poll_interval}"
                     )?;
                     writeln!(
                         output,
-                        "http_pull_waiting{{{},reason=\"backoff\"}} {}",
-                        stage_labels, backoff
+                        "http_pull_waiting{{{stage_labels},reason=\"backoff\"}} {backoff}"
                     )?;
                 }
             }
@@ -2154,8 +2151,7 @@ impl PrometheusExporter {
 
             writeln!(
                 output,
-                "{}_bucket{{{},le=\"{}\"}} {}",
-                metric_name, label_str, bucket, count
+                "{metric_name}_bucket{{{label_str},le=\"{bucket}\"}} {count}"
             )?;
         }
 
@@ -2281,7 +2277,7 @@ fn estimate_bucket_count(histogram: &HistogramSnapshot, bucket_value: f64) -> u6
         // Fallback to simple ratio if no percentiles available
         if histogram.max > histogram.min {
             let ratio = (bucket_value - histogram.min) / (histogram.max - histogram.min);
-            (histogram.count as f64 * ratio.min(1.0).max(0.0)) as u64
+            (histogram.count as f64 * ratio.clamp(0.0, 1.0)) as u64
         } else {
             // All values are the same
             if bucket_value >= histogram.max {
@@ -2322,10 +2318,12 @@ mod tests {
             },
         );
 
-        let mut snapshot = AppMetricsSnapshot::default();
-        snapshot.event_counts = event_counts;
-        snapshot.stage_metadata = stage_metadata;
-        snapshot.pipeline_state = "Created".to_string();
+        let snapshot = AppMetricsSnapshot {
+            event_counts,
+            stage_metadata,
+            pipeline_state: "Created".to_string(),
+            ..Default::default()
+        };
 
         // Update and render
         exporter.update_app_metrics(snapshot).unwrap();
@@ -2369,20 +2367,16 @@ mod tests {
         let base_path = escape_label("/api/ingest");
         assert!(output.contains("# TYPE http_ingestion_requests_total counter"));
         assert!(output.contains(&format!(
-            "http_ingestion_requests_total{{base_path=\"{}\"}} 5",
-            base_path
+            "http_ingestion_requests_total{{base_path=\"{base_path}\"}} 5"
         )));
         assert!(output.contains(&format!(
-            "http_ingestion_events_rejected_total{{base_path=\"{}\",reason=\"auth\"}} 1",
-            base_path
+            "http_ingestion_events_rejected_total{{base_path=\"{base_path}\",reason=\"auth\"}} 1"
         )));
         assert!(output.contains(&format!(
-            "http_ingestion_events_rejected_total{{base_path=\"{}\",reason=\"channel_closed\"}} 7",
-            base_path
+            "http_ingestion_events_rejected_total{{base_path=\"{base_path}\",reason=\"channel_closed\"}} 7"
         )));
         assert!(output.contains(&format!(
-            "http_ingestion_channel_depth{{base_path=\"{}\"}} 12",
-            base_path
+            "http_ingestion_channel_depth{{base_path=\"{base_path}\"}} 12"
         )));
     }
 
@@ -2403,20 +2397,27 @@ mod tests {
             },
         );
 
-        let mut telemetry = HttpPullTelemetry::default();
-        telemetry.state = HttpPullState::Waiting;
-        telemetry.wait_reason = Some(WaitReason::RateLimit);
-        telemetry.next_wake_unix_secs = Some(1_700_000_123);
-        telemetry.last_success_unix_secs = Some(1_700_000_000);
-        telemetry.requests_total = 10;
-        telemetry.responses_2xx = 7;
-        telemetry.responses_4xx = 2;
-        telemetry.responses_5xx = 1;
-        telemetry.events_decoded_total = 42;
+        let telemetry = HttpPullTelemetry {
+            state: HttpPullState::Waiting,
+            wait_reason: Some(WaitReason::RateLimit),
+            next_wake_unix_secs: Some(1_700_000_123),
+            last_success_unix_secs: Some(1_700_000_000),
+            requests_total: 10,
+            responses_2xx: 7,
+            responses_4xx: 2,
+            responses_5xx: 1,
+            events_decoded_total: 42,
+            ..Default::default()
+        };
 
-        let mut snapshot = AppMetricsSnapshot::default();
-        snapshot.stage_metadata = stage_metadata;
-        snapshot.http_pull_metrics.insert(stage_id, telemetry);
+        let mut http_pull_metrics = HashMap::new();
+        http_pull_metrics.insert(stage_id, telemetry);
+
+        let snapshot = AppMetricsSnapshot {
+            stage_metadata,
+            http_pull_metrics,
+            ..Default::default()
+        };
 
         exporter.update_app_metrics(snapshot).unwrap();
         let output = exporter.render_metrics().unwrap();
@@ -2424,28 +2425,22 @@ mod tests {
         let stage_id = escape_label(&stage_id.to_string());
         assert!(output.contains("# TYPE http_pull_waiting gauge"));
         assert!(output.contains(&format!(
-            "http_pull_waiting{{flow=\"order_flow\",stage=\"http_pull\",stage_id=\"{}\",reason=\"rate_limit\"}} 1",
-            stage_id
+            "http_pull_waiting{{flow=\"order_flow\",stage=\"http_pull\",stage_id=\"{stage_id}\",reason=\"rate_limit\"}} 1"
         )));
         assert!(output.contains(&format!(
-            "http_pull_next_wake_unix_seconds{{flow=\"order_flow\",stage=\"http_pull\",stage_id=\"{}\"}} 1700000123",
-            stage_id
+            "http_pull_next_wake_unix_seconds{{flow=\"order_flow\",stage=\"http_pull\",stage_id=\"{stage_id}\"}} 1700000123"
         )));
         assert!(output.contains(&format!(
-            "http_pull_last_success_unix_seconds{{flow=\"order_flow\",stage=\"http_pull\",stage_id=\"{}\"}} 1700000000",
-            stage_id
+            "http_pull_last_success_unix_seconds{{flow=\"order_flow\",stage=\"http_pull\",stage_id=\"{stage_id}\"}} 1700000000"
         )));
         assert!(output.contains(&format!(
-            "http_pull_requests_total{{flow=\"order_flow\",stage=\"http_pull\",stage_id=\"{}\"}} 10",
-            stage_id
+            "http_pull_requests_total{{flow=\"order_flow\",stage=\"http_pull\",stage_id=\"{stage_id}\"}} 10"
         )));
         assert!(output.contains(&format!(
-            "http_pull_responses_total{{flow=\"order_flow\",stage=\"http_pull\",stage_id=\"{}\",status_class=\"2xx\"}} 7",
-            stage_id
+            "http_pull_responses_total{{flow=\"order_flow\",stage=\"http_pull\",stage_id=\"{stage_id}\",status_class=\"2xx\"}} 7"
         )));
         assert!(output.contains(&format!(
-            "http_pull_events_decoded_total{{flow=\"order_flow\",stage=\"http_pull\",stage_id=\"{}\"}} 42",
-            stage_id
+            "http_pull_events_decoded_total{{flow=\"order_flow\",stage=\"http_pull\",stage_id=\"{stage_id}\"}} 42"
         )));
     }
 }

@@ -5,4 +5,3 @@
 
 /// The current ObzenFlow version (SemVer) for compatibility checks.
 pub const OBZENFLOW_VERSION: &str = env!("CARGO_PKG_VERSION");
-

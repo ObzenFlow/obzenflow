@@ -12,5 +12,3 @@ pub mod sinks;
 
 #[path = "flow.rs"]
 pub mod flow;
-
-pub use flow::run_example;

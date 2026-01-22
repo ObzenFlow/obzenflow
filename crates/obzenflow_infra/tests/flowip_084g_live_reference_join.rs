@@ -6,8 +6,8 @@ use obzenflow_core::event::status::processing_status::ProcessingStatus;
 use obzenflow_core::event::types::SeqNo;
 use obzenflow_core::event::ChainEventContent;
 use obzenflow_core::event::SystemEvent;
-use obzenflow_core::journal::journal::Journal;
 use obzenflow_core::journal::journal_owner::JournalOwner;
+use obzenflow_core::journal::Journal;
 use obzenflow_core::{ChainEvent, FlowId, StageId, SystemId, TypedPayload, WriterId};
 use obzenflow_infra::journal::disk::disk_journal::DiskJournal;
 use obzenflow_runtime_services::id_conversions::StageIdExt;
@@ -23,14 +23,14 @@ use obzenflow_topology::{StageType as TopologyStageType, TopologyBuilder};
 use serde::{Deserialize, Serialize};
 
 fn make_eof_event(writer: WriterId, seq: u64) -> ChainEvent {
-    let mut eof = ChainEventFactory::eof_event(writer.clone(), true);
+    let mut eof = ChainEventFactory::eof_event(writer, true);
     if let ChainEventContent::FlowControl(FlowControlPayload::Eof {
         ref mut writer_id,
         ref mut writer_seq,
         ..
     }) = eof.content
     {
-        *writer_id = Some(writer.clone());
+        *writer_id = Some(writer);
         *writer_seq = Some(SeqNo(seq));
     }
     eof
@@ -155,7 +155,7 @@ async fn live_join_processes_stream_without_reference_eof() {
                 key: "k1".into(),
                 value: "v1".into(),
             }
-            .to_event(reference_writer.clone()),
+            .to_event(reference_writer),
             None,
         )
         .await
@@ -164,14 +164,11 @@ async fn live_join_processes_stream_without_reference_eof() {
     // Stream emits one matching record and EOF.
     let stream_writer = WriterId::from(stream_stage);
     stream_journal
-        .append(
-            StreamRow { key: "k1".into() }.to_event(stream_writer.clone()),
-            None,
-        )
+        .append(StreamRow { key: "k1".into() }.to_event(stream_writer), None)
         .await
         .expect("append stream data");
     stream_journal
-        .append(make_eof_event(stream_writer.clone(), 1), None)
+        .append(make_eof_event(stream_writer, 1), None)
         .await
         .expect("append stream eof");
 
@@ -417,7 +414,7 @@ async fn live_join_reference_batch_cap_prevents_stream_starvation() {
     let reference_writer = WriterId::from(reference_stage);
     for i in 0..10u64 {
         reference_journal
-            .append(RefEvent { id: i }.to_event(reference_writer.clone()), None)
+            .append(RefEvent { id: i }.to_event(reference_writer), None)
             .await
             .expect("append reference data");
     }
@@ -425,11 +422,11 @@ async fn live_join_reference_batch_cap_prevents_stream_starvation() {
     // Stream emits one record + EOF.
     let stream_writer = WriterId::from(stream_stage);
     stream_journal
-        .append(StreamEvent { id: 1 }.to_event(stream_writer.clone()), None)
+        .append(StreamEvent { id: 1 }.to_event(stream_writer), None)
         .await
         .expect("append stream data");
     stream_journal
-        .append(make_eof_event(stream_writer.clone(), 1), None)
+        .append(make_eof_event(stream_writer, 1), None)
         .await
         .expect("append stream eof");
 
@@ -595,27 +592,24 @@ async fn live_join_forwards_reference_eof() {
                 key: "k1".into(),
                 value: "v1".into(),
             }
-            .to_event(reference_writer.clone()),
+            .to_event(reference_writer),
             None,
         )
         .await
         .expect("append reference data");
     reference_journal
-        .append(make_eof_event(reference_writer.clone(), 1), None)
+        .append(make_eof_event(reference_writer, 1), None)
         .await
         .expect("append reference eof");
 
     // Stream emits one matching record and EOF.
     let stream_writer = WriterId::from(stream_stage);
     stream_journal
-        .append(
-            StreamRow { key: "k1".into() }.to_event(stream_writer.clone()),
-            None,
-        )
+        .append(StreamRow { key: "k1".into() }.to_event(stream_writer), None)
         .await
         .expect("append stream data");
     stream_journal
-        .append(make_eof_event(stream_writer.clone(), 1), None)
+        .append(make_eof_event(stream_writer, 1), None)
         .await
         .expect("append stream eof");
 
@@ -864,7 +858,7 @@ async fn live_join_reference_errors_are_per_record() {
                 key: "k1".into(),
                 value: "v1".into(),
             }
-            .to_event(reference_writer.clone()),
+            .to_event(reference_writer),
             None,
         )
         .await
@@ -873,14 +867,11 @@ async fn live_join_reference_errors_are_per_record() {
     // Stream emits one record + EOF (must still be processed).
     let stream_writer = WriterId::from(stream_stage);
     stream_journal
-        .append(
-            StreamRow { key: "k1".into() }.to_event(stream_writer.clone()),
-            None,
-        )
+        .append(StreamRow { key: "k1".into() }.to_event(stream_writer), None)
         .await
         .expect("append stream data");
     stream_journal
-        .append(make_eof_event(stream_writer.clone(), 1), None)
+        .append(make_eof_event(stream_writer, 1), None)
         .await
         .expect("append stream eof");
 

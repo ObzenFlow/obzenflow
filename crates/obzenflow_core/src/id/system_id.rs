@@ -89,7 +89,7 @@ mod tests {
     fn test_system_id_display() {
         let ulid = Ulid::new();
         let id = SystemId::from_ulid(ulid);
-        assert_eq!(format!("{}", id), format!("system_{}", ulid));
+        assert_eq!(format!("{id}"), format!("system_{ulid}"));
     }
 
     #[test]
