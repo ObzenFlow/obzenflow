@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
 //! Base trait for events that can be journaled
 //!
 //! This trait ensures type safety by restricting what can be written to journals

@@ -51,6 +51,20 @@ cargo machete --skip-target-dir
 - Update docs/examples when behavior or APIs change.
 - Prefer opening an issue (or a design proposal) before large changes.
 
+## Source headers (SPDX)
+
+All Rust source files (`*.rs`) must start with an SPDX header block.
+
+Use:
+
+```rust
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+```
+
+Do not add individual names to per-file headers. Attribution lives in `NOTICE`, `LICENSE-MIT`, and `LICENSE-APACHE`.
+
 ## License
 
 By contributing, you agree that your contributions will be licensed under the project’s dual license (MIT OR Apache-2.0).
@@ -58,4 +72,3 @@ By contributing, you agree that your contributions will be licensed under the pr
 ## Security
 
 Please do not open public issues for security vulnerabilities. See `SECURITY.md`.
-

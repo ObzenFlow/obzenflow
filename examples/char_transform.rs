@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
 //! Character Transform Demo - Using FLOWIP-080h, FLOWIP-080j, FLOWIP-081, FLOWIP-081c & FLOWIP-082a
 //!
 //! Pipeline: Source → Transformer → Sink

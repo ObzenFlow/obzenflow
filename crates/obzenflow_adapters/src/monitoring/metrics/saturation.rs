@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
 use super::core::StatefulMetric;
 use super::core::{Metric, MetricSnapshot, MetricType, MetricUpdate, MetricValue};
 use std::collections::HashMap;

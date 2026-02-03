@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
 //! Demo: Topology Patterns - Fan-In, Fan-Out, and Diamond Patterns (FLOWIP-080h)
 //!
 //! This demonstrates how ObzenFlow naturally handles complex topologies through

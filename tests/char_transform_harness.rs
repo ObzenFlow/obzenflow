@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
 #![cfg(any())] // Disabled manual harness; kept as reference but not compiled as part of test suite
 
 //! Manual harness for char_transform to verify graceful completion and contract evidence.

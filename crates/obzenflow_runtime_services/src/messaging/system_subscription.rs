@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
 //! System journal subscription for lifecycle and coordination events
 //!
 //! This module provides a subscription wrapper for system/error journals that

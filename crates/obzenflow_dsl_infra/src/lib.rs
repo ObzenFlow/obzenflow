@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
 //! DSL and infrastructure layer for ObzenFlow
 //!
 //! This crate provides the high-level DSL (flow! macro) that serves as the primary

@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
 //! FLOWIP-056-666: This test is temporarily disabled as monitoring middleware is being redesigned
 //!
 //! Test middleware factory pattern for proper stage context injection

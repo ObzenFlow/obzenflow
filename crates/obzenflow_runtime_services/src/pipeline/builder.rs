@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
 //! Pipeline builder pattern for creating supervisors with proper FSM lifecycle
 //!
 //! This builder ensures supervisors are created and started correctly according

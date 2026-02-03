@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
 //! Run manifest schema for on-disk archives (FLOWIP-095a).
 //!
 //! This is a pure schema module (no I/O). Infra is responsible for reading and

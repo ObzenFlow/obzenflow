@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
 //! FLOWIP-051j-1 / FLOWIP-051j-2 integration regression tests.
 //!
 //! Ensures stateful stages:

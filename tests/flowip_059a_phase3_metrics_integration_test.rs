@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
 //! FLOWIP-059a Phase 3 integration tests
 //!
 //! These tests validate end-to-end wiring for:

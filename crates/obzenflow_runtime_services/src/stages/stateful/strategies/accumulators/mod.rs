@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
 // FLOWIP-080c: Stateful Transform Primitives - Core Accumulator Trait
 //
 // This module provides composable accumulator primitives for common aggregation patterns.

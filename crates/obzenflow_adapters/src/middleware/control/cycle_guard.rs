@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
 //! Cycle guard middleware to prevent infinite loops in topologies with cycles
 //!
 //! This middleware tracks how many times an event has been processed through

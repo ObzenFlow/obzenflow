@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
 //! Join metadata representation for topology export (FLOWIP-082a)
 //!
 //! This module defines a simple structural type that tracks, per join stage,

@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
 //! Journal sink stage FSM types and state machine definition
 //!
 //! Journal sinks consume events and write to external destinations.

@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
 //! Application framework for ObzenFlow
 //!
 //! Provides Spring Boot-style lifecycle management for flows with automatic

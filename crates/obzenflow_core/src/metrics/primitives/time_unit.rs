@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
 //! Time unit type for primitives layer
 //!
 //! Provides a lightweight, unit-aware time representation without depending on std::time::Duration.

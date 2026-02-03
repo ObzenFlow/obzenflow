@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
 //! Integration test for breaker-driven shutdown contracts (FLOWIP-051b)
 //!
 //! This test drives a small flow where a circuit breaker at a transform

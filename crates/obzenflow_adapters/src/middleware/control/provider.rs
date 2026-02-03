@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
 //! Concrete implementation of `ControlMiddlewareProvider`.
 //!
 //! This flow-scoped aggregator collects registrations from circuit breaker and

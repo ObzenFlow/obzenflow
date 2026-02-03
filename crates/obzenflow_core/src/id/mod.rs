@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
 //! Strongly typed identifiers for core domain entities
 //!
 //! These IDs are fundamental to the system and used throughout all layers

@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
 //! Test that verifies stage-level metrics work automatically
 //!
 //! This test confirms that FLOWIP-056-666's core requirement is met:

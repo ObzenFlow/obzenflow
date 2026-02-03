@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
 use super::domain::HnStory;
 use obzenflow::sources::{DecodeError, DecodeResult, HttpResponse, PullDecoder, RequestSpec, Url};
 use obzenflow_core::TypedPayload;

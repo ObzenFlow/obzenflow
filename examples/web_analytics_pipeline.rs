@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
 //! Web Analytics Pipeline - Using FLOWIP-080j & FLOWIP-082a
 //!
 //! Problem: Track user behavior on a website to understand engagement patterns.

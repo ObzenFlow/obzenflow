@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
 //! Log record format for disk-based journals
 //!
 //! Shared between DiskJournal and DiskJournalReader for efficient file-based operations.

@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
 // FLOWIP-080c: OnEOF Emission Strategy
 //
 // Emits results only when EOF is received, used for batch processing

@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
 use crate::http_client::{HttpClient, HttpClientError, HttpResponse, RequestSpec};
 use async_trait::async_trait;
 use std::collections::VecDeque;

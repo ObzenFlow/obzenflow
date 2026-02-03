@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
 //! Flow control HTTP endpoint (Play / Pause / Stop)
 //!
 //! Provides a small control surface for server-mode flows so that

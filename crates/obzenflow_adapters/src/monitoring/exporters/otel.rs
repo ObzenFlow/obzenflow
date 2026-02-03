@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
 //! OpenTelemetry exporter placeholder.
 //!
 //! The `metrics-otel` feature currently provides a minimal `MetricsExporter` implementation

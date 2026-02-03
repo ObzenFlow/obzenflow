@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
 /// Journal errors (domain-level, not I/O specific)
 #[derive(Debug, thiserror::Error)]
 pub enum JournalError {

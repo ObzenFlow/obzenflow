@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
 //! Typed Infinite Source Demo - FLOWIP-081d
 //!
 //! Demonstrates typed infinite sources without `WriterId` and `ChainEvent` boilerplate:

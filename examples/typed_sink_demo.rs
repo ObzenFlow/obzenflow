@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
 //! Typed Sink Demo - FLOWIP-081c
 //!
 //! Demonstrates typed sinks without `ChainEvent` payload extraction:

@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
 //! Message Bus for Inter-FSM Communication
 //!
 //! Provides type-safe channels for communication between Pipeline and Stage FSMs

@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
 use crate::event::vector_clock::VectorClock;
 use crate::event::{JournalEvent, JournalWriterId};
 use chrono::{DateTime, Utc};

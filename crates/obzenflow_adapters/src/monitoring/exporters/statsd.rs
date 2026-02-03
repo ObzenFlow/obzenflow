@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
 // StatsD exporter implementation
 // This module is only compiled when the "metrics-statsd" feature is enabled
 

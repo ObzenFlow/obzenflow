@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
 //! Idle CPU Usage Benchmark
 //!
 //! Measures CPU usage when the pipeline is idle (no events flowing).

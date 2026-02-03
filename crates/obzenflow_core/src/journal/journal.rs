@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
 use super::journal_error::JournalError;
 use super::journal_owner::JournalOwner;
 use super::journal_reader::JournalReader;

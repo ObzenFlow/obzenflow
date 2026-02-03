@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
 // FLOWIP-080c: GroupBy Accumulator
 //
 // Groups events by a key field and maintains per-group state using a custom reduce function.

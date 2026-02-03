@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
 use crate::event::{types::SeqNo, ChainEvent, EventId};
 use crate::id::StageId;
 use chrono::{DateTime, Utc};

@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
 //! Typed source helpers (FLOWIP-081 + FLOWIP-081d)
 //!
 //! These helpers let sources emit domain types (`T: TypedPayload + Serialize`) instead of

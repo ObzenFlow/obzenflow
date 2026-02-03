@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
 //! HN Ingestion Demo (FLOWIP-084f) — validates the HTTP pull source (FLOWIP-084e).
 //!
 //! Demonstrates the canonical `source → transform → sink` pattern:

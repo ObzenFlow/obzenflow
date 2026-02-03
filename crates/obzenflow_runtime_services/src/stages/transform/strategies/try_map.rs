@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
 //! TryMap helper for trait-based fallible transformations
 //!
 //! The TryMap helper is a fallible variant of Map that enables type-safe transformations

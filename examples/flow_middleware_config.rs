@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
 //! Demo: Flow-Level vs Stage-Level Middleware Configuration
 //!
 //! This demonstrates middleware inheritance - a critical concept for production flows.

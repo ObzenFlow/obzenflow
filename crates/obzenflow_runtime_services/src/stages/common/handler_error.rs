@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
 //! Handler-level error type for stage logic (FLOWIP-082h).
 //!
 //! This represents failures that occur inside handlers (sources, transforms,

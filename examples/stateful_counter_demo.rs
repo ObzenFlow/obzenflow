@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
 //! Stateful counter demo - demonstrates FLOWIP-080b stateful transform stages (FLOWIP-080h)
 //!
 //! Pipeline: Source → Transform → Stateful → Sink

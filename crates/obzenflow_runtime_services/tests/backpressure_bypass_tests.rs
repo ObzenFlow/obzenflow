@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
 use obzenflow_runtime_services::backpressure::{BackpressurePlan, BackpressureRegistry};
 use obzenflow_runtime_services::id_conversions::StageIdExt;
 use obzenflow_topology::TopologyBuilder;

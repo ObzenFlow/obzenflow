@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
 use super::decoder::HnStoryDecoder;
 use super::domain::{FormattedStory, HnStory};
 use super::mock_server::spawn_mock_hn_server;

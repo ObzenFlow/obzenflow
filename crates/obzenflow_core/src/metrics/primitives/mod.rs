@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
 //! Core metric primitives - atomic operations only
 //!
 //! These are the foundational building blocks that all metrics are built upon.

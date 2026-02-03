@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
 //! Simple test to verify control events flow through the system
 //! This is for FLOWIP-056-666 Phase 4.0 Task 4
 

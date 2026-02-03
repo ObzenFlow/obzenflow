@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
 //! E-commerce Top Products Demo - Using FLOWIP-080j & FLOWIP-082a
 //!
 //! Demonstrates TopNByTyped for tracking best-selling products by total revenue,

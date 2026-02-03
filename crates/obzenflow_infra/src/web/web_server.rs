@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
 //! Web server factory for all flow endpoints
 //!
 //! Provides a simple way to start a web server with topology, metrics, and health endpoints

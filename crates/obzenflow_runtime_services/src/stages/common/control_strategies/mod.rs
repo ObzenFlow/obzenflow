@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
 //! Control event handling strategies for supervisors
 //!
 //! This module implements the Strategy pattern to keep supervisor event loops clean

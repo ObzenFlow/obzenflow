@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
 //! System identifier - globally unique identifier for system components
 //!
 //! System components are self-supervised FSMs like Pipeline and MetricsAggregator

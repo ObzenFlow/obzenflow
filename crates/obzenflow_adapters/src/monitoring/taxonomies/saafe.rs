@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
 //! SAAFE (Saturation, Amendments, Anomalies, Failures, Errors) Taxonomy
 //!
 //! SAAFE is a comprehensive monitoring approach that extends beyond traditional methods:

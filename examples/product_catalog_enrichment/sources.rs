@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
 use super::fixtures;
 use obzenflow_runtime_services::stages::common::handlers::FiniteSourceHandler;
 use obzenflow_runtime_services::stages::source::FiniteSourceTyped;

@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
 //! Runtime services for ObzenFlow
 //!
 //! This layer contains business logic related to flow execution, runtime coordination,

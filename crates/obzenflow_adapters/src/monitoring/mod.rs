@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
 //! Monitoring Taxonomies for ObzenFlow
 //!
 //! With FLOWIP-056-666, monitoring taxonomies are now documentation and view definitions.

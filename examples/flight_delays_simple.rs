@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
 //! Flight Delay Analysis Pipeline - FLOWIP-082a Event Schemas & FLOWIP-080l Join Demo
 //!
 //! This demonstrates event schema design using TypedPayload trait and

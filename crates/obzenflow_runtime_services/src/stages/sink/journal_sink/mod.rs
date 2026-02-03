@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
 //! Journal sink stage implementation
 //!
 //! Journal sinks are the standard terminal stages in a pipeline that consume events

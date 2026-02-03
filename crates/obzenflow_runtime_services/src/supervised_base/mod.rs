@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
 //! Base abstractions for the runtime services
 //!
 //! This module provides supervised state machine patterns that enforce FSM-driven control flow:

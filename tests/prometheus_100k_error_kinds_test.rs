@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
 //! Integration test for error-kind metrics on the prometheus_100k_demo-style flow.
 //!
 //! This mirrors the high-volume source + error_prone_transform pipeline from

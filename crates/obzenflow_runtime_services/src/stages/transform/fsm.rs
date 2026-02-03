@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
 //! Transform stage FSM types and state machine definition
 //!
 //! Transforms process events from upstream stages and emit transformed events.

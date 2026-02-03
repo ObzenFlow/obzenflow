@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
 //! Middleware behavior hints for static analysis and validation
 //!
 //! This module provides a lightweight, zero-cost way for middleware factories

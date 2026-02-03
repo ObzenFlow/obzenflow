@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
 //! Metrics exporter trait for exposing metrics in various formats
 //!
 //! This trait allows the runtime layer to work with metrics exporters

@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
 //! Efficient cursor-based reader for DiskJournal
 //!
 //! Maintains an open file handle and tracks position for O(1) sequential reads.

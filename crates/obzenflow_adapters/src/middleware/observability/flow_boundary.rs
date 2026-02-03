@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
 //! Flow boundary tracking middleware for FLOWIP-055
 //!
 //! Tracks events at flow entry (source) and exit (sink) points to provide

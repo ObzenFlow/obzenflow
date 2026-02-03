@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
 //! ChainEvent - the enhanced event structure for FlowState RS
 //! This is the application-level event that lives inside EventEnvelope.data
 

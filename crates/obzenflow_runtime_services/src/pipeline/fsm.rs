@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
 //! Pipeline FSM using obzenflow_fsm
 //!
 //! This defines the pipeline state machine without the supervision logic

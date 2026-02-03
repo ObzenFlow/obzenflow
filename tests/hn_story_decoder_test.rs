@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
 //! Unit tests for HnStoryDecoder (FLOWIP-084f).
 //!
 //! These tests validate the decoder logic with fixtures — no network required.

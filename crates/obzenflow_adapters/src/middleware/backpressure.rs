@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
 use crate::middleware::control::ControlMiddlewareAggregator;
 use crate::middleware::{Middleware, MiddlewareAction, MiddlewareContext, MiddlewareFactory};
 use obzenflow_core::event::chain_event::ChainEvent;

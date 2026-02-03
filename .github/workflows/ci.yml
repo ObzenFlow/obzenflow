@@ -88,6 +88,40 @@ jobs:
         run: cargo fetch --locked
       - uses: Swatinem/rust-cache@v2
 
+      - name: Verify SPDX headers
+        run: |
+          python3 - <<'PY'
+          from __future__ import annotations
+          
+          import subprocess
+          import sys
+          from pathlib import Path
+          
+          expected = [
+              "// SPDX-License-Identifier: MIT OR Apache-2.0",
+              "// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors",
+              "// https://obzenflow.dev",
+          ]
+          
+          files = subprocess.check_output(["git", "ls-files", "*.rs"], text=True).splitlines()
+          bad: list[tuple[str, list[str]]] = []
+          for f in files:
+              lines = Path(f).read_text(encoding="utf-8").splitlines()
+              got = lines[:3]
+              if got != expected:
+                  bad.append((f, got))
+          
+          if bad:
+              print("SPDX header mismatch in Rust files:")
+              for f, got in bad:
+                  print(f" - {f}")
+                  for i, line in enumerate(got or ["<missing>"] * 3, start=1):
+                      print(f"   {i}: {line}")
+              sys.exit(1)
+          
+          print(f"SPDX headers OK in {len(files)} Rust files")
+          PY
+
       - name: Install cargo-deny
         uses: taiki-e/install-action@v2
         with:

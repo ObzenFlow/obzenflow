@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
 //! Prelude for ObzenFlow DSL - imports needed by the flow! macro
 //!
 //! Users typically won't import this directly, but the flow! macro uses it internally.

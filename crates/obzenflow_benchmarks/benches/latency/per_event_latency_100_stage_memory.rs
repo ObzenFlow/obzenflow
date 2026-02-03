@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
 //! 100-Stage Pipeline Latency Benchmark with MemoryJournal
 //!
 //! This benchmark tests the same 100-stage pipeline as per_event_latency_100_stage.rs

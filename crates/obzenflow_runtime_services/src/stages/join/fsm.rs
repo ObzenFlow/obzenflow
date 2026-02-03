@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
 //! FSM for join stages
 //!
 //! Join stages have a dedicated FSM that handles per-source EOF semantics.

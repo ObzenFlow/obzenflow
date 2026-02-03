@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
 //! Regression tests for the payment_gateway_resilience example.
 //!
 //! These tests exercise the strict vs breaker-aware configurations:

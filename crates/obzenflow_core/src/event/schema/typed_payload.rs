@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
 //! TypedPayload trait for type-safe event handling
 
 use crate::event::chain_event::{ChainEvent, ChainEventContent, ChainEventFactory};

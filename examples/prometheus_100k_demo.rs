@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
 //! Prometheus 100k Demo with FlowApplication Framework (FLOWIP-080h, 080j & 082a)
 //!
 //! This demo processes 100,000 events demonstrating:

@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
 #![cfg(any())] // Disabled: legacy throughput/backpressure harness, not part of safety cluster focused tests
 
 // tests/volume_tests.rs

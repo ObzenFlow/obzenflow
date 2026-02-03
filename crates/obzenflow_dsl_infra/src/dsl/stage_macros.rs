@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
 //! Type-explicit macros for creating stage descriptors
 //!
 //! These macros are the user-facing API for the let bindings approach.

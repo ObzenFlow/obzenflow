@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
 use crate::monitoring::metrics::core::Metric;
 
 /// Generic exporter interface for converting metrics to various formats

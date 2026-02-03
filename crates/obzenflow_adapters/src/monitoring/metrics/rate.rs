@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
 use super::core::{EventfulMetric, Metric, MetricSnapshot, MetricType, MetricUpdate, MetricValue};
 use obzenflow_core::metrics::primitives::Counter;
 use std::collections::HashMap;

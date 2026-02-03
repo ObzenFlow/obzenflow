@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
 //! Retry strategy for control events - used by circuit breakers and retry middleware
 
 use super::super::{ControlEventAction, ControlEventStrategy, ProcessingContext};

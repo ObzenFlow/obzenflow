@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
 use super::domain::{
     due_bucket, plan_sla_cap_hours, priority_sla_hours, Customer, EnrichedTicket, Ticket,
     TriagedTicket,

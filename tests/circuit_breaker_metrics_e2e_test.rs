@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
 //! End-to-end test for Circuit Breaker metrics in FLOWIP-056-666
 //!
 //! This test verifies that circuit breaker middleware emits control events

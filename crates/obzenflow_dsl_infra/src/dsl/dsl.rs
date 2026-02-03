@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
 //! Main flow! macro - the primary API for building ObzenFlow pipelines
 //!
 //! This is now a clean implementation using the let bindings approach that

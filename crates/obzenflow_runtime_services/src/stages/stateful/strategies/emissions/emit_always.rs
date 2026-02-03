@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
 // FLOWIP-080c: EmitAlways Emission Strategy
 //
 // Emits results after processing every event, useful for materialized views

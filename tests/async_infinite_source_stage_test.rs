@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use obzenflow_adapters::middleware::control::ControlMiddlewareAggregator;

@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
 #![cfg(any())]
 // Disabled for now: rate limiter + finite source drain semantics need a dedicated flowip; kept as a manual harness
 
