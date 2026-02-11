@@ -78,6 +78,16 @@ Some examples require features:
   Optional (real HN): `HN_LIVE=1 cargo run -p obzenflow --example hn_ingestion_demo --features http-pull`  
   Code: `examples/hn_ingestion_demo/flow.rs`
 
+- **`hn_ai_digest_demo`**: HN HTTP pull + typed accumulation + Rig-backed `ChatTransform` to generate a markdown digest (defaults to mock HN + Ollama).  
+  Run (mock HN + Ollama): `cargo run -p obzenflow --example hn_ai_digest_demo --features "http-pull ai-rig"`  
+  Optional (real HN): `HN_LIVE=1 cargo run -p obzenflow --example hn_ai_digest_demo --features "http-pull ai-rig"`  
+  Optional (OpenAI): `HN_AI_PROVIDER=openai OPENAI_API_KEY=... cargo run -p obzenflow --example hn_ai_digest_demo --features "http-pull ai-rig"`  
+  Ollama setup (macOS): `brew install ollama`, then start the server with `ollama serve` (or open the Ollama desktop app), then `ollama pull llama3.1:8b`  
+  Requirements: Ollama running locally (default `http://localhost:11434`) *or* a configured OpenAI/OpenAI-compatible endpoint. This example preflights the provider at startup and fails fast if it can’t connect or the model isn’t available.  
+  Third-party terms note: ObzenFlow only provides a client-side integration (via `rig-core`). It does not redistribute Ollama, model weights, or hosted LLM services. You are responsible for complying with any third-party licenses/terms (including model weight licenses and hosted-provider ToS/usage limits). When using a hosted provider, your prompts and story text will be sent to that provider.  
+  Useful env vars: `HN_AI_PROVIDER=ollama|openai`, `HN_AI_MODEL=...`, `HN_AI_INTERESTS="rust, ai, security"`, `OLLAMA_BASE_URL=...`, `OPENAI_BASE_URL=...`  
+  Code: `examples/hn_ai_digest_demo/flow.rs`
+
 ### Middleware, monitoring, and topology patterns
 
 - **`flow_middleware_config`**: flow-level vs stage-level middleware inheritance/override (rate limiting).  

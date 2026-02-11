@@ -69,7 +69,7 @@ anyhow = "1"
 # Core types
 url = "2"
 http = "1"
-bytes = "1"
+bytes = "1.11.1"
 
 # Data structures
 indexmap = "2"
@@ -92,6 +92,7 @@ subtle = "2"
 # Web / networking (optional in crates that use them)
 warp = "0.3"
 reqwest = { version = "0.12", default-features = false, features = ["charset", "http2", "rustls-tls-native-roots", "system-proxy"] }
+rustls-native-certs = "0.8"
 
 # Benchmarking / testing
 criterion = "0.5"
@@ -131,6 +132,7 @@ futures = { workspace = true }
 [features]
 console = ["obzenflow_infra/console"]
 http-pull = ["obzenflow_infra/reqwest-client"]
+ai-rig = ["obzenflow_infra/ai-rig"]
 
 [profile.release]
 lto = true
@@ -166,3 +168,8 @@ path = "examples/payment_gateway_resilience/main.rs"
 [[example]]
 name = "hn_ingestion_demo"
 path = "examples/hn_ingestion_demo/main.rs"
+
+[[example]]
+name = "hn_ai_digest_demo"
+path = "examples/hn_ai_digest_demo/main.rs"
+required-features = ["ai-rig"]

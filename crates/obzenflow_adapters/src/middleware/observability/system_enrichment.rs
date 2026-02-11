@@ -132,15 +132,39 @@ impl Middleware for SystemEnrichmentMiddleware {
                 }
                 StageType::Transform | StageType::Stateful | StageType::Sink | StageType::Join => {
                     // stages (transform, stateful, join) and sinks preserve correlation IDs
-                    // If somehow we get here without a correlation ID, log a warning
                     if event.correlation_id.is_none() {
-                        tracing::warn!(
-                            "SystemEnrichmentMiddleware: Non-control event {} in {} stage missing correlation_id",
-                            event.id,
-                            self.stage_name
-                        );
-                        // We could generate one here, but that would break journey tracking
-                        // Better to let it flow through and debug why it's missing
+                        // If this is a *root* event (no parent lineage), it's reasonable to
+                        // treat it as a journey start and generate correlation. This keeps
+                        // observability useful for aggregates and other synthetic outputs.
+                        if event.causality.is_root() {
+                            let correlation_id = CorrelationId::new();
+                            let mut correlation_payload =
+                                CorrelationPayload::new(&self.stage_name, event.id);
+
+                            correlation_payload.metadata = Some(serde_json::json!({
+                                "flow_name": self.flow_name,
+                                "flow_id": self.flow_id,
+                                "source_event_id": event.id.to_string(),
+                            }));
+
+                            event.correlation_id = Some(correlation_id);
+                            event.correlation_payload = Some(correlation_payload);
+
+                            tracing::trace!(
+                                "SystemEnrichmentMiddleware: Generated correlation_id {} for root event {} in stage {}",
+                                correlation_id,
+                                event.id,
+                                self.stage_name
+                            );
+                        } else {
+                            // Derived events should have had correlation propagated from their
+                            // parent. Leave it missing (and warn) so the root cause is visible.
+                            tracing::warn!(
+                                "SystemEnrichmentMiddleware: Non-control event {} in {} stage missing correlation_id",
+                                event.id,
+                                self.stage_name
+                            );
+                        }
                     }
                 }
             }
@@ -306,6 +330,38 @@ mod tests {
 
         // Correlation should be unchanged
         assert_eq!(event.correlation_id, Some(correlation_id));
+    }
+
+    #[test]
+    fn test_transform_generates_correlation_id_for_root_events() {
+        let middleware = SystemEnrichmentMiddleware::new(
+            "test_flow",
+            "flow-456",
+            "enricher",
+            StageId::new(),
+            StageType::Transform,
+        );
+        let ctx = MiddlewareContext::new();
+
+        let mut event = ChainEventFactory::data_event(
+            WriterId::from(StageId::new()),
+            "ticket.enriched",
+            json!({"id": "T-1"}),
+        );
+
+        assert!(event.correlation_id.is_none());
+        assert!(event.causality.is_root());
+
+        middleware.pre_write(&mut event, &ctx);
+
+        assert!(event.correlation_id.is_some());
+        let payload = event
+            .correlation_payload
+            .as_ref()
+            .expect("generated correlation payload should be present");
+        assert_eq!(payload.entry_stage, "enricher");
+        assert_eq!(payload.metadata.as_ref().unwrap()["flow_name"], "test_flow");
+        assert_eq!(payload.metadata.as_ref().unwrap()["flow_id"], "flow-456");
     }
 
     #[test]

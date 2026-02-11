@@ -30,6 +30,7 @@ thiserror = { workspace = true }
 crc32fast = { workspace = true }
 ring = { workspace = true }
 subtle = { workspace = true }
+url = { workspace = true }
 
 # Web frameworks (optional)
 warp = { workspace = true, optional = true }
@@ -41,13 +42,18 @@ console-subscriber = { workspace = true, optional = true }
 
 # HTTP client implementations (optional)
 reqwest = { workspace = true, optional = true }
+rustls-native-certs = { workspace = true, optional = true }
+
+# AI provider substrate (optional)
+rig_rs = { package = "rig-core", version = "0.30", default-features = false, optional = true }
 
 [features]
 default = []
 prometheus = []
 warp-server = ["dep:warp", "dep:bytes", "dep:tokio-stream"]
 console = ["dep:console-subscriber"]
-reqwest-client = ["dep:reqwest"]
+reqwest-client = ["dep:reqwest", "dep:rustls-native-certs"]
+ai-rig = ["reqwest-client", "dep:rig_rs"]
 
 [dev-dependencies]
 tokio-test = { workspace = true }

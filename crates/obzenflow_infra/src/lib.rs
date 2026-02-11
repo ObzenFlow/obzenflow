@@ -6,6 +6,7 @@
 //!
 //! This layer contains persistence, external integrations, and I/O
 
+pub mod ai;
 pub mod application;
 pub mod http_client;
 pub mod journal;

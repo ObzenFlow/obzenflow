@@ -6,6 +6,7 @@
 //!
 //! This layer contains interfaces, monitoring, and presentation logic
 
+pub mod ai;
 pub mod middleware;
 pub mod monitoring;
 pub mod sinks;

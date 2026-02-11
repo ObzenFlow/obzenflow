@@ -19,6 +19,7 @@ chrono = { workspace = true }
 url = { workspace = true }
 http = { workspace = true }
 bytes = { workspace = true }
+ring = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "macros"] }

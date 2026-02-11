@@ -1,0 +1,49 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
+//! HN AI Digest Demo (FLOWIP-086r) — showcases Rig-backed LLM transforms.
+//!
+//! Pipeline (batch):
+//! `HttpPullSource` → format stories → accumulate → `ChatTransform` → print markdown digest
+//!
+//! Run (default: local mock HN server + Ollama; requires Ollama running):
+//! `cargo run -p obzenflow --example hn_ai_digest_demo --features "http-pull ai-rig"`
+//!
+//! Ollama quickstart (macOS):
+//! - Install: `brew install ollama`
+//! - Start the server: `ollama serve` (or open the Ollama desktop app)
+//! - Pull the default model: `ollama pull llama3.1:8b`
+//!
+//! Provider preflight:
+//! This example checks provider reachability (and model availability where possible) at startup
+//! and fails fast with an actionable error if the provider isn't running/configured.
+//!
+//! Third-party terms note:
+//! ObzenFlow only provides a client-side integration (via `rig-core`). It does not redistribute
+//! Ollama, model weights, or hosted LLM services. You are responsible for complying with any
+//! third-party licenses/terms (including model weight licenses and hosted-provider ToS/usage limits).
+//! When using a hosted provider, your prompts and story text will be sent to that provider.
+//!
+//! Run against the real HN Firebase API (requires network):
+//! `HN_LIVE=1 cargo run -p obzenflow --example hn_ai_digest_demo --features "http-pull ai-rig"`
+//!
+//! Optional env vars (HN fetch):
+//! - `HN_MAX_STORIES=30` (default 30)
+//! - `HN_LIVE=1` (default 0)
+//! - `HN_POLL_TIMEOUT_SECS=120` (default 120)
+//!
+//! Optional env vars (AI):
+//! - `HN_AI_PROVIDER=ollama|openai` (default `ollama`)
+//! - `HN_AI_MODEL=llama3.1:8b` (default depends on provider)
+//! - `HN_AI_INTERESTS="rust, ai, security"` (optional personalization)
+//! - `HN_AI_PROMPT_STORIES=15` (optional; caps how many stories are included in the LLM prompt—useful for smaller-context Ollama models)
+//! - `OLLAMA_BASE_URL=http://localhost:11434` (optional; default rig provider base)
+//! - `OPENAI_API_KEY=...` (required for `HN_AI_PROVIDER=openai`)
+//! - `OPENAI_BASE_URL=http://localhost:8080/v1` (optional OpenAI-compatible base URL)
+
+mod support;
+
+fn main() -> anyhow::Result<()> {
+    support::flow::run_example()
+}

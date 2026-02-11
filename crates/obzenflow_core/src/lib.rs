@@ -8,6 +8,7 @@
 //! Everything here is pure types and traits with no knowledge
 //! of infrastructure, I/O, or external systems.
 
+pub mod ai;
 pub mod build_info;
 pub mod contracts;
 pub mod control_middleware;
