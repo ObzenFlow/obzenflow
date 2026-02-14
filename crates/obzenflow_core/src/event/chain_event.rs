@@ -834,21 +834,84 @@ impl ChainEventFactory {
         )
     }
 
-    /// Create a retry exhausted event
+    /// Create a retry exhausted event.
+    ///
+    /// When `cause` is provided the control event is linked to the input event
+    /// that triggered the retry sequence, establishing causal lineage for
+    /// downstream observability tooling.
     pub fn retry_exhausted(
         writer_id: WriterId,
         total_attempts: u32,
         last_error: String,
         total_duration_ms: u64,
+        cause: Option<EventId>,
     ) -> ChainEvent {
-        Self::observability_event(
+        let mut evt = Self::observability_event(
             writer_id,
             ObservabilityPayload::Middleware(MiddlewareLifecycle::Retry(RetryEvent::Exhausted {
                 total_attempts,
                 last_error,
                 total_duration_ms,
             })),
-        )
+        );
+        if let Some(parent) = cause {
+            evt.causality = CausalityContext::with_parent(parent);
+        }
+        evt
+    }
+
+    /// Create a retry attempt failed event.
+    ///
+    /// When `cause` is provided the control event is linked to the input event
+    /// that triggered the retry sequence.
+    pub fn retry_attempt_failed(
+        writer_id: WriterId,
+        attempt_number: u32,
+        max_attempts: u32,
+        error_kind: Option<ErrorKind>,
+        delay_ms: Option<u64>,
+        cause: Option<EventId>,
+    ) -> ChainEvent {
+        let mut evt = Self::observability_event(
+            writer_id,
+            ObservabilityPayload::Middleware(MiddlewareLifecycle::Retry(
+                RetryEvent::AttemptFailed {
+                    attempt_number,
+                    max_attempts,
+                    error_kind,
+                    delay_ms,
+                },
+            )),
+        );
+        if let Some(parent) = cause {
+            evt.causality = CausalityContext::with_parent(parent);
+        }
+        evt
+    }
+
+    /// Create a retry succeeded-after-retry event.
+    ///
+    /// When `cause` is provided the control event is linked to the input event
+    /// that triggered the retry sequence.
+    pub fn retry_succeeded_after_retry(
+        writer_id: WriterId,
+        total_attempts: u32,
+        total_duration_ms: u64,
+        cause: Option<EventId>,
+    ) -> ChainEvent {
+        let mut evt = Self::observability_event(
+            writer_id,
+            ObservabilityPayload::Middleware(MiddlewareLifecycle::Retry(
+                RetryEvent::SucceededAfterRetry {
+                    total_attempts,
+                    total_duration_ms,
+                },
+            )),
+        );
+        if let Some(parent) = cause {
+            evt.causality = CausalityContext::with_parent(parent);
+        }
+        evt
     }
 
     // Windowing metrics events

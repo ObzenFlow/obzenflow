@@ -3,7 +3,6 @@
 // https://obzenflow.dev
 
 use crate::ai::error_mapping::ai_client_error_to_handler_error_with_context;
-use crate::ai::retry::{execute_with_retry, AiRetryPolicy};
 use async_trait::async_trait;
 use obzenflow_core::ai::{
     attach_llm_observability, params_hash_for_embedding, prompt_hash_for_embedding_inputs,
@@ -30,14 +29,11 @@ pub struct EmbeddingTransform {
     client: Arc<dyn EmbeddingClient>,
     request_builder: Arc<EmbeddingRequestBuilder>,
     output_mapper: Arc<EmbeddingOutputMapper>,
-    retry_policy: AiRetryPolicy,
 }
 
 impl fmt::Debug for EmbeddingTransform {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("EmbeddingTransform")
-            .field("retry_policy", &self.retry_policy)
-            .finish()
+        f.debug_struct("EmbeddingTransform").finish()
     }
 }
 
@@ -50,7 +46,6 @@ impl EmbeddingTransform {
             client,
             request_builder: Arc::new(request_builder),
             output_mapper: Arc::new(default_embedding_output_mapper),
-            retry_policy: AiRetryPolicy::default(),
         }
     }
 
@@ -62,11 +57,6 @@ impl EmbeddingTransform {
             + 'static,
     {
         self.output_mapper = Arc::new(output_mapper);
-        self
-    }
-
-    pub fn with_retry_policy(mut self, retry_policy: AiRetryPolicy) -> Self {
-        self.retry_policy = retry_policy;
         self
     }
 }
@@ -83,13 +73,9 @@ impl AsyncTransformHandler for EmbeddingTransform {
             HandlerError::Validation(format!("embedding params canonicalization failed: {err}"))
         })?;
 
-        let response = execute_with_retry(&self.retry_policy, |_attempt| {
-            let client = self.client.clone();
-            let req = request.clone();
-            async move { client.embed(req).await }
-        })
-        .await
-        .map_err(|err| ai_client_error_to_handler_error_with_context(err, Some("embedding")))?;
+        let embed_result = self.client.embed(request.clone()).await;
+        let response = embed_result
+            .map_err(|err| ai_client_error_to_handler_error_with_context(err, Some("embedding")))?;
 
         let usage = response.usage.clone();
         let mut outputs = (self.output_mapper)(&event, response)?;
@@ -140,14 +126,11 @@ mod tests {
     use obzenflow_core::event::ChainEventFactory;
     use obzenflow_core::{StageId, WriterId};
     use std::collections::VecDeque;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
-    use std::time::Duration;
 
     #[derive(Debug, Default)]
     struct QueueEmbeddingClient {
         outcomes: Mutex<VecDeque<Result<EmbeddingResponse, AiClientError>>>,
-        calls: AtomicUsize,
     }
 
     impl QueueEmbeddingClient {
@@ -157,20 +140,11 @@ mod tests {
                 .expect("poisoned")
                 .push_back(Ok(response));
         }
-
-        fn enqueue_err(&self, err: AiClientError) {
-            self.outcomes.lock().expect("poisoned").push_back(Err(err));
-        }
-
-        fn calls(&self) -> usize {
-            self.calls.load(Ordering::SeqCst)
-        }
     }
 
     #[async_trait]
     impl EmbeddingClient for QueueEmbeddingClient {
         async fn embed(&self, _req: EmbeddingRequest) -> Result<EmbeddingResponse, AiClientError> {
-            self.calls.fetch_add(1, Ordering::SeqCst);
             self.outcomes
                 .lock()
                 .expect("poisoned")
@@ -222,42 +196,5 @@ mod tests {
             .expect("llm metadata should exist");
         assert_eq!(llm.provider.as_str(), "openai");
         assert_eq!(llm.model, "text-embedding-3-small");
-    }
-
-    #[tokio::test]
-    async fn embedding_transform_retries_transient_errors() {
-        let client = Arc::new(QueueEmbeddingClient::default());
-        client.enqueue_err(AiClientError::Remote {
-            message: "network".to_string(),
-        });
-        client.enqueue_ok(EmbeddingResponse {
-            vectors: vec![vec![1.0, 2.0]],
-            vector_dim: 2,
-            usage: None,
-            raw: None,
-        });
-
-        let transform = EmbeddingTransform::new(client.clone(), |_event| {
-            Ok(EmbeddingRequest {
-                provider: AiProvider::new("openai"),
-                model: "text-embedding-3-small".to_string(),
-                inputs: vec!["help".to_string()],
-                params: EmbeddingParams::default(),
-            })
-        })
-        .with_retry_policy(AiRetryPolicy {
-            max_attempts: 2,
-            initial_backoff: Duration::from_millis(1),
-            max_backoff: Duration::from_millis(2),
-            rate_limit_max_wait: Duration::from_millis(2),
-        });
-
-        let outputs = transform
-            .process(test_event())
-            .await
-            .expect("retry should recover");
-
-        assert_eq!(outputs.len(), 1);
-        assert_eq!(client.calls(), 2);
     }
 }

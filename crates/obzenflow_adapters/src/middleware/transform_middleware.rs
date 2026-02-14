@@ -15,8 +15,10 @@ use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
 use obzenflow_runtime_services::stages::common::handlers::{
     AsyncTransformHandler, TransformHandler,
 };
+use serde_json::json;
 use std::future::Future;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 /// A TransformHandler wrapper that applies middleware to transform operations
 #[derive(Clone)]
@@ -103,6 +105,17 @@ impl<H: TransformHandler> MiddlewareTransform<H> {
         // If the handler returns `Err(HandlerError)`, convert it into an
         // error-marked event so middleware (e.g., circuit breaker) can still
         // observe the ErrorKind-driven outcome.
+        // TODO(051c): When sync retry is added, extract `retry_after` from
+        // `HandlerError::RateLimited { retry_after, .. }` into baggage so the
+        // circuit breaker can honour provider back-off hints (mirrors the async path).
+        //
+        // TODO(D2/051c): The sync transform path catches `HandlerError` and converts
+        // it to an error-marked event, but never calls `Middleware::on_error` on the
+        // middleware chain.  This means any middleware relying on `on_error` (e.g.,
+        // for cleanup or observability) will not fire in the sync path.  The circuit
+        // breaker currently observes failures via `post_handle` + `ErrorKind` on the
+        // marked event, so this is not a correctness issue today, but it violates the
+        // middleware contract and should be reconciled when the sync retry loop is added.
         let mut results = match transform_fn(event.clone()) {
             Ok(results) => results,
             Err(err) => {
@@ -232,80 +245,152 @@ impl<H: AsyncTransformHandler> AsyncMiddlewareTransform<H> {
     async fn apply_middleware<F, Fut>(
         &self,
         event: ChainEvent,
-        transform_fn: F,
+        mut transform_fn: F,
     ) -> Result<Vec<ChainEvent>, HandlerError>
     where
-        F: FnOnce(ChainEvent) -> Fut,
+        F: FnMut(ChainEvent) -> Fut,
         Fut: Future<Output = Result<Vec<ChainEvent>, HandlerError>>,
     {
-        // Create ephemeral context for this processing
-        let mut ctx = MiddlewareContext::new();
+        let original = event.clone();
+        let retry_start = Instant::now();
+        let mut attempt: u32 = 0;
+        let mut accumulated_control_events: Vec<ChainEvent> = Vec::new();
 
-        // Pre-processing phase
-        for middleware in self.middleware_chain.iter() {
-            match middleware.pre_handle(&event, &mut ctx) {
-                MiddlewareAction::Continue => continue,
-                MiddlewareAction::Skip(mut results) => {
-                    // Pre-write phase for skip results
-                    for result in &mut results {
-                        for mw in self.middleware_chain.iter() {
-                            mw.pre_write(result, &ctx);
-                        }
-                    }
+        loop {
+            // Create a fresh ephemeral context per attempt so timing/observability middleware
+            // can record per-attempt processing metadata cleanly.
+            let mut ctx = MiddlewareContext::new();
+            ctx.set_baggage("circuit_breaker.attempt", json!(attempt));
 
-                    // Pre-write on control events - take ownership to avoid borrow issues
-                    let mut control_events = std::mem::take(&mut ctx.control_events);
-                    for control_event in &mut control_events {
-                        for mw in self.middleware_chain.iter() {
-                            mw.pre_write(control_event, &ctx);
-                        }
-                    }
-                    results.extend(control_events);
-                    return Ok(results);
-                }
-                MiddlewareAction::Abort => {
-                    let mut err = event.clone();
-                    err.processing_info.status = ProcessingStatus::error("aborted by middleware");
-                    return Ok(vec![err]);
-                }
-            }
-        }
-
-        // Execute the transform (async).
-        //
-        // If the handler returns `Err(HandlerError)`, convert it into an
-        // error-marked event so middleware (e.g., circuit breaker) can still
-        // observe the ErrorKind-driven outcome.
-        let mut results = match transform_fn(event.clone()).await {
-            Ok(results) => results,
-            Err(err) => {
-                let reason = format!("Transform handler error: {err:?}");
-                vec![event.clone().mark_as_error(reason, err.kind())]
-            }
-        };
-
-        // Post-processing phase (reverse order)
-        for middleware in self.middleware_chain.iter().rev() {
-            middleware.post_handle(&event, &results, &mut ctx);
-        }
-
-        // Pre-write phase: allow middleware to enrich each result event
-        for result in &mut results {
+            // Pre-processing phase
+            let mut short_circuit: Option<Vec<ChainEvent>> = None;
             for middleware in self.middleware_chain.iter() {
-                middleware.pre_write(result, &ctx);
-            }
-        }
+                match middleware.pre_handle(&original, &mut ctx) {
+                    MiddlewareAction::Continue => continue,
+                    MiddlewareAction::Skip(mut results) => {
+                        accumulated_control_events.extend(std::mem::take(&mut ctx.control_events));
+                        ctx.set_baggage(
+                            "circuit_breaker.total_retry_wall_ms",
+                            json!(retry_start.elapsed().as_millis()),
+                        );
 
-        // Append control events after all middleware runs
-        let mut control_events = std::mem::take(&mut ctx.control_events);
-        for control_event in &mut control_events {
-            for middleware in self.middleware_chain.iter() {
-                middleware.pre_write(control_event, &ctx);
-            }
-        }
-        results.extend(control_events);
+                        for result in &mut results {
+                            for mw in self.middleware_chain.iter() {
+                                mw.pre_write(result, &ctx);
+                            }
+                        }
+                        for control_event in &mut accumulated_control_events {
+                            for mw in self.middleware_chain.iter() {
+                                mw.pre_write(control_event, &ctx);
+                            }
+                        }
+                        results.append(&mut accumulated_control_events);
+                        short_circuit = Some(results);
+                        break;
+                    }
+                    MiddlewareAction::Abort => {
+                        accumulated_control_events.extend(std::mem::take(&mut ctx.control_events));
+                        ctx.set_baggage(
+                            "circuit_breaker.total_retry_wall_ms",
+                            json!(retry_start.elapsed().as_millis()),
+                        );
 
-        Ok(results)
+                        let mut err = original.clone();
+                        err.processing_info.status =
+                            ProcessingStatus::error("aborted by middleware");
+                        let mut results = vec![err];
+                        for result in &mut results {
+                            for mw in self.middleware_chain.iter() {
+                                mw.pre_write(result, &ctx);
+                            }
+                        }
+                        for control_event in &mut accumulated_control_events {
+                            for mw in self.middleware_chain.iter() {
+                                mw.pre_write(control_event, &ctx);
+                            }
+                        }
+                        results.append(&mut accumulated_control_events);
+                        short_circuit = Some(results);
+                        break;
+                    }
+                }
+            }
+
+            if let Some(results) = short_circuit {
+                return Ok(results);
+            }
+
+            // Execute the transform (async).
+            //
+            // If the handler returns `Err(HandlerError)`, convert it into an
+            // error-marked event so middleware (e.g., circuit breaker) can still
+            // observe the ErrorKind-driven outcome.
+            let mut results = match transform_fn(original.clone()).await {
+                Ok(results) => results,
+                Err(err) => {
+                    if let HandlerError::RateLimited {
+                        retry_after: Some(wait),
+                        ..
+                    } = &err
+                    {
+                        ctx.set_baggage(
+                            "circuit_breaker.retry_after_ms",
+                            json!(wait.as_millis() as u64),
+                        );
+                    }
+                    let reason = format!("Transform handler error: {err:?}");
+                    vec![original.clone().mark_as_error(reason, err.kind())]
+                }
+            };
+
+            // Post-processing phase (reverse order)
+            for middleware in self.middleware_chain.iter().rev() {
+                middleware.post_handle(&original, &results, &mut ctx);
+            }
+
+            accumulated_control_events.extend(std::mem::take(&mut ctx.control_events));
+
+            // Ask middleware (circuit breaker) if we should retry.
+            let should_retry = ctx
+                .get_baggage("circuit_breaker.should_retry")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+
+            if should_retry {
+                let delay_ms = ctx
+                    .get_baggage("circuit_breaker.retry_delay_ms")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                attempt = attempt.saturating_add(1);
+                if delay_ms > 0 {
+                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                }
+                continue;
+            }
+
+            // Final attempt: record total wall time across all attempts (including backoff).
+            ctx.set_baggage(
+                "circuit_breaker.total_retry_wall_ms",
+                json!(retry_start.elapsed().as_millis()),
+            );
+
+            // Pre-write phase: allow middleware to enrich each result event.
+            for result in &mut results {
+                for middleware in self.middleware_chain.iter() {
+                    middleware.pre_write(result, &ctx);
+                }
+            }
+
+            // Pre-write on accumulated control events and append them.
+            for control_event in &mut accumulated_control_events {
+                for middleware in self.middleware_chain.iter() {
+                    middleware.pre_write(control_event, &ctx);
+                }
+            }
+            results.append(&mut accumulated_control_events);
+
+            return Ok(results);
+        }
     }
 }
 
@@ -369,7 +454,9 @@ mod tests {
     use async_trait::async_trait;
     use obzenflow_core::event::ChainEventFactory;
     use serde_json::json;
+    use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration as StdDuration;
 
     struct TestTransform;
 
@@ -698,5 +785,122 @@ mod tests {
         // Second is the control event
         assert!(results[1].is_lifecycle());
         assert_eq!(results[1].event_type(), "lifecycle.metrics.state");
+    }
+
+    #[derive(Clone, Debug)]
+    struct FlakyAsyncTransform {
+        calls: Arc<AtomicUsize>,
+        fail_times: usize,
+    }
+
+    #[async_trait]
+    impl AsyncTransformHandler for FlakyAsyncTransform {
+        async fn process(&self, event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
+            let n = self.calls.fetch_add(1, Ordering::SeqCst);
+            if n < self.fail_times {
+                Err(HandlerError::Remote("transient".to_string()))
+            } else {
+                Ok(vec![event])
+            }
+        }
+
+        async fn drain(&mut self) -> Result<(), HandlerError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn async_middleware_transform_retries_via_circuit_breaker_baggage() {
+        use crate::middleware::control::{CircuitBreakerBuilder, ControlMiddlewareAggregator};
+        use crate::middleware::MiddlewareFactory;
+        use obzenflow_core::StageId;
+        use obzenflow_runtime_services::pipeline::config::StageConfig;
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let handler = FlakyAsyncTransform {
+            calls: calls.clone(),
+            fail_times: 2,
+        };
+
+        let factory = CircuitBreakerBuilder::new(5)
+            .with_retry_fixed(StdDuration::from_millis(1), 3)
+            .build();
+
+        let config = StageConfig {
+            stage_id: StageId::new(),
+            name: "test".to_string(),
+            flow_name: "test".to_string(),
+        };
+        let control = Arc::new(ControlMiddlewareAggregator::new());
+        let cb = factory.create(&config, control);
+
+        let wrapped = handler.middleware().with(cb).build();
+
+        let event = ChainEventFactory::data_event(
+            obzenflow_core::WriterId::from(StageId::new()),
+            "test",
+            json!({}),
+        );
+
+        let results = wrapped
+            .process(event)
+            .await
+            .expect("handler errors should be retried and eventually succeed");
+
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+
+        let data_events = results.iter().filter(|e| e.is_data()).count();
+        let control_events = results.iter().filter(|e| e.is_lifecycle()).count();
+        assert_eq!(data_events, 1);
+        assert_eq!(control_events, 3);
+    }
+
+    #[tokio::test]
+    async fn async_middleware_transform_exhausts_retries_and_returns_error_event() {
+        use crate::middleware::control::{CircuitBreakerBuilder, ControlMiddlewareAggregator};
+        use crate::middleware::MiddlewareFactory;
+        use obzenflow_core::StageId;
+        use obzenflow_runtime_services::pipeline::config::StageConfig;
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let handler = FlakyAsyncTransform {
+            calls: calls.clone(),
+            fail_times: usize::MAX,
+        };
+
+        let factory = CircuitBreakerBuilder::new(5)
+            .with_retry_fixed(StdDuration::from_millis(1), 3)
+            .build();
+
+        let config = StageConfig {
+            stage_id: StageId::new(),
+            name: "test".to_string(),
+            flow_name: "test".to_string(),
+        };
+        let control = Arc::new(ControlMiddlewareAggregator::new());
+        let cb = factory.create(&config, control);
+
+        let wrapped = handler.middleware().with(cb).build();
+
+        let event = ChainEventFactory::data_event(
+            obzenflow_core::WriterId::from(StageId::new()),
+            "test",
+            json!({}),
+        );
+
+        let results = wrapped
+            .process(event)
+            .await
+            .expect("handler errors should be converted into error events");
+
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+
+        let error_events = results
+            .iter()
+            .filter(|e| matches!(e.processing_info.status, ProcessingStatus::Error { .. }))
+            .count();
+        let control_events = results.iter().filter(|e| e.is_lifecycle()).count();
+        assert_eq!(error_events, 1);
+        assert_eq!(control_events, 3);
     }
 }

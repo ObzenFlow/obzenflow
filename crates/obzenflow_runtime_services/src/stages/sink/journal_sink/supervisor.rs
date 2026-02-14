@@ -488,7 +488,7 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                             match &envelope.event.content {
                                 obzenflow_core::event::ChainEventContent::FlowControl(signal) => {
                                     let mut processing_ctx = ProcessingContext::new();
-                                    let action = match signal {
+                                    let mut action = match signal {
                                         FlowControlPayload::Eof { natural, .. } => {
                                             tracing::info!(
                                                 stage_name = %ctx.stage_name,
@@ -511,111 +511,121 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                         _ => ControlEventAction::Forward,
                                     };
 
-                                    match action {
-                                        ControlEventAction::Forward => {
-                                            match signal {
-                                                // Treat only EOF as terminal; drain propagates but is non-terminal
-                                                FlowControlPayload::Eof { .. } => {
-                                                    let eof_outcome =
-                                                        subscription.take_last_eof_outcome();
-                                                    let _ = subscription
-                                                        .check_contracts(&mut contract_state[..])
-                                                        .await;
+                                    loop {
+                                        match action {
+                                            ControlEventAction::Delay(duration) => {
+                                                tracing::info!(
+                                                    stage_name = %ctx.stage_name,
+                                                    event_type = envelope.event.event_type(),
+                                                    duration = ?duration,
+                                                    "Sink delaying control event"
+                                                );
+                                                tokio::time::sleep(duration).await;
+                                                action = ControlEventAction::Forward;
+                                            }
+                                            ControlEventAction::Forward => {
+                                                match signal {
+                                                    // Treat only EOF as terminal; drain propagates but is non-terminal
+                                                    FlowControlPayload::Eof { .. } => {
+                                                        let eof_outcome =
+                                                            subscription.take_last_eof_outcome();
+                                                        let _ = subscription
+                                                            .check_contracts(
+                                                                &mut contract_state[..],
+                                                            )
+                                                            .await;
 
-                                                    // Capture upstream reader count for logging before
-                                                    // releasing the subscription lock.
-                                                    let upstream_readers =
-                                                        subscription.upstream_count();
+                                                        // Capture upstream reader count for logging before
+                                                        // releasing the subscription lock.
+                                                        let upstream_readers =
+                                                            subscription.upstream_count();
 
-                                                    match eof_outcome {
-                                                        Some(outcome) => {
-                                                            tracing::info!(
-                                                                target: "flowip-080o",
-                                                                stage_name = %ctx.stage_name,
-                                                                upstream_stage_id = ?outcome.stage_id,
-                                                                upstream_stage_name = %outcome.stage_name,
-                                                                reader_index = outcome.reader_index,
-                                                                eof_count = outcome.eof_count,
-                                                                total_readers = outcome.total_readers,
-                                                                is_final = outcome.is_final,
-                                                                event_type = envelope.event.event_type(),
-                                                                "Sink received EOF; evaluated drain decision"
-                                                            );
-
-                                                            if outcome.is_final {
+                                                        match eof_outcome {
+                                                            Some(outcome) => {
                                                                 tracing::info!(
                                                                     target: "flowip-080o",
                                                                     stage_name = %ctx.stage_name,
-                                                                    "Sink EOF is final; triggering FSM transition to Drained"
+                                                                    upstream_stage_id = ?outcome.stage_id,
+                                                                    upstream_stage_name = %outcome.stage_name,
+                                                                    reader_index = outcome.reader_index,
+                                                                    eof_count = outcome.eof_count,
+                                                                    total_readers = outcome.total_readers,
+                                                                    is_final = outcome.is_final,
+                                                                    event_type = envelope.event.event_type(),
+                                                                    "Sink received EOF; evaluated drain decision"
                                                                 );
 
-                                                                // FLOWIP-080o-part-2: Use FSM properly.
-                                                                // Return Transition(ReceivedEOF) to let the FSM handle
-                                                                // the Running -> Drained transition and execute actions:
-                                                                // [FlushBuffers, SendCompletion, Cleanup]
-                                                                //
-                                                                // Previously this returned Terminate directly, bypassing
-                                                                // the FSM and skipping flush/cleanup (which caused hangs
-                                                                // when attempted inline due to lock contention).
-                                                                return Ok(
+                                                                if outcome.is_final {
+                                                                    tracing::info!(
+                                                                        target: "flowip-080o",
+                                                                        stage_name = %ctx.stage_name,
+                                                                        "Sink EOF is final; triggering FSM transition to Drained"
+                                                                    );
+
+                                                                    // FLOWIP-080o-part-2: Use FSM properly.
+                                                                    // Return Transition(ReceivedEOF) to let the FSM handle
+                                                                    // the Running -> Drained transition and execute actions:
+                                                                    // [FlushBuffers, SendCompletion, Cleanup]
+                                                                    //
+                                                                    // Previously this returned Terminate directly, bypassing
+                                                                    // the FSM and skipping flush/cleanup (which caused hangs
+                                                                    // when attempted inline due to lock contention).
+                                                                    return Ok(
                                                                     EventLoopDirective::Transition(
                                                                         JournalSinkEvent::ReceivedEOF,
                                                                     ),
                                                                 );
-                                                            } else {
+                                                                } else {
+                                                                    tracing::info!(
+                                                                        stage_name = %ctx.stage_name,
+                                                                    "Sink EOF not final; continuing to consume remaining upstreams"
+                                                                    );
+                                                                }
+                                                            }
+                                                            None => {
                                                                 tracing::info!(
+                                                                    target: "flowip-080o",
                                                                     stage_name = %ctx.stage_name,
-                                                                "Sink EOF not final; continuing to consume remaining upstreams"
+                                                                    event_type = envelope.event.event_type(),
+                                                                    writer_id = ?envelope.event.writer_id,
+                                                                    upstream_readers = upstream_readers,
+                                                                    "Sink received EOF authored by a non-upstream writer; ignoring for EOF authority and continuing to consume"
                                                                 );
                                                             }
                                                         }
-                                                        None => {
-                                                            tracing::info!(
-                                                                target: "flowip-080o",
+                                                    }
+                                                    _ => {
+                                                        // Forward other control/control-like events to downstream journal
+                                                        self.forward_control_event(&envelope)
+                                                            .await?;
+
+                                                        // For non-EOF control events, let handler consume if needed
+                                                        let envelope_event = envelope.event.clone();
+                                                        let handler = &mut ctx.handler;
+
+                                                        if let Err(e) =
+                                                            handler.consume(envelope_event).await
+                                                        {
+                                                            tracing::error!(
                                                                 stage_name = %ctx.stage_name,
-                                                                event_type = envelope.event.event_type(),
-                                                                writer_id = ?envelope.event.writer_id,
-                                                                upstream_readers = upstream_readers,
-                                                                "Sink received EOF authored by a non-upstream writer; ignoring for EOF authority and continuing to consume"
+                                                                error = ?e,
+                                                                "Failed to consume control event"
                                                             );
                                                         }
                                                     }
                                                 }
-                                                _ => {
-                                                    // Forward other control/control-like events to downstream journal
-                                                    self.forward_control_event(&envelope).await?;
 
-                                                    // For non-EOF control events, let handler consume if needed
-                                                    let envelope_event = envelope.event.clone();
-                                                    let handler = &mut ctx.handler;
-
-                                                    if let Err(e) =
-                                                        handler.consume(envelope_event).await
-                                                    {
-                                                        tracing::error!(
-                                                            stage_name = %ctx.stage_name,
-                                                            error = ?e,
-                                                            "Failed to consume control event"
-                                                        );
-                                                    }
-                                                }
+                                                break;
                                             }
-                                        }
-                                        ControlEventAction::Delay(duration) => {
-                                            tracing::info!(
-                                                stage_name = %ctx.stage_name,
-                                                event_type = envelope.event.event_type(),
-                                                duration = ?duration,
-                                                "Sink delaying control event"
-                                            );
-                                            tokio::time::sleep(duration).await;
-                                        }
-                                        ControlEventAction::Retry | ControlEventAction::Skip => {
-                                            tracing::info!(
-                                                stage_name = %ctx.stage_name,
-                                                event_type = envelope.event.event_type(),
-                                                "Sink ignoring control event (Retry/Skip not implemented)"
-                                            );
+                                            ControlEventAction::Retry
+                                            | ControlEventAction::Skip => {
+                                                tracing::info!(
+                                                    stage_name = %ctx.stage_name,
+                                                    event_type = envelope.event.event_type(),
+                                                    "Sink ignoring control event (Retry/Skip not implemented)"
+                                                );
+                                                break;
+                                            }
                                         }
                                     }
                                 }
@@ -732,6 +742,8 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                                         } => match kind {
                                                             Some(ErrorKind::Timeout)
                                                             | Some(ErrorKind::Remote)
+                                                            | Some(ErrorKind::RateLimited)
+                                                            | Some(ErrorKind::PermanentFailure)
                                                             | Some(ErrorKind::Deserialization) => {
                                                                 true
                                                             }

@@ -14,5 +14,6 @@ pub use core::{ControlEventAction, ControlEventStrategy, ProcessingContext};
 // Concrete strategy implementations
 mod strategies;
 pub use strategies::{
-    BackoffStrategy, CompositeStrategy, JonestownStrategy, RetryStrategy, WindowingStrategy,
+    BackoffStrategy, CircuitBreakerEofStrategy, CompositeStrategy, JonestownStrategy,
+    RetryStrategy, WindowingStrategy,
 };

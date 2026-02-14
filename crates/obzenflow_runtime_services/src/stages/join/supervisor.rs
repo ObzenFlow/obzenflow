@@ -523,7 +523,7 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                 obzenflow_core::event::ChainEventContent::FlowControl(signal) => {
                                     let mut processing_ctx = ProcessingContext::new();
 
-                                    let action = match signal {
+                                    let mut action = match signal {
                                         FlowControlPayload::Eof { natural, .. } => {
                                             tracing::info!(
                                                 stage_name = %ctx.stage_name,
@@ -546,62 +546,70 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                         _ => ControlEventAction::Forward,
                                     };
 
-                                    match action {
-                                        ControlEventAction::Forward => {
-                                            // Always forward control events downstream
-                                            let written = self
-                                                .data_journal
-                                                .append(envelope.event.clone(), None)
-                                                .await?;
-                                            crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
+                                    loop {
+                                        match action {
+                                            ControlEventAction::Delay(duration) => {
+                                                tracing::info!(
+                                                    stage_name = %ctx.stage_name,
+                                                    event_type = envelope.event.event_type(),
+                                                    duration = ?duration,
+                                                    "Join delaying control event during Hydrating"
+                                                );
+                                                tokio::time::sleep(duration).await;
+                                                action = ControlEventAction::Forward;
+                                            }
+                                            ControlEventAction::Forward => {
+                                                // Always forward control events downstream
+                                                let written = self
+                                                    .data_journal
+                                                    .append(envelope.event.clone(), None)
+                                                    .await?;
+                                                crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
                                                 &written,
                                                 &self.system_journal,
                                             )
                                             .await;
 
-                                            if matches!(signal, FlowControlPayload::Eof { .. }) {
-                                                // FLOWIP-080p: use EofOutcome to decide when the
-                                                // reference side is truly complete.
-                                                let eof_outcome =
-                                                    subscription.take_last_eof_outcome();
-                                                if let Some(outcome) = eof_outcome {
-                                                    tracing::info!(
-                                                        target: "flowip-080o",
-                                                        stage_name = %ctx.stage_name,
-                                                        upstream_stage_id = ?outcome.stage_id,
-                                                        upstream_stage_name = %outcome.stage_name,
-                                                        reader_index = outcome.reader_index,
-                                                        eof_count = outcome.eof_count,
-                                                        total_readers = outcome.total_readers,
-                                                        is_final = outcome.is_final,
-                                                        "Join (Hydrating) evaluated EOF outcome for reference side"
-                                                    );
+                                                if matches!(signal, FlowControlPayload::Eof { .. })
+                                                {
+                                                    // FLOWIP-080p: use EofOutcome to decide when the
+                                                    // reference side is truly complete.
+                                                    let eof_outcome =
+                                                        subscription.take_last_eof_outcome();
+                                                    if let Some(outcome) = eof_outcome {
+                                                        tracing::info!(
+                                                            target: "flowip-080o",
+                                                            stage_name = %ctx.stage_name,
+                                                            upstream_stage_id = ?outcome.stage_id,
+                                                            upstream_stage_name = %outcome.stage_name,
+                                                            reader_index = outcome.reader_index,
+                                                            eof_count = outcome.eof_count,
+                                                            total_readers = outcome.total_readers,
+                                                            is_final = outcome.is_final,
+                                                            "Join (Hydrating) evaluated EOF outcome for reference side"
+                                                        );
 
-                                                    if outcome.is_final {
-                                                        // Reference EOF is final -> transition to Enriching
-                                                        directive =
-                                                            Ok(EventLoopDirective::Transition(
-                                                                JoinEvent::ReceivedEOF,
-                                                            ));
+                                                        if outcome.is_final {
+                                                            // Reference EOF is final -> transition to Enriching
+                                                            directive =
+                                                                Ok(EventLoopDirective::Transition(
+                                                                    JoinEvent::ReceivedEOF,
+                                                                ));
+                                                        }
                                                     }
                                                 }
+
+                                                break;
                                             }
-                                        }
-                                        ControlEventAction::Delay(duration) => {
-                                            tracing::info!(
-                                                stage_name = %ctx.stage_name,
-                                                event_type = envelope.event.event_type(),
-                                                duration = ?duration,
-                                                "Join delaying control event during Hydrating"
-                                            );
-                                            tokio::time::sleep(duration).await;
-                                        }
-                                        ControlEventAction::Retry | ControlEventAction::Skip => {
-                                            tracing::info!(
-                                                stage_name = %ctx.stage_name,
-                                                event_type = envelope.event.event_type(),
-                                                "Join ignoring control event (Retry/Skip not implemented) during Hydrating"
-                                            );
+                                            ControlEventAction::Retry
+                                            | ControlEventAction::Skip => {
+                                                tracing::info!(
+                                                    stage_name = %ctx.stage_name,
+                                                    event_type = envelope.event.event_type(),
+                                                    "Join ignoring control event (Retry/Skip not implemented) during Hydrating"
+                                                );
+                                                break;
+                                            }
                                         }
                                     }
                                 }
@@ -982,7 +990,7 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                     ) => {
                                         let mut processing_ctx = ProcessingContext::new();
 
-                                        let action = match signal {
+                                        let mut action = match signal {
                                             FlowControlPayload::Eof { natural, .. } => {
                                                 tracing::info!(
                                                     stage_name = %ctx.stage_name,
@@ -1007,63 +1015,72 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                             _ => ControlEventAction::Forward,
                                         };
 
-                                        match action {
-                                            ControlEventAction::Forward => {
-                                                // Always forward control events downstream
-                                                let written = self
-                                                    .data_journal
-                                                    .append(envelope.event.clone(), None)
-                                                    .await?;
-                                                crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
+                                        loop {
+                                            match action {
+                                                ControlEventAction::Delay(duration) => {
+                                                    tracing::info!(
+                                                        stage_name = %ctx.stage_name,
+                                                        event_type = envelope.event.event_type(),
+                                                        duration = ?duration,
+                                                        "Join delaying control event"
+                                                    );
+                                                    tokio::time::sleep(duration).await;
+                                                    action = ControlEventAction::Forward;
+                                                }
+                                                ControlEventAction::Forward => {
+                                                    // Always forward control events downstream
+                                                    let written = self
+                                                        .data_journal
+                                                        .append(envelope.event.clone(), None)
+                                                        .await?;
+                                                    crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
                                                 &written,
                                                 &self.system_journal,
                                             )
                                             .await;
 
-                                                // Use EofOutcome from the stream subscription to decide
-                                                // when the join can move to Draining.
-                                                if matches!(signal, FlowControlPayload::Eof { .. })
-                                                {
-                                                    let eof_outcome =
-                                                        subscription.take_last_eof_outcome();
-                                                    if let Some(outcome) = eof_outcome {
-                                                        tracing::info!(
-                                                            target: "flowip-080o",
-                                                            stage_name = %ctx.stage_name,
-                                                            upstream_stage_id = ?outcome.stage_id,
-                                                            upstream_stage_name = %outcome.stage_name,
-                                                            reader_index = outcome.reader_index,
-                                                            eof_count = outcome.eof_count,
-                                                            total_readers = outcome.total_readers,
-                                                            is_final = outcome.is_final,
-                                                            "Join (Enriching) evaluated EOF outcome for stream side"
-                                                        );
+                                                    // Use EofOutcome from the stream subscription to decide
+                                                    // when the join can move to Draining.
+                                                    if matches!(
+                                                        signal,
+                                                        FlowControlPayload::Eof { .. }
+                                                    ) {
+                                                        let eof_outcome =
+                                                            subscription.take_last_eof_outcome();
+                                                        if let Some(outcome) = eof_outcome {
+                                                            tracing::info!(
+                                                                target: "flowip-080o",
+                                                                stage_name = %ctx.stage_name,
+                                                                upstream_stage_id = ?outcome.stage_id,
+                                                                upstream_stage_name = %outcome.stage_name,
+                                                                reader_index = outcome.reader_index,
+                                                                eof_count = outcome.eof_count,
+                                                                total_readers = outcome.total_readers,
+                                                                is_final = outcome.is_final,
+                                                                "Join (Enriching) evaluated EOF outcome for stream side"
+                                                            );
 
-                                                        if outcome.is_final {
-                                                            directive =
-                                                                Ok(EventLoopDirective::Transition(
-                                                                    JoinEvent::ReceivedEOF,
-                                                                ));
+                                                            if outcome.is_final {
+                                                                directive = Ok(
+                                                                    EventLoopDirective::Transition(
+                                                                        JoinEvent::ReceivedEOF,
+                                                                    ),
+                                                                );
+                                                            }
                                                         }
                                                     }
+
+                                                    break;
                                                 }
-                                            }
-                                            ControlEventAction::Delay(duration) => {
-                                                tracing::info!(
-                                                    stage_name = %ctx.stage_name,
-                                                    event_type = envelope.event.event_type(),
-                                                    duration = ?duration,
-                                                    "Join delaying control event"
-                                                );
-                                                tokio::time::sleep(duration).await;
-                                            }
-                                            ControlEventAction::Retry
-                                            | ControlEventAction::Skip => {
-                                                tracing::info!(
-                                                    stage_name = %ctx.stage_name,
-                                                    event_type = envelope.event.event_type(),
-                                                    "Join ignoring control event (Retry/Skip not implemented)"
-                                                );
+                                                ControlEventAction::Retry
+                                                | ControlEventAction::Skip => {
+                                                    tracing::info!(
+                                                        stage_name = %ctx.stage_name,
+                                                        event_type = envelope.event.event_type(),
+                                                        "Join ignoring control event (Retry/Skip not implemented)"
+                                                    );
+                                                    break;
+                                                }
                                             }
                                         }
                                     }
@@ -1348,6 +1365,8 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                                         } => match kind {
                                                             Some(ErrorKind::Timeout)
                                                             | Some(ErrorKind::Remote)
+                                                            | Some(ErrorKind::RateLimited)
+                                                            | Some(ErrorKind::PermanentFailure)
                                                             | Some(ErrorKind::Deserialization) => {
                                                                 true
                                                             }
@@ -2115,6 +2134,8 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
                                             ProcessingStatus::Error { kind, .. } => match kind {
                                                 Some(ErrorKind::Timeout)
                                                 | Some(ErrorKind::Remote)
+                                                | Some(ErrorKind::RateLimited)
+                                                | Some(ErrorKind::PermanentFailure)
                                                 | Some(ErrorKind::Deserialization) => true,
                                                 Some(ErrorKind::Validation)
                                                 | Some(ErrorKind::Domain) => false,
@@ -2830,7 +2851,7 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> JoinSuper
                     obzenflow_core::event::ChainEventContent::FlowControl(signal) => {
                         let mut processing_ctx = ProcessingContext::new();
 
-                        let action = match signal {
+                        let mut action = match signal {
                             FlowControlPayload::Eof { natural, .. } => {
                                 tracing::info!(
                                     stage_name = %ctx.stage_name,
@@ -2853,25 +2874,29 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> JoinSuper
                             _ => ControlEventAction::Forward,
                         };
 
-                        match action {
-                            ControlEventAction::Forward => {
-                                let written = self
-                                    .data_journal
-                                    .append(envelope.event.clone(), None)
-                                    .await?;
-                                crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
+                        loop {
+                            match action {
+                                ControlEventAction::Delay(duration) => {
+                                    tokio::time::sleep(duration).await;
+                                    action = ControlEventAction::Forward;
+                                }
+                                ControlEventAction::Forward => {
+                                    let written = self
+                                        .data_journal
+                                        .append(envelope.event.clone(), None)
+                                        .await?;
+                                    crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
                                     &written,
                                     &self.system_journal,
                                 )
                                 .await;
-                                *directive = Ok(EventLoopDirective::Continue);
-                            }
-                            ControlEventAction::Delay(duration) => {
-                                tokio::time::sleep(duration).await;
-                                *directive = Ok(EventLoopDirective::Continue);
-                            }
-                            ControlEventAction::Retry | ControlEventAction::Skip => {
-                                *directive = Ok(EventLoopDirective::Continue);
+                                    *directive = Ok(EventLoopDirective::Continue);
+                                    break;
+                                }
+                                ControlEventAction::Retry | ControlEventAction::Skip => {
+                                    *directive = Ok(EventLoopDirective::Continue);
+                                    break;
+                                }
                             }
                         }
                     }
@@ -3111,6 +3136,8 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> JoinSuper
                                         ProcessingStatus::Error { kind, .. } => match kind {
                                             Some(ErrorKind::Timeout)
                                             | Some(ErrorKind::Remote)
+                                            | Some(ErrorKind::RateLimited)
+                                            | Some(ErrorKind::PermanentFailure)
                                             | Some(ErrorKind::Deserialization) => true,
                                             Some(ErrorKind::Validation)
                                             | Some(ErrorKind::Domain) => false,
@@ -3243,7 +3270,7 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> JoinSuper
                     obzenflow_core::event::ChainEventContent::FlowControl(signal) => {
                         let mut processing_ctx = ProcessingContext::new();
 
-                        let action = match signal {
+                        let mut action = match signal {
                             FlowControlPayload::Eof { natural, .. } => {
                                 tracing::info!(
                                     stage_name = %ctx.stage_name,
@@ -3267,38 +3294,42 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> JoinSuper
                             _ => ControlEventAction::Forward,
                         };
 
-                        match action {
-                            ControlEventAction::Forward => {
-                                let written = self
-                                    .data_journal
-                                    .append(envelope.event.clone(), None)
-                                    .await?;
-                                crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
+                        loop {
+                            match action {
+                                ControlEventAction::Delay(duration) => {
+                                    tokio::time::sleep(duration).await;
+                                    action = ControlEventAction::Forward;
+                                }
+                                ControlEventAction::Forward => {
+                                    let written = self
+                                        .data_journal
+                                        .append(envelope.event.clone(), None)
+                                        .await?;
+                                    crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
                                     &written,
                                     &self.system_journal,
                                 )
                                 .await;
 
-                                if matches!(signal, FlowControlPayload::Eof { .. }) {
-                                    let eof_outcome = subscription.take_last_eof_outcome();
-                                    if let Some(outcome) = eof_outcome {
-                                        if outcome.is_final {
-                                            *directive = Ok(EventLoopDirective::Transition(
-                                                JoinEvent::ReceivedEOF,
-                                            ));
-                                            return Ok(true);
+                                    if matches!(signal, FlowControlPayload::Eof { .. }) {
+                                        let eof_outcome = subscription.take_last_eof_outcome();
+                                        if let Some(outcome) = eof_outcome {
+                                            if outcome.is_final {
+                                                *directive = Ok(EventLoopDirective::Transition(
+                                                    JoinEvent::ReceivedEOF,
+                                                ));
+                                                return Ok(true);
+                                            }
                                         }
                                     }
-                                }
 
-                                *directive = Ok(EventLoopDirective::Continue);
-                            }
-                            ControlEventAction::Delay(duration) => {
-                                tokio::time::sleep(duration).await;
-                                *directive = Ok(EventLoopDirective::Continue);
-                            }
-                            ControlEventAction::Retry | ControlEventAction::Skip => {
-                                *directive = Ok(EventLoopDirective::Continue);
+                                    *directive = Ok(EventLoopDirective::Continue);
+                                    break;
+                                }
+                                ControlEventAction::Retry | ControlEventAction::Skip => {
+                                    *directive = Ok(EventLoopDirective::Continue);
+                                    break;
+                                }
                             }
                         }
                     }
@@ -3482,6 +3513,8 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> JoinSuper
                                         ProcessingStatus::Error { kind, .. } => match kind {
                                             Some(ErrorKind::Timeout)
                                             | Some(ErrorKind::Remote)
+                                            | Some(ErrorKind::RateLimited)
+                                            | Some(ErrorKind::PermanentFailure)
                                             | Some(ErrorKind::Deserialization) => true,
                                             Some(ErrorKind::Validation)
                                             | Some(ErrorKind::Domain) => false,

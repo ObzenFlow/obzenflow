@@ -231,6 +231,14 @@ pub enum RetryEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         backoff_ms: Option<u64>,
     },
+    AttemptFailed {
+        attempt_number: u32,
+        max_attempts: u32,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error_kind: Option<crate::event::status::processing_status::ErrorKind>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        delay_ms: Option<u64>,
+    },
     SucceededAfterRetry {
         total_attempts: u32,
         total_duration_ms: u64,

@@ -30,23 +30,18 @@ pub fn ai_client_error_to_handler_error_with_context(
         AiClientError::RateLimited {
             message,
             retry_after,
-        } => {
-            let msg = match retry_after {
-                Some(wait) => format!(
-                    "rate_limited: {} (retry_after_ms={})",
-                    message,
-                    wait.as_millis()
-                ),
-                None => format!("rate_limited: {message}"),
-            };
-            HandlerError::Remote(wrap(msg))
+        } => HandlerError::RateLimited {
+            message: wrap(format!("rate_limited: {message}")),
+            retry_after,
+        },
+        AiClientError::Auth { message } => {
+            HandlerError::PermanentFailure(wrap(format!("auth: {message}")))
         }
-        AiClientError::Auth { message } => HandlerError::Domain(wrap(format!("auth: {message}"))),
         AiClientError::InvalidRequest { message } => {
             HandlerError::Validation(wrap(format!("invalid_request: {message}")))
         }
         AiClientError::Unsupported { message } => {
-            HandlerError::Domain(wrap(format!("unsupported: {message}")))
+            HandlerError::Validation(wrap(format!("unsupported: {message}")))
         }
         AiClientError::Other { message } => HandlerError::Other(wrap(message)),
     }
@@ -58,7 +53,7 @@ mod tests {
     use std::time::Duration;
 
     #[test]
-    fn maps_rate_limited_to_remote_with_context() {
+    fn maps_rate_limited_to_rate_limited_with_context() {
         let out = ai_client_error_to_handler_error_with_context(
             AiClientError::RateLimited {
                 message: "429 from provider".to_string(),
@@ -68,24 +63,27 @@ mod tests {
         );
 
         match out {
-            HandlerError::Remote(message) => {
+            HandlerError::RateLimited {
+                message,
+                retry_after,
+            } => {
                 assert!(message.contains("chat_call"));
                 assert!(message.contains("rate_limited"));
-                assert!(message.contains("retry_after_ms=2000"));
+                assert_eq!(retry_after, Some(Duration::from_secs(2)));
             }
-            other => panic!("expected Remote, got {other:?}"),
+            other => panic!("expected RateLimited, got {other:?}"),
         }
     }
 
     #[test]
-    fn maps_auth_to_domain() {
+    fn maps_auth_to_permanent_failure() {
         let out = ai_client_error_to_handler_error(AiClientError::Auth {
             message: "bad api key".to_string(),
         });
 
         match out {
-            HandlerError::Domain(message) => assert!(message.contains("auth")),
-            other => panic!("expected Domain, got {other:?}"),
+            HandlerError::PermanentFailure(message) => assert!(message.contains("auth")),
+            other => panic!("expected PermanentFailure, got {other:?}"),
         }
     }
 }

@@ -16,6 +16,10 @@ pub enum ErrorKind {
     Timeout,
     /// Remote/transport failures (HTTP 5xx, connection refused, etc.).
     Remote,
+    /// Remote dependency throttled the request and suggested backoff.
+    RateLimited,
+    /// Permanent failure where retry is not expected to help (auth, bad credentials, etc.).
+    PermanentFailure,
     /// Unable to deserialize/parse the input payload.
     Deserialization,
     /// Business rule violation (invalid input, out-of-range value, etc.).
@@ -23,6 +27,7 @@ pub enum ErrorKind {
     /// Broader domain logic failure.
     Domain,
     /// Unclassified error; treated conservatively by default.
+    #[serde(other)]
     Unknown,
 }
 

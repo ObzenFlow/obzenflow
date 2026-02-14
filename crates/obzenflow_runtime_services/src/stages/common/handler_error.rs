@@ -13,6 +13,7 @@
 use crate::stages::common::stage_handle::StageError;
 use obzenflow_core::event::status::processing_status::ErrorKind;
 use std::fmt;
+use std::time::Duration;
 
 /// Error type for handler-level failures.
 #[derive(Debug, Clone)]
@@ -21,6 +22,13 @@ pub enum HandlerError {
     Timeout(String),
     /// Remote/transport failures (HTTP 5xx, connection refused, etc.).
     Remote(String),
+    /// Request was rate limited and may be retried after an optional delay.
+    RateLimited {
+        message: String,
+        retry_after: Option<Duration>,
+    },
+    /// Permanent failure where retry is not expected to help (auth, bad credentials, etc.).
+    PermanentFailure(String),
     /// Unable to deserialize/parse the input payload into the expected type.
     Deserialization(String),
     /// Business validation or rule violation.
@@ -42,6 +50,8 @@ impl HandlerError {
         match self {
             HandlerError::Timeout(_) => ErrorKind::Timeout,
             HandlerError::Remote(_) => ErrorKind::Remote,
+            HandlerError::RateLimited { .. } => ErrorKind::RateLimited,
+            HandlerError::PermanentFailure(_) => ErrorKind::PermanentFailure,
             HandlerError::Deserialization(_) => ErrorKind::Deserialization,
             HandlerError::Validation(_) => ErrorKind::Validation,
             HandlerError::Domain(_) => ErrorKind::Domain,
@@ -55,6 +65,18 @@ impl fmt::Display for HandlerError {
         match self {
             HandlerError::Timeout(msg) => write!(f, "Timeout: {msg}"),
             HandlerError::Remote(msg) => write!(f, "Remote error: {msg}"),
+            HandlerError::RateLimited {
+                message,
+                retry_after,
+            } => match retry_after {
+                Some(wait) => write!(
+                    f,
+                    "Rate limited: {message} (retry_after_ms={})",
+                    wait.as_millis()
+                ),
+                None => write!(f, "Rate limited: {message}"),
+            },
+            HandlerError::PermanentFailure(msg) => write!(f, "Permanent failure: {msg}"),
             HandlerError::Deserialization(msg) => {
                 write!(f, "Deserialization error: {msg}")
             }

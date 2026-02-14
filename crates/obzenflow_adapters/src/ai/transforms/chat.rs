@@ -3,7 +3,6 @@
 // https://obzenflow.dev
 
 use crate::ai::error_mapping::ai_client_error_to_handler_error_with_context;
-use crate::ai::retry::{execute_with_retry, AiRetryPolicy};
 use async_trait::async_trait;
 use obzenflow_core::ai::{
     attach_llm_observability, params_hash_for_chat, prompt_hash_for_chat,
@@ -31,14 +30,11 @@ pub struct ChatTransform {
     client: Arc<dyn ChatClient>,
     request_builder: Arc<ChatRequestBuilder>,
     output_mapper: Arc<ChatOutputMapper>,
-    retry_policy: AiRetryPolicy,
 }
 
 impl fmt::Debug for ChatTransform {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("ChatTransform")
-            .field("retry_policy", &self.retry_policy)
-            .finish()
+        f.debug_struct("ChatTransform").finish()
     }
 }
 
@@ -51,7 +47,6 @@ impl ChatTransform {
             client,
             request_builder: Arc::new(request_builder),
             output_mapper: Arc::new(default_chat_output_mapper),
-            retry_policy: AiRetryPolicy::default(),
         }
     }
 
@@ -63,11 +58,6 @@ impl ChatTransform {
             + 'static,
     {
         self.output_mapper = Arc::new(output_mapper);
-        self
-    }
-
-    pub fn with_retry_policy(mut self, retry_policy: AiRetryPolicy) -> Self {
-        self.retry_policy = retry_policy;
         self
     }
 }
@@ -88,13 +78,11 @@ impl AsyncTransformHandler for ChatTransform {
                 HandlerError::Validation(format!("chat schema canonicalization failed: {err}"))
             })?;
 
-        let response = execute_with_retry(&self.retry_policy, |_attempt| {
-            let client = self.client.clone();
-            let req = request.clone();
-            async move { client.chat(req).await }
-        })
-        .await
-        .map_err(|err| ai_client_error_to_handler_error_with_context(err, Some("chat")))?;
+        let response = self
+            .client
+            .chat(request.clone())
+            .await
+            .map_err(|err| ai_client_error_to_handler_error_with_context(err, Some("chat")))?;
 
         let usage = response.usage.clone();
         let mut outputs = (self.output_mapper)(&event, response)?;
@@ -150,14 +138,11 @@ mod tests {
     use obzenflow_core::event::ChainEventFactory;
     use obzenflow_core::{StageId, WriterId};
     use std::collections::VecDeque;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
-    use std::time::Duration;
 
     #[derive(Debug, Default)]
     struct QueueChatClient {
         outcomes: Mutex<VecDeque<Result<ChatResponse, AiClientError>>>,
-        calls: AtomicUsize,
     }
 
     impl QueueChatClient {
@@ -171,16 +156,11 @@ mod tests {
         fn enqueue_err(&self, err: AiClientError) {
             self.outcomes.lock().expect("poisoned").push_back(Err(err));
         }
-
-        fn calls(&self) -> usize {
-            self.calls.load(Ordering::SeqCst)
-        }
     }
 
     #[async_trait]
     impl ChatClient for QueueChatClient {
         async fn chat(&self, _req: ChatRequest) -> Result<ChatResponse, AiClientError> {
-            self.calls.fetch_add(1, Ordering::SeqCst);
             self.outcomes
                 .lock()
                 .expect("poisoned")
@@ -241,49 +221,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn chat_transform_retries_transient_errors() {
-        let client = Arc::new(QueueChatClient::default());
-        client.enqueue_err(AiClientError::Timeout {
-            message: "attempt 1".to_string(),
-        });
-        client.enqueue_ok(ChatResponse {
-            text: "ok".to_string(),
-            tool_calls: vec![],
-            usage: None,
-            raw: None,
-        });
-
-        let transform = ChatTransform::new(client.clone(), |_event| {
-            Ok(ChatRequest {
-                provider: AiProvider::new("openai"),
-                model: "gpt-4.1-mini".to_string(),
-                messages: vec![ChatMessage {
-                    role: ChatRole::user(),
-                    content: "hello".to_string(),
-                }],
-                params: ChatParams::default(),
-                tools: vec![],
-                response_format: None,
-            })
-        })
-        .with_retry_policy(AiRetryPolicy {
-            max_attempts: 2,
-            initial_backoff: Duration::from_millis(1),
-            max_backoff: Duration::from_millis(2),
-            rate_limit_max_wait: Duration::from_millis(2),
-        });
-
-        let outputs = transform
-            .process(test_event())
-            .await
-            .expect("retry should recover");
-
-        assert_eq!(outputs.len(), 1);
-        assert_eq!(client.calls(), 2);
-    }
-
-    #[tokio::test]
-    async fn chat_transform_maps_auth_to_domain_error() {
+    async fn chat_transform_maps_auth_to_permanent_failure() {
         let client = Arc::new(QueueChatClient::default());
         client.enqueue_err(AiClientError::Auth {
             message: "bad key".to_string(),
@@ -301,17 +239,16 @@ mod tests {
                 tools: vec![],
                 response_format: None,
             })
-        })
-        .with_retry_policy(AiRetryPolicy::no_retry());
+        });
 
         let err = transform
             .process(test_event())
             .await
-            .expect_err("auth errors should not retry and should fail");
+            .expect_err("auth errors should fail");
 
         match err {
-            HandlerError::Domain(message) => assert!(message.contains("auth")),
-            other => panic!("expected Domain error, got {other:?}"),
+            HandlerError::PermanentFailure(message) => assert!(message.contains("auth")),
+            other => panic!("expected PermanentFailure error, got {other:?}"),
         }
     }
 }

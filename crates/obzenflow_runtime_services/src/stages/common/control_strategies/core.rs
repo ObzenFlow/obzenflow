@@ -57,7 +57,9 @@ pub enum ControlEventAction {
     /// Forward the control event downstream immediately
     Forward,
 
-    /// Delay forwarding the control event
+    /// Delay forwarding the control event.
+    ///
+    /// Supervisors implement this as: sleep for the requested duration, then forward.
     Delay(Duration),
 
     /// Don't accept the control event yet, retry processing

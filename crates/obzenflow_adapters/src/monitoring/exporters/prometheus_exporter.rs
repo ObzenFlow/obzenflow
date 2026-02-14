@@ -230,6 +230,8 @@ impl PrometheusExporter {
                         let kind_label = match kind {
                             ErrorKind::Timeout => "timeout",
                             ErrorKind::Remote => "remote",
+                            ErrorKind::RateLimited => "rate_limited",
+                            ErrorKind::PermanentFailure => "permanent_failure",
                             ErrorKind::Deserialization => "deserialization",
                             ErrorKind::Validation => "validation",
                             ErrorKind::Domain => "domain",

@@ -127,7 +127,7 @@ pub(crate) async fn preflight_ollama(
         .timeout(DEFAULT_TIMEOUT)
         .send()
         .await
-        .map_err(|err| map_reqwest_error(err, "ollama"))?;
+        .map_err(|err| map_reqwest_error(err, "ollama", &base_url, &tags_url))?;
 
     if resp.status() == StatusCode::NOT_FOUND {
         // Older/alternate deployments: accept reachability if /api/version exists.
@@ -180,7 +180,7 @@ async fn preflight_ollama_version(
         .timeout(DEFAULT_TIMEOUT)
         .send()
         .await
-        .map_err(|err| map_reqwest_error(err, "ollama"))?;
+        .map_err(|err| map_reqwest_error(err, "ollama", base_url, &version_url))?;
 
     if resp.status().is_success() {
         return Ok(());
@@ -215,7 +215,7 @@ pub(crate) async fn preflight_openai_models(
         .timeout(DEFAULT_TIMEOUT)
         .send()
         .await
-        .map_err(|err| map_reqwest_error(err, "openai"))?;
+        .map_err(|err| map_reqwest_error(err, "openai", &base_url, &models_url))?;
 
     match resp.status() {
         StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => {
@@ -278,24 +278,110 @@ pub(crate) async fn preflight_openai_models(
     Ok(())
 }
 
-fn map_reqwest_error(err: reqwest::Error, provider: &str) -> AiClientError {
+fn map_reqwest_error(
+    err: reqwest::Error,
+    provider: &str,
+    base_url: &Url,
+    request_url: &Url,
+) -> AiClientError {
     if err.is_timeout() {
+        let mut message = String::new();
+        message.push_str(&format!(
+            "{provider} preflight timed out after {timeout:?} (GET {request_url}).\n",
+            timeout = DEFAULT_TIMEOUT
+        ));
+        message.push_str(&format!("base_url: {base_url}\n"));
+        message.push_str("What this means: the preflight request did not complete in time (this is a lightweight health check; no inference).\n");
+        message.push_str("Fix:\n");
+        match provider {
+            "ollama" => {
+                message.push_str("- Ensure the Ollama server is running (`ollama serve` or open the desktop app)\n");
+                message.push_str(&format!(
+                    "- Verify the endpoint responds: `curl -fsS {request_url}`\n"
+                ));
+                message.push_str(
+                    "- If running in a VM/container, ensure port 11434 is exposed to the host\n",
+                );
+                message.push_str("- If the server is under heavy load, wait and retry\n");
+            }
+            "openai" => {
+                message.push_str("- Check network connectivity and any proxy/firewall rules\n");
+                message.push_str(&format!(
+                    "- Verify the endpoint responds: `curl -fsS {request_url}`\n"
+                ));
+                message.push_str("- If using an OpenAI-compatible server, confirm the base URL typically ends with `/v1`\n");
+                message.push_str("- If the provider is under load, wait and retry\n");
+            }
+            _ => {
+                message.push_str(&format!(
+                    "- Verify the endpoint responds: `curl -fsS {request_url}`\n"
+                ));
+                message.push_str("- Check network connectivity and retry\n");
+            }
+        }
+        message.push_str(&format!("Cause: {err}"));
+
         return AiClientError::Timeout {
-            message: format!("{provider} preflight timed out: {err}"),
+            message: message.trim_end().to_string(),
         };
     }
 
     if err.is_connect() {
         return AiClientError::Remote {
-            message: format!(
-                "{provider} preflight could not connect: {err} (is the provider running and reachable?)"
-            ),
+            message: format_connect_error(provider, base_url, request_url, &err),
         };
     }
 
     AiClientError::Remote {
-        message: format!("{provider} preflight failed: {err}"),
+        message: format!("{provider} preflight request failed (GET {request_url}): {err}"),
     }
+}
+
+fn format_connect_error(
+    provider: &str,
+    base_url: &Url,
+    request_url: &Url,
+    err: &reqwest::Error,
+) -> String {
+    let mut message = String::new();
+    message.push_str(&format!(
+        "{provider} preflight could not connect (GET {request_url}).\n"
+    ));
+    message.push_str(&format!("base_url: {base_url}\n"));
+    message.push_str(
+        "What this means: the client cannot reach the provider endpoint from this process.\n",
+    );
+    message.push_str("Fix:\n");
+
+    match provider {
+        "ollama" => {
+            message.push_str("- Start Ollama (`ollama serve` or open the desktop app)\n");
+            message.push_str(&format!(
+                "- Verify it's reachable: `curl -fsS {request_url}`\n"
+            ));
+            message.push_str("- If Ollama is running on another host/port, set `OLLAMA_BASE_URL` (e.g. `OLLAMA_BASE_URL=http://127.0.0.1:11434`)\n");
+            message.push_str("- If running in Docker/VM, expose port 11434 to the host\n");
+        }
+        "openai" => {
+            message.push_str("- Check network connectivity and any proxy/firewall rules\n");
+            message.push_str(
+                "- If using OpenAI-hosted, the default base URL is `https://api.openai.com/v1`\n",
+            );
+            message.push_str("- If using an OpenAI-compatible server, set `OPENAI_BASE_URL` (typically ending with `/v1`)\n");
+            message.push_str(&format!(
+                "- Verify it's reachable: `curl -fsS {request_url}`\n"
+            ));
+        }
+        _ => {
+            message.push_str(&format!(
+                "- Verify it's reachable: `curl -fsS {request_url}`\n"
+            ));
+            message.push_str("- Check network connectivity and retry\n");
+        }
+    }
+
+    message.push_str(&format!("Cause: {err}"));
+    message.trim_end().to_string()
 }
 
 #[cfg(test)]

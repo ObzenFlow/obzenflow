@@ -622,7 +622,7 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
                                     let mut processing_ctx = ProcessingContext::new();
 
                                     // Get the action from the control strategy
-                                    let action = match signal {
+                                    let mut action = match signal {
                                         FlowControlPayload::Eof { .. } => {
                                             tracing::info!(
                                                 stage_name = %ctx.stage_name,
@@ -643,97 +643,107 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
                                         _ => ControlEventAction::Forward,
                                     };
 
-                                    // Execute the action
-                                    match action {
-                                        ControlEventAction::Forward => {
-                                            // Handle EOF specially: only transition when ALL upstreams have EOF'd
-                                            if envelope.event.is_eof() {
-                                                let eof_outcome =
-                                                    subscription.take_last_eof_outcome();
-
-                                                // Contract check at EOF time
-                                                let _ = subscription
-                                                    .check_contracts(&mut contract_state[..])
-                                                    .await;
-
-                                                if let Some(outcome) = eof_outcome {
-                                                    if outcome.is_final {
-                                                        // All upstream readers have reached EOF: begin draining.
-                                                        ctx.buffered_eof =
-                                                            Some(envelope.event.clone());
-                                                        tracing::info!(
-                                                            stage_name = %ctx.stage_name,
-                                                            event_type = envelope.event.event_type(),
-                                                            "Transform stage received final EOF for all upstreams, transitioning to draining"
-                                                        );
-                                                        // Forward EOF downstream before transitioning
-                                                        self.forward_control_event(&envelope)
-                                                            .await?;
-                                                        // Restore before returning
-                                                        ctx.subscription = subscription_opt;
-                                                        ctx.contract_state = contract_state;
-                                                        return Ok(EventLoopDirective::Transition(
-                                                            TransformEvent::ReceivedEOF,
-                                                        ));
-                                                    } else {
-                                                        // Non-final EOF: forward but don't drain yet.
-                                                        // Continue processing events from other upstreams.
-                                                        self.forward_control_event(&envelope)
-                                                            .await?;
-                                                    }
-                                                } else {
-                                                    // No outcome yet (unexpected), forward and continue.
-                                                    self.forward_control_event(&envelope).await?;
-                                                }
-                                            } else if matches!(signal, FlowControlPayload::Drain) {
-                                                // Drain events from pipeline BeginDrain should initiate stage draining
-                                                ctx.buffered_eof = Some(envelope.event.clone());
+                                    loop {
+                                        match action {
+                                            ControlEventAction::Delay(duration) => {
                                                 tracing::info!(
                                                     stage_name = %ctx.stage_name,
                                                     event_type = envelope.event.event_type(),
-                                                    "Transform stage received drain signal, transitioning to draining"
+                                                    duration = ?duration,
+                                                    "Delaying control event"
                                                 );
-                                                self.forward_control_event(&envelope).await?;
-                                                // Restore before returning
-                                                ctx.subscription = subscription_opt;
-                                                ctx.contract_state = contract_state;
-                                                return Ok(EventLoopDirective::Transition(
-                                                    TransformEvent::ReceivedEOF,
-                                                ));
-                                            } else {
-                                                // Other control events: just forward
-                                                self.forward_control_event(&envelope).await?;
+                                                tokio::time::sleep(duration).await;
+                                                action = ControlEventAction::Forward;
                                             }
-                                        }
-                                        ControlEventAction::Delay(duration) => {
-                                            tracing::info!(
-                                                stage_name = %ctx.stage_name,
-                                                event_type = envelope.event.event_type(),
-                                                duration = ?duration,
-                                                "Delaying control event"
-                                            );
-                                            tokio::time::sleep(duration).await;
-                                            // Return Continue to re-process after delay
-                                            return Ok(EventLoopDirective::Continue);
-                                        }
-                                        ControlEventAction::Retry => {
-                                            tracing::info!(
-                                                stage_name = %ctx.stage_name,
-                                                event_type = envelope.event.event_type(),
-                                                "Retry requested, buffering event"
-                                            );
-                                            if envelope.event.is_eof() {
-                                                processing_ctx.buffered_eof =
-                                                    Some(envelope.clone());
+                                            ControlEventAction::Forward => {
+                                                // Handle EOF specially: only transition when ALL upstreams have EOF'd
+                                                if envelope.event.is_eof() {
+                                                    let eof_outcome =
+                                                        subscription.take_last_eof_outcome();
+
+                                                    // Contract check at EOF time
+                                                    let _ = subscription
+                                                        .check_contracts(&mut contract_state[..])
+                                                        .await;
+
+                                                    if let Some(outcome) = eof_outcome {
+                                                        if outcome.is_final {
+                                                            // All upstream readers have reached EOF: begin draining.
+                                                            ctx.buffered_eof =
+                                                                Some(envelope.event.clone());
+                                                            tracing::info!(
+                                                                stage_name = %ctx.stage_name,
+                                                                event_type = envelope.event.event_type(),
+                                                                "Transform stage received final EOF for all upstreams, transitioning to draining"
+                                                            );
+                                                            // Forward EOF downstream before transitioning
+                                                            self.forward_control_event(&envelope)
+                                                                .await?;
+                                                            // Restore before returning
+                                                            ctx.subscription = subscription_opt;
+                                                            ctx.contract_state = contract_state;
+                                                            return Ok(
+                                                                EventLoopDirective::Transition(
+                                                                    TransformEvent::ReceivedEOF,
+                                                                ),
+                                                            );
+                                                        } else {
+                                                            // Non-final EOF: forward but don't drain yet.
+                                                            // Continue processing events from other upstreams.
+                                                            self.forward_control_event(&envelope)
+                                                                .await?;
+                                                        }
+                                                    } else {
+                                                        // No outcome yet (unexpected), forward and continue.
+                                                        self.forward_control_event(&envelope)
+                                                            .await?;
+                                                    }
+                                                } else if matches!(
+                                                    signal,
+                                                    FlowControlPayload::Drain
+                                                ) {
+                                                    // Drain events from pipeline BeginDrain should initiate stage draining
+                                                    ctx.buffered_eof = Some(envelope.event.clone());
+                                                    tracing::info!(
+                                                        stage_name = %ctx.stage_name,
+                                                        event_type = envelope.event.event_type(),
+                                                        "Transform stage received drain signal, transitioning to draining"
+                                                    );
+                                                    self.forward_control_event(&envelope).await?;
+                                                    // Restore before returning
+                                                    ctx.subscription = subscription_opt;
+                                                    ctx.contract_state = contract_state;
+                                                    return Ok(EventLoopDirective::Transition(
+                                                        TransformEvent::ReceivedEOF,
+                                                    ));
+                                                } else {
+                                                    // Other control events: just forward
+                                                    self.forward_control_event(&envelope).await?;
+                                                }
+
+                                                break;
                                             }
-                                        }
-                                        ControlEventAction::Skip => {
-                                            tracing::warn!(
-                                                stage_name = %ctx.stage_name,
-                                                event_type = envelope.event.event_type(),
-                                                "Skipping control event (dangerous!)"
-                                            );
-                                            // Don't forward, don't process
+                                            ControlEventAction::Retry => {
+                                                tracing::info!(
+                                                    stage_name = %ctx.stage_name,
+                                                    event_type = envelope.event.event_type(),
+                                                    "Retry requested, buffering event"
+                                                );
+                                                if envelope.event.is_eof() {
+                                                    processing_ctx.buffered_eof =
+                                                        Some(envelope.clone());
+                                                }
+                                                break;
+                                            }
+                                            ControlEventAction::Skip => {
+                                                tracing::warn!(
+                                                    stage_name = %ctx.stage_name,
+                                                    event_type = envelope.event.event_type(),
+                                                    "Skipping control event (dangerous!)"
+                                                );
+                                                // Don't forward, don't process
+                                                break;
+                                            }
                                         }
                                     }
                                 }
@@ -813,6 +823,8 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
                                                         } => match kind {
                                                             Some(ErrorKind::Timeout)
                                                             | Some(ErrorKind::Remote)
+                                                            | Some(ErrorKind::RateLimited)
+                                                            | Some(ErrorKind::PermanentFailure)
                                                             | Some(ErrorKind::Deserialization) => {
                                                                 true
                                                             }
@@ -1429,6 +1441,8 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
                                         ProcessingStatus::Error { kind, .. } => match kind {
                                             Some(ErrorKind::Timeout)
                                             | Some(ErrorKind::Remote)
+                                            | Some(ErrorKind::RateLimited)
+                                            | Some(ErrorKind::PermanentFailure)
                                             | Some(ErrorKind::Deserialization) => true,
                                             Some(ErrorKind::Validation)
                                             | Some(ErrorKind::Domain) => false,

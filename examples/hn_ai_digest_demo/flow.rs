@@ -10,6 +10,7 @@ use anyhow::{anyhow, Result};
 use obzenflow::sinks::ConsoleSink;
 use obzenflow::sources::{HeaderMap, HttpPullConfig, HttpPullSource, Url};
 use obzenflow_adapters::ai::ChatTransform;
+use obzenflow_adapters::middleware::control::ai_circuit_breaker;
 use obzenflow_core::ai::{ChatMessage, ChatParams, ChatRequest, ChatRole};
 use obzenflow_core::event::chain_event::ChainEventFactory;
 use obzenflow_core::event::status::processing_status::ErrorKind;
@@ -233,7 +234,7 @@ async fn run_example_async() -> Result<()> {
                 ));
                 formatter = transform!("formatter" => formatter);
                 batch = stateful!("batch" => digest_seed);
-                digest = async_transform!("digest_llm" => llm);
+                digest = async_transform!("digest_llm" => llm, [ai_circuit_breaker()]);
                 output = sink!("digest_summary" => ConsoleSink::<HnDigestSummary>::new(format_digest_summary_for_console));
             },
 
