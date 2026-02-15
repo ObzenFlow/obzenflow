@@ -4,5 +4,6 @@
 
 //! Public crate entrypoint for ObzenFlow.
 
+pub mod ai;
 pub mod sinks;
 pub mod sources;

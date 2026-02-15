@@ -97,6 +97,29 @@ pub struct ChatMessage {
     pub content: String,
 }
 
+impl ChatMessage {
+    pub fn system(content: impl Into<String>) -> Self {
+        Self {
+            role: ChatRole::system(),
+            content: content.into(),
+        }
+    }
+
+    pub fn user(content: impl Into<String>) -> Self {
+        Self {
+            role: ChatRole::user(),
+            content: content.into(),
+        }
+    }
+
+    pub fn assistant(content: impl Into<String>) -> Self {
+        Self {
+            role: ChatRole::assistant(),
+            content: content.into(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct ChatParams {
     #[serde(skip_serializing_if = "Option::is_none")]

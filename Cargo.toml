@@ -109,6 +109,8 @@ obzenflow_runtime_services = { workspace = true }
 obzenflow_adapters = { workspace = true }
 obzenflow_dsl_infra = { workspace = true }
 obzenflow_infra = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
 
 [dev-dependencies]
 # Used by examples/tests/benchmarks in this crate

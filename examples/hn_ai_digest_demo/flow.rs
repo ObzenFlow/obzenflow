@@ -7,16 +7,14 @@ use super::domain::{FormattedStory, HnStory};
 use super::mock_server::spawn_mock_hn_server;
 use super::util::{env_bool, env_usize, truncate_chars};
 use anyhow::{anyhow, Result};
+use obzenflow::ai::{ChatTransform, ChatTransformExt};
 use obzenflow::sinks::ConsoleSink;
 use obzenflow::sources::{HeaderMap, HttpPullConfig, HttpPullSource, Url};
-use obzenflow_adapters::ai::ChatTransform;
 use obzenflow_adapters::middleware::control::ai_circuit_breaker;
-use obzenflow_core::ai::{ChatMessage, ChatParams, ChatRequest, ChatRole};
 use obzenflow_core::event::chain_event::ChainEventFactory;
 use obzenflow_core::event::status::processing_status::ErrorKind;
 use obzenflow_core::{ChainEvent, TypedPayload};
 use obzenflow_dsl_infra::{async_source, async_transform, flow, sink, stateful, transform};
-use obzenflow_infra::ai::rig::RigChatClient;
 use obzenflow_infra::application::{FlowApplication, LogLevel};
 use obzenflow_infra::http_client::default_http_client;
 use obzenflow_infra::journal::disk_journals;
@@ -24,7 +22,6 @@ use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
 use obzenflow_runtime_services::stages::stateful::strategies::accumulators::ReduceTyped;
 use obzenflow_runtime_services::stages::transform::TryMapWith;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 use std::time::Duration;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -91,7 +88,26 @@ async fn run_example_async() -> Result<()> {
     let base_url_for_summary = base_url.to_string();
     let mode_label_for_summary = mode_label.to_string();
 
-    let (rig_client, ai_provider_label, ai_model_label) = build_rig_chat_client_from_env().await?;
+    let ai_provider_label = std::env::var("HN_AI_PROVIDER")
+        .unwrap_or_else(|_| "ollama".to_string())
+        .trim()
+        .to_ascii_lowercase();
+
+    let ai_provider_label = match ai_provider_label.as_str() {
+        "ollama" => "ollama".to_string(),
+        "openai" => "openai".to_string(),
+        other => {
+            return Err(anyhow!(
+                "unsupported HN_AI_PROVIDER='{other}' (expected 'ollama' or 'openai')"
+            ))
+        }
+    };
+
+    let ai_model_label = match ai_provider_label.as_str() {
+        "ollama" => std::env::var("HN_AI_MODEL").unwrap_or_else(|_| "llama3.1:8b".to_string()),
+        "openai" => std::env::var("HN_AI_MODEL").unwrap_or_else(|_| "gpt-4.1-mini".to_string()),
+        _ => unreachable!("provider label validated above"),
+    };
 
     let prompt_story_limit =
         env_usize("HN_AI_PROMPT_STORIES").unwrap_or_else(|| match ai_provider_label.as_str() {
@@ -139,85 +155,95 @@ async fn run_example_async() -> Result<()> {
     let interests_for_request = interests.clone();
     let interests_for_summary = interests.clone();
 
-    let ai_provider = rig_client.provider().clone();
-    let ai_model = rig_client.model().to_string();
-
-    let ai_provider_for_summary = ai_provider.as_str().to_string();
-    let ai_model_for_summary = ai_model.clone();
+    let ai_provider_for_summary = ai_provider_label.clone();
+    let ai_model_for_summary = ai_model_label.clone();
 
     let system_prompt = "You write concise, skimmable Hacker News digests from a list of headlines + URLs. Be neutral, avoid hype, and do not invent facts beyond what the titles imply."
         .to_string();
-    let system_prompt_for_request = system_prompt.clone();
     let system_prompt_for_summary = system_prompt.clone();
 
-    let llm = ChatTransform::new(Arc::new(rig_client), move |event: &ChainEvent| {
-        let mut seed = HnTopStories::try_from_event(event).map_err(|err| {
-            HandlerError::Validation(format!("hn digest seed decode failed: {err}"))
-        })?;
+    let llm_builder = match ai_provider_label.as_str() {
+        "ollama" => {
+            let mut builder = ChatTransform::builder().ollama(ai_model_label.clone());
+            if let Ok(base_url) = std::env::var("OLLAMA_BASE_URL") {
+                let base_url = base_url.trim();
+                if !base_url.is_empty() {
+                    builder = builder.base_url(base_url.to_string());
+                }
+            }
+            builder
+        }
+        "openai" => {
+            let api_key = std::env::var("OPENAI_API_KEY")
+                .map_err(|_| anyhow!("OPENAI_API_KEY is required when HN_AI_PROVIDER=openai"))?;
+            match std::env::var("OPENAI_BASE_URL")
+                .ok()
+                .map(|v| v.trim().to_string())
+            {
+                None => ChatTransform::builder().openai(ai_model_label.clone(), api_key),
+                Some(base_url) if base_url.is_empty() => {
+                    ChatTransform::builder().openai(ai_model_label.clone(), api_key)
+                }
+                Some(base_url) => ChatTransform::builder().openai_compatible(
+                    ai_model_label.clone(),
+                    api_key,
+                    base_url,
+                ),
+            }
+        }
+        _ => unreachable!("provider label validated above"),
+    };
 
-        seed.stories.truncate(prompt_story_limit);
+    let llm = llm_builder
+        .system(system_prompt)
+        .temperature(0.2)
+        .max_tokens(800)
+        .output_mapper(move |input: &ChainEvent, response| {
+            let mut seed = HnTopStories::try_from_event(input).map_err(|err| {
+                HandlerError::Validation(format!("hn digest seed decode failed: {err}"))
+            })?;
 
-        let prompt = build_digest_prompt(&seed, interests_for_request.as_deref());
+            let stories_fetched = seed.stories.len();
+            seed.stories.truncate(prompt_story_limit);
+            let stories_used = seed.stories.len();
 
-        Ok(ChatRequest {
-            provider: ai_provider.clone(),
-            model: ai_model.clone(),
-            messages: vec![
-                ChatMessage {
-                    role: ChatRole::system(),
-                    content: system_prompt_for_request.clone(),
-                },
-                ChatMessage {
-                    role: ChatRole::user(),
-                    content: prompt,
-                },
-            ],
-            params: ChatParams {
-                temperature: Some(0.2),
-                max_tokens: Some(800),
-                ..ChatParams::default()
-            },
-            tools: vec![],
-            response_format: None,
+            let user_prompt = build_digest_prompt(&seed, interests_for_summary.as_deref());
+
+            let summary = HnDigestSummary {
+                mode: mode_label_for_summary.clone(),
+                base_url: base_url_for_summary.clone(),
+                ai_provider: ai_provider_for_summary.clone(),
+                ai_model: ai_model_for_summary.clone(),
+                stories_fetched,
+                stories_used,
+                prompt_story_limit,
+                interests: interests_for_summary.clone(),
+                chat_prompt_system: system_prompt_for_summary.clone(),
+                chat_prompt_user: user_prompt,
+                input: seed,
+                output_markdown: response.text,
+            };
+
+            let payload = serde_json::to_value(&summary).map_err(|err| {
+                HandlerError::Validation(format!("digest summary payload encode failed: {err}"))
+            })?;
+
+            Ok(vec![ChainEventFactory::derived_data_event(
+                input.writer_id,
+                input,
+                HnDigestSummary::versioned_event_type(),
+                payload,
+            )])
         })
-    })
-    .with_output_mapper(move |input: &ChainEvent, response| {
-        let mut seed = HnTopStories::try_from_event(input).map_err(|err| {
-            HandlerError::Validation(format!("hn digest seed decode failed: {err}"))
-        })?;
+        .build(move |event: &ChainEvent| {
+            let mut seed = HnTopStories::try_from_event(event).map_err(|err| {
+                HandlerError::Validation(format!("hn digest seed decode failed: {err}"))
+            })?;
 
-        let stories_fetched = seed.stories.len();
-        seed.stories.truncate(prompt_story_limit);
-        let stories_used = seed.stories.len();
-
-        let user_prompt = build_digest_prompt(&seed, interests_for_summary.as_deref());
-
-        let summary = HnDigestSummary {
-            mode: mode_label_for_summary.clone(),
-            base_url: base_url_for_summary.clone(),
-            ai_provider: ai_provider_for_summary.clone(),
-            ai_model: ai_model_for_summary.clone(),
-            stories_fetched,
-            stories_used,
-            prompt_story_limit,
-            interests: interests_for_summary.clone(),
-            chat_prompt_system: system_prompt_for_summary.clone(),
-            chat_prompt_user: user_prompt,
-            input: seed,
-            output_markdown: response.text,
-        };
-
-        let payload = serde_json::to_value(&summary).map_err(|err| {
-            HandlerError::Validation(format!("digest summary payload encode failed: {err}"))
-        })?;
-
-        Ok(vec![ChainEventFactory::derived_data_event(
-            input.writer_id,
-            input,
-            HnDigestSummary::versioned_event_type(),
-            payload,
-        )])
-    });
+            seed.stories.truncate(prompt_story_limit);
+            Ok(build_digest_prompt(&seed, interests_for_request.as_deref()))
+        })
+        .await?;
 
     FlowApplication::builder()
         .with_console_subscriber()
@@ -304,52 +330,6 @@ fn format_digest_summary_for_console(summary: &HnDigestSummary) -> String {
     out.push_str(summary.output_markdown.trim());
 
     out
-}
-
-async fn build_rig_chat_client_from_env() -> Result<(RigChatClient, String, String)> {
-    let provider = std::env::var("HN_AI_PROVIDER")
-        .unwrap_or_else(|_| "ollama".to_string())
-        .trim()
-        .to_ascii_lowercase();
-
-    match provider.as_str() {
-        "ollama" => {
-            let model = std::env::var("HN_AI_MODEL").unwrap_or_else(|_| "llama3.1:8b".to_string());
-            let base_url = std::env::var("OLLAMA_BASE_URL")
-                .ok()
-                .map(|v| Url::parse(v.trim()))
-                .transpose()
-                .map_err(|e| anyhow!("invalid OLLAMA_BASE_URL: {e}"))?;
-
-            let client = RigChatClient::ollama_checked(model.clone(), base_url)
-                .await
-                .map_err(|e| anyhow!("failed to create ollama client: {e}"))?;
-            Ok((client, "ollama".to_string(), model))
-        }
-        "openai" => {
-            let model = std::env::var("HN_AI_MODEL").unwrap_or_else(|_| "gpt-4.1-mini".to_string());
-            let api_key = std::env::var("OPENAI_API_KEY")
-                .map_err(|_| anyhow!("OPENAI_API_KEY is required when HN_AI_PROVIDER=openai"))?;
-
-            let client = match std::env::var("OPENAI_BASE_URL").ok() {
-                None => RigChatClient::openai_checked(model.clone(), api_key)
-                    .await
-                    .map_err(|e| anyhow!("failed to create openai client: {e}"))?,
-                Some(base_url) => {
-                    let base_url = Url::parse(base_url.trim())
-                        .map_err(|e| anyhow!("invalid OPENAI_BASE_URL: {e}"))?;
-                    RigChatClient::openai_compatible_checked(model.clone(), api_key, base_url)
-                        .await
-                        .map_err(|e| anyhow!("failed to create openai-compatible client: {e}"))?
-                }
-            };
-
-            Ok((client, "openai".to_string(), model))
-        }
-        other => Err(anyhow!(
-            "unsupported HN_AI_PROVIDER='{other}' (expected 'ollama' or 'openai')"
-        )),
-    }
 }
 
 fn build_digest_prompt(seed: &HnTopStories, interests: Option<&str>) -> String {
