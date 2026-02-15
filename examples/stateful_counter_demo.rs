@@ -2,26 +2,19 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Stateful counter demo - demonstrates FLOWIP-080b stateful transform stages (FLOWIP-080h)
+//! Stateful counter demo
 //!
 //! Pipeline: Source → Transform → Stateful → Sink
-//!   • Source: Emits numbered events
+//!   • Source: Emits numbered events (1-10)
 //!   • Transform: Filters even numbers
 //!   • Stateful: Counts events and accumulates sum
-//!   • Sink: Prints results
-//!
-//! This demonstrates:
-//!   - StatefulHandler trait usage
-//!   - Functional state updates (no Arc<Mutex>!)
-//!   - drain() being called on EOF
-//!   - Integration with transform and sink stages
-//!
-//! **FLOWIP-080h Update**: Replaced 29-line EvenFilter struct with Filter helper
+//!   • Sink: Prints results as JSON
 //!
 //! Run with: `cargo run --example stateful_counter_demo`
 
 use anyhow::Result;
 use async_trait::async_trait;
+use obzenflow::sinks::ConsoleSink;
 use obzenflow_core::{
     event::chain_event::{ChainEvent, ChainEventFactory},
     id::StageId,
@@ -32,14 +25,31 @@ use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
 use obzenflow_runtime_services::stages::common::handlers::StatefulHandler;
 use obzenflow_runtime_services::stages::source::FiniteSourceTyped;
-// ✨ FLOWIP-080h: Import Filter helper
 use obzenflow_runtime_services::stages::transform::Filter;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::path::PathBuf;
 
 // ============================================================================
 // Source: Emits numbered events
 // ============================================================================
+
+/// Source helper that emits a sequence of numbered events
+fn number_source(
+    count: u64,
+) -> FiniteSourceTyped<
+    NumberEvent,
+    impl FnMut(usize) -> Option<Vec<NumberEvent>> + Send + Sync + Clone,
+> {
+    FiniteSourceTyped::from_item_fn(move |index| {
+        let value = (index as u64) + 1;
+        if value > count {
+            return None;
+        }
+        println!("📤 Source emitting: {value}");
+        Some(NumberEvent { value })
+    })
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct NumberEvent {
@@ -64,12 +74,10 @@ impl TypedPayload for AggregationResult {
 }
 
 // ============================================================================
-// FLOWIP-080h: Filter Helper for Even Numbers
+// Transform: Filter even numbers
 // ============================================================================
 
-/// Filter that only passes even numbers (FLOWIP-080h)
-///
-/// Replaces 29-line EvenFilter struct with a Filter helper
+/// Filter that only passes even numbers
 fn even_filter() -> Filter<impl Fn(&ChainEvent) -> bool + Send + Sync + Clone> {
     Filter::new(|event| {
         if let Some(value) = event.payload()["value"].as_u64() {
@@ -87,7 +95,7 @@ fn even_filter() -> Filter<impl Fn(&ChainEvent) -> bool + Send + Sync + Clone> {
 }
 
 // ============================================================================
-// Stateful: Count and sum events (FLOWIP-080b)
+// Stateful: Count and sum events
 // ============================================================================
 
 /// State for the counter - tracks count and running sum
@@ -170,7 +178,7 @@ async fn main() -> Result<()> {
     // Set environment to use console metrics
     std::env::set_var("OBZENFLOW_METRICS_EXPORTER", "console");
 
-    println!("🚀 Stateful Counter Demo (FLOWIP-080b)");
+    println!("🚀 Stateful Counter Demo");
     println!("========================================");
     println!("Pipeline: Source(1-10) → Transform(even) → Stateful(count+sum) → Sink");
     println!();
@@ -179,37 +187,22 @@ async fn main() -> Result<()> {
     use obzenflow_infra::application::FlowApplication;
 
     FlowApplication::run(flow! {
-        name: "stateful_counter_demo",
-        journals: disk_journals(std::path::PathBuf::from("target/stateful_demo_journal")),
+        name: "stateful_counter",
+        journals: disk_journals(PathBuf::from("target/counter-logs")),
         middleware: [],
 
-            stages: {
-                // FLOWIP-081: Typed finite sources (no WriterId/ChainEvent boilerplate)
-                numbers = source!("numbers" => FiniteSourceTyped::from_item_fn(|index| {
-                    let value = (index as u64) + 1;
-                    if value > 10 {
-                        return None;
-                    }
+        stages: {
+            numbers = source!("numbers" => number_source(10));
+            evens   = transform!("even_filter" => even_filter());
+            counter = stateful!("counter" => CounterHandler::new());
+            output  = sink!("summary" => ConsoleSink::<AggregationResult>::json_pretty());
+        },
 
-                    println!("📤 Source emitting: {value}");
-                    Some(NumberEvent { value })
-                }));
-                // ✨ FLOWIP-080h: Using Filter helper instead of EvenFilter struct
-                evens = transform!("even_filter" => even_filter());
-                counter = stateful!("counter" => CounterHandler::new());
-                output = sink!("print" => |agg: AggregationResult| {
-                    println!("\n✨ FINAL RESULT:");
-                    println!("   Count: {}", agg.count);
-                    println!("   Sum: {}", agg.sum);
-                    println!("   Average: {}", agg.average);
-                });
-            },
-
-            topology: {
-                numbers |> evens;
-                evens |> counter;
-                counter |> output;
-            }
+        topology: {
+            numbers |> evens;
+            evens   |> counter;
+            counter |> output;
+        }
     })
     .await?;
 
