@@ -830,6 +830,7 @@ mod tests {
             stage_id: StageId::new(),
             name: "test".to_string(),
             flow_name: "test".to_string(),
+            cycle_guard: None,
         };
         let control = Arc::new(ControlMiddlewareAggregator::new());
         let cb = factory.create(&config, control);
@@ -876,6 +877,7 @@ mod tests {
             stage_id: StageId::new(),
             name: "test".to_string(),
             flow_name: "test".to_string(),
+            cycle_guard: None,
         };
         let control = Arc::new(ControlMiddlewareAggregator::new());
         let cb = factory.create(&config, control);

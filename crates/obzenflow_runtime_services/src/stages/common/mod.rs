@@ -6,6 +6,7 @@
 
 pub(crate) mod backpressure_activity_pulse;
 pub mod control_strategies;
+pub(crate) mod cycle_guard;
 pub mod handler_error;
 pub mod handlers;
 pub mod middleware_mirror;

@@ -2433,6 +2433,7 @@ mod tests {
             stage_id,
             name: "test".to_string(),
             flow_name: "test_flow".to_string(),
+            cycle_guard: None,
         };
         let factory = CircuitBreakerFactory::new(3);
         let strategy = factory
@@ -2459,6 +2460,7 @@ mod tests {
             stage_id: stage_id_2,
             name: "test_2".to_string(),
             flow_name: "test_flow".to_string(),
+            cycle_guard: None,
         };
 
         let factory_2 = CircuitBreakerFactory::new(3);

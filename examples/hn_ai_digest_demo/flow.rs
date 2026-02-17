@@ -7,7 +7,11 @@ use super::domain::{FormattedStory, HnStory};
 use super::mock_server::spawn_mock_hn_server;
 use super::util::{env_bool, env_usize, truncate_chars};
 use anyhow::{anyhow, Result};
-use obzenflow::ai::{ChatTransform, ChatTransformExt};
+use async_trait::async_trait;
+use obzenflow::ai::{
+    estimator_for_model, split_to_budget, ChatTransform, ChatTransformExt, EstimateSource,
+    TokenCount, TokenEstimator,
+};
 use obzenflow::sinks::ConsoleSink;
 use obzenflow::sources::{HeaderMap, HttpPullConfig, HttpPullSource, Url};
 use obzenflow_adapters::middleware::control::ai_circuit_breaker;
@@ -19,9 +23,13 @@ use obzenflow_infra::application::{FlowApplication, LogLevel};
 use obzenflow_infra::http_client::default_http_client;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
+use obzenflow_runtime_services::stages::common::handlers::{
+    AsyncTransformHandler, TransformHandler,
+};
 use obzenflow_runtime_services::stages::stateful::strategies::accumulators::ReduceTyped;
 use obzenflow_runtime_services::stages::transform::TryMapWith;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use std::time::Duration;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -34,18 +42,99 @@ impl TypedPayload for HnTopStories {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+struct HnDigestChunk {
+    group_index: usize,
+    group_count: usize,
+    budget_per_group: TokenCount,
+    estimated_tokens: TokenCount,
+    oversize: bool,
+    decomposition_depth: u32,
+    story_numbers: Vec<usize>,
+    stories: Vec<FormattedStory>,
+}
+
+impl TypedPayload for HnDigestChunk {
+    const EVENT_TYPE: &'static str = "hn.digest_chunk";
+}
+
+/// An oversize chunk that needs further decomposition before it is safe to send to the LLM.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct HnDigestOversizeChunk {
+    parent_group_index: usize,
+    parent_group_count: usize,
+    budget_per_group: TokenCount,
+    estimated_tokens: TokenCount,
+    story_numbers: Vec<usize>,
+    stories: Vec<FormattedStory>,
+    decomposition_depth: u32,
+}
+
+impl TypedPayload for HnDigestOversizeChunk {
+    const EVENT_TYPE: &'static str = "hn.digest_oversize_chunk";
+}
+
+/// A condensed chunk produced by the oversize sub-pipeline.
+///
+/// This is fed back into the main pipeline via the `<|` backflow edge.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct HnDigestCondensedChunk {
+    parent_group_index: usize,
+    parent_group_count: usize,
+    budget_per_group: TokenCount,
+    estimated_tokens: TokenCount,
+    story_numbers: Vec<usize>,
+    stories: Vec<FormattedStory>,
+    condensed_markdown: String,
+    decomposition_depth: u32,
+}
+
+impl TypedPayload for HnDigestCondensedChunk {
+    const EVENT_TYPE: &'static str = "hn.digest_condensed_chunk";
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct HnDigestChunkSummary {
+    group_index: usize,
+    group_count: usize,
+    budget_per_group: TokenCount,
+    estimated_tokens: TokenCount,
+    oversize: bool,
+    decomposition_depth: u32,
+    story_numbers: Vec<usize>,
+    stories: Vec<FormattedStory>,
+    chat_prompt_user: String,
+    output_markdown: String,
+}
+
+impl TypedPayload for HnDigestChunkSummary {
+    const EVENT_TYPE: &'static str = "hn.digest_chunk_summary";
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct HnDigestChunkSummaries {
+    budget_per_group: TokenCount,
+    summaries: Vec<HnDigestChunkSummary>,
+}
+
+impl TypedPayload for HnDigestChunkSummaries {
+    const EVENT_TYPE: &'static str = "hn.digest_chunk_summaries";
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct HnDigestSummary {
     mode: String,
     base_url: String,
     ai_provider: String,
     ai_model: String,
+    token_estimator: EstimateSource,
     stories_fetched: usize,
-    stories_used: usize,
-    prompt_story_limit: usize,
+    budget_per_group: TokenCount,
+    groups: usize,
     interests: Option<String>,
     chat_prompt_system: String,
     chat_prompt_user: String,
     input: HnTopStories,
+    chunk_summaries: Vec<HnDigestChunkSummary>,
     output_markdown: String,
 }
 
@@ -109,12 +198,19 @@ async fn run_example_async() -> Result<()> {
         _ => unreachable!("provider label validated above"),
     };
 
-    let prompt_story_limit =
-        env_usize("HN_AI_PROMPT_STORIES").unwrap_or_else(|| match ai_provider_label.as_str() {
-            "ollama" => max_stories.min(15),
-            _ => max_stories,
-        });
-    let prompt_story_limit = prompt_story_limit.max(1);
+    let budget_per_group_tokens =
+        env_usize("HN_AI_GROUP_BUDGET_TOKENS").unwrap_or(match ai_provider_label.as_str() {
+            "ollama" => 2500,
+            _ => 6000,
+        }) as u64;
+    if budget_per_group_tokens == 0 {
+        return Err(anyhow!(
+            "HN_AI_GROUP_BUDGET_TOKENS must be greater than zero"
+        ));
+    }
+    let budget_per_group = TokenCount::new(budget_per_group_tokens);
+
+    let estimator: Arc<dyn TokenEstimator> = Arc::from(estimator_for_model(&ai_model_label));
 
     println!("HN AI Digest Demo (FLOWIP-086r)");
     println!("===============================");
@@ -128,6 +224,8 @@ async fn run_example_async() -> Result<()> {
     println!("  poll_timeout: {poll_timeout_secs}s");
     println!("  ai_provider: {ai_provider_label}");
     println!("  ai_model: {ai_model_label}");
+    println!("  token_estimator: {:?}", estimator.source());
+    println!("  group_budget_tokens: {budget_per_group_tokens}");
     println!();
 
     let decoder = HnStoryDecoder::new(base_url, max_stories);
@@ -152,75 +250,223 @@ async fn run_example_async() -> Result<()> {
     .emit_on_eof();
 
     let interests = std::env::var("HN_AI_INTERESTS").ok();
-    let interests_for_request = interests.clone();
-    let interests_for_summary = interests.clone();
+    let interests_for_map_request = interests.clone();
+    let interests_for_map_summary = interests.clone();
+    let interests_for_oversize_request = interests.clone();
+    let interests_for_reduce_request = interests.clone();
+    let interests_for_reduce_summary = interests.clone();
 
     let ai_provider_for_summary = ai_provider_label.clone();
     let ai_model_for_summary = ai_model_label.clone();
+    let token_estimator_for_summary = estimator.source();
 
     let system_prompt = "You write concise, skimmable Hacker News digests from a list of headlines + URLs. Be neutral, avoid hype, and do not invent facts beyond what the titles imply."
         .to_string();
     let system_prompt_for_summary = system_prompt.clone();
 
-    let llm_builder = match ai_provider_label.as_str() {
+    let openai_api_key = match ai_provider_label.as_str() {
+        "openai" => Some(
+            std::env::var("OPENAI_API_KEY")
+                .map_err(|_| anyhow!("OPENAI_API_KEY is required when HN_AI_PROVIDER=openai"))?,
+        ),
+        _ => None,
+    };
+
+    let openai_base_url = std::env::var("OPENAI_BASE_URL")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty());
+
+    let ollama_base_url = std::env::var("OLLAMA_BASE_URL")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty());
+
+    let make_llm_builder = || match ai_provider_label.as_str() {
         "ollama" => {
             let mut builder = ChatTransform::builder().ollama(ai_model_label.clone());
-            if let Ok(base_url) = std::env::var("OLLAMA_BASE_URL") {
-                let base_url = base_url.trim();
-                if !base_url.is_empty() {
-                    builder = builder.base_url(base_url.to_string());
-                }
+            if let Some(base_url) = &ollama_base_url {
+                builder = builder.base_url(base_url.clone());
             }
             builder
         }
         "openai" => {
-            let api_key = std::env::var("OPENAI_API_KEY")
-                .map_err(|_| anyhow!("OPENAI_API_KEY is required when HN_AI_PROVIDER=openai"))?;
-            match std::env::var("OPENAI_BASE_URL")
-                .ok()
-                .map(|v| v.trim().to_string())
-            {
+            let api_key = openai_api_key
+                .clone()
+                .expect("api key must exist for openai");
+            match openai_base_url.as_deref() {
                 None => ChatTransform::builder().openai(ai_model_label.clone(), api_key),
-                Some(base_url) if base_url.is_empty() => {
-                    ChatTransform::builder().openai(ai_model_label.clone(), api_key)
-                }
                 Some(base_url) => ChatTransform::builder().openai_compatible(
                     ai_model_label.clone(),
                     api_key,
-                    base_url,
+                    base_url.to_string(),
                 ),
             }
         }
         _ => unreachable!("provider label validated above"),
     };
 
-    let llm = llm_builder
+    let splitter = HnDigestSplitter::new(estimator.clone(), budget_per_group);
+    let oversize_sub_splitter =
+        HnDigestOversizeSubSplitter::new(estimator.clone(), budget_per_group);
+
+    let map_llm = make_llm_builder()
+        .system(system_prompt.clone())
+        .temperature(0.2)
+        .max_tokens(800)
+        .output_mapper(move |input: &ChainEvent, response| {
+            let chunk = HnDigestChunk::try_from_event(input).map_err(|err| {
+                HandlerError::Validation(format!("hn digest chunk decode failed: {err}"))
+            })?;
+
+            let user_prompt = build_chunk_prompt(&chunk, interests_for_map_summary.as_deref());
+
+            let summary = HnDigestChunkSummary {
+                group_index: chunk.group_index,
+                group_count: chunk.group_count,
+                budget_per_group: chunk.budget_per_group,
+                estimated_tokens: chunk.estimated_tokens,
+                oversize: chunk.oversize,
+                decomposition_depth: chunk.decomposition_depth,
+                story_numbers: chunk.story_numbers.clone(),
+                stories: chunk.stories.clone(),
+                chat_prompt_user: user_prompt,
+                output_markdown: response.text,
+            };
+
+            let payload = serde_json::to_value(&summary).map_err(|err| {
+                HandlerError::Validation(format!("chunk summary payload encode failed: {err}"))
+            })?;
+
+            Ok(vec![ChainEventFactory::derived_data_event(
+                input.writer_id,
+                input,
+                HnDigestChunkSummary::versioned_event_type(),
+                payload,
+            )])
+        })
+        .build(move |event: &ChainEvent| {
+            let chunk = HnDigestChunk::try_from_event(event).map_err(|err| {
+                HandlerError::Validation(format!("hn digest chunk decode failed: {err}"))
+            })?;
+
+            Ok(build_chunk_prompt(
+                &chunk,
+                interests_for_map_request.as_deref(),
+            ))
+        })
+        .await?
+        .with_estimator(estimator.clone());
+
+    let map_router = HnDigestMapRouter::new(map_llm);
+
+    let oversize_map_llm = make_llm_builder()
+        .system(system_prompt.clone())
+        .temperature(0.1)
+        .max_tokens(400)
+        .output_mapper(move |input: &ChainEvent, response| {
+            let chunk = HnDigestChunk::try_from_event(input).map_err(|err| {
+                HandlerError::Validation(format!("hn digest chunk decode failed: {err}"))
+            })?;
+
+            let condensed = HnDigestCondensedChunk {
+                parent_group_index: chunk.group_index,
+                parent_group_count: chunk.group_count,
+                budget_per_group: chunk.budget_per_group,
+                estimated_tokens: chunk.estimated_tokens,
+                story_numbers: chunk.story_numbers.clone(),
+                stories: chunk.stories.clone(),
+                condensed_markdown: response.text,
+                decomposition_depth: chunk.decomposition_depth,
+            };
+
+            let payload = serde_json::to_value(&condensed).map_err(|err| {
+                HandlerError::Validation(format!(
+                    "hn digest condensed chunk payload encode failed: {err}"
+                ))
+            })?;
+
+            Ok(vec![ChainEventFactory::derived_data_event(
+                input.writer_id,
+                input,
+                HnDigestCondensedChunk::versioned_event_type(),
+                payload,
+            )])
+        })
+        .build(move |event: &ChainEvent| {
+            let chunk = HnDigestChunk::try_from_event(event).map_err(|err| {
+                HandlerError::Validation(format!("hn digest chunk decode failed: {err}"))
+            })?;
+
+            Ok(build_oversize_chunk_prompt(
+                &chunk,
+                interests_for_oversize_request.as_deref(),
+            ))
+        })
+        .await?
+        .with_estimator(estimator.clone());
+
+    let oversize_map_router = HnDigestOversizeMapRouter::new(oversize_map_llm);
+
+    let chunk_summaries = ReduceTyped::new(
+        HnDigestChunkSummaries::default(),
+        |acc: &mut HnDigestChunkSummaries, summary: &HnDigestChunkSummary| {
+            if acc.budget_per_group == TokenCount::ZERO {
+                acc.budget_per_group = summary.budget_per_group;
+            }
+            acc.summaries.push(summary.clone());
+        },
+    )
+    .emit_on_eof();
+
+    let digest_llm = make_llm_builder()
         .system(system_prompt)
         .temperature(0.2)
         .max_tokens(800)
         .output_mapper(move |input: &ChainEvent, response| {
-            let mut seed = HnTopStories::try_from_event(input).map_err(|err| {
-                HandlerError::Validation(format!("hn digest seed decode failed: {err}"))
+            let mut batch = HnDigestChunkSummaries::try_from_event(input).map_err(|err| {
+                HandlerError::Validation(format!("hn digest chunk summaries decode failed: {err}"))
             })?;
 
-            let stories_fetched = seed.stories.len();
-            seed.stories.truncate(prompt_story_limit);
-            let stories_used = seed.stories.len();
+            batch.summaries.sort_by_key(|s| {
+                (
+                    s.group_index,
+                    s.story_numbers.first().copied().unwrap_or(usize::MAX),
+                )
+            });
+            let groups = batch.summaries.len();
 
-            let user_prompt = build_digest_prompt(&seed, interests_for_summary.as_deref());
+            let mut numbered_stories: Vec<(usize, FormattedStory)> = Vec::new();
+            for summary in &batch.summaries {
+                for (n, story) in summary.story_numbers.iter().zip(summary.stories.iter()) {
+                    numbered_stories.push((*n, story.clone()));
+                }
+            }
+            numbered_stories.sort_by_key(|(n, _)| *n);
+            let seed = HnTopStories {
+                stories: numbered_stories
+                    .into_iter()
+                    .map(|(_, story)| story)
+                    .collect(),
+            };
+
+            let stories_fetched = seed.stories.len();
+            let user_prompt = build_reduce_prompt(&batch, interests_for_reduce_summary.as_deref());
 
             let summary = HnDigestSummary {
                 mode: mode_label_for_summary.clone(),
                 base_url: base_url_for_summary.clone(),
                 ai_provider: ai_provider_for_summary.clone(),
                 ai_model: ai_model_for_summary.clone(),
+                token_estimator: token_estimator_for_summary,
                 stories_fetched,
-                stories_used,
-                prompt_story_limit,
-                interests: interests_for_summary.clone(),
+                budget_per_group: batch.budget_per_group,
+                groups,
+                interests: interests_for_reduce_summary.clone(),
                 chat_prompt_system: system_prompt_for_summary.clone(),
                 chat_prompt_user: user_prompt,
                 input: seed,
+                chunk_summaries: batch.summaries.clone(),
                 output_markdown: response.text,
             };
 
@@ -236,14 +482,17 @@ async fn run_example_async() -> Result<()> {
             )])
         })
         .build(move |event: &ChainEvent| {
-            let mut seed = HnTopStories::try_from_event(event).map_err(|err| {
-                HandlerError::Validation(format!("hn digest seed decode failed: {err}"))
+            let batch = HnDigestChunkSummaries::try_from_event(event).map_err(|err| {
+                HandlerError::Validation(format!("hn digest chunk summaries decode failed: {err}"))
             })?;
 
-            seed.stories.truncate(prompt_story_limit);
-            Ok(build_digest_prompt(&seed, interests_for_request.as_deref()))
+            Ok(build_reduce_prompt(
+                &batch,
+                interests_for_reduce_request.as_deref(),
+            ))
         })
-        .await?;
+        .await?
+        .with_estimator(estimator.clone());
 
     FlowApplication::builder()
         .with_console_subscriber()
@@ -260,15 +509,28 @@ async fn run_example_async() -> Result<()> {
                 ));
                 formatter = transform!("formatter" => formatter);
                 batch = stateful!("batch" => digest_seed);
-                digest = async_transform!("digest_llm" => llm, [ai_circuit_breaker()]);
+                split = transform!("split_to_budget" => splitter);
+                map = async_transform!("map_llm" => map_router, [ai_circuit_breaker()]);
+                oversize_sub_split = transform!("oversize_sub_split" => oversize_sub_splitter);
+                oversize_map = async_transform!("oversize_map_llm" => oversize_map_router, [ai_circuit_breaker()]);
+                reduce = stateful!("reduce" => chunk_summaries);
+                digest = async_transform!("digest_llm" => digest_llm, [ai_circuit_breaker()]);
                 output = sink!("digest_summary" => ConsoleSink::<HnDigestSummary>::new(format_digest_summary_for_console));
             },
 
             topology: {
                 source |> formatter;
                 formatter |> batch;
-                batch |> digest;
+                batch |> split;
+                split |> map;
+                split |> reduce;
+                map |> reduce;
+                reduce |> digest;
                 digest |> output;
+
+                split |> oversize_sub_split;
+                oversize_sub_split |> oversize_map;
+                split <| oversize_map;
             }
         })
         .await?;
@@ -289,11 +551,29 @@ fn format_digest_summary_for_console(summary: &HnDigestSummary) -> String {
     out.push_str(&format!("base_url: {}\n", summary.base_url));
     out.push_str(&format!("ai_provider: {}\n", summary.ai_provider));
     out.push_str(&format!("ai_model: {}\n", summary.ai_model));
+    out.push_str(&format!("token_estimator: {:?}\n", summary.token_estimator));
     out.push_str(&format!("stories_fetched: {}\n", summary.stories_fetched));
     out.push_str(&format!(
-        "stories_used: {} (prompt limit: {})\n",
-        summary.stories_used, summary.prompt_story_limit
+        "groups: {} (budget_per_group: {})\n",
+        summary.groups, summary.budget_per_group
     ));
+    let oversize_groups = summary
+        .chunk_summaries
+        .iter()
+        .filter(|s| s.oversize)
+        .count();
+    if oversize_groups > 0 {
+        out.push_str(&format!("oversize_groups: {}\n", oversize_groups));
+
+        let max_depth = summary
+            .chunk_summaries
+            .iter()
+            .filter(|s| s.oversize)
+            .map(|s| s.decomposition_depth)
+            .max()
+            .unwrap_or(0);
+        out.push_str(&format!("oversize_max_depth: {}\n", max_depth));
+    }
 
     if let Some(interests) = &summary.interests {
         if !interests.trim().is_empty() {
@@ -332,7 +612,378 @@ fn format_digest_summary_for_console(summary: &HnDigestSummary) -> String {
     out
 }
 
-fn build_digest_prompt(seed: &HnTopStories, interests: Option<&str>) -> String {
+#[derive(Clone)]
+struct HnDigestSplitter {
+    estimator: Arc<dyn TokenEstimator>,
+    budget_per_group: TokenCount,
+}
+
+impl std::fmt::Debug for HnDigestSplitter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HnDigestSplitter")
+            .field("estimator_source", &self.estimator.source())
+            .field("budget_per_group", &self.budget_per_group)
+            .finish()
+    }
+}
+
+impl HnDigestSplitter {
+    fn new(estimator: Arc<dyn TokenEstimator>, budget_per_group: TokenCount) -> Self {
+        Self {
+            estimator,
+            budget_per_group,
+        }
+    }
+}
+
+#[async_trait]
+impl TransformHandler for HnDigestSplitter {
+    fn process(&self, event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
+        if HnDigestOversizeChunk::event_type_matches(&event.event_type()) {
+            let payload = event.payload().clone();
+            return Ok(vec![ChainEventFactory::derived_data_event(
+                event.writer_id,
+                &event,
+                HnDigestOversizeChunk::versioned_event_type(),
+                payload,
+            )]);
+        }
+
+        if HnDigestCondensedChunk::event_type_matches(&event.event_type()) {
+            let condensed = HnDigestCondensedChunk::try_from_event(&event).map_err(|err| {
+                HandlerError::Validation(format!("hn digest condensed chunk decode failed: {err}"))
+            })?;
+
+            let summary = HnDigestChunkSummary {
+                group_index: condensed.parent_group_index,
+                group_count: condensed.parent_group_count,
+                budget_per_group: condensed.budget_per_group,
+                estimated_tokens: condensed.estimated_tokens,
+                oversize: true,
+                decomposition_depth: condensed.decomposition_depth,
+                story_numbers: condensed.story_numbers.clone(),
+                stories: condensed.stories.clone(),
+                chat_prompt_user: format!(
+                    "Oversize backflow (decomposition_depth={})",
+                    condensed.decomposition_depth
+                ),
+                output_markdown: condensed.condensed_markdown,
+            };
+
+            let payload = serde_json::to_value(&summary).map_err(|err| {
+                HandlerError::Validation(format!("chunk summary payload encode failed: {err}"))
+            })?;
+
+            return Ok(vec![ChainEventFactory::derived_data_event(
+                event.writer_id,
+                &event,
+                HnDigestChunkSummary::versioned_event_type(),
+                payload,
+            )]);
+        }
+
+        if !HnTopStories::event_type_matches(&event.event_type()) {
+            return Ok(vec![event]);
+        }
+
+        let seed = HnTopStories::try_from_event(&event).map_err(|err| {
+            HandlerError::Validation(format!("hn digest seed decode failed: {err}"))
+        })?;
+
+        let story_lines = seed
+            .stories
+            .iter()
+            .enumerate()
+            .map(|(idx, story)| render_story_line(idx + 1, story, 0))
+            .collect::<Vec<_>>();
+
+        let story_line_refs = story_lines.iter().map(|s| s.as_str()).collect::<Vec<_>>();
+        let groups = split_to_budget(
+            self.estimator.as_ref(),
+            &story_line_refs,
+            self.budget_per_group,
+        )
+        .map_err(|err| HandlerError::Validation(format!("split_to_budget failed: {err}")))?;
+
+        let group_count = groups.len();
+        let mut outputs = Vec::with_capacity(group_count);
+
+        for (group_index, group) in groups.into_iter().enumerate() {
+            let mut story_numbers = Vec::with_capacity(group.indices.len());
+            let mut stories = Vec::with_capacity(group.indices.len());
+
+            for idx in group.indices {
+                let Some(story) = seed.stories.get(idx) else {
+                    return Err(HandlerError::Validation(format!(
+                        "split_to_budget returned out-of-range index: {idx}"
+                    )));
+                };
+                story_numbers.push(idx + 1);
+                stories.push(story.clone());
+            }
+
+            if group.oversize {
+                let oversize = HnDigestOversizeChunk {
+                    parent_group_index: group_index,
+                    parent_group_count: group_count,
+                    budget_per_group: self.budget_per_group,
+                    estimated_tokens: group.estimated_tokens,
+                    story_numbers,
+                    stories,
+                    decomposition_depth: 0,
+                };
+
+                let payload = serde_json::to_value(&oversize).map_err(|err| {
+                    HandlerError::Validation(format!(
+                        "hn digest oversize chunk payload encode failed: {err}"
+                    ))
+                })?;
+
+                outputs.push(ChainEventFactory::derived_data_event(
+                    event.writer_id,
+                    &event,
+                    HnDigestOversizeChunk::versioned_event_type(),
+                    payload,
+                ));
+            } else {
+                let chunk = HnDigestChunk {
+                    group_index,
+                    group_count,
+                    budget_per_group: self.budget_per_group,
+                    estimated_tokens: group.estimated_tokens,
+                    oversize: false,
+                    decomposition_depth: 0,
+                    story_numbers,
+                    stories,
+                };
+
+                let payload = serde_json::to_value(&chunk).map_err(|err| {
+                    HandlerError::Validation(format!(
+                        "hn digest chunk payload encode failed: {err}"
+                    ))
+                })?;
+
+                outputs.push(ChainEventFactory::derived_data_event(
+                    event.writer_id,
+                    &event,
+                    HnDigestChunk::versioned_event_type(),
+                    payload,
+                ));
+            }
+        }
+
+        Ok(outputs)
+    }
+
+    async fn drain(&mut self) -> Result<(), HandlerError> {
+        Ok(())
+    }
+}
+
+#[derive(Clone)]
+struct HnDigestOversizeSubSplitter {
+    estimator: Arc<dyn TokenEstimator>,
+    budget_per_group: TokenCount,
+}
+
+impl std::fmt::Debug for HnDigestOversizeSubSplitter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HnDigestOversizeSubSplitter")
+            .field("estimator_source", &self.estimator.source())
+            .field("budget_per_group", &self.budget_per_group)
+            .finish()
+    }
+}
+
+impl HnDigestOversizeSubSplitter {
+    fn new(estimator: Arc<dyn TokenEstimator>, budget_per_group: TokenCount) -> Self {
+        Self {
+            estimator,
+            budget_per_group,
+        }
+    }
+}
+
+#[async_trait]
+impl TransformHandler for HnDigestOversizeSubSplitter {
+    fn process(&self, event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
+        if !HnDigestOversizeChunk::event_type_matches(&event.event_type()) {
+            return Ok(Vec::new());
+        }
+
+        let seed = HnDigestOversizeChunk::try_from_event(&event).map_err(|err| {
+            HandlerError::Validation(format!("hn digest oversize chunk decode failed: {err}"))
+        })?;
+
+        let story_lines = seed
+            .stories
+            .iter()
+            .zip(seed.story_numbers.iter())
+            .map(|(story, n)| render_story_line(*n, story, seed.decomposition_depth))
+            .collect::<Vec<_>>();
+
+        let story_line_refs = story_lines.iter().map(|s| s.as_str()).collect::<Vec<_>>();
+        let groups = split_to_budget(
+            self.estimator.as_ref(),
+            &story_line_refs,
+            self.budget_per_group,
+        )
+        .map_err(|err| HandlerError::Validation(format!("split_to_budget failed: {err}")))?;
+
+        let mut outputs = Vec::new();
+
+        for group in groups {
+            let mut story_numbers = Vec::with_capacity(group.indices.len());
+            let mut stories = Vec::with_capacity(group.indices.len());
+
+            for idx in group.indices {
+                let Some(n) = seed.story_numbers.get(idx) else {
+                    return Err(HandlerError::Validation(format!(
+                        "split_to_budget returned out-of-range index: {idx}"
+                    )));
+                };
+                let Some(story) = seed.stories.get(idx) else {
+                    return Err(HandlerError::Validation(format!(
+                        "split_to_budget returned out-of-range index: {idx}"
+                    )));
+                };
+                story_numbers.push(*n);
+                stories.push(story.clone());
+            }
+
+            if group.oversize {
+                let oversize = HnDigestOversizeChunk {
+                    parent_group_index: seed.parent_group_index,
+                    parent_group_count: seed.parent_group_count,
+                    budget_per_group: seed.budget_per_group,
+                    estimated_tokens: group.estimated_tokens,
+                    story_numbers,
+                    stories,
+                    decomposition_depth: seed.decomposition_depth.saturating_add(1),
+                };
+
+                let payload = serde_json::to_value(&oversize).map_err(|err| {
+                    HandlerError::Validation(format!(
+                        "hn digest oversize chunk payload encode failed: {err}"
+                    ))
+                })?;
+
+                outputs.push(ChainEventFactory::derived_data_event(
+                    event.writer_id,
+                    &event,
+                    HnDigestOversizeChunk::versioned_event_type(),
+                    payload,
+                ));
+            } else {
+                let chunk = HnDigestChunk {
+                    group_index: seed.parent_group_index,
+                    group_count: seed.parent_group_count,
+                    budget_per_group: seed.budget_per_group,
+                    estimated_tokens: group.estimated_tokens,
+                    oversize: false,
+                    decomposition_depth: seed.decomposition_depth,
+                    story_numbers,
+                    stories,
+                };
+
+                let payload = serde_json::to_value(&chunk).map_err(|err| {
+                    HandlerError::Validation(format!(
+                        "hn digest chunk payload encode failed: {err}"
+                    ))
+                })?;
+
+                outputs.push(ChainEventFactory::derived_data_event(
+                    event.writer_id,
+                    &event,
+                    HnDigestChunk::versioned_event_type(),
+                    payload,
+                ));
+            }
+        }
+
+        Ok(outputs)
+    }
+
+    async fn drain(&mut self) -> Result<(), HandlerError> {
+        Ok(())
+    }
+}
+
+#[derive(Clone)]
+struct HnDigestMapRouter {
+    inner: ChatTransform,
+}
+
+impl std::fmt::Debug for HnDigestMapRouter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HnDigestMapRouter").finish()
+    }
+}
+
+impl HnDigestMapRouter {
+    fn new(inner: ChatTransform) -> Self {
+        Self { inner }
+    }
+}
+
+#[async_trait]
+impl AsyncTransformHandler for HnDigestMapRouter {
+    async fn process(&self, event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
+        if !HnDigestChunk::event_type_matches(&event.event_type()) {
+            return Ok(Vec::new());
+        }
+
+        self.inner.process(event).await
+    }
+
+    async fn drain(&mut self) -> Result<(), HandlerError> {
+        self.inner.drain().await
+    }
+}
+
+#[derive(Clone)]
+struct HnDigestOversizeMapRouter {
+    inner: ChatTransform,
+}
+
+impl std::fmt::Debug for HnDigestOversizeMapRouter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HnDigestOversizeMapRouter").finish()
+    }
+}
+
+impl HnDigestOversizeMapRouter {
+    fn new(inner: ChatTransform) -> Self {
+        Self { inner }
+    }
+}
+
+#[async_trait]
+impl AsyncTransformHandler for HnDigestOversizeMapRouter {
+    async fn process(&self, event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
+        if HnDigestChunk::event_type_matches(&event.event_type()) {
+            return self.inner.process(event).await;
+        }
+
+        if HnDigestOversizeChunk::event_type_matches(&event.event_type()) {
+            let payload = event.payload().clone();
+            return Ok(vec![ChainEventFactory::derived_data_event(
+                event.writer_id,
+                &event,
+                HnDigestOversizeChunk::versioned_event_type(),
+                payload,
+            )]);
+        }
+
+        Ok(Vec::new())
+    }
+
+    async fn drain(&mut self) -> Result<(), HandlerError> {
+        self.inner.drain().await
+    }
+}
+
+fn build_chunk_prompt(chunk: &HnDigestChunk, interests: Option<&str>) -> String {
     let mut out = String::new();
 
     if let Some(interests) = interests {
@@ -341,38 +992,125 @@ fn build_digest_prompt(seed: &HnTopStories, interests: Option<&str>) -> String {
         out.push_str("\n\n");
     }
 
-    let story_count = seed.stories.len();
-    out.push_str(
-        "Write a Markdown digest of the following Hacker News stories (headlines + URLs only).\n",
-    );
+    out.push_str("Summarise this chunk of Hacker News stories (headlines + URLs only).\n");
     out.push_str("- Do not invent facts that are not implied by the title.\n");
-    out.push_str("- Use a neutral, specific tone (avoid filler adjectives like \"shocking\", \"interesting\", \"concerning\").\n");
-    out.push_str(
-        "- Start the response immediately with \"## Stories\" (no intro/preamble text).\n",
-    );
-    out.push_str("- Include *every* story exactly once, in the same order, using the provided URLs verbatim.\n\n");
+    out.push_str("- Use a neutral, specific tone.\n");
+    out.push_str("- Keep the output short so it can be reduced later.\n\n");
 
-    out.push_str("Output format (follow exactly):\n\n");
-    out.push_str("## Stories\n");
+    out.push_str("Output format (follow exactly):\n");
     out.push_str(&format!(
-        "1..{story_count}. [Title](URL) — 1–2 sentence summary (≤35 words)\n\n"
+        "## Chunk {}/{}\n",
+        chunk.group_index + 1,
+        chunk.group_count
     ));
-    out.push_str("## What's topical today\n");
-    out.push_str("Thesis: 1 sentence that connects 2+ themes, citing story numbers like (2, 7).\n");
     out.push_str("Themes:\n");
-    out.push_str("- <theme> (stories: 1, 3, 9): 1 sentence with specific nouns from the titles\n");
-    out.push_str("- <theme> (stories: ...): ...\n");
-    out.push_str("Watch: 1 sentence on what to pay attention to next.\n\n");
-    out.push_str("Avoid generic wrap-ups (do not say: \"range of topics\", \"variety of topics\", \"from X to Y\").\n\n");
+    out.push_str("- <theme>: 1 sentence\n");
+    out.push_str("- <theme>: 1 sentence\n");
+    out.push_str("Notable stories:\n");
+    out.push_str("- (n) [Title](URL): 1 sentence\n");
+    out.push_str("- (n) [Title](URL): 1 sentence\n\n");
 
     out.push_str("Stories (numbered; use these URLs verbatim):\n");
-    for (idx, story) in seed.stories.iter().enumerate() {
-        let title = truncate_chars(story.title.trim(), 140);
-        let url = story.url.trim();
-        out.push_str(&format!("{n}. {title} — {url}\n", n = idx + 1));
+    for (n, story) in chunk.story_numbers.iter().zip(chunk.stories.iter()) {
+        out.push_str(&render_story_line(*n, story, chunk.decomposition_depth));
+        out.push('\n');
     }
 
     out
+}
+
+fn build_oversize_chunk_prompt(chunk: &HnDigestChunk, interests: Option<&str>) -> String {
+    let mut out = String::new();
+
+    if let Some(interests) = interests {
+        out.push_str("My interests: ");
+        out.push_str(interests.trim());
+        out.push_str("\n\n");
+    }
+
+    out.push_str("This chunk came from the oversize backflow path.\n");
+    out.push_str("Summarise it very aggressively so it can be reduced later.\n");
+    out.push_str("- Do not invent facts that are not implied by the title.\n");
+    out.push_str("- Prefer citing story numbers over including long links.\n");
+    out.push_str("- Keep the output short.\n\n");
+
+    out.push_str("Output format:\n");
+    out.push_str(&format!(
+        "## Chunk {}/{}\n",
+        chunk.group_index + 1,
+        chunk.group_count
+    ));
+    out.push_str("- (n) 1 sentence\n");
+    out.push_str("- (n) 1 sentence\n\n");
+
+    out.push_str("Stories (numbered):\n");
+    for (n, story) in chunk.story_numbers.iter().zip(chunk.stories.iter()) {
+        out.push_str(&render_story_line(*n, story, chunk.decomposition_depth));
+        out.push('\n');
+    }
+
+    out
+}
+
+fn build_reduce_prompt(batch: &HnDigestChunkSummaries, interests: Option<&str>) -> String {
+    let mut out = String::new();
+
+    if let Some(interests) = interests {
+        out.push_str("My interests: ");
+        out.push_str(interests.trim());
+        out.push_str("\n\n");
+    }
+
+    out.push_str("Write a concise Markdown digest of the following Hacker News chunk summaries.\n");
+    out.push_str("- Do not invent facts that are not implied by the titles.\n");
+    out.push_str("- Start the response immediately with \"## What's topical today\" (no intro).\n");
+    out.push_str("- Include: Thesis, Themes (cite story numbers), Notable stories, Watch.\n");
+    out.push_str("- Avoid generic wrap-ups.\n\n");
+
+    let mut summaries = batch.summaries.clone();
+    summaries.sort_by_key(|s| {
+        (
+            s.group_index,
+            s.story_numbers.first().copied().unwrap_or(usize::MAX),
+        )
+    });
+
+    out.push_str("Chunk summaries:\n");
+    for summary in &summaries {
+        let oversize_suffix = if summary.oversize {
+            format!(" (oversize depth {})", summary.decomposition_depth)
+        } else {
+            String::new()
+        };
+        out.push_str(&format!(
+            "\n### Chunk {}/{}{}\n",
+            summary.group_index + 1,
+            summary.group_count,
+            oversize_suffix
+        ));
+        out.push_str(summary.output_markdown.trim());
+        out.push('\n');
+    }
+
+    out
+}
+
+fn render_story_line(n: usize, story: &FormattedStory, decomposition_depth: u32) -> String {
+    let title = story.title.trim();
+    let url = story.url.trim();
+
+    match decomposition_depth {
+        0 => format!("{n}. {} — {}", truncate_chars(title, 140), url),
+        1 => format!(
+            "{n}. {} — {}",
+            truncate_chars(title, 120),
+            truncate_chars(url, 120)
+        ),
+        2 => format!("{n}. {}", truncate_chars(title, 100)),
+        3 => format!("{n}. {}", truncate_chars(title, 80)),
+        4 => format!("{n}. {}", truncate_chars(title, 60)),
+        _ => format!("{n}."),
+    }
 }
 
 fn format_story_event(event: ChainEvent) -> std::result::Result<ChainEvent, String> {

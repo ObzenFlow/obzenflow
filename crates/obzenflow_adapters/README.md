@@ -124,7 +124,7 @@ This crate contains a “batteries included” set of middleware factories (plus
 - Control/resilience (`src/middleware/control/`)
   - `CircuitBreakerFactory` / `CircuitBreakerBuilder`: configurable open/half-open behavior, optional fallbacks, and rate-based modes.
   - `RateLimiterFactory`: token-bucket rate limiting with durable lifecycle/summary events.
-  - `CycleGuardMiddlewareFactory`: prevents runaway cycles using correlation IDs.
+  - Cycle protection is implemented in stage supervisors (FLOWIP-051l), not via middleware.
 - State (`src/middleware/state/`)
   - `WindowingMiddlewareFactory`: time-window aggregation; integrates with `WindowingStrategy` to delay EOF so windows can flush.
 - System (`src/middleware/system/`)

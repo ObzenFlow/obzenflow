@@ -13,6 +13,7 @@ mod hashing;
 mod observability;
 mod ports;
 mod structured_output;
+mod token_estimation;
 mod types;
 
 pub use error::{AiClientError, StructuredOutputError};
@@ -27,6 +28,10 @@ pub use observability::{
 };
 pub use ports::{ChatClient, EmbeddingClient};
 pub use structured_output::{StructuredOutputSchema, StructuredOutputSpec, ValidationHook};
+pub use token_estimation::{
+    remaining_budget, split_to_budget, EstimateSource, HeuristicTokenEstimator, SplitGroup,
+    TokenCount, TokenEstimate, TokenEstimationError, TokenEstimator,
+};
 pub use types::{
     AiProvider, ChatMessage, ChatParams, ChatRequest, ChatResponse, ChatResponseFormat, ChatRole,
     EmbeddingParams, EmbeddingRequest, EmbeddingResponse, ToolCall, ToolDefinition, Usage,

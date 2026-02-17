@@ -4,8 +4,13 @@
 
 //! HN AI Digest Demo (FLOWIP-086r) — showcases Rig-backed LLM transforms.
 //!
-//! Pipeline (batch):
-//! `HttpPullSource` → format stories → accumulate → `ChatTransform` → print markdown digest
+//! Pipeline (batch + map-reduce):
+//! `HttpPullSource` → format stories → accumulate → split_to_budget → map (LLM) → reduce → digest (LLM) → print markdown digest
+//!
+//! Oversize backflow (FLOWIP-086x):
+//! `split_to_budget` emits oversize chunks when a single item exceeds the per-group token budget.
+//! These route through `oversize_sub_split` → `oversize_map` (LLM) and feed a condensed result back
+//! into the main splitter via `<|`.
 //!
 //! Run (default: local mock HN server + Ollama; requires Ollama running):
 //! `cargo run -p obzenflow --example hn_ai_digest_demo --features "http-pull ai-rig"`
@@ -37,7 +42,7 @@
 //! - `HN_AI_PROVIDER=ollama|openai` (default `ollama`)
 //! - `HN_AI_MODEL=llama3.1:8b` (default depends on provider)
 //! - `HN_AI_INTERESTS="rust, ai, security"` (optional personalization)
-//! - `HN_AI_PROMPT_STORIES=15` (optional; caps how many stories are included in the LLM prompt—useful for smaller-context Ollama models)
+//! - `HN_AI_GROUP_BUDGET_TOKENS=2500` (optional; per-chunk input budget used for map-reduce splitting)
 //! - `OLLAMA_BASE_URL=http://localhost:11434` (optional; default rig provider base)
 //! - `OPENAI_API_KEY=...` (required for `HN_AI_PROVIDER=openai`)
 //! - `OPENAI_BASE_URL=http://localhost:8080/v1` (optional OpenAI-compatible base URL)

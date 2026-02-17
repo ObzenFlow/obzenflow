@@ -914,6 +914,7 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stag
             flow_name: config.flow_name.clone(),
             control_strategy: Some(control_strategy),
             upstream_stages: resources.upstream_stages.clone(),
+            cycle_guard: config.cycle_guard,
         };
 
         // Use the builder to create the handle
@@ -1048,6 +1049,7 @@ impl<H: AsyncTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
             flow_name: config.flow_name.clone(),
             control_strategy: Some(control_strategy),
             upstream_stages: resources.upstream_stages.clone(),
+            cycle_guard: config.cycle_guard,
         };
 
         // Use the builder to create the handle
@@ -1767,6 +1769,7 @@ mod tests {
             stage_id,
             name: "cb_source".to_string(),
             flow_name: "test_flow".to_string(),
+            cycle_guard: None,
         };
 
         // Minimal StageResources: journals are never actually written in this unit test.

@@ -11,6 +11,16 @@
 
 pub use obzenflow_adapters::ai::{ChatTransform, EmbeddingTransform};
 
+pub use obzenflow_core::ai::{
+    remaining_budget, split_to_budget, EstimateSource, HeuristicTokenEstimator, SplitGroup,
+    TokenCount, TokenEstimate, TokenEstimationError, TokenEstimator,
+};
+
+pub use obzenflow_infra::ai::estimator_for_model;
+
+#[cfg(feature = "ai-tiktoken")]
+pub use obzenflow_infra::ai::TiktokenEstimator;
+
 #[cfg(feature = "ai-rig")]
 mod rig_builder;
 

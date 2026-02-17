@@ -145,9 +145,12 @@ macro_rules! flow {
             $crate::parse_topology!(connections, $($edge)*);
 
             // Create closure for flow middleware
-            let create_flow_middleware = || vec![
-                $(Box::new($flow_mw) as Box<dyn obzenflow_adapters::middleware::MiddlewareFactory>),*
-            ];
+            let create_flow_middleware =
+                || -> Vec<Box<dyn obzenflow_adapters::middleware::MiddlewareFactory>> {
+                    vec![
+                        $(Box::new($flow_mw) as Box<dyn obzenflow_adapters::middleware::MiddlewareFactory>),*
+                    ]
+                };
 
             // Build the flow
             $crate::build_typed_flow!($flow_name, journals, stages, connections, create_flow_middleware)
@@ -192,9 +195,12 @@ macro_rules! flow {
             $crate::parse_topology!(connections, $($edge)*);
 
             // Create closure for flow middleware
-            let create_flow_middleware = || vec![
-                $(Box::new($flow_mw) as Box<dyn obzenflow_adapters::middleware::MiddlewareFactory>),*
-            ];
+            let create_flow_middleware =
+                || -> Vec<Box<dyn obzenflow_adapters::middleware::MiddlewareFactory>> {
+                    vec![
+                        $(Box::new($flow_mw) as Box<dyn obzenflow_adapters::middleware::MiddlewareFactory>),*
+                    ]
+                };
 
             // Build the flow
             $crate::build_typed_flow!("default", journals, stages, connections, create_flow_middleware)
@@ -370,6 +376,25 @@ macro_rules! build_typed_flow {
             obzenflow_topology::Topology::new(topology_stages.clone(), topology_edges.clone())
                 .map_err(FlowBuildError::TopologyValidationFailed)?,
         );
+
+        // FLOWIP-051l (P0): backflow cycles are currently only supported for transform stages.
+        // Reject any topology where a cycle-member stage is not a transform so we do not silently
+        // drop cycle protection for other stage types when the middleware-based guard is removed.
+        let unsupported_cycle_members: Vec<String> = topology
+            .stages()
+            .filter(|stage| {
+                topology.is_in_cycle(stage.id)
+                    && stage.stage_type != obzenflow_topology::StageType::Transform
+            })
+            .map(|stage| format!("{} ({})", stage.name.as_str(), stage.stage_type))
+            .collect();
+
+        if !unsupported_cycle_members.is_empty() {
+            return Err(FlowBuildError::UnsupportedCycleTopology(format!(
+                "backflow cycles are only supported for transform stages in this release; non-transform cycle members: {}",
+                unsupported_cycle_members.join(", ")
+            )));
+        }
 
         // Collect join metadata per stage (FLOWIP-082a)
         use obzenflow_runtime_services::pipeline::JoinMetadata;
@@ -647,10 +672,22 @@ macro_rules! build_typed_flow {
         for (name, id) in &name_to_id {
             if let Some(descriptor) = descriptors.remove(name) {
                 let stage_type = descriptor.stage_type();
+                let is_in_cycle = topology.is_in_cycle(to_topology_id(*id));
                 let config = StageConfig {
                     stage_id: *id,
                     name: descriptor.name().to_string(),
                     flow_name: $flow_name.to_string(),
+                    cycle_guard: if is_in_cycle
+                        && matches!(
+                            descriptor.stage_type(),
+                            obzenflow_core::event::context::StageType::Transform
+                        ) {
+                        Some(obzenflow_runtime_services::pipeline::config::CycleGuardConfig {
+                            max_iterations: 10,
+                        })
+                    } else {
+                        None
+                    },
                 };
 
                 // Get the pre-built resources for this stage
@@ -714,25 +751,8 @@ macro_rules! build_typed_flow {
                     );
                 }
 
-                // Check if this stage is in a cycle and needs CycleGuard
-                let mut flow_middleware = create_flow_middleware();
-                let is_in_cycle = topology.is_in_cycle(to_topology_id(*id));
-                tracing::info!(
-                    "Checking stage '{}' (id={:?}) for cycles: {}",
-                    name,
-                    id,
-                    is_in_cycle
-                );
-
-                if is_in_cycle {
-                    tracing::info!(
-                        "Stage '{}' detected in cycle, auto-attaching CycleGuard middleware",
-                        name
-                    );
-                    // Add CycleGuard middleware with a reasonable default (10 iterations)
-                    use obzenflow_adapters::middleware::control::cycle_guard;
-                    flow_middleware.push(cycle_guard(10));
-                }
+                // Flow-level middleware list (stage-local middleware is resolved later).
+                let flow_middleware = create_flow_middleware();
 
                 // Structural: compute final middleware stack config for this stage (FLOWIP-059)
                 let flow_names: Vec<String> = flow_middleware
@@ -788,7 +808,7 @@ macro_rules! build_typed_flow {
                     backpressure: backpressure_config,
                 });
 
-                // Create handle with flow middleware (including CycleGuard if needed)
+                // Create handle with flow middleware (cycle protection is configured via StageConfig for transforms).
                 let handle = descriptor
                     .create_handle_with_flow_middleware(
                         config,

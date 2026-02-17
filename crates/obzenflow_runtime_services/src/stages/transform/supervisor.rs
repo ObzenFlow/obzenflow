@@ -7,6 +7,7 @@
 use crate::messaging::PollResult;
 use crate::metrics::instrumentation::process_with_instrumentation;
 use crate::stages::common::control_strategies::{ControlEventAction, ProcessingContext};
+use crate::stages::common::cycle_guard::CycleGuard;
 use crate::stages::common::handlers::transform::traits::UnifiedTransformHandler;
 use crate::supervised_base::base::Supervisor;
 use crate::supervised_base::{EventLoopDirective, HandlerSupervised};
@@ -40,6 +41,9 @@ pub(crate) struct TransformSupervisor<
 
     /// Stage ID
     pub(crate) stage_id: StageId,
+
+    /// Supervisor-level cycle protection for backflow cycle members (FLOWIP-051l).
+    pub(crate) cycle_guard: Option<CycleGuard>,
 
     /// Phantom marker to keep H in the type while no fields reference it directly
     pub(crate) _marker: std::marker::PhantomData<H>,
@@ -615,71 +619,105 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
                                 "Transform processing event"
                             );
 
+                            let upstream = subscription.last_delivered_upstream_stage();
+                            let suppress_event = self
+                                .check_cycle_guard_data_event(
+                                    ctx,
+                                    &envelope,
+                                    upstream,
+                                    "Failed to write cycle guard error event",
+                                )
+                                .await?;
+
                             // Match on event content to determine how to process
-                            match &envelope.event.content {
-                                obzenflow_core::event::ChainEventContent::FlowControl(signal) => {
-                                    // Processing context for control events
-                                    let mut processing_ctx = ProcessingContext::new();
+                            if !suppress_event {
+                                match &envelope.event.content {
+                                    obzenflow_core::event::ChainEventContent::FlowControl(
+                                        signal,
+                                    ) => {
+                                        // Processing context for control events
+                                        let mut processing_ctx = ProcessingContext::new();
 
-                                    // Get the action from the control strategy
-                                    let mut action = match signal {
-                                        FlowControlPayload::Eof { .. } => {
-                                            tracing::info!(
-                                                stage_name = %ctx.stage_name,
-                                                "Transform received EOF from upstream"
-                                            );
-                                            ctx.control_strategy
-                                                .handle_eof(&envelope, &mut processing_ctx)
-                                        }
-                                        FlowControlPayload::Watermark { .. } => ctx
-                                            .control_strategy
-                                            .handle_watermark(&envelope, &mut processing_ctx),
-                                        FlowControlPayload::Checkpoint { .. } => ctx
-                                            .control_strategy
-                                            .handle_checkpoint(&envelope, &mut processing_ctx),
-                                        FlowControlPayload::Drain => ctx
-                                            .control_strategy
-                                            .handle_drain(&envelope, &mut processing_ctx),
-                                        _ => ControlEventAction::Forward,
-                                    };
-
-                                    loop {
-                                        match action {
-                                            ControlEventAction::Delay(duration) => {
+                                        // Get the action from the control strategy
+                                        let mut action = match signal {
+                                            FlowControlPayload::Eof { .. } => {
                                                 tracing::info!(
                                                     stage_name = %ctx.stage_name,
-                                                    event_type = envelope.event.event_type(),
-                                                    duration = ?duration,
-                                                    "Delaying control event"
+                                                    "Transform received EOF from upstream"
                                                 );
-                                                tokio::time::sleep(duration).await;
-                                                action = ControlEventAction::Forward;
+                                                ctx.control_strategy
+                                                    .handle_eof(&envelope, &mut processing_ctx)
                                             }
-                                            ControlEventAction::Forward => {
-                                                // Handle EOF specially: only transition when ALL upstreams have EOF'd
-                                                if envelope.event.is_eof() {
-                                                    let eof_outcome =
-                                                        subscription.take_last_eof_outcome();
+                                            FlowControlPayload::Watermark { .. } => ctx
+                                                .control_strategy
+                                                .handle_watermark(&envelope, &mut processing_ctx),
+                                            FlowControlPayload::Checkpoint { .. } => ctx
+                                                .control_strategy
+                                                .handle_checkpoint(&envelope, &mut processing_ctx),
+                                            FlowControlPayload::Drain => ctx
+                                                .control_strategy
+                                                .handle_drain(&envelope, &mut processing_ctx),
+                                            _ => ControlEventAction::Forward,
+                                        };
 
-                                                    // Contract check at EOF time
-                                                    let _ = subscription
-                                                        .check_contracts(&mut contract_state[..])
-                                                        .await;
+                                        loop {
+                                            match action {
+                                                ControlEventAction::Delay(duration) => {
+                                                    tracing::info!(
+                                                        stage_name = %ctx.stage_name,
+                                                        event_type = envelope.event.event_type(),
+                                                        duration = ?duration,
+                                                        "Delaying control event"
+                                                    );
+                                                    tokio::time::sleep(duration).await;
+                                                    action = ControlEventAction::Forward;
+                                                }
+                                                ControlEventAction::Forward => {
+                                                    // Handle EOF specially: only transition when ALL upstreams have EOF'd
+                                                    if envelope.event.is_eof() {
+                                                        let eof_outcome =
+                                                            subscription.take_last_eof_outcome();
 
-                                                    if let Some(outcome) = eof_outcome {
-                                                        if outcome.is_final {
-                                                            // All upstream readers have reached EOF: begin draining.
+                                                        if let (Some(guard), Some(upstream)) = (
+                                                            self.cycle_guard.as_mut(),
+                                                            subscription
+                                                                .last_delivered_upstream_stage(),
+                                                        ) {
+                                                            guard.note_upstream_eof(upstream);
+                                                        }
+
+                                                        // Contract check at EOF time
+                                                        let _ = subscription
+                                                            .check_contracts(
+                                                                &mut contract_state[..],
+                                                            )
+                                                            .await;
+
+                                                        let cycle_drain_ready = self
+                                                            .cycle_guard
+                                                            .as_ref()
+                                                            .is_some_and(|guard| {
+                                                                guard.has_seen_all_upstream_eofs(
+                                                                    contract_state.len(),
+                                                                )
+                                                            });
+
+                                                        if cycle_drain_ready {
+                                                            // FLOWIP-051l: In SCC topologies, upstream-authored EOF
+                                                            // may never arrive due to cyclical dependency. Once we
+                                                            // have observed an EOF on every upstream reader, begin
+                                                            // draining to avoid liveness deadlocks.
                                                             ctx.buffered_eof =
                                                                 Some(envelope.event.clone());
                                                             tracing::info!(
                                                                 stage_name = %ctx.stage_name,
                                                                 event_type = envelope.event.event_type(),
-                                                                "Transform stage received final EOF for all upstreams, transitioning to draining"
+                                                                "Transform stage reached cycle EOF boundary, transitioning to draining"
                                                             );
-                                                            // Forward EOF downstream before transitioning
-                                                            self.forward_control_event(&envelope)
-                                                                .await?;
-                                                            // Restore before returning
+                                                            self.forward_control_event_guarded(
+                                                                &envelope,
+                                                            )
+                                                            .await?;
                                                             ctx.subscription = subscription_opt;
                                                             ctx.contract_state = contract_state;
                                                             return Ok(
@@ -687,72 +725,108 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
                                                                     TransformEvent::ReceivedEOF,
                                                                 ),
                                                             );
-                                                        } else {
-                                                            // Non-final EOF: forward but don't drain yet.
-                                                            // Continue processing events from other upstreams.
-                                                            self.forward_control_event(&envelope)
-                                                                .await?;
                                                         }
-                                                    } else {
-                                                        // No outcome yet (unexpected), forward and continue.
-                                                        self.forward_control_event(&envelope)
+
+                                                        if let Some(outcome) = eof_outcome {
+                                                            if outcome.is_final {
+                                                                // All upstream readers have reached EOF: begin draining.
+                                                                ctx.buffered_eof =
+                                                                    Some(envelope.event.clone());
+                                                                tracing::info!(
+                                                                    stage_name = %ctx.stage_name,
+                                                                    event_type = envelope.event.event_type(),
+                                                                    "Transform stage received final EOF for all upstreams, transitioning to draining"
+                                                                );
+                                                                // Forward EOF downstream before transitioning
+                                                                self.forward_control_event_guarded(
+                                                                    &envelope,
+                                                                )
+                                                                .await?;
+                                                                // Restore before returning
+                                                                ctx.subscription = subscription_opt;
+                                                                ctx.contract_state = contract_state;
+                                                                return Ok(
+                                                                    EventLoopDirective::Transition(
+                                                                        TransformEvent::ReceivedEOF,
+                                                                    ),
+                                                                );
+                                                            } else {
+                                                                // Non-final EOF: forward but don't drain yet.
+                                                                // Continue processing events from other upstreams.
+                                                                self.forward_control_event_guarded(
+                                                                    &envelope,
+                                                                )
+                                                                .await?;
+                                                            }
+                                                        } else {
+                                                            // No outcome yet (unexpected), forward and continue.
+                                                            self.forward_control_event_guarded(
+                                                                &envelope,
+                                                            )
                                                             .await?;
+                                                        }
+                                                    } else if matches!(
+                                                        signal,
+                                                        FlowControlPayload::Drain
+                                                    ) {
+                                                        // Drain events from pipeline BeginDrain should initiate stage draining
+                                                        ctx.buffered_eof =
+                                                            Some(envelope.event.clone());
+                                                        tracing::info!(
+                                                            stage_name = %ctx.stage_name,
+                                                            event_type = envelope.event.event_type(),
+                                                            "Transform stage received drain signal, transitioning to draining"
+                                                        );
+                                                        self.forward_control_event_guarded(
+                                                            &envelope,
+                                                        )
+                                                        .await?;
+                                                        // Restore before returning
+                                                        ctx.subscription = subscription_opt;
+                                                        ctx.contract_state = contract_state;
+                                                        return Ok(EventLoopDirective::Transition(
+                                                            TransformEvent::ReceivedEOF,
+                                                        ));
+                                                    } else {
+                                                        // Other control events: just forward
+                                                        self.forward_control_event_guarded(
+                                                            &envelope,
+                                                        )
+                                                        .await?;
                                                     }
-                                                } else if matches!(
-                                                    signal,
-                                                    FlowControlPayload::Drain
-                                                ) {
-                                                    // Drain events from pipeline BeginDrain should initiate stage draining
-                                                    ctx.buffered_eof = Some(envelope.event.clone());
+
+                                                    break;
+                                                }
+                                                ControlEventAction::Retry => {
                                                     tracing::info!(
                                                         stage_name = %ctx.stage_name,
                                                         event_type = envelope.event.event_type(),
-                                                        "Transform stage received drain signal, transitioning to draining"
+                                                        "Retry requested, buffering event"
                                                     );
-                                                    self.forward_control_event(&envelope).await?;
-                                                    // Restore before returning
-                                                    ctx.subscription = subscription_opt;
-                                                    ctx.contract_state = contract_state;
-                                                    return Ok(EventLoopDirective::Transition(
-                                                        TransformEvent::ReceivedEOF,
-                                                    ));
-                                                } else {
-                                                    // Other control events: just forward
-                                                    self.forward_control_event(&envelope).await?;
+                                                    if envelope.event.is_eof() {
+                                                        processing_ctx.buffered_eof =
+                                                            Some(envelope.clone());
+                                                    }
+                                                    break;
                                                 }
-
-                                                break;
-                                            }
-                                            ControlEventAction::Retry => {
-                                                tracing::info!(
-                                                    stage_name = %ctx.stage_name,
-                                                    event_type = envelope.event.event_type(),
-                                                    "Retry requested, buffering event"
-                                                );
-                                                if envelope.event.is_eof() {
-                                                    processing_ctx.buffered_eof =
-                                                        Some(envelope.clone());
+                                                ControlEventAction::Skip => {
+                                                    tracing::warn!(
+                                                        stage_name = %ctx.stage_name,
+                                                        event_type = envelope.event.event_type(),
+                                                        "Skipping control event (dangerous!)"
+                                                    );
+                                                    // Don't forward, don't process
+                                                    break;
                                                 }
-                                                break;
-                                            }
-                                            ControlEventAction::Skip => {
-                                                tracing::warn!(
-                                                    stage_name = %ctx.stage_name,
-                                                    event_type = envelope.event.event_type(),
-                                                    "Skipping control event (dangerous!)"
-                                                );
-                                                // Don't forward, don't process
-                                                break;
                                             }
                                         }
                                     }
-                                }
-                                obzenflow_core::event::ChainEventContent::Data { .. } => {
-                                    // Process data event (or pass through error-marked events)
-                                    let envelope_clone = envelope.clone();
-                                    let handler = &ctx.handler;
+                                    obzenflow_core::event::ChainEventContent::Data { .. } => {
+                                        // Process data event (or pass through error-marked events)
+                                        let envelope_clone = envelope.clone();
+                                        let handler = &ctx.handler;
 
-                                    let result = process_with_instrumentation(
+                                        let result = process_with_instrumentation(
                                         &ctx.instrumentation,
                                         || async move {
                                             use obzenflow_core::event::status::processing_status::ProcessingStatus;
@@ -790,34 +864,38 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
                                     )
                                     .await;
 
-                                    match result {
-                                        Ok(transformed_events) => {
-                                            let upstream_stage =
-                                                subscription.last_delivered_upstream_stage();
+                                        match result {
+                                            Ok(transformed_events) => {
+                                                let upstream_stage =
+                                                    subscription.last_delivered_upstream_stage();
 
-                                            // Write error-journal events immediately; stage-journal
-                                            // outputs are gated by backpressure.
-                                            let mut pending_data_outputs: std::collections::VecDeque<
+                                                // Write error-journal events immediately; stage-journal
+                                                // outputs are gated by backpressure.
+                                                let mut pending_data_outputs: std::collections::VecDeque<
                                                 ChainEvent,
                                             > = std::collections::VecDeque::new();
 
-                                            for event in transformed_events {
-                                                use obzenflow_core::event::status::processing_status::{
+                                                for event in transformed_events {
+                                                    use obzenflow_core::event::status::processing_status::{
                                                     ErrorKind, ProcessingStatus,
                                                 };
 
-                                                // Count all error-marked events for lifecycle / flow rollups,
-                                                // even when they are not stage-fatal.
-                                                if let ProcessingStatus::Error { kind, .. } =
-                                                    &event.processing_info.status
-                                                {
-                                                    let k =
-                                                        kind.clone().unwrap_or(ErrorKind::Unknown);
-                                                    ctx.instrumentation.record_error(k);
-                                                }
+                                                    // Count all error-marked events for lifecycle / flow rollups,
+                                                    // even when they are not stage-fatal.
+                                                    if let ProcessingStatus::Error {
+                                                        kind, ..
+                                                    } = &event.processing_info.status
+                                                    {
+                                                        let k = kind
+                                                            .clone()
+                                                            .unwrap_or(ErrorKind::Unknown);
+                                                        ctx.instrumentation.record_error(k);
+                                                    }
 
-                                                let route_to_error_journal =
-                                                    match &event.processing_info.status {
+                                                    let route_to_error_journal = match &event
+                                                        .processing_info
+                                                        .status
+                                                    {
                                                         ProcessingStatus::Error {
                                                             kind, ..
                                                         } => match kind {
@@ -835,34 +913,35 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
                                                         _ => false,
                                                     };
 
-                                                if route_to_error_journal {
-                                                    tracing::info!(
-                                                        stage_name = %ctx.stage_name,
-                                                        event_id = %event.id,
-                                                        "Writing error event to error journal (FLOWIP-082e)"
-                                                    );
-                                                    ctx.error_journal
-                                                        .append(event, Some(&envelope))
-                                                        .await
-                                                        .map_err(|e| {
-                                                            format!(
+                                                    if route_to_error_journal {
+                                                        tracing::info!(
+                                                            stage_name = %ctx.stage_name,
+                                                            event_id = %event.id,
+                                                            "Writing error event to error journal (FLOWIP-082e)"
+                                                        );
+                                                        ctx.error_journal
+                                                            .append(event, Some(&envelope))
+                                                            .await
+                                                            .map_err(|e| {
+                                                                format!(
                                                                 "Failed to write error event: {e}"
                                                             )
-                                                        })?;
-                                                    // Error events are isolated to the stage's error journal and
-                                                    // MUST NOT participate in downstream transport contracts.
-                                                } else {
-                                                    pending_data_outputs.push_back(event);
+                                                            })?;
+                                                        // Error events are isolated to the stage's error journal and
+                                                        // MUST NOT participate in downstream transport contracts.
+                                                    } else {
+                                                        pending_data_outputs.push_back(event);
+                                                    }
                                                 }
-                                            }
 
-                                            // Now write stage-journal outputs with per-edge backpressure.
-                                            while let Some(event) = pending_data_outputs.pop_front()
-                                            {
-                                                if event.is_data() {
-                                                    // Debug-only: emit activity pulses even when bypass is enabled, so
-                                                    // operators can see what *would* have blocked (FLOWIP-086k).
-                                                    if crate::backpressure::BackpressureWriter::is_bypass_enabled() {
+                                                // Now write stage-journal outputs with per-edge backpressure.
+                                                while let Some(event) =
+                                                    pending_data_outputs.pop_front()
+                                                {
+                                                    if event.is_data() {
+                                                        // Debug-only: emit activity pulses even when bypass is enabled, so
+                                                        // operators can see what *would* have blocked (FLOWIP-086k).
+                                                        if crate::backpressure::BackpressureWriter::is_bypass_enabled() {
                                                         if let Some((min_credit, limiting)) =
                                                             ctx.backpressure_writer
                                                                 .min_downstream_credit_detail()
@@ -915,37 +994,44 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
                                                         }
                                                     }
 
-                                                    let Some(reservation) =
-                                                        ctx.backpressure_writer.reserve(1)
-                                                    else {
-                                                        // Queue remaining outputs and retry later (bounded to one input).
-                                                        ctx.pending_parent = Some(envelope.clone());
-                                                        ctx.pending_ack_upstream = upstream_stage;
-                                                        ctx.pending_outputs.push_back(event);
-                                                        ctx.pending_outputs
-                                                            .extend(pending_data_outputs);
+                                                        let Some(reservation) =
+                                                            ctx.backpressure_writer.reserve(1)
+                                                        else {
+                                                            // Queue remaining outputs and retry later (bounded to one input).
+                                                            ctx.pending_parent =
+                                                                Some(envelope.clone());
+                                                            ctx.pending_ack_upstream =
+                                                                upstream_stage;
+                                                            ctx.pending_outputs.push_back(event);
+                                                            ctx.pending_outputs
+                                                                .extend(pending_data_outputs);
 
-                                                        let delay =
-                                                            ctx.backpressure_backoff.next_delay();
-                                                        ctx.backpressure_writer.record_wait(delay);
+                                                            let delay = ctx
+                                                                .backpressure_backoff
+                                                                .next_delay();
+                                                            ctx.backpressure_writer
+                                                                .record_wait(delay);
 
-                                                        if let Some((min_credit, limiting)) = ctx
-                                                            .backpressure_writer
-                                                            .min_downstream_credit_detail()
-                                                        {
-                                                            ctx.backpressure_pulse.record_delay(
-                                                                delay,
-                                                                Some(min_credit),
-                                                                Some(limiting),
-                                                            );
-                                                        } else {
-                                                            ctx.backpressure_pulse
-                                                                .record_delay(delay, None, None);
-                                                        }
-                                                        if let Some(pulse) =
-                                                            ctx.backpressure_pulse.maybe_emit()
-                                                        {
-                                                            let flow_context = FlowContext {
+                                                            if let Some((min_credit, limiting)) =
+                                                                ctx.backpressure_writer
+                                                                    .min_downstream_credit_detail()
+                                                            {
+                                                                ctx.backpressure_pulse
+                                                                    .record_delay(
+                                                                        delay,
+                                                                        Some(min_credit),
+                                                                        Some(limiting),
+                                                                    );
+                                                            } else {
+                                                                ctx.backpressure_pulse
+                                                                    .record_delay(
+                                                                        delay, None, None,
+                                                                    );
+                                                            }
+                                                            if let Some(pulse) =
+                                                                ctx.backpressure_pulse.maybe_emit()
+                                                            {
+                                                                let flow_context = FlowContext {
                                                                 flow_name: ctx.flow_name.clone(),
                                                                 flow_id: ctx.flow_id.to_string(),
                                                                 stage_name: ctx.stage_name.clone(),
@@ -953,7 +1039,7 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
                                                                 stage_type: obzenflow_core::event::context::StageType::Transform,
                                                             };
 
-                                                            let event = ChainEventFactory::observability_event(
+                                                                let event = ChainEventFactory::observability_event(
                                                                 WriterId::from(self.stage_id),
                                                                 ObservabilityPayload::Middleware(
                                                                     MiddlewareLifecycle::Backpressure(pulse),
@@ -964,125 +1050,128 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
                                                                 ctx.instrumentation.snapshot_with_control(),
                                                             );
 
-                                                            match ctx
-                                                                .data_journal
-                                                                .append(event, None)
-                                                                .await
-                                                            {
-                                                                Ok(written) => {
-                                                                    crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
+                                                                match ctx
+                                                                    .data_journal
+                                                                    .append(event, None)
+                                                                    .await
+                                                                {
+                                                                    Ok(written) => {
+                                                                        crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
                                                                         &written,
                                                                         &ctx.system_journal,
                                                                     )
                                                                     .await;
+                                                                    }
+                                                                    Err(e) => tracing::warn!(
+                                                                        stage_name = %ctx.stage_name,
+                                                                        journal_error = %e,
+                                                                        "Failed to append backpressure activity pulse"
+                                                                    ),
                                                                 }
-                                                                Err(e) => tracing::warn!(
-                                                                    stage_name = %ctx.stage_name,
-                                                                    journal_error = %e,
-                                                                    "Failed to append backpressure activity pulse"
-                                                                ),
                                                             }
+                                                            tokio::time::sleep(delay).await;
+                                                            break;
+                                                        };
+
+                                                        let flow_context = FlowContext {
+                                                        flow_name: ctx.flow_name.clone(),
+                                                        flow_id: ctx.flow_id.to_string(),
+                                                        stage_name: ctx.stage_name.clone(),
+                                                        stage_id: self.stage_id,
+                                                        stage_type: obzenflow_core::event::context::StageType::Transform,
+                                                    };
+
+                                                        let enriched_event = event
+                                                            .with_flow_context(flow_context)
+                                                            .with_runtime_context(
+                                                                ctx.instrumentation
+                                                                    .snapshot_with_control(),
+                                                            );
+
+                                                        if enriched_event.is_data() {
+                                                            ctx.instrumentation
+                                                                .record_output_event(
+                                                                    &enriched_event,
+                                                                );
+                                                            subscription.track_output_event();
                                                         }
-                                                        tokio::time::sleep(delay).await;
-                                                        break;
-                                                    };
 
-                                                    let flow_context = FlowContext {
-                                                        flow_name: ctx.flow_name.clone(),
-                                                        flow_id: ctx.flow_id.to_string(),
-                                                        stage_name: ctx.stage_name.clone(),
-                                                        stage_id: self.stage_id,
-                                                        stage_type: obzenflow_core::event::context::StageType::Transform,
-                                                    };
-
-                                                    let enriched_event = event
-                                                        .with_flow_context(flow_context)
-                                                        .with_runtime_context(
-                                                            ctx.instrumentation
-                                                                .snapshot_with_control(),
-                                                        );
-
-                                                    if enriched_event.is_data() {
-                                                        ctx.instrumentation
-                                                            .record_output_event(&enriched_event);
-                                                        subscription.track_output_event();
-                                                    }
-
-                                                    let written = ctx
+                                                        let written = ctx
                                                         .data_journal
                                                         .append(enriched_event, Some(&envelope))
                                                         .await
                                                         .map_err(|e| {
                                                             format!("Failed to write transformed event: {e}")
                                                         })?;
-                                                    reservation.commit(1);
-                                                    ctx.backpressure_backoff.reset();
-                                                    crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
+                                                        reservation.commit(1);
+                                                        ctx.backpressure_backoff.reset();
+                                                        crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
                                                         &written,
                                                         &ctx.system_journal,
                                                     )
                                                     .await;
-                                                } else {
-                                                    // Non-data outputs bypass credit gating.
-                                                    let flow_context = FlowContext {
-                                                        flow_name: ctx.flow_name.clone(),
-                                                        flow_id: ctx.flow_id.to_string(),
-                                                        stage_name: ctx.stage_name.clone(),
-                                                        stage_id: self.stage_id,
-                                                        stage_type: obzenflow_core::event::context::StageType::Transform,
-                                                    };
-
-                                                    let enriched_event = event
-                                                        .with_flow_context(flow_context)
-                                                        .with_runtime_context(
-                                                            ctx.instrumentation
-                                                                .snapshot_with_control(),
-                                                        );
-
-                                                    let written = ctx
-                                                        .data_journal
-                                                        .append(enriched_event, Some(&envelope))
-                                                        .await
-                                                        .map_err(|e| {
-                                                            format!("Failed to write transformed event: {e}")
-                                                        })?;
-                                                    crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
-                                                        &written,
-                                                        &ctx.system_journal,
-                                                    )
-                                                    .await;
-                                                }
-                                            }
-
-                                            // If we didn't enqueue anything, ack upstream consumption now.
-                                            if ctx.pending_outputs.is_empty() {
-                                                if let Some(upstream) = upstream_stage {
-                                                    if let Some(reader) =
-                                                        ctx.backpressure_readers.get(&upstream)
-                                                    {
-                                                        reader.ack_consumed(1);
                                                     } else {
-                                                        tracing::warn!(
-                                                            stage_name = %ctx.stage_name,
-                                                            upstream = ?upstream,
-                                                            "Transform backpressure ack skipped: missing reader handle"
-                                                        );
+                                                        // Non-data outputs bypass credit gating.
+                                                        let flow_context = FlowContext {
+                                                        flow_name: ctx.flow_name.clone(),
+                                                        flow_id: ctx.flow_id.to_string(),
+                                                        stage_name: ctx.stage_name.clone(),
+                                                        stage_id: self.stage_id,
+                                                        stage_type: obzenflow_core::event::context::StageType::Transform,
+                                                    };
+
+                                                        let enriched_event = event
+                                                            .with_flow_context(flow_context)
+                                                            .with_runtime_context(
+                                                                ctx.instrumentation
+                                                                    .snapshot_with_control(),
+                                                            );
+
+                                                        let written = ctx
+                                                        .data_journal
+                                                        .append(enriched_event, Some(&envelope))
+                                                        .await
+                                                        .map_err(|e| {
+                                                            format!("Failed to write transformed event: {e}")
+                                                        })?;
+                                                        crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
+                                                        &written,
+                                                        &ctx.system_journal,
+                                                    )
+                                                    .await;
+                                                    }
+                                                }
+
+                                                // If we didn't enqueue anything, ack upstream consumption now.
+                                                if ctx.pending_outputs.is_empty() {
+                                                    if let Some(upstream) = upstream_stage {
+                                                        if let Some(reader) =
+                                                            ctx.backpressure_readers.get(&upstream)
+                                                        {
+                                                            reader.ack_consumed(1);
+                                                        } else {
+                                                            tracing::warn!(
+                                                                stage_name = %ctx.stage_name,
+                                                                upstream = ?upstream,
+                                                                "Transform backpressure ack skipped: missing reader handle"
+                                                            );
+                                                        }
                                                     }
                                                 }
                                             }
-                                        }
-                                        Err(e) => {
-                                            tracing::error!(
-                                                stage_name = %ctx.stage_name,
-                                                error = ?e,
-                                                "Transform processing error"
-                                            );
+                                            Err(e) => {
+                                                tracing::error!(
+                                                    stage_name = %ctx.stage_name,
+                                                    error = ?e,
+                                                    "Transform processing error"
+                                                );
+                                            }
                                         }
                                     }
-                                }
-                                _ => {
-                                    // Other content types we don't recognize - forward them
-                                    self.forward_control_event(&envelope).await?;
+                                    _ => {
+                                        // Other content types we don't recognize - forward them
+                                        self.forward_control_event(&envelope).await?;
+                                    }
                                 }
                             }
 
@@ -1376,8 +1465,18 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
 
                             ctx.instrumentation.record_consumed(&envelope);
 
+                            let upstream = subscription.last_delivered_upstream_stage();
+                            let suppress_event = self
+                                .check_cycle_guard_data_event(
+                                    ctx,
+                                    &envelope,
+                                    upstream,
+                                    "Failed to write cycle guard error event during drain",
+                                )
+                                .await?;
+
                             // Process remaining event based on type
-                            if !envelope.event.is_control() {
+                            if !suppress_event && !envelope.event.is_control() {
                                 // Process data events (or pass through error-marked events)
                                 let envelope_clone = envelope.clone();
                                 let handler = &ctx.handler;
@@ -1664,7 +1763,7 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
                                         }
                                     }
                                 }
-                            } else {
+                            } else if !suppress_event {
                                 // Forward control events during draining (CRITICAL FIX for FLOWIP-080o)
                                 // This ensures contract events (consumption_final, consumption_progress, etc.)
                                 // are not lost during the draining phase
@@ -1676,7 +1775,7 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
 
                                 // Don't forward EOF again during draining - it will be sent after drain completes
                                 if !envelope.event.is_eof() {
-                                    self.forward_control_event(&envelope).await?;
+                                    self.forward_control_event_guarded(&envelope).await?;
                                 }
                             }
                             Ok(EventLoopDirective::Continue)
@@ -1739,6 +1838,70 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
 impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
     TransformSupervisor<H>
 {
+    async fn check_cycle_guard_data_event(
+        &mut self,
+        ctx: &mut TransformContext<H>,
+        envelope: &EventEnvelope<ChainEvent>,
+        upstream: Option<StageId>,
+        write_error_context: &'static str,
+    ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+        let Some(guard) = &mut self.cycle_guard else {
+            return Ok(false);
+        };
+
+        if let obzenflow_core::event::ChainEventContent::Data { .. } = &envelope.event.content {
+            if let Err(error_event) = guard.check_data(&envelope.event) {
+                let flow_context = FlowContext {
+                    flow_name: ctx.flow_name.clone(),
+                    flow_id: ctx.flow_id.to_string(),
+                    stage_name: ctx.stage_name.clone(),
+                    stage_id: self.stage_id,
+                    stage_type: obzenflow_core::event::context::StageType::Transform,
+                };
+
+                let error_event = (*error_event)
+                    .with_flow_context(flow_context)
+                    .with_runtime_context(ctx.instrumentation.snapshot_with_control());
+
+                ctx.error_journal
+                    .append(error_event, Some(envelope))
+                    .await
+                    .map_err(|e| format!("{write_error_context}: {e}"))?;
+
+                ctx.instrumentation.record_error(
+                    obzenflow_core::event::status::processing_status::ErrorKind::Unknown,
+                );
+
+                if let Some(upstream) = upstream {
+                    if let Some(reader) = ctx.backpressure_readers.get(&upstream) {
+                        reader.ack_consumed(1);
+                    }
+                }
+
+                return Ok(true);
+            }
+        }
+
+        Ok(false)
+    }
+
+    async fn forward_control_event_guarded(
+        &mut self,
+        envelope: &EventEnvelope<ChainEvent>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let should_forward = self
+            .cycle_guard
+            .as_mut()
+            .map(|guard| guard.should_forward_signal(&envelope.event))
+            .unwrap_or(true);
+
+        if should_forward {
+            self.forward_control_event(envelope).await?;
+        }
+
+        Ok(())
+    }
+
     /// Helper to forward control events
     async fn forward_control_event(
         &self,
@@ -2081,6 +2244,7 @@ mod tests {
             data_journal: data_journal.clone(),
             system_journal,
             stage_id: t,
+            cycle_guard: None,
             _marker: std::marker::PhantomData,
         };
 

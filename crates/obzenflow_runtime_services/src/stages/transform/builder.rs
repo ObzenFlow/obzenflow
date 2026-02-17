@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use crate::metrics::instrumentation::StageInstrumentation;
 use crate::stages::common::control_strategies::{ControlEventStrategy, JonestownStrategy};
+use crate::stages::common::cycle_guard::CycleGuard;
 use crate::stages::common::handlers::transform::traits::UnifiedTransformHandler;
 use crate::stages::common::handlers::{AsyncTransformHandler, TransformHandler};
 use crate::stages::resources_builder::StageResources;
@@ -116,6 +117,10 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Supe
             data_journal: self.resources.data_journal.clone(),
             system_journal: self.resources.system_journal.clone(),
             stage_id: self.config.stage_id,
+            cycle_guard: self
+                .config
+                .cycle_guard
+                .map(|cfg| CycleGuard::new(cfg.max_iterations, self.config.stage_name.clone())),
             _marker: std::marker::PhantomData,
         };
 
@@ -253,6 +258,10 @@ impl<H: AsyncTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
             data_journal: self.resources.data_journal.clone(),
             system_journal: self.resources.system_journal.clone(),
             stage_id: self.config.stage_id,
+            cycle_guard: self
+                .config
+                .cycle_guard
+                .map(|cfg| CycleGuard::new(cfg.max_iterations, self.config.stage_name.clone())),
             _marker: std::marker::PhantomData,
         };
 

@@ -46,6 +46,7 @@ rustls-native-certs = { workspace = true, optional = true }
 
 # AI provider substrate (optional)
 rig_rs = { package = "rig-core", version = "0.30", default-features = false, optional = true }
+tiktoken-rs = { version = "0.9", optional = true }
 
 [features]
 default = []
@@ -54,6 +55,7 @@ warp-server = ["dep:warp", "dep:bytes", "dep:tokio-stream"]
 console = ["dep:console-subscriber"]
 reqwest-client = ["dep:reqwest", "dep:rustls-native-certs"]
 ai-rig = ["reqwest-client", "dep:rig_rs"]
+ai-tiktoken = ["dep:tiktoken-rs"]
 
 [dev-dependencies]
 tokio-test = { workspace = true }

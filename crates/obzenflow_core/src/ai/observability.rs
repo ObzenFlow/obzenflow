@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use crate::ai::{AiProvider, Usage, LLM_HASH_VERSION_SHA256_V1};
+use crate::ai::{AiProvider, TokenEstimate, Usage, LLM_HASH_VERSION_SHA256_V1};
 use crate::event::chain_event::ChainEvent;
 use crate::event::context::observability_context::ObservabilityContext;
 use serde::{Deserialize, Serialize};
@@ -53,6 +53,8 @@ pub struct LlmObservability {
     pub hashes: LlmHashes,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub usage: Option<Usage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimated_input_tokens: Option<TokenEstimate>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cache: Option<LlmCacheInfo>,
 }
@@ -67,6 +69,7 @@ impl LlmObservability {
             model: model.into(),
             hashes,
             usage: None,
+            estimated_input_tokens: None,
             cache: None,
         }
     }

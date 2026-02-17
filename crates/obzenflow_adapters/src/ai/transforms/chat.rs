@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use obzenflow_core::ai::{
     attach_llm_observability, params_hash_for_chat, prompt_hash_for_chat,
     schema_hash_for_response_format, ChatClient, ChatRequest, ChatResponse, LlmHashes,
-    LlmObservability,
+    LlmObservability, TokenEstimator,
 };
 use obzenflow_core::event::chain_event::ChainEventContent;
 use obzenflow_core::ChainEvent;
@@ -28,6 +28,7 @@ type ChatOutputMapper = dyn Fn(&ChainEvent, ChatResponse) -> Result<Vec<ChainEve
 #[derive(Clone)]
 pub struct ChatTransform {
     client: Arc<dyn ChatClient>,
+    estimator: Option<Arc<dyn TokenEstimator>>,
     request_builder: Arc<ChatRequestBuilder>,
     output_mapper: Arc<ChatOutputMapper>,
 }
@@ -45,9 +46,15 @@ impl ChatTransform {
     {
         Self {
             client,
+            estimator: None,
             request_builder: Arc::new(request_builder),
             output_mapper: Arc::new(default_chat_output_mapper),
         }
+    }
+
+    pub fn with_estimator(mut self, estimator: Arc<dyn TokenEstimator>) -> Self {
+        self.estimator = Some(estimator);
+        self
     }
 
     pub fn with_output_mapper<F>(mut self, output_mapper: F) -> Self
@@ -78,6 +85,11 @@ impl AsyncTransformHandler for ChatTransform {
                 HandlerError::Validation(format!("chat schema canonicalization failed: {err}"))
             })?;
 
+        let estimated_input_tokens = self
+            .estimator
+            .as_ref()
+            .map(|estimator| estimator.estimate_chat_request(&request));
+
         let response = self
             .client
             .chat(request.clone())
@@ -93,6 +105,7 @@ impl AsyncTransformHandler for ChatTransform {
         let mut llm =
             LlmObservability::new(request.provider.clone(), request.model.clone(), hashes);
         llm.usage = usage;
+        llm.estimated_input_tokens = estimated_input_tokens;
 
         for output in &mut outputs {
             attach_llm_observability(output, llm.clone()).map_err(|err| {
@@ -132,8 +145,8 @@ fn default_chat_output_mapper(
 mod tests {
     use super::*;
     use obzenflow_core::ai::{
-        AiClientError, AiProvider, ChatMessage, ChatParams, ChatResponseFormat, ChatRole, Usage,
-        UsageSource,
+        AiClientError, AiProvider, ChatMessage, ChatParams, ChatResponseFormat, ChatRole,
+        EstimateSource, TokenCount, TokenEstimate, TokenEstimator, Usage, UsageSource,
     };
     use obzenflow_core::event::ChainEventFactory;
     use obzenflow_core::{StageId, WriterId};
@@ -177,6 +190,32 @@ mod tests {
         )
     }
 
+    #[derive(Debug)]
+    struct FixedTokenEstimator {
+        tokens: TokenCount,
+        source: EstimateSource,
+    }
+
+    impl TokenEstimator for FixedTokenEstimator {
+        fn estimate_text(&self, _text: &str) -> TokenEstimate {
+            TokenEstimate {
+                tokens: self.tokens,
+                source: self.source,
+            }
+        }
+
+        fn estimate_chat_request(&self, _req: &ChatRequest) -> TokenEstimate {
+            TokenEstimate {
+                tokens: self.tokens,
+                source: self.source,
+            }
+        }
+
+        fn source(&self) -> EstimateSource {
+            self.source
+        }
+    }
+
     #[tokio::test]
     async fn chat_transform_attaches_llm_metadata() {
         let client = Arc::new(QueueChatClient::default());
@@ -218,6 +257,54 @@ mod tests {
         assert_eq!(llm.provider.as_str(), "ollama");
         assert_eq!(llm.model, "llama3.1:8b");
         assert_eq!(llm.hashes.version, "sha256:v1");
+    }
+
+    #[tokio::test]
+    async fn chat_transform_attaches_estimated_input_tokens_when_estimator_is_present() {
+        let client = Arc::new(QueueChatClient::default());
+        client.enqueue_ok(ChatResponse {
+            text: "ok".to_string(),
+            tool_calls: vec![],
+            usage: None,
+            raw: None,
+        });
+
+        let estimator = Arc::new(FixedTokenEstimator {
+            tokens: TokenCount::new(123),
+            source: EstimateSource::Heuristic,
+        });
+
+        let transform = ChatTransform::new(client, |_event| {
+            Ok(ChatRequest {
+                provider: AiProvider::new("ollama"),
+                model: "llama3.1:8b".to_string(),
+                messages: vec![ChatMessage {
+                    role: ChatRole::user(),
+                    content: "hello".to_string(),
+                }],
+                params: ChatParams::default(),
+                tools: vec![],
+                response_format: None,
+            })
+        })
+        .with_estimator(estimator);
+
+        let outputs = transform
+            .process(test_event())
+            .await
+            .expect("chat transform should succeed");
+
+        let llm = obzenflow_core::ai::read_llm_observability(&outputs[0])
+            .expect("llm read should parse")
+            .expect("llm metadata should exist");
+
+        assert_eq!(
+            llm.estimated_input_tokens,
+            Some(TokenEstimate {
+                tokens: TokenCount::new(123),
+                source: EstimateSource::Heuristic
+            })
+        );
     }
 
     #[tokio::test]

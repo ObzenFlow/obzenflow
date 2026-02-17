@@ -9,6 +9,13 @@ use crate::stages::common::handlers::{
 };
 use obzenflow_core::StageId;
 
+/// Supervisor-level cycle protection configuration (FLOWIP-051l).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CycleGuardConfig {
+    /// Maximum iterations allowed for a single correlation ID within a cycle member stage.
+    pub max_iterations: usize,
+}
+
 /// Stage handler type that can be converted to BoxedStageHandle
 pub enum StageHandlerType {
     FiniteSource(Box<dyn FiniteSourceHandler>),
@@ -23,6 +30,7 @@ pub struct StageConfig {
     pub stage_id: StageId,
     pub name: String,
     pub flow_name: String,
+    pub cycle_guard: Option<CycleGuardConfig>,
 }
 
 // TODO: Observers need redesign for FLOWIP-084

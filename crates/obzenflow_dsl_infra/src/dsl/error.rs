@@ -12,6 +12,9 @@ pub enum FlowBuildError {
     #[error("Topology validation failed: {0}")]
     TopologyValidationFailed(#[source] TopologyError),
 
+    #[error("Unsupported cycle topology: {0}")]
+    UnsupportedCycleTopology(String),
+
     #[error("Journal factory failed: {0}")]
     JournalFactoryFailed(String),
 

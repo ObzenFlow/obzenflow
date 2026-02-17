@@ -135,6 +135,7 @@ futures = { workspace = true }
 console = ["obzenflow_infra/console"]
 http-pull = ["obzenflow_infra/reqwest-client"]
 ai-rig = ["obzenflow_infra/ai-rig"]
+ai-tiktoken = ["obzenflow_infra/ai-tiktoken"]
 
 [profile.release]
 lto = true

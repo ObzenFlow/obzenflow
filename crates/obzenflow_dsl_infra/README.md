@@ -138,7 +138,7 @@ Implementation details live in `src/dsl/dsl.rs` (inside `build_typed_flow!`):
    - The DSL also conditionally adds the reference edge unless it is already explicit.
 5. **Topology validation**
    - Builds `obzenflow_topology::Topology` and fails with `FlowBuildError::TopologyValidationFailed`.
-   - Cycle membership is later used to auto-attach `CycleGuard` middleware.
+   - Cycle membership is later used to enable supervisor-level cycle protection for transform stages (FLOWIP-051l).
 6. **Journal allocation + run manifest**
    - Creates one system journal and per-stage data + error journals.
    - Writes `run_manifest.json` via `FlowJournalFactory::write_run_manifest` (disk-backed factories implement this; others no-op).
@@ -151,7 +151,7 @@ Implementation details live in `src/dsl/dsl.rs` (inside `build_typed_flow!`):
    - For each descriptor:
      - Pull pre-built `StageResources`.
      - Special-case join stages: prepend the reference journal/stage into upstream lists.
-     - Auto-add `CycleGuard` to flow middleware when the stage is in a topology cycle.
+     - Enable supervisor-level cycle protection (default `max_iterations = 10`) when the stage is a cycle-member transform (FLOWIP-051l).
      - Build `MiddlewareStackConfig` per stage from middleware factory snapshots (for UI/observability).
      - Call `StageDescriptor::create_handle_with_flow_middleware(...)`.
 10. **Pipeline build**
@@ -202,7 +202,7 @@ Safety:
 
 Cycle protection:
 
-- If `topology.is_in_cycle(stage)` is true, the DSL auto-attaches `cycle_guard(10)` middleware (from adapters) to prevent unbounded feedback amplification.
+- If `topology.is_in_cycle(stage)` is true, the DSL enables supervisor-level cycle protection (default `max_iterations = 10`) for transform stages (FLOWIP-051l). Non-transform stages in cycles are currently rejected at materialisation time.
 
 ### Join stages (reference + stream)
 
