@@ -16,15 +16,16 @@ use obzenflow_core::StageId;
 use obzenflow_core::{ChainEvent, EventEnvelope, FlowId, WriterId};
 use obzenflow_fsm::{EventVariant, FsmAction, FsmContext, StateVariant};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::marker::PhantomData;
 use std::sync::Arc;
 
-use crate::backpressure::{BackpressureReader, BackpressureWriter};
+use crate::backpressure::{BackpressureReader, BackpressureRegistry, BackpressureWriter};
 use crate::messaging::upstream_subscription::{ContractConfig, ReaderProgress};
 use crate::messaging::UpstreamSubscription;
 use crate::metrics::instrumentation::{snapshot_stage_metrics, StageInstrumentation};
 use crate::metrics::tail_read;
+use crate::pipeline::config::CycleGuardConfig;
 use crate::stages::common::backpressure_activity_pulse::BackpressureActivityPulse;
 use crate::stages::common::control_strategies::ControlEventStrategy;
 use crate::stages::common::handlers::transform::traits::UnifiedTransformHandler;
@@ -326,6 +327,21 @@ pub(crate) struct TransformContext<H: UnifiedTransformHandler> {
 
     /// Backoff for blocked output writes (1ms → … → 50ms cap).
     pub(crate) backpressure_backoff: IdleBackoff,
+
+    /// Flow-scoped backpressure registry (FLOWIP-051n quiescence predicate).
+    pub(crate) backpressure_registry: Arc<BackpressureRegistry>,
+
+    /// Cycle guard configuration for this stage (FLOWIP-051l, FLOWIP-051n).
+    pub(crate) cycle_guard_config: Option<CycleGuardConfig>,
+
+    /// External EOFs received by SCC entry points, keyed by upstream stage id (FLOWIP-051n).
+    pub(crate) external_eofs_received: HashSet<StageId>,
+
+    /// Whether a Drain terminal intent has been received at the SCC entry point (FLOWIP-051n).
+    pub(crate) drain_received: bool,
+
+    /// Buffered terminal envelope (EOF or Drain) held by SCC entry points until quiescence (FLOWIP-051n).
+    pub(crate) buffered_terminal_envelope: Option<EventEnvelope<ChainEvent>>,
 }
 
 impl<H: UnifiedTransformHandler + 'static> FsmContext for TransformContext<H> {}

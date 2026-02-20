@@ -39,3 +39,22 @@ impl StageIdExt for StageId {
         StageId::from_ulid(topology_id.ulid())
     }
 }
+
+/// Extension trait for converting between core SccId and topology SccId.
+///
+/// Both types share the same underlying ULID representation, they just
+/// use different crates to handle them (same pattern as `StageIdExt`).
+pub trait SccIdExt {
+    fn to_core_scc_id(self) -> obzenflow_core::SccId;
+    fn from_core_scc_id(core_id: obzenflow_core::SccId) -> Self;
+}
+
+impl SccIdExt for obzenflow_topology::SccId {
+    fn to_core_scc_id(self) -> obzenflow_core::SccId {
+        obzenflow_core::SccId::from_ulid(self.ulid())
+    }
+
+    fn from_core_scc_id(core_id: obzenflow_core::SccId) -> Self {
+        obzenflow_topology::SccId::from_ulid(core_id.as_ulid())
+    }
+}

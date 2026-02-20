@@ -4,6 +4,7 @@
 
 //! Builder for transform stages
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::metrics::instrumentation::StageInstrumentation;
@@ -80,6 +81,8 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Supe
             .instrumentation
             .unwrap_or_else(|| Arc::new(StageInstrumentation::new()));
 
+        let cycle_guard_config = self.config.cycle_guard.clone();
+
         // Create context with bound subscription factory from resources
         let context = TransformContext {
             handler: self.handler,
@@ -109,6 +112,11 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Supe
                     std::time::Duration::from_millis(1),
                     std::time::Duration::from_millis(50),
                 ),
+            backpressure_registry: self.resources.backpressure_registry.clone(),
+            cycle_guard_config: cycle_guard_config.clone(),
+            external_eofs_received: HashSet::new(),
+            drain_received: false,
+            buffered_terminal_envelope: None,
         };
 
         // Create supervisor (private - not exposed)
@@ -117,10 +125,14 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Supe
             data_journal: self.resources.data_journal.clone(),
             system_journal: self.resources.system_journal.clone(),
             stage_id: self.config.stage_id,
-            cycle_guard: self
-                .config
-                .cycle_guard
-                .map(|cfg| CycleGuard::new(cfg.max_iterations, self.config.stage_name.clone())),
+            cycle_guard: cycle_guard_config.as_ref().map(|cfg| {
+                CycleGuard::new(
+                    cfg.max_iterations,
+                    cfg.scc_id,
+                    cfg.is_entry_point,
+                    self.config.stage_name.clone(),
+                )
+            }),
             _marker: std::marker::PhantomData,
         };
 
@@ -221,6 +233,8 @@ impl<H: AsyncTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
             .instrumentation
             .unwrap_or_else(|| Arc::new(StageInstrumentation::new()));
 
+        let cycle_guard_config = self.config.cycle_guard.clone();
+
         // Create context with bound subscription factory from resources
         let context = TransformContext {
             handler: AsyncTransformHandlerAdapter(self.handler),
@@ -250,6 +264,11 @@ impl<H: AsyncTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
                     std::time::Duration::from_millis(1),
                     std::time::Duration::from_millis(50),
                 ),
+            backpressure_registry: self.resources.backpressure_registry.clone(),
+            cycle_guard_config: cycle_guard_config.clone(),
+            external_eofs_received: HashSet::new(),
+            drain_received: false,
+            buffered_terminal_envelope: None,
         };
 
         // Create supervisor (private - not exposed)
@@ -258,10 +277,14 @@ impl<H: AsyncTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
             data_journal: self.resources.data_journal.clone(),
             system_journal: self.resources.system_journal.clone(),
             stage_id: self.config.stage_id,
-            cycle_guard: self
-                .config
-                .cycle_guard
-                .map(|cfg| CycleGuard::new(cfg.max_iterations, self.config.stage_name.clone())),
+            cycle_guard: cycle_guard_config.as_ref().map(|cfg| {
+                CycleGuard::new(
+                    cfg.max_iterations,
+                    cfg.scc_id,
+                    cfg.is_entry_point,
+                    self.config.stage_name.clone(),
+                )
+            }),
             _marker: std::marker::PhantomData,
         };
 

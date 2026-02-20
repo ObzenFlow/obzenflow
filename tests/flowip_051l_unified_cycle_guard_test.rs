@@ -356,8 +356,8 @@ async fn flowip_051l_cycle_guard_bounds_data_backflow() -> Result<()> {
 
     assert_eq!(
         counter.load(Ordering::Relaxed),
-        10,
-        "expected cycle guard to bound the data backflow iterations"
+        30,
+        "expected cycle guard to bound the data backflow iterations (default max_iterations=30)"
     );
 
     let run_dir = single_flow_run_dir(&base)?;
@@ -369,7 +369,7 @@ async fn flowip_051l_cycle_guard_bounds_data_backflow() -> Result<()> {
     );
 
     assert!(
-        any_log_contains(&run_dir, "Cycle limit exceeded")?,
+        any_log_contains(&run_dir, "Cycle depth")?,
         "expected to find cycle guard abort in logs; run_dir={:?}",
         run_dir
     );

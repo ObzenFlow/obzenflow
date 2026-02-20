@@ -878,28 +878,23 @@ impl FsmAction for PipelineAction {
                     return Ok(());
                 }
 
-                if context.stage_data_journals.is_empty() {
-                    return Ok(());
-                }
-
-                tracing::info!("Requesting metrics drain via data journals");
+                tracing::info!("Requesting metrics drain via system journal");
 
                 let writer_id = WriterId::from(context.system_id);
 
-                // 1. Create the proper drain event (FlowSignalPayload::Drain)
-                // Pipeline (system component) creates ChainEvent with system writer ID
-                let drain_event = ChainEventFactory::drain_event(writer_id);
-
-                // 2. Publish drain request to ALL stage data journals
-                // (metrics aggregator reads from these journals)
-                for (stage_id, journal) in &context.stage_data_journals {
-                    if let Err(e) = journal.append(drain_event.clone(), None).await {
-                        tracing::warn!(
-                            stage_id = %stage_id,
-                            error = %e,
-                            "Failed to publish metrics drain event to stage journal; continuing"
-                        );
-                    }
+                // Publish drain request to the system journal.
+                // The metrics aggregator watches this event and will publish MetricsCoordination::Drained when complete.
+                let drain_event = obzenflow_core::event::SystemEvent::new(
+                    writer_id,
+                    obzenflow_core::event::SystemEventType::MetricsCoordination(
+                        obzenflow_core::event::MetricsCoordinationEvent::DrainRequested,
+                    ),
+                );
+                if let Err(e) = context.system_journal.append(drain_event, None).await {
+                    tracing::warn!(
+                        error = %e,
+                        "Failed to publish metrics drain request to system journal; continuing"
+                    );
                 }
 
                 // 3. Wait for drain completion event from system journal

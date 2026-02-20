@@ -36,7 +36,7 @@ pub use journal::Journal;
 pub use event::schema::TypedPayload;
 
 // Re-export typed IDs
-pub use id::{FlowId, JournalId, StageId, SystemId};
+pub use id::{CycleDepth, FlowId, JournalId, SccId, StageId, SystemId};
 
 // Re-export Ulid for convenience since it's used in many IDs
 pub use ulid::Ulid;

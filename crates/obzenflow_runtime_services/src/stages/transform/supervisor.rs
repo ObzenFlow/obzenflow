@@ -578,7 +578,11 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
                     ctx.pending_parent = None;
                 }
 
-                let directive = if let Some(subscription) = subscription_opt.as_mut() {
+                let directive = if let Some(directive) =
+                    self.maybe_release_buffered_terminal(ctx).await?
+                {
+                    directive
+                } else if let Some(subscription) = subscription_opt.as_mut() {
                     tracing::trace!(
                         target: "flowip-080o",
                         stage_name = %ctx.stage_name,
@@ -590,7 +594,7 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
                         .poll_next_with_state(state.variant_name(), Some(&mut contract_state[..]))
                         .await
                     {
-                        PollResult::Event(envelope) => {
+                        PollResult::Event(mut envelope) => {
                             use obzenflow_core::event::JournalEvent;
                             tracing::trace!(
                                 target: "flowip-080o",
@@ -623,7 +627,7 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
                             let suppress_event = self
                                 .check_cycle_guard_data_event(
                                     ctx,
-                                    &envelope,
+                                    &mut envelope,
                                     upstream,
                                     "Failed to write cycle guard error event",
                                 )
@@ -675,13 +679,103 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
                                                 ControlEventAction::Forward => {
                                                     // Handle EOF specially: only transition when ALL upstreams have EOF'd
                                                     if envelope.event.is_eof() {
+                                                        let upstream_stage = subscription
+                                                            .last_delivered_upstream_stage();
+
+                                                        // FLOWIP-051n: Only treat this EOF as a terminal signal
+                                                        // if it was authored by the upstream stage that owns
+                                                        // the journal we read it from. Journals can contain
+                                                        // forwarded EOFs from earlier stages (e.g. hn_stories
+                                                        // EOF forwarded through batch's journal). These must
+                                                        // not be treated as the upstream's terminal EOF.
+                                                        let is_terminal_eof = if let Some(
+                                                            upstream,
+                                                        ) = upstream_stage
+                                                        {
+                                                            match &envelope.event.content {
+                                                                obzenflow_core::event::ChainEventContent::FlowControl(
+                                                                    FlowControlPayload::Eof { writer_id, .. }
+                                                                ) => match writer_id {
+                                                                    Some(obzenflow_core::WriterId::Stage(eof_stage)) => *eof_stage == upstream,
+                                                                    Some(_) => false,
+                                                                    None => true,
+                                                                },
+                                                                _ => false,
+                                                            }
+                                                        } else {
+                                                            true
+                                                        };
+
+                                                        if let Some(cfg) =
+                                                            ctx.cycle_guard_config.as_ref()
+                                                        {
+                                                            if cfg.is_entry_point {
+                                                                if !is_terminal_eof {
+                                                                    // Forwarded EOF from a different stage; not a terminal signal.
+                                                                    tracing::debug!(
+                                                                        stage_name = %ctx.stage_name,
+                                                                        upstream = ?upstream_stage,
+                                                                        "Transform entry point ignoring forwarded (non-terminal) EOF"
+                                                                    );
+                                                                    break;
+                                                                }
+
+                                                                if let Some(upstream) =
+                                                                    upstream_stage
+                                                                {
+                                                                    if cfg
+                                                                        .external_upstreams
+                                                                        .contains(&upstream)
+                                                                    {
+                                                                        // FLOWIP-051n: buffer external EOF at SCC entry points.
+                                                                        // Do not forward and do not transition until SCC quiescence.
+                                                                        ctx.buffered_terminal_envelope
+                                                                            .get_or_insert_with(|| {
+                                                                                envelope.clone()
+                                                                            });
+                                                                        ctx.buffered_eof = Some(
+                                                                            envelope.event.clone(),
+                                                                        );
+                                                                        ctx.external_eofs_received
+                                                                            .insert(upstream);
+
+                                                                        tracing::info!(
+                                                                            stage_name = %ctx.stage_name,
+                                                                            upstream = ?upstream,
+                                                                            "Transform entry point buffered external EOF"
+                                                                        );
+                                                                    } else {
+                                                                        // Internal EOF should not normally arrive because the entry point
+                                                                        // buffers external terminal signals. Ignore to avoid premature drain.
+                                                                        tracing::debug!(
+                                                                            stage_name = %ctx.stage_name,
+                                                                            upstream = ?upstream,
+                                                                            "Transform entry point ignoring internal EOF"
+                                                                        );
+                                                                    }
+                                                                } else {
+                                                                    tracing::debug!(
+                                                                        stage_name = %ctx.stage_name,
+                                                                        "Transform entry point ignoring EOF with unknown upstream"
+                                                                    );
+                                                                }
+
+                                                                // Contract check at EOF time.
+                                                                let _ = subscription
+                                                                    .check_contracts(
+                                                                        &mut contract_state[..],
+                                                                    )
+                                                                    .await;
+                                                                break;
+                                                            }
+                                                        }
+
                                                         let eof_outcome =
                                                             subscription.take_last_eof_outcome();
 
                                                         if let (Some(guard), Some(upstream)) = (
                                                             self.cycle_guard.as_mut(),
-                                                            subscription
-                                                                .last_delivered_upstream_stage(),
+                                                            upstream_stage,
                                                         ) {
                                                             guard.note_upstream_eof(upstream);
                                                         }
@@ -693,14 +787,20 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
                                                             )
                                                             .await;
 
-                                                        let cycle_drain_ready = self
-                                                            .cycle_guard
+                                                        let is_cycle_entry_point = ctx
+                                                            .cycle_guard_config
                                                             .as_ref()
-                                                            .is_some_and(|guard| {
-                                                                guard.has_seen_all_upstream_eofs(
-                                                                    contract_state.len(),
-                                                                )
-                                                            });
+                                                            .is_some_and(|cfg| cfg.is_entry_point);
+
+                                                        let cycle_drain_ready = !is_cycle_entry_point
+                                                            && self
+                                                                .cycle_guard
+                                                                .as_ref()
+                                                                .is_some_and(|guard| {
+                                                                    guard.has_seen_all_upstream_eofs(
+                                                                        contract_state.len(),
+                                                                    )
+                                                                });
 
                                                         if cycle_drain_ready {
                                                             // FLOWIP-051l: In SCC topologies, upstream-authored EOF
@@ -769,6 +869,30 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
                                                         signal,
                                                         FlowControlPayload::Drain
                                                     ) {
+                                                        if ctx
+                                                            .cycle_guard_config
+                                                            .as_ref()
+                                                            .is_some_and(|cfg| cfg.is_entry_point)
+                                                        {
+                                                            // FLOWIP-051n: buffer Drain at SCC entry points.
+                                                            // Do not forward and do not transition until SCC quiescence.
+                                                            ctx.drain_received = true;
+                                                            ctx.buffered_terminal_envelope
+                                                                .get_or_insert_with(|| {
+                                                                    envelope.clone()
+                                                                });
+                                                            if ctx.buffered_eof.is_none() {
+                                                                ctx.buffered_eof =
+                                                                    Some(envelope.event.clone());
+                                                            }
+
+                                                            tracing::info!(
+                                                                stage_name = %ctx.stage_name,
+                                                                "Transform entry point buffered drain signal"
+                                                            );
+                                                            break;
+                                                        }
+
                                                         // Drain events from pipeline BeginDrain should initiate stage draining
                                                         ctx.buffered_eof =
                                                             Some(envelope.event.clone());
@@ -1180,53 +1304,59 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
                         }
                         PollResult::NoEvents => {
                             // No events available right now
-                            // Check contracts if appropriate (FSM decides when)
-                            if subscription.should_check_contracts(&contract_state[..]) {
-                                match subscription
-                                    .check_contracts(&mut contract_state[..])
-                                    .await
-                                {
-                                    Ok(crate::messaging::upstream_subscription::ContractStatus::Stalled(upstream)) => {
-                                        tracing::warn!(
-                                            stage_name = %ctx.stage_name,
-                                            upstream = ?upstream,
-                                            "Upstream stalled detected during active processing"
-                                        );
-                                    }
-                                    Ok(crate::messaging::upstream_subscription::ContractStatus::Violated { upstream, cause }) => {
-                                        tracing::error!(
-                                            stage_name = %ctx.stage_name,
-                                            upstream = ?upstream,
-                                            cause = ?cause,
-                                            "Contract violation detected during active processing"
-                                        );
-                                    }
-                                    Ok(_) => {
-                                        // Healthy or ProgressEmitted - no action needed
-                                    }
-                                    Err(e) => {
-                                        tracing::error!(
-                                            stage_name = %ctx.stage_name,
-                                            error = %e,
-                                            "Failed to check contracts"
-                                        );
+                            if let Some(directive) =
+                                self.maybe_release_buffered_terminal(ctx).await?
+                            {
+                                directive
+                            } else {
+                                // Check contracts if appropriate (FSM decides when)
+                                if subscription.should_check_contracts(&contract_state[..]) {
+                                    match subscription
+                                        .check_contracts(&mut contract_state[..])
+                                        .await
+                                    {
+                                        Ok(crate::messaging::upstream_subscription::ContractStatus::Stalled(upstream)) => {
+                                            tracing::warn!(
+                                                stage_name = %ctx.stage_name,
+                                                upstream = ?upstream,
+                                                "Upstream stalled detected during active processing"
+                                            );
+                                        }
+                                        Ok(crate::messaging::upstream_subscription::ContractStatus::Violated { upstream, cause }) => {
+                                            tracing::error!(
+                                                stage_name = %ctx.stage_name,
+                                                upstream = ?upstream,
+                                                cause = ?cause,
+                                                "Contract violation detected during active processing"
+                                            );
+                                        }
+                                        Ok(_) => {
+                                            // Healthy or ProgressEmitted - no action needed
+                                        }
+                                        Err(e) => {
+                                            tracing::error!(
+                                                stage_name = %ctx.stage_name,
+                                                error = %e,
+                                                "Failed to check contracts"
+                                            );
+                                        }
                                     }
                                 }
+
+                                tracing::trace!(
+                                    stage_name = %ctx.stage_name,
+                                    "No events available, sleeping"
+                                );
+                                tracing::trace!(
+                                    target: "flowip-080o",
+                                    stage_name = %ctx.stage_name,
+                                    "transform: poll_next returned NoEvents; sleeping briefly"
+                                );
+                                tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+
+                                // No work this iteration; remain in Running.
+                                EventLoopDirective::Continue
                             }
-
-                            tracing::trace!(
-                                stage_name = %ctx.stage_name,
-                                "No events available, sleeping"
-                            );
-                            tracing::trace!(
-                                target: "flowip-080o",
-                                stage_name = %ctx.stage_name,
-                                "transform: poll_next returned NoEvents; sleeping briefly"
-                            );
-                            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-
-                            // No work this iteration; remain in Running.
-                            EventLoopDirective::Continue
                         }
                         PollResult::Error(e) => {
                             tracing::error!(
@@ -1441,7 +1571,7 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
                         .poll_next_with_state(state.variant_name(), Some(&mut contract_state[..]))
                         .await
                     {
-                        PollResult::Event(envelope) => {
+                        PollResult::Event(mut envelope) => {
                             tracing::trace!(
                                 target: "flowip-080o",
                                 stage_name = %ctx.stage_name,
@@ -1469,7 +1599,7 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
                             let suppress_event = self
                                 .check_cycle_guard_data_event(
                                     ctx,
-                                    &envelope,
+                                    &mut envelope,
                                     upstream,
                                     "Failed to write cycle guard error event during drain",
                                 )
@@ -1841,7 +1971,7 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
     async fn check_cycle_guard_data_event(
         &mut self,
         ctx: &mut TransformContext<H>,
-        envelope: &EventEnvelope<ChainEvent>,
+        envelope: &mut EventEnvelope<ChainEvent>,
         upstream: Option<StageId>,
         write_error_context: &'static str,
     ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
@@ -1850,7 +1980,7 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
         };
 
         if let obzenflow_core::event::ChainEventContent::Data { .. } = &envelope.event.content {
-            if let Err(error_event) = guard.check_data(&envelope.event) {
+            if let Err(error_event) = guard.check_data(&mut envelope.event) {
                 let flow_context = FlowContext {
                     flow_name: ctx.flow_name.clone(),
                     flow_id: ctx.flow_id.to_string(),
@@ -1902,6 +2032,79 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
         Ok(())
     }
 
+    async fn maybe_release_buffered_terminal(
+        &mut self,
+        ctx: &mut TransformContext<H>,
+    ) -> Result<
+        Option<EventLoopDirective<TransformEvent<H>>>,
+        Box<dyn std::error::Error + Send + Sync>,
+    > {
+        let Some(cfg) = ctx.cycle_guard_config.as_ref() else {
+            return Ok(None);
+        };
+        if !cfg.is_entry_point {
+            return Ok(None);
+        }
+
+        let Some(buffered) = ctx.buffered_terminal_envelope.take() else {
+            return Ok(None);
+        };
+
+        if cfg.scc_internal_edges.is_empty() {
+            tracing::error!(
+                stage_name = %ctx.stage_name,
+                scc_id = %cfg.scc_id,
+                "Cycle entry point has no scc_internal_edges; refusing to release terminal"
+            );
+            ctx.buffered_terminal_envelope = Some(buffered);
+            return Ok(None);
+        }
+
+        let terminal_ready = cfg
+            .external_upstreams
+            .is_subset(&ctx.external_eofs_received)
+            || ctx.drain_received;
+        if !terminal_ready {
+            ctx.buffered_terminal_envelope = Some(buffered);
+            return Ok(None);
+        }
+
+        for &(upstream, downstream) in &cfg.scc_internal_edges {
+            match ctx
+                .backpressure_registry
+                .edge_in_flight(upstream, downstream)
+            {
+                Some(0) => continue,
+                Some(_) => {
+                    ctx.buffered_terminal_envelope = Some(buffered);
+                    return Ok(None);
+                }
+                None => {
+                    tracing::error!(
+                        stage_name = %ctx.stage_name,
+                        scc_id = %cfg.scc_id,
+                        upstream = ?upstream,
+                        downstream = ?downstream,
+                        "SCC-internal edge has no backpressure tracking; refusing to release terminal"
+                    );
+                    ctx.buffered_terminal_envelope = Some(buffered);
+                    return Ok(None);
+                }
+            }
+        }
+
+        tracing::info!(
+            stage_name = %ctx.stage_name,
+            scc_id = %cfg.scc_id,
+            "Cycle entry point releasing buffered terminal signal (SCC quiescent)"
+        );
+
+        self.forward_control_event_guarded(&buffered).await?;
+        Ok(Some(EventLoopDirective::Transition(
+            TransformEvent::ReceivedEOF,
+        )))
+    }
+
     /// Helper to forward control events
     async fn forward_control_event(
         &self,
@@ -1938,7 +2141,9 @@ mod tests {
     use super::*;
     use crate::backpressure::{BackpressurePlan, BackpressureRegistry};
     use crate::id_conversions::StageIdExt;
+    use crate::pipeline::config::CycleGuardConfig;
     use crate::stages::common::control_strategies::JonestownStrategy;
+    use crate::stages::common::cycle_guard::CycleGuard;
     use crate::stages::common::handler_error::HandlerError;
     use crate::stages::common::handlers::TransformHandler;
     use crate::stages::resources_builder::SubscriptionFactory;
@@ -1963,6 +2168,133 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Mutex};
     use tokio_test::{assert_pending, assert_ready};
+
+    async fn build_cycle_entry_harness<
+        H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
+        F: FnOnce(StageId) -> H,
+    >(
+        handler_factory: F,
+    ) -> (
+        TransformSupervisor<H>,
+        TransformContext<H>,
+        BackpressureRegistry,
+        StageId,
+        StageId,
+        StageId,
+        Arc<dyn Journal<ChainEvent>>,
+    ) {
+        let mut builder = TopologyBuilder::new();
+        let s_top = builder.add_stage(Some("s".to_string())); // external upstream
+        let t_top = builder.add_stage(Some("t".to_string())); // entry point
+        let u_top = builder.add_stage(Some("u".to_string())); // cycle peer
+        builder.add_backward_edge(u_top, t_top); // u -> t (backflow)
+        let topology = builder.build_unchecked().expect("topology");
+
+        let s = StageId::from_topology_id(s_top);
+        let t = StageId::from_topology_id(t_top);
+        let u = StageId::from_topology_id(u_top);
+
+        let plan = BackpressurePlan::disabled()
+            .track_only_edge(t, u)
+            .track_only_edge(u, t);
+        let registry = BackpressureRegistry::new(&topology, &plan);
+
+        let upstream_journal: Arc<dyn Journal<ChainEvent>> =
+            Arc::new(TestJournal::new(JournalOwner::stage(s)));
+        let internal_journal: Arc<dyn Journal<ChainEvent>> =
+            Arc::new(TestJournal::new(JournalOwner::stage(u)));
+        let data_journal: Arc<dyn Journal<ChainEvent>> =
+            Arc::new(TestJournal::new(JournalOwner::stage(t)));
+        let error_journal: Arc<dyn Journal<ChainEvent>> =
+            Arc::new(TestJournal::new(JournalOwner::stage(t)));
+        let system_journal: Arc<dyn Journal<SystemEvent>> =
+            Arc::new(TestJournal::new(JournalOwner::stage(t)));
+
+        let mut stage_names = HashMap::new();
+        stage_names.insert(s, "s".to_string());
+        stage_names.insert(t, "t".to_string());
+        stage_names.insert(u, "u".to_string());
+        let subscription_factory = SubscriptionFactory::new(stage_names);
+        let mut upstream_subscription_factory = subscription_factory
+            .bind(&[(s, upstream_journal.clone()), (u, internal_journal.clone())]);
+        upstream_subscription_factory.owner_label = "t".to_string();
+
+        let instrumentation =
+            Arc::new(crate::metrics::instrumentation::StageInstrumentation::new());
+        let control_strategy: Arc<
+            dyn crate::stages::common::control_strategies::ControlEventStrategy,
+        > = Arc::new(JonestownStrategy);
+
+        let mut backpressure_readers = HashMap::new();
+        backpressure_readers.insert(s, registry.reader(s, t));
+        backpressure_readers.insert(u, registry.reader(u, t));
+
+        let cycle_guard_config = CycleGuardConfig {
+            max_iterations: crate::pipeline::MaxIterations::new(30),
+            scc_id: obzenflow_core::SccId::from_ulid(obzenflow_core::Ulid::from(0u128)),
+            external_upstreams: [s].into_iter().collect(),
+            internal_upstreams: [u].into_iter().collect(),
+            is_entry_point: true,
+            scc_internal_edges: vec![(t, u), (u, t)],
+        };
+
+        let handler = handler_factory(t);
+        let mut ctx = TransformContext {
+            handler,
+            stage_id: t,
+            stage_name: "t".to_string(),
+            flow_name: "cycle_test_flow".to_string(),
+            flow_id: FlowId::new(),
+            data_journal: data_journal.clone(),
+            error_journal,
+            system_journal: system_journal.clone(),
+            writer_id: None,
+            subscription: None,
+            contract_state: Vec::new(),
+            control_strategy,
+            buffered_eof: None,
+            instrumentation,
+            upstream_subscription_factory,
+            backpressure_writer: registry.writer(t),
+            backpressure_readers,
+            pending_outputs: std::collections::VecDeque::new(),
+            pending_parent: None,
+            pending_ack_upstream: None,
+            backpressure_pulse:
+                crate::stages::common::backpressure_activity_pulse::BackpressureActivityPulse::new(),
+            backpressure_backoff:
+                crate::supervised_base::idle_backoff::IdleBackoff::exponential_with_cap(
+                    std::time::Duration::from_millis(1),
+                    std::time::Duration::from_millis(50),
+                ),
+            backpressure_registry: std::sync::Arc::new(registry.clone()),
+            cycle_guard_config: Some(cycle_guard_config),
+            external_eofs_received: std::collections::HashSet::new(),
+            drain_received: false,
+            buffered_terminal_envelope: None,
+        };
+
+        TransformAction::AllocateResources
+            .execute(&mut ctx)
+            .await
+            .expect("allocate resources");
+
+        let supervisor = TransformSupervisor::<H> {
+            name: "transform_test".to_string(),
+            data_journal: data_journal.clone(),
+            system_journal,
+            stage_id: t,
+            cycle_guard: Some(CycleGuard::new(
+                crate::pipeline::MaxIterations::new(30),
+                obzenflow_core::SccId::from_ulid(obzenflow_core::Ulid::from(0u128)),
+                true,
+                "t".to_string(),
+            )),
+            _marker: std::marker::PhantomData,
+        };
+
+        (supervisor, ctx, registry, s, t, u, upstream_journal)
+    }
 
     struct TestJournal<T: JournalEvent> {
         id: JournalId,
@@ -2232,6 +2564,11 @@ mod tests {
                     std::time::Duration::from_millis(1),
                     std::time::Duration::from_millis(50),
                 ),
+            backpressure_registry: std::sync::Arc::new(registry.clone()),
+            cycle_guard_config: None,
+            external_eofs_received: std::collections::HashSet::new(),
+            drain_received: false,
+            buffered_terminal_envelope: None,
         };
 
         TransformAction::AllocateResources
@@ -2445,5 +2782,137 @@ mod tests {
             .copied()
             .unwrap_or(0);
         assert_eq!(waited, 3_000_000, "1ms + 2ms backoff expected");
+    }
+
+    #[tokio::test]
+    async fn entry_point_buffers_external_eof_until_scc_quiescent() {
+        let (mut supervisor, mut ctx, registry, s, t, u, upstream_journal) =
+            build_cycle_entry_harness(|_| FilterHandler).await;
+
+        // Simulate in-flight cycle work on u -> t so the buffered EOF cannot be released immediately.
+        let u_writer = registry.writer(u);
+        u_writer.reserve(1).expect("reserve").commit(1);
+
+        upstream_journal
+            .append(ChainEventFactory::eof_event(WriterId::from(s), true), None)
+            .await
+            .expect("append eof");
+
+        let state = TransformState::<FilterHandler>::Running;
+        let directive = supervisor
+            .dispatch_state(&state, &mut ctx)
+            .await
+            .expect("dispatch eof");
+        assert!(
+            matches!(directive, EventLoopDirective::Continue),
+            "expected entry point to buffer EOF and continue"
+        );
+        assert!(ctx.buffered_terminal_envelope.is_some());
+        assert!(ctx.external_eofs_received.contains(&s));
+
+        let forwarded = ctx
+            .data_journal
+            .read_causally_ordered()
+            .await
+            .expect("read data journal")
+            .into_iter()
+            .any(|env| env.event.is_eof());
+        assert!(
+            !forwarded,
+            "expected EOF not to be forwarded while in-flight"
+        );
+
+        // Once the SCC is quiescent, the next dispatch releases the buffered EOF.
+        registry.reader(u, t).ack_consumed(1);
+        let directive = supervisor
+            .dispatch_state(&state, &mut ctx)
+            .await
+            .expect("dispatch release");
+        assert!(matches!(
+            directive,
+            EventLoopDirective::Transition(TransformEvent::ReceivedEOF)
+        ));
+
+        let forwarded = ctx
+            .data_journal
+            .read_causally_ordered()
+            .await
+            .expect("read data journal")
+            .into_iter()
+            .any(|env| env.event.is_eof());
+        assert!(forwarded, "expected EOF to be forwarded after quiescence");
+    }
+
+    #[tokio::test]
+    async fn entry_point_buffers_drain_until_scc_quiescent() {
+        let (mut supervisor, mut ctx, registry, s, t, u, upstream_journal) =
+            build_cycle_entry_harness(|_| FilterHandler).await;
+
+        // Simulate in-flight cycle work on u -> t so the buffered Drain cannot be released immediately.
+        let u_writer = registry.writer(u);
+        u_writer.reserve(1).expect("reserve").commit(1);
+
+        upstream_journal
+            .append(ChainEventFactory::drain_event(WriterId::from(s)), None)
+            .await
+            .expect("append drain");
+
+        let state = TransformState::<FilterHandler>::Running;
+        let directive = supervisor
+            .dispatch_state(&state, &mut ctx)
+            .await
+            .expect("dispatch drain");
+        assert!(
+            matches!(directive, EventLoopDirective::Continue),
+            "expected entry point to buffer drain and continue"
+        );
+        assert!(ctx.buffered_terminal_envelope.is_some());
+        assert!(ctx.drain_received);
+
+        let forwarded = ctx
+            .data_journal
+            .read_causally_ordered()
+            .await
+            .expect("read data journal")
+            .into_iter()
+            .any(|env| {
+                matches!(
+                    env.event.content,
+                    obzenflow_core::event::ChainEventContent::FlowControl(
+                        FlowControlPayload::Drain
+                    )
+                )
+            });
+        assert!(
+            !forwarded,
+            "expected drain not to be forwarded while in-flight"
+        );
+
+        // Once the SCC is quiescent, the next dispatch releases the buffered Drain.
+        registry.reader(u, t).ack_consumed(1);
+        let directive = supervisor
+            .dispatch_state(&state, &mut ctx)
+            .await
+            .expect("dispatch release");
+        assert!(matches!(
+            directive,
+            EventLoopDirective::Transition(TransformEvent::ReceivedEOF)
+        ));
+
+        let forwarded = ctx
+            .data_journal
+            .read_causally_ordered()
+            .await
+            .expect("read data journal")
+            .into_iter()
+            .any(|env| {
+                matches!(
+                    env.event.content,
+                    obzenflow_core::event::ChainEventContent::FlowControl(
+                        FlowControlPayload::Drain
+                    )
+                )
+            });
+        assert!(forwarded, "expected drain to be forwarded after quiescence");
     }
 }

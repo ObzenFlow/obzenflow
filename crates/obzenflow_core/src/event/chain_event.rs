@@ -12,7 +12,7 @@ use crate::event::context::{
 };
 use crate::event::status::processing_status::{ErrorKind, ProcessingStatus};
 use crate::event::types::{CorrelationId, EventId, WriterId};
-use crate::id::StageId;
+use crate::id::{CycleDepth, SccId, StageId};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -59,6 +59,17 @@ pub struct ChainEvent {
     /// Provenance for replayed events (FLOWIP-095a).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub replay_context: Option<ReplayContext>,
+
+    // === Cycle Iteration Tracking (FLOWIP-051p) ===
+    /// Per-event cycle depth counter. Incremented at the SCC entry point
+    /// on each round trip. None for events that have never entered a cycle.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cycle_depth: Option<CycleDepth>,
+
+    /// SCC identifier that `cycle_depth` belongs to. When an event enters
+    /// an SCC with a different ID, the depth is reset.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cycle_scc_id: Option<SccId>,
 
     // === Runtime Instrumentation (FLOWIP-056c) ===
     /// Runtime snapshot at event creation time
@@ -283,10 +294,13 @@ impl ChainEvent {
         self
     }
 
-    /// Propagate correlation from parent event to derived event
+    /// Propagate correlation and cycle state from parent event to derived event
     pub fn with_correlation_from(mut self, parent: &ChainEvent) -> Self {
         self.correlation_id = parent.correlation_id;
         self.correlation_payload = parent.correlation_payload.clone();
+        // Propagate cycle iteration state (FLOWIP-051p)
+        self.cycle_depth = parent.cycle_depth;
+        self.cycle_scc_id = parent.cycle_scc_id;
         self
     }
 
@@ -998,6 +1012,10 @@ impl ChainEventFactory {
         event.correlation_payload = parent.correlation_payload.clone();
         event.replay_context = parent.replay_context.clone();
 
+        // Propagate cycle iteration state (FLOWIP-051p)
+        event.cycle_depth = parent.cycle_depth;
+        event.cycle_scc_id = parent.cycle_scc_id;
+
         // FIX (FLOWIP-082): Propagate full lineage with depth limit
         const DEFAULT_MAX_LINEAGE_DEPTH: usize = 100;
 
@@ -1068,6 +1086,8 @@ impl ChainEventFactory {
             correlation_id: None,
             correlation_payload: None,
             replay_context: None,
+            cycle_depth: None,
+            cycle_scc_id: None,
             runtime_context: None,
             observability: None,
         };

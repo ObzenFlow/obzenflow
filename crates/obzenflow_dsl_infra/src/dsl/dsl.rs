@@ -214,7 +214,7 @@ macro_rules! build_typed_flow {
     ($flow_name:expr, $journals:expr, $stages:expr, $connections:expr, $create_flow_middleware:expr) => {{
         use $crate::prelude::*;
         use $crate::dsl::FlowBuildError;
-        use std::collections::HashMap;
+        use std::collections::{HashMap, HashSet};
         use obzenflow_topology::{StageInfo as TopologyStageInfo, DirectedEdge, EdgeKind};
         use std::sync::Arc;
 
@@ -310,7 +310,6 @@ macro_rules! build_typed_flow {
 
         // Precompute explicit forward edges so join reference edges can avoid duplication (e.g.
         // when using join tuple syntax in the topology block).
-        use std::collections::HashSet;
         let explicit_forward_edges: HashSet<(String, String)> = connections
             .iter()
             .filter(|(_, _, kind)| matches!(kind, EdgeKind::Forward))
@@ -395,6 +394,86 @@ macro_rules! build_typed_flow {
                 unsupported_cycle_members.join(", ")
             )));
         }
+
+        // FLOWIP-051n (P0): SCCs must have exactly one entry point.
+        //
+        // An SCC entry point is a cycle-member stage that has at least one upstream outside its SCC.
+        // For P0, multi-entry SCCs are rejected at build time to avoid ambiguous EOF/Drain gating.
+        let mut scc_to_members: HashMap<obzenflow_topology::SccId, Vec<obzenflow_topology::StageId>> = HashMap::new();
+        for stage in topology.stages() {
+            if let Some(scc_id) = topology.scc_id(stage.id) {
+                scc_to_members.entry(scc_id).or_default().push(stage.id);
+            }
+        }
+
+        let mut scc_entry_points: HashMap<obzenflow_topology::SccId, obzenflow_topology::StageId> = HashMap::new();
+        for (scc_id, members) in &scc_to_members {
+            let mut entry_points = Vec::new();
+            for &member in members {
+                let has_external_upstream = topology
+                    .upstream_stages(member)
+                    .iter()
+                    .any(|upstream| topology.scc_id(*upstream) != Some(*scc_id));
+                if has_external_upstream {
+                    entry_points.push(member);
+                }
+            }
+
+            if entry_points.len() != 1 {
+                let entry_names: Vec<String> = entry_points
+                    .iter()
+                    .filter_map(|id| topology.stage_name(*id).map(|name| name.to_string()))
+                    .collect();
+
+                let found = if entry_names.is_empty() {
+                    "<none>".to_string()
+                } else {
+                    entry_names.join(", ")
+                };
+
+                return Err(FlowBuildError::UnsupportedCycleTopology(format!(
+                    "SCC {scc_id} must have exactly one entry point (cycle-member stage with at least one external upstream); found {}: {found}",
+                    entry_points.len()
+                )));
+            }
+
+            scc_entry_points.insert(*scc_id, entry_points[0]);
+        }
+
+        use obzenflow_runtime_services::pipeline::MaxIterations;
+        let cycle_max_iterations: MaxIterations = match std::env::var("OBZENFLOW_CYCLE_MAX_ITERATIONS") {
+            Ok(raw) => match raw.parse::<usize>() {
+                Ok(0) => {
+                    tracing::warn!(
+                        value = %raw,
+                        "OBZENFLOW_CYCLE_MAX_ITERATIONS must be > 0; using default of {}",
+                        MaxIterations::DEFAULT,
+                    );
+                    MaxIterations::DEFAULT
+                }
+                Ok(value) => {
+                    if value > u16::MAX as usize {
+                        tracing::warn!(
+                            value = value,
+                            clamped = u16::MAX,
+                            "OBZENFLOW_CYCLE_MAX_ITERATIONS exceeds u16::MAX; clamping (FLOWIP-051p)"
+                        );
+                    }
+                    // try_from_usize clamps to u16::MAX; None case (0) already handled above.
+                    MaxIterations::try_from_usize(value).unwrap_or(MaxIterations::DEFAULT)
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        value = %raw,
+                        error = %err,
+                        "Invalid OBZENFLOW_CYCLE_MAX_ITERATIONS; using default of {}",
+                        MaxIterations::DEFAULT,
+                    );
+                    MaxIterations::DEFAULT
+                }
+            },
+            Err(_) => MaxIterations::DEFAULT,
+        };
 
         // Collect join metadata per stage (FLOWIP-082a)
         use obzenflow_runtime_services::pipeline::JoinMetadata;
@@ -673,6 +752,7 @@ macro_rules! build_typed_flow {
             if let Some(descriptor) = descriptors.remove(name) {
                 let stage_type = descriptor.stage_type();
                 let is_in_cycle = topology.is_in_cycle(to_topology_id(*id));
+                let topology_stage_id = to_topology_id(*id);
                 let config = StageConfig {
                     stage_id: *id,
                     name: descriptor.name().to_string(),
@@ -682,8 +762,56 @@ macro_rules! build_typed_flow {
                             descriptor.stage_type(),
                             obzenflow_core::event::context::StageType::Transform
                         ) {
+                        let Some(scc_id) = topology.scc_id(topology_stage_id) else {
+                            return Err(FlowBuildError::UnsupportedCycleTopology(format!(
+                                "stage '{}' is marked as in-cycle, but has no scc_id",
+                                descriptor.name()
+                            )));
+                        };
+
+                        let mut external_upstreams: HashSet<StageId> = HashSet::new();
+                        let mut internal_upstreams: HashSet<StageId> = HashSet::new();
+                        for upstream in topology.upstream_stages(topology_stage_id) {
+                            let upstream_core = StageId::from_ulid(upstream.ulid());
+                            if topology.scc_id(upstream) == Some(scc_id) {
+                                internal_upstreams.insert(upstream_core);
+                            } else {
+                                external_upstreams.insert(upstream_core);
+                            }
+                        }
+
+                        let is_entry_point = scc_entry_points
+                            .get(&scc_id)
+                            .copied()
+                            .is_some_and(|entry| entry == topology_stage_id);
+
+                        let scc_internal_edges: Vec<(StageId, StageId)> = if is_entry_point {
+                            topology
+                                .edges()
+                                .iter()
+                                .filter(|edge| {
+                                    topology.scc_id(edge.from) == Some(scc_id)
+                                        && topology.scc_id(edge.to) == Some(scc_id)
+                                })
+                                .map(|edge| {
+                                    (
+                                        StageId::from_ulid(edge.from.ulid()),
+                                        StageId::from_ulid(edge.to.ulid()),
+                                    )
+                                })
+                                .collect()
+                        } else {
+                            Vec::new()
+                        };
+
+                        use obzenflow_runtime_services::id_conversions::SccIdExt;
                         Some(obzenflow_runtime_services::pipeline::config::CycleGuardConfig {
-                            max_iterations: 10,
+                            max_iterations: cycle_max_iterations,
+                            scc_id: scc_id.to_core_scc_id(),
+                            external_upstreams,
+                            internal_upstreams,
+                            is_entry_point,
+                            scc_internal_edges,
                         })
                     } else {
                         None

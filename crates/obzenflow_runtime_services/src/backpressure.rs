@@ -20,10 +20,19 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BackpressureEdgeMode {
+    Disabled,
+    /// State allocated and atomics maintained, but reserve() never blocks.
+    TrackOnly,
+    /// Full backpressure with a credit window.
+    Enforced(NonZeroU64),
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct BackpressurePlan {
     stage_defaults: HashMap<StageId, NonZeroU64>,
-    edge_overrides: HashMap<(StageId, StageId), Option<NonZeroU64>>,
+    edge_overrides: HashMap<(StageId, StageId), BackpressureEdgeMode>,
 }
 
 impl BackpressurePlan {
@@ -42,20 +51,53 @@ impl BackpressurePlan {
         downstream: StageId,
         window: NonZeroU64,
     ) -> Self {
-        self.edge_overrides
-            .insert((upstream, downstream), Some(window));
+        self.edge_overrides.insert(
+            (upstream, downstream),
+            BackpressureEdgeMode::Enforced(window),
+        );
         self
     }
 
     pub fn disable_edge(mut self, upstream: StageId, downstream: StageId) -> Self {
-        self.edge_overrides.insert((upstream, downstream), None);
+        self.edge_overrides
+            .insert((upstream, downstream), BackpressureEdgeMode::Disabled);
         self
     }
 
-    fn window_for_edge(&self, upstream: StageId, downstream: StageId) -> Option<NonZeroU64> {
+    pub fn track_only_edge(mut self, upstream: StageId, downstream: StageId) -> Self {
+        self.edge_overrides
+            .insert((upstream, downstream), BackpressureEdgeMode::TrackOnly);
+        self
+    }
+
+    fn mode_for_edge(&self, upstream: StageId, downstream: StageId) -> BackpressureEdgeMode {
         match self.edge_overrides.get(&(upstream, downstream)) {
-            Some(v) => *v,
-            None => self.stage_defaults.get(&upstream).copied(),
+            Some(mode) => *mode,
+            None => self
+                .stage_defaults
+                .get(&upstream)
+                .copied()
+                .map(BackpressureEdgeMode::Enforced)
+                .unwrap_or(BackpressureEdgeMode::Disabled),
+        }
+    }
+
+    pub fn auto_enable_scc_internal_edges(&mut self, topology: &Topology) {
+        for edge in topology.edges() {
+            let upstream = StageId::from_topology_id(edge.from);
+            let downstream = StageId::from_topology_id(edge.to);
+
+            let Some(up_scc) = topology.scc_id(edge.from) else {
+                continue;
+            };
+            if topology.scc_id(edge.to) != Some(up_scc) {
+                continue;
+            }
+
+            if self.mode_for_edge(upstream, downstream) == BackpressureEdgeMode::Disabled {
+                self.edge_overrides
+                    .insert((upstream, downstream), BackpressureEdgeMode::TrackOnly);
+            }
         }
     }
 }
@@ -107,14 +149,16 @@ impl BackpressureRegistry {
             let upstream = StageId::from_topology_id(edge.from);
             let downstream = StageId::from_topology_id(edge.to);
 
-            let Some(window) = plan.window_for_edge(upstream, downstream) else {
-                continue;
+            let window = match plan.mode_for_edge(upstream, downstream) {
+                BackpressureEdgeMode::Disabled => continue,
+                BackpressureEdgeMode::TrackOnly => u64::MAX,
+                BackpressureEdgeMode::Enforced(window) => window.get(),
             };
 
             let edge_state = Arc::new(EdgeState {
                 upstream,
                 downstream,
-                window: window.get(),
+                window,
                 reader_seq: AtomicU64::new(0),
             });
 
@@ -149,7 +193,7 @@ impl BackpressureRegistry {
 
             let writer_seq = stage.writer_seq.load(Ordering::Acquire);
             let reserved = stage.reserved.load(Ordering::Acquire);
-            let effective_writer = writer_seq + reserved;
+            let effective_writer = writer_seq.saturating_add(reserved);
 
             snapshot.stage_writer_seq.insert(*stage_id, writer_seq);
             snapshot
@@ -163,7 +207,7 @@ impl BackpressureRegistry {
                 let reader_seq = edge.reader_seq.load(Ordering::Acquire);
                 min_reader_seq = min_reader_seq.min(reader_seq);
 
-                let allowed = reader_seq + edge.window;
+                let allowed = reader_seq.saturating_add(edge.window);
                 let credit = allowed.saturating_sub(effective_writer);
                 min_credit = min_credit.min(credit);
 
@@ -195,6 +239,20 @@ impl BackpressureRegistry {
             state: self.edges.get(&(upstream, downstream)).cloned(),
         }
     }
+
+    /// Compute edge_in_flight for a single (upstream, downstream) pair.
+    /// Returns None if the edge is not tracked.
+    pub fn edge_in_flight(&self, upstream: StageId, downstream: StageId) -> Option<u64> {
+        let stage = self.stages.get(&upstream)?;
+        let edge = self.edges.get(&(upstream, downstream))?;
+
+        let effective_writer = stage
+            .writer_seq
+            .load(Ordering::Acquire)
+            .saturating_add(stage.reserved.load(Ordering::Acquire));
+        let reader_seq = edge.reader_seq.load(Ordering::Acquire);
+        Some(effective_writer.saturating_sub(reader_seq))
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -222,14 +280,19 @@ impl BackpressureWriter {
             return u64::MAX;
         }
 
-        let effective_writer =
-            state.writer_seq.load(Ordering::Acquire) + state.reserved.load(Ordering::Acquire);
+        let effective_writer = state
+            .writer_seq
+            .load(Ordering::Acquire)
+            .saturating_add(state.reserved.load(Ordering::Acquire));
 
         state
             .downstream_edges
             .iter()
             .map(|edge| {
-                let allowed = edge.reader_seq.load(Ordering::Acquire) + edge.window;
+                let allowed = edge
+                    .reader_seq
+                    .load(Ordering::Acquire)
+                    .saturating_add(edge.window);
                 allowed.saturating_sub(effective_writer)
             })
             .min()
@@ -242,14 +305,19 @@ impl BackpressureWriter {
             return None;
         }
 
-        let effective_writer =
-            state.writer_seq.load(Ordering::Acquire) + state.reserved.load(Ordering::Acquire);
+        let effective_writer = state
+            .writer_seq
+            .load(Ordering::Acquire)
+            .saturating_add(state.reserved.load(Ordering::Acquire));
 
         state
             .downstream_edges
             .iter()
             .map(|edge| {
-                let allowed = edge.reader_seq.load(Ordering::Acquire) + edge.window;
+                let allowed = edge
+                    .reader_seq
+                    .load(Ordering::Acquire)
+                    .saturating_add(edge.window);
                 let credit = allowed.saturating_sub(effective_writer);
                 (credit, edge.downstream)
             })
@@ -310,12 +378,16 @@ impl BackpressureWriter {
         loop {
             let writer_seq = state.writer_seq.load(Ordering::Acquire);
             let reserved = state.reserved.load(Ordering::Acquire);
-            let effective_writer = writer_seq + reserved;
+            let effective_writer = writer_seq.saturating_add(reserved);
 
             let min_allowed = state
                 .downstream_edges
                 .iter()
-                .map(|edge| edge.reader_seq.load(Ordering::Acquire) + edge.window)
+                .map(|edge| {
+                    edge.reader_seq
+                        .load(Ordering::Acquire)
+                        .saturating_add(edge.window)
+                })
                 .min()
                 .unwrap_or(u64::MAX);
 

@@ -43,6 +43,7 @@
 //! - `HN_AI_MODEL=llama3.1:8b` (default depends on provider)
 //! - `HN_AI_INTERESTS="rust, ai, security"` (optional personalization)
 //! - `HN_AI_GROUP_BUDGET_TOKENS=2500` (optional; per-chunk input budget used for map-reduce splitting)
+//! - `HN_AI_GROUP_MAX_STORIES=10` (optional; cap stories per chunk; set `0` for unlimited)
 //! - `OLLAMA_BASE_URL=http://localhost:11434` (optional; default rig provider base)
 //! - `OPENAI_API_KEY=...` (required for `HN_AI_PROVIDER=openai`)
 //! - `OPENAI_BASE_URL=http://localhost:8080/v1` (optional OpenAI-compatible base URL)

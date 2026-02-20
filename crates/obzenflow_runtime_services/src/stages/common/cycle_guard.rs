@@ -6,27 +6,22 @@
 //!
 //! This guard is intended to live in stage supervisors, not in the middleware chain.
 //! It handles both:
-//! - Data events: abort after too many iterations of the same correlation ID.
+//! - Data events: per-event cycle depth tracking (FLOWIP-051p), abort after too many round trips.
 //! - Flow control signals: attenuate amplification in topologies with backflow edges.
 
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::status::processing_status::ProcessingStatus;
 use obzenflow_core::event::types::{JournalIndex, JournalPath, SeqNo};
-use obzenflow_core::event::{ChainEvent, CorrelationId, EventId};
-use obzenflow_core::{StageId, WriterId};
+use obzenflow_core::event::{ChainEvent, EventId};
+use obzenflow_core::{CycleDepth, SccId, StageId, WriterId};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use tracing::{debug, warn};
 
+use crate::pipeline::MaxIterations;
+
 const DEFAULT_ENTRY_TTL: Duration = Duration::from_secs(300);
 const DEFAULT_CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
-
-/// Entry in the cycle tracking map with timestamp for TTL.
-#[derive(Debug, Clone)]
-struct CycleEntry {
-    iterations: usize,
-    last_accessed: Instant,
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum SignalKind {
@@ -66,8 +61,9 @@ struct ProgressEntry {
 pub(crate) struct CycleGuard {
     stage_name: String,
 
-    max_iterations: usize,
-    cycle_tracking: HashMap<CorrelationId, CycleEntry>,
+    max_iterations: MaxIterations,
+    scc_id: SccId,
+    is_entry_point: bool,
     entry_ttl: Duration,
     cleanup_interval: Duration,
     last_cleanup: Instant,
@@ -82,11 +78,17 @@ pub(crate) struct CycleGuard {
 }
 
 impl CycleGuard {
-    pub(crate) fn new(max_iterations: usize, stage_name: impl Into<String>) -> Self {
+    pub(crate) fn new(
+        max_iterations: MaxIterations,
+        scc_id: SccId,
+        is_entry_point: bool,
+        stage_name: impl Into<String>,
+    ) -> Self {
         Self {
             stage_name: stage_name.into(),
             max_iterations,
-            cycle_tracking: HashMap::new(),
+            scc_id,
+            is_entry_point,
             entry_ttl: DEFAULT_ENTRY_TTL,
             cleanup_interval: DEFAULT_CLEANUP_INTERVAL,
             last_cleanup: Instant::now(),
@@ -243,52 +245,54 @@ impl CycleGuard {
         }
     }
 
-    /// Track iterations for a data event by correlation id.
+    /// Per-event cycle depth check (FLOWIP-051p).
+    ///
+    /// Only the SCC entry point increments `cycle_depth`; non-entry stages
+    /// pass through without modification. When an event enters a different
+    /// SCC, its depth is reset.
     ///
     /// Returns an error-marked clone of `event` when the iteration limit is exceeded.
-    pub(crate) fn check_data(&mut self, event: &ChainEvent) -> Result<(), Box<ChainEvent>> {
-        let Some(correlation_id) = event.correlation_id else {
+    pub(crate) fn check_data(&mut self, event: &mut ChainEvent) -> Result<(), Box<ChainEvent>> {
+        if !self.is_entry_point {
             return Ok(());
+        }
+
+        // First visit to any SCC: initialise tracking fields.
+        let depth = match (event.cycle_scc_id, event.cycle_depth) {
+            // Same SCC: increment depth.
+            (Some(id), Some(d)) if id == self.scc_id => d.increment(),
+            // Different SCC or first encounter: reset to 1.
+            _ => CycleDepth::first(),
         };
 
-        let now = Instant::now();
-        self.maybe_cleanup(now);
-
-        let entry = self
-            .cycle_tracking
-            .entry(correlation_id)
-            .and_modify(|e| {
-                e.iterations = e.iterations.saturating_add(1);
-                e.last_accessed = now;
-            })
-            .or_insert_with(|| CycleEntry {
-                iterations: 1,
-                last_accessed: now,
-            });
+        event.cycle_depth = Some(depth);
+        event.cycle_scc_id = Some(self.scc_id);
 
         debug!(
             stage_name = %self.stage_name,
             event_id = %event.id,
-            correlation_id = %correlation_id,
-            iterations = entry.iterations,
-            max_iterations = self.max_iterations,
-            "CycleGuard: processing data event"
+            correlation_id = ?event.correlation_id,
+            cycle_depth = %depth,
+            max_iterations = %self.max_iterations,
+            scc_id = %self.scc_id,
+            "CycleGuard: processing data event (per-event depth)"
         );
 
-        if entry.iterations > self.max_iterations {
+        if depth.as_u16() > self.max_iterations.as_u16() {
             warn!(
                 stage_name = %self.stage_name,
                 event_id = %event.id,
-                correlation_id = %correlation_id,
-                iterations = entry.iterations,
-                max_iterations = self.max_iterations,
-                "CycleGuard: aborting data event, cycle exceeded max iterations"
+                correlation_id = ?event.correlation_id,
+                cycle_depth = %depth,
+                max_iterations = %self.max_iterations,
+                scc_id = %self.scc_id,
+                "CycleGuard: aborting data event, cycle depth exceeded max iterations"
             );
 
             let mut error_event = event.clone();
             error_event.processing_info.status = ProcessingStatus::error(format!(
-                "Cycle limit exceeded after {} iterations (max: {}) for correlation {} in stage {}",
-                entry.iterations, self.max_iterations, correlation_id, self.stage_name
+                "Cycle depth {} exceeds max iterations {} ({}) in stage {}",
+                depth, self.max_iterations, self.scc_id, self.stage_name
             ));
             return Err(Box::new(error_event));
         }
@@ -320,21 +324,6 @@ impl CycleGuard {
         }
 
         self.last_cleanup = now;
-
-        self.cycle_tracking.retain(|correlation_id, entry| {
-            let age = now.duration_since(entry.last_accessed);
-            if age > self.entry_ttl {
-                debug!(
-                    stage_name = %self.stage_name,
-                    correlation_id = %correlation_id,
-                    age = ?age,
-                    "CycleGuard: removing expired correlation entry"
-                );
-                false
-            } else {
-                true
-            }
-        });
 
         self.forwarded_signal_ids.retain(|event_id, last_seen| {
             let age = now.duration_since(*last_seen);
@@ -410,6 +399,9 @@ mod tests {
     use obzenflow_core::WriterId;
     use serde_json::json;
     use std::time::{Duration, Instant};
+    fn test_scc_id(n: u128) -> SccId {
+        SccId::from_ulid(obzenflow_core::Ulid::from(n))
+    }
 
     fn progress_event(origin: WriterId, seq: u64) -> ChainEvent {
         ChainEventFactory::consumption_progress_event(
@@ -430,7 +422,7 @@ mod tests {
 
     #[test]
     fn check_signal_deduplicates_by_event_id() {
-        let mut guard = CycleGuard::new(10, "stage_a");
+        let mut guard = CycleGuard::new(MaxIterations::new(10), test_scc_id(0), true, "stage_a");
         let writer_id = WriterId::from(StageId::new());
         let event = ChainEventFactory::drain_event(writer_id);
 
@@ -440,7 +432,7 @@ mod tests {
 
     #[test]
     fn check_signal_suppresses_stale_consumption_progress() {
-        let mut guard = CycleGuard::new(10, "stage_a");
+        let mut guard = CycleGuard::new(MaxIterations::new(10), test_scc_id(0), true, "stage_a");
         let origin = WriterId::from(StageId::new());
 
         let event1 = progress_event(origin, 1);
@@ -455,7 +447,7 @@ mod tests {
 
     #[test]
     fn check_signal_allows_advanced_consumption_progress() {
-        let mut guard = CycleGuard::new(10, "stage_a");
+        let mut guard = CycleGuard::new(MaxIterations::new(10), test_scc_id(0), true, "stage_a");
         let origin = WriterId::from(StageId::new());
 
         let event1 = progress_event(origin, 1);
@@ -470,7 +462,7 @@ mod tests {
 
     #[test]
     fn check_signal_suppresses_repeated_one_shots_by_kind_and_origin() {
-        let mut guard = CycleGuard::new(10, "stage_a");
+        let mut guard = CycleGuard::new(MaxIterations::new(10), test_scc_id(0), true, "stage_a");
         let origin = WriterId::from(StageId::new());
 
         let event1 = ChainEventFactory::drain_event(origin);
@@ -485,7 +477,7 @@ mod tests {
 
     #[test]
     fn check_signal_allows_one_shots_from_distinct_origins() {
-        let mut guard = CycleGuard::new(10, "stage_a");
+        let mut guard = CycleGuard::new(MaxIterations::new(10), test_scc_id(0), true, "stage_a");
         let origin_a = WriterId::from(StageId::new());
         let origin_b = WriterId::from(StageId::new());
 
@@ -498,7 +490,7 @@ mod tests {
 
     #[test]
     fn check_signal_allows_repeated_watermarks_and_checkpoints() {
-        let mut guard = CycleGuard::new(10, "stage_a");
+        let mut guard = CycleGuard::new(MaxIterations::new(10), test_scc_id(0), true, "stage_a");
         let origin = WriterId::from(StageId::new());
 
         assert!(guard.should_forward_signal(&ChainEventFactory::watermark_event(origin, 1, None)));
@@ -522,22 +514,13 @@ mod tests {
 
     #[test]
     fn cleanup_removes_expired_entries_across_all_maps() {
-        let mut guard = CycleGuard::new(10, "stage_a");
+        let mut guard = CycleGuard::new(MaxIterations::new(10), test_scc_id(0), true, "stage_a");
         guard.entry_ttl = Duration::from_millis(0);
         guard.cleanup_interval = Duration::from_millis(0);
 
         let now = Instant::now();
         guard.last_cleanup = now - Duration::from_secs(1);
         let old = now - Duration::from_secs(1);
-
-        let correlation_id = CorrelationId::new();
-        guard.cycle_tracking.insert(
-            correlation_id,
-            CycleEntry {
-                iterations: 1,
-                last_accessed: old,
-            },
-        );
 
         let origin = WriterId::from(StageId::new());
         let event_id = ChainEventFactory::drain_event(origin).id;
@@ -566,7 +549,6 @@ mod tests {
 
         guard.maybe_cleanup(now);
 
-        assert!(guard.cycle_tracking.is_empty());
         assert!(guard.forwarded_signal_ids.is_empty());
         assert!(guard.forwarded_one_shots.is_empty());
         assert!(guard.progress_watermarks.is_empty());
@@ -575,7 +557,7 @@ mod tests {
 
     #[test]
     fn upstream_eof_tracking_reaches_expected_boundary() {
-        let mut guard = CycleGuard::new(10, "stage_a");
+        let mut guard = CycleGuard::new(MaxIterations::new(10), test_scc_id(0), true, "stage_a");
         let a = StageId::new();
         let b = StageId::new();
 
@@ -592,19 +574,24 @@ mod tests {
     }
 
     #[test]
-    fn check_data_tracks_iterations_by_correlation_id() {
-        let mut guard = CycleGuard::new(2, "stage_a");
+    fn check_data_increments_depth_at_entry_point() {
+        let mut guard = CycleGuard::new(MaxIterations::new(2), test_scc_id(1), true, "stage_a");
 
         let writer_id = WriterId::from(StageId::new());
         let mut event = ChainEventFactory::data_event(writer_id, "t", json!({"x": 1}));
-        let correlation_id = CorrelationId::new();
-        event.correlation_id = Some(correlation_id);
 
-        assert!(guard.check_data(&event).is_ok());
-        assert!(guard.check_data(&event).is_ok());
+        // First pass: depth set to 1, scc_id set to 1.
+        assert!(guard.check_data(&mut event).is_ok());
+        assert_eq!(event.cycle_depth, Some(CycleDepth::new(1)));
+        assert_eq!(event.cycle_scc_id, Some(test_scc_id(1)));
 
+        // Second pass: depth incremented to 2 (at max_iterations).
+        assert!(guard.check_data(&mut event).is_ok());
+        assert_eq!(event.cycle_depth, Some(CycleDepth::new(2)));
+
+        // Third pass: depth 3 exceeds max_iterations=2, should abort.
         let err = guard
-            .check_data(&event)
+            .check_data(&mut event)
             .expect_err("third iteration should abort");
         assert!(matches!(
             &err.processing_info.status,
@@ -613,10 +600,55 @@ mod tests {
     }
 
     #[test]
-    fn check_data_skips_events_without_correlation_id() {
-        let mut guard = CycleGuard::new(1, "stage_a");
+    fn check_data_non_entry_point_passes_through() {
+        let mut guard = CycleGuard::new(MaxIterations::new(1), test_scc_id(1), false, "stage_b");
+
         let writer_id = WriterId::from(StageId::new());
-        let event = ChainEventFactory::data_event(writer_id, "t", json!({"x": 1}));
-        assert!(guard.check_data(&event).is_ok());
+        let mut event = ChainEventFactory::data_event(writer_id, "t", json!({"x": 1}));
+        event.cycle_depth = Some(CycleDepth::new(5));
+        event.cycle_scc_id = Some(test_scc_id(1));
+
+        // Non-entry point should not modify or check the event.
+        assert!(guard.check_data(&mut event).is_ok());
+        assert_eq!(
+            event.cycle_depth,
+            Some(CycleDepth::new(5)),
+            "depth should be unchanged"
+        );
+    }
+
+    #[test]
+    fn check_data_resets_depth_on_scc_boundary() {
+        let mut guard = CycleGuard::new(MaxIterations::new(10), test_scc_id(2), true, "stage_c");
+
+        let writer_id = WriterId::from(StageId::new());
+        let mut event = ChainEventFactory::data_event(writer_id, "t", json!({"x": 1}));
+        // Simulate event arriving from a different SCC.
+        event.cycle_depth = Some(CycleDepth::new(8));
+        event.cycle_scc_id = Some(test_scc_id(1));
+
+        assert!(guard.check_data(&mut event).is_ok());
+        assert_eq!(
+            event.cycle_depth,
+            Some(CycleDepth::first()),
+            "depth should reset on SCC boundary"
+        );
+        assert_eq!(
+            event.cycle_scc_id,
+            Some(test_scc_id(2)),
+            "scc_id should update"
+        );
+    }
+
+    #[test]
+    fn check_data_passes_through_events_without_prior_cycle_state() {
+        let mut guard = CycleGuard::new(MaxIterations::new(10), test_scc_id(1), true, "stage_a");
+
+        let writer_id = WriterId::from(StageId::new());
+        let mut event = ChainEventFactory::data_event(writer_id, "t", json!({"x": 1}));
+
+        assert!(guard.check_data(&mut event).is_ok());
+        assert_eq!(event.cycle_depth, Some(CycleDepth::first()));
+        assert_eq!(event.cycle_scc_id, Some(test_scc_id(1)));
     }
 }

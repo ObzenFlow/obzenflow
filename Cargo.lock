@@ -1557,9 +1557,9 @@ dependencies = [
 
 [[package]]
 name = "obzenflow-topology"
-version = "0.2.0"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f3c133bfa2ae87864179dd940402f63dbf6e5d22960db9683c643042db740241"
+checksum = "24a96354dacd4123ed6aa6c8f26a2b8276d81bb890209f66d8386b7a5d560eff"
 dependencies = [
  "obzenflow-idkit",
  "once_cell",

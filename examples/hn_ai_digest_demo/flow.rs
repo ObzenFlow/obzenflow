@@ -10,7 +10,7 @@ use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use obzenflow::ai::{
     estimator_for_model, split_to_budget, ChatTransform, ChatTransformExt, EstimateSource,
-    TokenCount, TokenEstimator,
+    SplitGroup, TokenCount, TokenEstimator,
 };
 use obzenflow::sinks::ConsoleSink;
 use obzenflow::sources::{HeaderMap, HttpPullConfig, HttpPullSource, Url};
@@ -210,6 +210,12 @@ async fn run_example_async() -> Result<()> {
     }
     let budget_per_group = TokenCount::new(budget_per_group_tokens);
 
+    let max_stories_per_group_raw = env_usize("HN_AI_GROUP_MAX_STORIES").unwrap_or(10);
+    let max_stories_per_group = match max_stories_per_group_raw {
+        0 => None,
+        n => Some(n),
+    };
+
     let estimator: Arc<dyn TokenEstimator> = Arc::from(estimator_for_model(&ai_model_label));
 
     println!("HN AI Digest Demo (FLOWIP-086r)");
@@ -226,6 +232,10 @@ async fn run_example_async() -> Result<()> {
     println!("  ai_model: {ai_model_label}");
     println!("  token_estimator: {:?}", estimator.source());
     println!("  group_budget_tokens: {budget_per_group_tokens}");
+    match max_stories_per_group {
+        None => println!("  group_max_stories: unlimited"),
+        Some(v) => println!("  group_max_stories: {v}"),
+    }
     println!();
 
     let decoder = HnStoryDecoder::new(base_url, max_stories);
@@ -306,7 +316,8 @@ async fn run_example_async() -> Result<()> {
         _ => unreachable!("provider label validated above"),
     };
 
-    let splitter = HnDigestSplitter::new(estimator.clone(), budget_per_group);
+    let splitter =
+        HnDigestSplitter::new(estimator.clone(), budget_per_group, max_stories_per_group);
     let oversize_sub_splitter =
         HnDigestOversizeSubSplitter::new(estimator.clone(), budget_per_group);
 
@@ -331,7 +342,7 @@ async fn run_example_async() -> Result<()> {
                 story_numbers: chunk.story_numbers.clone(),
                 stories: chunk.stories.clone(),
                 chat_prompt_user: user_prompt,
-                output_markdown: response.text,
+                output_markdown: strip_accidental_story_echo(&response.text),
             };
 
             let payload = serde_json::to_value(&summary).map_err(|err| {
@@ -616,6 +627,7 @@ fn format_digest_summary_for_console(summary: &HnDigestSummary) -> String {
 struct HnDigestSplitter {
     estimator: Arc<dyn TokenEstimator>,
     budget_per_group: TokenCount,
+    max_stories_per_group: Option<usize>,
 }
 
 impl std::fmt::Debug for HnDigestSplitter {
@@ -623,15 +635,21 @@ impl std::fmt::Debug for HnDigestSplitter {
         f.debug_struct("HnDigestSplitter")
             .field("estimator_source", &self.estimator.source())
             .field("budget_per_group", &self.budget_per_group)
+            .field("max_stories_per_group", &self.max_stories_per_group)
             .finish()
     }
 }
 
 impl HnDigestSplitter {
-    fn new(estimator: Arc<dyn TokenEstimator>, budget_per_group: TokenCount) -> Self {
+    fn new(
+        estimator: Arc<dyn TokenEstimator>,
+        budget_per_group: TokenCount,
+        max_stories_per_group: Option<usize>,
+    ) -> Self {
         Self {
             estimator,
             budget_per_group,
+            max_stories_per_group,
         }
     }
 }
@@ -697,13 +715,23 @@ impl TransformHandler for HnDigestSplitter {
             .map(|(idx, story)| render_story_line(idx + 1, story, 0))
             .collect::<Vec<_>>();
 
+        let story_line_tokens = story_lines
+            .iter()
+            .map(|s| self.estimator.estimate_text(s).tokens)
+            .collect::<Vec<_>>();
+
         let story_line_refs = story_lines.iter().map(|s| s.as_str()).collect::<Vec<_>>();
-        let groups = split_to_budget(
+        let mut groups = split_to_budget(
             self.estimator.as_ref(),
             &story_line_refs,
             self.budget_per_group,
         )
         .map_err(|err| HandlerError::Validation(format!("split_to_budget failed: {err}")))?;
+
+        if let Some(max_stories_per_group) = self.max_stories_per_group {
+            groups =
+                enforce_max_group_story_count(groups, max_stories_per_group, &story_line_tokens);
+        }
 
         let group_count = groups.len();
         let mut outputs = Vec::with_capacity(group_count);
@@ -992,10 +1020,17 @@ fn build_chunk_prompt(chunk: &HnDigestChunk, interests: Option<&str>) -> String 
         out.push_str("\n\n");
     }
 
-    out.push_str("Summarise this chunk of Hacker News stories (headlines + URLs only).\n");
-    out.push_str("- Do not invent facts that are not implied by the title.\n");
+    let min_citations = chunk.stories.len().min(6);
+    out.push_str(
+        "Summarise this chunk of Hacker News stories (titles + URLs are provided as input).\n",
+    );
+    out.push_str("- Do not invent facts that are not implied by the titles.\n");
     out.push_str("- Use a neutral, specific tone.\n");
-    out.push_str("- Keep the output short so it can be reduced later.\n\n");
+    out.push_str("- IMPORTANT: Do not repeat the input story list.\n");
+    out.push_str("- Cite stories only by number, like (12); do not paste URLs.\n");
+    out.push_str(&format!(
+        "- Reference at least {min_citations} distinct story numbers across Themes + Notable stories.\n\n",
+    ));
 
     out.push_str("Output format (follow exactly):\n");
     out.push_str(&format!(
@@ -1004,17 +1039,22 @@ fn build_chunk_prompt(chunk: &HnDigestChunk, interests: Option<&str>) -> String 
         chunk.group_count
     ));
     out.push_str("Themes:\n");
-    out.push_str("- <theme>: 1 sentence\n");
-    out.push_str("- <theme>: 1 sentence\n");
+    out.push_str("- <theme> (n, n, n): 1 sentence\n");
+    out.push_str("- <theme> (n, n, n): 1 sentence\n");
+    out.push_str("- <theme> (n, n, n): 1 sentence\n");
     out.push_str("Notable stories:\n");
-    out.push_str("- (n) [Title](URL): 1 sentence\n");
-    out.push_str("- (n) [Title](URL): 1 sentence\n\n");
+    out.push_str("- (n) Title: 1 sentence\n");
+    out.push_str("- (n) Title: 1 sentence\n");
+    out.push_str("- (n) Title: 1 sentence\n");
+    out.push_str("- (n) Title: 1 sentence\n\n");
 
-    out.push_str("Stories (numbered; use these URLs verbatim):\n");
+    out.push_str("Input stories (numbered; do not repeat):\n");
+    out.push_str("```text\n");
     for (n, story) in chunk.story_numbers.iter().zip(chunk.stories.iter()) {
         out.push_str(&render_story_line(*n, story, chunk.decomposition_depth));
         out.push('\n');
     }
+    out.push_str("```\n");
 
     out
 }
@@ -1028,10 +1068,11 @@ fn build_oversize_chunk_prompt(chunk: &HnDigestChunk, interests: Option<&str>) -
         out.push_str("\n\n");
     }
 
-    out.push_str("This chunk came from the oversize backflow path.\n");
-    out.push_str("Summarise it very aggressively so it can be reduced later.\n");
+    out.push_str(
+        "Summarise the following stories very aggressively so they can be reduced later.\n",
+    );
     out.push_str("- Do not invent facts that are not implied by the title.\n");
-    out.push_str("- Prefer citing story numbers over including long links.\n");
+    out.push_str("- Cite stories only by number like (12); do not paste URLs.\n");
     out.push_str("- Keep the output short.\n\n");
 
     out.push_str("Output format:\n");
@@ -1043,13 +1084,63 @@ fn build_oversize_chunk_prompt(chunk: &HnDigestChunk, interests: Option<&str>) -
     out.push_str("- (n) 1 sentence\n");
     out.push_str("- (n) 1 sentence\n\n");
 
-    out.push_str("Stories (numbered):\n");
+    out.push_str("Input stories (numbered; do not repeat):\n");
+    out.push_str("```text\n");
     for (n, story) in chunk.story_numbers.iter().zip(chunk.stories.iter()) {
         out.push_str(&render_story_line(*n, story, chunk.decomposition_depth));
         out.push('\n');
     }
+    out.push_str("```\n");
 
     out
+}
+
+fn enforce_max_group_story_count(
+    groups: Vec<SplitGroup>,
+    max_stories_per_group: usize,
+    item_tokens: &[TokenCount],
+) -> Vec<SplitGroup> {
+    if max_stories_per_group == 0 {
+        return groups;
+    }
+
+    let mut out = Vec::new();
+    for group in groups {
+        if group.oversize || group.indices.len() <= max_stories_per_group {
+            out.push(group);
+            continue;
+        }
+
+        for indices in group.indices.chunks(max_stories_per_group) {
+            let mut estimated_tokens = TokenCount::ZERO;
+            for idx in indices {
+                if let Some(tokens) = item_tokens.get(*idx) {
+                    estimated_tokens = estimated_tokens.saturating_add(*tokens);
+                }
+            }
+
+            out.push(SplitGroup {
+                indices: indices.to_vec(),
+                estimated_tokens,
+                oversize: false,
+            });
+        }
+    }
+
+    out
+}
+
+fn strip_accidental_story_echo(markdown: &str) -> String {
+    let mut out = String::new();
+    for line in markdown.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("Stories:") || trimmed.starts_with("Input stories") {
+            break;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out.trim_end().to_string()
 }
 
 fn build_reduce_prompt(batch: &HnDigestChunkSummaries, interests: Option<&str>) -> String {
@@ -1100,7 +1191,11 @@ fn render_story_line(n: usize, story: &FormattedStory, decomposition_depth: u32)
     let url = story.url.trim();
 
     match decomposition_depth {
-        0 => format!("{n}. {} — {}", truncate_chars(title, 140), url),
+        0 => format!(
+            "{n}. {} — {}",
+            truncate_chars(title, 140),
+            truncate_chars(url, 200)
+        ),
         1 => format!(
             "{n}. {} — {}",
             truncate_chars(title, 120),
@@ -1109,7 +1204,7 @@ fn render_story_line(n: usize, story: &FormattedStory, decomposition_depth: u32)
         2 => format!("{n}. {}", truncate_chars(title, 100)),
         3 => format!("{n}. {}", truncate_chars(title, 80)),
         4 => format!("{n}. {}", truncate_chars(title, 60)),
-        _ => format!("{n}."),
+        _ => format!("{n}. {}", truncate_chars(title, 40)),
     }
 }
 

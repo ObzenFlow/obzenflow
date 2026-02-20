@@ -1885,6 +1885,35 @@ mod tests {
         let system_journal: Arc<dyn Journal<SystemEvent>> =
             Arc::new(NoopJournal::new(system_owner));
 
+        let topology_stage_id = obzenflow_topology::StageId::from_ulid(stage_id.as_ulid());
+        let topology_stage = obzenflow_topology::StageInfo::new(
+            topology_stage_id,
+            "cb_source",
+            obzenflow_topology::StageType::FiniteSource,
+        );
+        let dummy_stage_id =
+            obzenflow_topology::StageId::from_ulid(obzenflow_core::StageId::new().as_ulid());
+        let dummy_stage = obzenflow_topology::StageInfo::new(
+            dummy_stage_id,
+            "dummy",
+            obzenflow_topology::StageType::Sink,
+        );
+        let topology = obzenflow_topology::Topology::new_unvalidated(
+            vec![topology_stage, dummy_stage],
+            vec![obzenflow_topology::DirectedEdge::new(
+                topology_stage_id,
+                dummy_stage_id,
+                obzenflow_topology::EdgeKind::Forward,
+            )],
+        )
+        .expect("topology");
+        let backpressure_registry = std::sync::Arc::new(
+            obzenflow_runtime_services::backpressure::BackpressureRegistry::new(
+                &topology,
+                &obzenflow_runtime_services::backpressure::BackpressurePlan::disabled(),
+            ),
+        );
+
         let resources = StageResources {
             flow_id: FlowId::new(),
             data_journal,
@@ -1902,6 +1931,7 @@ mod tests {
             error_journals: Vec::new(),
             backpressure_writer: Default::default(),
             backpressure_readers: Default::default(),
+            backpressure_registry,
             replay_archive: None,
         };
 

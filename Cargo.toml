@@ -40,7 +40,7 @@ obzenflow_benchmarks = { version = "0.1.0", path = "crates/obzenflow_benchmarks"
 obzenflow_sketches = { version = "0.1.0", path = "crates/obzenflow_sketches" }
 
 # External ObzenFlow crates
-obzenflow-topology = "0.2"
+obzenflow-topology = "0.3"
 obzenflow-fsm = "0.3"
 
 # Async/runtime + utilities

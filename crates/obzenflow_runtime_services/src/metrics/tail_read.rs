@@ -36,7 +36,10 @@ type StageJournalEntry = (
 pub async fn read_latest_runtime_context(
     journal: &Arc<dyn Journal<ChainEvent>>,
 ) -> Option<RuntimeContext> {
-    for n in [1, 5, 20, 100, 500, 2_000] {
+    // In most flows, the last few events contain a runtime_context snapshot.
+    // However, some stages can end with a large number of control or forwarded
+    // events that omit runtime_context, so we expand the search window.
+    for n in [1, 5, 20, 100, 500, 2_000, 10_000, 50_000] {
         match journal.read_last_n(n).await {
             Ok(events) => {
                 // IMPORTANT: read_last_n returns most recent first (API contract).
@@ -66,7 +69,10 @@ pub async fn read_latest_runtime_context_for_stage(
     journal: &Arc<dyn Journal<ChainEvent>>,
     stage_id: StageId,
 ) -> Option<RuntimeContext> {
-    for n in [1, 5, 20, 100, 500, 2_000] {
+    // See read_latest_runtime_context. The stage-filtered variant can be more
+    // sensitive to "tail noise" because forwarded events often re-stamp
+    // flow_context but omit runtime_context.
+    for n in [1, 5, 20, 100, 500, 2_000, 10_000, 50_000] {
         match journal.read_last_n(n).await {
             Ok(events) => {
                 for env in events.into_iter() {

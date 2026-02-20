@@ -185,6 +185,11 @@ pub struct StageResources {
     /// Backpressure readers keyed by upstream stage ID (FLOWIP-086k).
     pub backpressure_readers: HashMap<StageId, BackpressureReader>,
 
+    /// Flow-scoped backpressure registry (FLOWIP-086k).
+    ///
+    /// Used by cycle entry points to evaluate SCC quiescence (FLOWIP-051n).
+    pub backpressure_registry: Arc<BackpressureRegistry>,
+
     /// Optional replay archive injection (FLOWIP-095a). Sources use this to
     /// read archived journals instead of calling external systems.
     pub replay_archive: Option<Arc<dyn ReplayArchive>>,
@@ -242,9 +247,11 @@ impl StageResourcesBuilder {
         let message_bus = Arc::new(FsmMessageBus::new());
 
         // Build backpressure registry once per flow (Phase 1: in-process).
+        let mut backpressure_plan = self.backpressure_plan;
+        backpressure_plan.auto_enable_scc_internal_edges(self.topology.as_ref());
         let backpressure_registry = Arc::new(BackpressureRegistry::new(
             self.topology.as_ref(),
-            &self.backpressure_plan,
+            &backpressure_plan,
         ));
 
         // Build stage resources for each stage
@@ -413,6 +420,7 @@ impl StageResourcesBuilder {
                 error_journals: error_journals_for_stage,
                 backpressure_writer,
                 backpressure_readers,
+                backpressure_registry: backpressure_registry.clone(),
                 replay_archive: self.replay_archive.clone(),
             };
 

@@ -9,6 +9,7 @@ pub mod config;
 pub mod fsm;
 pub mod handle;
 pub mod join_metadata;
+pub mod max_iterations;
 pub mod supervisor;
 
 // Re-export commonly used types
@@ -18,3 +19,4 @@ pub use config::{ObserverConfig, StageConfig as PipelineStageConfig, StageHandle
 pub use fsm::{PipelineAction, PipelineEvent, PipelineState};
 pub use handle::{FlowHandle, MiddlewareStackConfig};
 pub use join_metadata::JoinMetadata;
+pub use max_iterations::MaxIterations;

@@ -10,7 +10,6 @@
 use crate::messaging::{PollResult, SubscriptionPoller};
 use crate::supervised_base::base::Supervisor;
 use crate::supervised_base::{EventLoopDirective, SelfSupervised};
-use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::SystemEvent;
 use obzenflow_core::event::{JournalEvent, WriterId};
 use obzenflow_core::id::SystemId;
@@ -142,16 +141,6 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                 let mut system_subscription = ctx.system_subscription.take();
                 let mut export_timer = ctx.export_timer.take();
 
-                // Helper to check if either subscription has a drain event
-                let check_for_drain = |envelope: &obzenflow_core::EventEnvelope<ChainEvent>| {
-                    matches!(
-                        &envelope.event.content,
-                        obzenflow_core::event::ChainEventContent::FlowControl(
-                            FlowControlPayload::Drain
-                        )
-                    )
-                };
-
                 let directive: Result<
                     EventLoopDirective<Self::Event>,
                     Box<dyn std::error::Error + Send + Sync>,
@@ -225,6 +214,20 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                                 );
                                 if matches!(
                                     &envelope.event.event,
+                                    obzenflow_core::event::SystemEventType::MetricsCoordination(
+                                        obzenflow_core::event::MetricsCoordinationEvent::DrainRequested,
+                                    )
+                                ) {
+                                    tracing::info!(
+                                        "Metrics aggregator received drain request from system journal"
+                                    );
+                                    export_timer = None;
+                                    directive = Ok(EventLoopDirective::Transition(
+                                        MetricsAggregatorEvent::StartDraining,
+                                    ))
+                                } else {
+                                if matches!(
+                                    &envelope.event.event,
                                     obzenflow_core::event::SystemEventType::PipelineLifecycle(
                                         obzenflow_core::event::PipelineLifecycleEvent::Draining { .. }
                                             | obzenflow_core::event::PipelineLifecycleEvent::AllStagesCompleted { .. }
@@ -241,6 +244,7 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                                         envelope: Box::new(envelope),
                                     }
                                 ))
+                                }
                             }
                             Ok(None) => {
                                 // No events available - sleep to avoid busy loop
@@ -280,23 +284,7 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                                     event_kind = kind,
                                     "Metrics aggregator received journal event"
                                 );
-                                // Check for drain event
-                                if check_for_drain(&envelope) {
-                                    tracing::info!(
-                                        "Metrics aggregator received drain event from data journal \
-                                         event_id={} writer={:?}",
-                                        envelope.event.id,
-                                        envelope.event.writer_id
-                                    );
-                                    // Clear the timer when transitioning away from Running
-                                    export_timer = None;
-                                    // Immediately transition into draining; don't process this
-                                    // event as a normal metrics update.
-                                    directive = Ok(EventLoopDirective::Transition(
-                                        MetricsAggregatorEvent::StartDraining,
-                                    ));
-                                } else if envelope.event.is_control() || envelope.event.is_system()
-                                {
+                                if envelope.event.is_control() || envelope.event.is_system() {
                                     // Skip control and system events - they shouldn't be counted
                                     // in metrics
                                     directive = Ok(EventLoopDirective::Continue);
@@ -343,21 +331,7 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                                     event_type = envelope.event.event_type(),
                                     "Metrics aggregator received error event"
                                 );
-                                // Check for drain event
-                                if check_for_drain(&envelope) {
-                                    tracing::info!(
-                                        "Metrics aggregator received drain event from error journal \
-                                         event_id={} writer={:?}",
-                                        envelope.event.id,
-                                        envelope.event.writer_id
-                                    );
-                                    // Clear the timer when transitioning away from Running
-                                    export_timer = None;
-                                    directive = Ok(EventLoopDirective::Transition(
-                                        MetricsAggregatorEvent::StartDraining,
-                                    ));
-                                } else if envelope.event.is_control() || envelope.event.is_system()
-                                {
+                                if envelope.event.is_control() || envelope.event.is_system() {
                                     // Skip control and system events
                                     directive = Ok(EventLoopDirective::Continue);
                                 } else {

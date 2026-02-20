@@ -7,13 +7,42 @@
 use crate::stages::common::handlers::{
     FiniteSourceHandler, InfiniteSourceHandler, SinkHandler, TransformHandler,
 };
-use obzenflow_core::StageId;
+use obzenflow_core::{SccId, StageId};
+use std::collections::HashSet;
+
+use super::MaxIterations;
 
 /// Supervisor-level cycle protection configuration (FLOWIP-051l).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CycleGuardConfig {
-    /// Maximum iterations allowed for a single correlation ID within a cycle member stage.
-    pub max_iterations: usize,
+    /// Maximum round trips allowed for a single event within this SCC.
+    ///
+    /// Enforced by the cycle guard at the SCC entry point (FLOWIP-051p).
+    pub max_iterations: MaxIterations,
+
+    /// Opaque SCC identifier.
+    ///
+    /// Deterministic for a given topology, but not stable across topology changes.
+    /// Used only for grouping cycle-member stages within a single materialisation.
+    pub scc_id: SccId,
+
+    /// Upstream stages outside this stage's SCC.
+    ///
+    /// EOF/Drain from these upstreams means "no more new data entering the cycle".
+    pub external_upstreams: HashSet<StageId>,
+
+    /// Upstream stages inside this stage's SCC.
+    pub internal_upstreams: HashSet<StageId>,
+
+    /// Whether this stage is the SCC entry point.
+    ///
+    /// Only the entry point buffers terminal signals and evaluates SCC quiescence.
+    pub is_entry_point: bool,
+
+    /// All (upstream, downstream) edge pairs within this SCC.
+    ///
+    /// Only populated for entry-point stages.
+    pub scc_internal_edges: Vec<(StageId, StageId)>,
 }
 
 /// Stage handler type that can be converted to BoxedStageHandle
