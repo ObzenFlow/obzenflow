@@ -10,7 +10,9 @@
 
 pub mod finite;
 pub mod infinite;
+pub(crate) mod replay_lifecycle;
 pub mod strategies;
+pub(crate) mod supervision;
 pub mod typed;
 
 pub use typed::{

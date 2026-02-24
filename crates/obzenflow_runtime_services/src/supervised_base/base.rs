@@ -22,18 +22,13 @@ pub enum EventLoopDirective<E> {
     Terminate,
 }
 
-/// Private module to seal the Supervisor trait
-pub mod private {
-    pub trait Sealed {}
-}
-
 /// Base trait that all supervisors must implement
 /// This enforces that every supervisor provides FSM building capabilities
 ///
-/// This trait is sealed - it can ONLY be implemented by types that also implement
-/// either SelfSupervised or HandlerSupervised. This prevents anyone from creating
-/// a "supervisor" that bypasses FSM patterns.
-pub trait Supervisor: private::Sealed {
+/// This is crate-internal (see `supervised_base::mod.rs`). External code should
+/// implement `SelfSupervised` or `HandlerSupervised` instead of implementing
+/// `Supervisor` directly.
+pub trait Supervisor {
     type State: StateVariant;
     type Event: EventVariant;
     type Context: FsmContext;

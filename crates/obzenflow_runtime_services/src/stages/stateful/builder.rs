@@ -10,15 +10,13 @@ use crate::metrics::instrumentation::StageInstrumentation;
 use crate::stages::common::control_strategies::{ControlEventStrategy, JonestownStrategy};
 use crate::stages::common::handlers::StatefulHandler;
 use crate::stages::resources_builder::StageResources;
-use crate::supervised_base::base::Supervisor;
 use crate::supervised_base::{
-    BuilderError, ChannelBuilder, EventLoopDirective, EventReceiver, HandleBuilder,
-    HandlerSupervised, HandlerSupervisedExt, StateWatcher, SupervisorBuilder,
-    SupervisorTaskBuilder,
+    BuilderError, ChannelBuilder, HandleBuilder, HandlerSupervisedExt,
+    HandlerSupervisedWithExternalEvents, SupervisorBuilder, SupervisorTaskBuilder,
 };
 
 use super::config::StatefulConfig;
-use super::fsm::{StatefulAction, StatefulContext, StatefulEvent, StatefulState};
+use super::fsm::{StatefulContext, StatefulState};
 use super::handle::StatefulHandle;
 use super::supervisor::StatefulSupervisor;
 
@@ -121,6 +119,7 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Super
             name: format!("stateful_{}", self.config.stage_name),
             system_journal: self.resources.system_journal.clone(),
             stage_id: self.config.stage_id,
+            subscription: None,
             _marker: std::marker::PhantomData,
         };
 
@@ -131,13 +130,11 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Super
         let supervisor_name = format!("stateful_{}", self.config.stage_name);
         let task = SupervisorTaskBuilder::<StatefulSupervisor<H>>::new(&supervisor_name).spawn(
             move || async move {
-                // Create a wrapper that handles external events
-                let supervisor_with_events = HandlerSupervisedWithExternalEvents {
+                let supervisor_with_events = HandlerSupervisedWithExternalEvents::new(
                     supervisor,
-                    external_events: event_receiver,
-                    state_watcher: state_watcher_for_task,
-                    last_state: None,
-                };
+                    event_receiver,
+                    state_watcher_for_task,
+                );
 
                 // Run with the wrapper
                 HandlerSupervisedExt::run(
@@ -156,117 +153,5 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Super
             .with_supervisor_task(task)
             .build_standard()
             .map_err(|e| BuilderError::Other(e.to_string()))
-    }
-}
-
-/// Internal wrapper that bridges external events with the handler-supervised supervisor
-struct HandlerSupervisedWithExternalEvents<
-    H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
-> {
-    supervisor: StatefulSupervisor<H>,
-    external_events: EventReceiver<StatefulEvent<H>>,
-    state_watcher: StateWatcher<StatefulState<H>>,
-    last_state: Option<StatefulState<H>>,
-}
-
-// Delegate trait implementations to the inner supervisor
-impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Supervisor
-    for HandlerSupervisedWithExternalEvents<H>
-{
-    type State = StatefulState<H>;
-    type Event = StatefulEvent<H>;
-    type Context = StatefulContext<H>;
-    type Action = StatefulAction<H>;
-
-    fn build_state_machine(
-        &self,
-        initial_state: Self::State,
-    ) -> obzenflow_fsm::StateMachine<Self::State, Self::Event, Self::Context, Self::Action> {
-        // Delegate to the inner supervisor so we reuse its FSM definition
-        // (currently expressed via the typed `fsm!` DSL) instead of
-        // constructing a separate builder here.
-        self.supervisor.build_state_machine(initial_state)
-    }
-
-    fn name(&self) -> &str {
-        self.supervisor.name()
-    }
-}
-
-// Implement Sealed for the wrapper
-impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
-    crate::supervised_base::base::private::Sealed for HandlerSupervisedWithExternalEvents<H>
-{
-}
-
-#[async_trait::async_trait]
-impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSupervised
-    for HandlerSupervisedWithExternalEvents<H>
-{
-    type Handler = H;
-
-    fn writer_id(&self) -> obzenflow_core::WriterId {
-        self.supervisor.writer_id()
-    }
-
-    fn stage_id(&self) -> obzenflow_core::StageId {
-        self.supervisor.stage_id()
-    }
-
-    fn event_for_action_error(&self, msg: String) -> StatefulEvent<H> {
-        self.supervisor.event_for_action_error(msg)
-    }
-
-    async fn write_completion_event(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        self.supervisor.write_completion_event().await
-    }
-
-    async fn dispatch_state(
-        &mut self,
-        state: &Self::State,
-        context: &mut Self::Context,
-    ) -> Result<EventLoopDirective<Self::Event>, Box<dyn std::error::Error + Send + Sync>> {
-        // Update state for external observers only when it changes (FLOWIP-086i).
-        if self.last_state.as_ref() != Some(state) {
-            let new_state = state.clone();
-            let _ = self.state_watcher.update(new_state.clone());
-            self.last_state = Some(new_state);
-        }
-
-        // Created is a pure "wait for Initialize" state; block on control events to avoid spin.
-        if matches!(state, StatefulState::Created) {
-            match self.external_events.recv().await {
-                Some(event) => return Ok(EventLoopDirective::Transition(event)),
-                None => {
-                    if !matches!(state, StatefulState::Failed(_)) {
-                        return Ok(EventLoopDirective::Transition(StatefulEvent::Error(
-                            "External control channel closed".to_string(),
-                        )));
-                    }
-                }
-            }
-        }
-
-        // Check for external events first
-        match self.external_events.try_recv() {
-            Ok(event) => {
-                // Got an external event, transition to handle it
-                return Ok(EventLoopDirective::Transition(event));
-            }
-            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
-                // No external events, proceed with normal dispatch
-            }
-            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
-                // Channel closed, initiate shutdown only if not already failed
-                if !matches!(state, StatefulState::Failed(_)) {
-                    return Ok(EventLoopDirective::Transition(StatefulEvent::Error(
-                        "External control channel closed".to_string(),
-                    )));
-                }
-            }
-        }
-
-        // Delegate to the actual supervisor
-        self.supervisor.dispatch_state(state, context).await
     }
 }

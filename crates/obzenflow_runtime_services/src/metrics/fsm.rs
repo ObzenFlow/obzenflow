@@ -142,21 +142,6 @@ pub struct MetricsAggregatorContext {
     /// Flow-scoped backpressure registry for observability (FLOWIP-086k).
     pub backpressure_registry: Option<Arc<crate::backpressure::BackpressureRegistry>>,
 
-    /// Subscription to read from all stage data journals
-    pub data_subscription:
-        Option<crate::messaging::upstream_subscription::UpstreamSubscription<ChainEvent>>,
-
-    /// Subscription to read from all error journals (FLOWIP-082g)
-    pub error_subscription:
-        Option<crate::messaging::upstream_subscription::UpstreamSubscription<ChainEvent>>,
-
-    /// Subscription to read from system journal for lifecycle events (FLOWIP-059b)
-    pub system_subscription: Option<
-        crate::messaging::system_subscription::SystemSubscription<
-            obzenflow_core::event::SystemEvent,
-        >,
-    >,
-
     /// Whether to include error journals in metrics collection
     pub include_error_journals: bool,
 
@@ -164,8 +149,17 @@ pub struct MetricsAggregatorContext {
     pub metrics_store: MetricsStore,
     pub export_interval_secs: u64,
     pub system_id: SystemId,
-    pub export_timer: Option<tokio::time::Interval>,
     pub stage_metadata: HashMap<StageId, StageMetadata>,
+}
+
+pub(crate) struct MetricsAggregatorIo {
+    pub(crate) data_subscription:
+        crate::messaging::upstream_subscription::UpstreamSubscription<ChainEvent>,
+    pub(crate) error_subscription:
+        Option<crate::messaging::upstream_subscription::UpstreamSubscription<ChainEvent>>,
+    pub(crate) system_subscription: crate::messaging::system_subscription::SystemSubscription<
+        obzenflow_core::event::SystemEvent,
+    >,
 }
 
 /// Simple metrics storage
@@ -254,14 +248,14 @@ pub struct StageMetrics {
 }
 
 impl MetricsAggregatorContext {
-    pub async fn new(
+    pub(crate) async fn new(
         inputs: crate::metrics::inputs::MetricsInputs,
         system_journal: Arc<dyn Journal<obzenflow_core::event::SystemEvent>>,
         exporter: Option<Arc<dyn obzenflow_core::metrics::MetricsExporter>>,
         export_interval_secs: u64,
         system_id: SystemId,
         stage_metadata: HashMap<StageId, StageMetadata>,
-    ) -> Result<Self, String> {
+    ) -> Result<(Self, MetricsAggregatorIo), String> {
         // Initialize in-memory metrics store so we can seed snapshot fields
         // before constructing subscriptions (FLOWIP-059 Phase 6).
         let mut metrics_store = MetricsStore::default();
@@ -636,22 +630,26 @@ impl MetricsAggregatorContext {
             .map(|(id, journal)| (*id, journal.clone()))
             .collect();
 
-        Ok(Self {
+        let context = Self {
             system_journal,
             stage_data_journals,
             stage_error_journals,
             backpressure_registry: inputs.backpressure_registry.clone(),
-            data_subscription: Some(data_subscription),
-            error_subscription,
-            system_subscription: Some(system_subscription),
             include_error_journals: true, // Default to true per FLOWIP-082g
             exporter,
             metrics_store,
             export_interval_secs,
             system_id,
-            export_timer: None,
             stage_metadata,
-        })
+        };
+
+        let io = MetricsAggregatorIo {
+            data_subscription,
+            error_subscription,
+            system_subscription,
+        };
+
+        Ok((context, io))
     }
 }
 
@@ -2348,15 +2346,11 @@ mod tests {
             stage_data_journals: HashMap::new(),
             stage_error_journals: HashMap::new(),
             backpressure_registry: None,
-            data_subscription: None,
-            error_subscription: None,
-            system_subscription: None,
             include_error_journals: true,
             exporter: None,
             metrics_store: store,
             export_interval_secs: 10,
             system_id: obzenflow_core::SystemId::new(),
-            export_timer: None,
             stage_metadata,
         };
 

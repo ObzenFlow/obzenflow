@@ -10,20 +10,16 @@ use std::time::Duration;
 use crate::metrics::instrumentation::StageInstrumentation;
 use crate::stages::common::handlers::InfiniteSourceHandler;
 use crate::stages::resources_builder::StageResources;
+use crate::stages::source::replay_lifecycle::ReplayCompletionGuard;
 use crate::stages::source::strategies::{JonestownSourceStrategy, SourceControlStrategy};
-use crate::supervised_base::base::Supervisor;
 use crate::supervised_base::{
-    BuilderError, ChannelBuilder, EventLoopDirective, EventReceiver, HandleBuilder,
-    HandlerSupervised, HandlerSupervisedExt, StateWatcher, SupervisorBuilder,
-    SupervisorTaskBuilder,
+    BuilderError, ChannelBuilder, HandleBuilder, HandlerSupervisedExt,
+    HandlerSupervisedWithExternalEvents, SupervisorBuilder, SupervisorTaskBuilder,
 };
-use obzenflow_core::{StageId, WriterId};
+use obzenflow_core::WriterId;
 
 use super::config::InfiniteSourceConfig;
-use super::fsm::{
-    InfiniteSourceAction, InfiniteSourceContext, InfiniteSourceContextInit, InfiniteSourceEvent,
-    InfiniteSourceState,
-};
+use super::fsm::{InfiniteSourceContext, InfiniteSourceContextInit, InfiniteSourceState};
 use super::handle::InfiniteSourceHandle;
 use super::supervisor::InfiniteSourceSupervisor;
 
@@ -119,7 +115,7 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
             ),
             replay_driver: None,
             replay_started_at: None,
-            replay_completed_emitted: false,
+            replay_completion: ReplayCompletionGuard::default(),
         };
 
         // Clone what we need for the task
@@ -129,13 +125,11 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
         let supervisor_name = format!("infinite_source_{}", self.config.stage_name);
         let task = SupervisorTaskBuilder::<InfiniteSourceSupervisor<H>>::new(&supervisor_name)
             .spawn(move || async move {
-                // Create a wrapper that handles external events
-                let supervisor_with_events = HandlerSupervisedWithExternalEvents {
+                let supervisor_with_events = HandlerSupervisedWithExternalEvents::new(
                     supervisor,
-                    external_events: event_receiver,
-                    state_watcher: state_watcher_for_task,
-                    last_state: None,
-                };
+                    event_receiver,
+                    state_watcher_for_task,
+                );
 
                 // Run with the wrapper
                 HandlerSupervisedExt::run(
@@ -153,121 +147,5 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
             .with_supervisor_task(task)
             .build_standard()
             .map_err(|e| BuilderError::Other(e.to_string()))
-    }
-}
-
-/// Internal wrapper that bridges external events with the handler-supervised supervisor
-struct HandlerSupervisedWithExternalEvents<
-    H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
-> {
-    supervisor: InfiniteSourceSupervisor<H>,
-    external_events: EventReceiver<InfiniteSourceEvent<H>>,
-    state_watcher: StateWatcher<InfiniteSourceState<H>>,
-    last_state: Option<InfiniteSourceState<H>>,
-}
-
-// Delegate trait implementations to the inner supervisor
-impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Supervisor
-    for HandlerSupervisedWithExternalEvents<H>
-{
-    type State = InfiniteSourceState<H>;
-    type Event = InfiniteSourceEvent<H>;
-    type Context = InfiniteSourceContext<H>;
-    type Action = InfiniteSourceAction<H>;
-
-    fn build_state_machine(
-        &self,
-        initial_state: Self::State,
-    ) -> obzenflow_fsm::StateMachine<Self::State, Self::Event, Self::Context, Self::Action> {
-        // Delegate to the inner supervisor so we reuse its DSL-defined FSM.
-        self.supervisor.build_state_machine(initial_state)
-    }
-
-    fn name(&self) -> &str {
-        self.supervisor.name()
-    }
-}
-
-// Implement Sealed for the wrapper
-impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
-    crate::supervised_base::base::private::Sealed for HandlerSupervisedWithExternalEvents<H>
-{
-}
-
-#[async_trait::async_trait]
-impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSupervised
-    for HandlerSupervisedWithExternalEvents<H>
-{
-    type Handler = H;
-
-    fn writer_id(&self) -> obzenflow_core::WriterId {
-        self.supervisor.writer_id()
-    }
-
-    fn stage_id(&self) -> StageId {
-        self.supervisor.stage_id()
-    }
-
-    fn event_for_action_error(&self, msg: String) -> InfiniteSourceEvent<H> {
-        self.supervisor.event_for_action_error(msg)
-    }
-
-    async fn write_completion_event(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        self.supervisor.write_completion_event().await
-    }
-
-    async fn dispatch_state(
-        &mut self,
-        state: &Self::State,
-        context: &mut Self::Context,
-    ) -> Result<EventLoopDirective<Self::Event>, Box<dyn std::error::Error + Send + Sync>> {
-        // Update state for external observers only when it changes (FLOWIP-086i).
-        if self.last_state.as_ref() != Some(state) {
-            let new_state = state.clone();
-            let _ = self.state_watcher.update(new_state.clone());
-            self.last_state = Some(new_state);
-        }
-
-        // In these states the supervisor is purely waiting for external control events.
-        // Blocking here avoids a busy-spin loop (FLOWIP-086i).
-        if matches!(
-            state,
-            InfiniteSourceState::Created
-                | InfiniteSourceState::Initialized
-                | InfiniteSourceState::WaitingForGun
-        ) {
-            match self.external_events.recv().await {
-                Some(event) => return Ok(EventLoopDirective::Transition(event)),
-                None => {
-                    if !matches!(state, InfiniteSourceState::Failed(_)) {
-                        return Ok(EventLoopDirective::Transition(InfiniteSourceEvent::Error(
-                            "External control channel closed".to_string(),
-                        )));
-                    }
-                }
-            }
-        }
-
-        // Check for external events first
-        match self.external_events.try_recv() {
-            Ok(event) => {
-                // Got an external event, transition to handle it
-                return Ok(EventLoopDirective::Transition(event));
-            }
-            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
-                // No external events, proceed with normal dispatch
-            }
-            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
-                // Channel closed, initiate shutdown only if not already failed
-                if !matches!(state, InfiniteSourceState::Failed(_)) {
-                    return Ok(EventLoopDirective::Transition(InfiniteSourceEvent::Error(
-                        "External control channel closed".to_string(),
-                    )));
-                }
-            }
-        }
-
-        // Delegate to the actual supervisor
-        self.supervisor.dispatch_state(state, context).await
     }
 }

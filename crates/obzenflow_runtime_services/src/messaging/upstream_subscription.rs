@@ -553,6 +553,14 @@ where
         self.last_eof_outcome.take()
     }
 
+    /// Peek at the most recent EOF accounting outcome, if any.
+    ///
+    /// This does not clear the stored outcome. Supervisors typically call
+    /// `take_last_eof_outcome()` once they have accepted the EOF decision.
+    pub fn last_eof_outcome(&self) -> Option<&EofOutcome> {
+        self.last_eof_outcome.as_ref()
+    }
+
     /// Enable contract emission for at-least-once delivery guarantees
     pub fn with_contracts(
         mut self,
@@ -1460,6 +1468,22 @@ where
             }
         }
         false
+    }
+
+    /// Convenience method that combines `should_check_contracts` and
+    /// `check_contracts` into a single call.
+    ///
+    /// Returns `None` when the check interval has not elapsed yet (no work
+    /// done). Returns `Some(result)` when a check was performed.
+    pub async fn maybe_check_contracts(
+        &mut self,
+        reader_progress: &mut [ReaderProgress],
+    ) -> Option<Result<ContractStatus>> {
+        if self.should_check_contracts(reader_progress) {
+            Some(self.check_contracts(reader_progress).await)
+        } else {
+            None
+        }
     }
 }
 

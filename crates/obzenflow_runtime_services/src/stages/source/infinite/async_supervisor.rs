@@ -6,16 +6,15 @@
 
 use crate::replay::{ReplayContextTemplate, ReplayDriver};
 use crate::stages::common::handlers::AsyncInfiniteSourceHandler;
+use crate::stages::common::supervision::flow_context_factory::make_flow_context;
+use crate::stages::source::replay_lifecycle::ReplayCompletionGuard;
+use crate::stages::source::supervision::{
+    drain_pending_outputs_async, emit_batch_to_pending_outputs, per_data_event_duration_for_batch,
+};
 use crate::supervised_base::base::Supervisor;
 use crate::supervised_base::{EventLoopDirective, EventReceiver, HandlerSupervised, StateWatcher};
-use obzenflow_core::event::context::FlowContext;
-use obzenflow_core::event::payloads::observability_payload::{
-    MiddlewareLifecycle, ObservabilityPayload,
-};
-use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
-use obzenflow_core::event::{
-    ChainEventFactory, ReplayLifecycleEvent, SystemEvent, SystemEventType,
-};
+use obzenflow_core::event::context::StageType;
+use obzenflow_core::event::{ReplayLifecycleEvent, SystemEvent, SystemEventType};
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{StageId, WriterId};
 use obzenflow_fsm::{fsm, EventVariant, StateVariant, Transition};
@@ -58,13 +57,8 @@ pub(crate) struct AsyncInfiniteSourceSupervisor<
     /// Replay lifecycle started timestamp for duration tracking (FLOWIP-095a).
     pub(crate) replay_started_at: Option<Instant>,
 
-    /// Whether we've emitted ReplayLifecycle::Completed for this stage.
-    pub(crate) replay_completed_emitted: bool,
-}
-
-impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
-    crate::supervised_base::base::private::Sealed for AsyncInfiniteSourceSupervisor<H>
-{
+    /// Guard that ensures ReplayLifecycle::Completed is emitted once (FLOWIP-095a).
+    pub(crate) replay_completion: ReplayCompletionGuard,
 }
 
 impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Supervisor
@@ -355,165 +349,32 @@ impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
             InfiniteSourceState::Running => {
                 // Drain any pending outputs first so backpressure doesn't let sources
                 // accumulate unbounded in-memory batches.
-                while let Some(event_to_write) = ctx.pending_outputs.pop_front() {
-                    let journal = if matches!(
-                        event_to_write.processing_info.status,
-                        obzenflow_core::event::status::processing_status::ProcessingStatus::Error { .. }
-                    ) {
-                        &ctx.error_journal
-                    } else {
-                        &ctx.data_journal
-                    };
+                let flow_id = ctx.flow_id.to_string();
+                let stage_flow_context = make_flow_context(
+                    &ctx.flow_name,
+                    &flow_id,
+                    &ctx.stage_name,
+                    self.stage_id,
+                    StageType::InfiniteSource,
+                );
 
-                    let event_to_write = event_to_write
-                        .with_runtime_context(ctx.instrumentation.snapshot_with_control());
-
-                    if Arc::ptr_eq(journal, &ctx.data_journal) && event_to_write.is_data() {
-                        // Debug-only: emit activity pulses even when bypass is enabled, so
-                        // operators can see what *would* have blocked (FLOWIP-086k).
-                        if crate::backpressure::BackpressureWriter::is_bypass_enabled() {
-                            if let Some((min_credit, limiting)) =
-                                ctx.backpressure_writer.min_downstream_credit_detail()
-                            {
-                                if min_credit < 1 {
-                                    ctx.backpressure_pulse.record_delay(
-                                        Duration::ZERO,
-                                        Some(min_credit),
-                                        Some(limiting),
-                                    );
-                                    if let Some(pulse) = ctx.backpressure_pulse.maybe_emit() {
-                                        let flow_context = FlowContext {
-                                            flow_name: ctx.flow_name.clone(),
-                                            flow_id: ctx.flow_id.to_string(),
-                                            stage_name: ctx.stage_name.clone(),
-                                            stage_id: self.stage_id,
-                                            stage_type: obzenflow_core::event::context::StageType::InfiniteSource,
-                                        };
-
-                                        let event = ChainEventFactory::observability_event(
-                                            WriterId::from(self.stage_id),
-                                            ObservabilityPayload::Middleware(
-                                                MiddlewareLifecycle::Backpressure(pulse),
-                                            ),
-                                        )
-                                        .with_flow_context(flow_context)
-                                        .with_runtime_context(
-                                            ctx.instrumentation.snapshot_with_control(),
-                                        );
-
-                                        match ctx.data_journal.append(event, None).await {
-                                            Ok(written) => {
-                                                crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
-                                                    &written,
-                                                    &self.system_journal,
-                                                )
-                                                .await;
-                                            }
-                                            Err(e) => tracing::warn!(
-                                                stage_name = %ctx.stage_name,
-                                                journal_error = %e,
-                                                "Failed to append backpressure activity pulse"
-                                            ),
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        let Some(reservation) = ctx.backpressure_writer.reserve(1) else {
-                            ctx.pending_outputs.push_front(event_to_write);
-                            let delay = ctx.backpressure_backoff.next_delay();
-                            ctx.backpressure_writer.record_wait(delay);
-
-                            if let Some((min_credit, limiting)) =
-                                ctx.backpressure_writer.min_downstream_credit_detail()
-                            {
-                                ctx.backpressure_pulse.record_delay(
-                                    delay,
-                                    Some(min_credit),
-                                    Some(limiting),
-                                );
-                            } else {
-                                ctx.backpressure_pulse.record_delay(delay, None, None);
-                            }
-                            if let Some(pulse) = ctx.backpressure_pulse.maybe_emit() {
-                                let flow_context = FlowContext {
-                                    flow_name: ctx.flow_name.clone(),
-                                    flow_id: ctx.flow_id.to_string(),
-                                    stage_name: ctx.stage_name.clone(),
-                                    stage_id: self.stage_id,
-                                    stage_type:
-                                        obzenflow_core::event::context::StageType::InfiniteSource,
-                                };
-
-                                let event = ChainEventFactory::observability_event(
-                                    WriterId::from(self.stage_id),
-                                    ObservabilityPayload::Middleware(
-                                        MiddlewareLifecycle::Backpressure(pulse),
-                                    ),
-                                )
-                                .with_flow_context(flow_context)
-                                .with_runtime_context(ctx.instrumentation.snapshot_with_control());
-
-                                match ctx.data_journal.append(event, None).await {
-                                    Ok(written) => {
-                                        crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
-                                            &written,
-                                            &self.system_journal,
-                                        )
-                                        .await;
-                                    }
-                                    Err(e) => tracing::warn!(
-                                        stage_name = %ctx.stage_name,
-                                        journal_error = %e,
-                                        "Failed to append backpressure activity pulse"
-                                    ),
-                                }
-                            }
-
-                            tokio::select! {
-                                biased;
-                                maybe_event = self.external_events.recv() => {
-                                    match maybe_event {
-                                        Some(event) => return Ok(EventLoopDirective::Transition(event)),
-                                        None => {
-                                            return Ok(EventLoopDirective::Transition(InfiniteSourceEvent::Error(
-                                                "External control channel closed".to_string(),
-                                            )));
-                                        }
-                                    }
-                                }
-                                _ = tokio::time::sleep(delay) => {}
-                            }
-                            return Ok(EventLoopDirective::Continue);
-                        };
-
-                        let written = journal
-                            .append(event_to_write, None)
-                            .await
-                            .map_err(|e| format!("Failed to write event: {e}"))?;
-                        reservation.commit(1);
-                        ctx.backpressure_backoff.reset();
-
-                        crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
-                            &written,
-                            &self.system_journal,
-                        )
-                        .await;
-                    } else {
-                        let written = journal
-                            .append(event_to_write, None)
-                            .await
-                            .map_err(|e| format!("Failed to write event: {e}"))?;
-
-                        if Arc::ptr_eq(journal, &ctx.data_journal) {
-                            crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
-                                &written,
-                                &self.system_journal,
-                            )
-                            .await;
-                        }
-                    }
+                if let Some(directive) = drain_pending_outputs_async(
+                    &mut ctx.pending_outputs,
+                    &stage_flow_context,
+                    self.stage_id,
+                    &ctx.data_journal,
+                    &ctx.error_journal,
+                    &ctx.system_journal,
+                    &ctx.instrumentation,
+                    &ctx.backpressure_writer,
+                    &mut ctx.backpressure_pulse,
+                    &mut ctx.backpressure_backoff,
+                    &mut self.external_events,
+                    || InfiniteSourceEvent::Error("External control channel closed".to_string()),
+                )
+                .await?
+                {
+                    return Ok(directive);
                 }
 
                 ctx.instrumentation
@@ -566,13 +427,7 @@ impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
                         }
                     }
 
-                    let flow_context = FlowContext {
-                        flow_name: ctx.flow_name.clone(),
-                        flow_id: ctx.flow_id.to_string(),
-                        stage_name: ctx.stage_name.clone(),
-                        stage_id: self.stage_id,
-                        stage_type: obzenflow_core::event::context::StageType::InfiniteSource,
-                    };
+                    let flow_context = stage_flow_context.clone();
 
                     let tick_started_at = Instant::now();
                     let next_result = tokio::select! {
@@ -607,62 +462,32 @@ impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
                                 Duration::from_nanos(0)
                             };
 
-                            if let ProcessingStatus::Error { kind, .. } =
-                                &event.processing_info.status
-                            {
-                                let k = kind.clone().unwrap_or(ErrorKind::Unknown);
-                                ctx.instrumentation.record_error(k);
-                            }
-
                             let events_to_write = self.run_if_not_error(event, |e| vec![e]);
-                            for event_to_write in events_to_write {
-                                if event_to_write.is_data() {
-                                    ctx.instrumentation.record_output_event(&event_to_write);
-                                    ctx.instrumentation
-                                        .events_processed_total
-                                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                    ctx.instrumentation
-                                        .record_processing_time(per_data_event_duration);
-                                }
-                                ctx.pending_outputs.push_back(event_to_write);
-                            }
+                            emit_batch_to_pending_outputs(
+                                events_to_write,
+                                &stage_flow_context,
+                                &ctx.instrumentation,
+                                per_data_event_duration,
+                                &mut ctx.pending_outputs,
+                            );
 
                             Ok(EventLoopDirective::Continue)
                         }
                         Ok(None) => {
-                            if !self.replay_completed_emitted {
-                                self.replay_completed_emitted = true;
-                                let duration_ms = self
-                                    .replay_started_at
-                                    .map(|started| {
-                                        let ms = started.elapsed().as_millis();
-                                        u64::try_from(ms).unwrap_or(u64::MAX)
-                                    })
-                                    .unwrap_or(0);
-                                let (replayed_count, skipped_count) = self
-                                    .replay_driver
-                                    .as_ref()
-                                    .map_or((0, 0), |d| (d.replayed_events(), d.skipped_events()));
-                                let completed_event = SystemEvent::new(
-                                    WriterId::from(self.stage_id),
-                                    SystemEventType::ReplayLifecycle(
-                                        ReplayLifecycleEvent::Completed {
-                                            replayed_count,
-                                            skipped_count,
-                                            duration_ms,
-                                        },
-                                    ),
-                                );
-                                if let Err(e) =
-                                    self.system_journal.append(completed_event, None).await
-                                {
-                                    tracing::error!(
-                                        stage_name = %ctx.stage_name,
-                                        journal_error = %e,
-                                        "Failed to append ReplayLifecycle::Completed system event"
-                                    );
-                                }
-                            }
+                            let (replayed_count, skipped_count) = self
+                                .replay_driver
+                                .as_ref()
+                                .map_or((0, 0), |d| (d.replayed_events(), d.skipped_events()));
+                            self.replay_completion
+                                .maybe_emit_completed(
+                                    self.stage_id,
+                                    &ctx.stage_name,
+                                    &self.system_journal,
+                                    self.replay_started_at,
+                                    replayed_count,
+                                    skipped_count,
+                                )
+                                .await;
 
                             ctx.completion_reason =
                                 InfiniteSourceCompletionReason::ArchiveExhausted;
@@ -700,49 +525,17 @@ impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
 
                             let data_events_in_tick =
                                 events.iter().filter(|event| event.is_data()).count();
-                            let per_data_event_duration = if data_events_in_tick > 0 {
-                                let nanos = (tick_duration.as_nanos() / data_events_in_tick as u128)
-                                    .min(u64::MAX as u128)
-                                    as u64;
-                                Duration::from_nanos(nanos)
-                            } else {
-                                Duration::from_nanos(0)
-                            };
-
-                            for event in events {
-                                let flow_context = FlowContext {
-                                    flow_name: ctx.flow_name.clone(),
-                                    flow_id: ctx.flow_id.to_string(),
-                                    stage_name: ctx.stage_name.clone(),
-                                    stage_id: self.stage_id,
-                                    stage_type:
-                                        obzenflow_core::event::context::StageType::InfiniteSource,
-                                };
-
-                                let staged_event = event.with_flow_context(flow_context);
-
-                                if let ProcessingStatus::Error { kind, .. } =
-                                    &staged_event.processing_info.status
-                                {
-                                    let k = kind.clone().unwrap_or(ErrorKind::Unknown);
-                                    ctx.instrumentation.record_error(k);
-                                }
-
-                                let events_to_write =
-                                    self.run_if_not_error(staged_event, |e| vec![e]);
-
-                                for event_to_write in events_to_write {
-                                    if event_to_write.is_data() {
-                                        ctx.instrumentation.record_output_event(&event_to_write);
-                                        ctx.instrumentation
-                                            .events_processed_total
-                                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                        ctx.instrumentation
-                                            .record_processing_time(per_data_event_duration);
-                                    }
-                                    ctx.pending_outputs.push_back(event_to_write);
-                                }
-                            }
+                            let per_data_event_duration = per_data_event_duration_for_batch(
+                                tick_duration,
+                                data_events_in_tick,
+                            );
+                            emit_batch_to_pending_outputs(
+                                events,
+                                &stage_flow_context,
+                                &ctx.instrumentation,
+                                per_data_event_duration,
+                                &mut ctx.pending_outputs,
+                            );
 
                             Ok(EventLoopDirective::Continue)
                         }

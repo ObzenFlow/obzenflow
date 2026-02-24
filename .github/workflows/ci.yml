@@ -122,6 +122,11 @@ jobs:
           print(f"SPDX headers OK in {len(files)} Rust files")
           PY
 
+      - name: Verify supervised_base sealing
+        run: |
+          ! grep -n '^pub mod base;' crates/obzenflow_runtime_services/src/supervised_base/mod.rs
+          ! grep -n 'pub use base::Supervisor' crates/obzenflow_runtime_services/src/supervised_base/mod.rs
+
       - name: Install cargo-deny
         uses: taiki-e/install-action@v2
         with:

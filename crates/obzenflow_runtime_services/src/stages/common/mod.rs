@@ -12,6 +12,7 @@ pub mod handlers;
 pub mod middleware_mirror;
 pub mod source_handle;
 pub mod stage_handle;
+pub(crate) mod supervision;
 
 // Re-export handler traits for convenience
 pub use handlers::{

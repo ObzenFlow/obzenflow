@@ -11,13 +11,10 @@
 use crate::backpressure::{BackpressureReader, BackpressureWriter};
 use crate::messaging::upstream_subscription::{ContractConfig, ReaderProgress};
 use crate::messaging::UpstreamSubscription;
-use crate::metrics::instrumentation::{snapshot_stage_metrics, StageInstrumentation};
-use crate::metrics::tail_read;
+use crate::metrics::instrumentation::StageInstrumentation;
 use crate::stages::common::control_strategies::ControlEventStrategy;
 use crate::stages::common::handlers::SinkHandler;
-use crate::stages::common::stage_handle::{
-    FORCE_SHUTDOWN_MESSAGE, STOP_REASON_TIMEOUT, STOP_REASON_USER_STOP,
-};
+use crate::stages::common::supervision::lifecycle_actions;
 use crate::stages::resources_builder::BoundSubscriptionFactory;
 use obzenflow_core::event::context::{FlowContext, StageType};
 use obzenflow_core::event::{ChainEventFactory, SystemEvent};
@@ -370,141 +367,42 @@ impl<H: SinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAction<H> 
             }
 
             JournalSinkAction::PublishRunning => {
-                let running_event = SystemEvent::stage_running(ctx.stage_id);
-
-                if let Err(e) = ctx.system_journal.append(running_event, None).await {
-                    tracing::error!(
-                        stage_name = %ctx.stage_name,
-                        journal_error = %e,
-                        "Failed to publish running event; continuing without system journal entry"
-                    );
-                }
-
-                tracing::info!(
-                    stage_name = %ctx.stage_name,
-                    "Sink published running event"
-                );
+                lifecycle_actions::publish_running_best_effort(
+                    "Sink",
+                    ctx.stage_id,
+                    &ctx.stage_name,
+                    &ctx.system_journal,
+                )
+                .await;
                 Ok(())
             }
 
             JournalSinkAction::SendCompletion => {
-                // Write completion event to system journal using tail-read metrics.
-                //
-                // Some stages may legitimately complete without emitting any runtime-context
-                // bearing events (e.g. zero input / filtered streams). In that case, fall back
-                // to a best-effort snapshot from instrumentation instead of failing completion.
-                let metrics = match tail_read::read_stage_metrics_from_tail(
+                lifecycle_actions::send_completion_best_effort(
+                    "Sink",
+                    ctx.stage_id,
+                    &ctx.stage_name,
+                    &ctx.system_journal,
                     &ctx.data_journal,
                     Some(&ctx.error_journal),
-                    ctx.stage_id,
+                    ctx.instrumentation.as_ref(),
                 )
-                .await
-                {
-                    Some(metrics) => metrics,
-                    None => snapshot_stage_metrics(ctx.instrumentation.as_ref()),
-                };
-                let completion_event =
-                    SystemEvent::stage_completed_with_metrics(ctx.stage_id, metrics);
-
-                tracing::info!(
-                    target: "flowip-080o",
-                    stage_name = %ctx.stage_name,
-                    stage_id = ?ctx.stage_id,
-                    fsm_state = "Draining",
-                    "sink: writing stage_completed to system.log"
-                );
-
-                match ctx.system_journal.append(completion_event, None).await {
-                    Ok(_) => {
-                        tracing::info!(
-                            target: "flowip-080o",
-                            stage_name = %ctx.stage_name,
-                            stage_id = ?ctx.stage_id,
-                            fsm_state = "Draining",
-                            "sink: stage_completed append succeeded"
-                        );
-                    }
-                    Err(e) => {
-                        tracing::error!(
-                            target: "flowip-080o",
-                            stage_name = %ctx.stage_name,
-                            stage_id = ?ctx.stage_id,
-                            fsm_state = "Draining",
-                            journal_error = %e,
-                            "sink: failed to append stage_completed; continuing without system journal entry"
-                        );
-                    }
-                }
-
-                tracing::info!(
-                    stage_name = %ctx.stage_name,
-                    "Sink sent completion event"
-                );
+                .await;
                 Ok(())
             }
 
             JournalSinkAction::SendFailure { message } => {
-                // Write failure event to system journal with tail-read metrics.
-                // If no runtime_context is available in the journals at failure
-                // time, fall back to a best-effort snapshot from instrumentation.
-                let metrics = match tail_read::read_stage_metrics_from_tail(
+                lifecycle_actions::send_failure_best_effort(
+                    "Sink",
+                    ctx.stage_id,
+                    &ctx.stage_name,
+                    message,
+                    &ctx.system_journal,
                     &ctx.data_journal,
                     Some(&ctx.error_journal),
-                    ctx.stage_id,
+                    ctx.instrumentation.as_ref(),
                 )
-                .await
-                {
-                    Some(metrics) => metrics,
-                    None => snapshot_stage_metrics(ctx.instrumentation.as_ref()),
-                };
-
-                let cancel_reason = match message.as_str() {
-                    FORCE_SHUTDOWN_MESSAGE | STOP_REASON_USER_STOP => Some(STOP_REASON_USER_STOP),
-                    STOP_REASON_TIMEOUT => Some(STOP_REASON_TIMEOUT),
-                    _ => None,
-                };
-
-                let system_event = if let Some(reason) = cancel_reason {
-                    SystemEvent::stage_cancelled_with_metrics(
-                        ctx.stage_id,
-                        reason.to_string(),
-                        metrics,
-                    )
-                } else {
-                    SystemEvent::stage_failed_with_metrics(
-                        ctx.stage_id,
-                        message.clone(),
-                        false, // not recoverable
-                        metrics,
-                    )
-                };
-
-                match ctx.system_journal.append(system_event, None).await {
-                    Ok(_) => {
-                        if let Some(reason) = cancel_reason {
-                            tracing::info!(
-                                stage_name = %ctx.stage_name,
-                                reason = %reason,
-                                "Sink stage cancelled"
-                            );
-                        } else {
-                            tracing::error!(
-                                stage_name = %ctx.stage_name,
-                                error = %message,
-                                "Sink encountered error"
-                            );
-                        }
-                    }
-                    Err(e) => {
-                        tracing::error!(
-                            stage_name = %ctx.stage_name,
-                            error = %message,
-                            journal_error = %e,
-                            "Sink encountered error but failed to write error event"
-                        );
-                    }
-                }
-
+                .await;
                 Ok(())
             }
 
@@ -606,31 +504,38 @@ impl<H: SinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAction<H> 
             }
 
             JournalSinkAction::Cleanup => {
-                tracing::info!(
-                    target: "flowip-080o",
-                    stage_name = %ctx.stage_name,
-                    "sink: Cleanup action - acquiring handler lock"
-                );
-                // Call handler drain before stopping tasks
-                let handler = &mut ctx.handler;
-                tracing::info!(
-                    target: "flowip-080o",
-                    stage_name = %ctx.stage_name,
-                    "sink: Cleanup action - calling handler.drain()"
-                );
-                handler.drain().await.map_err(|e| {
-                    obzenflow_fsm::FsmError::HandlerError(format!("Failed to drain handler: {e:?}"))
-                })?;
-                tracing::info!(
-                    target: "flowip-080o",
-                    stage_name = %ctx.stage_name,
-                    "sink: Cleanup action - handler.drain() complete, dropping handler lock"
-                );
-                tracing::info!(
-                    target: "flowip-080o",
-                    stage_name = %ctx.stage_name,
-                    "sink: Cleanup action - COMPLETE (handler drained)"
-                );
+                let stage_name = ctx.stage_name.clone();
+                lifecycle_actions::cleanup_with_result("Sink", &stage_name, || async {
+                    tracing::info!(
+                        target: "flowip-080o",
+                        stage_name = %stage_name,
+                        "sink: Cleanup action - acquiring handler lock"
+                    );
+                    // Call handler drain before stopping tasks
+                    let handler = &mut ctx.handler;
+                    tracing::info!(
+                        target: "flowip-080o",
+                        stage_name = %stage_name,
+                        "sink: Cleanup action - calling handler.drain()"
+                    );
+                    handler.drain().await.map_err(|e| {
+                        obzenflow_fsm::FsmError::HandlerError(format!(
+                            "Failed to drain handler: {e:?}"
+                        ))
+                    })?;
+                    tracing::info!(
+                        target: "flowip-080o",
+                        stage_name = %stage_name,
+                        "sink: Cleanup action - handler.drain() complete, dropping handler lock"
+                    );
+                    tracing::info!(
+                        target: "flowip-080o",
+                        stage_name = %stage_name,
+                        "sink: Cleanup action - COMPLETE (handler drained)"
+                    );
+                    Ok::<(), obzenflow_fsm::FsmError>(())
+                })
+                .await?;
                 Ok(())
             }
 

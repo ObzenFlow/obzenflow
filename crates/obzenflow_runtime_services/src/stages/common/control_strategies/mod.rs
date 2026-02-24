@@ -11,6 +11,9 @@
 mod core;
 pub use core::{ControlEventAction, ControlEventStrategy, ProcessingContext};
 
+// Control signal dispatch helper
+pub(crate) mod dispatch;
+
 // Concrete strategy implementations
 mod strategies;
 pub use strategies::{

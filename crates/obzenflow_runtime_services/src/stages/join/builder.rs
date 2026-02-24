@@ -9,17 +9,15 @@ use std::sync::Arc;
 use crate::metrics::instrumentation::StageInstrumentation;
 use crate::stages::common::handlers::JoinHandler;
 use crate::stages::resources_builder::StageResources;
-use crate::supervised_base::base::Supervisor;
 use crate::supervised_base::{
-    BuilderError, ChannelBuilder, EventLoopDirective, EventReceiver, HandleBuilder,
-    HandlerSupervised, HandlerSupervisedExt, StateWatcher, SupervisorBuilder,
-    SupervisorTaskBuilder,
+    BuilderError, ChannelBuilder, HandleBuilder, HandlerSupervisedExt,
+    HandlerSupervisedWithExternalEvents, SupervisorBuilder, SupervisorTaskBuilder,
 };
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{ChainEvent, StageId};
 
 use super::config::JoinConfig;
-use super::fsm::{JoinAction, JoinContext, JoinEvent, JoinState};
+use super::fsm::{JoinContext, JoinState};
 use super::handle::JoinHandle;
 use super::supervisor::JoinSupervisor;
 
@@ -149,10 +147,11 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
         // Create supervisor
         let supervisor = JoinSupervisor {
             name: format!("join_{}", self.config.stage_name),
-            data_journal: self.resources.data_journal.clone(),
             system_journal: self.resources.system_journal.clone(),
             stage_id: self.config.stage_id,
             stage_name: self.config.stage_name.clone(),
+            reference_subscription: None,
+            stream_subscription: None,
             _marker: std::marker::PhantomData,
         };
 
@@ -163,13 +162,11 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
         let supervisor_name = format!("join_{}", self.config.stage_name);
         let task = SupervisorTaskBuilder::<JoinSupervisor<H>>::new(&supervisor_name).spawn(
             move || async move {
-                // Create a wrapper that handles external events
-                let supervisor_with_events = HandlerSupervisedWithExternalEvents {
+                let supervisor_with_events = HandlerSupervisedWithExternalEvents::new(
                     supervisor,
-                    external_events: event_receiver,
-                    state_watcher: state_watcher_for_task,
-                    last_state: None,
-                };
+                    event_receiver,
+                    state_watcher_for_task,
+                );
 
                 // Run with the wrapper
                 HandlerSupervisedExt::run(supervisor_with_events, JoinState::<H>::Created, context)
@@ -184,108 +181,5 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
             .with_supervisor_task(task)
             .build_standard()
             .map_err(|e| BuilderError::Other(e.to_string()))
-    }
-}
-
-/// Internal wrapper that bridges external events with the handler-supervised supervisor
-struct HandlerSupervisedWithExternalEvents<
-    H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
-> {
-    supervisor: JoinSupervisor<H>,
-    external_events: EventReceiver<JoinEvent<H>>,
-    state_watcher: StateWatcher<JoinState<H>>,
-    last_state: Option<JoinState<H>>,
-}
-
-// Delegate trait implementations to the inner supervisor
-impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Supervisor
-    for HandlerSupervisedWithExternalEvents<H>
-{
-    type State = JoinState<H>;
-    type Event = JoinEvent<H>;
-    type Context = JoinContext<H>;
-    type Action = JoinAction<H>;
-
-    fn build_state_machine(
-        &self,
-        initial_state: Self::State,
-    ) -> obzenflow_fsm::StateMachine<Self::State, Self::Event, Self::Context, Self::Action> {
-        // Delegate to the inner supervisor so we reuse its DSL-defined FSM.
-        self.supervisor.build_state_machine(initial_state)
-    }
-
-    fn name(&self) -> &str {
-        self.supervisor.name()
-    }
-}
-
-impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
-    crate::supervised_base::base::private::Sealed for HandlerSupervisedWithExternalEvents<H>
-{
-}
-
-#[async_trait::async_trait]
-impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSupervised
-    for HandlerSupervisedWithExternalEvents<H>
-{
-    type Handler = H;
-
-    fn writer_id(&self) -> obzenflow_core::WriterId {
-        self.supervisor.writer_id()
-    }
-
-    fn stage_id(&self) -> StageId {
-        self.supervisor.stage_id()
-    }
-
-    fn event_for_action_error(&self, msg: String) -> JoinEvent<H> {
-        self.supervisor.event_for_action_error(msg)
-    }
-
-    async fn write_completion_event(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        self.supervisor.write_completion_event().await
-    }
-
-    async fn dispatch_state(
-        &mut self,
-        state: &Self::State,
-        context: &mut Self::Context,
-    ) -> Result<EventLoopDirective<Self::Event>, Box<dyn std::error::Error + Send + Sync>> {
-        // Update state watcher only when it changes (FLOWIP-086i).
-        if self.last_state.as_ref() != Some(state) {
-            let new_state = state.clone();
-            let _ = self.state_watcher.update(new_state.clone());
-            self.last_state = Some(new_state);
-        }
-
-        // Created is a pure "wait for Initialize" state; block on control events to avoid spin.
-        if matches!(state, JoinState::Created) {
-            match self.external_events.recv().await {
-                Some(event) => return Ok(EventLoopDirective::Transition(event)),
-                None => {
-                    if !matches!(state, JoinState::Failed(_)) {
-                        return Ok(EventLoopDirective::Transition(JoinEvent::Error(
-                            "External control channel closed".to_string(),
-                        )));
-                    }
-                }
-            }
-        }
-
-        // Check for external events first (non-blocking in active states)
-        match self.external_events.try_recv() {
-            Ok(event) => return Ok(EventLoopDirective::Transition(event)),
-            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {}
-            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
-                if !matches!(state, JoinState::Failed(_)) {
-                    return Ok(EventLoopDirective::Transition(JoinEvent::Error(
-                        "External control channel closed".to_string(),
-                    )));
-                }
-            }
-        }
-
-        // Otherwise delegate to supervisor
-        self.supervisor.dispatch_state(state, context).await
     }
 }

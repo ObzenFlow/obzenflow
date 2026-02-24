@@ -8,7 +8,7 @@
 //! to the FSM architecture patterns, returning only a FlowHandle for control.
 
 use super::{
-    fsm::{PipelineAction, PipelineContext, PipelineEvent, PipelineState},
+    fsm::{PipelineContext, PipelineEvent, PipelineState},
     handle::{FlowHandle, FlowHandleExtras, MiddlewareStackConfig},
     supervisor::PipelineSupervisor,
 };
@@ -18,11 +18,10 @@ use crate::{
     message_bus::FsmMessageBus,
     stages::common::stage_handle::BoxedStageHandle,
     supervised_base::{
-        base::Supervisor, BuilderError, ChannelBuilder, EventReceiver, HandleBuilder,
-        SelfSupervisedExt, StateWatcher, SupervisorBuilder, SupervisorTaskBuilder,
+        BuilderError, ChannelBuilder, HandleBuilder, SelfSupervisedExt,
+        SelfSupervisedWithExternalEvents, SupervisorBuilder, SupervisorTaskBuilder,
     },
 };
-use obzenflow_core::event::WriterId;
 use obzenflow_core::event::{ChainEvent, SystemEvent};
 use obzenflow_core::id::{FlowId, SystemId};
 use obzenflow_core::journal::Journal;
@@ -327,10 +326,7 @@ impl SupervisorBuilder for PipelineBuilder {
             stage_lifecycle_metrics: HashMap::new(),
             flow_start_time: None,
             last_system_event_id_seen: None,
-            stop_requested: false,
-            stop_mode: None,
-            stop_reason: None,
-            stop_deadline: None,
+            stop_intent: Default::default(),
         };
 
         // Create channels using the common infrastructure
@@ -356,13 +352,13 @@ impl SupervisorBuilder for PipelineBuilder {
         // Spawn the supervisor task with proper FSM lifecycle
         tracing::info!("About to create pipeline supervisor task");
 
-        // Create the supervisor wrapper BEFORE the spawn to reduce closure size
-        let supervisor_with_events = SupervisorWithExternalEvents {
+        // Wrap the supervisor so external control events can be injected
+        // consistently (FLOWIP-086i, FLOWIP-051m Phase 1c).
+        let supervisor_with_events = SelfSupervisedWithExternalEvents::new(
             supervisor,
-            external_events: event_receiver,
-            state_watcher: state_watcher_for_task,
-            last_state: None,
-        };
+            event_receiver,
+            state_watcher_for_task,
+        );
 
         let supervisor_task = SupervisorTaskBuilder::<PipelineSupervisor>::new(
             "pipeline_supervisor",
@@ -431,118 +427,5 @@ impl SupervisorBuilder for PipelineBuilder {
                 system_journal: Some(self.system_journal.clone()),
             },
         ))
-    }
-}
-
-/// Internal wrapper that bridges external events with the supervisor
-struct SupervisorWithExternalEvents {
-    supervisor: PipelineSupervisor,
-    external_events: EventReceiver<PipelineEvent>,
-    state_watcher: StateWatcher<PipelineState>,
-    last_state: Option<PipelineState>,
-}
-
-// Delegate trait implementations to the inner supervisor
-impl Supervisor for SupervisorWithExternalEvents {
-    type State = PipelineState;
-    type Event = PipelineEvent;
-    type Context = PipelineContext;
-    type Action = PipelineAction;
-
-    fn build_state_machine(
-        &self,
-        initial_state: Self::State,
-    ) -> obzenflow_fsm::StateMachine<Self::State, Self::Event, Self::Context, Self::Action> {
-        // Delegate to the inner supervisor so we reuse its DSL-defined FSM.
-        self.supervisor.build_state_machine(initial_state)
-    }
-
-    fn name(&self) -> &str {
-        self.supervisor.name()
-    }
-}
-
-#[async_trait::async_trait]
-impl crate::supervised_base::SelfSupervised for SupervisorWithExternalEvents {
-    fn writer_id(&self) -> WriterId {
-        self.supervisor.writer_id()
-    }
-
-    fn event_for_action_error(&self, msg: String) -> PipelineEvent {
-        self.supervisor.event_for_action_error(msg)
-    }
-
-    async fn write_completion_event(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        self.supervisor.write_completion_event().await
-    }
-
-    async fn dispatch_state(
-        &mut self,
-        state: &Self::State,
-        context: &mut PipelineContext,
-    ) -> Result<
-        crate::supervised_base::EventLoopDirective<Self::Event>,
-        Box<dyn std::error::Error + Send + Sync>,
-    > {
-        // Update state for external observers only when it changes (FLOWIP-086i).
-        if self.last_state.as_ref() != Some(state) {
-            let new_state = state.clone();
-            let _ = self.state_watcher.update(new_state.clone());
-            self.last_state = Some(new_state);
-        }
-
-        // Terminal states should not process additional external control events.
-        // Delegate directly so the supervisor can terminate cleanly.
-        if matches!(state, PipelineState::Drained | PipelineState::Failed { .. }) {
-            return self.supervisor.dispatch_state(state, context).await;
-        }
-
-        // Created is a pure "wait for Materialize" state; block on control events to avoid spin.
-        if matches!(state, PipelineState::Created) {
-            match self.external_events.recv().await {
-                Some(event) => {
-                    return Ok(crate::supervised_base::EventLoopDirective::Transition(
-                        event,
-                    ));
-                }
-                None => {
-                    return Ok(crate::supervised_base::EventLoopDirective::Transition(
-                        PipelineEvent::Error {
-                            message: "External control channel closed".to_string(),
-                        },
-                    ));
-                }
-            }
-        }
-
-        // During Materializing state, ignore external events to allow
-        // supervisor's dispatch_state to complete materialization first
-        let should_check_external = !matches!(state, PipelineState::Materializing);
-
-        if should_check_external {
-            // Check for external events first
-            match self.external_events.try_recv() {
-                Ok(event) => {
-                    // Got an external event, transition to handle it
-                    return Ok(crate::supervised_base::EventLoopDirective::Transition(
-                        event,
-                    ));
-                }
-                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
-                    // No external events, proceed with normal dispatch
-                }
-                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
-                    // Channel closed, initiate shutdown
-                    return Ok(crate::supervised_base::EventLoopDirective::Transition(
-                        PipelineEvent::Error {
-                            message: "External control channel closed".to_string(),
-                        },
-                    ));
-                }
-            }
-        }
-
-        // Delegate to the actual supervisor
-        self.supervisor.dispatch_state(state, context).await
     }
 }

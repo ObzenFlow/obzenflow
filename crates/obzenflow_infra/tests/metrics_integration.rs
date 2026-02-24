@@ -80,15 +80,11 @@ fn make_empty_context(
         stage_data_journals: std::collections::HashMap::new(),
         stage_error_journals: std::collections::HashMap::new(),
         backpressure_registry: None,
-        data_subscription: None,
-        error_subscription: None,
-        system_subscription: None,
         include_error_journals: true,
         exporter: Some(exporter),
         metrics_store: MetricsStore::default(),
         export_interval_secs: 60,
         system_id,
-        export_timer: None,
         stage_metadata: single_stage_metadata(stage_id),
     }
 }

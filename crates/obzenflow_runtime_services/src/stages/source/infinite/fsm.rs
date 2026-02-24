@@ -273,12 +273,6 @@ pub struct InfiniteSourceContext<H> {
     /// Writer ID for this source (initialized during setup)
     pub writer_id: Option<WriterId>,
 
-    /// Flag indicating if source can emit (set to true after Start event)
-    pub can_emit: bool,
-
-    /// Flag to track if shutdown was requested
-    pub shutdown_requested: bool,
-
     /// Why the source is shutting down (affects EOF semantics).
     pub completion_reason: InfiniteSourceCompletionReason,
 
@@ -335,8 +329,6 @@ impl<H> InfiniteSourceContext<H> {
             replay_archive: init.replay_archive,
             bus: init.bus,
             writer_id: None,
-            can_emit: false,
-            shutdown_requested: false,
             completion_reason: InfiniteSourceCompletionReason::ExternalDrain,
             instrumentation: init.instrumentation,
             control_strategy: init.control_strategy,

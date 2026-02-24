@@ -9,6 +9,7 @@ use std::sync::Arc;
 use crate::metrics::instrumentation::StageInstrumentation;
 use crate::stages::common::handlers::AsyncFiniteSourceHandler;
 use crate::stages::resources_builder::StageResources;
+use crate::stages::source::replay_lifecycle::ReplayCompletionGuard;
 use crate::stages::source::strategies::{JonestownSourceStrategy, SourceControlStrategy};
 use crate::supervised_base::{
     BuilderError, ChannelBuilder, HandleBuilder, HandlerSupervisedExt, SupervisorBuilder,
@@ -103,7 +104,7 @@ impl<H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
             last_state: None,
             replay_driver: None,
             replay_started_at: None,
-            replay_completed_emitted: false,
+            replay_completion: ReplayCompletionGuard::default(),
         };
 
         let supervisor_name = format!("async_finite_source_{}", self.config.stage_name);

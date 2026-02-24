@@ -75,6 +75,9 @@ pub trait HandlerSupervisedExt: HandlerSupervised {
         Self::Context: 'static,
         Self::Action: 'static,
     {
+        let supervisor_name = self.name().to_string();
+        let supervisor_writer = self.writer_id();
+        let supervisor_stage = self.stage_id();
         let mut context = context;
 
         // Build the state machine via the Supervisor API
@@ -95,7 +98,58 @@ pub trait HandlerSupervisedExt: HandlerSupervised {
             );
 
             // Get directive from the supervisor's dispatch logic (with mutable context)
-            let directive = self.dispatch_state(&current_state, &mut context).await?;
+            let directive = match self.dispatch_state(&current_state, &mut context).await {
+                Ok(d) => d,
+                Err(e) => {
+                    tracing::error!(
+                        supervisor = %supervisor_name,
+                        writer_id = ?supervisor_writer,
+                        stage_id = ?supervisor_stage,
+                        state = %current_state.variant_name(),
+                        error = %e,
+                        "dispatch_state returned error; driving FSM through failure path"
+                    );
+
+                    let failure_event = self.event_for_action_error(format!(
+                        "dispatch_state error in {}: {e}",
+                        current_state.variant_name()
+                    ));
+                    let failure_actions = machine
+                        .handle(failure_event, &mut context)
+                        .await
+                        .map_err(|fe| {
+                            format!(
+                                "FSM error after dispatch_state failure (missing Error handler in state {}?): {fe}",
+                                current_state.variant_name()
+                            )
+                        })?;
+
+                    tracing::info!(
+                        supervisor = %supervisor_name,
+                        writer_id = ?supervisor_writer,
+                        stage_id = ?supervisor_stage,
+                        iteration = loop_iteration,
+                        action_count = failure_actions.len(),
+                        "HandlerSupervised: executing failure-handling actions"
+                    );
+                    for (i, failure_action) in failure_actions.into_iter().enumerate() {
+                        tracing::info!(
+                            supervisor = %supervisor_name,
+                            writer_id = ?supervisor_writer,
+                            stage_id = ?supervisor_stage,
+                            iteration = loop_iteration,
+                            action_index = i,
+                            action = ?failure_action,
+                            "HandlerSupervised: executing failure-handling action"
+                        );
+                        failure_action.execute(&mut context).await.map_err(|e2| {
+                            format!("Action error during dispatch_state failure handling: {e2}")
+                        })?;
+                    }
+
+                    continue;
+                }
+            };
 
             tracing::debug!(
                 target: "obzenflow_runtime_services::supervised_base::handler_supervised",

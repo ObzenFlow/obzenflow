@@ -9,7 +9,7 @@
 
 use super::base::{EventLoopDirective, Supervisor};
 use obzenflow_core::event::WriterId;
-use obzenflow_fsm::FsmAction;
+use obzenflow_fsm::{FsmAction, StateVariant};
 
 /// Trait that self-supervised components MUST implement
 /// This ensures they provide all required functionality
@@ -86,7 +86,52 @@ pub trait SelfSupervisedExt: SelfSupervised {
 
             // Get directive from the supervisor's dispatch logic, with full access to context
             tracing::trace!("Calling dispatch_state for state: {:?}", current_state);
-            let directive = self.dispatch_state(&current_state, &mut context).await?;
+            let directive = match self.dispatch_state(&current_state, &mut context).await {
+                Ok(d) => d,
+                Err(e) => {
+                    tracing::error!(
+                        supervisor = %supervisor_name,
+                        writer_id = ?supervisor_writer,
+                        state = %current_state.variant_name(),
+                        error = %e,
+                        "dispatch_state returned error; driving FSM through failure path"
+                    );
+
+                    let failure_event = self.event_for_action_error(format!(
+                        "dispatch_state error in {}: {e}",
+                        current_state.variant_name()
+                    ));
+                    let failure_actions = machine
+                        .handle(failure_event, &mut context)
+                        .await
+                        .map_err(|fe| format!("FSM error after dispatch_state failure: {fe}"))?;
+
+                    tracing::debug!(
+                        supervisor = %supervisor_name,
+                        writer_id = ?supervisor_writer,
+                        iteration,
+                        failure_action_count = failure_actions.len(),
+                        "Loop iteration {}: Executing {} failure-handling actions",
+                        iteration,
+                        failure_actions.len()
+                    );
+                    for (i, failure_action) in failure_actions.into_iter().enumerate() {
+                        tracing::debug!(
+                            supervisor = %supervisor_name,
+                            writer_id = ?supervisor_writer,
+                            iteration,
+                            failure_action_index = i,
+                            action = ?failure_action,
+                            "Executing failure-handling action"
+                        );
+                        failure_action.execute(&mut context).await.map_err(|e2| {
+                            format!("Action error during dispatch_state failure handling: {e2}")
+                        })?;
+                    }
+
+                    continue;
+                }
+            };
             tracing::debug!(
                 supervisor = %supervisor_name,
                 writer_id = ?supervisor_writer,
@@ -228,6 +273,3 @@ pub trait SelfSupervisedExt: SelfSupervised {
 
 // Blanket implementation - any type that implements SelfSupervised gets run() for free
 impl<T: SelfSupervised> SelfSupervisedExt for T {}
-
-// Seal implementation - any type that implements SelfSupervised can be a Supervisor
-impl<T: SelfSupervised> super::base::private::Sealed for T {}

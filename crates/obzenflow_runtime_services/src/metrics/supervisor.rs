@@ -7,9 +7,11 @@
 //! The supervisor owns the FSM directly and runs autonomously.
 //! Once started, all communication happens through journal events only.
 
+use crate::messaging::system_subscription::SystemSubscription;
+use crate::messaging::upstream_subscription::UpstreamSubscription;
 use crate::messaging::{PollResult, SubscriptionPoller};
 use crate::supervised_base::base::Supervisor;
-use crate::supervised_base::{EventLoopDirective, SelfSupervised};
+use crate::supervised_base::{EventLoopDirective, SelfSupervised, StateWatcher};
 use obzenflow_core::event::SystemEvent;
 use obzenflow_core::event::{JournalEvent, WriterId};
 use obzenflow_core::id::SystemId;
@@ -35,6 +37,14 @@ pub(crate) struct MetricsAggregatorSupervisor {
 
     /// System ID for metrics writer
     pub(crate) system_id: SystemId,
+
+    pub(crate) data_subscription: Option<UpstreamSubscription<ChainEvent>>,
+    pub(crate) error_subscription: Option<UpstreamSubscription<ChainEvent>>,
+    pub(crate) system_subscription: Option<SystemSubscription<SystemEvent>>,
+    pub(crate) export_timer: Option<tokio::time::Interval>,
+
+    pub(crate) state_watcher: StateWatcher<MetricsAggregatorState>,
+    pub(crate) last_state: Option<MetricsAggregatorState>,
 }
 
 // Implement base Supervisor trait
@@ -90,10 +100,15 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
         state: &Self::State,
         ctx: &mut MetricsAggregatorContext,
     ) -> Result<EventLoopDirective<Self::Event>, Box<dyn std::error::Error + Send + Sync>> {
+        // Update state for external observers only when it changes (FLOWIP-086i).
+        if self.last_state.as_ref() != Some(state) {
+            let new_state = state.clone();
+            let _ = self.state_watcher.update(new_state.clone());
+            self.last_state = Some(new_state);
+        }
+
         match state {
             MetricsAggregatorState::Initializing => {
-                // Subscriptions are already created in the context during builder
-
                 // Publish ready event to system journal
                 // Metrics aggregator creates SystemEvent directly
                 let event = obzenflow_core::event::SystemEvent::new(
@@ -120,7 +135,7 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
             MetricsAggregatorState::Running => {
                 tracing::debug!("Metrics aggregator state=Running");
                 // Create timer on first entry to Running state
-                if ctx.export_timer.is_none() {
+                if self.export_timer.is_none() {
                     tracing::debug!(
                         "Creating export timer with interval {}s",
                         ctx.export_interval_secs
@@ -131,15 +146,16 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                     export_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                     // First tick happens immediately, so consume it
                     export_timer.tick().await;
-                    ctx.export_timer = Some(export_timer);
+                    self.export_timer = Some(export_timer);
                 }
 
-                // Take subscriptions and timer out of the context so no borrow
-                // of ctx lives across `.await` while polling.
-                let mut data_subscription = ctx.data_subscription.take();
-                let mut error_subscription = ctx.error_subscription.take();
-                let mut system_subscription = ctx.system_subscription.take();
-                let mut export_timer = ctx.export_timer.take();
+                let MetricsAggregatorSupervisor {
+                    data_subscription,
+                    error_subscription,
+                    system_subscription,
+                    export_timer,
+                    ..
+                } = self;
 
                 let directive: Result<
                     EventLoopDirective<Self::Event>,
@@ -221,7 +237,7 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                                     tracing::info!(
                                         "Metrics aggregator received drain request from system journal"
                                     );
-                                    export_timer = None;
+                                    *export_timer = None;
                                     directive = Ok(EventLoopDirective::Transition(
                                         MetricsAggregatorEvent::StartDraining,
                                     ))
@@ -236,7 +252,7 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                                             | obzenflow_core::event::PipelineLifecycleEvent::Failed { .. }
                                     )
                                 ) {
-                                    export_timer = None;
+                                    *export_timer = None;
                                 }
                                 // Process system event through FSM event
                                 directive = Ok(EventLoopDirective::Transition(
@@ -376,12 +392,6 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                     }
                 }
 
-                // Restore subscriptions and timer back into the context
-                ctx.data_subscription = data_subscription;
-                ctx.error_subscription = error_subscription;
-                ctx.system_subscription = system_subscription;
-                ctx.export_timer = export_timer;
-
                 directive
             }
 
@@ -394,9 +404,12 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                 //
                 // We intentionally do NOT depend on journal EOF control events here because some
                 // stage journals (notably sinks) may not emit explicit EOF markers.
-                let mut data_subscription = ctx.data_subscription.take();
-                let mut error_subscription = ctx.error_subscription.take();
-                let mut system_subscription = ctx.system_subscription.take();
+                let MetricsAggregatorSupervisor {
+                    data_subscription,
+                    error_subscription,
+                    system_subscription,
+                    ..
+                } = self;
 
                 // 1) Poll system events first so lifecycle terminal flags are up-to-date.
                 if let Some(sub) = system_subscription.as_mut() {
@@ -407,9 +420,6 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                                 event_type = envelope.event.event_type_name(),
                                 "Metrics aggregator draining received system event"
                             );
-                            ctx.data_subscription = data_subscription;
-                            ctx.error_subscription = error_subscription;
-                            ctx.system_subscription = system_subscription;
                             return Ok(EventLoopDirective::Transition(
                                 MetricsAggregatorEvent::ProcessSystemEvent {
                                     envelope: Box::new(envelope),
@@ -421,9 +431,6 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                             let err_msg =
                                 format!("Error reading system events during draining: {e}");
                             tracing::error!(error = %err_msg, "Metrics aggregator draining system subscription errored");
-                            ctx.data_subscription = data_subscription;
-                            ctx.error_subscription = error_subscription;
-                            ctx.system_subscription = system_subscription;
                             return Ok(EventLoopDirective::Transition(
                                 MetricsAggregatorEvent::Error(err_msg),
                             ));
@@ -450,10 +457,6 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                                 "Metrics aggregator draining received journal event"
                             );
 
-                            ctx.data_subscription = data_subscription;
-                            ctx.error_subscription = error_subscription;
-                            ctx.system_subscription = system_subscription;
-
                             if envelope.event.is_control() || envelope.event.is_system() {
                                 tracing::debug!(
                                     "Metrics aggregator draining: skipped control/system event id={} writer={:?}",
@@ -472,9 +475,6 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                         PollResult::NoEvents => {}
                         PollResult::Error(e) => {
                             let err_msg = format!("Data journal read error during draining: {e}");
-                            ctx.data_subscription = data_subscription;
-                            ctx.error_subscription = error_subscription;
-                            ctx.system_subscription = system_subscription;
                             if err_msg.contains("Partial read retries exceeded") {
                                 tracing::warn!(
                                     error = %err_msg,
@@ -503,10 +503,6 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                                 "Metrics aggregator draining received error event"
                             );
 
-                            ctx.data_subscription = data_subscription;
-                            ctx.error_subscription = error_subscription;
-                            ctx.system_subscription = system_subscription;
-
                             if envelope.event.is_control() || envelope.event.is_system() {
                                 tracing::debug!(
                                     "Metrics aggregator draining: skipped control/system error event id={} writer={:?}",
@@ -525,9 +521,6 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                         PollResult::NoEvents => {}
                         PollResult::Error(e) => {
                             let err_msg = format!("Error journal read error during draining: {e}");
-                            ctx.data_subscription = data_subscription;
-                            ctx.error_subscription = error_subscription;
-                            ctx.system_subscription = system_subscription;
                             if err_msg.contains("Partial read retries exceeded") {
                                 tracing::warn!(
                                     error = %err_msg,
@@ -553,20 +546,12 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                     tracing::info!(
                         "Metrics aggregator: drained journals and lifecycle terminal; emitting FlowTerminal"
                     );
-                    ctx.data_subscription = data_subscription;
-                    ctx.error_subscription = error_subscription;
-                    ctx.system_subscription = system_subscription;
                     return Ok(EventLoopDirective::Transition(
                         MetricsAggregatorEvent::FlowTerminal,
                     ));
                 }
 
                 idle_backoff().await;
-
-                // Restore subscriptions back into the context
-                ctx.data_subscription = data_subscription;
-                ctx.error_subscription = error_subscription;
-                ctx.system_subscription = system_subscription;
 
                 Ok(EventLoopDirective::Continue)
             }
@@ -596,5 +581,167 @@ impl Drop for MetricsAggregatorSupervisor {
     fn drop(&mut self) {
         // Clean shutdown - subscription will be dropped automatically
         tracing::debug!("Metrics aggregator supervisor dropped");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::metrics::fsm::MetricsStore;
+    use crate::supervised_base::{ChannelBuilder, SelfSupervisedExt};
+    use async_trait::async_trait;
+    use obzenflow_core::event::types::EventId;
+    use obzenflow_core::id::{JournalId, SystemId};
+    use obzenflow_core::journal::{JournalError, JournalReader};
+    use obzenflow_core::{EventEnvelope, Journal, JournalOwner};
+    use std::collections::HashMap;
+    use std::marker::PhantomData;
+
+    struct EmptyReader<T> {
+        position: u64,
+        _phantom: PhantomData<T>,
+    }
+
+    #[async_trait]
+    impl<T> JournalReader<T> for EmptyReader<T>
+    where
+        T: obzenflow_core::event::JournalEvent,
+    {
+        async fn next(&mut self) -> Result<Option<EventEnvelope<T>>, JournalError> {
+            Ok(None)
+        }
+
+        async fn skip(&mut self, _n: u64) -> Result<u64, JournalError> {
+            Ok(0)
+        }
+
+        fn position(&self) -> u64 {
+            self.position
+        }
+    }
+
+    struct FailAppendJournal<T> {
+        id: JournalId,
+        _phantom: PhantomData<T>,
+    }
+
+    impl<T> FailAppendJournal<T> {
+        fn new() -> Self {
+            Self {
+                id: JournalId::new(),
+                _phantom: PhantomData,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl<T> Journal<T> for FailAppendJournal<T>
+    where
+        T: obzenflow_core::event::JournalEvent + 'static,
+    {
+        fn id(&self) -> &JournalId {
+            &self.id
+        }
+
+        fn owner(&self) -> Option<&JournalOwner> {
+            None
+        }
+
+        async fn append(
+            &self,
+            _event: T,
+            _parent: Option<&EventEnvelope<T>>,
+        ) -> Result<EventEnvelope<T>, JournalError> {
+            Err(JournalError::Implementation {
+                message: "append failed".to_string(),
+                source: Box::new(std::io::Error::other("append failed")),
+            })
+        }
+
+        async fn read_causally_ordered(&self) -> Result<Vec<EventEnvelope<T>>, JournalError> {
+            Ok(Vec::new())
+        }
+
+        async fn read_causally_after(
+            &self,
+            _after_event_id: &EventId,
+        ) -> Result<Vec<EventEnvelope<T>>, JournalError> {
+            Ok(Vec::new())
+        }
+
+        async fn read_event(
+            &self,
+            _event_id: &EventId,
+        ) -> Result<Option<EventEnvelope<T>>, JournalError> {
+            Ok(None)
+        }
+
+        async fn reader(&self) -> Result<Box<dyn JournalReader<T>>, JournalError> {
+            Ok(Box::new(EmptyReader {
+                position: 0,
+                _phantom: PhantomData,
+            }))
+        }
+
+        async fn reader_from(
+            &self,
+            position: u64,
+        ) -> Result<Box<dyn JournalReader<T>>, JournalError> {
+            Ok(Box::new(EmptyReader {
+                position,
+                _phantom: PhantomData,
+            }))
+        }
+
+        async fn read_last_n(&self, _count: usize) -> Result<Vec<EventEnvelope<T>>, JournalError> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[tokio::test]
+    async fn state_watcher_reports_failed_on_dispatch_error() {
+        let system_journal: Arc<dyn Journal<SystemEvent>> =
+            Arc::new(FailAppendJournal::<SystemEvent>::new());
+        let system_id = SystemId::new();
+
+        let (_event_sender, _event_receiver, state_watcher) =
+            ChannelBuilder::<MetricsAggregatorEvent, MetricsAggregatorState>::new()
+                .with_event_buffer(1)
+                .build(MetricsAggregatorState::Initializing);
+
+        let supervisor = MetricsAggregatorSupervisor {
+            name: "metrics_aggregator".to_string(),
+            system_journal: system_journal.clone(),
+            system_id,
+            data_subscription: None,
+            error_subscription: None,
+            system_subscription: None,
+            export_timer: None,
+            state_watcher: state_watcher.clone(),
+            last_state: Some(MetricsAggregatorState::Initializing),
+        };
+
+        let ctx = MetricsAggregatorContext {
+            system_journal,
+            stage_data_journals: HashMap::new(),
+            stage_error_journals: HashMap::new(),
+            backpressure_registry: None,
+            include_error_journals: true,
+            exporter: None,
+            metrics_store: MetricsStore::default(),
+            export_interval_secs: 10,
+            system_id,
+            stage_metadata: HashMap::new(),
+        };
+
+        let _ = SelfSupervisedExt::run(supervisor, MetricsAggregatorState::Initializing, ctx).await;
+
+        assert!(
+            matches!(
+                state_watcher.current(),
+                MetricsAggregatorState::Failed { .. }
+            ),
+            "expected state watcher to reflect Failed on error path"
+        );
     }
 }

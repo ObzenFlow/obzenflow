@@ -90,7 +90,7 @@ impl SupervisorBuilder for MetricsAggregatorBuilder {
         let system_id = obzenflow_core::id::SystemId::new();
 
         // Create metrics context with all mutable state
-        let metrics_context = MetricsAggregatorContext::new(
+        let (metrics_context, metrics_io) = MetricsAggregatorContext::new(
             self.inputs.clone(),
             self.system_journal.clone(),
             Some(self.exporter),
@@ -104,7 +104,7 @@ impl SupervisorBuilder for MetricsAggregatorBuilder {
         // Create channels for supervisor communication
         // Even though metrics runs autonomously, we still create channels
         // for consistency and potential future use
-        let (event_sender, _, state_watcher) =
+        let (event_sender, _event_receiver, state_watcher) =
             ChannelBuilder::<MetricsAggregatorEvent, MetricsAggregatorState>::new()
                 .with_event_buffer(10) // Small buffer, rarely used
                 .build(MetricsAggregatorState::Initializing);
@@ -114,34 +114,26 @@ impl SupervisorBuilder for MetricsAggregatorBuilder {
             name: "metrics_aggregator".to_string(),
             system_journal: self.system_journal.clone(),
             system_id,
+            data_subscription: Some(metrics_io.data_subscription),
+            error_subscription: metrics_io.error_subscription,
+            system_subscription: Some(metrics_io.system_subscription),
+            export_timer: None,
+            state_watcher: state_watcher.clone(),
+            last_state: Some(MetricsAggregatorState::Initializing),
         };
-
-        // Clone what we need for the task
-        let state_watcher_for_task = state_watcher.clone();
 
         // Spawn the supervisor task
         let supervisor_task = SupervisorTaskBuilder::<MetricsAggregatorSupervisor>::new(
             "metrics_aggregator",
         )
         .spawn(move || async move {
-            // Run the supervisor directly - metrics doesn't need external events
-            let supervisor_with_state_updates = supervisor;
-
-            // We'll update state manually in dispatch_state
-            // This is simpler than the wrapper pattern for autonomous supervisors
-            let result = SelfSupervisedExt::run(
-                supervisor_with_state_updates,
+            // Run the supervisor directly. Metrics does not use external events.
+            SelfSupervisedExt::run(
+                supervisor,
                 MetricsAggregatorState::Initializing,
                 metrics_context,
             )
-            .await;
-
-            // Update final state
-            let _ = state_watcher_for_task.update(MetricsAggregatorState::Drained {
-                last_event_id: None,
-            });
-
-            result
+            .await
         });
 
         // Build and return the standard handle
