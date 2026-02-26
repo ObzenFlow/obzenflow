@@ -9,7 +9,7 @@
 //! data is written before shutdown.
 
 use crate::backpressure::{BackpressureReader, BackpressureWriter};
-use crate::messaging::upstream_subscription::{ContractConfig, ReaderProgress};
+use crate::messaging::upstream_subscription::{ContractConfig, ContractsWiring, ReaderProgress};
 use crate::messaging::UpstreamSubscription;
 use crate::metrics::instrumentation::StageInstrumentation;
 use crate::stages::common::control_strategies::ControlEventStrategy;
@@ -341,14 +341,15 @@ impl<H: SinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAction<H> 
                 // Build subscription using bound factory with contracts
                 let subscription = ctx
                     .upstream_subscription_factory
-                    .build_with_contracts(
+                    .build_with_contracts(ContractsWiring {
                         writer_id,
-                        ctx.data_journal.clone(),
-                        ContractConfig::default(),
-                        Some(ctx.system_journal.clone()),
-                        Some(ctx.stage_id),
-                        ctx.instrumentation.control_middleware().clone(),
-                    )
+                        contract_journal: ctx.data_journal.clone(),
+                        config: ContractConfig::default(),
+                        system_journal: Some(ctx.system_journal.clone()),
+                        reader_stage: Some(ctx.stage_id),
+                        control_middleware: ctx.instrumentation.control_middleware().clone(),
+                        include_delivery_contract: true,
+                    })
                     .await
                     .map_err(|e| {
                         obzenflow_fsm::FsmError::HandlerError(format!(
@@ -518,11 +519,37 @@ impl<H: SinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAction<H> 
                         stage_name = %stage_name,
                         "sink: Cleanup action - calling handler.drain()"
                     );
-                    handler.drain().await.map_err(|e| {
+                    let drain_result = handler.drain().await.map_err(|e| {
                         obzenflow_fsm::FsmError::HandlerError(format!(
                             "Failed to drain handler: {e:?}"
                         ))
                     })?;
+
+                    // If the handler reports a drain delivery payload, journal it for audit
+                    // completeness. This is a stage-level delivery receipt and therefore has
+                    // no per-event causality parents.
+                    if let Some(mut payload) = drain_result {
+                        payload.destination = stage_name.clone();
+                        let writer_id = ctx.writer_id.expect("writer_id not initialised");
+
+                        let flow_ctx = FlowContext {
+                            flow_name: ctx.flow_name.clone(),
+                            flow_id: ctx.flow_id.to_string(),
+                            stage_name: ctx.stage_name.clone(),
+                            stage_id: ctx.stage_id,
+                            stage_type: StageType::Sink,
+                        };
+
+                        let evt = ChainEventFactory::delivery_event(writer_id, payload)
+                            .with_flow_context(flow_ctx)
+                            .with_runtime_context(ctx.instrumentation.snapshot_with_control());
+
+                        ctx.data_journal.append(evt, None).await.map_err(|e| {
+                            obzenflow_fsm::FsmError::HandlerError(format!(
+                                "Failed to write drain delivery receipt: {e}"
+                            ))
+                        })?;
+                    }
                     tracing::info!(
                         target: "flowip-080o",
                         stage_name = %stage_name,

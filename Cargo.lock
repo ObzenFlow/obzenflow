@@ -1522,9 +1522,9 @@ dependencies = [
 
 [[package]]
 name = "obzenflow-fsm"
-version = "0.3.0"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3d2e8db771e56bc49d5eace07b86b5e91c39679de088e7ed4ba7ade2b4959549"
+checksum = "2771149ccd8ca85d154f9dcdb8926263c09da4931e689e764e2542a82d8c7b3a"
 dependencies = [
  "async-trait",
  "futures",
@@ -1536,9 +1536,9 @@ dependencies = [
 
 [[package]]
 name = "obzenflow-fsm-macros"
-version = "0.1.0"
+version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5cc9a77cecf2b228a32528e4e2ad064352c7e684c0dffc744752660c85f6bcd6"
+checksum = "23223789b208349730c6d2394794ca9b5983b3b736e570670eb6dd267c2d6687"
 dependencies = [
  "proc-macro2",
  "quote",

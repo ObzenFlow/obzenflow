@@ -12,12 +12,11 @@ use crate::backpressure::{
 };
 use crate::id_conversions::StageIdExt;
 use crate::message_bus::FsmMessageBus;
-use crate::messaging::upstream_subscription::{ContractConfig, UpstreamSubscription};
+use crate::messaging::upstream_subscription::{ContractsWiring, UpstreamSubscription};
 use crate::replay::ReplayArchive;
-use obzenflow_core::control_middleware::ControlMiddlewareProvider;
 use obzenflow_core::event::SystemEvent;
 use obzenflow_core::journal::Journal;
-use obzenflow_core::{ChainEvent, FlowId, StageId, SystemId, WriterId};
+use obzenflow_core::{ChainEvent, FlowId, StageId, SystemId};
 use obzenflow_topology::Topology;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -105,25 +104,13 @@ impl BoundSubscriptionFactory {
     /// Build a subscription with contracts configured from the bound journals
     pub async fn build_with_contracts(
         &self,
-        writer_id: WriterId,
-        data_journal: Arc<dyn Journal<ChainEvent>>,
-        contract_config: ContractConfig,
-        system_journal: Option<Arc<dyn Journal<SystemEvent>>>,
-        reader_stage: Option<StageId>,
-        control_middleware: Arc<dyn ControlMiddlewareProvider>,
+        wiring: ContractsWiring,
     ) -> Result<UpstreamSubscription<ChainEvent>, String> {
         let subscription =
             UpstreamSubscription::new_with_names(&self.owner_label, &self.journals_with_names)
                 .await
                 .map_err(|e| format!("Failed to create subscription: {e:?}"))?
-                .with_contracts(
-                    writer_id,
-                    data_journal,
-                    contract_config,
-                    system_journal,
-                    reader_stage,
-                    control_middleware,
-                )
+                .with_contracts(wiring)
                 .transport_only();
 
         Ok(subscription)

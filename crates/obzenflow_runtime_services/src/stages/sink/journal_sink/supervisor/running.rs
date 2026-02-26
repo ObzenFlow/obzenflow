@@ -14,6 +14,7 @@ use crate::stages::common::supervision::error_routing::route_to_error_journal;
 use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::stages::common::supervision::forward_control_event::forward_control_event as forward_control_event_helper;
 use crate::supervised_base::EventLoopDirective;
+use futures::FutureExt;
 use obzenflow_core::event::context::causality_context::CausalityContext;
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
@@ -22,6 +23,7 @@ use obzenflow_core::event::{ChainEventFactory, EventEnvelope, JournalEvent};
 use obzenflow_core::ChainEvent;
 use obzenflow_core::WriterId;
 use obzenflow_fsm::StateVariant;
+use std::panic::AssertUnwindSafe;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
@@ -178,7 +180,7 @@ async fn dispatch_event<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync +
             dispatch_control_event(ctx, subscription, envelope, signal).await
         }
         obzenflow_core::event::ChainEventContent::Data { .. } => {
-            dispatch_data_event(ctx, envelope).await
+            dispatch_data_event(ctx, subscription, envelope).await
         }
         _ => {
             // For other content types, just consume without instrumentation.
@@ -369,6 +371,7 @@ async fn dispatch_control_event<
 
 async fn dispatch_data_event<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static>(
     ctx: &mut JournalSinkContext<H>,
+    subscription: &mut crate::messaging::UpstreamSubscription<ChainEvent>,
     envelope: &EventEnvelope<ChainEvent>,
 ) -> Result<EventLoopDirective<JournalSinkEvent<H>>, Box<dyn std::error::Error + Send + Sync>> {
     let envelope_event = envelope.event.clone();
@@ -377,14 +380,16 @@ async fn dispatch_data_event<H: SinkHandler + Clone + std::fmt::Debug + Send + S
     // Use instrumentation wrapper but keep handler-level failures as per-record
     // outcomes instead of stage-fatal errors.
     let ack_result = process_with_instrumentation(&ctx.instrumentation, || async {
-        let result = ctx.handler.consume(envelope_event).await;
+        let result = AssertUnwindSafe(ctx.handler.consume(envelope_event))
+            .catch_unwind()
+            .await;
 
         match result {
-            Ok(mut payload) => {
+            Ok(Ok(mut payload)) => {
                 payload.destination = stage_name.clone();
-                Ok((payload, None))
+                Ok((payload, None, false))
             }
-            Err(err) => {
+            Ok(Err(err)) => {
                 let fail_payload = DeliveryPayload::failed(
                     stage_name.clone(),
                     DeliveryMethod::Noop,
@@ -392,14 +397,36 @@ async fn dispatch_data_event<H: SinkHandler + Clone + std::fmt::Debug + Send + S
                     err.to_string(),
                     /* final_attempt */ false,
                 );
-                Ok((fail_payload, Some(err)))
+                Ok((fail_payload, Some(err), false))
+            }
+            Err(panic_payload) => {
+                let msg = panic_payload
+                    .downcast_ref::<&str>()
+                    .map(|s| (*s).to_string())
+                    .or_else(|| panic_payload.downcast_ref::<String>().cloned())
+                    .unwrap_or_else(|| "unknown panic payload".to_string());
+
+                tracing::error!(
+                    stage_name = %stage_name,
+                    panic = %msg,
+                    "SinkHandler::consume() panicked"
+                );
+
+                let fail_payload = DeliveryPayload::failed(
+                    stage_name.clone(),
+                    DeliveryMethod::Noop,
+                    "handler_panic",
+                    msg,
+                    /* final_attempt */ true,
+                );
+                Ok((fail_payload, None, true))
             }
         }
     })
     .await;
 
     match ack_result {
-        Ok((payload, maybe_err)) => {
+        Ok((payload, maybe_err, panicked)) => {
             let flow_id = ctx.flow_id.to_string();
             let flow_context = make_flow_context(
                 &ctx.flow_name,
@@ -431,6 +458,10 @@ async fn dispatch_data_event<H: SinkHandler + Clone + std::fmt::Debug + Send + S
                 &ctx.system_journal,
             )
             .await;
+
+            if let Some(upstream_stage) = subscription.last_delivered_upstream_stage() {
+                subscription.notify_delivery_receipt(&written.event, upstream_stage);
+            }
 
             // Per-record handler errors are not stage-fatal. Surface them as
             // error-marked events, routed by ErrorKind policy.
@@ -483,7 +514,11 @@ async fn dispatch_data_event<H: SinkHandler + Clone + std::fmt::Debug + Send + S
                 }
             }
 
-            Ok(EventLoopDirective::Continue)
+            if panicked {
+                Err("SinkHandler::consume() panicked".into())
+            } else {
+                Ok(EventLoopDirective::Continue)
+            }
         }
         Err(e) => {
             // Instrumentation-level or unexpected failure: treat as stage-fatal.

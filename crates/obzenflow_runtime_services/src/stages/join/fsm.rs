@@ -23,7 +23,7 @@ use std::sync::Arc;
 
 use super::config::JoinReferenceMode;
 use crate::backpressure::{BackpressureReader, BackpressureWriter};
-use crate::messaging::upstream_subscription::{ContractConfig, ReaderProgress};
+use crate::messaging::upstream_subscription::{ContractConfig, ContractsWiring, ReaderProgress};
 use crate::messaging::UpstreamSubscription;
 use crate::metrics::instrumentation::StageInstrumentation;
 use crate::stages::common::backpressure_activity_pulse::BackpressureActivityPulse;
@@ -407,14 +407,15 @@ impl<H: JoinHandler + Send + Sync + 'static> FsmAction for JoinAction<H> {
                 // 1) Subscribe to reference journal ONLY
                 let ref_subscription = ctx
                     .reference_subscription_factory
-                    .build_with_contracts(
+                    .build_with_contracts(ContractsWiring {
                         writer_id,
-                        ctx.data_journal.clone(),
-                        ContractConfig::default(),
-                        Some(ctx.system_journal.clone()),
-                        Some(ctx.stage_id),
-                        ctx.instrumentation.control_middleware().clone(),
-                    )
+                        contract_journal: ctx.data_journal.clone(),
+                        config: ContractConfig::default(),
+                        system_journal: Some(ctx.system_journal.clone()),
+                        reader_stage: Some(ctx.stage_id),
+                        control_middleware: ctx.instrumentation.control_middleware().clone(),
+                        include_delivery_contract: false,
+                    })
                     .await
                     .map_err(|e| {
                         obzenflow_fsm::FsmError::HandlerError(format!(
@@ -438,14 +439,15 @@ impl<H: JoinHandler + Send + Sync + 'static> FsmAction for JoinAction<H> {
 
                 let stream_subscription = ctx
                     .stream_subscription_factory
-                    .build_with_contracts(
+                    .build_with_contracts(ContractsWiring {
                         writer_id,
-                        ctx.data_journal.clone(),
-                        ContractConfig::default(),
-                        Some(ctx.system_journal.clone()),
-                        Some(ctx.stage_id),
-                        ctx.instrumentation.control_middleware().clone(),
-                    )
+                        contract_journal: ctx.data_journal.clone(),
+                        config: ContractConfig::default(),
+                        system_journal: Some(ctx.system_journal.clone()),
+                        reader_stage: Some(ctx.stage_id),
+                        control_middleware: ctx.instrumentation.control_middleware().clone(),
+                        include_delivery_contract: false,
+                    })
                     .await
                     .map_err(|e| {
                         obzenflow_fsm::FsmError::HandlerError(format!(

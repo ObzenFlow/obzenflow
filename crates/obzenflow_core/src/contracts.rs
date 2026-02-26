@@ -2,13 +2,15 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use crate::event::{types::SeqNo, ChainEvent, EventId};
+use crate::event::payloads::delivery_payload::DeliveryResult;
+use crate::event::{types::SeqNo, ChainEvent, ChainEventContent, EventId};
 use crate::id::StageId;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use serde_json::Value as JsonValue;
+use serde_json::{json, Value as JsonValue};
 use std::any::{Any, TypeId};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::sync::Mutex;
 
 /// Result of contract verification for a single contract on an edge.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -431,5 +433,283 @@ impl Contract for SourceContract {
                 ),
             }),
         }
+    }
+}
+
+// ======================================================================
+// Delivery contract (FLOWIP-090f)
+// ======================================================================
+
+#[derive(Debug, Default)]
+struct DeliveryState {
+    /// Consumed data events awaiting a delivery receipt.
+    pending: HashSet<EventId>,
+    pending_peak: usize,
+
+    /// Aggregate counters for evidence and policy.
+    consumed_total: u64,
+    receipted_total: u64,
+    success_count: u64,
+    partial_count: u64,
+    failed_count: u64,
+    failed_final_count: u64,
+
+    /// Receipts whose immediate parent does not match any pending consumed event ID.
+    ///
+    /// Under correct receipt routing, this indicates a wiring defect.
+    orphan_deliveries: u64,
+}
+
+/// Verifies that every data event consumed by a sink handler produces a delivery
+/// receipt journalled with causality-parent linkage back to that consumed event.
+///
+/// This contract deliberately stores bounded state: only the set of consumed
+/// event IDs that are still awaiting receipts, plus aggregate counters. This
+/// keeps memory usage O(pending) rather than O(total events).
+pub struct DeliveryContract {
+    state: Mutex<DeliveryState>,
+}
+
+impl Default for DeliveryContract {
+    fn default() -> Self {
+        Self {
+            state: Mutex::new(DeliveryState::default()),
+        }
+    }
+}
+
+impl Contract for DeliveryContract {
+    fn name(&self) -> &str {
+        "DeliveryContract"
+    }
+
+    fn on_write(&self, event: &ChainEvent, _ctx: &mut ContractWriteContext) {
+        let ChainEventContent::Delivery(payload) = &event.content else {
+            return;
+        };
+
+        // Receipts must identify the consumed event via the immediate causality parent.
+        let Some(parent_id) = event.causality.parent_ids.first().copied() else {
+            return;
+        };
+
+        let mut st = self.state.lock().expect("DeliveryContract state poisoned");
+
+        if !st.pending.remove(&parent_id) {
+            st.orphan_deliveries = st.orphan_deliveries.saturating_add(1);
+            return;
+        }
+
+        st.receipted_total = st.receipted_total.saturating_add(1);
+        match &payload.result {
+            DeliveryResult::Success { .. } => {
+                st.success_count = st.success_count.saturating_add(1);
+            }
+            DeliveryResult::Partial { .. } => {
+                st.partial_count = st.partial_count.saturating_add(1);
+            }
+            DeliveryResult::Failed { final_attempt, .. } => {
+                st.failed_count = st.failed_count.saturating_add(1);
+                if *final_attempt {
+                    st.failed_final_count = st.failed_final_count.saturating_add(1);
+                }
+            }
+        }
+    }
+
+    fn on_read(&self, event: &ChainEvent, _ctx: &mut ContractReadContext) {
+        // Only data events require receipts.
+        if !event.is_data() {
+            return;
+        }
+
+        let mut st = self.state.lock().expect("DeliveryContract state poisoned");
+
+        st.consumed_total = st.consumed_total.saturating_add(1);
+        st.pending.insert(event.id);
+        st.pending_peak = st.pending_peak.max(st.pending.len());
+    }
+
+    fn verify(&self, ctx: &ContractContext<'_>) -> ContractResult {
+        let st = self.state.lock().expect("DeliveryContract state poisoned");
+
+        let missing_count = st.pending.len();
+        let orphan_count = st.orphan_deliveries as usize;
+
+        let mut missing_sample: Vec<EventId> = st.pending.iter().take(100).copied().collect();
+        missing_sample.sort();
+
+        if missing_count == 0 && orphan_count == 0 {
+            ContractResult::Passed(ContractEvidence {
+                contract_name: self.name().to_string(),
+                upstream_stage: ctx.upstream_stage,
+                downstream_stage: ctx.downstream_stage,
+                verified_at: Utc::now(),
+                details: json!({
+                    "consumed_total": st.consumed_total,
+                    "receipted_total": st.receipted_total,
+                    "pending_peak": st.pending_peak,
+                    "has_failures": st.failed_count > 0,
+                    "success_count": st.success_count,
+                    "partial_count": st.partial_count,
+                    "failed_count": st.failed_count,
+                    "failed_final_count": st.failed_final_count,
+                }),
+            })
+        } else {
+            ContractResult::Failed(ContractViolation {
+                contract_name: self.name().to_string(),
+                upstream_stage: ctx.upstream_stage,
+                downstream_stage: ctx.downstream_stage,
+                detected_at: Utc::now(),
+                cause: ViolationCause::DeliveryMismatch {
+                    missing_deliveries: missing_count,
+                    orphan_deliveries: orphan_count,
+                },
+                details: json!({
+                    "consumed_total": st.consumed_total,
+                    "receipted_total": st.receipted_total,
+                    "pending_peak": st.pending_peak,
+                    "missing_count": missing_count,
+                    "orphan_count": orphan_count,
+                    "missing_event_ids": missing_sample
+                        .iter()
+                        .map(|id| id.to_string())
+                        .collect::<Vec<_>>(),
+                }),
+            })
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::event::context::causality_context::CausalityContext;
+    use crate::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
+    use crate::event::ChainEventFactory;
+    use crate::WriterId;
+
+    fn dummy_ctx() -> (ContractWriteContext, ContractReadContext, StageId, StageId) {
+        let upstream_stage = StageId::new();
+        let downstream_stage = StageId::new();
+        let write_ctx = ContractWriteContext::new(upstream_stage);
+        let read_ctx = ContractReadContext::new(downstream_stage, upstream_stage);
+        (write_ctx, read_ctx, upstream_stage, downstream_stage)
+    }
+
+    #[test]
+    fn delivery_contract_empty_passes() {
+        let contract = DeliveryContract::default();
+        let (write_ctx, read_ctx, upstream, downstream) = dummy_ctx();
+        let ctx = ContractContext {
+            upstream_stage: upstream,
+            downstream_stage: downstream,
+            write_state: &write_ctx.state,
+            read_state: &read_ctx.state,
+        };
+        assert!(matches!(contract.verify(&ctx), ContractResult::Passed(_)));
+    }
+
+    #[test]
+    fn delivery_contract_missing_receipt_fails() {
+        let contract = DeliveryContract::default();
+        let (write_ctx, mut read_ctx, upstream, downstream) = dummy_ctx();
+
+        let consumed =
+            ChainEventFactory::data_event(WriterId::from(upstream), "test.event", json!({"a": 1}));
+        contract.on_read(&consumed, &mut read_ctx);
+
+        let ctx = ContractContext {
+            upstream_stage: upstream,
+            downstream_stage: downstream,
+            write_state: &write_ctx.state,
+            read_state: &read_ctx.state,
+        };
+
+        match contract.verify(&ctx) {
+            ContractResult::Failed(v) => match v.cause {
+                ViolationCause::DeliveryMismatch {
+                    missing_deliveries,
+                    orphan_deliveries,
+                } => {
+                    assert_eq!(missing_deliveries, 1);
+                    assert_eq!(orphan_deliveries, 0);
+                }
+                other => panic!("unexpected cause: {other:?}"),
+            },
+            other => panic!("expected failure, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn delivery_contract_failed_receipt_is_accounted_for() {
+        let contract = DeliveryContract::default();
+        let (mut write_ctx, mut read_ctx, upstream, downstream) = dummy_ctx();
+
+        let consumed =
+            ChainEventFactory::data_event(WriterId::from(upstream), "test.event", json!({"a": 1}));
+        let parent_id = consumed.id;
+        contract.on_read(&consumed, &mut read_ctx);
+
+        let receipt_payload = DeliveryPayload::failed(
+            "dest",
+            DeliveryMethod::Noop,
+            "sink_error",
+            "boom",
+            /* final_attempt */ true,
+        );
+        let receipt =
+            ChainEventFactory::delivery_event(WriterId::from(downstream), receipt_payload)
+                .with_causality(CausalityContext::with_parent(parent_id));
+
+        contract.on_write(&receipt, &mut write_ctx);
+
+        let ctx = ContractContext {
+            upstream_stage: upstream,
+            downstream_stage: downstream,
+            write_state: &write_ctx.state,
+            read_state: &read_ctx.state,
+        };
+        assert!(matches!(contract.verify(&ctx), ContractResult::Passed(_)));
+    }
+
+    #[test]
+    fn delivery_contract_orphan_receipt_fails() {
+        let contract = DeliveryContract::default();
+        let (mut write_ctx, mut read_ctx, upstream, downstream) = dummy_ctx();
+
+        // No consumed event observed, but a receipt arrives.
+        let receipt_payload =
+            DeliveryPayload::success("dest", DeliveryMethod::Noop, /* bytes */ None);
+        let receipt =
+            ChainEventFactory::delivery_event(WriterId::from(downstream), receipt_payload)
+                .with_causality(CausalityContext::with_parent(EventId::new()));
+
+        contract.on_write(&receipt, &mut write_ctx);
+
+        let ctx = ContractContext {
+            upstream_stage: upstream,
+            downstream_stage: downstream,
+            write_state: &write_ctx.state,
+            read_state: &read_ctx.state,
+        };
+
+        match contract.verify(&ctx) {
+            ContractResult::Failed(v) => match v.cause {
+                ViolationCause::DeliveryMismatch {
+                    missing_deliveries,
+                    orphan_deliveries,
+                } => {
+                    assert_eq!(missing_deliveries, 0);
+                    assert_eq!(orphan_deliveries, 1);
+                }
+                other => panic!("unexpected cause: {other:?}"),
+            },
+            other => panic!("expected failure, got: {other:?}"),
+        }
+
+        // Keep the compiler honest about the unused read_ctx.
+        let _ = &mut read_ctx;
     }
 }

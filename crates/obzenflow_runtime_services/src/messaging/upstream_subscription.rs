@@ -28,6 +28,7 @@ use obzenflow_core::journal::journal_error::JournalError;
 use obzenflow_core::journal::journal_reader::JournalReader;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::ContractResult;
+use obzenflow_core::DeliveryContract;
 use obzenflow_core::EventEnvelope;
 use obzenflow_core::Result;
 use obzenflow_core::StageId;
@@ -276,6 +277,17 @@ pub struct ContractTracker {
     output_events_written: SeqNo,
 }
 
+/// Wiring configuration for enabling contracts on an upstream subscription.
+pub struct ContractsWiring {
+    pub writer_id: WriterId,
+    pub contract_journal: Arc<dyn Journal<ChainEvent>>,
+    pub config: ContractConfig,
+    pub system_journal: Option<Arc<dyn Journal<SystemEvent>>>,
+    pub reader_stage: Option<StageId>,
+    pub control_middleware: Arc<dyn ControlMiddlewareProvider>,
+    pub include_delivery_contract: bool,
+}
+
 /// Runtime configuration for contract emissions
 #[derive(Clone)]
 pub struct ContractConfig {
@@ -489,6 +501,43 @@ where
         self.last_delivered_upstream_stage
     }
 
+    /// Bridge a sink delivery receipt write into the edge-scoped `ContractChain`
+    /// for the upstream that delivered the consumed parent event.
+    ///
+    /// This is used by sink supervisors to feed `ChainEventContent::Delivery`
+    /// events (written to the sink's own journal) into the same per-edge
+    /// contract chain that observed the consumed input event via `on_read`.
+    pub fn notify_delivery_receipt(&mut self, receipt: &ChainEvent, upstream_stage: StageId) {
+        let Some(reader_stage) = self.contract_tracker.as_ref().and_then(|t| t.reader_stage) else {
+            // Contracts are not configured for this subscription.
+            return;
+        };
+
+        let Some(index) = self
+            .readers
+            .iter()
+            .position(|(id, _, _)| *id == upstream_stage)
+        else {
+            tracing::warn!(
+                owner = %self.owner_label,
+                ?upstream_stage,
+                "notify_delivery_receipt: no reader slot for upstream stage"
+            );
+            return;
+        };
+
+        let Some(chain_slot) = self.contract_chains.get_mut(index) else {
+            return;
+        };
+        let Some(chain) = chain_slot.as_mut() else {
+            return;
+        };
+
+        // The receipt is written by the sink (the reader stage for this subscription).
+        // SeqNo(0) because receipt accounting does not use sequence numbers.
+        chain.on_write(receipt, reader_stage, SeqNo(0));
+    }
+
     /// Configure this subscription to deliver only transport-relevant events to the caller.
     ///
     /// This is intended for *stage runtime* subscriptions where downstream stages should
@@ -562,21 +611,23 @@ where
     }
 
     /// Enable contract emission for at-least-once delivery guarantees
-    pub fn with_contracts(
-        mut self,
-        writer_id: WriterId,
-        journal: Arc<dyn Journal<ChainEvent>>,
-        config: ContractConfig,
-        system_journal: Option<Arc<dyn Journal<SystemEvent>>>,
-        reader_stage: Option<StageId>,
-        control_middleware: Arc<dyn ControlMiddlewareProvider>,
-    ) -> Self {
+    pub fn with_contracts(mut self, wiring: ContractsWiring) -> Self {
+        let ContractsWiring {
+            writer_id,
+            contract_journal,
+            config,
+            system_journal,
+            reader_stage,
+            control_middleware,
+            include_delivery_contract,
+        } = wiring;
+
         self.control_middleware = control_middleware.clone();
 
         self.contract_tracker = Some(ContractTracker {
             config,
             writer_id,
-            journal,
+            journal: contract_journal,
             system_journal,
             reader_stage,
             output_events_written: SeqNo(0),
@@ -589,9 +640,12 @@ where
                 .readers
                 .iter()
                 .map(|_| {
-                    let chain = ContractChain::new()
+                    let mut chain = ContractChain::new()
                         .with_contract(TransportContract::new())
                         .with_contract(obzenflow_core::SourceContract::new());
+                    if include_delivery_contract {
+                        chain = chain.with_contract(DeliveryContract::default());
+                    }
                     Some(chain)
                 })
                 .collect();
@@ -1870,14 +1924,15 @@ mod tests {
 
         let contract_config = ContractConfig::default();
         let writer_id_for_contracts = WriterId::from(reader_stage);
-        subscription = subscription.with_contracts(
-            writer_id_for_contracts,
-            contract_journal.clone(),
-            contract_config,
-            Some(system_journal.clone()),
-            Some(reader_stage),
+        subscription = subscription.with_contracts(ContractsWiring {
+            writer_id: writer_id_for_contracts,
+            contract_journal: contract_journal.clone(),
+            config: contract_config,
+            system_journal: Some(system_journal.clone()),
+            reader_stage: Some(reader_stage),
             control_middleware,
-        );
+            include_delivery_contract: false,
+        });
 
         (
             subscription,

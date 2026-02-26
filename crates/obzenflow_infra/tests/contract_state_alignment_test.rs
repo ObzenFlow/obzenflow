@@ -10,7 +10,7 @@ use obzenflow_core::journal::Journal;
 use obzenflow_core::{JournalOwner, NoControlMiddleware, StageId, WriterId};
 use obzenflow_infra::journal::{DiskJournal, MemoryJournal};
 use obzenflow_runtime_services::messaging::upstream_subscription::{
-    ContractConfig, ReaderProgress, UpstreamSubscription,
+    ContractConfig, ContractsWiring, ReaderProgress, UpstreamSubscription,
 };
 use obzenflow_runtime_services::messaging::PollResult;
 use ulid::Ulid;
@@ -85,14 +85,15 @@ async fn build_subscription_with_contracts(
         stall_checks_before_emit: 1,
     };
 
-    subscription = subscription.with_contracts(
+    subscription = subscription.with_contracts(ContractsWiring {
         writer_id,
-        data_journal.clone(),
+        contract_journal: data_journal.clone(),
         config,
-        None,
-        Some(stage_id),
-        Arc::new(NoControlMiddleware),
-    );
+        system_journal: None,
+        reader_stage: Some(stage_id),
+        control_middleware: Arc::new(NoControlMiddleware),
+        include_delivery_contract: false,
+    });
 
     (subscription, data_journal, upstream_journal, stage_id)
 }

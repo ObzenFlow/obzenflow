@@ -267,6 +267,29 @@ impl SupervisorBuilder for PipelineBuilder {
             .map(|stage| StageId::from_topology_id(stage.id))
             .collect();
 
+        // Identify sink stages by semantic type so we can attach delivery contracts
+        // for UI/observability.
+        let sink_stages: HashSet<StageId> = self
+            .topology
+            .stages()
+            .filter(|stage| stage.stage_type == obzenflow_topology::StageType::Sink)
+            .map(|stage| StageId::from_topology_id(stage.id))
+            .collect();
+
+        let delivery_contract_pairs: HashSet<(StageId, StageId)> = self
+            .topology
+            .edges()
+            .iter()
+            .filter(|edge| edge.kind == obzenflow_topology::EdgeKind::Forward)
+            .map(|edge| {
+                (
+                    StageId::from_topology_id(edge.from),
+                    StageId::from_topology_id(edge.to),
+                )
+            })
+            .filter(|(_, downstream)| sink_stages.contains(downstream))
+            .collect();
+
         // Track every topology edge so we can require ContractStatus evidence for each upstream->reader pair
         let expected_contract_pairs: HashSet<(StageId, StageId)> = self
             .topology
@@ -283,6 +306,7 @@ impl SupervisorBuilder for PipelineBuilder {
         // Structural contract attachments for topology observability:
         // - Every edge gets TransportContract.
         // - Edges whose upstream is a source stage also get SourceContract.
+        // - Forward edges into sink stages also get DeliveryContract.
         let mut contract_attachments_map: HashMap<(StageId, StageId), Vec<String>> =
             self.contract_attachments.unwrap_or_default();
         for (upstream, downstream) in &expected_contract_pairs {
@@ -294,6 +318,11 @@ impl SupervisorBuilder for PipelineBuilder {
             }
             if expected_sources.contains(upstream) && !entry.iter().any(|n| n == "SourceContract") {
                 entry.push("SourceContract".to_string());
+            }
+            if delivery_contract_pairs.contains(&(*upstream, *downstream))
+                && !entry.iter().any(|n| n == "DeliveryContract")
+            {
+                entry.push("DeliveryContract".to_string());
             }
         }
 
