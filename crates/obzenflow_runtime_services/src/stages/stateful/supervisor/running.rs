@@ -190,9 +190,11 @@ pub(super) async fn dispatch_accumulating<
                         ControlResolution::Forward => {
                             if envelope.event.is_eof() {
                                 if let Some(subscription) = sup.subscription.as_mut() {
-                                    let _ = subscription
-                                        .check_contracts(&mut ctx.contract_state[..])
-                                        .await;
+                                    drop(
+                                        subscription
+                                            .check_contracts(&mut ctx.contract_state[..])
+                                            .await,
+                                    );
                                     let _ = subscription.take_last_eof_outcome();
                                 }
                             }
@@ -310,19 +312,19 @@ pub(super) async fn dispatch_accumulating<
                         .check_contracts(&mut ctx.contract_state[..])
                         .await
                     {
-                        Ok(crate::messaging::upstream_subscription::ContractStatus::Stalled(
+                        crate::messaging::upstream_subscription::ContractStatus::Stalled(
                             upstream,
-                        )) => {
+                        ) => {
                             tracing::warn!(
                                 stage_name = %ctx.stage_name,
                                 upstream = ?upstream,
                                 "Upstream stalled detected during stateful processing"
                             );
                         }
-                        Ok(crate::messaging::upstream_subscription::ContractStatus::Violated {
+                        crate::messaging::upstream_subscription::ContractStatus::Violated {
                             upstream,
                             cause,
-                        }) => {
+                        } => {
                             tracing::error!(
                                 stage_name = %ctx.stage_name,
                                 upstream = ?upstream,
@@ -330,14 +332,7 @@ pub(super) async fn dispatch_accumulating<
                                 "Contract violation detected during stateful processing"
                             );
                         }
-                        Ok(_) => {}
-                        Err(e) => {
-                            tracing::error!(
-                                stage_name = %ctx.stage_name,
-                                error = %e,
-                                "Failed to check contracts"
-                            );
-                        }
+                        _ => {}
                     }
                 }
             }

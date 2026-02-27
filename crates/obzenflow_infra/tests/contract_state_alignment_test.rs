@@ -163,10 +163,7 @@ async fn contract_state_tracks_seq_and_emits_final() {
     );
 
     // Run contract checks; this should emit a consumption_final event.
-    let status = subscription
-        .check_contracts(&mut progress[..])
-        .await
-        .expect("check_contracts failed");
+    let status = subscription.check_contracts(&mut progress[..]).await;
     match status {
         obzenflow_runtime_services::messaging::upstream_subscription::ContractStatus::ProgressEmitted
         | obzenflow_runtime_services::messaging::upstream_subscription::ContractStatus::Healthy => {
@@ -266,10 +263,7 @@ async fn contract_seq_divergence_missing_events_emits_gap_and_violation() {
     assert_eq!(progress[0].reader_seq, SeqNo(2));
     assert_eq!(progress[0].advertised_writer_seq, Some(SeqNo(3)));
 
-    let status = subscription
-        .check_contracts(&mut progress[..])
-        .await
-        .expect("check_contracts failed");
+    let status = subscription.check_contracts(&mut progress[..]).await;
 
     // Status should indicate a violation with SeqDivergence.
     match status {
@@ -442,10 +436,7 @@ async fn contract_seq_divergence_overconsumption_sets_violation_without_gap() {
     assert_eq!(progress[0].reader_seq, SeqNo(2));
     assert_eq!(progress[0].advertised_writer_seq, Some(SeqNo(1)));
 
-    let status = subscription
-        .check_contracts(&mut progress[..])
-        .await
-        .expect("check_contracts failed");
+    let status = subscription.check_contracts(&mut progress[..]).await;
 
     // Any SeqDivergence (including over-consumption) is now surfaced as a violation.
     match status {

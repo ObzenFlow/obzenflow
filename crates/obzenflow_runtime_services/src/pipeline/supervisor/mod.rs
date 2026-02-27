@@ -341,16 +341,23 @@ impl PipelineSupervisor {
 
         let seen = &context.contract_pairs;
 
-        // Success requires that no *gating* contract edge has an explicit failure recorded.
-        // Missing contract evidence is tolerated here; it is surfaced via logs/metrics
-        // but does not block drain at the transport-contract layer. Source edges configured
-        // in warn-only mode are treated as non-gating for this check.
-        !seen.iter().any(|((upstream, _reader), status)| {
-            let is_source = context.expected_sources.contains(upstream);
-            let mode = source_contract_mode();
-            let is_gating = is_gating_edge_for_contract(is_source, mode);
-            is_gating && !status.is_passed()
-        })
+        // Success requires that every *gating* contract edge has a recorded pass.
+        // Missing contract evidence blocks completion: the pipeline must see
+        // explicit pass evidence before synthesising AllStagesCompleted.
+        // Source edges configured in warn-only mode are treated as non-gating
+        // for this check.
+        context
+            .expected_contract_pairs
+            .iter()
+            .all(|(upstream, reader)| {
+                let is_source = context.expected_sources.contains(upstream);
+                let mode = source_contract_mode();
+                let is_gating = is_gating_edge_for_contract(is_source, mode);
+                if !is_gating {
+                    return true;
+                }
+                matches!(seen.get(&(*upstream, *reader)), Some(status) if status.is_passed())
+            })
     }
 
     /// Synthesize and write AllStagesCompleted when we know we are done.

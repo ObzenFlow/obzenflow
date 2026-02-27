@@ -107,24 +107,22 @@ pub(super) async fn dispatch_running<
             directive_result
         }
         PollResult::NoEvents => {
-            if let Some(result) = subscription
+            if let Some(status) = subscription
                 .maybe_check_contracts(&mut ctx.contract_state[..])
                 .await
             {
-                match result {
-                    Ok(crate::messaging::upstream_subscription::ContractStatus::Stalled(
-                        upstream,
-                    )) => {
+                match status {
+                    crate::messaging::upstream_subscription::ContractStatus::Stalled(upstream) => {
                         tracing::warn!(
                             stage_name = %ctx.stage_name,
                             upstream = ?upstream,
                             "Upstream stalled detected during sink processing"
                         );
                     }
-                    Ok(crate::messaging::upstream_subscription::ContractStatus::Violated {
+                    crate::messaging::upstream_subscription::ContractStatus::Violated {
                         upstream,
                         cause,
-                    }) => {
+                    } => {
                         tracing::error!(
                             stage_name = %ctx.stage_name,
                             upstream = ?upstream,
@@ -132,15 +130,7 @@ pub(super) async fn dispatch_running<
                             "Contract violation detected during sink processing"
                         );
                     }
-                    Ok(_) => {}
-                    Err(e) => {
-                        // Phase 3: do not silently discard contract check errors.
-                        tracing::warn!(
-                            stage_name = %ctx.stage_name,
-                            error = %e,
-                            "Failed to check contracts"
-                        );
-                    }
+                    _ => {}
                 }
             }
 
@@ -245,9 +235,11 @@ async fn dispatch_control_event<
     match resolution {
         ControlResolution::Forward => {
             if envelope.event.is_eof() {
-                let _ = subscription
-                    .check_contracts(&mut ctx.contract_state[..])
-                    .await;
+                drop(
+                    subscription
+                        .check_contracts(&mut ctx.contract_state[..])
+                        .await,
+                );
                 let _ = subscription.take_last_eof_outcome();
 
                 let upstream_readers = subscription.upstream_count();
@@ -309,9 +301,11 @@ async fn dispatch_control_event<
         }
         ControlResolution::ForwardAndDrain => {
             // Final EOF (all authoritative upstream EOFs observed).
-            let _ = subscription
-                .check_contracts(&mut ctx.contract_state[..])
-                .await;
+            drop(
+                subscription
+                    .check_contracts(&mut ctx.contract_state[..])
+                    .await,
+            );
             let _ = subscription.take_last_eof_outcome();
 
             if let Some(outcome) = last_eof_outcome {

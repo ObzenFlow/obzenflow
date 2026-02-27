@@ -273,24 +273,22 @@ pub(super) async fn dispatch_enriching<
             }
         }
         PollResult::NoEvents => {
-            if let Some(result) = subscription
+            if let Some(status) = subscription
                 .maybe_check_contracts(&mut ctx.stream_contract_state[..])
                 .await
             {
-                match result {
-                    Ok(crate::messaging::upstream_subscription::ContractStatus::Stalled(
-                        upstream,
-                    )) => {
+                match status {
+                    crate::messaging::upstream_subscription::ContractStatus::Stalled(upstream) => {
                         tracing::warn!(
                             stage_name = %ctx.stage_name,
                             upstream = ?upstream,
                             "Stream upstream stalled during join enriching"
                         );
                     }
-                    Ok(crate::messaging::upstream_subscription::ContractStatus::Violated {
+                    crate::messaging::upstream_subscription::ContractStatus::Violated {
                         upstream,
                         cause,
-                    }) => {
+                    } => {
                         tracing::error!(
                             stage_name = %ctx.stage_name,
                             upstream = ?upstream,
@@ -298,14 +296,7 @@ pub(super) async fn dispatch_enriching<
                             "Stream contract violation during join enriching"
                         );
                     }
-                    Ok(_) => {}
-                    Err(e) => {
-                        tracing::error!(
-                            stage_name = %ctx.stage_name,
-                            error = %e,
-                            "Failed to check stream contracts"
-                        );
-                    }
+                    _ => {}
                 }
             }
 

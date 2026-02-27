@@ -484,7 +484,7 @@ impl<H: SinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAction<H> 
                         stage_name = %ctx.stage_name,
                         "sink: FlushBuffers action - calling check_contracts"
                     );
-                    let _ = subscription.check_contracts(&mut contract_state[..]).await;
+                    drop(subscription.check_contracts(&mut contract_state[..]).await);
                     tracing::info!(
                         target: "flowip-080o",
                         stage_name = %ctx.stage_name,

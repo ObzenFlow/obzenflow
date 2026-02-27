@@ -127,9 +127,11 @@ pub(super) async fn dispatch_draining<
                 return Ok(EventLoopDirective::Continue);
             }
             PollResult::NoEvents => {
-                let _ = subscription
-                    .check_contracts(&mut ctx.reference_contract_state[..])
-                    .await;
+                drop(
+                    subscription
+                        .check_contracts(&mut ctx.reference_contract_state[..])
+                        .await,
+                );
             }
             PollResult::Error(e) => {
                 return Ok(EventLoopDirective::Transition(JoinEvent::Error(format!(
@@ -249,9 +251,11 @@ pub(super) async fn dispatch_draining<
                 return Ok(EventLoopDirective::Continue);
             }
             PollResult::NoEvents => {
-                let _ = subscription
-                    .check_contracts(&mut ctx.stream_contract_state[..])
-                    .await;
+                drop(
+                    subscription
+                        .check_contracts(&mut ctx.stream_contract_state[..])
+                        .await,
+                );
             }
             PollResult::Error(e) => {
                 return Ok(EventLoopDirective::Transition(JoinEvent::Error(

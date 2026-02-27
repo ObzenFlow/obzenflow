@@ -240,9 +240,11 @@ async fn dispatch_draining_inner<
         }
         PollResult::NoEvents => {
             if let Some(subscription) = sup.subscription.as_mut() {
-                let _ = subscription
-                    .check_contracts(&mut ctx.contract_state[..])
-                    .await;
+                drop(
+                    subscription
+                        .check_contracts(&mut ctx.contract_state[..])
+                        .await,
+                );
             }
 
             tracing::info!(stage_name = %ctx.stage_name, "Transform queue drained");

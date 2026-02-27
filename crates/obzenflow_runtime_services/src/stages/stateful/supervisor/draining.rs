@@ -249,9 +249,11 @@ pub(super) async fn dispatch_draining<
             PollResult::NoEvents => {
                 // Queue is truly drained - no more events available.
                 // Do a final contract check before draining.
-                let _ = subscription
-                    .check_contracts(&mut ctx.contract_state[..])
-                    .await;
+                drop(
+                    subscription
+                        .check_contracts(&mut ctx.contract_state[..])
+                        .await,
+                );
 
                 tracing::info!(
                     stage_name = %ctx.stage_name,

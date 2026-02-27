@@ -224,14 +224,18 @@ async fn dispatch_running_inner<
                                 if let Some(subscription) = sup.subscription.as_mut() {
                                     if is_cycle_entry_point {
                                         if is_terminal_eof(&envelope, upstream_stage) {
-                                            let _ = subscription
-                                                .check_contracts(&mut ctx.contract_state[..])
-                                                .await;
+                                            drop(
+                                                subscription
+                                                    .check_contracts(&mut ctx.contract_state[..])
+                                                    .await,
+                                            );
                                         }
                                     } else {
-                                        let _ = subscription
-                                            .check_contracts(&mut ctx.contract_state[..])
-                                            .await;
+                                        drop(
+                                            subscription
+                                                .check_contracts(&mut ctx.contract_state[..])
+                                                .await,
+                                        );
                                         let _ = subscription.take_last_eof_outcome();
                                     }
                                 }
@@ -245,9 +249,11 @@ async fn dispatch_running_inner<
 
                             if envelope.event.is_eof() {
                                 if let Some(subscription) = sup.subscription.as_mut() {
-                                    let _ = subscription
-                                        .check_contracts(&mut ctx.contract_state[..])
-                                        .await;
+                                    drop(
+                                        subscription
+                                            .check_contracts(&mut ctx.contract_state[..])
+                                            .await,
+                                    );
                                     if !is_cycle_entry_point {
                                         let _ = subscription.take_last_eof_outcome();
                                     }
@@ -287,9 +293,11 @@ async fn dispatch_running_inner<
                                 );
 
                                 if let Some(subscription) = sup.subscription.as_mut() {
-                                    let _ = subscription
-                                        .check_contracts(&mut ctx.contract_state[..])
-                                        .await;
+                                    drop(
+                                        subscription
+                                            .check_contracts(&mut ctx.contract_state[..])
+                                            .await,
+                                    );
                                 }
                             }
 
@@ -301,9 +309,11 @@ async fn dispatch_running_inner<
                                 && is_terminal_eof(&envelope, upstream_stage)
                             {
                                 if let Some(subscription) = sup.subscription.as_mut() {
-                                    let _ = subscription
-                                        .check_contracts(&mut ctx.contract_state[..])
-                                        .await;
+                                    drop(
+                                        subscription
+                                            .check_contracts(&mut ctx.contract_state[..])
+                                            .await,
+                                    );
                                 }
                             }
 
@@ -471,21 +481,19 @@ async fn dispatch_running_inner<
                 None
             };
 
-            if let Some(result) = maybe_contract_check {
-                match result {
-                    Ok(crate::messaging::upstream_subscription::ContractStatus::Stalled(
-                        upstream,
-                    )) => {
+            if let Some(status) = maybe_contract_check {
+                match status {
+                    crate::messaging::upstream_subscription::ContractStatus::Stalled(upstream) => {
                         tracing::warn!(
                             stage_name = %ctx.stage_name,
                             upstream = ?upstream,
                             "Upstream stalled detected during active processing"
                         );
                     }
-                    Ok(crate::messaging::upstream_subscription::ContractStatus::Violated {
+                    crate::messaging::upstream_subscription::ContractStatus::Violated {
                         upstream,
                         cause,
-                    }) => {
+                    } => {
                         tracing::error!(
                             stage_name = %ctx.stage_name,
                             upstream = ?upstream,
@@ -493,14 +501,7 @@ async fn dispatch_running_inner<
                             "Contract violation detected during active processing"
                         );
                     }
-                    Ok(_) => {}
-                    Err(e) => {
-                        tracing::error!(
-                            stage_name = %ctx.stage_name,
-                            error = %e,
-                            "Failed to check contracts"
-                        );
-                    }
+                    _ => {}
                 }
             }
 

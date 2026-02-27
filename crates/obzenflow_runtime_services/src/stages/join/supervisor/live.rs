@@ -65,14 +65,18 @@ pub(super) async fn dispatch_live<
     }
 
     if let Some(subscription) = sup.reference_subscription.as_mut() {
-        let _ = subscription
-            .maybe_check_contracts(&mut ctx.reference_contract_state[..])
-            .await;
+        drop(
+            subscription
+                .maybe_check_contracts(&mut ctx.reference_contract_state[..])
+                .await,
+        );
     }
     if let Some(subscription) = sup.stream_subscription.as_mut() {
-        let _ = subscription
-            .maybe_check_contracts(&mut ctx.stream_contract_state[..])
-            .await;
+        drop(
+            subscription
+                .maybe_check_contracts(&mut ctx.stream_contract_state[..])
+                .await,
+        );
     }
 
     tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
