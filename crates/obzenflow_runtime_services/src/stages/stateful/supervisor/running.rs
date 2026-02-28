@@ -141,7 +141,7 @@ pub(super) async fn dispatch_accumulating<
                 .event_loops_with_work_total
                 .fetch_add(1, Ordering::Relaxed);
 
-            match &envelope.event.content {
+            let directive = match &envelope.event.content {
                 obzenflow_core::event::ChainEventContent::FlowControl(signal) => {
                     let contract_reader_count = ctx.contract_state.len();
                     let upstream_stage = sup
@@ -199,21 +199,21 @@ pub(super) async fn dispatch_accumulating<
                                 }
                             }
                             sup.forward_control_event(ctx, &envelope).await?;
-                            Ok(EventLoopDirective::Continue)
+                            EventLoopDirective::Continue
                         }
                         ControlResolution::ForwardAndDrain => {
                             ctx.buffered_eof = Some(envelope.event.clone());
                             sup.forward_control_event(ctx, &envelope).await?;
-                            Ok(EventLoopDirective::Transition(StatefulEvent::ReceivedEOF))
+                            EventLoopDirective::Transition(StatefulEvent::ReceivedEOF)
                         }
-                        ControlResolution::Suppress => Ok(EventLoopDirective::Continue),
+                        ControlResolution::Suppress => EventLoopDirective::Continue,
                         ControlResolution::BufferAtEntryPoint { .. } => {
                             tracing::warn!(
                                 stage_name = %ctx.stage_name,
                                 event_type = envelope.event.event_type(),
                                 "Stateful stage received entry-point buffering resolution without cycle config"
                             );
-                            Ok(EventLoopDirective::Continue)
+                            EventLoopDirective::Continue
                         }
                         ControlResolution::Delay(_) => {
                             unreachable!("Delay is handled before executing the resolution")
@@ -224,7 +224,7 @@ pub(super) async fn dispatch_accumulating<
                                 event_type = envelope.event.event_type(),
                                 "Retry requested for control event (not implemented)"
                             );
-                            Ok(EventLoopDirective::Continue)
+                            EventLoopDirective::Continue
                         }
                         ControlResolution::Skip => {
                             tracing::warn!(
@@ -232,7 +232,7 @@ pub(super) async fn dispatch_accumulating<
                                 event_type = envelope.event.event_type(),
                                 "Skipping control event (dangerous!)"
                             );
-                            Ok(EventLoopDirective::Continue)
+                            EventLoopDirective::Continue
                         }
                     }
                 }
@@ -281,37 +281,76 @@ pub(super) async fn dispatch_accumulating<
 
                     // Check if we should emit based on updated state
                     if handler.should_emit(&ctx.current_state) {
-                        return Ok(EventLoopDirective::Transition(StatefulEvent::ShouldEmit));
-                    }
-
-                    // Backpressure ack: upstream input was consumed into state.
-                    let upstream_stage = sup
-                        .subscription
-                        .as_ref()
-                        .and_then(|subscription| subscription.last_delivered_upstream_stage());
-                    if let Some(upstream) = upstream_stage {
-                        if let Some(reader) = ctx.backpressure_readers.get(&upstream) {
-                            reader.ack_consumed(1);
+                        EventLoopDirective::Transition(StatefulEvent::ShouldEmit)
+                    } else {
+                        // Backpressure ack: upstream input was consumed into state.
+                        let upstream_stage = sup
+                            .subscription
+                            .as_ref()
+                            .and_then(|subscription| subscription.last_delivered_upstream_stage());
+                        if let Some(upstream) = upstream_stage {
+                            if let Some(reader) = ctx.backpressure_readers.get(&upstream) {
+                                reader.ack_consumed(1);
+                            }
                         }
-                    }
 
-                    Ok(EventLoopDirective::Continue)
+                        EventLoopDirective::Continue
+                    }
                 }
                 _ => {
                     // Other content types: forward.
                     sup.forward_control_event(ctx, &envelope).await?;
-                    Ok(EventLoopDirective::Continue)
+                    EventLoopDirective::Continue
+                }
+            };
+
+            if let Some(subscription) = sup.subscription.as_mut() {
+                if let Some(status) = subscription
+                    .maybe_check_contracts_tick(
+                        &mut ctx.contract_state[..],
+                        &mut ctx.last_contract_check,
+                    )
+                    .await
+                {
+                    match status {
+                        crate::messaging::upstream_subscription::ContractStatus::Stalled(
+                            upstream,
+                        ) => {
+                            tracing::warn!(
+                                stage_name = %ctx.stage_name,
+                                upstream = ?upstream,
+                                "Upstream stalled detected during active processing"
+                            );
+                        }
+                        crate::messaging::upstream_subscription::ContractStatus::Violated {
+                            upstream,
+                            cause,
+                        } => {
+                            tracing::error!(
+                                stage_name = %ctx.stage_name,
+                                upstream = ?upstream,
+                                cause = ?cause,
+                                "Contract violation detected during active processing"
+                            );
+                        }
+                        _ => {}
+                    }
                 }
             }
+
+            Ok(directive)
         }
         PollResult::NoEvents => {
             // No events available right now.
             if let Some(subscription) = sup.subscription.as_mut() {
-                if subscription.should_check_contracts(&ctx.contract_state[..]) {
-                    match subscription
-                        .check_contracts(&mut ctx.contract_state[..])
-                        .await
-                    {
+                if let Some(status) = subscription
+                    .maybe_check_contracts_tick(
+                        &mut ctx.contract_state[..],
+                        &mut ctx.last_contract_check,
+                    )
+                    .await
+                {
+                    match status {
                         crate::messaging::upstream_subscription::ContractStatus::Stalled(
                             upstream,
                         ) => {

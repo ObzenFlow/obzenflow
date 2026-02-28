@@ -320,8 +320,14 @@ pub struct JoinContext<H: JoinHandler> {
     /// FSM-owned contract state for reference side (aligned with reference_subscription readers)
     pub reference_contract_state: Vec<ReaderProgress>,
 
+    /// Last supervisor-driven contract check instant for the reference subscription (FLOWIP-080r).
+    pub(crate) reference_last_contract_check: Option<tokio::time::Instant>,
+
     /// FSM-owned contract state for stream side (aligned with stream_subscription readers)
     pub stream_contract_state: Vec<ReaderProgress>,
+
+    /// Last supervisor-driven contract check instant for the stream subscription (FLOWIP-080r).
+    pub(crate) stream_last_contract_check: Option<tokio::time::Instant>,
 
     /// Buffered EOF event to forward when draining completes
     pub buffered_eof: Option<ChainEvent>,
@@ -415,6 +421,7 @@ impl<H: JoinHandler + Send + Sync + 'static> FsmAction for JoinAction<H> {
                         reader_stage: Some(ctx.stage_id),
                         control_middleware: ctx.instrumentation.control_middleware().clone(),
                         include_delivery_contract: false,
+                        cycle_guard_config: None,
                     })
                     .await
                     .map_err(|e| {
@@ -447,6 +454,7 @@ impl<H: JoinHandler + Send + Sync + 'static> FsmAction for JoinAction<H> {
                         reader_stage: Some(ctx.stage_id),
                         control_middleware: ctx.instrumentation.control_middleware().clone(),
                         include_delivery_contract: false,
+                        cycle_guard_config: None,
                     })
                     .await
                     .map_err(|e| {

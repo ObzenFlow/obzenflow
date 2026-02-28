@@ -243,6 +243,7 @@ where
             reader_stage,
             control_middleware,
             include_delivery_contract,
+            cycle_guard_config,
         } = wiring;
 
         self.control_middleware = control_middleware.clone();
@@ -262,12 +263,29 @@ where
             self.contract_chains = self
                 .readers
                 .iter()
-                .map(|_| {
+                .map(|(upstream_stage, _, _)| {
                     let mut chain = ContractChain::new()
                         .with_contract(TransportContract::new())
                         .with_contract(obzenflow_core::SourceContract::new());
                     if include_delivery_contract {
                         chain = chain.with_contract(DeliveryContract::default());
+                    }
+
+                    // Divergence detection is attached only for SCC-internal upstreams
+                    // when cycle metadata is available (FLOWIP-080r).
+                    if let Some(cycle_cfg) = &cycle_guard_config {
+                        if cycle_cfg.internal_upstreams.contains(upstream_stage) {
+                            let thresholds = obzenflow_core::DivergenceThresholds {
+                                max_cycle_depth: cycle_cfg.max_iterations.as_u16(),
+                                ..Default::default()
+                            };
+                            chain = chain.with_contract(
+                                obzenflow_core::DivergenceContract::with_thresholds(
+                                    cycle_cfg.scc_id,
+                                    thresholds,
+                                ),
+                            );
+                        }
                     }
                     Some(chain)
                 })

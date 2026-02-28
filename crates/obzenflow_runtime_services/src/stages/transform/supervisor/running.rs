@@ -176,10 +176,46 @@ async fn dispatch_running_inner<
                 .await?;
 
             if suppress_event {
-                return Ok(EventLoopDirective::Continue);
+                let directive = EventLoopDirective::Continue;
+
+                if let Some(subscription) = sup.subscription.as_mut() {
+                    if let Some(status) = subscription
+                        .maybe_check_contracts_tick(
+                            &mut ctx.contract_state[..],
+                            &mut ctx.last_contract_check,
+                        )
+                        .await
+                    {
+                        match status {
+                            crate::messaging::upstream_subscription::ContractStatus::Stalled(
+                                upstream,
+                            ) => {
+                                tracing::warn!(
+                                    stage_name = %ctx.stage_name,
+                                    upstream = ?upstream,
+                                    "Upstream stalled detected during active processing"
+                                );
+                            }
+                            crate::messaging::upstream_subscription::ContractStatus::Violated {
+                                upstream,
+                                cause,
+                            } => {
+                                tracing::error!(
+                                    stage_name = %ctx.stage_name,
+                                    upstream = ?upstream,
+                                    cause = ?cause,
+                                    "Contract violation detected during active processing"
+                                );
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+
+                return Ok(directive);
             }
 
-            match &envelope.event.content {
+            let directive = match &envelope.event.content {
                 obzenflow_core::event::ChainEventContent::FlowControl(signal) => {
                     let cycle_config = ctx.cycle_guard_config.as_ref();
                     let is_cycle_entry_point = cycle_config.is_some_and(|cfg| cfg.is_entry_point);
@@ -242,7 +278,7 @@ async fn dispatch_running_inner<
                             }
 
                             sup.forward_control_event_guarded(&envelope).await?;
-                            Ok(EventLoopDirective::Continue)
+                            EventLoopDirective::Continue
                         }
                         ControlResolution::ForwardAndDrain => {
                             ctx.buffered_eof = Some(envelope.event.clone());
@@ -266,7 +302,7 @@ async fn dispatch_running_inner<
                                 "Transform stage transitioning to draining"
                             );
                             sup.forward_control_event_guarded(&envelope).await?;
-                            Ok(EventLoopDirective::Transition(TransformEvent::ReceivedEOF))
+                            EventLoopDirective::Transition(TransformEvent::ReceivedEOF)
                         }
                         ControlResolution::BufferAtEntryPoint { is_drain } => {
                             ctx.buffered_terminal_envelope
@@ -301,7 +337,7 @@ async fn dispatch_running_inner<
                                 }
                             }
 
-                            Ok(EventLoopDirective::Continue)
+                            EventLoopDirective::Continue
                         }
                         ControlResolution::Suppress => {
                             if envelope.event.is_eof()
@@ -317,7 +353,7 @@ async fn dispatch_running_inner<
                                 }
                             }
 
-                            Ok(EventLoopDirective::Continue)
+                            EventLoopDirective::Continue
                         }
                         ControlResolution::Delay(_) => {
                             unreachable!("Delay is handled before executing the resolution")
@@ -328,7 +364,7 @@ async fn dispatch_running_inner<
                                 event_type = envelope.event.event_type(),
                                 "Retry requested for control event (not implemented)"
                             );
-                            Ok(EventLoopDirective::Continue)
+                            EventLoopDirective::Continue
                         }
                         ControlResolution::Skip => {
                             tracing::warn!(
@@ -336,7 +372,7 @@ async fn dispatch_running_inner<
                                 event_type = envelope.event.event_type(),
                                 "Skipping control event (dangerous!)"
                             );
-                            Ok(EventLoopDirective::Continue)
+                            EventLoopDirective::Continue
                         }
                     }
                 }
@@ -459,14 +495,50 @@ async fn dispatch_running_inner<
                         }
                     }
 
-                    Ok(EventLoopDirective::Continue)
+                    EventLoopDirective::Continue
                 }
                 _ => {
                     // Other content types: forward them.
                     sup.forward_control_event(&envelope).await?;
-                    Ok(EventLoopDirective::Continue)
+                    EventLoopDirective::Continue
+                }
+            };
+
+            if let Some(subscription) = sup.subscription.as_mut() {
+                if let Some(status) = subscription
+                    .maybe_check_contracts_tick(
+                        &mut ctx.contract_state[..],
+                        &mut ctx.last_contract_check,
+                    )
+                    .await
+                {
+                    match status {
+                        crate::messaging::upstream_subscription::ContractStatus::Stalled(
+                            upstream,
+                        ) => {
+                            tracing::warn!(
+                                stage_name = %ctx.stage_name,
+                                upstream = ?upstream,
+                                "Upstream stalled detected during active processing"
+                            );
+                        }
+                        crate::messaging::upstream_subscription::ContractStatus::Violated {
+                            upstream,
+                            cause,
+                        } => {
+                            tracing::error!(
+                                stage_name = %ctx.stage_name,
+                                upstream = ?upstream,
+                                cause = ?cause,
+                                "Contract violation detected during active processing"
+                            );
+                        }
+                        _ => {}
+                    }
                 }
             }
+
+            Ok(directive)
         }
         PollResult::NoEvents => {
             if let Some(directive) = sup.maybe_release_buffered_terminal(ctx).await? {
@@ -475,7 +547,10 @@ async fn dispatch_running_inner<
 
             let maybe_contract_check = if let Some(subscription) = sup.subscription.as_mut() {
                 subscription
-                    .maybe_check_contracts(&mut ctx.contract_state[..])
+                    .maybe_check_contracts_tick(
+                        &mut ctx.contract_state[..],
+                        &mut ctx.last_contract_check,
+                    )
                     .await
             } else {
                 None

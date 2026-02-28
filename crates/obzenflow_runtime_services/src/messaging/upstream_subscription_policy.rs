@@ -95,6 +95,17 @@ impl ContractPolicy for TransportStrictPolicy {
                     ViolationCause::AccountingMismatch { .. } => {
                         EventViolationCause::Other("accounting_mismatch".into())
                     }
+                    ViolationCause::Divergence {
+                        predicate,
+                        observed,
+                        threshold,
+                        window_seconds,
+                    } => EventViolationCause::Divergence {
+                        predicate: predicate.clone(),
+                        observed: *observed,
+                        threshold: *threshold,
+                        window_seconds: *window_seconds,
+                    },
                     ViolationCause::Other(msg) => EventViolationCause::Other(msg.clone()),
                 };
                 return EdgeContractDecision::Fail(event_cause);
@@ -133,6 +144,11 @@ impl ContractPolicy for BreakerAwarePolicy {
         // with CB-open windows can be added later.
         match prior {
             EdgeContractDecision::Fail(EventViolationCause::SeqDivergence { .. }) => {
+                EdgeContractDecision::Pass
+            }
+            EdgeContractDecision::Fail(EventViolationCause::Divergence { predicate, .. })
+                if predicate == "signal_to_data_ratio" || predicate == "signals_when_no_data" =>
+            {
                 EdgeContractDecision::Pass
             }
             _ => prior,

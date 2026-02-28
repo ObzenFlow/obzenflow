@@ -38,7 +38,7 @@ pub struct JournalPath(pub String);
 pub struct JournalIndex(pub u64);
 
 /// Reason for at-least-once violations.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "violation_type", content = "details", rename_all = "snake_case")]
 pub enum ViolationCause {
     ExpectedCountMismatch {
@@ -55,6 +55,13 @@ pub enum ViolationCause {
     },
     StallExceeded {
         threshold_ms: DurationMs,
+    },
+    Divergence {
+        predicate: String,
+        observed: f64,
+        threshold: f64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        window_seconds: Option<u64>,
     },
     Other(String),
 }

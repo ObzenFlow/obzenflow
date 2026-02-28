@@ -63,7 +63,7 @@ fn transport_contract_passes_when_counts_match() {
     let result = contract.verify(&ctx);
     match result {
         obzenflow_core::contracts::ContractResult::Passed(evidence) => {
-            assert_eq!(evidence.contract_name, "TransportContract");
+            assert_eq!(evidence.contract_name, TransportContract::NAME);
             assert_eq!(evidence.upstream_stage, writer_stage);
             assert_eq!(evidence.downstream_stage, reader_stage);
         }
@@ -99,7 +99,7 @@ fn transport_contract_fails_when_counts_diverge() {
     let result = contract.verify(&ctx);
     match result {
         obzenflow_core::contracts::ContractResult::Failed(violation) => {
-            assert_eq!(violation.contract_name, "TransportContract");
+            assert_eq!(violation.contract_name, TransportContract::NAME);
         }
         other => panic!("expected Failed, got {other:?}"),
     }

@@ -67,14 +67,20 @@ pub(super) async fn dispatch_live<
     if let Some(subscription) = sup.reference_subscription.as_mut() {
         drop(
             subscription
-                .maybe_check_contracts(&mut ctx.reference_contract_state[..])
+                .maybe_check_contracts_tick(
+                    &mut ctx.reference_contract_state[..],
+                    &mut ctx.reference_last_contract_check,
+                )
                 .await,
         );
     }
     if let Some(subscription) = sup.stream_subscription.as_mut() {
         drop(
             subscription
-                .maybe_check_contracts(&mut ctx.stream_contract_state[..])
+                .maybe_check_contracts_tick(
+                    &mut ctx.stream_contract_state[..],
+                    &mut ctx.stream_last_contract_check,
+                )
                 .await,
         );
     }
@@ -106,7 +112,7 @@ async fn poll_live_reference<H: JoinHandler + Clone + std::fmt::Debug + Send + S
                 .join_reference_since_last_stream
                 .store(ctx.reference_since_last_stream as u64, Ordering::Relaxed);
 
-            match &envelope.event.content {
+            let directive = match &envelope.event.content {
                 obzenflow_core::event::ChainEventContent::FlowControl(signal) => {
                     let contract_reader_count = ctx.reference_contract_state.len();
                     let upstream_stage = subscription.last_delivered_upstream_stage();
@@ -172,7 +178,7 @@ async fn poll_live_reference<H: JoinHandler + Clone + std::fmt::Debug + Send + S
                         }
                     }
 
-                    Ok(Some(EventLoopDirective::Continue))
+                    Some(EventLoopDirective::Continue)
                 }
                 obzenflow_core::event::ChainEventContent::Data { .. } => {
                     let event = envelope.event.clone();
@@ -187,6 +193,14 @@ async fn poll_live_reference<H: JoinHandler + Clone + std::fmt::Debug + Send + S
                             VecDeque::from([event]),
                         )
                         .await?;
+                        drop(
+                            subscription
+                                .maybe_check_contracts_tick(
+                                    &mut ctx.reference_contract_state[..],
+                                    &mut ctx.reference_last_contract_check,
+                                )
+                                .await,
+                        );
                         return Ok(Some(EventLoopDirective::Continue));
                     }
 
@@ -257,10 +271,21 @@ async fn poll_live_reference<H: JoinHandler + Clone + std::fmt::Debug + Send + S
                         }
                     }
 
-                    Ok(Some(EventLoopDirective::Continue))
+                    Some(EventLoopDirective::Continue)
                 }
-                _ => Ok(Some(EventLoopDirective::Continue)),
-            }
+                _ => Some(EventLoopDirective::Continue),
+            };
+
+            drop(
+                subscription
+                    .maybe_check_contracts_tick(
+                        &mut ctx.reference_contract_state[..],
+                        &mut ctx.reference_last_contract_check,
+                    )
+                    .await,
+            );
+
+            Ok(directive)
         }
         PollResult::NoEvents => Ok(None),
         PollResult::Error(e) => Ok(Some(EventLoopDirective::Transition(JoinEvent::Error(
@@ -292,7 +317,7 @@ async fn poll_live_stream<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync
                 .join_reference_since_last_stream
                 .store(0, Ordering::Relaxed);
 
-            match &envelope.event.content {
+            let directive = match &envelope.event.content {
                 obzenflow_core::event::ChainEventContent::FlowControl(signal) => {
                     if envelope.event.is_eof() {
                         ctx.buffered_eof = Some(envelope.event.clone());
@@ -334,14 +359,14 @@ async fn poll_live_stream<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync
                             if envelope.event.is_eof() {
                                 let _ = subscription.take_last_eof_outcome();
                             }
-                            Ok(Some(EventLoopDirective::Continue))
+                            Some(EventLoopDirective::Continue)
                         }
                         ControlResolution::ForwardAndDrain => {
                             common::forward_control_event_and_mirror(ctx, &envelope).await?;
                             if envelope.event.is_eof() {
                                 let _ = subscription.take_last_eof_outcome();
                             }
-                            Ok(Some(EventLoopDirective::Transition(JoinEvent::ReceivedEOF)))
+                            Some(EventLoopDirective::Transition(JoinEvent::ReceivedEOF))
                         }
                         ControlResolution::Suppress
                         | ControlResolution::BufferAtEntryPoint { .. } => {
@@ -350,7 +375,7 @@ async fn poll_live_stream<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync
                                 event_type = envelope.event.event_type(),
                                 "Join received cycle-only control resolution without cycle config"
                             );
-                            Ok(Some(EventLoopDirective::Continue))
+                            Some(EventLoopDirective::Continue)
                         }
                         ControlResolution::Delay(_) => {
                             unreachable!("Delay is handled before executing the resolution")
@@ -361,7 +386,7 @@ async fn poll_live_stream<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync
                                 event_type = envelope.event.event_type(),
                                 "Retry requested for control event (not implemented) during Live (stream)"
                             );
-                            Ok(Some(EventLoopDirective::Continue))
+                            Some(EventLoopDirective::Continue)
                         }
                         ControlResolution::Skip => {
                             tracing::warn!(
@@ -369,7 +394,7 @@ async fn poll_live_stream<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync
                                 event_type = envelope.event.event_type(),
                                 "Skipping control event (dangerous!) during Live (stream)"
                             );
-                            Ok(Some(EventLoopDirective::Continue))
+                            Some(EventLoopDirective::Continue)
                         }
                     }
                 }
@@ -391,6 +416,14 @@ async fn poll_live_stream<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync
                             VecDeque::from([event]),
                         )
                         .await?;
+                        drop(
+                            subscription
+                                .maybe_check_contracts_tick(
+                                    &mut ctx.stream_contract_state[..],
+                                    &mut ctx.stream_last_contract_check,
+                                )
+                                .await,
+                        );
                         return Ok(Some(EventLoopDirective::Continue));
                     }
 
@@ -461,10 +494,21 @@ async fn poll_live_stream<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync
                         }
                     }
 
-                    Ok(Some(EventLoopDirective::Continue))
+                    Some(EventLoopDirective::Continue)
                 }
-                _ => Ok(Some(EventLoopDirective::Continue)),
-            }
+                _ => Some(EventLoopDirective::Continue),
+            };
+
+            drop(
+                subscription
+                    .maybe_check_contracts_tick(
+                        &mut ctx.stream_contract_state[..],
+                        &mut ctx.stream_last_contract_check,
+                    )
+                    .await,
+            );
+
+            Ok(directive)
         }
         PollResult::NoEvents => Ok(None),
         PollResult::Error(e) => Ok(Some(EventLoopDirective::Transition(JoinEvent::Error(

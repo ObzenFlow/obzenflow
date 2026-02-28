@@ -93,6 +93,7 @@ async fn build_subscription_with_contracts(
         reader_stage: Some(stage_id),
         control_middleware: Arc::new(NoControlMiddleware),
         include_delivery_contract: false,
+        cycle_guard_config: None,
     });
 
     (subscription, data_journal, upstream_journal, stage_id)
@@ -115,6 +116,7 @@ async fn contract_state_tracks_seq_and_emits_final() {
         last_vector_clock: None,
         last_progress_seq: SeqNo(0),
         last_progress_instant: None,
+        last_contract_result_seq: SeqNo(0),
         stalled_since: None,
         consecutive_stall_checks: 0,
         final_emitted: false,
@@ -225,6 +227,7 @@ async fn contract_seq_divergence_missing_events_emits_gap_and_violation() {
         last_vector_clock: None,
         last_progress_seq: SeqNo(0),
         last_progress_instant: None,
+        last_contract_result_seq: SeqNo(0),
         stalled_since: None,
         consecutive_stall_checks: 0,
         final_emitted: false,
@@ -397,6 +400,7 @@ async fn contract_seq_divergence_overconsumption_sets_violation_without_gap() {
         last_vector_clock: None,
         last_progress_seq: SeqNo(0),
         last_progress_instant: None,
+        last_contract_result_seq: SeqNo(0),
         stalled_since: None,
         consecutive_stall_checks: 0,
         final_emitted: false,

@@ -103,7 +103,7 @@ pub enum SystemEventType {
         upstream: StageId,
         reader: StageId,
         contract_name: String,
-        /// "passed", "failed", or "pending"
+        /// "passed", "failed", "pending", or "healthy" (mid-flight heartbeat)
         status: String,
         /// Stable category label (e.g. "seq_divergence", "content_mismatch", "other")
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -123,6 +123,50 @@ pub enum SystemEventType {
         original_cause: crate::contracts::ViolationCause,
         policy: String,
     },
+}
+
+/// Stable status labels for `SystemEventType::ContractResult`.
+///
+/// The `system.log` schema stores these as strings for compatibility with JSON
+/// consumers (SSE, metrics aggregation). Prefer this enum when emitting or
+/// matching on status values to avoid stringly-typed drift.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ContractResultStatusLabel {
+    Passed,
+    Failed,
+    Pending,
+    Healthy,
+}
+
+impl ContractResultStatusLabel {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Passed => "passed",
+            Self::Failed => "failed",
+            Self::Pending => "pending",
+            Self::Healthy => "healthy",
+        }
+    }
+}
+
+impl std::fmt::Display for ContractResultStatusLabel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for ContractResultStatusLabel {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "passed" => Ok(Self::Passed),
+            "failed" => Ok(Self::Failed),
+            "pending" => Ok(Self::Pending),
+            "healthy" => Ok(Self::Healthy),
+            _ => Err(()),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -666,9 +710,15 @@ impl JournalEvent for SystemEvent {
                 }
             }
             SystemEventType::ContractResult { status, .. } => match status.as_str() {
-                "passed" => "system.contract.result.passed",
-                "failed" => "system.contract.result.failed",
-                "pending" => "system.contract.result.pending",
+                s if s == ContractResultStatusLabel::Passed.as_str() => {
+                    "system.contract.result.passed"
+                }
+                s if s == ContractResultStatusLabel::Failed.as_str() => {
+                    "system.contract.result.failed"
+                }
+                s if s == ContractResultStatusLabel::Pending.as_str() => {
+                    "system.contract.result.pending"
+                }
                 _ => "system.contract.result",
             },
             SystemEventType::ContractOverrideByPolicy { .. } => {

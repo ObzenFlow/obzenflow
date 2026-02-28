@@ -81,6 +81,7 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
             writer_id: None,
             subscription: None,
             contract_state: Vec::new(),
+            last_contract_check: None,
             instrumentation,
             upstream_subscription_factory: self.resources.upstream_subscription_factory,
             control_strategy,

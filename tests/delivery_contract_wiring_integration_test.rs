@@ -15,11 +15,11 @@ use anyhow::Result;
 use async_trait::async_trait;
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
-use obzenflow_core::event::system_event::SystemEvent;
+use obzenflow_core::event::system_event::{ContractResultStatusLabel, SystemEvent};
 use obzenflow_core::event::SystemEventType;
 use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::journal::Journal;
-use obzenflow_core::{StageId, SystemId, WriterId};
+use obzenflow_core::{DeliveryContract, StageId, SystemId, WriterId};
 use obzenflow_dsl_infra::{flow, sink, source};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
@@ -177,9 +177,18 @@ async fn sink_edge_emits_passed_delivery_contract_result() -> Result<()> {
                     contract_name,
                     status,
                     ..
-                } if contract_name == "DeliveryContract" => match status.as_str() {
-                    "passed" => seen_delivery_contract_pass = true,
-                    "failed" => seen_delivery_contract_fail = true,
+                } if contract_name == DeliveryContract::NAME => match status.as_str() {
+                    s if s == ContractResultStatusLabel::Passed.as_str() => {
+                        seen_delivery_contract_pass = true
+                    }
+                    s if s == ContractResultStatusLabel::Failed.as_str() => {
+                        seen_delivery_contract_fail = true
+                    }
+                    // FLOWIP-080r emits mid-flight "healthy" heartbeats for
+                    // `check_progress` evaluations. DeliveryContract only reaches
+                    // a definitive passed/failed outcome at EOF verification.
+                    s if s == ContractResultStatusLabel::Healthy.as_str() => {}
+                    s if s == ContractResultStatusLabel::Pending.as_str() => {}
                     other => {
                         return Err(anyhow::anyhow!(
                             "unexpected DeliveryContract status in system.log: {other}"

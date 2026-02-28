@@ -340,6 +340,12 @@ pub struct StatefulContext<H: StatefulHandler> {
     /// FSM-owned contract state for each upstream reader (aligned with subscription readers)
     pub contract_state: Vec<ReaderProgress>,
 
+    /// Supervisor-driven contract-check tick (FLOWIP-080r).
+    ///
+    /// This avoids starvation under sustained load by allowing the supervisor
+    /// to schedule contract checks from the active `PollResult::Event` path.
+    pub(crate) last_contract_check: Option<tokio::time::Instant>,
+
     /// Control event handling strategy
     pub control_strategy: Arc<dyn ControlEventStrategy>,
 
@@ -425,6 +431,7 @@ impl<H: StatefulHandler + Send + Sync + 'static> FsmAction for StatefulAction<H>
                             reader_stage: Some(ctx.stage_id),
                             control_middleware: ctx.instrumentation.control_middleware().clone(),
                             include_delivery_contract: false,
+                            cycle_guard_config: None,
                         })
                         .await
                         .map_err(|e| {

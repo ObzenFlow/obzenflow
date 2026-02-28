@@ -115,4 +115,33 @@ impl ContractChain {
             })
             .collect()
     }
+
+    /// Check all contracts' `check_progress` hooks and collect any failures.
+    ///
+    /// Contracts that do not report incremental status return `ContractResult::Pending`.
+    pub fn check_progress_all(
+        &self,
+        upstream_stage: obzenflow_core::StageId,
+        downstream_stage: obzenflow_core::StageId,
+    ) -> Vec<(String, ContractResult)> {
+        self.contracts
+            .iter()
+            .zip(self.write_contexts.iter())
+            .zip(self.read_contexts.iter())
+            .map(|((contract, write_ctx), read_ctx)| {
+                let ctx = ContractContext {
+                    upstream_stage,
+                    downstream_stage,
+                    write_state: &write_ctx.state,
+                    read_state: &read_ctx.state,
+                };
+
+                let result = match contract.check_progress(&ctx) {
+                    Some(v) => ContractResult::Failed(v),
+                    None => ContractResult::Pending,
+                };
+                (contract.name().to_string(), result)
+            })
+            .collect()
+    }
 }

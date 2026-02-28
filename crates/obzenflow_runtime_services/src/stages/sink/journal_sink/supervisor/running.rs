@@ -93,7 +93,7 @@ pub(super) async fn dispatch_running<
                 .fetch_add(1, Ordering::Relaxed);
 
             let is_data = envelope.event.is_data();
-            let directive_result = dispatch_event(ctx, subscription, &envelope).await;
+            let directive = dispatch_event(ctx, subscription, &envelope).await?;
 
             // Backpressure ack: upstream input was consumed by sink handler.
             if is_data {
@@ -104,11 +104,44 @@ pub(super) async fn dispatch_running<
                 }
             }
 
-            directive_result
+            if let Some(status) = subscription
+                .maybe_check_contracts_tick(
+                    &mut ctx.contract_state[..],
+                    &mut ctx.last_contract_check,
+                )
+                .await
+            {
+                match status {
+                    crate::messaging::upstream_subscription::ContractStatus::Stalled(upstream) => {
+                        tracing::warn!(
+                            stage_name = %ctx.stage_name,
+                            upstream = ?upstream,
+                            "Upstream stalled detected during sink processing"
+                        );
+                    }
+                    crate::messaging::upstream_subscription::ContractStatus::Violated {
+                        upstream,
+                        cause,
+                    } => {
+                        tracing::error!(
+                            stage_name = %ctx.stage_name,
+                            upstream = ?upstream,
+                            cause = ?cause,
+                            "Contract violation detected during sink processing"
+                        );
+                    }
+                    _ => {}
+                }
+            }
+
+            Ok(directive)
         }
         PollResult::NoEvents => {
             if let Some(status) = subscription
-                .maybe_check_contracts(&mut ctx.contract_state[..])
+                .maybe_check_contracts_tick(
+                    &mut ctx.contract_state[..],
+                    &mut ctx.last_contract_check,
+                )
                 .await
             {
                 match status {

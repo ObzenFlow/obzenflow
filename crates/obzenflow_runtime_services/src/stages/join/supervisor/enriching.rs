@@ -65,7 +65,7 @@ pub(super) async fn dispatch_enriching<
                 .event_loops_with_work_total
                 .fetch_add(1, Ordering::Relaxed);
 
-            match &envelope.event.content {
+            let directive = match &envelope.event.content {
                 obzenflow_core::event::ChainEventContent::FlowControl(signal) => {
                     if envelope.event.is_eof() {
                         ctx.buffered_eof = Some(envelope.event.clone());
@@ -114,7 +114,7 @@ pub(super) async fn dispatch_enriching<
                             if envelope.event.is_eof() {
                                 let _ = subscription.take_last_eof_outcome();
                             }
-                            Ok(EventLoopDirective::Continue)
+                            EventLoopDirective::Continue
                         }
                         ControlResolution::ForwardAndDrain => {
                             common::forward_control_event_and_mirror(ctx, &envelope).await?;
@@ -135,7 +135,7 @@ pub(super) async fn dispatch_enriching<
                                 }
                             }
 
-                            Ok(EventLoopDirective::Transition(JoinEvent::ReceivedEOF))
+                            EventLoopDirective::Transition(JoinEvent::ReceivedEOF)
                         }
                         ControlResolution::Suppress
                         | ControlResolution::BufferAtEntryPoint { .. } => {
@@ -144,7 +144,7 @@ pub(super) async fn dispatch_enriching<
                                 event_type = envelope.event.event_type(),
                                 "Join received cycle-only control resolution without cycle config"
                             );
-                            Ok(EventLoopDirective::Continue)
+                            EventLoopDirective::Continue
                         }
                         ControlResolution::Delay(_) => {
                             unreachable!("Delay is handled before executing the resolution")
@@ -155,7 +155,7 @@ pub(super) async fn dispatch_enriching<
                                 event_type = envelope.event.event_type(),
                                 "Retry requested for control event (not implemented) during Enriching"
                             );
-                            Ok(EventLoopDirective::Continue)
+                            EventLoopDirective::Continue
                         }
                         ControlResolution::Skip => {
                             tracing::warn!(
@@ -163,7 +163,7 @@ pub(super) async fn dispatch_enriching<
                                 event_type = envelope.event.event_type(),
                                 "Skipping control event (dangerous!) during Enriching"
                             );
-                            Ok(EventLoopDirective::Continue)
+                            EventLoopDirective::Continue
                         }
                     }
                 }
@@ -191,6 +191,14 @@ pub(super) async fn dispatch_enriching<
                             VecDeque::from([event]),
                         )
                         .await?;
+                        drop(
+                            subscription
+                                .maybe_check_contracts_tick(
+                                    &mut ctx.stream_contract_state[..],
+                                    &mut ctx.stream_last_contract_check,
+                                )
+                                .await,
+                        );
                         return Ok(EventLoopDirective::Continue);
                     }
 
@@ -260,7 +268,7 @@ pub(super) async fn dispatch_enriching<
                         }
                     }
 
-                    Ok(EventLoopDirective::Continue)
+                    EventLoopDirective::Continue
                 }
                 _ => {
                     tracing::warn!(
@@ -268,13 +276,27 @@ pub(super) async fn dispatch_enriching<
                         event_type = envelope.event.event_type(),
                         "Join received unexpected event content type during Enriching"
                     );
-                    Ok(EventLoopDirective::Continue)
+                    EventLoopDirective::Continue
                 }
-            }
+            };
+
+            drop(
+                subscription
+                    .maybe_check_contracts_tick(
+                        &mut ctx.stream_contract_state[..],
+                        &mut ctx.stream_last_contract_check,
+                    )
+                    .await,
+            );
+
+            Ok(directive)
         }
         PollResult::NoEvents => {
             if let Some(status) = subscription
-                .maybe_check_contracts(&mut ctx.stream_contract_state[..])
+                .maybe_check_contracts_tick(
+                    &mut ctx.stream_contract_state[..],
+                    &mut ctx.stream_last_contract_check,
+                )
                 .await
             {
                 match status {

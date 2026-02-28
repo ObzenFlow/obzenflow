@@ -148,6 +148,19 @@ pub(super) async fn dispatch_running(
                     advertised_writer_seq,
                     reason,
                 } => {
+                    // A ContractStatus is used for two distinct purposes:
+                    // 1) Mid-flight gating/abort (pass=false).
+                    // 2) EOF-time shutdown gating for sources (pass=true/false in warn-only mode).
+                    //
+                    // Continuous contract evaluation can emit mid-flight evidence for observability
+                    // (e.g. ContractResult heartbeats). Those MUST NOT be interpreted as
+                    // "source completed; begin draining".
+                    //
+                    // The runtime only learns the upstream writer's final sequence at EOF (writer_seq),
+                    // so `advertised_writer_seq.is_some()` is our best proxy for "final/EOF-time status".
+                    let is_source = context.expected_sources.contains(upstream);
+                    let is_final = advertised_writer_seq.is_some();
+
                     // Record per-edge contract status.
                     if *pass {
                         context.contract_pairs.insert(
@@ -192,12 +205,18 @@ pub(super) async fn dispatch_running(
                         } else {
                             // Warn-only for source contracts: treat as
                             // "completed" for shutdown gating but do not abort.
-                            context.contract_status.insert(*upstream, true);
+                            if is_source && is_final {
+                                context.contract_status.insert(*upstream, true);
+                            }
                             return Ok(EventLoopDirective::Continue);
                         }
                     }
 
-                    // Mark upstream source as having passed its contract.
+                    // Mark upstream source as having passed its contract (EOF-time only).
+                    if !(is_source && is_final) {
+                        return Ok(EventLoopDirective::Continue);
+                    }
+
                     context.contract_status.insert(*upstream, true);
                     let expected = &context.expected_sources;
                     let all_pass = !expected.is_empty()

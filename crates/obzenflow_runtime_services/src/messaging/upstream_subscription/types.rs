@@ -15,6 +15,8 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::time::Instant;
 
+use crate::pipeline::config::CycleGuardConfig;
+
 /// Status of contract checking
 #[derive(Debug)]
 #[must_use]
@@ -154,6 +156,12 @@ pub struct ReaderProgress {
     pub last_progress_seq: SeqNo,
     pub last_progress_instant: Option<Instant>,
 
+    /// Last reader_seq for which we emitted a mid-flight ContractResult heartbeat.
+    ///
+    /// This is used to avoid emitting redundant `"healthy"` contract results on
+    /// every wall-clock tick when no new data has been consumed on the edge.
+    pub last_contract_result_seq: SeqNo,
+
     /// Stall detection
     pub stalled_since: Option<Instant>,
     pub consecutive_stall_checks: u32,
@@ -177,6 +185,7 @@ impl ReaderProgress {
             last_vector_clock: None,
             last_progress_seq: SeqNo(0),
             last_progress_instant: None,
+            last_contract_result_seq: SeqNo(0),
             stalled_since: None,
             consecutive_stall_checks: 0,
             final_emitted: false,
@@ -213,6 +222,7 @@ pub struct ContractsWiring {
     pub reader_stage: Option<StageId>,
     pub control_middleware: Arc<dyn ControlMiddlewareProvider>,
     pub include_delivery_contract: bool,
+    pub cycle_guard_config: Option<CycleGuardConfig>,
 }
 
 /// Runtime configuration for contract emissions

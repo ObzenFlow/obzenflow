@@ -13,7 +13,9 @@ use obzenflow_core::event::event_envelope::EventEnvelope;
 use obzenflow_core::event::identity::JournalWriterId;
 use obzenflow_core::event::journal_event::JournalEvent;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
-use obzenflow_core::event::system_event::{SystemEvent, SystemEventType};
+use obzenflow_core::event::system_event::{
+    ContractResultStatusLabel, SystemEvent, SystemEventType,
+};
 use obzenflow_core::event::types::{
     Count, DurationMs, SeqNo, ViolationCause as EventViolationCause,
 };
@@ -24,8 +26,8 @@ use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::journal::journal_reader::JournalReader;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{
-    CircuitBreakerContractInfo, CircuitBreakerContractMode, ControlMiddlewareProvider,
-    NoControlMiddleware, StageId, WriterId,
+    CircuitBreakerContractInfo, CircuitBreakerContractMode, ControlMiddlewareProvider, EventId,
+    NoControlMiddleware, StageId, TransportContract, WriterId,
 };
 use serde_json::json;
 use std::collections::HashMap;
@@ -458,6 +460,7 @@ async fn progress_append_failure_does_not_advance_progress_state() {
         reader_stage: None,
         control_middleware: Arc::new(NoControlMiddleware),
         include_delivery_contract: false,
+        cycle_guard_config: None,
     });
 
     let mut reader_progress = [ReaderProgress::new(upstream_stage)];
@@ -501,6 +504,7 @@ async fn final_append_failure_keeps_final_emitted_false() {
         reader_stage: None,
         control_middleware: Arc::new(NoControlMiddleware),
         include_delivery_contract: false,
+        cycle_guard_config: None,
     });
 
     subscription.state.mark_reader_eof(0);
@@ -554,6 +558,7 @@ async fn contract_status_append_failure_keeps_final_emitted_false() {
         reader_stage: Some(reader_stage),
         control_middleware: Arc::new(NoControlMiddleware),
         include_delivery_contract: false,
+        cycle_guard_config: None,
     });
 
     // Avoid contract-chain variability: force legacy fallback path while still
@@ -579,6 +584,72 @@ async fn contract_status_append_failure_keeps_final_emitted_false() {
             ChainEventContent::FlowControl(FlowControlPayload::ConsumptionFinal { .. })
         )),
         "expected final event to be persisted even when ContractStatus append fails"
+    );
+}
+
+#[tokio::test]
+async fn progress_contract_heartbeats_are_suppressed_until_data_observed() {
+    let upstream_stage = StageId::new();
+    let upstream_owner = JournalOwner::stage(upstream_stage);
+    let upstream_journal: Arc<dyn Journal<ChainEvent>> = Arc::new(TestJournal::new(upstream_owner));
+    let upstreams = [(upstream_stage, "upstream".to_string(), upstream_journal)];
+
+    let mut subscription = UpstreamSubscription::new_with_names("test_owner", &upstreams)
+        .await
+        .unwrap();
+
+    let contract_stage = StageId::new();
+    let contract_owner = JournalOwner::stage(contract_stage);
+    let contract_journal: Arc<dyn Journal<ChainEvent>> = Arc::new(TestJournal::new(contract_owner));
+
+    let reader_stage = StageId::new();
+    let system_owner = JournalOwner::stage(reader_stage);
+    let system_journal: Arc<dyn Journal<SystemEvent>> = Arc::new(TestJournal::new(system_owner));
+
+    subscription = subscription.with_contracts(ContractsWiring {
+        writer_id: WriterId::from(contract_stage),
+        contract_journal: contract_journal.clone(),
+        config: ContractConfig::default(),
+        system_journal: Some(system_journal.clone()),
+        reader_stage: Some(reader_stage),
+        control_middleware: Arc::new(NoControlMiddleware),
+        include_delivery_contract: false,
+        cycle_guard_config: None,
+    });
+
+    // Simulate having observed some flow signals, but no data events.
+    //
+    // This matches server `startup_mode=manual`, where stages may emit
+    // `ConsumptionProgress` signals with `reader_seq=0` before any data flows.
+    let mut reader_progress = [ReaderProgress::new(upstream_stage)];
+    reader_progress[0].last_event_id = Some(EventId::new());
+    reader_progress[0].reader_seq = SeqNo(0);
+
+    let _status = subscription.check_contracts(&mut reader_progress).await;
+
+    let events = system_journal.read_causally_ordered().await.unwrap();
+    assert!(
+        !events.iter().any(|env| matches!(
+            &env.event.event,
+            SystemEventType::ContractResult { .. } | SystemEventType::ContractStatus { .. }
+        )),
+        "expected progress contract heartbeats to be suppressed before any data is observed"
+    );
+
+    // Once data is observed, progress contract heartbeats should be emitted.
+    reader_progress[0].reader_seq = SeqNo(1);
+    let _status = subscription.check_contracts(&mut reader_progress).await;
+
+    let events = system_journal.read_causally_ordered().await.unwrap();
+    assert!(
+        events.iter().any(|env| matches!(
+            &env.event.event,
+            SystemEventType::ContractResult { contract_name, status, cause, .. }
+                if contract_name == TransportContract::NAME
+                    && status == ContractResultStatusLabel::Healthy.as_str()
+                    && cause.is_none()
+        )),
+        "expected a healthy TransportContract ContractResult heartbeat once data is observed"
     );
 }
 
@@ -621,6 +692,7 @@ async fn stall_append_failure_does_not_set_stalled_since() {
         reader_stage: None,
         control_middleware: Arc::new(NoControlMiddleware),
         include_delivery_contract: false,
+        cycle_guard_config: None,
     });
 
     let mut reader_progress = [ReaderProgress::new(upstream_stage)];
@@ -678,6 +750,7 @@ async fn multi_reader_progress_isolated_under_partial_append_failure() {
         reader_stage: None,
         control_middleware: Arc::new(NoControlMiddleware),
         include_delivery_contract: false,
+        cycle_guard_config: None,
     });
 
     let mut reader_progress = [
@@ -752,6 +825,7 @@ async fn build_upstream_with_seq_divergence(
         reader_stage: Some(reader_stage),
         control_middleware,
         include_delivery_contract: false,
+        cycle_guard_config: None,
     });
 
     (
@@ -886,10 +960,16 @@ async fn strict_mode_produces_seq_divergence_and_gap_event() {
                 reason,
                 ..
             } => {
+                if *pass {
+                    // FLOWIP-080r may emit passing contract-status heartbeats during
+                    // mid-flight checks. This test asserts that a failure status is
+                    // emitted for strict SeqDivergence at EOF.
+                    continue;
+                }
+
                 status_found = true;
                 assert_eq!(*upstream, upstream_stage);
                 assert_eq!(*reader, reader_stage);
-                assert!(!pass);
                 match reason {
                     Some(EventViolationCause::SeqDivergence { .. }) => {}
                     other => {

@@ -292,6 +292,9 @@ pub(crate) struct TransformContext<H: UnifiedTransformHandler> {
     /// FSM-owned contract state for each upstream reader (aligned with subscription readers)
     pub contract_state: Vec<ReaderProgress>,
 
+    /// Last supervisor-driven contract check instant (FLOWIP-080r).
+    pub(crate) last_contract_check: Option<tokio::time::Instant>,
+
     /// Control event handling strategy
     pub control_strategy: Arc<dyn ControlEventStrategy>,
 
@@ -373,6 +376,7 @@ impl<H: UnifiedTransformHandler + Send + Sync + 'static> FsmAction for Transform
                         reader_stage: Some(ctx.stage_id),
                         control_middleware: ctx.instrumentation.control_middleware().clone(),
                         include_delivery_contract: false,
+                        cycle_guard_config: ctx.cycle_guard_config.clone(),
                     })
                     .await
                     .map_err(|e| {

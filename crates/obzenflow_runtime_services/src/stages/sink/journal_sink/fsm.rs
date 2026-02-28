@@ -301,6 +301,9 @@ pub struct JournalSinkContext<H: SinkHandler> {
     /// FSM-owned contract state for each upstream reader (aligned with subscription readers)
     pub contract_state: Vec<ReaderProgress>,
 
+    /// Last supervisor-driven contract check instant (FLOWIP-080r).
+    pub(crate) last_contract_check: Option<tokio::time::Instant>,
+
     /// Stage instrumentation for metrics tracking
     pub instrumentation: Arc<StageInstrumentation>,
 
@@ -349,6 +352,7 @@ impl<H: SinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAction<H> 
                         reader_stage: Some(ctx.stage_id),
                         control_middleware: ctx.instrumentation.control_middleware().clone(),
                         include_delivery_contract: true,
+                        cycle_guard_config: None,
                     })
                     .await
                     .map_err(|e| {

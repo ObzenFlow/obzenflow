@@ -11,6 +11,7 @@ use serde_json::{json, Value as JsonValue};
 use std::any::{Any, TypeId};
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 /// Result of contract verification for a single contract on an edge.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -64,8 +65,34 @@ pub enum ViolationCause {
         inputs_observed: u64,
         accounted_for: u64,
     },
+    /// Mid-flight divergence detection predicate fired.
+    Divergence {
+        /// Stable predicate identifier (for example, "signal_to_data_ratio", "cycle_depth").
+        predicate: String,
+        /// Observed value for this predicate.
+        observed: f64,
+        /// Threshold that was exceeded.
+        threshold: f64,
+        /// Window size in seconds for windowed predicates (when applicable).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        window_seconds: Option<u64>,
+    },
     /// Generic string message for future / ad-hoc contracts.
     Other(String),
+}
+
+impl ViolationCause {
+    /// Stable, snake_case label for metrics and evidence emission.
+    pub fn cause_label(&self) -> &'static str {
+        match self {
+            ViolationCause::SeqDivergence { .. } => "seq_divergence",
+            ViolationCause::ContentMismatch { .. } => "content_mismatch",
+            ViolationCause::DeliveryMismatch { .. } => "delivery_mismatch",
+            ViolationCause::AccountingMismatch { .. } => "accounting_mismatch",
+            ViolationCause::Divergence { .. } => "divergence",
+            ViolationCause::Other(_) => "other",
+        }
+    }
 }
 
 /// A single hash mismatch between write/read sides.
@@ -209,6 +236,8 @@ impl Default for TransportContract {
 }
 
 impl TransportContract {
+    pub const NAME: &'static str = "TransportContract";
+
     pub fn new() -> Self {
         Self
     }
@@ -216,7 +245,7 @@ impl TransportContract {
 
 impl Contract for TransportContract {
     fn name(&self) -> &str {
-        "TransportContract"
+        Self::NAME
     }
 
     fn on_write(&self, event: &ChainEvent, ctx: &mut ContractWriteContext) {
@@ -331,6 +360,8 @@ impl Default for SourceContract {
 }
 
 impl SourceContract {
+    pub const NAME: &'static str = "SourceContract";
+
     pub fn new() -> Self {
         Self
     }
@@ -338,7 +369,7 @@ impl SourceContract {
 
 impl Contract for SourceContract {
     fn name(&self) -> &str {
-        "SourceContract"
+        Self::NAME
     }
 
     fn on_write(&self, event: &ChainEvent, ctx: &mut ContractWriteContext) {
@@ -478,9 +509,13 @@ impl Default for DeliveryContract {
     }
 }
 
+impl DeliveryContract {
+    pub const NAME: &'static str = "DeliveryContract";
+}
+
 impl Contract for DeliveryContract {
     fn name(&self) -> &str {
-        "DeliveryContract"
+        Self::NAME
     }
 
     fn on_write(&self, event: &ChainEvent, _ctx: &mut ContractWriteContext) {
@@ -582,12 +617,279 @@ impl Contract for DeliveryContract {
     }
 }
 
+// ======================================================================
+// Divergence contract (FLOWIP-080r)
+// ======================================================================
+
+/// Threshold configuration for divergence detection predicates (FLOWIP-080r).
+///
+/// This configuration is evaluated per edge by [`DivergenceContract`] on a tumbling
+/// window. Phase 1 implements:
+/// - windowed signal-to-data ratio bounds
+/// - windowed absolute caps when no data is observed
+/// - cycle depth bounds for SCC-internal data events
+#[derive(Debug, Clone)]
+pub struct DivergenceThresholds {
+    /// Evaluation window for windowed predicates.
+    pub window: Duration,
+
+    /// Maximum ratio of flow control signals to data events per window.
+    pub signal_to_data_ratio: f64,
+
+    /// Absolute cap on flow control signals per window when `data_events == 0`.
+    pub max_signals_when_no_data: u64,
+
+    /// Maximum per-event cycle depth allowed before failing.
+    pub max_cycle_depth: u16,
+
+    /// TTL for per-key state (dedup keys, counters) to bound memory in long-running flows.
+    ///
+    /// Phase 1 implementation uses bounded counters, but this is retained for follow-up
+    /// predicates that require per-key maps (mirroring CycleGuard's TTL behaviour).
+    pub state_ttl: Duration,
+}
+
+impl Default for DivergenceThresholds {
+    fn default() -> Self {
+        Self {
+            window: Duration::from_secs(60),
+            signal_to_data_ratio: 10.0,
+            max_signals_when_no_data: 1_000,
+            // Match MaxIterations::DEFAULT in runtime_services (FLOWIP-051p).
+            max_cycle_depth: 30,
+            state_ttl: Duration::from_secs(300),
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct DivergenceState {
+    window_start: Option<Instant>,
+    data_events: u64,
+    flow_control_signals: u64,
+    max_cycle_depth_observed: u16,
+}
+
+/// Contract that detects mid-flight divergence on SCC-internal edges (FLOWIP-080r).
+///
+/// This contract is observational: it records counts in `on_read` and reports
+/// violations from `check_progress`. It does not suppress or rewrite events.
+pub struct DivergenceContract {
+    scc_id: crate::SccId,
+    thresholds: DivergenceThresholds,
+    state: Mutex<DivergenceState>,
+}
+
+impl DivergenceContract {
+    pub const NAME: &'static str = "DivergenceContract";
+
+    /// Create a new divergence contract for a specific SCC using default thresholds.
+    pub fn new(scc_id: crate::SccId) -> Self {
+        Self::with_thresholds(scc_id, DivergenceThresholds::default())
+    }
+
+    /// Create a new divergence contract for a specific SCC using explicit thresholds.
+    pub fn with_thresholds(scc_id: crate::SccId, thresholds: DivergenceThresholds) -> Self {
+        Self {
+            scc_id,
+            thresholds,
+            state: Mutex::new(DivergenceState::default()),
+        }
+    }
+
+    fn check_signal_to_data_ratio(
+        &self,
+        ctx: &ContractContext<'_>,
+        st: &DivergenceState,
+    ) -> Option<ContractViolation> {
+        let window_seconds = Some(self.thresholds.window.as_secs());
+
+        if st.data_events == 0 {
+            if st.flow_control_signals > self.thresholds.max_signals_when_no_data {
+                return Some(ContractViolation {
+                    contract_name: self.name().to_string(),
+                    upstream_stage: ctx.upstream_stage,
+                    downstream_stage: ctx.downstream_stage,
+                    detected_at: Utc::now(),
+                    cause: ViolationCause::Divergence {
+                        predicate: "signals_when_no_data".to_string(),
+                        observed: st.flow_control_signals as f64,
+                        threshold: self.thresholds.max_signals_when_no_data as f64,
+                        window_seconds,
+                    },
+                    details: json!({
+                        "window_seconds": self.thresholds.window.as_secs(),
+                        "flow_control_signals": st.flow_control_signals,
+                        "data_events": st.data_events,
+                        "max_signals_when_no_data": self.thresholds.max_signals_when_no_data,
+                    }),
+                });
+            }
+            return None;
+        }
+
+        let observed_ratio = st.flow_control_signals as f64 / st.data_events as f64;
+        if observed_ratio > self.thresholds.signal_to_data_ratio {
+            return Some(ContractViolation {
+                contract_name: self.name().to_string(),
+                upstream_stage: ctx.upstream_stage,
+                downstream_stage: ctx.downstream_stage,
+                detected_at: Utc::now(),
+                cause: ViolationCause::Divergence {
+                    predicate: "signal_to_data_ratio".to_string(),
+                    observed: observed_ratio,
+                    threshold: self.thresholds.signal_to_data_ratio,
+                    window_seconds,
+                },
+                details: json!({
+                    "window_seconds": self.thresholds.window.as_secs(),
+                    "flow_control_signals": st.flow_control_signals,
+                    "data_events": st.data_events,
+                    "observed_ratio": observed_ratio,
+                    "threshold_ratio": self.thresholds.signal_to_data_ratio,
+                }),
+            });
+        }
+
+        None
+    }
+
+    fn check_cycle_depth(
+        &self,
+        ctx: &ContractContext<'_>,
+        st: &DivergenceState,
+    ) -> Option<ContractViolation> {
+        if st.max_cycle_depth_observed > self.thresholds.max_cycle_depth {
+            return Some(ContractViolation {
+                contract_name: self.name().to_string(),
+                upstream_stage: ctx.upstream_stage,
+                downstream_stage: ctx.downstream_stage,
+                detected_at: Utc::now(),
+                cause: ViolationCause::Divergence {
+                    predicate: "cycle_depth".to_string(),
+                    observed: st.max_cycle_depth_observed as f64,
+                    threshold: self.thresholds.max_cycle_depth as f64,
+                    window_seconds: None,
+                },
+                details: json!({
+                    "scc_id": self.scc_id.to_string(),
+                    "max_cycle_depth_observed": st.max_cycle_depth_observed,
+                    "max_cycle_depth": self.thresholds.max_cycle_depth,
+                }),
+            });
+        }
+        None
+    }
+}
+
+impl Contract for DivergenceContract {
+    fn name(&self) -> &str {
+        DivergenceContract::NAME
+    }
+
+    fn on_write(&self, _event: &ChainEvent, _ctx: &mut ContractWriteContext) {
+        // Divergence predicates are evaluated on the reader side in Phase 1.
+    }
+
+    fn on_read(&self, event: &ChainEvent, _ctx: &mut ContractReadContext) {
+        let mut st = self
+            .state
+            .lock()
+            .expect("DivergenceContract state poisoned");
+
+        if st.window_start.is_none() {
+            st.window_start = Some(Instant::now());
+        }
+
+        match &event.content {
+            ChainEventContent::Data { .. } => {
+                st.data_events = st.data_events.saturating_add(1);
+            }
+            ChainEventContent::FlowControl(_) => {
+                st.flow_control_signals = st.flow_control_signals.saturating_add(1);
+            }
+            _ => {}
+        }
+
+        // Cycle depth applies to data events only; flow control signals do not carry
+        // `cycle_depth` in the current model (FLOWIP-051p).
+        if event.is_data() && event.cycle_scc_id == Some(self.scc_id) {
+            if let Some(depth) = event.cycle_depth {
+                st.max_cycle_depth_observed = st.max_cycle_depth_observed.max(depth.as_u16());
+            }
+        }
+    }
+
+    fn verify(&self, ctx: &ContractContext<'_>) -> ContractResult {
+        let st = self
+            .state
+            .lock()
+            .expect("DivergenceContract state poisoned");
+        let observed_ratio = if st.data_events == 0 {
+            None
+        } else {
+            Some(st.flow_control_signals as f64 / st.data_events as f64)
+        };
+
+        ContractResult::Passed(ContractEvidence {
+            contract_name: self.name().to_string(),
+            upstream_stage: ctx.upstream_stage,
+            downstream_stage: ctx.downstream_stage,
+            verified_at: Utc::now(),
+            details: json!({
+                "scc_id": self.scc_id.to_string(),
+                "window_seconds": self.thresholds.window.as_secs(),
+                "signal_to_data_ratio_threshold": self.thresholds.signal_to_data_ratio,
+                "max_signals_when_no_data": self.thresholds.max_signals_when_no_data,
+                "max_cycle_depth": self.thresholds.max_cycle_depth,
+                "data_events_observed_in_window": st.data_events,
+                "flow_control_signals_observed_in_window": st.flow_control_signals,
+                "signal_to_data_ratio_observed": observed_ratio,
+                "max_cycle_depth_observed": st.max_cycle_depth_observed,
+            }),
+        })
+    }
+
+    fn check_progress(&self, ctx: &ContractContext<'_>) -> Option<ContractViolation> {
+        let now = Instant::now();
+        let mut st = self
+            .state
+            .lock()
+            .expect("DivergenceContract state poisoned");
+
+        let Some(window_start) = st.window_start else {
+            st.window_start = Some(now);
+            return None;
+        };
+
+        let window_elapsed = now.duration_since(window_start) >= self.thresholds.window;
+
+        if let Some(v) = self.check_cycle_depth(ctx, &st) {
+            return Some(v);
+        }
+        if let Some(v) = self.check_signal_to_data_ratio(ctx, &st) {
+            return Some(v);
+        }
+
+        if window_elapsed {
+            st.window_start = Some(now);
+            st.data_events = 0;
+            st.flow_control_signals = 0;
+            st.max_cycle_depth_observed = 0;
+        }
+
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::event::context::causality_context::CausalityContext;
     use crate::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
-    use crate::event::ChainEventFactory;
+    use crate::event::types::SeqNo;
+    use crate::event::{ChainEventFactory, ConsumptionProgressEventParams};
+    use crate::CycleDepth;
     use crate::WriterId;
 
     fn dummy_ctx() -> (ContractWriteContext, ContractReadContext, StageId, StageId) {
@@ -711,5 +1013,300 @@ mod tests {
 
         // Keep the compiler honest about the unused read_ctx.
         let _ = &mut read_ctx;
+    }
+
+    #[test]
+    fn divergence_contract_signal_ratio_violation_emits_progress_violation() {
+        let scc_id = crate::SccId::from(crate::Ulid::new());
+        let thresholds = DivergenceThresholds {
+            window: Duration::from_secs(60),
+            signal_to_data_ratio: 2.0,
+            max_signals_when_no_data: 10,
+            max_cycle_depth: 30,
+            state_ttl: Duration::from_secs(300),
+        };
+        let contract = DivergenceContract::with_thresholds(scc_id, thresholds);
+        let (write_ctx, mut read_ctx, upstream, downstream) = dummy_ctx();
+
+        // 1 data event, 3 signals -> ratio 3.0 > 2.0.
+        let data = ChainEventFactory::data_event(
+            crate::WriterId::from(upstream),
+            "test.event",
+            json!({"a": 1}),
+        );
+        contract.on_read(&data, &mut read_ctx);
+
+        let progress = ChainEventFactory::consumption_progress_event(
+            crate::WriterId::from(upstream),
+            ConsumptionProgressEventParams {
+                reader_seq: SeqNo(1),
+                last_event_id: None,
+                vector_clock: None,
+                eof_seen: false,
+                reader_path: crate::event::types::JournalPath("x".to_string()),
+                reader_index: crate::event::types::JournalIndex(0),
+                advertised_writer_seq: None,
+                advertised_vector_clock: None,
+                stalled_since: None,
+            },
+        );
+        contract.on_read(&progress, &mut read_ctx);
+        contract.on_read(&progress, &mut read_ctx);
+        contract.on_read(&progress, &mut read_ctx);
+
+        let ctx = ContractContext {
+            upstream_stage: upstream,
+            downstream_stage: downstream,
+            write_state: &write_ctx.state,
+            read_state: &read_ctx.state,
+        };
+
+        let Some(v) = contract.check_progress(&ctx) else {
+            panic!("expected divergence violation, got None");
+        };
+
+        match v.cause {
+            ViolationCause::Divergence {
+                predicate,
+                observed,
+                threshold,
+                window_seconds,
+            } => {
+                assert_eq!(predicate, "signal_to_data_ratio");
+                assert!(observed > threshold);
+                assert_eq!(window_seconds, Some(60));
+            }
+            other => panic!("unexpected cause: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn divergence_contract_does_not_apply_cycle_depth_to_flow_control_signals() {
+        let scc_id = crate::SccId::from(crate::Ulid::new());
+        let thresholds = DivergenceThresholds {
+            window: Duration::from_secs(60),
+            signal_to_data_ratio: 10.0,
+            max_signals_when_no_data: 1_000,
+            max_cycle_depth: 1,
+            state_ttl: Duration::from_secs(300),
+        };
+        let contract = DivergenceContract::with_thresholds(scc_id, thresholds);
+        let (write_ctx, mut read_ctx, upstream, downstream) = dummy_ctx();
+
+        let progress = ChainEventFactory::consumption_progress_event(
+            crate::WriterId::from(upstream),
+            ConsumptionProgressEventParams {
+                reader_seq: SeqNo(0),
+                last_event_id: None,
+                vector_clock: None,
+                eof_seen: false,
+                reader_path: crate::event::types::JournalPath("x".to_string()),
+                reader_index: crate::event::types::JournalIndex(0),
+                advertised_writer_seq: None,
+                advertised_vector_clock: None,
+                stalled_since: None,
+            },
+        );
+        contract.on_read(&progress, &mut read_ctx);
+
+        let ctx = ContractContext {
+            upstream_stage: upstream,
+            downstream_stage: downstream,
+            write_state: &write_ctx.state,
+            read_state: &read_ctx.state,
+        };
+
+        // No data event with cycle_depth observed, so no cycle-depth violation should be produced.
+        assert!(contract.check_progress(&ctx).is_none());
+    }
+
+    #[test]
+    fn divergence_contract_signals_when_no_data_violation_emits_progress_violation() {
+        let scc_id = crate::SccId::from(crate::Ulid::new());
+        let thresholds = DivergenceThresholds {
+            window: Duration::from_secs(60),
+            signal_to_data_ratio: 10.0,
+            max_signals_when_no_data: 2,
+            max_cycle_depth: 30,
+            state_ttl: Duration::from_secs(300),
+        };
+        let contract = DivergenceContract::with_thresholds(scc_id, thresholds);
+        let (write_ctx, mut read_ctx, upstream, downstream) = dummy_ctx();
+
+        let progress = ChainEventFactory::consumption_progress_event(
+            crate::WriterId::from(upstream),
+            ConsumptionProgressEventParams {
+                reader_seq: SeqNo(0),
+                last_event_id: None,
+                vector_clock: None,
+                eof_seen: false,
+                reader_path: crate::event::types::JournalPath("x".to_string()),
+                reader_index: crate::event::types::JournalIndex(0),
+                advertised_writer_seq: None,
+                advertised_vector_clock: None,
+                stalled_since: None,
+            },
+        );
+        contract.on_read(&progress, &mut read_ctx);
+        contract.on_read(&progress, &mut read_ctx);
+        contract.on_read(&progress, &mut read_ctx);
+
+        let ctx = ContractContext {
+            upstream_stage: upstream,
+            downstream_stage: downstream,
+            write_state: &write_ctx.state,
+            read_state: &read_ctx.state,
+        };
+
+        let Some(v) = contract.check_progress(&ctx) else {
+            panic!("expected divergence violation, got None");
+        };
+
+        match v.cause {
+            ViolationCause::Divergence {
+                predicate,
+                observed,
+                threshold,
+                window_seconds,
+            } => {
+                assert_eq!(predicate, "signals_when_no_data");
+                assert!(observed > threshold);
+                assert_eq!(window_seconds, Some(60));
+            }
+            other => panic!("unexpected cause: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn divergence_contract_cycle_depth_violation_emits_progress_violation() {
+        let scc_id = crate::SccId::from(crate::Ulid::new());
+        let thresholds = DivergenceThresholds {
+            window: Duration::from_secs(60),
+            signal_to_data_ratio: 10.0,
+            max_signals_when_no_data: 1_000,
+            max_cycle_depth: 3,
+            state_ttl: Duration::from_secs(300),
+        };
+        let contract = DivergenceContract::with_thresholds(scc_id, thresholds);
+        let (write_ctx, mut read_ctx, upstream, downstream) = dummy_ctx();
+
+        let mut data =
+            ChainEventFactory::data_event(crate::WriterId::from(upstream), "test.event", json!({}));
+        data.cycle_scc_id = Some(scc_id);
+        data.cycle_depth = Some(CycleDepth::new(4));
+
+        contract.on_read(&data, &mut read_ctx);
+
+        let ctx = ContractContext {
+            upstream_stage: upstream,
+            downstream_stage: downstream,
+            write_state: &write_ctx.state,
+            read_state: &read_ctx.state,
+        };
+
+        let Some(v) = contract.check_progress(&ctx) else {
+            panic!("expected divergence violation, got None");
+        };
+
+        match v.cause {
+            ViolationCause::Divergence {
+                predicate,
+                observed,
+                threshold,
+                window_seconds,
+            } => {
+                assert_eq!(predicate, "cycle_depth");
+                assert_eq!(observed, 4.0);
+                assert_eq!(threshold, 3.0);
+                assert_eq!(window_seconds, None);
+            }
+            other => panic!("unexpected cause: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn divergence_contract_within_bounds_returns_none() {
+        let scc_id = crate::SccId::from(crate::Ulid::new());
+        let thresholds = DivergenceThresholds {
+            window: Duration::from_secs(60),
+            signal_to_data_ratio: 10.0,
+            max_signals_when_no_data: 1_000,
+            max_cycle_depth: 30,
+            state_ttl: Duration::from_secs(300),
+        };
+        let contract = DivergenceContract::with_thresholds(scc_id, thresholds);
+        let (write_ctx, mut read_ctx, upstream, downstream) = dummy_ctx();
+
+        for _ in 0..10 {
+            let data = ChainEventFactory::data_event(
+                crate::WriterId::from(upstream),
+                "test.event",
+                json!({"a": 1}),
+            );
+            contract.on_read(&data, &mut read_ctx);
+        }
+
+        let signal = ChainEventFactory::watermark_event(crate::WriterId::from(upstream), 0, None);
+        for _ in 0..50 {
+            contract.on_read(&signal, &mut read_ctx);
+        }
+
+        let ctx = ContractContext {
+            upstream_stage: upstream,
+            downstream_stage: downstream,
+            write_state: &write_ctx.state,
+            read_state: &read_ctx.state,
+        };
+
+        assert!(contract.check_progress(&ctx).is_none());
+    }
+
+    #[test]
+    fn divergence_contract_window_rollover_resets_counters() {
+        let scc_id = crate::SccId::from(crate::Ulid::new());
+        let thresholds = DivergenceThresholds {
+            window: Duration::from_secs(60),
+            signal_to_data_ratio: 10.0,
+            max_signals_when_no_data: 1_000,
+            max_cycle_depth: 30,
+            state_ttl: Duration::from_secs(300),
+        };
+        let contract = DivergenceContract::with_thresholds(scc_id, thresholds.clone());
+        let (write_ctx, mut read_ctx, upstream, downstream) = dummy_ctx();
+
+        let data = ChainEventFactory::data_event(
+            crate::WriterId::from(upstream),
+            "test.event",
+            json!({"a": 1}),
+        );
+        contract.on_read(&data, &mut read_ctx);
+
+        let signal = ChainEventFactory::watermark_event(crate::WriterId::from(upstream), 0, None);
+        contract.on_read(&signal, &mut read_ctx);
+
+        {
+            let mut st = contract.state.lock().expect("state poisoned");
+            if let Some(backdated) =
+                Instant::now().checked_sub(thresholds.window + Duration::from_secs(1))
+            {
+                st.window_start = Some(backdated);
+            } else {
+                st.window_start = Some(Instant::now());
+            }
+        }
+
+        let ctx = ContractContext {
+            upstream_stage: upstream,
+            downstream_stage: downstream,
+            write_state: &write_ctx.state,
+            read_state: &read_ctx.state,
+        };
+
+        assert!(contract.check_progress(&ctx).is_none());
+
+        let st = contract.state.lock().expect("state poisoned");
+        assert_eq!(st.data_events, 0);
+        assert_eq!(st.flow_control_signals, 0);
+        assert_eq!(st.max_cycle_depth_observed, 0);
     }
 }

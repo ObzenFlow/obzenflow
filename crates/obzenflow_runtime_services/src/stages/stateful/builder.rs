@@ -92,6 +92,7 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Super
             writer_id: None,
             subscription: None,
             contract_state: Vec::new(),
+            last_contract_check: None,
             control_strategy,
             buffered_eof: None,
             last_consumed_envelope: None,

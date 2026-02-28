@@ -28,6 +28,7 @@ use obzenflow_core::journal::Journal;
 use obzenflow_core::journal::JournalStorageKind;
 use obzenflow_core::metrics::MetricsExporter;
 use obzenflow_core::StageId;
+use obzenflow_core::{DeliveryContract, SourceContract, TransportContract};
 use obzenflow_topology::Topology;
 use std::{
     collections::{HashMap, HashSet},
@@ -313,16 +314,18 @@ impl SupervisorBuilder for PipelineBuilder {
             let entry = contract_attachments_map
                 .entry((*upstream, *downstream))
                 .or_default();
-            if !entry.iter().any(|n| n == "TransportContract") {
-                entry.push("TransportContract".to_string());
+            if !entry.iter().any(|n| n == TransportContract::NAME) {
+                entry.push(TransportContract::NAME.to_string());
             }
-            if expected_sources.contains(upstream) && !entry.iter().any(|n| n == "SourceContract") {
-                entry.push("SourceContract".to_string());
+            if expected_sources.contains(upstream)
+                && !entry.iter().any(|n| n == SourceContract::NAME)
+            {
+                entry.push(SourceContract::NAME.to_string());
             }
             if delivery_contract_pairs.contains(&(*upstream, *downstream))
-                && !entry.iter().any(|n| n == "DeliveryContract")
+                && !entry.iter().any(|n| n == DeliveryContract::NAME)
             {
-                entry.push("DeliveryContract".to_string());
+                entry.push(DeliveryContract::NAME.to_string());
             }
         }
 

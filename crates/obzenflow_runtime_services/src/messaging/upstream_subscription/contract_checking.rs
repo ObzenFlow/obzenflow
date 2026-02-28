@@ -6,7 +6,9 @@ use super::{ContractStatus, ReaderProgress, UpstreamSubscription};
 use crate::messaging::upstream_subscription_policy::{
     EdgeContext, EdgeContractDecision, PolicyHints,
 };
-use obzenflow_core::event::system_event::{SystemEvent, SystemEventType};
+use obzenflow_core::event::system_event::{
+    ContractResultStatusLabel, SystemEvent, SystemEventType,
+};
 use obzenflow_core::event::types::{
     Count, DurationMs, JournalIndex, JournalPath, SeqNo, ViolationCause as EventViolationCause,
 };
@@ -15,6 +17,20 @@ use obzenflow_core::event::{
 };
 use obzenflow_core::{ContractResult, ViolationCause};
 use tokio::time::Instant;
+
+fn contract_result_labels_for_emission(
+    result: &ContractResult,
+    pending_label: ContractResultStatusLabel,
+) -> (String, Option<String>) {
+    match result {
+        ContractResult::Passed(_) => (ContractResultStatusLabel::Passed.to_string(), None),
+        ContractResult::Failed(v) => (
+            ContractResultStatusLabel::Failed.to_string(),
+            Some(v.cause.cause_label().to_string()),
+        ),
+        ContractResult::Pending => (pending_label.to_string(), None),
+    }
+}
 
 impl<T> UpstreamSubscription<T>
 where
@@ -44,6 +60,14 @@ where
                 continue;
             }
 
+            // Continuous contract evaluation (FLOWIP-080r).
+            //
+            // We run `check_progress` independently of progress emission so that
+            // divergence detection and other mid-flight predicates cannot starve
+            // behind the `should_emit_progress` gating logic.
+            self.check_progress_contracts_for_reader(progress, index, &mut status)
+                .await;
+
             if self.should_emit_progress(progress, index, now) {
                 self.emit_progress_for_reader(progress, index, now, &mut status)
                     .await;
@@ -60,6 +84,203 @@ where
         }
 
         status
+    }
+
+    async fn check_progress_contracts_for_reader(
+        &mut self,
+        progress: &mut ReaderProgress,
+        index: usize,
+        status: &mut ContractStatus,
+    ) {
+        let Some(tracker) = &self.contract_tracker else {
+            return;
+        };
+
+        let (Some(reader_stage), Some(chain_slot)) = (
+            tracker.reader_stage,
+            self.contract_chains.get(index).and_then(|c| c.as_ref()),
+        ) else {
+            return;
+        };
+
+        // Once we've observed EOF for this upstream, EOF verification will run
+        // on the same tick (via `should_emit_progress`) and emit definitive
+        // pass/fail evidence. Avoid emitting redundant mid-flight heartbeats.
+        if self.state.is_reader_eof(index) {
+            return;
+        }
+
+        // Avoid emitting contract "healthy" heartbeats before we've observed any
+        // data events on this edge.
+        //
+        // In server mode with `startup_mode=manual`, non-source stages are started
+        // during materialization and may poll upstreams while sources are still
+        // waiting for an external Run. Those stages still emit `ConsumptionProgress`
+        // flow signals with `reader_seq=0` (contract mechanism), which can cause
+        // downstream subscriptions to observe events even though no data is flowing.
+        //
+        // Only emitting heartbeats once `reader_seq` has advanced avoids noisy and
+        // misleading UI output ("all contracts healthy") when a flow is idle or
+        // awaiting manual start.
+        if progress.reader_seq.0 == 0 {
+            return;
+        }
+
+        let should_emit_healthy = progress.reader_seq != progress.last_contract_result_seq;
+
+        let results = chain_slot.check_progress_all(progress.stage_id, reader_stage);
+        let results_only: Vec<ContractResult> = results.iter().map(|(_, r)| r.clone()).collect();
+
+        // Emit per-contract progress results to the system journal so SSE/UIs can
+        // render mid-flight contract health (even when no violations are present).
+        //
+        // MetricsAggregator also observes ContractResult, so this provides a
+        // lightweight heartbeat for long-running flows (e.g. prometheus_100k_demo).
+        if let Some(system_journal) = &tracker.system_journal {
+            let mut emitted_any = false;
+            for (contract_name, result) in &results {
+                // Only emit "healthy" heartbeats when we've observed additional
+                // data since the last heartbeat. Failed results must always be
+                // emitted (and may occur without new data due to control-signal
+                // predicates like divergence detection).
+                if matches!(result, ContractResult::Pending) && !should_emit_healthy {
+                    continue;
+                }
+
+                let (status_label, cause_label) =
+                    contract_result_labels_for_emission(result, ContractResultStatusLabel::Healthy);
+
+                let result_event = SystemEvent::new(
+                    tracker.writer_id,
+                    SystemEventType::ContractResult {
+                        upstream: progress.stage_id,
+                        reader: reader_stage,
+                        contract_name: contract_name.clone(),
+                        status: status_label,
+                        cause: cause_label,
+                        reader_seq: Some(progress.reader_seq),
+                        advertised_writer_seq: progress.advertised_writer_seq,
+                    },
+                );
+                if let Err(e) = system_journal.append(result_event, None).await {
+                    tracing::error!(
+                        target: "flowip-105",
+                        owner = %self.owner_label,
+                        upstream = ?progress.stage_id,
+                        reader = ?reader_stage,
+                        reader_index = index,
+                        contract = %contract_name,
+                        error = %e,
+                        "Failed to append progress contract result event; skipping emission"
+                    );
+                } else {
+                    emitted_any = true;
+                }
+            }
+
+            if emitted_any && should_emit_healthy {
+                progress.last_contract_result_seq = progress.reader_seq;
+            }
+        }
+
+        let edge = EdgeContext {
+            upstream_stage: progress.stage_id,
+            downstream_stage: reader_stage,
+            advertised_writer_seq: progress.advertised_writer_seq,
+            reader_seq: progress.reader_seq,
+        };
+
+        let cb_info = self
+            .control_middleware
+            .circuit_breaker_contract_info(&progress.stage_id);
+        let hints = PolicyHints {
+            breaker_mode: cb_info.map(|i| i.mode),
+            has_opened_since_registration: cb_info
+                .map(|i| i.has_opened_since_registration)
+                .unwrap_or(false),
+            has_fallback_configured: cb_info.map(|i| i.has_fallback_configured).unwrap_or(false),
+        };
+
+        let Some(policy_stack) = self.contract_policies.get(index).and_then(|p| p.as_ref()) else {
+            return;
+        };
+
+        let raw_failure: Option<(String, ViolationCause)> = results.iter().find_map(|(name, r)| {
+            let ContractResult::Failed(v) = r else {
+                return None;
+            };
+            Some((name.clone(), v.cause.clone()))
+        });
+
+        let decision = policy_stack.decide(&results_only, &edge, &hints);
+        match decision {
+            EdgeContractDecision::Pass => {
+                // If raw contracts reported a failure but policies overrode it
+                // to Pass, emit an override system event.
+                if let (Some(system_journal), Some((contract_name, cause))) =
+                    (&tracker.system_journal, raw_failure)
+                {
+                    let override_event = SystemEvent::new(
+                        tracker.writer_id,
+                        SystemEventType::ContractOverrideByPolicy {
+                            upstream: progress.stage_id,
+                            reader: reader_stage,
+                            contract_name,
+                            original_cause: cause,
+                            policy: "breaker_aware".to_string(),
+                        },
+                    );
+                    if let Err(e) = system_journal.append(override_event, None).await {
+                        tracing::error!(
+                            target: "flowip-105",
+                            owner = %self.owner_label,
+                            upstream = ?progress.stage_id,
+                            reader = ?reader_stage,
+                            reader_index = index,
+                            error = %e,
+                            "Failed to append contract override event; skipping emission"
+                        );
+                    }
+                }
+            }
+            EdgeContractDecision::Fail(cause) => {
+                if !matches!(status, ContractStatus::Violated { .. }) {
+                    *status = ContractStatus::Violated {
+                        upstream: progress.stage_id,
+                        cause: cause.clone(),
+                    };
+                }
+
+                // Emit edge-level contract status to system journal so gating and SSE
+                // can react to the violation.
+                if let Some(system_journal) = &tracker.system_journal {
+                    let status_event = SystemEvent::new(
+                        tracker.writer_id,
+                        SystemEventType::ContractStatus {
+                            upstream: progress.stage_id,
+                            reader: reader_stage,
+                            pass: false,
+                            reader_seq: Some(progress.reader_seq),
+                            advertised_writer_seq: progress.advertised_writer_seq,
+                            reason: Some(cause.clone()),
+                        },
+                    );
+                    if let Err(e) = system_journal.append(status_event, None).await {
+                        tracing::error!(
+                            target: "flowip-105",
+                            owner = %self.owner_label,
+                            upstream = ?progress.stage_id,
+                            reader = ?reader_stage,
+                            reader_index = index,
+                            error = %e,
+                            "Failed to append progress contract status; skipping emission"
+                        );
+                    }
+                }
+
+                progress.contract_violated = true;
+            }
+        }
     }
 
     async fn emit_progress_for_reader(
@@ -147,21 +368,10 @@ where
             // pipeline gating (which uses ContractStatus + policies).
             if let Some(system_journal) = &tracker.system_journal {
                 for (contract_name, result) in &results {
-                    let (status_label, cause_label) = match result {
-                        ContractResult::Passed(_) => ("passed".to_string(), None),
-                        ContractResult::Failed(v) => {
-                            let cause = match &v.cause {
-                                ViolationCause::SeqDivergence { .. } => "seq_divergence",
-                                ViolationCause::ContentMismatch { .. } => "content_mismatch",
-                                ViolationCause::DeliveryMismatch { .. } => "delivery_mismatch",
-                                ViolationCause::AccountingMismatch { .. } => "accounting_mismatch",
-                                ViolationCause::Other(_) => "other",
-                            }
-                            .to_string();
-                            ("failed".to_string(), Some(cause))
-                        }
-                        ContractResult::Pending => ("pending".to_string(), None),
-                    };
+                    let (status_label, cause_label) = contract_result_labels_for_emission(
+                        result,
+                        ContractResultStatusLabel::Pending,
+                    );
 
                     let result_event = SystemEvent::new(
                         tracker.writer_id,
@@ -592,5 +802,38 @@ where
         } else {
             None
         }
+    }
+
+    /// Supervisor-driven contract checking tick (FLOWIP-080r).
+    ///
+    /// This avoids starvation under sustained load by allowing supervisors to
+    /// call contract checks from the `PollResult::Event` path using a
+    /// wall-clock tick that is independent of `PollResult::NoEvents`.
+    ///
+    /// `last_contract_check` is stored in the supervisor's running-state
+    /// context (per subscription).
+    pub async fn maybe_check_contracts_tick(
+        &mut self,
+        reader_progress: &mut [ReaderProgress],
+        last_contract_check: &mut Option<Instant>,
+    ) -> Option<ContractStatus> {
+        let Some(tracker) = &self.contract_tracker else {
+            return None;
+        };
+
+        let now = Instant::now();
+        let tick_ms = (tracker.config.progress_max_interval.0 / 2).max(1);
+
+        let due = match last_contract_check {
+            Some(last) => now.duration_since(*last).as_millis() as u64 >= tick_ms,
+            None => true,
+        };
+
+        if !due {
+            return None;
+        }
+
+        *last_contract_check = Some(now);
+        Some(self.check_contracts(reader_progress).await)
     }
 }
