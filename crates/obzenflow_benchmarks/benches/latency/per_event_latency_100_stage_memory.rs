@@ -14,13 +14,13 @@ use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::event::ChainEventContent;
 use obzenflow_core::WriterId;
-use obzenflow_dsl_infra::{flow, sink, source, transform};
+use obzenflow_dsl::{flow, sink, source, transform};
 use obzenflow_infra::journal::memory_journals;
-use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
-use obzenflow_runtime_services::stages::common::handlers::{
+use obzenflow_runtime::stages::common::handler_error::HandlerError;
+use obzenflow_runtime::stages::common::handlers::{
     FiniteSourceHandler, SinkHandler, TransformHandler,
 };
-use obzenflow_runtime_services::stages::SourceError;
+use obzenflow_runtime::stages::SourceError;
 // Monitoring taxonomies are no longer needed with FLOWIP-056-666
 // Metrics are automatically collected by MetricsAggregator from the event journal
 use async_trait::async_trait;

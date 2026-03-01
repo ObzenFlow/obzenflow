@@ -15,8 +15,8 @@ use obzenflow_core::{
     },
     FlowId,
 };
-use obzenflow_runtime_services::journal::FlowJournalFactory;
-use obzenflow_runtime_services::replay::{ReplayArchive, ReplayError};
+use obzenflow_runtime::journal::FlowJournalFactory;
+use obzenflow_runtime::replay::{ReplayArchive, ReplayError};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};

@@ -16,8 +16,8 @@ use crate::application::config::CorsModeArg;
 use crate::application::config::StartupMode;
 use clap::Parser;
 use obzenflow_core::web::{CorsConfig, CorsMode, HttpEndpoint, ServerConfig};
-use obzenflow_dsl_infra::FlowDefinition;
-use obzenflow_runtime_services::prelude::FlowHandle;
+use obzenflow_dsl::FlowDefinition;
+use obzenflow_runtime::prelude::FlowHandle;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::task::JoinHandle;
@@ -287,7 +287,7 @@ impl FlowApplicationBuilder {
 /// # Example with #[tokio::main]
 /// ```ignore
 /// use obzenflow_infra::application::FlowApplication;
-/// use obzenflow_dsl_infra::flow;
+/// use obzenflow_dsl::flow;
 ///
 /// #[tokio::main]
 /// async fn main() -> Result<(), Box<dyn std::error::Error>> {

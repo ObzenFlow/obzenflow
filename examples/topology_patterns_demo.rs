@@ -26,15 +26,15 @@ use obzenflow_core::{
     id::StageId,
     TypedPayload, WriterId,
 };
-use obzenflow_dsl_infra::{flow, sink, source, stateful, transform};
+use obzenflow_dsl::{flow, sink, source, stateful, transform};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
-use obzenflow_runtime_services::stages::common::handlers::{SinkHandler, StatefulHandler};
-use obzenflow_runtime_services::stages::source::FiniteSourceTyped;
+use obzenflow_runtime::stages::common::handler_error::HandlerError;
+use obzenflow_runtime::stages::common::handlers::{SinkHandler, StatefulHandler};
+use obzenflow_runtime::stages::source::FiniteSourceTyped;
 // ✨ FLOWIP-080h: Import Map helper
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
-use obzenflow_runtime_services::stages::transform::Map;
+use obzenflow_runtime::stages::transform::Map;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::BTreeMap;

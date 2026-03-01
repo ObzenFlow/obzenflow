@@ -6,10 +6,10 @@
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::{StageId, WriterId};
-use obzenflow_dsl_infra::{flow, sink, source, transform};
+use obzenflow_dsl::{flow, sink, source, transform};
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
-use obzenflow_runtime_services::stages::common::handlers::{
+use obzenflow_runtime::stages::common::handler_error::HandlerError;
+use obzenflow_runtime::stages::common::handlers::{
     FiniteSourceHandler, SinkHandler, TransformHandler,
 };
 // FLOWIP-056-666: Monitoring middleware temporarily disabled pending redesign
@@ -51,7 +51,7 @@ async fn test_dsl_pipeline() -> Result<()> {
             &mut self,
         ) -> Result<
             Option<Vec<ChainEvent>>,
-            obzenflow_runtime_services::stages::common::handlers::source::traits::SourceError,
+            obzenflow_runtime::stages::common::handlers::source::traits::SourceError,
         > {
             if self.emitted < self.events.len() {
                 let (event_type, payload) = &self.events[self.emitted];

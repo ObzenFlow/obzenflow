@@ -18,8 +18,8 @@ use obzenflow_core::event::payloads::observability_payload::{
     MiddlewareLifecycle, ObservabilityPayload, RateLimiterEvent,
 };
 use obzenflow_core::{StageId, WriterId};
-use obzenflow_runtime_services::pipeline::config::StageConfig;
-use obzenflow_runtime_services::stages::common::control_strategies::{
+use obzenflow_runtime::pipeline::config::StageConfig;
+use obzenflow_runtime::stages::common::control_strategies::{
     ControlEventStrategy, WindowingStrategy,
 };
 use serde_json::json;

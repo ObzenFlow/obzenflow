@@ -166,7 +166,7 @@ mod tests {
     use async_trait::async_trait;
     use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
     use obzenflow_core::event::ChainEventFactory;
-    use obzenflow_runtime_services::stages::common::handlers::SinkHandler;
+    use obzenflow_runtime::stages::common::handlers::SinkHandler;
     use serde_json::json;
 
     #[test]
@@ -192,7 +192,7 @@ mod tests {
     #[tokio::test] // use Tokio or any async‑test runtime
     async fn test_logging_middleware_with_sink() {
         use crate::middleware::SinkHandlerExt;
-        use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
+        use obzenflow_runtime::stages::common::handler_error::HandlerError;
 
         /// Simple in‑memory sink for testing
         struct TestSink {

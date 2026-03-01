@@ -11,10 +11,8 @@ use super::{Middleware, MiddlewareAction, MiddlewareContext};
 use async_trait::async_trait;
 use obzenflow_core::event::status::processing_status::ProcessingStatus;
 use obzenflow_core::ChainEvent;
-use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
-use obzenflow_runtime_services::stages::common::handlers::{
-    AsyncTransformHandler, TransformHandler,
-};
+use obzenflow_runtime::stages::common::handler_error::HandlerError;
+use obzenflow_runtime::stages::common::handlers::{AsyncTransformHandler, TransformHandler};
 use serde_json::json;
 use std::future::Future;
 use std::sync::Arc;
@@ -814,7 +812,7 @@ mod tests {
         use crate::middleware::control::{CircuitBreakerBuilder, ControlMiddlewareAggregator};
         use crate::middleware::MiddlewareFactory;
         use obzenflow_core::StageId;
-        use obzenflow_runtime_services::pipeline::config::StageConfig;
+        use obzenflow_runtime::pipeline::config::StageConfig;
 
         let calls = Arc::new(AtomicUsize::new(0));
         let handler = FlakyAsyncTransform {
@@ -861,7 +859,7 @@ mod tests {
         use crate::middleware::control::{CircuitBreakerBuilder, ControlMiddlewareAggregator};
         use crate::middleware::MiddlewareFactory;
         use obzenflow_core::StageId;
-        use obzenflow_runtime_services::pipeline::config::StageConfig;
+        use obzenflow_runtime::pipeline::config::StageConfig;
 
         let calls = Arc::new(AtomicUsize::new(0));
         let handler = FlakyAsyncTransform {

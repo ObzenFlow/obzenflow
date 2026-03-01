@@ -8,12 +8,12 @@
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::event::event_id::EventId;
 use obzenflow_core::journal::writer_id::WriterId;
-use obzenflow_dsl_infra::{flow, sink, source, transform};
+use obzenflow_dsl::{flow, sink, source, transform};
 use obzenflow_infra::journal::DiskJournal;
-use obzenflow_runtime_services::stages::common::handlers::{
+use obzenflow_runtime::stages::common::handlers::{
     FiniteSourceHandler, SinkHandler, TransformHandler,
 };
-use obzenflow_runtime_services::stages::SourceError;
+use obzenflow_runtime::stages::SourceError;
 // FLOWIP-056-666: Monitoring middleware temporarily disabled pending redesign
 use anyhow::Result;
 use async_trait::async_trait;

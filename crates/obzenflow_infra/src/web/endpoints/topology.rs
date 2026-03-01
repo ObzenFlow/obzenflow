@@ -10,7 +10,7 @@
 use async_trait::async_trait;
 use obzenflow_core::web::{HttpEndpoint, HttpMethod, Request, Response, WebError};
 use obzenflow_core::StageId;
-use obzenflow_runtime_services::id_conversions::StageIdExt;
+use obzenflow_runtime::id_conversions::StageIdExt;
 use obzenflow_topology::EdgeKind;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -19,7 +19,7 @@ type StageMetadataMap = std::collections::HashMap<StageId, StageMetadata>;
 type MiddlewareStacks = Arc<std::collections::HashMap<StageId, MiddlewareStackConfig>>;
 type ContractAttachments = Arc<std::collections::HashMap<(StageId, StageId), Vec<String>>>;
 type JoinMetadataMap =
-    Arc<std::collections::HashMap<StageId, obzenflow_runtime_services::pipeline::JoinMetadata>>;
+    Arc<std::collections::HashMap<StageId, obzenflow_runtime::pipeline::JoinMetadata>>;
 
 /// JSON representation of flow topology for the API
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -166,7 +166,7 @@ pub struct ContractApiInfo {
 }
 
 /// Re-export MiddlewareStackConfig from runtime_services for the web layer
-pub use obzenflow_runtime_services::pipeline::MiddlewareStackConfig;
+pub use obzenflow_runtime::pipeline::MiddlewareStackConfig;
 
 /// HTTP endpoint that serves flow topology
 pub struct TopologyHttpEndpoint {

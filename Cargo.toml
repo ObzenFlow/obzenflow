@@ -16,9 +16,9 @@ members = ["crates/*"]
 # Note: obzenflow_benchmarks is excluded from default-members as it's only for benchmarking
 default-members = [
     "crates/obzenflow_core",
-    "crates/obzenflow_runtime_services",
+    "crates/obzenflow_runtime",
     "crates/obzenflow_adapters",
-    "crates/obzenflow_dsl_infra",
+    "crates/obzenflow_dsl",
     "crates/obzenflow_infra"
 ]
 
@@ -32,9 +32,9 @@ repository = "https://github.com/obzenflow/obzenflow"
 [workspace.dependencies]
 # Workspace crates (kept `publish = false` to prevent accidental publishing)
 obzenflow_core = { version = "0.1.0", path = "crates/obzenflow_core" }
-obzenflow_runtime_services = { version = "0.1.0", path = "crates/obzenflow_runtime_services" }
+obzenflow_runtime = { version = "0.1.0", path = "crates/obzenflow_runtime" }
 obzenflow_adapters = { version = "0.1.0", path = "crates/obzenflow_adapters" }
-obzenflow_dsl_infra = { version = "0.1.0", path = "crates/obzenflow_dsl_infra" }
+obzenflow_dsl = { version = "0.1.0", path = "crates/obzenflow_dsl" }
 obzenflow_infra = { version = "0.1.0", path = "crates/obzenflow_infra" }
 obzenflow_benchmarks = { version = "0.1.0", path = "crates/obzenflow_benchmarks" }
 obzenflow_sketches = { version = "0.1.0", path = "crates/obzenflow_sketches" }
@@ -105,9 +105,9 @@ clap = { version = "4.5", features = ["derive"] }
 [dependencies]
 # Internal workspace dependencies
 obzenflow_core = { workspace = true }
-obzenflow_runtime_services = { workspace = true }
+obzenflow_runtime = { workspace = true }
 obzenflow_adapters = { workspace = true }
-obzenflow_dsl_infra = { workspace = true }
+obzenflow_dsl = { workspace = true }
 obzenflow_infra = { workspace = true }
 serde_json = { workspace = true }
 async-trait = { workspace = true }

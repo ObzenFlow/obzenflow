@@ -12,11 +12,11 @@ use obzenflow::sources::{HeaderMap, HttpPullConfig, HttpPullSource, Url};
 use obzenflow_core::event::chain_event::ChainEventFactory;
 use obzenflow_core::event::status::processing_status::ErrorKind;
 use obzenflow_core::TypedPayload;
-use obzenflow_dsl_infra::{async_source, flow, sink, transform};
+use obzenflow_dsl::{async_source, flow, sink, transform};
 use obzenflow_infra::application::{FlowApplication, LogLevel};
 use obzenflow_infra::http_client::default_http_client;
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime_services::stages::transform::TryMapWith;
+use obzenflow_runtime::stages::transform::TryMapWith;
 use std::time::Duration;
 
 pub fn run_example() -> Result<()> {

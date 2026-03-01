@@ -14,15 +14,15 @@ use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{ChainEvent, FlowId, StageId, SystemId, TypedPayload, WriterId};
 use obzenflow_infra::journal::disk::disk_journal::DiskJournal;
-use obzenflow_runtime_services::id_conversions::StageIdExt;
-use obzenflow_runtime_services::stages::common::control_strategies::JonestownStrategy;
-use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
-use obzenflow_runtime_services::stages::join::handle::JoinHandleExt;
-use obzenflow_runtime_services::stages::join::{JoinBuilder, JoinConfig, JoinReferenceMode};
-use obzenflow_runtime_services::stages::resources_builder::StageResourcesBuilder;
-use obzenflow_runtime_services::stages::JoinHandler;
-use obzenflow_runtime_services::supervised_base::SupervisorBuilder;
-use obzenflow_runtime_services::supervised_base::SupervisorHandle;
+use obzenflow_runtime::id_conversions::StageIdExt;
+use obzenflow_runtime::stages::common::control_strategies::JonestownStrategy;
+use obzenflow_runtime::stages::common::handler_error::HandlerError;
+use obzenflow_runtime::stages::join::handle::JoinHandleExt;
+use obzenflow_runtime::stages::join::{JoinBuilder, JoinConfig, JoinReferenceMode};
+use obzenflow_runtime::stages::resources_builder::StageResourcesBuilder;
+use obzenflow_runtime::stages::JoinHandler;
+use obzenflow_runtime::supervised_base::SupervisorBuilder;
+use obzenflow_runtime::supervised_base::SupervisorHandle;
 use obzenflow_topology::{StageType as TopologyStageType, TopologyBuilder};
 use serde::{Deserialize, Serialize};
 
@@ -191,17 +191,15 @@ async fn live_join_processes_stream_without_reference_eof() {
         .take_stage_resources(join_stage)
         .expect("join resources exist");
 
-    let handler = obzenflow_runtime_services::stages::join::InnerJoinBuilder::<
-        CatalogRow,
-        StreamRow,
-        JoinedRow,
-    >::new()
-    .catalog_key(|c| c.key.clone())
-    .stream_key(|s| s.key.clone())
-    .build(|catalog, stream| JoinedRow {
-        value: catalog.value,
-        key: stream.key,
-    });
+    let handler =
+        obzenflow_runtime::stages::join::InnerJoinBuilder::<CatalogRow, StreamRow, JoinedRow>::new(
+        )
+        .catalog_key(|c| c.key.clone())
+        .stream_key(|s| s.key.clone())
+        .build(|catalog, stream| JoinedRow {
+            value: catalog.value,
+            key: stream.key,
+        });
 
     let control = Arc::new(JonestownStrategy);
     let mut join_config = JoinConfig::new(
@@ -632,17 +630,15 @@ async fn live_join_forwards_reference_eof() {
         .take_stage_resources(join_stage)
         .expect("join resources exist");
 
-    let handler = obzenflow_runtime_services::stages::join::InnerJoinBuilder::<
-        CatalogRow,
-        StreamRow,
-        JoinedRow,
-    >::new()
-    .catalog_key(|c| c.key.clone())
-    .stream_key(|s| s.key.clone())
-    .build(|catalog, stream| JoinedRow {
-        value: catalog.value,
-        key: stream.key,
-    });
+    let handler =
+        obzenflow_runtime::stages::join::InnerJoinBuilder::<CatalogRow, StreamRow, JoinedRow>::new(
+        )
+        .catalog_key(|c| c.key.clone())
+        .stream_key(|s| s.key.clone())
+        .build(|catalog, stream| JoinedRow {
+            value: catalog.value,
+            key: stream.key,
+        });
 
     let control = Arc::new(JonestownStrategy);
     let mut join_config = JoinConfig::new(

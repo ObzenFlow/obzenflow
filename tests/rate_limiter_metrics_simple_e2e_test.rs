@@ -16,9 +16,9 @@ use obzenflow_adapters::middleware::rate_limit;
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::{StageId, WriterId};
-use obzenflow_dsl_infra::{flow, sink, source, transform};
+use obzenflow_dsl::{flow, sink, source, transform};
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime_services::stages::common::handlers::{
+use obzenflow_runtime::stages::common::handlers::{
     FiniteSourceHandler, SinkHandler, TransformHandler,
 };
 use serde_json::json;
@@ -48,7 +48,7 @@ impl FiniteSourceHandler for BurstSource {
         &mut self,
     ) -> Result<
         Option<Vec<ChainEvent>>,
-        obzenflow_runtime_services::stages::common::handlers::source::traits::SourceError,
+        obzenflow_runtime::stages::common::handlers::source::traits::SourceError,
     > {
         if self.current >= self.total_events {
             return Ok(None);

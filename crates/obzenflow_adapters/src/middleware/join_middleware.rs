@@ -23,8 +23,8 @@ use super::{Middleware, MiddlewareAction, MiddlewareContext};
 use async_trait::async_trait;
 use obzenflow_core::event::status::processing_status::ProcessingStatus;
 use obzenflow_core::{ChainEvent, StageId, WriterId};
-use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
-use obzenflow_runtime_services::stages::common::handlers::JoinHandler;
+use obzenflow_runtime::stages::common::handler_error::HandlerError;
+use obzenflow_runtime::stages::common::handlers::JoinHandler;
 use std::sync::Arc;
 
 /// A JoinHandler wrapper that applies middleware to join operations
@@ -156,9 +156,7 @@ where
         Ok(results)
     }
 
-    fn reference_mode(
-        &self,
-    ) -> obzenflow_runtime_services::stages::join::config::JoinReferenceMode {
+    fn reference_mode(&self) -> obzenflow_runtime::stages::join::config::JoinReferenceMode {
         self.inner.reference_mode()
     }
 

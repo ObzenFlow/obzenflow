@@ -10,8 +10,8 @@
 
 use super::{Middleware, MiddlewareHints, MiddlewareSafety};
 use obzenflow_core::event::context::StageType;
-use obzenflow_runtime_services::pipeline::config::StageConfig;
-use obzenflow_runtime_services::stages::common::control_strategies::ControlEventStrategy;
+use obzenflow_runtime::pipeline::config::StageConfig;
+use obzenflow_runtime::stages::common::control_strategies::ControlEventStrategy;
 use std::sync::Arc;
 
 use super::control::ControlMiddlewareAggregator;
@@ -26,7 +26,7 @@ use super::control::ControlMiddlewareAggregator;
 /// ```rust
 /// use obzenflow_adapters::middleware::{MiddlewareFactory, Middleware, LoggingMiddleware};
 /// use obzenflow_adapters::middleware::control::ControlMiddlewareAggregator;
-/// use obzenflow_runtime_services::pipeline::config::StageConfig;
+/// use obzenflow_runtime::pipeline::config::StageConfig;
 /// use std::sync::Arc;
 ///
 /// struct LoggingFactory;

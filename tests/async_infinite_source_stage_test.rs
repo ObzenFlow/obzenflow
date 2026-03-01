@@ -10,16 +10,14 @@ use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::event::ChainEventContent;
 use obzenflow_core::{StageId, WriterId};
-use obzenflow_dsl_infra::{async_infinite_source, flow, sink};
+use obzenflow_dsl::{async_infinite_source, flow, sink};
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime_services::pipeline::config::StageConfig;
-use obzenflow_runtime_services::pipeline::{FlowHandle, PipelineState};
-use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
-use obzenflow_runtime_services::stages::common::handlers::{
-    AsyncInfiniteSourceHandler, SinkHandler,
-};
-use obzenflow_runtime_services::stages::SourceError;
-use obzenflow_runtime_services::supervised_base::SupervisorHandle;
+use obzenflow_runtime::pipeline::config::StageConfig;
+use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
+use obzenflow_runtime::stages::common::handler_error::HandlerError;
+use obzenflow_runtime::stages::common::handlers::{AsyncInfiniteSourceHandler, SinkHandler};
+use obzenflow_runtime::stages::SourceError;
+use obzenflow_runtime::supervised_base::SupervisorHandle;
 use serde_json::json;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};

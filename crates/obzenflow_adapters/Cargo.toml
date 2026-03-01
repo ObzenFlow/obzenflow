@@ -11,7 +11,7 @@ publish = false
 [dependencies]
 # Internal dependencies
 obzenflow_core = { workspace = true }
-obzenflow_runtime_services = { workspace = true }
+obzenflow_runtime = { workspace = true }
 
 # Adapter layer dependencies
 tokio = { workspace = true, features = ["full"] }

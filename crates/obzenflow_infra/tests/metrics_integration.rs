@@ -19,8 +19,8 @@ use obzenflow_core::metrics::{AppMetricsSnapshot, MetricsExporter, StageMetadata
 use obzenflow_core::EventEnvelope;
 use obzenflow_fsm::FsmAction;
 use obzenflow_infra::journal::MemoryJournal;
-use obzenflow_runtime_services::metrics::fsm::build_metrics_aggregator_fsm;
-use obzenflow_runtime_services::metrics::{
+use obzenflow_runtime::metrics::fsm::build_metrics_aggregator_fsm;
+use obzenflow_runtime::metrics::{
     MetricsAggregatorAction, MetricsAggregatorContext, MetricsAggregatorEvent,
     MetricsAggregatorState, MetricsStore, StageMetrics,
 };

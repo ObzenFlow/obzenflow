@@ -3,8 +3,8 @@
 // https://obzenflow.dev
 
 use super::fixtures;
-use obzenflow_runtime_services::stages::common::handlers::FiniteSourceHandler;
-use obzenflow_runtime_services::stages::source::FiniteSourceTyped;
+use obzenflow_runtime::stages::common::handlers::FiniteSourceHandler;
+use obzenflow_runtime::stages::source::FiniteSourceTyped;
 
 pub fn categories_source() -> impl FiniteSourceHandler + Clone + std::fmt::Debug + 'static {
     FiniteSourceTyped::new(fixtures::categories())

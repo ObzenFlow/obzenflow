@@ -20,12 +20,12 @@ use obzenflow_core::{
     id::StageId,
     TypedPayload, WriterId,
 };
-use obzenflow_dsl_infra::{flow, sink, source, stateful, transform};
+use obzenflow_dsl::{flow, sink, source, stateful, transform};
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
-use obzenflow_runtime_services::stages::common::handlers::StatefulHandler;
-use obzenflow_runtime_services::stages::source::FiniteSourceTyped;
-use obzenflow_runtime_services::stages::transform::Filter;
+use obzenflow_runtime::stages::common::handler_error::HandlerError;
+use obzenflow_runtime::stages::common::handlers::StatefulHandler;
+use obzenflow_runtime::stages::source::FiniteSourceTyped;
+use obzenflow_runtime::stages::transform::Filter;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::path::PathBuf;

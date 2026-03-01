@@ -15,12 +15,12 @@ use obzenflow_core::{
     id::StageId,
     TypedPayload, WriterId,
 };
-use obzenflow_dsl_infra::{flow, sink, source, stateful, transform};
+use obzenflow_dsl::{flow, sink, source, stateful, transform};
 use obzenflow_infra::application::{FlowApplication, LogLevel};
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime_services::stages::common::handlers::{FiniteSourceHandler, SinkHandler};
-use obzenflow_runtime_services::stages::stateful::strategies::accumulators::ReduceTyped;
-use obzenflow_runtime_services::stages::transform::MapTyped;
+use obzenflow_runtime::stages::common::handlers::{FiniteSourceHandler, SinkHandler};
+use obzenflow_runtime::stages::stateful::strategies::accumulators::ReduceTyped;
+use obzenflow_runtime::stages::transform::MapTyped;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{BufRead, BufReader};
@@ -56,7 +56,7 @@ impl FiniteSourceHandler for TextCharSource {
         &mut self,
     ) -> Result<
         Option<Vec<ChainEvent>>,
-        obzenflow_runtime_services::stages::common::handlers::source::traits::SourceError,
+        obzenflow_runtime::stages::common::handlers::source::traits::SourceError,
     > {
         if self.current_sentence >= self.sentences.len() {
             return Ok(None);

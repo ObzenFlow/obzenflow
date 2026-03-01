@@ -15,11 +15,11 @@ use obzenflow_core::event::payloads::observability_payload::{
 use obzenflow_core::event::status::processing_status::ErrorKind;
 use obzenflow_core::event::ChainEventFactory;
 use obzenflow_core::{ChainEvent, WriterId};
-use obzenflow_runtime_services::stages::common::handlers::{
+use obzenflow_runtime::stages::common::handlers::{
     AsyncFiniteSourceHandler, AsyncInfiniteSourceHandler, FiniteSourceHandler,
     InfiniteSourceHandler,
 };
-use obzenflow_runtime_services::stages::SourceError;
+use obzenflow_runtime::stages::SourceError;
 use serde_json::json;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -649,7 +649,7 @@ impl<H: FiniteSourceHandler> FiniteSourceHandler for MiddlewareFiniteSource<H> {
         &mut self,
     ) -> Result<
         Option<Vec<ChainEvent>>,
-        obzenflow_runtime_services::stages::common::handlers::source::traits::SourceError,
+        obzenflow_runtime::stages::common::handlers::source::traits::SourceError,
     > {
         // Create a synthetic event for middleware to process.
         //
@@ -837,7 +837,7 @@ impl<H: InfiniteSourceHandler> InfiniteSourceHandler for MiddlewareInfiniteSourc
         &mut self,
     ) -> Result<
         Vec<ChainEvent>,
-        obzenflow_runtime_services::stages::common::handlers::source::traits::SourceError,
+        obzenflow_runtime::stages::common::handlers::source::traits::SourceError,
     > {
         // Create a synthetic event for middleware to process
         let synthetic_event = ChainEventFactory::data_event(

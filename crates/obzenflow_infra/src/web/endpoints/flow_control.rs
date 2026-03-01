@@ -10,7 +10,7 @@
 
 use async_trait::async_trait;
 use obzenflow_core::web::{HttpEndpoint, HttpMethod, Request, Response, WebError};
-use obzenflow_runtime_services::pipeline::FlowHandle;
+use obzenflow_runtime::pipeline::FlowHandle;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Duration;

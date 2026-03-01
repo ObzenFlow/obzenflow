@@ -10,10 +10,10 @@ use obzenflow_core::event::payloads::observability_payload::{
 use obzenflow_core::event::ChainEventFactory;
 use obzenflow_core::http_client::{HeaderMap, HttpClient, HttpClientError};
 use obzenflow_core::{ChainEvent, WriterId};
-use obzenflow_runtime_services::stages::common::handlers::{
+use obzenflow_runtime::stages::common::handlers::{
     AsyncFiniteSourceHandler, AsyncInfiniteSourceHandler,
 };
-use obzenflow_runtime_services::stages::SourceError;
+use obzenflow_runtime::stages::SourceError;
 use serde::Serialize;
 use std::collections::VecDeque;
 use std::fmt::Debug;

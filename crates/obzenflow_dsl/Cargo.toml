@@ -1,0 +1,27 @@
+[package]
+name = "obzenflow_dsl"
+description = "DSL and infrastructure layer for ObzenFlow - flow! macro and high-level orchestration"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+# Internal dependencies - all layers needed for DSL
+obzenflow_core = { workspace = true }
+obzenflow-topology = { workspace = true }
+obzenflow_runtime = { workspace = true }
+obzenflow_adapters = { workspace = true }
+
+# Core dependencies
+tokio = { workspace = true, features = ["full"] }
+async-trait = { workspace = true }
+tracing = { workspace = true }
+indexmap = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tokio-test = { workspace = true }

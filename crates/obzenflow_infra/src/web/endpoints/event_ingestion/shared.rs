@@ -4,7 +4,7 @@
 
 use obzenflow_core::event::ingestion::EventSubmission;
 use obzenflow_core::event::ingestion::IngestionTelemetry;
-use obzenflow_runtime_services::pipeline::fsm::PipelineState;
+use obzenflow_runtime::pipeline::fsm::PipelineState;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::{mpsc, watch};

@@ -31,12 +31,10 @@ use obzenflow_core::{
     event::chain_event::{ChainEvent, ChainEventFactory},
     CircuitBreakerContractMode, TypedPayload,
 };
-use obzenflow_dsl_infra::{async_transform, flow, sink, source, transform};
+use obzenflow_dsl::{async_transform, flow, sink, source, transform};
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
-use obzenflow_runtime_services::stages::common::handlers::{
-    AsyncTransformHandler, TransformHandler,
-};
+use obzenflow_runtime::stages::common::handler_error::HandlerError;
+use obzenflow_runtime::stages::common::handlers::{AsyncTransformHandler, TransformHandler};
 use serde_json::json;
 use std::num::NonZeroU32;
 
@@ -216,7 +214,7 @@ impl AsyncTransformHandler for GatewayTransform {
     }
 }
 
-fn build_flow() -> obzenflow_dsl_infra::FlowDefinition {
+fn build_flow() -> obzenflow_dsl::FlowDefinition {
     flow! {
         name: "payment_gateway_resilience_demo",
         journals: disk_journals(std::path::PathBuf::from("target/payment-gateway-logs")),
@@ -318,7 +316,7 @@ struct GlitchyFlowConfig {
 }
 
 #[cfg(not(test))]
-fn build_glitchy_flow(config: GlitchyFlowConfig) -> obzenflow_dsl_infra::FlowDefinition {
+fn build_glitchy_flow(config: GlitchyFlowConfig) -> obzenflow_dsl::FlowDefinition {
     let GlitchyFlowConfig {
         total_events,
         rate_limit_events_per_sec,
@@ -331,7 +329,7 @@ fn build_glitchy_flow(config: GlitchyFlowConfig) -> obzenflow_dsl_infra::FlowDef
     } = config;
 
     let payments_stage = if use_async_source {
-        obzenflow_dsl_infra::dsl::stage_descriptor::AsyncFiniteSourceDescriptor::new(
+        obzenflow_dsl::dsl::stage_descriptor::AsyncFiniteSourceDescriptor::new(
             "payments",
             AsyncScrapedGlitchyPaymentCommandSource::with_cycle(
                 total_events,
@@ -580,7 +578,7 @@ pub fn run_example_in_tests() -> Result<()> {
 /// outage pattern, the `gateway → summary` edge should eventually fail
 /// with a SeqDivergence transport violation.
 #[cfg(test)]
-fn build_strict_flow() -> obzenflow_dsl_infra::FlowDefinition {
+fn build_strict_flow() -> obzenflow_dsl::FlowDefinition {
     flow! {
         name: "payment_gateway_resilience_strict_demo",
         journals: disk_journals(std::path::PathBuf::from("target/payment-gateway-logs-strict")),

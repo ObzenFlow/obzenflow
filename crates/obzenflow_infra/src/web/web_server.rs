@@ -9,18 +9,17 @@
 use obzenflow_core::metrics::MetricsExporter;
 use obzenflow_core::web::{HttpEndpoint, ServerConfig, WebError, WebServer};
 use obzenflow_core::StageId;
-use obzenflow_runtime_services::pipeline::fsm::PipelineState;
-use obzenflow_runtime_services::pipeline::FlowHandle;
+use obzenflow_runtime::pipeline::fsm::PipelineState;
+use obzenflow_runtime::pipeline::FlowHandle;
 use obzenflow_topology::Topology;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 pub type MiddlewareStacks =
-    Arc<HashMap<StageId, obzenflow_runtime_services::pipeline::MiddlewareStackConfig>>;
+    Arc<HashMap<StageId, obzenflow_runtime::pipeline::MiddlewareStackConfig>>;
 pub type ContractAttachments = Arc<HashMap<(StageId, StageId), Vec<String>>>;
-pub type JoinMetadataMap =
-    Arc<HashMap<StageId, obzenflow_runtime_services::pipeline::JoinMetadata>>;
+pub type JoinMetadataMap = Arc<HashMap<StageId, obzenflow_runtime::pipeline::JoinMetadata>>;
 
 pub struct WebServerResources {
     pub topology: Arc<Topology>,

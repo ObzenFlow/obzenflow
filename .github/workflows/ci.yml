@@ -6,6 +6,76 @@ on:
   pull_request:
 
 jobs:
+  dco:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify DCO sign-off
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          python3 - <<'PY'
+          from __future__ import annotations
+
+          import os
+          import subprocess
+          import sys
+
+          base_sha = os.environ.get("BASE_SHA")
+          head_sha = os.environ.get("HEAD_SHA")
+
+          if not base_sha or not head_sha:
+            print("DCO check skipped: missing BASE_SHA/HEAD_SHA")
+            sys.exit(0)
+
+          def ensure_commit(sha: str) -> None:
+            try:
+              subprocess.check_call(["git", "cat-file", "-e", f"{sha}^{{commit}}"])
+            except subprocess.CalledProcessError:
+              subprocess.check_call(["git", "fetch", "--no-tags", "--depth", "1", "origin", sha])
+
+          ensure_commit(base_sha)
+          ensure_commit(head_sha)
+
+          merge_base = (
+            subprocess.check_output(["git", "merge-base", base_sha, head_sha], text=True)
+            .strip()
+          )
+
+          commits = (
+            subprocess.check_output(["git", "rev-list", f"{merge_base}..{head_sha}"], text=True)
+            .splitlines()
+          )
+
+          missing: list[str] = []
+          for sha in commits:
+            message = subprocess.check_output(["git", "show", "-s", "--format=%B", sha], text=True)
+            if "Signed-off-by:" not in message:
+              missing.append(sha)
+
+          if missing:
+            print("DCO sign-off missing in one or more commits:")
+            for sha in missing:
+              subject = subprocess.check_output(
+                ["git", "show", "-s", "--format=%s", sha],
+                text=True,
+              ).strip()
+              print(f" - {sha[:7]} {subject}")
+            print()
+            print("Fix:")
+            print(" - For a new commit:      git commit -s")
+            print(" - For the last commit:   git commit --amend -s")
+            print(" - For all branch commits: git rebase -i --signoff main")
+            sys.exit(1)
+
+          print(f"DCO sign-off OK in {len(commits)} commit(s).")
+          PY
+
   fmt:
     runs-on: ubuntu-latest
     steps:
@@ -124,8 +194,8 @@ jobs:
 
       - name: Verify supervised_base sealing
         run: |
-          ! grep -n '^pub mod base;' crates/obzenflow_runtime_services/src/supervised_base/mod.rs
-          ! grep -n 'pub use base::Supervisor' crates/obzenflow_runtime_services/src/supervised_base/mod.rs
+          ! grep -n '^pub mod base;' crates/obzenflow_runtime/src/supervised_base/mod.rs
+          ! grep -n 'pub use base::Supervisor' crates/obzenflow_runtime/src/supervised_base/mod.rs
 
       - name: Install cargo-deny
         uses: taiki-e/install-action@v2

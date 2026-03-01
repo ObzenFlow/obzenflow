@@ -5,7 +5,7 @@
 use obzenflow::sinks::CsvSink;
 use obzenflow::sources::CsvSource;
 use obzenflow_core::TypedPayload;
-use obzenflow_dsl_infra::{flow, sink, source};
+use obzenflow_dsl::{flow, sink, source};
 use obzenflow_infra::journal::disk_journals;
 use serde::{Deserialize, Serialize};
 use tempfile::TempDir;

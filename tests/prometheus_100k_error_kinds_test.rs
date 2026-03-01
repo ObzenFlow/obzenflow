@@ -19,11 +19,11 @@ use obzenflow_core::{
     id::StageId,
     TypedPayload, WriterId,
 };
-use obzenflow_dsl_infra::{flow, sink, source, transform};
+use obzenflow_dsl::{flow, sink, source, transform};
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
-use obzenflow_runtime_services::stages::common::handlers::{FiniteSourceHandler, SinkHandler};
-use obzenflow_runtime_services::stages::transform::Map;
+use obzenflow_runtime::stages::common::handler_error::HandlerError;
+use obzenflow_runtime::stages::common::handlers::{FiniteSourceHandler, SinkHandler};
+use obzenflow_runtime::stages::transform::Map;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::time::{sleep, Duration};
@@ -51,7 +51,7 @@ impl FiniteSourceHandler for HighVolumeSource {
         &mut self,
     ) -> Result<
         Option<Vec<ChainEvent>>,
-        obzenflow_runtime_services::stages::common::handlers::source::traits::SourceError,
+        obzenflow_runtime::stages::common::handlers::source::traits::SourceError,
     > {
         if self.count >= self.total_events {
             return Ok(None);

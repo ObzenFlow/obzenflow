@@ -11,8 +11,8 @@ use obzenflow_core::{
     },
     TypedPayload,
 };
-use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
-use obzenflow_runtime_services::stages::common::handlers::SinkHandler;
+use obzenflow_runtime::stages::common::handler_error::HandlerError;
+use obzenflow_runtime::stages::common::handlers::SinkHandler;
 
 /// Sink that prints a concise summary of how many payments
 /// succeeded, failed validation, or never even reached the

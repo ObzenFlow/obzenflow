@@ -11,14 +11,14 @@ use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, Delivery
 use obzenflow_core::event::{PipelineLifecycleEvent, SystemEvent, SystemEventType};
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{StageId, WriterId};
-use obzenflow_dsl_infra::{flow, infinite_source, sink, source};
+use obzenflow_dsl::{flow, infinite_source, sink, source};
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime_services::pipeline::{FlowHandle, PipelineState};
-use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
-use obzenflow_runtime_services::stages::common::handlers::{
+use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
+use obzenflow_runtime::stages::common::handler_error::HandlerError;
+use obzenflow_runtime::stages::common::handlers::{
     FiniteSourceHandler, InfiniteSourceHandler, SinkHandler,
 };
-use obzenflow_runtime_services::supervised_base::SupervisorHandle;
+use obzenflow_runtime::supervised_base::SupervisorHandle;
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::tempdir;
@@ -88,7 +88,7 @@ impl InfiniteSourceHandler for SlowInfiniteSource {
         &mut self,
     ) -> Result<
         Vec<ChainEvent>,
-        obzenflow_runtime_services::stages::common::handlers::source::traits::SourceError,
+        obzenflow_runtime::stages::common::handlers::source::traits::SourceError,
     > {
         std::thread::sleep(self.sleep);
         self.counter += 1;
@@ -124,7 +124,7 @@ impl FiniteSourceHandler for SlowFiniteSource {
         &mut self,
     ) -> Result<
         Option<Vec<ChainEvent>>,
-        obzenflow_runtime_services::stages::common::handlers::source::traits::SourceError,
+        obzenflow_runtime::stages::common::handlers::source::traits::SourceError,
     > {
         if self.emitted >= self.max {
             return Ok(None);

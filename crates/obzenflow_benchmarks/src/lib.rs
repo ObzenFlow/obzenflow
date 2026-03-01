@@ -42,10 +42,10 @@ pub mod prelude {
     pub use obzenflow_core::{ChainEvent, EventId, WriterId};
 
     // Runtime services
-    pub use obzenflow_runtime_services::prelude::*;
+    pub use obzenflow_runtime::prelude::*;
 
     // DSL
-    pub use obzenflow_dsl_infra::prelude::*;
+    pub use obzenflow_dsl::prelude::*;
 
     // Journal
     pub use obzenflow_infra::journal::*;

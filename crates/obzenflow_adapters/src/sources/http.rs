@@ -11,8 +11,8 @@ use obzenflow_core::event::payloads::observability_payload::{
 };
 use obzenflow_core::event::ChainEventFactory;
 use obzenflow_core::{ChainEvent, WriterId};
-use obzenflow_runtime_services::stages::common::handlers::AsyncInfiniteSourceHandler;
-use obzenflow_runtime_services::stages::SourceError;
+use obzenflow_runtime::stages::common::handlers::AsyncInfiniteSourceHandler;
+use obzenflow_runtime::stages::SourceError;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;

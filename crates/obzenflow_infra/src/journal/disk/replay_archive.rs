@@ -21,7 +21,7 @@ use obzenflow_core::journal::run_manifest::{
 use obzenflow_core::journal::JournalReader;
 use obzenflow_core::journal::{ArchiveStatus, StatusDerivation};
 use obzenflow_core::{ChainEvent, StageId};
-use obzenflow_runtime_services::replay::{ReplayArchive, ReplayError};
+use obzenflow_runtime::replay::{ReplayArchive, ReplayError};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};

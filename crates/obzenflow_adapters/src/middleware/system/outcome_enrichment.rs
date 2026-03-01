@@ -9,7 +9,7 @@ use crate::middleware::{
 };
 use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::status::processing_status::ProcessingStatus;
-use obzenflow_runtime_services::pipeline::config::StageConfig;
+use obzenflow_runtime::pipeline::config::StageConfig;
 use serde_json::Value;
 
 /// Middleware that detects error conditions and sets ProcessingOutcome.

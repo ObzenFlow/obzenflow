@@ -9,10 +9,10 @@ use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, Delivery
 use obzenflow_core::event::ChainEventContent;
 use obzenflow_core::event::CorrelationId;
 use obzenflow_core::{StageId, WriterId};
-use obzenflow_dsl_infra::{async_source, async_transform, flow, sink, source, transform};
+use obzenflow_dsl::{async_source, async_transform, flow, sink, source, transform};
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
-use obzenflow_runtime_services::stages::common::handlers::{
+use obzenflow_runtime::stages::common::handler_error::HandlerError;
+use obzenflow_runtime::stages::common::handlers::{
     AsyncFiniteSourceHandler, AsyncTransformHandler, FiniteSourceHandler, SinkHandler,
     TransformHandler,
 };
@@ -101,7 +101,7 @@ impl FiniteSourceHandler for SingleSeedSource {
         &mut self,
     ) -> std::result::Result<
         Option<Vec<ChainEvent>>,
-        obzenflow_runtime_services::stages::common::handlers::source::traits::SourceError,
+        obzenflow_runtime::stages::common::handlers::source::traits::SourceError,
     > {
         if self.emitted {
             return Ok(None);
@@ -351,7 +351,7 @@ impl AsyncFiniteSourceHandler for SeedThenDrainSource {
         &mut self,
     ) -> std::result::Result<
         Option<Vec<ChainEvent>>,
-        obzenflow_runtime_services::stages::common::handlers::source::traits::SourceError,
+        obzenflow_runtime::stages::common::handlers::source::traits::SourceError,
     > {
         match self.state {
             0 => {
@@ -402,7 +402,7 @@ impl FiniteSourceHandler for DualSeedSource {
         &mut self,
     ) -> std::result::Result<
         Option<Vec<ChainEvent>>,
-        obzenflow_runtime_services::stages::common::handlers::source::traits::SourceError,
+        obzenflow_runtime::stages::common::handlers::source::traits::SourceError,
     > {
         let (correlation_id, target) = match self.emitted {
             0 => (self.converge_correlation_id, self.converge_target),

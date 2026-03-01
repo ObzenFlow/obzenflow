@@ -7,14 +7,12 @@ use super::sinks::{per_order_printer, summary_printer, CatalogAnalyticsSummary};
 use super::sources::*;
 use anyhow::Result;
 use obzenflow_adapters::middleware::rate_limit;
-use obzenflow_dsl_infra::{flow, join, sink, source, stateful, with_ref};
+use obzenflow_dsl::{flow, join, sink, source, stateful, with_ref};
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime_services::stages::join::{
-    InnerJoinBuilder, LeftJoinBuilder, StrictJoinBuilder,
-};
-use obzenflow_runtime_services::stages::stateful::strategies::accumulators::ReduceTyped;
+use obzenflow_runtime::stages::join::{InnerJoinBuilder, LeftJoinBuilder, StrictJoinBuilder};
+use obzenflow_runtime::stages::stateful::strategies::accumulators::ReduceTyped;
 
-fn build_flow() -> obzenflow_dsl_infra::FlowDefinition {
+fn build_flow() -> obzenflow_dsl::FlowDefinition {
     flow! {
         name: "product_catalog_enrichment",
         journals: disk_journals(std::path::PathBuf::from("target/catalog-logs")),

@@ -13,10 +13,10 @@ use obzenflow_core::{
     id::StageId,
     TypedPayload, WriterId,
 };
-use obzenflow_runtime_services::stages::common::handlers::source::traits::SourceError;
+use obzenflow_runtime::stages::common::handlers::source::traits::SourceError;
 #[cfg(not(test))]
-use obzenflow_runtime_services::stages::common::handlers::AsyncFiniteSourceHandler;
-use obzenflow_runtime_services::stages::common::handlers::FiniteSourceHandler;
+use obzenflow_runtime::stages::common::handlers::AsyncFiniteSourceHandler;
+use obzenflow_runtime::stages::common::handlers::FiniteSourceHandler;
 use serde_json::json;
 #[cfg(not(test))]
 use std::time::{Duration, Instant};

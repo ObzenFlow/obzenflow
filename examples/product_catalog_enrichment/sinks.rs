@@ -4,8 +4,8 @@
 
 use super::domain::EnrichedOrderWithPromo;
 use obzenflow_core::TypedPayload;
-use obzenflow_runtime_services::stages::common::handlers::SinkHandler;
-use obzenflow_runtime_services::stages::sink::SinkTyped;
+use obzenflow_runtime::stages::common::handlers::SinkHandler;
+use obzenflow_runtime::stages::sink::SinkTyped;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]

@@ -10,8 +10,8 @@ use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{ChainEvent, FlowId, StageId, SystemId};
 use obzenflow_infra::journal::MemoryJournal;
-use obzenflow_runtime_services::id_conversions::StageIdExt;
-use obzenflow_runtime_services::stages::resources_builder::StageResourcesBuilder;
+use obzenflow_runtime::id_conversions::StageIdExt;
+use obzenflow_runtime::stages::resources_builder::StageResourcesBuilder;
 use obzenflow_topology::{StageType as TopologyStageType, TopologyBuilder};
 
 #[tokio::test]

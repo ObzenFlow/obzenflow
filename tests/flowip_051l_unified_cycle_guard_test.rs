@@ -8,10 +8,10 @@ use obzenflow_core::event::chain_event::ChainEventFactory;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::event::CorrelationId;
 use obzenflow_core::{ChainEvent, StageId, WriterId};
-use obzenflow_dsl_infra::{async_source, flow, sink, source, stateful, transform};
+use obzenflow_dsl::{async_source, flow, sink, source, stateful, transform};
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
-use obzenflow_runtime_services::stages::common::handlers::{
+use obzenflow_runtime::stages::common::handler_error::HandlerError;
+use obzenflow_runtime::stages::common::handlers::{
     AsyncFiniteSourceHandler, FiniteSourceHandler, SinkHandler, StatefulHandler, TransformHandler,
 };
 use serde_json::json;
@@ -41,7 +41,7 @@ impl FiniteSourceHandler for TestEventSource {
         &mut self,
     ) -> std::result::Result<
         Option<Vec<ChainEvent>>,
-        obzenflow_runtime_services::stages::common::handlers::source::traits::SourceError,
+        obzenflow_runtime::stages::common::handlers::source::traits::SourceError,
     > {
         if self.remaining == 0 {
             return Ok(None);
@@ -81,7 +81,7 @@ impl AsyncFiniteSourceHandler for CorrelatedEventSource {
         &mut self,
     ) -> std::result::Result<
         Option<Vec<ChainEvent>>,
-        obzenflow_runtime_services::stages::common::handlers::source::traits::SourceError,
+        obzenflow_runtime::stages::common::handlers::source::traits::SourceError,
     > {
         if !self.emitted {
             self.emitted = true;

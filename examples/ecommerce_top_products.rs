@@ -12,11 +12,11 @@
 use anyhow::Result;
 use obzenflow_adapters::middleware::rate_limit;
 use obzenflow_core::TypedPayload;
-use obzenflow_dsl_infra::{flow, sink, source, stateful};
+use obzenflow_dsl::{flow, sink, source, stateful};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime_services::stages::source::FiniteSourceTyped;
-use obzenflow_runtime_services::stages::stateful::strategies::accumulators::TopNByTyped;
+use obzenflow_runtime::stages::source::FiniteSourceTyped;
+use obzenflow_runtime::stages::stateful::strategies::accumulators::TopNByTyped;
 use serde::{Deserialize, Serialize};
 
 // FLOWIP-082a: Strongly-typed event with schema version

@@ -21,11 +21,11 @@ use obzenflow_core::journal::Journal;
 use obzenflow_core::{
     CycleDepth, DivergenceContract, StageId, SystemId, TransportContract, WriterId,
 };
-use obzenflow_dsl_infra::{async_transform, flow, sink, source, transform};
+use obzenflow_dsl::{async_transform, flow, sink, source, transform};
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
-use obzenflow_runtime_services::stages::common::handlers::source::traits::SourceError;
-use obzenflow_runtime_services::stages::common::handlers::{
+use obzenflow_runtime::stages::common::handler_error::HandlerError;
+use obzenflow_runtime::stages::common::handlers::source::traits::SourceError;
+use obzenflow_runtime::stages::common::handlers::{
     AsyncTransformHandler, FiniteSourceHandler, SinkHandler, TransformHandler,
 };
 use serde_json::json;

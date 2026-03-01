@@ -17,14 +17,14 @@ use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, Delivery
 use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
 use obzenflow_core::metrics::MetricsExporter;
 use obzenflow_core::{StageId, WriterId};
-use obzenflow_dsl_infra::{flow, sink, source, transform};
+use obzenflow_dsl::{flow, sink, source, transform};
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime_services::pipeline::handle::MiddlewareStackConfig;
-use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
-use obzenflow_runtime_services::stages::common::handlers::{
+use obzenflow_runtime::pipeline::handle::MiddlewareStackConfig;
+use obzenflow_runtime::stages::common::handler_error::HandlerError;
+use obzenflow_runtime::stages::common::handlers::{
     FiniteSourceHandler, SinkHandler, TransformHandler,
 };
-use obzenflow_runtime_services::stages::SourceError;
+use obzenflow_runtime::stages::SourceError;
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -237,7 +237,7 @@ fn unique_journal_dir(prefix: &str) -> std::path::PathBuf {
 }
 
 async fn run_with_metrics_timeout(
-    flow_handle: obzenflow_runtime_services::pipeline::handle::FlowHandle,
+    flow_handle: obzenflow_runtime::pipeline::handle::FlowHandle,
     timeout: Duration,
 ) -> Result<Arc<dyn MetricsExporter>> {
     match tokio::time::timeout(timeout, flow_handle.run_with_metrics()).await {

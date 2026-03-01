@@ -19,6 +19,13 @@ The full text is in `DCO.md`.
 - Amend the most recent commit: `git commit --amend -s`
 - Sign off all commits on your branch (interactive): `git rebase -i --signoff main`
 
+## Contribution provenance
+
+If you are employed, you are responsible for ensuring your employer's intellectual property policies permit your contribution. Many employment contracts include IP assignment clauses that may cover work done outside of office hours or on personal equipment.
+
+If your employer requires a corporate sign-off or approval for open source contributions, please obtain it before submitting a pull request.
+By signing off your commits (DCO), you attest you have the right to contribute the work under the project's license terms.
+
 ## Development setup
 
 ### Prerequisites

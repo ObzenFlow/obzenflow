@@ -9,7 +9,7 @@ use obzenflow_core::{StageId, WriterId};
 use obzenflow_infra::web::endpoints::event_ingestion::{
     create_ingestion_endpoints, IngestionConfig,
 };
-use obzenflow_runtime_services::stages::common::handlers::source::AsyncInfiniteSourceHandler;
+use obzenflow_runtime::stages::common::handlers::source::AsyncInfiniteSourceHandler;
 
 #[tokio::test]
 async fn http_post_feeds_httpsource_chain_events() {

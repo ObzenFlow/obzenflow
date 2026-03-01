@@ -15,7 +15,7 @@ use obzenflow_core::event::context::{FlowContext, StageType};
 use obzenflow_core::event::payloads::correlation_payload::CorrelationPayload;
 use obzenflow_core::event::CorrelationId;
 use obzenflow_core::StageId;
-use obzenflow_runtime_services::pipeline::config::StageConfig;
+use obzenflow_runtime::pipeline::config::StageConfig;
 
 /// Middleware that ensures events have proper flow context
 ///

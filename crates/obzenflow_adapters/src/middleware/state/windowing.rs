@@ -13,8 +13,8 @@ use crate::middleware::{
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::{StageId, WriterId};
-use obzenflow_runtime_services::pipeline::config::StageConfig;
-use obzenflow_runtime_services::stages::common::control_strategies::{
+use obzenflow_runtime::pipeline::config::StageConfig;
+use obzenflow_runtime::stages::common::control_strategies::{
     ControlEventStrategy, WindowingStrategy,
 };
 use serde_json::json;

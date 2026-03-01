@@ -21,8 +21,8 @@ use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStat
 use obzenflow_core::event::{ChainEventFactory, CircuitBreakerSummaryEventParams};
 use obzenflow_core::TypedPayload;
 use obzenflow_core::{StageId, WriterId};
-use obzenflow_runtime_services::pipeline::config::StageConfig;
-use obzenflow_runtime_services::stages::common::control_strategies::{
+use obzenflow_runtime::pipeline::config::StageConfig;
+use obzenflow_runtime::stages::common::control_strategies::{
     BackoffStrategy, CircuitBreakerEofStrategy, ControlEventStrategy,
 };
 use serde::de::DeserializeOwned;
@@ -2420,8 +2420,8 @@ mod tests {
         use crate::middleware::control::ControlMiddlewareAggregator;
         use obzenflow_core::event::event_envelope::EventEnvelope;
         use obzenflow_core::event::JournalWriterId;
-        use obzenflow_runtime_services::pipeline::config::StageConfig;
-        use obzenflow_runtime_services::stages::common::control_strategies::{
+        use obzenflow_runtime::pipeline::config::StageConfig;
+        use obzenflow_runtime::stages::common::control_strategies::{
             ControlEventAction, ProcessingContext,
         };
 

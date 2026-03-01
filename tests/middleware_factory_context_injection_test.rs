@@ -17,12 +17,12 @@ use obzenflow_adapters::middleware::MiddlewareFactory;
 // use obzenflow_adapters::monitoring::taxonomies::red::RED;
 use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::journal::writer_id::WriterId;
-use obzenflow_dsl_infra::dsl::stage_descriptor::{StageDescriptor, TransformDescriptor};
+use obzenflow_dsl::dsl::stage_descriptor::{StageDescriptor, TransformDescriptor};
 use obzenflow_infra::journal::memory::MemoryJournal;
-use obzenflow_runtime_services::data_plane::journal_subscription::ReactiveJournal;
-use obzenflow_runtime_services::message_bus::FsmMessageBus;
-use obzenflow_runtime_services::pipeline::config::StageConfig;
-use obzenflow_runtime_services::stages::common::handlers::TransformHandler;
+use obzenflow_runtime::data_plane::journal_subscription::ReactiveJournal;
+use obzenflow_runtime::message_bus::FsmMessageBus;
+use obzenflow_runtime::pipeline::config::StageConfig;
+use obzenflow_runtime::stages::common::handlers::TransformHandler;
 use obzenflow_topology::StageId;
 use std::sync::Arc;
 

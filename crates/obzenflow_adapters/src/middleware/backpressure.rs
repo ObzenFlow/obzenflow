@@ -6,7 +6,7 @@ use crate::middleware::control::ControlMiddlewareAggregator;
 use crate::middleware::{Middleware, MiddlewareAction, MiddlewareContext, MiddlewareFactory};
 use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::context::StageType;
-use obzenflow_runtime_services::pipeline::config::StageConfig;
+use obzenflow_runtime::pipeline::config::StageConfig;
 use std::num::NonZeroU64;
 use std::sync::Arc;
 

@@ -15,13 +15,13 @@ use obzenflow_core::{
     event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload},
     StageId, WriterId,
 };
-use obzenflow_dsl_infra::{flow, sink, source, transform};
+use obzenflow_dsl::{flow, sink, source, transform};
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
-use obzenflow_runtime_services::stages::common::handlers::{
+use obzenflow_runtime::stages::common::handler_error::HandlerError;
+use obzenflow_runtime::stages::common::handlers::{
     FiniteSourceHandler, SinkHandler, TransformHandler,
 };
-use obzenflow_runtime_services::stages::SourceError;
+use obzenflow_runtime::stages::SourceError;
 use serde_json::json;
 use std::sync::{Arc, Mutex};
 use tokio::time::{sleep, Duration};

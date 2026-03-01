@@ -221,7 +221,7 @@ mod tests {
         MiddlewareHints, RetryHint,
     };
     use obzenflow_core::ChainEvent;
-    use obzenflow_runtime_services::pipeline::config::StageConfig;
+    use obzenflow_runtime::pipeline::config::StageConfig;
     use std::time::Duration;
 
     // Mock middleware for testing dangerous patterns

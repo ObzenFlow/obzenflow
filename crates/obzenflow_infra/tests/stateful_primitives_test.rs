@@ -12,13 +12,13 @@ use obzenflow_core::{
     id::StageId,
     WriterId,
 };
-use obzenflow_dsl_infra::{flow, sink, source, stateful};
+use obzenflow_dsl::{flow, sink, source, stateful};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
-use obzenflow_runtime_services::stages::common::handlers::{FiniteSourceHandler, SinkHandler};
-use obzenflow_runtime_services::stages::stateful::{Conflate, GroupBy, Reduce};
-use obzenflow_runtime_services::stages::SourceError;
+use obzenflow_runtime::stages::common::handler_error::HandlerError;
+use obzenflow_runtime::stages::common::handlers::{FiniteSourceHandler, SinkHandler};
+use obzenflow_runtime::stages::stateful::{Conflate, GroupBy, Reduce};
+use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 

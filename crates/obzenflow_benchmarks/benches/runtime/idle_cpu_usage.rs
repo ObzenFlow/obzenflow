@@ -13,14 +13,14 @@ use obzenflow_benchmarks::prelude::*;
 use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::event::ChainEventContent;
-use obzenflow_dsl_infra::{flow, sink, source, transform};
+use obzenflow_dsl::{flow, sink, source, transform};
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
-use obzenflow_runtime_services::stages::common::handlers::{
+use obzenflow_runtime::stages::common::handler_error::HandlerError;
+use obzenflow_runtime::stages::common::handlers::{
     FiniteSourceHandler, SinkHandler, TransformHandler,
 };
-use obzenflow_runtime_services::stages::SourceError;
-use obzenflow_runtime_services::supervised_base::SupervisorHandle;
+use obzenflow_runtime::stages::SourceError;
+use obzenflow_runtime::supervised_base::SupervisorHandle;
 // Monitoring removed per FLOWIP-056-666
 use async_trait::async_trait;
 use std::sync::atomic::{AtomicU64, Ordering};

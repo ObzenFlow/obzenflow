@@ -3,7 +3,7 @@
 // https://obzenflow.dev
 
 use obzenflow_core::ai::AiClientError;
-use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
+use obzenflow_runtime::stages::common::handler_error::HandlerError;
 
 /// Map a core `AiClientError` to runtime `HandlerError` according to FLOWIP-086d.
 pub fn ai_client_error_to_handler_error(err: AiClientError) -> HandlerError {

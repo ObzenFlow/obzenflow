@@ -11,9 +11,9 @@ publish = false
 [dependencies]
 # ObzenFlow dependencies - we need all layers for integration benchmarks
 obzenflow_core = { workspace = true }
-obzenflow_runtime_services = { workspace = true }
+obzenflow_runtime = { workspace = true }
 obzenflow_adapters = { workspace = true }
-obzenflow_dsl_infra = { workspace = true }
+obzenflow_dsl = { workspace = true }
 obzenflow_infra = { workspace = true }
 
 # Async runtime

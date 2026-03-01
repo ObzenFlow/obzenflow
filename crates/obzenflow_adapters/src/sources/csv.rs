@@ -15,7 +15,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use csv::{Reader, ReaderBuilder, StringRecord};
 use obzenflow_core::event::ChainEventFactory;
 use obzenflow_core::{ChainEvent, TypedPayload, WriterId};
-use obzenflow_runtime_services::stages::{FiniteSourceHandler, SourceError};
+use obzenflow_runtime::stages::{FiniteSourceHandler, SourceError};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -455,7 +455,7 @@ impl CsvReaderState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use obzenflow_runtime_services::stages::FiniteSourceHandler;
+    use obzenflow_runtime::stages::FiniteSourceHandler;
     use std::io::Write;
     use tempfile::NamedTempFile;
 

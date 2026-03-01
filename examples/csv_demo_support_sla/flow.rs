@@ -13,12 +13,12 @@ use obzenflow::sinks::CsvSink;
 use obzenflow::sources::CsvSource;
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::TypedPayload;
-use obzenflow_dsl_infra::{flow, join, sink, source, transform, with_ref};
+use obzenflow_dsl::{flow, join, sink, source, transform, with_ref};
 use obzenflow_infra::application::{FlowApplication, LogLevel};
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
-use obzenflow_runtime_services::stages::common::handlers::TransformHandler;
-use obzenflow_runtime_services::stages::join::InnerJoinBuilder;
+use obzenflow_runtime::stages::common::handler_error::HandlerError;
+use obzenflow_runtime::stages::common::handlers::TransformHandler;
+use obzenflow_runtime::stages::join::InnerJoinBuilder;
 use std::path::PathBuf;
 
 #[derive(Clone, Debug)]
@@ -74,7 +74,7 @@ fn build_flow(
     tickets: CsvSource<Ticket>,
     output_sink: CsvSink,
     journals_dir: PathBuf,
-) -> obzenflow_dsl_infra::FlowDefinition {
+) -> obzenflow_dsl::FlowDefinition {
     flow! {
         name: "csv_demo_support_sla",
         journals: disk_journals(journals_dir),

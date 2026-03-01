@@ -9,13 +9,13 @@ use obzenflow_core::{
     id::StageId,
     WriterId,
 };
-use obzenflow_dsl_infra::{flow, sink, source, transform};
+use obzenflow_dsl::{flow, sink, source, transform};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
-use obzenflow_runtime_services::stages::common::handlers::{FiniteSourceHandler, SinkHandler};
-use obzenflow_runtime_services::stages::transform::Map;
-use obzenflow_runtime_services::stages::SourceError;
+use obzenflow_runtime::stages::common::handler_error::HandlerError;
+use obzenflow_runtime::stages::common::handlers::{FiniteSourceHandler, SinkHandler};
+use obzenflow_runtime::stages::transform::Map;
+use obzenflow_runtime::stages::SourceError;
 use serde_json::json;
 
 #[derive(Clone, Debug)]

@@ -33,16 +33,16 @@ use obzenflow_adapters::sinks::{ConsoleSink, SnapshotTableFormatter};
 use obzenflow_adapters::sources::http::HttpSource;
 use obzenflow_core::event::schema::TypedPayload;
 use obzenflow_core::{ChainEvent, StageId, WriterId};
-use obzenflow_dsl_infra::{async_infinite_source, flow, join, sink, stateful, with_ref};
+use obzenflow_dsl::{async_infinite_source, flow, join, sink, stateful, with_ref};
 use obzenflow_infra::application::{FlowApplication, LogLevel};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_infra::web::endpoints::event_ingestion::{
     create_ingestion_endpoints, IngestionConfig, TypedValidator, ValidationConfig,
 };
-use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
-use obzenflow_runtime_services::stages::common::handlers::{StatefulHandler, StatefulHandlerExt};
-use obzenflow_runtime_services::stages::join::strategies::InnerJoinBuilder;
-use obzenflow_runtime_services::stages::stateful::strategies::emissions::EmitAlways;
+use obzenflow_runtime::stages::common::handler_error::HandlerError;
+use obzenflow_runtime::stages::common::handlers::{StatefulHandler, StatefulHandlerExt};
+use obzenflow_runtime::stages::join::strategies::InnerJoinBuilder;
+use obzenflow_runtime::stages::stateful::strategies::emissions::EmitAlways;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;

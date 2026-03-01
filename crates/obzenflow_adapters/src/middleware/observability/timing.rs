@@ -12,7 +12,7 @@ use crate::middleware::{
 };
 use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::time::MetricsDuration;
-use obzenflow_runtime_services::pipeline::config::StageConfig;
+use obzenflow_runtime::pipeline::config::StageConfig;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Middleware that measures processing time and adds it to events

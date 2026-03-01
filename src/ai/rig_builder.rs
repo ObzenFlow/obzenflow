@@ -18,7 +18,7 @@ use obzenflow_core::ai::{
 use obzenflow_core::http_client::Url;
 use obzenflow_core::ChainEvent;
 use obzenflow_infra::ai::rig::{RigChatClient, RigEmbeddingClient};
-use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
+use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -1176,7 +1176,7 @@ mod tests {
     use obzenflow_core::ai::{AiClientError, ChatResponseFormat, ToolDefinition};
     use obzenflow_core::event::ChainEventFactory;
     use obzenflow_core::{StageId, WriterId};
-    use obzenflow_runtime_services::stages::common::handlers::AsyncTransformHandler;
+    use obzenflow_runtime::stages::common::handlers::AsyncTransformHandler;
     use serde_json::json;
     use std::sync::Mutex;
 

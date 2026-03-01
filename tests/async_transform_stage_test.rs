@@ -15,11 +15,11 @@ use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::StageId;
 use obzenflow_core::WriterId;
-use obzenflow_dsl_infra::{async_transform, flow, sink, source};
+use obzenflow_dsl::{async_transform, flow, sink, source};
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime_services::pipeline::config::StageConfig;
-use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
-use obzenflow_runtime_services::stages::common::handlers::{
+use obzenflow_runtime::pipeline::config::StageConfig;
+use obzenflow_runtime::stages::common::handler_error::HandlerError;
+use obzenflow_runtime::stages::common::handlers::{
     AsyncTransformHandler, FiniteSourceHandler, SinkHandler,
 };
 use serde_json::json;
@@ -56,7 +56,7 @@ impl FiniteSourceHandler for TestEventSource {
         &mut self,
     ) -> Result<
         Option<Vec<ChainEvent>>,
-        obzenflow_runtime_services::stages::common::handlers::source::traits::SourceError,
+        obzenflow_runtime::stages::common::handlers::source::traits::SourceError,
     > {
         if self.emitted < 2 {
             let index = self.emitted;

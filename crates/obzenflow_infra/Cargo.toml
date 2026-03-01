@@ -12,9 +12,9 @@ publish = false
 # Internal dependencies - depends on all layers
 obzenflow_core = { workspace = true }
 obzenflow-topology = { workspace = true }
-obzenflow_runtime_services = { workspace = true }
+obzenflow_runtime = { workspace = true }
 obzenflow_adapters = { workspace = true }
-obzenflow_dsl_infra = { workspace = true }
+obzenflow_dsl = { workspace = true }
 
 # Infrastructure dependencies
 tokio = { workspace = true, features = ["full", "tracing"] }

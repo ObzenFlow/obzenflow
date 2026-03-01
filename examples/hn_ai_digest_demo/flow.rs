@@ -18,16 +18,14 @@ use obzenflow_adapters::middleware::control::ai_circuit_breaker;
 use obzenflow_core::event::chain_event::ChainEventFactory;
 use obzenflow_core::event::status::processing_status::ErrorKind;
 use obzenflow_core::{ChainEvent, TypedPayload};
-use obzenflow_dsl_infra::{async_source, async_transform, flow, sink, stateful, transform};
+use obzenflow_dsl::{async_source, async_transform, flow, sink, stateful, transform};
 use obzenflow_infra::application::{FlowApplication, LogLevel};
 use obzenflow_infra::http_client::default_http_client;
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
-use obzenflow_runtime_services::stages::common::handlers::{
-    AsyncTransformHandler, TransformHandler,
-};
-use obzenflow_runtime_services::stages::stateful::strategies::accumulators::ReduceTyped;
-use obzenflow_runtime_services::stages::transform::TryMapWith;
+use obzenflow_runtime::stages::common::handler_error::HandlerError;
+use obzenflow_runtime::stages::common::handlers::{AsyncTransformHandler, TransformHandler};
+use obzenflow_runtime::stages::stateful::strategies::accumulators::ReduceTyped;
+use obzenflow_runtime::stages::transform::TryMapWith;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Duration;

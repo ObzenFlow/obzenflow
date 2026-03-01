@@ -12,8 +12,8 @@ use async_trait::async_trait;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::time::MetricsDuration;
 use obzenflow_core::ChainEvent;
-use obzenflow_runtime_services::stages::common::handler_error::HandlerError;
-use obzenflow_runtime_services::stages::common::handlers::SinkHandler;
+use obzenflow_runtime::stages::common::handler_error::HandlerError;
+use obzenflow_runtime::stages::common::handlers::SinkHandler;
 use std::sync::Arc;
 
 /// A SinkHandler wrapper that applies middleware

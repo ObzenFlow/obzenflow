@@ -9,10 +9,10 @@ use obzenflow_core::event::{ChainEvent, ChainEventContent, ChainEventFactory};
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{JournalOwner, NoControlMiddleware, StageId, WriterId};
 use obzenflow_infra::journal::{DiskJournal, MemoryJournal};
-use obzenflow_runtime_services::messaging::upstream_subscription::{
+use obzenflow_runtime::messaging::upstream_subscription::{
     ContractConfig, ContractsWiring, ReaderProgress, UpstreamSubscription,
 };
-use obzenflow_runtime_services::messaging::PollResult;
+use obzenflow_runtime::messaging::PollResult;
 use ulid::Ulid;
 
 /// Helper to create a simple data event for a given writer and seq
@@ -167,8 +167,8 @@ async fn contract_state_tracks_seq_and_emits_final() {
     // Run contract checks; this should emit a consumption_final event.
     let status = subscription.check_contracts(&mut progress[..]).await;
     match status {
-        obzenflow_runtime_services::messaging::upstream_subscription::ContractStatus::ProgressEmitted
-        | obzenflow_runtime_services::messaging::upstream_subscription::ContractStatus::Healthy => {
+        obzenflow_runtime::messaging::upstream_subscription::ContractStatus::ProgressEmitted
+        | obzenflow_runtime::messaging::upstream_subscription::ContractStatus::Healthy => {
             // OK – final emission is part of progress path
         }
         other => panic!("unexpected contract status: {other:?}"),
@@ -270,7 +270,7 @@ async fn contract_seq_divergence_missing_events_emits_gap_and_violation() {
 
     // Status should indicate a violation with SeqDivergence.
     match status {
-        obzenflow_runtime_services::messaging::upstream_subscription::ContractStatus::Violated {
+        obzenflow_runtime::messaging::upstream_subscription::ContractStatus::Violated {
             upstream,
             cause,
         } => {
@@ -444,7 +444,7 @@ async fn contract_seq_divergence_overconsumption_sets_violation_without_gap() {
 
     // Any SeqDivergence (including over-consumption) is now surfaced as a violation.
     match status {
-        obzenflow_runtime_services::messaging::upstream_subscription::ContractStatus::Violated {
+        obzenflow_runtime::messaging::upstream_subscription::ContractStatus::Violated {
             upstream,
             cause,
         } => {
@@ -457,9 +457,9 @@ async fn contract_seq_divergence_overconsumption_sets_violation_without_gap() {
                 other => panic!("unexpected violation cause: {other:?}"),
             }
         }
-        other => panic!(
-            "expected ContractStatus::Violated for over-consumption path, got {other:?}"
-        ),
+        other => {
+            panic!("expected ContractStatus::Violated for over-consumption path, got {other:?}")
+        }
     }
 
     assert!(
