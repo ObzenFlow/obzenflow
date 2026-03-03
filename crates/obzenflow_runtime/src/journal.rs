@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Journal factory interface used by the DSL (FLOWIP-095a / OT-16).
+//! Journal factory interface used by the DSL
 //!
 //! Onion architecture note:
 //! - Inner layers define stable traits (`Journal`, `JournalReader`, `ReplayArchive`)

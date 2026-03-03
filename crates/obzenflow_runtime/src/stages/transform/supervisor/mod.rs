@@ -4,7 +4,7 @@
 
 //! Transform supervisor implementation using HandlerSupervised pattern
 //!
-//! Decomposed from a single file into submodules (FLOWIP-051m):
+//! Decomposed into submodules:
 //! - `running.rs`  — Running state event loop
 //! - `draining.rs` — Draining state event loop
 //! - `tests.rs`    — All unit tests

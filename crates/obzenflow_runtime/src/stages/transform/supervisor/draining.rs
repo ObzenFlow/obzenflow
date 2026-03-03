@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Draining state event loop for the transform supervisor (FLOWIP-051m).
+//! Draining state event loop for the transform supervisor
 
 use crate::messaging::PollResult;
 use crate::metrics::instrumentation::process_with_instrumentation;

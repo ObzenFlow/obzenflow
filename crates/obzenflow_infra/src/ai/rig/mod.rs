@@ -5,7 +5,7 @@
 //! Rig.rs-backed AI clients.
 //!
 //! This module implements the `obzenflow_core::ai` port traits using `rig` as the
-//! provider substrate, per FLOWIP-086r.
+//! provider substrate.
 
 mod chat_client;
 mod embedding_client;

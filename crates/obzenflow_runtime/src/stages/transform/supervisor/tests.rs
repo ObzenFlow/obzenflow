@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Transform supervisor tests (moved verbatim from supervisor.rs, FLOWIP-051m).
+//! Transform supervisor tests
 
 use super::*;
 use crate::backpressure::{BackpressurePlan, BackpressureRegistry};

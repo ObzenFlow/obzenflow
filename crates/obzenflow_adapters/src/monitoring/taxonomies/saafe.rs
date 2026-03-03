@@ -15,7 +15,7 @@
 //!
 //! ## Metrics Available in ObzenFlow
 //!
-//! With FLOWIP-056-666, core metrics are emitted automatically from journals; consult
+//! Core metrics are emitted automatically from journals; consult
 //! obzenflow_adapters metrics documentation for current coverage.
 
 /// SAAFE taxonomy definition

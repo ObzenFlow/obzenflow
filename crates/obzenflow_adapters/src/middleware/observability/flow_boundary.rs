@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Flow boundary tracking middleware for FLOWIP-055
+//! Flow boundary tracking middleware
 //!
 //! Tracks events at flow entry (source) and exit (sink) points to provide
 //! true end-to-end latency and throughput metrics.

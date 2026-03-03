@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Running state event loop for the transform supervisor (FLOWIP-051m).
+//! Running state event loop for the transform supervisor
 
 use crate::messaging::PollResult;
 use crate::metrics::instrumentation::process_with_instrumentation;

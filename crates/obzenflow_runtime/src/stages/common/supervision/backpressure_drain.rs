@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Backpressure-aware pending output drain loop (FLOWIP-086k).
+//! Backpressure-aware pending output drain loop
 //!
 //! `drain_one_pending()` handles the full bypass-pulse / reserve-or-requeue /
 //! commit-and-reset cycle for a single pending output event. Supervisors call

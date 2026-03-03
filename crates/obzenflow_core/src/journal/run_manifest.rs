@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Run manifest schema for on-disk archives (FLOWIP-095a).
+//! Run manifest schema for on-disk archives
 //!
 //! This is a pure schema module (no I/O). Infra is responsible for reading and
 //! writing `run_manifest.json` in the run directory.

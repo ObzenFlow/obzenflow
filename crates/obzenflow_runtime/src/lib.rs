@@ -2,10 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Runtime services for ObzenFlow
-//!
-//! This layer contains business logic related to flow execution, runtime coordination,
-//! and execution management.
+#![doc = include_str!("../README.md")]
 
 // Core modules
 pub mod backpressure;
@@ -24,7 +21,52 @@ pub mod metrics;
 pub mod pipeline;
 pub mod stages;
 
-// Re-export commonly used types
+/// Convenience re-exports of the most commonly used runtime types.
+///
+/// The prelude gathers types that almost every flow definition or stage
+/// implementation needs, grouped into five categories:
+///
+/// **Errors** — [`FlowError`](crate::errors::FlowError),
+/// [`MessageBusError`](crate::errors::MessageBusError),
+/// [`PipelineSupervisorError`](crate::errors::PipelineSupervisorError),
+/// and the [`RuntimeResult`](crate::errors::RuntimeResult) type alias.
+///
+/// **Pipeline** —
+/// [`PipelineBuilder`](crate::pipeline::PipelineBuilder) and
+/// [`PipelineStageConfig`](crate::pipeline::PipelineStageConfig) for
+/// constructing flows,
+/// [`FlowHandle`](crate::pipeline::FlowHandle) for controlling a running
+/// pipeline, and
+/// [`PipelineState`](crate::pipeline::PipelineState) /
+/// [`PipelineEvent`](crate::pipeline::PipelineEvent) /
+/// [`PipelineAction`](crate::pipeline::PipelineAction) for observing
+/// lifecycle transitions.
+///
+/// **Message bus** —
+/// [`FsmMessageBus`](crate::message_bus::FsmMessageBus) (the inter-stage
+/// transport) and
+/// [`StageCommand`](crate::message_bus::StageCommand) (control signals
+/// sent to individual stages).
+///
+/// **Handlers** — the user-facing handler traits:
+/// [`FiniteSourceHandler`](crate::stages::FiniteSourceHandler),
+/// [`InfiniteSourceHandler`](crate::stages::InfiniteSourceHandler),
+/// [`TransformHandler`](crate::stages::TransformHandler),
+/// [`SinkHandler`](crate::stages::SinkHandler),
+/// [`StatefulHandler`](crate::stages::StatefulHandler),
+/// [`ObserverHandler`](crate::stages::ObserverHandler), and the
+/// [`ResourceManaged`](crate::stages::ResourceManaged) trait for stages
+/// that own resources. Also includes
+/// [`SourceError`](crate::stages::SourceError) for source-specific error
+/// reporting.
+///
+/// **Metrics** —
+/// [`DefaultMetricsConfig`](crate::metrics::DefaultMetricsConfig) for
+/// configuring the built-in metrics subsystem.
+///
+/// **Event flow** —
+/// [`UpstreamSubscription`](crate::messaging::UpstreamSubscription) for
+/// wiring journal-based message delivery between stages.
 pub mod prelude {
     // Errors
     pub use crate::errors::{FlowError, MessageBusError, PipelineSupervisorError, RuntimeResult};
@@ -43,9 +85,6 @@ pub mod prelude {
         FiniteSourceHandler, InfiniteSourceHandler, ObserverHandler, ResourceManaged, SinkHandler,
         SourceError, StatefulHandler, TransformHandler,
     };
-
-    // Note: Supervisors are internal implementation details and not exported.
-    // Use builders and handles for creating and controlling stages.
 
     // Event flow
     pub use crate::messaging::UpstreamSubscription;

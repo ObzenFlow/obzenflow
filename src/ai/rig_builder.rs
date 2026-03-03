@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Rig-backed AI transform builders (FLOWIP-086d-part-2).
+//! Rig-backed AI transform builders
 //!
 //! This module lives in the top-level `obzenflow` crate to avoid creating a
 //! dependency cycle (`obzenflow_infra` depends on `obzenflow_adapters`).

@@ -193,11 +193,11 @@ impl<T> TryMap<T> {
     /// Use a custom error handler for failed conversions
     ///
     /// Provides full control over error handling. The handler receives
-    /// the original event and error message, returning Option<ChainEvent>
+    /// the original event and error message, returning `Option<ChainEvent>`
     /// (Some to emit, None to drop).
     ///
     /// # Arguments
-    /// * `handler` - Function (ChainEvent, String) -> Option<ChainEvent>
+    /// * `handler` - Function `(ChainEvent, String) -> Option<ChainEvent>`
     pub fn on_error_with<H>(mut self, handler: H) -> Self
     where
         H: Fn(ChainEvent, String) -> Option<ChainEvent> + Send + Sync + 'static,

@@ -5,7 +5,7 @@
 //! Metrics traits and types for the core domain
 //!
 //! This module defines abstract interfaces for metrics collection
-//! and export, using the wide events approach from FLOWIP-056c.
+//! and export, using the wide events approach.
 
 pub mod exporter;
 pub mod observer;

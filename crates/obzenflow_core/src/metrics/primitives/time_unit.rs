@@ -5,7 +5,7 @@
 //! Time unit type for primitives layer
 //!
 //! Provides a lightweight, unit-aware time representation without depending on std::time::Duration.
-//! This maintains proper layer separation in the FLOWIP-004 architecture.
+//! This maintains proper layer separation in the onion architecture.
 
 /// Lightweight time unit representation for primitives
 ///

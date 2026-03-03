@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Runtime context for FSM instrumentation (FLOWIP-056c)
+//! Runtime context for FSM instrumentation
 
 use crate::event::identity::journal_writer_id::JournalWriterId;
 use crate::event::status::processing_status::ErrorKind;

@@ -11,7 +11,7 @@ use super::fsm::{StatefulEvent, StatefulState};
 
 /// Type alias for the stateful stage handle
 ///
-/// Note: Unlike TransformHandle, we don't provide a default Box<dyn> type
+/// Note: Unlike TransformHandle, we don't provide a default `Box<dyn>` type
 /// because StatefulHandler has an associated type (State) which cannot be
 /// used in a trait object without specifying it.
 pub type StatefulHandle<H> = StandardHandle<StatefulEvent<H>, StatefulState<H>>;

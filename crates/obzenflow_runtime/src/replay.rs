@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Replay-from-archive interfaces (FLOWIP-095a).
+//! Replay-from-archive interfaces
 //!
 //! Onion architecture note: runtime services define stable interfaces; infra
 //! provides concrete implementations (e.g., disk-backed archive readers).

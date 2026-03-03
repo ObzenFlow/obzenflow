@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Shared supervisor helpers (FLOWIP-051m)
+//! Shared supervisor helpers
 //!
 //! This module contains free functions and small types extracted from the
 //! per-stage supervisor event loops. Each helper is designed to be called

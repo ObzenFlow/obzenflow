@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! CSV file sink (FLOWIP-083e).
+//! CSV file sink
 
 use async_trait::async_trait;
 use csv::{Writer, WriterBuilder};

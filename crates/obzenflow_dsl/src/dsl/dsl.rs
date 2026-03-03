@@ -104,7 +104,49 @@ macro_rules! parse_topology_with_joins {
     };
 }
 
-/// The main flow! macro using the clean typed approach
+/// Declare an ObzenFlow pipeline as a single expression.
+///
+/// `flow!` is the primary API for building pipelines. It takes five sections
+/// and returns a [`FlowDefinition`](crate::FlowDefinition) that can be handed
+/// to `FlowApplication::run()`.
+///
+/// ## Sections
+///
+/// | Section | Purpose |
+/// |---------|---------|
+/// | `name:` | String identifier used for journal directories and metrics. |
+/// | `journals:` | Journal factory (`disk_journals(path)` or `memory_journals()`). |
+/// | `middleware:` | Flow-level middleware applied to every stage by default. |
+/// | `stages:` | Let-bindings producing stage descriptors via stage macros. |
+/// | `topology:` | Edges connecting stages (`a \|> b;` forward, `a <\| b;` backward). |
+///
+/// ## Minimal example
+///
+/// ```rust,ignore
+/// use obzenflow_dsl::{flow, source, transform, sink};
+/// use obzenflow_infra::journal::memory_journals;
+/// use obzenflow_runtime::stages::source::FiniteSourceTyped;
+/// use obzenflow_runtime::stages::transform::MapTyped;
+///
+/// let pipeline = flow! {
+///     name: "example",
+///     journals: memory_journals(),
+///     middleware: [],
+///
+///     stages: {
+///         src = source!("input" => FiniteSourceTyped::new(vec![MyEvent { value: 1 }]));
+///         map = transform!("double" => MapTyped::new(|e: MyEvent| Doubled { value: e.value * 2 }));
+///         out = sink!("output" => |d: Doubled| { println!("{}", d.value); });
+///     },
+///
+///     topology: {
+///         src |> map;
+///         map |> out;
+///     }
+/// };
+/// ```
+///
+/// The `name:` section is optional. If omitted, the flow is named `"default"`.
 #[macro_export]
 macro_rules! flow {
     // Pattern with explicit flow name (stage descriptors as expressions)

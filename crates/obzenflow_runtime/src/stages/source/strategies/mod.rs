@@ -11,10 +11,9 @@
 //! strategies govern how sources decide to emit FlowControl on
 //! completion or drain.
 //!
-//! FLOWIP-081a introduces an explicit strategy hook here so that
-//! sources can participate in the same safety/contract story as
-//! other stages, while keeping the default "Jonestown" behaviour
-//! unchanged.
+//! An explicit strategy hook lets sources participate in the same
+//! safety/contract story as other stages, while keeping the default
+//! behaviour unchanged.
 
 use std::collections::HashMap;
 use std::sync::Arc;

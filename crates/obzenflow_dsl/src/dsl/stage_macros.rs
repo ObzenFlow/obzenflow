@@ -7,7 +7,15 @@
 //! These macros are the user-facing API for the let bindings approach.
 //! Each returns a boxed StageDescriptor that knows its type.
 
-/// Create a finite source stage descriptor
+/// Create a finite source stage descriptor.
+///
+/// ```rust,ignore
+/// // Emit a vector of typed payloads:
+/// let s = source!("readings" => FiniteSourceTyped::new(vec![reading1, reading2]));
+///
+/// // With stage-level middleware:
+/// let s = source!("readings" => FiniteSourceTyped::new(data), [rate_limit(10.0)]);
+/// ```
 #[macro_export]
 macro_rules! source {
     ($name:literal => $handler:expr) => {
@@ -23,7 +31,14 @@ macro_rules! source {
     }};
 }
 
-/// Create an async finite source stage descriptor
+/// Create an async finite source stage descriptor.
+///
+/// Accepts an optional poll timeout as a tuple `(handler, timeout)`.
+///
+/// ```rust,ignore
+/// let s = async_source!("http_fetch" => my_async_source);
+/// let s = async_source!("http_fetch" => (my_async_source, Duration::from_secs(5)));
+/// ```
 #[macro_export]
 macro_rules! async_source {
     ($name:literal => ($handler:expr, $poll_timeout:expr)) => {
@@ -47,7 +62,14 @@ macro_rules! async_source {
     }};
 }
 
-/// Create an infinite source stage descriptor
+/// Create an infinite source stage descriptor.
+///
+/// Unlike finite sources, infinite sources never signal completion on their
+/// own. The pipeline runs until shut down externally.
+///
+/// ```rust,ignore
+/// let s = infinite_source!("ticker" => my_infinite_handler);
+/// ```
 #[macro_export]
 macro_rules! infinite_source {
     ($name:literal => $handler:expr) => {
@@ -63,7 +85,14 @@ macro_rules! infinite_source {
     }};
 }
 
-/// Create an async infinite source stage descriptor
+/// Create an async infinite source stage descriptor.
+///
+/// Combines infinite-source semantics with an async poll loop. Accepts an
+/// optional poll timeout as a tuple `(handler, timeout)`.
+///
+/// ```rust,ignore
+/// let s = async_infinite_source!("ws_stream" => my_ws_handler);
+/// ```
 #[macro_export]
 macro_rules! async_infinite_source {
     ($name:literal => ($handler:expr, $poll_timeout:expr)) => {
@@ -87,7 +116,15 @@ macro_rules! async_infinite_source {
     }};
 }
 
-/// Create a transform stage descriptor
+/// Create a transform stage descriptor.
+///
+/// ```rust,ignore
+/// // Using a TransformHandler implementation:
+/// let t = transform!("validator" => MyValidator::new());
+///
+/// // Using a typed one-to-one mapper:
+/// let t = transform!("double" => MapTyped::new(|e: Input| Output { v: e.v * 2 }));
+/// ```
 #[macro_export]
 macro_rules! transform {
     ($name:literal => $handler:expr) => {
@@ -103,7 +140,14 @@ macro_rules! transform {
     }};
 }
 
-/// Create an async transform stage descriptor
+/// Create an async transform stage descriptor.
+///
+/// Use this when the transform needs to perform async I/O (HTTP calls,
+/// database lookups, etc.).
+///
+/// ```rust,ignore
+/// let t = async_transform!("enrich" => MyAsyncEnricher::new());
+/// ```
 #[macro_export]
 macro_rules! async_transform {
     ($name:literal => $handler:expr) => {
@@ -119,7 +163,18 @@ macro_rules! async_transform {
     }};
 }
 
-/// Create a sink stage descriptor
+/// Create a sink stage descriptor.
+///
+/// Accepts a `SinkHandler` implementation, a `ConsoleSink`, or a typed
+/// closure `|event: MyType| { ... }`.
+///
+/// ```rust,ignore
+/// // Struct-based sink:
+/// let s = sink!("output" => ConsoleSink::<MyEvent>::json());
+///
+/// // Closure-based sink (typed):
+/// let s = sink!("log" => |e: MyEvent| { println!("{:?}", e); });
+/// ```
 #[macro_export]
 macro_rules! sink {
     ($name:literal => |$arg:ident : $ty:ty| $body:block) => {
@@ -163,7 +218,19 @@ macro_rules! sink {
     }};
 }
 
-/// Create a stateful stage descriptor
+/// Create a stateful stage descriptor.
+///
+/// Stateful stages accumulate events into internal state and periodically
+/// emit aggregate results. Supports an optional `emit_interval` for
+/// time-based emission.
+///
+/// ```rust,ignore
+/// // Custom StatefulHandler:
+/// let s = stateful!("aggregator" => MyAggregator::new());
+///
+/// // With a time-based emit interval:
+/// let s = stateful!("counter" => MyCounter::new(), emit_interval = Duration::from_secs(5));
+/// ```
 #[macro_export]
 macro_rules! stateful {
     ($name:literal => $handler:expr, emit_interval = $emit_interval:expr) => {
@@ -205,9 +272,21 @@ macro_rules! with_ref {
     };
 }
 
-/// Create a join stage descriptor
-/// For DSL usage, use with_ref! macro to specify reference
-/// Example: join!("enricher" => with_ref!(carriers, handler))
+/// Create a join stage descriptor.
+///
+/// Joins enrich a stream with reference data loaded by another stage. Use
+/// the [`with_ref!`] macro to bind the reference stage variable and handler
+/// together.
+///
+/// ```rust,ignore
+/// // In the stages block, `carriers` is a source stage variable:
+/// let j = join!("enricher" => with_ref!(carriers,
+///     InnerJoinBuilder::<Carrier, Order, Enriched>::new()
+///         .catalog_key(|c: &Carrier| c.code.clone())
+///         .stream_key(|o: &Order| o.carrier_code.clone())
+///         .build(|carrier, order| Enriched { /* ... */ })
+/// ));
+/// ```
 #[macro_export]
 macro_rules! join {
     ($name:literal => $join_with_ref:expr) => {

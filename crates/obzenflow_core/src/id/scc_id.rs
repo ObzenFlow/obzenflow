@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! SCC identifier for cycle iteration tracking (FLOWIP-051p)
+//! SCC identifier for cycle iteration tracking
 
 use serde::{Deserialize, Serialize};
 use std::fmt;

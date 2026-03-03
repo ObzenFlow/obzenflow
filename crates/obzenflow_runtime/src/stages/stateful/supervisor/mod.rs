@@ -4,7 +4,7 @@
 
 //! Stateful supervisor implementation using HandlerSupervised pattern.
 //!
-//! Decomposed from a single file into submodules (FLOWIP-051m):
+//! Decomposed into submodules:
 //! - `running.rs`  contains the Accumulating and Emitting loops
 //! - `draining.rs` contains the Draining loop
 

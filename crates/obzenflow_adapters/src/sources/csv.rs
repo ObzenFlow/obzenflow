@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! CSV file source (FLOWIP-084b).
+//! CSV file source
 //!
 //! Design notes (aligned with the FlowIP decisions):
 //! - Sync `FiniteSourceHandler` (blocking file IO inside `next()`)

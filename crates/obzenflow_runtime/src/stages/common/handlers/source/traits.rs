@@ -5,9 +5,9 @@
 //! Source handler traits for both finite and infinite sources
 //!
 //! 051b refinement:
-//! - Finite sources now use Result<Option<Vec<ChainEvent>>, SourceError> so EOF
+//! - Finite sources now use `Result<Option<Vec<ChainEvent>>, SourceError>` so EOF
 //!   and infra failures are explicit in the type system.
-//! - Infinite sources use Result<Vec<ChainEvent>, SourceError>.
+//! - Infinite sources use `Result<Vec<ChainEvent>, SourceError>`.
 
 use async_trait::async_trait;
 use obzenflow_core::ChainEvent;

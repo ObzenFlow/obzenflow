@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Archive metadata shared across layers (FLOWIP-095a).
+//! Archive metadata shared across layers
 //!
 //! These are pure schema types (no I/O). Outer layers derive/compute values
 //! and inject them into runtime services via stable interfaces.

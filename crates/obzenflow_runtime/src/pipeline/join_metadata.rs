@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Join metadata representation for topology export (FLOWIP-082a)
+//! Join metadata representation for topology export
 //!
 //! This module defines a simple structural type that tracks, per join stage,
 //! which upstream stages are treated as catalog/reference sources vs

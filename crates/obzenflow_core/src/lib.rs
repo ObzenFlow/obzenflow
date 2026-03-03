@@ -2,11 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Core domain layer - pure abstractions with minimal dependencies
-//!
-//! This is the innermost layer of the onion architecture.
-//! Everything here is pure types and traits with no knowledge
-//! of infrastructure, I/O, or external systems.
+#![doc = include_str!("../README.md")]
 
 pub mod ai;
 pub mod build_info;

@@ -2,11 +2,11 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Supervisor-level cycle protection (FLOWIP-051l).
+//! Supervisor-level cycle protection
 //!
 //! This guard is intended to live in stage supervisors, not in the middleware chain.
 //! It handles both:
-//! - Data events: per-event cycle depth tracking (FLOWIP-051p), abort after too many round trips.
+//! - Data events: per-event cycle depth tracking, abort after too many round trips.
 //! - Flow control signals: attenuate amplification in topologies with backflow edges.
 
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;

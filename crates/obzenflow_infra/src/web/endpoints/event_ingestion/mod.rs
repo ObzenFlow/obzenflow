@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! HTTP event ingestion endpoints (FLOWIP-084d).
+//! HTTP event ingestion endpoints
 //!
 //! Provides a small ingestion surface for push-based flows:
 //! - `POST {base_path}/events` (single event)

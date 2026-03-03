@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Adapter sources (FLOWIP-084 series).
+//! Adapter sources
 
 pub mod csv;
 pub mod http;

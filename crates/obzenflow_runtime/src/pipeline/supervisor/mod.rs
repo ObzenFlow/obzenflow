@@ -8,8 +8,6 @@
 //! - own the pipeline FSM and dispatch loop (via `SelfSupervised`)
 //! - poll subscriptions and translate I/O into FSM events
 //! - execute orchestration side effects via FSM actions
-//!
-//! FLOWIP-051m-part-2: align pipeline supervision structure and single-source the pipeline FSM.
 
 mod abort_requested;
 mod common;

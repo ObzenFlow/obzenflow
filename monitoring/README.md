@@ -106,7 +106,7 @@ docker-compose logs -f
 With the new concurrent metrics API (FLOWIP-058), you can build flows that serve metrics while running:
 
 ```rust
-use obzenflow_dsl_infra::{flow, source, transform, sink};
+use obzenflow_dsl::{flow, source, transform, sink};
 use obzenflow_infra::web::start_metrics_server;
 
 #[tokio::main]

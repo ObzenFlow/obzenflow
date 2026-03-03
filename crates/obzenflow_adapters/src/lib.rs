@@ -2,9 +2,13 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Adapters layer for ObzenFlow
+//! Composable middleware, concrete source/sink adapters, and monitoring
+//! exporters for ObzenFlow pipelines. Middleware factories (rate limiting,
+//! circuit breakers) are applied at the flow or stage level through the
+//! `flow!` macro. Sources and sinks provide the I/O boundary for ingesting
+//! and emitting events.
 //!
-//! This layer contains interfaces, monitoring, and presentation logic
+#![doc = include_str!("../README.md")]
 
 pub mod ai;
 pub mod middleware;

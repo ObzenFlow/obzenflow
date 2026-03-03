@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Draining state event loop for the stateful supervisor (FLOWIP-051m).
+//! Draining state event loop for the stateful supervisor
 
 use crate::metrics::instrumentation::process_with_instrumentation_no_count;
 use crate::stages::common::handlers::StatefulHandler;

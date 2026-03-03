@@ -4,7 +4,7 @@
 
 //! Monitoring Taxonomies for ObzenFlow
 //!
-//! With FLOWIP-056-666, monitoring taxonomies are now documentation and view definitions.
+//! Monitoring taxonomies are now documentation and view definitions.
 //! Metrics are automatically collected by the MetricsAggregator from the event journal.
 //!
 //! ## Available Taxonomies

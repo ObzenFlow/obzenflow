@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Control signal dispatch helper (FLOWIP-051m).
+//! Control signal dispatch helper
 //!
 //! Replaces the duplicated match block that every supervisor uses to map a
 //! `FlowControlPayload` variant to the appropriate `ControlEventStrategy`

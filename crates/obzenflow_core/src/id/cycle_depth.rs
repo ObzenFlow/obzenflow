@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Per-event cycle depth counter (FLOWIP-051p)
+//! Per-event cycle depth counter
 
 use serde::{Deserialize, Serialize};
 use std::fmt;

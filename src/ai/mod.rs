@@ -2,12 +2,12 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! AI facade for ObzenFlow (FLOWIP-086d).
+//! AI facade for ObzenFlow
 //!
 //! This module re-exports the provider-agnostic AI transforms from the adapters
 //! layer. When the `ai-rig` feature is enabled, it also provides a fluent
-//! builder API (FLOWIP-086d-part-2) that constructs Rig-backed clients and
-//! wires them into transforms without exposing infra types in user code.
+//! builder API that constructs Rig-backed clients and wires them into
+//! transforms without exposing infra types in user code.
 
 pub use obzenflow_adapters::ai::{ChatTransform, EmbeddingTransform};
 

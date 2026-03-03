@@ -5,14 +5,14 @@
 //! Stateful stage implementation
 //!
 //! Stateful stages maintain state across events, enabling aggregations,
-//! windowing operations, and session tracking without Arc<Mutex> anti-patterns.
+//! windowing operations, and session tracking without `Arc<Mutex>` anti-patterns.
 //!
 //! Key features:
 //! - Functional state updates (handler returns new state)
 //! - Type-safe state management (State: Clone + Send + Sync)
 //! - Proper lifecycle with Accumulating → Draining → Drained states
 //! - Control event strategies for customizing behavior
-//! - Foundation for FLOWIP-080c primitives (GroupBy, Reduce, Conflate)
+//! - Composition primitives (GroupBy, Reduce, Conflate)
 //!
 //! # Example
 //!

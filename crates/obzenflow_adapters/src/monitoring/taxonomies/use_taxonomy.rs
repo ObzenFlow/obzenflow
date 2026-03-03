@@ -13,7 +13,7 @@
 //!
 //! ## Metrics Available in ObzenFlow
 //!
-//! With FLOWIP-056-666, USE metrics are automatically derived from control events:
+//! USE metrics are automatically derived from control events:
 //!
 //! | Metric | Prometheus Name | Description |
 //! |--------|----------------|-------------|

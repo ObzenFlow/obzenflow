@@ -13,7 +13,7 @@
 //!
 //! ## Metrics Available in ObzenFlow
 //!
-//! With FLOWIP-056-666, RED metrics are automatically derived from the event journal:
+//! RED metrics are automatically derived from the event journal:
 //!
 //! | Metric | Prometheus Name | Description |
 //! |--------|----------------|-------------|

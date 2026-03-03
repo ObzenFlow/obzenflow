@@ -116,7 +116,7 @@ pub enum ErrorStrategy {
     /// specific error field structures.
     ///
     /// # Example
-    /// ```ignore
+    /// ```text
     /// // .on_error_emit_with("Record.invalid", |_event, error| {
     /// //     json!({"validation_errors": {"missing_fields": parse_error(error)}})
     /// // })
@@ -126,7 +126,7 @@ pub enum ErrorStrategy {
     /// Custom error handler function
     ///
     /// Calls the provided closure with (original_event, error_message).
-    /// The closure returns Option<ChainEvent> - Some to emit an event,
+    /// The closure returns `Option<ChainEvent>` - Some to emit an event,
     /// None to drop it. Use this for complete custom error handling logic
     /// (e.g., creating entirely new events, circuit breakers, etc.).
     Custom(Arc<dyn Fn(ChainEvent, String) -> Option<ChainEvent> + Send + Sync>),
@@ -378,11 +378,11 @@ where
     /// Use a custom error handler for failed conversions
     ///
     /// Provides full control over error handling. The handler receives
-    /// the original event and error message, returning Option<ChainEvent>
+    /// the original event and error message, returning `Option<ChainEvent>`
     /// (Some to emit, None to drop).
     ///
     /// # Arguments
-    /// * `handler` - Function (ChainEvent, String) -> Option<ChainEvent>
+    /// * `handler` - Function `(ChainEvent, String) -> Option<ChainEvent>`
     ///
     /// # Example
     /// ```ignore

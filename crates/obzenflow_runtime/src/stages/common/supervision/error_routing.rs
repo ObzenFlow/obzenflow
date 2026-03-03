@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Error journal routing logic (FLOWIP-082e).
+//! Error journal routing logic
 //!
 //! Determines whether an error-marked event should be routed to the stage's
 //! error journal (isolation from downstream transport contracts) or kept in

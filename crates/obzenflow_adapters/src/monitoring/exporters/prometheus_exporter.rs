@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Clean Prometheus exporter implementation for FLOWIP-056-666
+//! Prometheus exporter implementation
 //!
 //! This module implements the MetricsExporter trait for Prometheus exposition format.
 //! It receives snapshots from collectors and renders them as Prometheus text.

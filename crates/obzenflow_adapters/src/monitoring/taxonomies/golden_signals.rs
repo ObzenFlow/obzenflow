@@ -14,7 +14,7 @@
 //!
 //! ## Metrics Available in ObzenFlow
 //!
-//! With FLOWIP-056-666, Golden Signals are automatically derived from events:
+//! Golden Signals are automatically derived from events:
 //!
 //! | Signal | Prometheus Name | Description |
 //! |--------|----------------|-------------|

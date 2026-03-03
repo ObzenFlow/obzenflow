@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Typed source helpers (FLOWIP-081 + FLOWIP-081d)
+//! Typed source helpers
 //!
 //! These helpers let sources emit domain types (`T: TypedPayload + Serialize`) instead of
 //! manually constructing `ChainEvent` values with stage `WriterId` boilerplate.

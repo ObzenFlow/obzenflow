@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Console sink (FLOWIP-083d).
+//! Console sink
 //!
 //! A typed sink for printing events to stdout/stderr with reusable formatters.
 

@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Typed sink helpers (FLOWIP-081c).
+//! Typed sink helpers
 //!
 //! Sinks normally consume `ChainEvent` and must:
 //! - filter by event type

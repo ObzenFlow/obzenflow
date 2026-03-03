@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Configured ceiling for cycle depth (FLOWIP-051p)
+//! Configured ceiling for cycle depth
 
 use std::fmt;
 

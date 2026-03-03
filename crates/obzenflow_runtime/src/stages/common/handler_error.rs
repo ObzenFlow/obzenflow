@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Handler-level error type for stage logic (FLOWIP-082h).
+//! Handler-level error type for stage logic
 //!
 //! This represents failures that occur inside handlers (sources, transforms,
 //! joins, stateful handlers, sinks, observers). Pipeline coordination and

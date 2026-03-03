@@ -6,21 +6,32 @@ Status: **pre-1.0**. APIs are still evolving and may change between releases.
 
 ## Principles
 
-Most streaming frameworks are optimized for shipping bytes with minimal overhead. That’s useful, but as streaming systems are increasingly used for data intelligence (training small models, generating predictions, triggering automated actions), the “hard part” shifts.
+ObzenFlow is built around journal-first execution, wide-event observability, and evidence-based correctness. Every stage reads from upstream append-only journals and writes its outputs to its own journal, making the system’s journaled history both the execution substrate and the primary observability surface.
 
-In these systems, **correctness**, **observability**, and **provenance** matter more than raw throughput. You need to answer audits with evidence: what happened, why it happened, and whether you can reproduce it deterministically.
+For the full design philosophy, see [obzenflow.dev/philosophy](https://obzenflow.dev/philosophy/).
 
-**ObzenFlow is a next generation streaming framework built around an event‑sourced model.** Every stage reads from upstream *append‑only journals*, and writes its outputs to its own journal. Observability is derived from the same journaled history that drives execution. If an event isn’t recorded, it isn’t part of the system’s truth, and the system's truth is the primary observability substrate. 
+Every ObzenFlow application follows the same shape:
 
-This is a powerful model for building dataflow systems that are performant and operationally correct.
+```rust,ignore
+FlowApplication::run(flow! {
+    name: "my_pipeline",
+    journals: disk_journals("target/logs".into()),
+    middleware: [rate_limit(100.0)],
 
-- **Journal-first execution**: stage-local immutable journals are the data plane; stages communicate by writing and reading journals.
-- **Wide events provide observability**: events carry all flow/stage context so you can compute end-to-end metrics and debug pipelines directly from the journals.
-- **Evidence-based correctness**: failures are explicit and typed; optional contracts let you enforce and validate operational invariants such as *at-least-once delivery*.
-- **Replayable iteration**: run once, then replay recorded inputs to debug, test new logic, and answer audit questions without re-ingesting.
-- **Typed, evolvable events**: model events as Rust types with stable `EVENT_TYPE` and `SCHEMA_VERSION`.
+    stages: {
+        src   = source!("input" => my_source);
+        xform = transform!("enrich" => my_transform);
+        out   = sink!("output" => my_sink);
+    },
 
-To see what an ObzenFlow application looks like end-to-end, start with the runnable examples in `examples/` (catalog: `examples/README.md`). They include domain types, fixtures/mocks, and a `FlowApplication` entrypoint.
+    topology: {
+        src |> xform |> out;
+    }
+})
+.await?;
+```
+
+For runnable versions with real domain types and handlers, see the examples catalog in `examples/README.md`.
 
 ## Quickstart: run a real end-to-end demo (HTTP ingestion)
 
@@ -50,52 +61,24 @@ Observe:
 
 Code: `examples/http_ingestion_piggy_bank_demo.rs`
 
-### Continue learning
+## More examples
 
-- Quickstart (HTTP ingestion + join + stateful): `examples/http_ingestion_piggy_bank_demo.rs`
-- Examples catalog (recommended runs + code pointers): `examples/README.md`
-- Architecture docs (crate READMEs):
-    - `crates/obzenflow_core/README.md` — business domain + core “ports” (traits)
-    - `crates/obzenflow_runtime_services/README.md` — execution engine + stage orchestration
-    - `crates/obzenflow_dsl_infra/README.md` — `flow!` DSL + middleware resolution
-    - `crates/obzenflow_infra/README.md` — `FlowApplication` + feature-gated infrastructure implementations
-    - `crates/obzenflow_adapters/README.md` — middleware + concrete sources/sinks
-- Monitoring stack: `monitoring/README.md`
-
-### More examples
-
-Full catalog (grouped, with commands): `examples/README.md`
+The full catalog with grouped commands and code pointers is in `examples/README.md`. A few highlights:
 
 ```bash
-# “Framework overview” flow: reference catalogs + joins + stateful summary
+# Framework overview: reference catalogs + joins + stateful summary
 cargo run -p obzenflow --example product_catalog_enrichment
 
-# Resilience story: circuit breaker + typed fallback + contracts
+# Resilience: circuit breaker + typed fallback + contracts
 cargo run -p obzenflow --example payment_gateway_resilience
 
 # Middleware inheritance/override (observe /metrics while it runs)
 cargo run -p obzenflow --example flow_middleware_config --features obzenflow_infra/warp-server -- --server
-
-# HTTP pull source (defaults to local mock server)
-cargo run -p obzenflow --example hn_ingestion_demo --features http-pull
 ```
 
-### Features (quick notes)
+No features are enabled by default. `--features obzenflow_infra/warp-server` enables the HTTP server and web endpoints, and `--features http-pull` enables HTTP pull sources. See `crates/obzenflow_infra/README.md` for the full feature matrix.
 
-- `--features obzenflow_infra/warp-server` enables HTTP server mode (`--server`) and web endpoints.
-- `--features http-pull` enables HTTP pull sources (maps to `obzenflow_infra/reqwest-client`).
-- Full feature matrix and injection points: `crates/obzenflow_infra/README.md`
-
-### Monitoring (optional)
-
-Start the local Prometheus + Grafana stack:
-
-```bash
-cd monitoring
-./setup.sh
-```
-
-Details: `monitoring/README.md`
+An optional Prometheus + Grafana monitoring stack is available in `monitoring/` (see `monitoring/README.md`).
 
 ## Project organization
 
@@ -104,8 +87,8 @@ ObzenFlow follows an onion architecture: `obzenflow_core` defines the business d
 Inner layers are intentionally generic (domain types + traits) and avoid I/O and runtime/framework integration. Outer layers provide concrete implementations (journals, web/HTTP, middleware/exporters) and wire them into runtime services via traits and composition.
 
 - `crates/obzenflow_core/README.md`: core domain types + stable interfaces (events, journals, contracts, middleware ports)
-- `crates/obzenflow_runtime_services/README.md`: stage execution + supervisors + runtime orchestration (the engine)
-- `crates/obzenflow_dsl_infra/README.md`: the `flow!` DSL and how it builds a runnable flow graph (including middleware resolution)
+- `crates/obzenflow_runtime/README.md`: stage execution + supervisors + runtime orchestration (the engine)
+- `crates/obzenflow_dsl/README.md`: the `flow!` DSL and how it builds a runnable flow graph (including middleware resolution)
 - `crates/obzenflow_infra/README.md`: `FlowApplication` + journaling/web/HTTP implementations, mostly behind feature flags
 - `crates/obzenflow_adapters/README.md`: middleware + concrete sources/sinks (connectors) intended to be composed into flows
 

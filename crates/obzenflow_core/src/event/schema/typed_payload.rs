@@ -43,7 +43,7 @@ pub trait TypedPayload: Serialize + DeserializeOwned + Sized {
     ///
     /// Increment this when making backward-compatible changes:
     /// - Adding optional fields
-    /// - Adding enum variants (with #[non_exhaustive])
+    /// - Adding enum variants (with `#[non_exhaustive]`)
     /// - Relaxing validation
     ///
     /// Breaking changes require a new event type with a semantic name change.

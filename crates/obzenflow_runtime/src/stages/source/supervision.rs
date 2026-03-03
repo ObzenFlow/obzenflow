@@ -4,8 +4,8 @@
 
 //! Shared supervision helpers for source supervisors (finite/infinite, sync/async).
 //!
-//! Phase 5 (FLOWIP-051m-part-2): reduce duplication in source supervisors while
-//! preserving responsiveness and backpressure semantics.
+//! Reduces duplication across source supervisors while preserving
+//! responsiveness and backpressure semantics.
 
 use crate::backpressure::BackpressureWriter;
 use crate::metrics::instrumentation::StageInstrumentation;

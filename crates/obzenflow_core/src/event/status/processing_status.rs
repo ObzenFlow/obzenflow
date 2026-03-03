@@ -5,7 +5,7 @@
 //! Processing outcome types
 //!
 //! Defines the possible outcomes of processing an event, including
-//! structured error classification via `ErrorKind` (FLOWIP-082h).
+//! structured error classification via `ErrorKind`.
 
 use serde::{Deserialize, Serialize};
 

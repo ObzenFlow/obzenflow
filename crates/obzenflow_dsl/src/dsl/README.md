@@ -1,15 +1,15 @@
 # DSL Build Pipeline (design notes)
 
-This document holds the detailed “how it works” diagrams for `obzenflow_dsl_infra`. The crate-level `README.md` intentionally keeps the architecture overview lightweight.
+This document holds the detailed “how it works” diagrams for `obzenflow_dsl`. The crate-level `README.md` intentionally keeps the architecture overview lightweight.
 
 ## Layering overview
 
 ```mermaid
 flowchart LR
   Core["obzenflow_core<br/>(domain types + traits)"]
-  Runtime["obzenflow_runtime_services<br/>(supervised execution + stage builders)"]
+  Runtime["obzenflow_runtime<br/>(supervised execution + stage builders)"]
   Adapters["obzenflow_adapters<br/>(middleware + exporters + integrations)"]
-  DSL["obzenflow_dsl_infra<br/>(flow! + composition root)"]
+  DSL["obzenflow_dsl<br/>(flow! + composition root)"]
   Infra["obzenflow_infra<br/>(journal implementations, app runner)"]
   Topology["obzenflow-topology<br/>(graph validation + SCC/cycles)"]
 

@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Accumulating and Emitting state event loops for the stateful supervisor (FLOWIP-051m).
+//! Accumulating and Emitting state event loops for the stateful supervisor
 
 use crate::messaging::PollResult;
 use crate::metrics::instrumentation::process_with_instrumentation_no_count;

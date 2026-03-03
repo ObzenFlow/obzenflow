@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! HTTP Pull Decoder Examples (FLOWIP-084e).
+//! HTTP Pull Decoder Examples
 //!
 //! Run with:
 //! `cargo run -p obzenflow_adapters --example http_pull_decoders`

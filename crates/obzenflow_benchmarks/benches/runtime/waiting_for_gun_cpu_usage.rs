@@ -5,7 +5,7 @@
 //! WaitingForGun CPU Usage Benchmark
 //!
 //! Measures CPU usage while the pipeline is materialized but not started.
-//! This specifically targets FLOWIP-086i’s “pure wait” busy-spin scenarios
+//! This specifically targets “pure wait” busy-spin scenarios
 //! (notably sources in `WaitingForGun`).
 
 use async_trait::async_trait;

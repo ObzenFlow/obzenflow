@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Token estimation primitives (FLOWIP-086x).
+//! Token estimation primitives
 //!
 //! This module provides a lightweight token estimation layer that can be used
 //! by higher-level components (context packing, map-reduce splitting, token

@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Backpressure contracts (FLOWIP-086k)
+//! Backpressure contracts
 //!
 //! Phase 1 implementation: in-process, per-edge, consumption-driven credits.
 //! - Credits are replenished when downstream acks consumption of *data* events.

@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Disk-backed replay archive implementation (FLOWIP-095a).
+//! Disk-backed replay archive implementation
 //!
 //! This is an outer-layer implementation that reads `run_manifest.json` and
 //! archived disk journals, exposed to runtime services via the `ReplayArchive`

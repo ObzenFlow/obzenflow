@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Adapter sinks (FLOWIP-083 series).
+//! Adapter sinks
 
 pub mod console;
 pub mod csv;

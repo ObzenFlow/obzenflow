@@ -21,15 +21,15 @@
 //! 4. Second middleware's `post_handle`
 //! 5. First middleware's `post_handle`
 //!
-//! ## Monitoring with FLOWIP-056-666
+//! ## Monitoring
 //!
-//! With FLOWIP-056-666 Wide Events, monitoring is no longer implemented as middleware.
+//! With Wide Events, monitoring is no longer implemented as middleware.
 //! Instead, metrics are automatically derived from the event journal by MetricsAggregator.
 //!
 //! The monitoring taxonomies (RED, USE, Golden Signals, SAAFE) are now documentation-only
 //! and provide Prometheus queries and Grafana dashboards for viewing metrics.
 //!
-//! ```rust
+//! ```text
 //! // OLD: Monitoring middleware (no longer available)
 //! // let red_middleware = RED::monitoring();
 //!
