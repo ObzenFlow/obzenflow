@@ -10,31 +10,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.1.2] - 2026-03-04
 
 ### Changed
-- Trimmed internal crate READMEs for cleaner docs.rs landing pages; extracted architecture detail to `obzenflow-meta/docs-seed/` as seeds for future documentation
-- Rewrote facade `lib.rs` with comprehensive FlowApplication anatomy guide, including domain types, handlers, flow! block sections, and end-to-end example
-- Added usage examples to all 10 stage descriptor macros (`source!`, `transform!`, `sink!`, `stateful!`, `join!`, and async variants)
-- Added `homepage = "https://obzenflow.dev"` to workspace metadata for improved crates.io listing
-
-### Fixed
-- Resolved all rustdoc warnings across the workspace (backtick escaping, `ignore` to `text` on non-compilable code blocks)
-- Removed `FLOWIP-xxx` references from `//!` module doc comments across all published crates (meaningless to external users)
-- Fixed stale crate name references (`obzenflow_runtime_services` to `obzenflow_runtime`, `obzenflow_dsl_infra` to `obzenflow_dsl`)
-- Fixed root `LICENSE-APACHE` drift from sub-crate copies (removed unused APPENDIX boilerplate section)
-
-### Added
-- CI license file validation step: checks presence, byte-identity across crates, and copyright year consistency between SPDX headers and LICENSE-MIT
-- `#![doc = include_str!("../README.md")]` on all six published crate `lib.rs` files so READMEs serve as docs.rs landing pages
-- Module docs for `src/sources.rs`, `src/sinks.rs`, and `obzenflow_runtime::prelude`
-
-### Removed
-- Verbose maintainer-oriented content from internal crate READMEs (preserved in `obzenflow-meta/docs-seed/`)
+- Improved rustdoc and crate READMEs across all published crates
+- Added `homepage` field to workspace metadata
+- Added CI license file validation step
 
 ## [0.1.1] - 2026-03-01
 
 ### Changed
-- Established deliberate naming convention: standalone published crates use hyphens (`obzenflow-fsm`, `obzenflow-topology`, `obzenflow-idkit`), internal implementation crates use underscores (`obzenflow_core`, `obzenflow_runtime`, `obzenflow_adapters`, `obzenflow_dsl`, `obzenflow_infra`) to visually signal they are not intended for direct dependency
-- Governance files (TRADEMARKS.md, DCO.md, CONTRIBUTING.md, NOTICE, licence files) included in every workspace crate directory so they ship in each published tarball
-- NOTICE files updated to "ObzenFlow Contributors" copyright holder
+- Governance files included in every published crate tarball
+- Established underscore naming convention for internal workspace crates
 
 ## [0.1.0] - 2026-03-01
 
