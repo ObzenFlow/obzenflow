@@ -192,6 +192,89 @@ jobs:
           print(f"SPDX headers OK in {len(files)} Rust files")
           PY
 
+      - name: Verify license files
+        run: |
+          python3 - <<'PY'
+          from __future__ import annotations
+
+          import glob
+          import re
+          import sys
+          from pathlib import Path
+
+          REQUIRED = ["LICENSE-MIT", "LICENSE-APACHE", "NOTICE"]
+          root = Path(".")
+          errors: list[str] = []
+
+          # --- 1. Discover crate directories dynamically ---
+          crate_dirs = sorted(
+              Path(p).parent for p in glob.glob("crates/*/Cargo.toml")
+          )
+          if not crate_dirs:
+              print("No crates found under crates/*/Cargo.toml")
+              sys.exit(1)
+
+          # --- 2. Presence check ---
+          for name in REQUIRED:
+              if not (root / name).is_file():
+                  errors.append(f"Missing root {name}")
+
+          for crate_dir in crate_dirs:
+              for name in REQUIRED:
+                  if not (crate_dir / name).is_file():
+                      errors.append(f"Missing {crate_dir / name}")
+
+          # --- 3. Byte-identity check ---
+          for crate_dir in crate_dirs:
+              for name in REQUIRED:
+                  root_file = root / name
+                  crate_file = crate_dir / name
+                  if root_file.is_file() and crate_file.is_file():
+                      if root_file.read_bytes() != crate_file.read_bytes():
+                          errors.append(
+                              f"{crate_file} differs from root {name}"
+                          )
+
+          # --- 4. Copyright year consistency ---
+          # Single source of truth: the SPDX header expected value (line 2 in
+          # the SPDX check above).
+          spdx_copyright = (
+              "// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors"
+          )
+          m = re.search(r"(\d{4}(?:-\d{4})?)", spdx_copyright)
+          if not m:
+              errors.append("Cannot extract year range from SPDX header")
+          else:
+              spdx_years = m.group(1)
+              mit = root / "LICENSE-MIT"
+              if mit.is_file():
+                  mit_lines = mit.read_text(encoding="utf-8").splitlines()
+                  if len(mit_lines) < 3:
+                      errors.append("LICENSE-MIT has fewer than 3 lines")
+                  else:
+                      cm = re.search(r"(\d{4}(?:-\d{4})?)", mit_lines[2])
+                      if not cm:
+                          errors.append(
+                              "Cannot extract year from LICENSE-MIT line 3"
+                          )
+                      elif cm.group(1) != spdx_years:
+                          errors.append(
+                              f"Year mismatch: SPDX header has {spdx_years}, "
+                              f"LICENSE-MIT line 3 has {cm.group(1)}"
+                          )
+
+          if errors:
+              print("License file check failed:")
+              for e in errors:
+                  print(f"  - {e}")
+              sys.exit(1)
+
+          print(
+              f"License files OK: {len(REQUIRED)} files verified across "
+              f"root + {len(crate_dirs)} crate(s)"
+          )
+          PY
+
       - name: Verify supervised_base sealing
         run: |
           ! grep -n '^pub mod base;' crates/obzenflow_runtime/src/supervised_base/mod.rs
