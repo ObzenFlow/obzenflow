@@ -541,7 +541,6 @@ pub fn run_example() -> Result<()> {
     };
 
     obzenflow_infra::application::FlowApplication::builder()
-        .with_console_subscriber()
         .with_log_level(obzenflow_infra::application::LogLevel::Info)
         .run_blocking(flow)?;
 

@@ -20,6 +20,7 @@
 //! Run with: `cargo run -p obzenflow --example char_transform`
 
 use anyhow::Result;
+use obzenflow_adapters::middleware::rate_limit;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, stateful, transform};
 use obzenflow_infra::application::{FlowApplication, LogLevel};
@@ -30,6 +31,8 @@ use obzenflow_runtime::stages::transform::MapTyped;
 // FLOWIP-080j: Typed stateful accumulators
 use obzenflow_runtime::stages::stateful::strategies::accumulators::ReduceTyped;
 use serde::{Deserialize, Serialize};
+
+const CHAR_TRANSFORM_RATE_LIMIT: f64 = 10.0;
 
 // FLOWIP-080h & FLOWIP-082a: Domain types for type-safe transformations
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -130,6 +133,7 @@ async fn main() -> Result<()> {
     println!("Demonstrating:");
     println!("  • Character-level processing with StatefulHandler");
     println!("  • Capitalize letters + convert digits to words");
+    println!("  • Flow-level middleware with a gentle rate limit");
     println!("  • Clean accumulation and transformation pattern\n");
     println!("Input sentences:");
     println!("  1. \"hello 2024 world!\"");
@@ -140,12 +144,13 @@ async fn main() -> Result<()> {
     let char_events = build_char_events(&sentences);
 
     FlowApplication::builder()
-        .with_console_subscriber()
         .with_log_level(LogLevel::Info)
         .run_async(flow! {
             name: "char_transform",
             journals: disk_journals(std::path::PathBuf::from("target/char-transform-logs")),
-            middleware: [],
+            middleware: [
+                rate_limit(CHAR_TRANSFORM_RATE_LIMIT)
+            ],
 
             stages: {
                 // FLOWIP-081: Typed finite sources (no WriterId/ChainEvent boilerplate)

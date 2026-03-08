@@ -231,10 +231,52 @@ impl<H: AsyncFiniteSourceHandler> AsyncFiniteSourceHandler for MiddlewareAsyncFi
 
         let mut ctx = MiddlewareContext::new();
 
-        // Phase 0: gating middleware (CB + flow_control + rate_limiter) before polling.
+        // Phase 0a: circuit breaker pre-handle (must run before polling).
+        for middleware in self.middleware_chain.iter() {
+            if middleware.middleware_name() != "circuit_breaker" {
+                continue;
+            }
+
+            match middleware.pre_handle(&synthetic_event, &mut ctx) {
+                MiddlewareAction::Continue => continue,
+                MiddlewareAction::Skip(mut results) => {
+                    backoff_on_cb_rejection_async(&ctx).await;
+
+                    // Pre-write enrichment for skip results
+                    for result in &mut results {
+                        for mw in self.middleware_chain.iter() {
+                            mw.pre_write(result, &ctx);
+                        }
+                    }
+
+                    // Append control events
+                    let mut control_events = std::mem::take(&mut ctx.control_events);
+                    for control_event in &mut control_events {
+                        for mw in self.middleware_chain.iter() {
+                            mw.pre_write(control_event, &ctx);
+                        }
+                    }
+                    results.extend(control_events);
+
+                    if results.iter().any(|e| e.is_data()) {
+                        self.empty_poll_backoff.reset();
+                    }
+
+                    return Ok(Some(results));
+                }
+                MiddlewareAction::Abort => return Ok(Some(Vec::new())),
+            }
+        }
+
+        // Phase 0b: flow-control / rate-limiter gating before polling.
+        //
+        // Keep these before `inner.next()` for async finite sources so we still gate the
+        // underlying IO. If the poll later returns `Ok(None)`, we discard any control events
+        // emitted here so the final completion poll cannot keep the supervisor alive forever.
+        let completion_control_base = ctx.control_events.len();
         for middleware in self.middleware_chain.iter() {
             let name = middleware.middleware_name();
-            if name != "circuit_breaker" && name != "rate_limiter" && name != "flow_control" {
+            if name != "rate_limiter" && name != "flow_control" {
                 continue;
             }
 
@@ -242,7 +284,6 @@ impl<H: AsyncFiniteSourceHandler> AsyncFiniteSourceHandler for MiddlewareAsyncFi
                 MiddlewareAction::Continue => continue,
                 MiddlewareAction::Skip(mut results) => {
                     match name {
-                        "circuit_breaker" => backoff_on_cb_rejection_async(&ctx).await,
                         "flow_control" => {
                             let backoff = self.empty_poll_backoff.next_backoff();
                             tokio::time::sleep(backoff).await;
@@ -293,8 +334,11 @@ impl<H: AsyncFiniteSourceHandler> AsyncFiniteSourceHandler for MiddlewareAsyncFi
             None => self.inner.next().await,
         };
 
-        // Completion short-circuit: flush control events before EOF.
+        // Completion short-circuit: do not let pre-poll non-CB control events re-arm
+        // completion for an exhausted source.
         if matches!(inner_result, Ok(None)) {
+            ctx.control_events.truncate(completion_control_base);
+
             // Give circuit breaker a chance to settle probe state (HalfOpen).
             for middleware in self
                 .middleware_chain
@@ -1065,11 +1109,17 @@ impl<H: InfiniteSourceHandler> InfiniteSourceMiddlewareBuilder<H> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::middleware::control::circuit_breaker::CircuitBreakerMiddleware;
+    use crate::middleware::control::{
+        circuit_breaker::CircuitBreakerMiddleware, ControlMiddlewareAggregator,
+        RateLimiterFactory,
+    };
+    use crate::middleware::MiddlewareFactory;
     use async_trait::async_trait;
     use obzenflow_core::event::status::processing_status::ErrorKind;
     use obzenflow_core::event::status::processing_status::ProcessingStatus;
     use obzenflow_core::StageId;
+    use obzenflow_runtime::pipeline::config::StageConfig;
+    use serde_json::json;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
@@ -1244,6 +1294,80 @@ mod tests {
             calls.load(Ordering::SeqCst),
             1,
             "breaker should prevent further inner.next() calls while Open"
+        );
+    }
+
+    #[derive(Clone, Debug)]
+    struct SingleEventAsyncFiniteSource {
+        calls: Arc<AtomicUsize>,
+        writer_id: WriterId,
+    }
+
+    #[async_trait]
+    impl AsyncFiniteSourceHandler for SingleEventAsyncFiniteSource {
+        fn bind_writer_id(&mut self, id: WriterId) {
+            self.writer_id = id;
+        }
+
+        async fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            if call == 0 {
+                return Ok(Some(vec![ChainEventFactory::data_event(
+                    self.writer_id,
+                    "test.event",
+                    json!({ "call": call }),
+                )]));
+            }
+
+            Ok(None)
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn async_finite_source_completion_is_not_rearmed_by_rate_limiter_control_events() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let stage_id = StageId::new();
+        let writer_id = WriterId::from(stage_id);
+
+        let inner = SingleEventAsyncFiniteSource {
+            calls: calls.clone(),
+            writer_id,
+        };
+
+        let config = StageConfig {
+            stage_id,
+            name: "async_finite_rate_limited_source".to_string(),
+            flow_name: "source_middleware_tests".to_string(),
+            cycle_guard: None,
+        };
+        let rate_limiter = RateLimiterFactory::new(20.0)
+            .with_burst(1.0)
+            .create(&config, Arc::new(ControlMiddlewareAggregator::new()));
+
+        let mut wrapped = MiddlewareAsyncFiniteSource::new(inner, writer_id)
+            .with_middleware(rate_limiter);
+
+        let first = wrapped
+            .next()
+            .await
+            .expect("first async finite source poll should succeed");
+        assert!(
+            first.as_ref().is_some_and(|events| events.iter().any(ChainEvent::is_data)),
+            "first poll should produce a data event"
+        );
+
+        let second = tokio::time::timeout(Duration::from_secs(1), wrapped.next())
+            .await
+            .expect("completion poll should not hang")
+            .expect("completion poll should not propagate SourceError");
+        assert!(
+            second.is_none(),
+            "completion poll should return None instead of synthetic control events"
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "expected exactly one data poll followed by one completion poll"
         );
     }
 

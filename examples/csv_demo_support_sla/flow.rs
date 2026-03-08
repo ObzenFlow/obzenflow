@@ -176,7 +176,6 @@ pub fn run_example() -> Result<()> {
     println!();
 
     FlowApplication::builder()
-        .with_console_subscriber()
         .with_log_level(LogLevel::Info)
         .run_blocking(build_flow(customers, tickets, output_sink, journals_dir))?;
 

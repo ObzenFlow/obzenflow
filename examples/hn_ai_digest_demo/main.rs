@@ -37,6 +37,7 @@
 //! - `HN_MAX_STORIES=30` (default 30)
 //! - `HN_LIVE=1` (default 0)
 //! - `HN_POLL_TIMEOUT_SECS=120` (default 120)
+//! - `HN_SOURCE_RATE_LIMIT=10.0` (default 10.0 events/sec)
 //!
 //! Optional env vars (AI):
 //! - `HN_AI_PROVIDER=ollama|openai` (default `ollama`)

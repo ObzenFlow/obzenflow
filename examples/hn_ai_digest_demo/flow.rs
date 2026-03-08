@@ -14,6 +14,7 @@ use obzenflow::ai::{
 };
 use obzenflow::sinks::ConsoleSink;
 use obzenflow::sources::{HeaderMap, HttpPullConfig, HttpPullSource, Url};
+use obzenflow_adapters::middleware::rate_limit;
 use obzenflow_adapters::middleware::control::ai_circuit_breaker;
 use obzenflow_core::event::chain_event::ChainEventFactory;
 use obzenflow_core::event::status::processing_status::ErrorKind;
@@ -29,6 +30,12 @@ use obzenflow_runtime::stages::transform::TryMapWith;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Duration;
+
+const DEFAULT_HN_SOURCE_RATE_LIMIT: f64 = 10.0;
+
+fn env_f64(key: &str) -> Option<f64> {
+    std::env::var(key).ok().and_then(|v| v.parse().ok())
+}
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct HnTopStories {
@@ -157,6 +164,10 @@ async fn run_example_async() -> Result<()> {
     let max_stories = env_usize("HN_MAX_STORIES").unwrap_or(30);
     let poll_timeout_secs = env_usize("HN_POLL_TIMEOUT_SECS").unwrap_or(120);
     let live = env_bool("HN_LIVE").unwrap_or(false);
+    let source_rate_limit = env_f64("HN_SOURCE_RATE_LIMIT").unwrap_or(DEFAULT_HN_SOURCE_RATE_LIMIT);
+    if source_rate_limit <= 0.0 {
+        return Err(anyhow!("HN_SOURCE_RATE_LIMIT must be greater than zero"));
+    }
 
     let mut _mock_server = None;
     let (base_url, mode_label) = if live {
@@ -234,6 +245,9 @@ async fn run_example_async() -> Result<()> {
         None => println!("  group_max_stories: unlimited"),
         Some(v) => println!("  group_max_stories: {v}"),
     }
+    println!(
+        "  source_rate_limit: {source_rate_limit} events/sec"
+    );
     println!();
 
     let decoder = HnStoryDecoder::new(base_url, max_stories);
@@ -504,7 +518,6 @@ async fn run_example_async() -> Result<()> {
         .with_estimator(estimator.clone());
 
     FlowApplication::builder()
-        .with_console_subscriber()
         .with_log_level(LogLevel::Info)
         .run_async(flow! {
             name: "hn_ai_digest_demo",
@@ -515,7 +528,9 @@ async fn run_example_async() -> Result<()> {
                 source = async_source!("hn_stories" => (
                     HttpPullSource::new(decoder, config),
                     Some(Duration::from_secs(poll_timeout_secs as u64))
-                ));
+                ), [
+                    rate_limit(source_rate_limit)
+                ]);
                 formatter = transform!("formatter" => formatter);
                 batch = stateful!("batch" => digest_seed);
                 split = transform!("split_to_budget" => splitter);

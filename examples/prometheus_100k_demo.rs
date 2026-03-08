@@ -184,14 +184,11 @@ fn main() -> Result<()> {
     println!("Usage:");
     println!("  Basic:              cargo run --package obzenflow --example prometheus_100k_demo");
     println!("  With metrics:       cargo run --package obzenflow --example prometheus_100k_demo --features obzenflow_infra/warp-server -- --server");
-    println!("  With console:       cargo run --package obzenflow --example prometheus_100k_demo --features console,obzenflow_infra/warp-server -- --server");
     println!("  Custom port:        cargo run --package obzenflow --example prometheus_100k_demo --features obzenflow_infra/warp-server -- --server --server-port 8080");
     println!();
 
-    // Use FlowApplication builder - handles runtime, observability, and features automatically
-    // No #[cfg] needed! with_console_subscriber() is a no-op if 'console' feature is disabled
+    // Use FlowApplication builder - handles runtime, observability, and features automatically.
     FlowApplication::builder()
-        .with_console_subscriber()  // Enables tokio-console if --features console is used
         .with_log_level(obzenflow_infra::application::LogLevel::Info)
         .run_blocking(flow! {
             name: "prometheus_100k_demo",

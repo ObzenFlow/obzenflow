@@ -6,25 +6,25 @@
 //!
 //! A curl-friendly end-to-end demo that uses:
 //! - HTTP ingestion (push-based source)
-//! - Join stage (accounts as reference catalog; transactions as stream)
-//! - Stateful stage (materializes a checkbook snapshot per tx)
+//! - Join stage (accounts as reference catalog; ledger entries as stream)
+//! - Stateful stage (materializes a checkbook snapshot per posted entry)
 //! - Console sink (prints balances + a transaction table)
 //!
 //! Run with:
 //! `cargo run -p obzenflow --example http_ingestion_piggy_bank_demo --features obzenflow_infra/warp-server -- --server --server-port 9090`
 //!
-//! 1) Create accounts (reference side; required before transactions):
-//!    `curl -XPOST http://127.0.0.1:9090/api/bank/accounts/events -H 'content-type: application/json' -d '{"event_type":"bank.account","data":{"account_id":"acct-1","owner":"Alice","initial_balance_cents":1000}}'`
-//!    `curl -XPOST http://127.0.0.1:9090/api/bank/accounts/events -H 'content-type: application/json' -d '{"event_type":"bank.account","data":{"account_id":"acct-2","owner":"Bob","initial_balance_cents":0}}'`
+//! 1) Open accounts (reference side; required before ledger entries):
+//!    `curl -XPOST http://127.0.0.1:9090/api/bank/accounts/events -H 'content-type: application/json' -d '{"event_type":"bank.account_opened","data":{"account_id":"acct-1","owner":"Alice","initial_balance_cents":1000}}'`
+//!    `curl -XPOST http://127.0.0.1:9090/api/bank/accounts/events -H 'content-type: application/json' -d '{"event_type":"bank.account_opened","data":{"account_id":"acct-2","owner":"Bob","initial_balance_cents":0}}'`
 //!
-//! 2) Post transactions (stream side):
-//!    `curl -XPOST http://127.0.0.1:9090/api/bank/tx/events -H 'content-type: application/json' -d '{"event_type":"bank.tx","data":{"account_id":"acct-1","delta_cents":250,"note":"paycheck"}}'`
-//!    `curl -XPOST http://127.0.0.1:9090/api/bank/tx/events -H 'content-type: application/json' -d '{"event_type":"bank.tx","data":{"account_id":"acct-1","delta_cents":-99,"note":"coffee"}}'`
+//! 2) Post credits and debits (stream side):
+//!    `curl -XPOST http://127.0.0.1:9090/api/bank/tx/events -H 'content-type: application/json' -d '{"event_type":"bank.ledger_entry","data":{"account_id":"acct-1","kind":"Credit","amount_cents":250,"note":"paycheck"}}'`
+//!    `curl -XPOST http://127.0.0.1:9090/api/bank/tx/events -H 'content-type: application/json' -d '{"event_type":"bank.ledger_entry","data":{"account_id":"acct-1","kind":"Debit","amount_cents":99,"note":"coffee"}}'`
 //!
 //! Notes:
-//! - Transactions for unknown accounts are dropped until the account exists.
+//! - Entries for unknown accounts are dropped until the account exists.
 //! - Accounts can be submitted at any time; the join catalog updates continuously.
-//! - The stateful stage emits a `bank.checkbook` snapshot for every accepted transaction.
+//! - The stateful stage emits a `bank.checkbook` snapshot for every posted entry.
 //! - The `{accepted,rejected}` response is per-request (single POST => accepted=1). For cumulative counts, check `/metrics`.
 
 use anyhow::Result;
@@ -48,47 +48,64 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+// ---------------------------------------------------------------------------
+// Domain events
+// ---------------------------------------------------------------------------
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct BankAccount {
+struct AccountOpened {
     account_id: String,
     owner: String,
     initial_balance_cents: i64,
 }
 
-impl TypedPayload for BankAccount {
-    const EVENT_TYPE: &'static str = "bank.account";
+impl TypedPayload for AccountOpened {
+    const EVENT_TYPE: &'static str = "bank.account_opened";
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+enum EntryKind {
+    Credit,
+    Debit,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct BankTransaction {
+struct LedgerEntry {
     account_id: String,
-    delta_cents: i64,
+    kind: EntryKind,
+    amount_cents: u64,
     #[serde(default)]
     note: Option<String>,
 }
 
-impl TypedPayload for BankTransaction {
-    const EVENT_TYPE: &'static str = "bank.tx";
+impl TypedPayload for LedgerEntry {
+    const EVENT_TYPE: &'static str = "bank.ledger_entry";
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct EnrichedBankTransaction {
+struct PostedEntry {
     account_id: String,
     owner: String,
+    kind: EntryKind,
+    amount_cents: u64,
     initial_balance_cents: i64,
-    delta_cents: i64,
     #[serde(default)]
     note: Option<String>,
 }
 
-impl TypedPayload for EnrichedBankTransaction {
-    const EVENT_TYPE: &'static str = "bank.tx_enriched";
+impl TypedPayload for PostedEntry {
+    const EVENT_TYPE: &'static str = "bank.posted_entry";
 }
+
+// ---------------------------------------------------------------------------
+// Projection types
+// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct CheckbookEntry {
     index: u64,
-    delta_cents: i64,
+    kind: EntryKind,
+    amount_cents: u64,
     balance_cents: i64,
     #[serde(default)]
     note: Option<String>,
@@ -108,6 +125,10 @@ struct CheckbookSnapshot {
 impl TypedPayload for CheckbookSnapshot {
     const EVENT_TYPE: &'static str = "bank.checkbook";
 }
+
+// ---------------------------------------------------------------------------
+// Stateful handler — accumulates posted entries into a checkbook projection
+// ---------------------------------------------------------------------------
 
 #[derive(Clone, Debug, Default)]
 struct CheckbookState {
@@ -142,43 +163,53 @@ impl StatefulHandler for Checkbook {
     type State = CheckbookState;
 
     fn accumulate(&mut self, state: &mut Self::State, event: ChainEvent) {
-        let Some(tx) = EnrichedBankTransaction::from_event(&event) else {
+        let Some(entry) = PostedEntry::from_event(&event) else {
             return;
         };
 
         let ledger = state
             .ledgers
-            .entry(tx.account_id.clone())
+            .entry(entry.account_id.clone())
             .or_insert_with(|| AccountLedger {
-                owner: tx.owner.clone(),
-                current_balance_cents: tx.initial_balance_cents,
+                owner: entry.owner.clone(),
+                current_balance_cents: entry.initial_balance_cents,
                 total_credits_cents: 0,
                 total_debits_cents: 0,
                 transactions: Vec::new(),
             });
 
-        ledger.owner = tx.owner.clone();
+        ledger.owner = entry.owner.clone();
 
-        if tx.delta_cents >= 0 {
-            ledger.total_credits_cents = ledger.total_credits_cents.saturating_add(tx.delta_cents);
-        } else {
-            ledger.total_debits_cents = ledger
-                .total_debits_cents
-                .saturating_add(tx.delta_cents.saturating_abs());
+        match entry.kind {
+            EntryKind::Credit => {
+                ledger.total_credits_cents = ledger
+                    .total_credits_cents
+                    .saturating_add(entry.amount_cents as i64);
+                ledger.current_balance_cents = ledger
+                    .current_balance_cents
+                    .saturating_add(entry.amount_cents as i64);
+            }
+            EntryKind::Debit => {
+                ledger.total_debits_cents = ledger
+                    .total_debits_cents
+                    .saturating_add(entry.amount_cents as i64);
+                ledger.current_balance_cents = ledger
+                    .current_balance_cents
+                    .saturating_sub(entry.amount_cents as i64);
+            }
         }
 
-        ledger.current_balance_cents = ledger.current_balance_cents.saturating_add(tx.delta_cents);
-
-        let entry = CheckbookEntry {
+        let checkbook_entry = CheckbookEntry {
             index: ledger.transactions.len() as u64 + 1,
-            delta_cents: tx.delta_cents,
+            kind: entry.kind,
+            amount_cents: entry.amount_cents,
             balance_cents: ledger.current_balance_cents,
-            note: tx.note,
+            note: entry.note,
         };
-        ledger.transactions.push(entry);
+        ledger.transactions.push(checkbook_entry);
 
         state.last_snapshot = Some(CheckbookSnapshot {
-            account_id: tx.account_id,
+            account_id: entry.account_id,
             owner: ledger.owner.clone(),
             current_balance_cents: ledger.current_balance_cents,
             available_balance_cents: ledger.current_balance_cents,
@@ -216,6 +247,10 @@ fn format_cents(cents: i64) -> String {
     format!("{sign}${}.{:02}", abs / 100, abs % 100)
 }
 
+fn format_unsigned_cents(cents: u64) -> String {
+    format!("${}.{:02}", cents / 100, cents % 100)
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // Required for --server mode (FlowApplication enforces metrics for extra endpoints).
@@ -224,7 +259,7 @@ async fn main() -> Result<()> {
     let accounts_config = IngestionConfig {
         base_path: "/api/bank/accounts".to_string(),
         validation: Some(ValidationConfig::Single {
-            validator: Arc::new(TypedValidator::<BankAccount>::new()),
+            validator: Arc::new(TypedValidator::<AccountOpened>::new()),
         }),
         ..Default::default()
     };
@@ -236,7 +271,7 @@ async fn main() -> Result<()> {
     let tx_config = IngestionConfig {
         base_path: "/api/bank/tx".to_string(),
         validation: Some(ValidationConfig::Single {
-            validator: Arc::new(TypedValidator::<BankTransaction>::new()),
+            validator: Arc::new(TypedValidator::<LedgerEntry>::new()),
         }),
         ..Default::default()
     };
@@ -248,20 +283,20 @@ async fn main() -> Result<()> {
     endpoints.extend(accounts_endpoints);
     endpoints.extend(tx_endpoints);
 
-    let join_handler =
-        InnerJoinBuilder::<BankAccount, BankTransaction, EnrichedBankTransaction>::new()
-            .catalog_key(|account: &BankAccount| account.account_id.clone())
-            .stream_key(|tx: &BankTransaction| tx.account_id.clone())
-            .live()
-            .build(
-                |account: BankAccount, tx: BankTransaction| EnrichedBankTransaction {
-                    account_id: tx.account_id,
-                    owner: account.owner,
-                    initial_balance_cents: account.initial_balance_cents,
-                    delta_cents: tx.delta_cents,
-                    note: tx.note,
-                },
-            );
+    let join_handler = InnerJoinBuilder::<AccountOpened, LedgerEntry, PostedEntry>::new()
+        .catalog_key(|account: &AccountOpened| account.account_id.clone())
+        .stream_key(|entry: &LedgerEntry| entry.account_id.clone())
+        .live()
+        .build(
+            |account: AccountOpened, entry: LedgerEntry| PostedEntry {
+                account_id: entry.account_id,
+                owner: account.owner,
+                kind: entry.kind,
+                amount_cents: entry.amount_cents,
+                initial_balance_cents: account.initial_balance_cents,
+                note: entry.note,
+            },
+        );
 
     FlowApplication::builder()
         .with_log_level(LogLevel::Info)
@@ -281,31 +316,37 @@ async fn main() -> Result<()> {
                 accounts = async_infinite_source!("accounts" => accounts_source);
                 tx = async_infinite_source!("tx" => tx_source);
 
-                enriched = join!("enriched" => with_ref!(accounts, join_handler));
+                posted = join!("posted" => with_ref!(accounts, join_handler));
 
                 checkbook = stateful!("checkbook" => Checkbook::new().with_emission(EmitAlways));
 
                 printer = sink!("printer" => ConsoleSink::<CheckbookSnapshot>::new(
                     SnapshotTableFormatter::new(
-                        &["#", "Δ", "Credit", "Debit", "Balance", "Note"],
+                        &["#", "Kind", "Amount", "Credit", "Debit", "Balance", "Note"],
                         |snapshot: &CheckbookSnapshot| {
                             snapshot
                                 .transactions
                                 .iter()
-                                .map(|tx| {
-                                    let (credit, debit) = match tx.delta_cents.cmp(&0) {
-                                        std::cmp::Ordering::Greater => (format_cents(tx.delta_cents), String::new()),
-                                        std::cmp::Ordering::Less => (String::new(), format_cents(tx.delta_cents.saturating_abs())),
-                                        std::cmp::Ordering::Equal => (String::new(), String::new()),
+                                .map(|entry| {
+                                    let amount = format_unsigned_cents(entry.amount_cents);
+                                    let (credit, debit) = match entry.kind {
+                                        EntryKind::Credit => (amount.clone(), String::new()),
+                                        EntryKind::Debit => (String::new(), amount.clone()),
+                                    };
+
+                                    let kind_label = match entry.kind {
+                                        EntryKind::Credit => "Credit",
+                                        EntryKind::Debit => "Debit",
                                     };
 
                                     vec![
-                                        tx.index.to_string(),
-                                        format_cents(tx.delta_cents),
+                                        entry.index.to_string(),
+                                        kind_label.to_string(),
+                                        amount,
                                         credit,
                                         debit,
-                                        format_cents(tx.balance_cents),
-                                        tx.note.as_deref().unwrap_or("").to_string(),
+                                        format_cents(entry.balance_cents),
+                                        entry.note.as_deref().unwrap_or("").to_string(),
                                     ]
                                 })
                                 .collect()
@@ -337,8 +378,8 @@ async fn main() -> Result<()> {
             },
 
             topology: {
-                tx |> enriched;
-                enriched |> checkbook;
+                tx |> posted;
+                posted |> checkbook;
                 checkbook |> printer;
             }
         })

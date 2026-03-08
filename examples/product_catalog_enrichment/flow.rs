@@ -219,7 +219,6 @@ pub fn run_example() -> Result<()> {
     println!("\n📂 Loading Reference Data (Dimensions)...\n");
 
     obzenflow_infra::application::FlowApplication::builder()
-        .with_console_subscriber()
         .with_log_level(obzenflow_infra::application::LogLevel::Info)
         .run_blocking(build_flow())?;
 
