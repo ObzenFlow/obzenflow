@@ -56,7 +56,7 @@ impl TypedPayload for LeaderboardUpdate {
 async fn main() -> Result<()> {
     std::env::set_var("OBZENFLOW_METRICS_EXPORTER", "console");
 
-    println!("🎮 FlowState RS - TopN Leaderboard Demo");
+    println!("🎮 ObzenFlow - TopN Leaderboard Demo");
     println!("=======================================");
     println!("✨ Using FLOWIP-080j TopNTyped & FLOWIP-082a TypedPayload");
     println!();

@@ -104,7 +104,7 @@ impl StatsDExporter {
         })
     }
 
-    /// Set metric name prefix (default: "flowstate.")
+    /// Set metric name prefix (defaults to the exporter's built-in prefix).
     pub fn with_prefix(mut self, prefix: impl Into<String>) -> Self {
         self.prefix = prefix.into();
         self

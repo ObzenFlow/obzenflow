@@ -12,6 +12,8 @@
 //! These route through `oversize_sub_split` → `oversize_map` (LLM) and feed a condensed result back
 //! into the main splitter via `<|`.
 //!
+//! Tutorials: `https://obzenflow.dev/tutorials/`
+//!
 //! Run (default: local mock HN server + Ollama; requires Ollama running):
 //! `cargo run -p obzenflow --example hn_ai_digest_demo --features "http-pull ai"`
 //!

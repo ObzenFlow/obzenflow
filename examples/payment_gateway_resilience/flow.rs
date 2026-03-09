@@ -416,7 +416,7 @@ fn build_glitchy_flow(config: GlitchyFlowConfig) -> obzenflow_dsl::FlowDefinitio
 
 #[cfg(not(test))]
 pub fn run_example() -> Result<()> {
-    println!("💳 FlowState RS - Payment Gateway Resilience Demo");
+    println!("💳 ObzenFlow - Payment Gateway Resilience Demo");
     println!("{}", "=".repeat(60));
     println!("This example shows how circuit breakers and rate limits");
     println!("work together to protect an unreliable dependency.");

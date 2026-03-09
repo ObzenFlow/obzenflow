@@ -2,10 +2,10 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! # Middleware System for FlowState
+//! # Middleware System for ObzenFlow
 //!
 //! This module provides a composable middleware system for adding cross-cutting
-//! concerns like monitoring, logging, rate limiting, and retries to your FlowState
+//! concerns like monitoring, logging, rate limiting, and retries to your ObzenFlow
 //! pipeline stages without modifying their core logic.
 //!
 //! ## Middleware Overview
@@ -39,7 +39,7 @@
 //!
 //! ## Available Monitoring Views
 //!
-//! FlowState provides several monitoring taxonomies as view definitions:
+//! ObzenFlow provides several monitoring taxonomies as view definitions:
 //!
 //! ### RED (Rate, Errors, Duration)
 //! Best for request/response systems and sources. Tracks:

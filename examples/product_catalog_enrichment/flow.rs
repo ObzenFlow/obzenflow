@@ -204,7 +204,7 @@ fn build_flow() -> obzenflow_dsl::FlowDefinition {
 
 #[cfg(not(test))]
 pub fn run_example() -> Result<()> {
-    println!("🛒 FlowState RS - Product Catalog Enrichment");
+    println!("🛒 ObzenFlow - Product Catalog Enrichment");
     println!("{}", "=".repeat(60));
     println!("✨ Demonstrating All Three Join Strategies:");
     println!("   • InnerJoin: Core dimension enrichment (Category→Product→SKU)");

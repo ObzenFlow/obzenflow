@@ -63,7 +63,7 @@ impl TypedPayload for TopProductsUpdate {
 async fn main() -> Result<()> {
     std::env::set_var("OBZENFLOW_METRICS_EXPORTER", "console");
 
-    println!("🛒 FlowState RS - E-commerce Top Products Analytics");
+    println!("🛒 ObzenFlow - E-commerce Top Products Analytics");
     println!("===================================================");
     println!("✨ Using FLOWIP-080j TopNByTyped & FLOWIP-082a TypedPayload");
     println!();

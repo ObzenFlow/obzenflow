@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! ChainEvent - the enhanced event structure for FlowState RS
+//! ChainEvent - the enhanced event structure for ObzenFlow
 //! This is the application-level event that lives inside EventEnvelope.data
 
 use crate::event::context::causality_context::CausalityContext;
@@ -16,7 +16,7 @@ use crate::id::{CycleDepth, SccId, StageId};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// The definitive event structure for FlowState RS
+/// The definitive event structure for ObzenFlow
 /// Lives inside EventEnvelope.data as serialized bytes
 /// Focuses on application concerns, NOT infrastructure concerns
 /// Designed to support CHAIN maturity model levels 1-4

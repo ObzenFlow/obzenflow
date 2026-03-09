@@ -4,7 +4,7 @@
 
 //! Tokio Worker Thread Experiment for 3-Stage Pipelines
 //!
-//! This benchmark investigates tokio scheduler behavior, NOT FlowState performance.
+//! This benchmark investigates tokio scheduler behavior, NOT ObzenFlow performance.
 //! It tests the hypothesis that tokio's default 4 worker threads create performance
 //! anomalies for pipelines with 3-4 concurrent tasks.
 //!

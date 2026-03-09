@@ -311,7 +311,7 @@ impl StatefulHandler for CarrierAggregator {
 pub async fn main() -> Result<()> {
     std::env::set_var("OBZENFLOW_METRICS_EXPORTER", "console");
 
-    println!("🛫 FlowState RS - Flight Delay Analysis");
+    println!("🛫 ObzenFlow - Flight Delay Analysis");
     println!("========================================");
     println!("✨ FLOWIP-082a: TypedPayload Event Schemas");
     println!("✨ FLOWIP-080l: Typed Join Helpers");
