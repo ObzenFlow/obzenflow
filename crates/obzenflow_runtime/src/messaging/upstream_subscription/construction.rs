@@ -92,12 +92,12 @@ where
 
         let mut readers = Vec::new();
 
-        tracing::info!(
+        tracing::debug!(
             "Creating subscription for {} upstream journals",
             upstream_journals.len()
         );
 
-        tracing::info!(
+        tracing::debug!(
             target: "flowip-080o",
             owner = owner_label,
             readers = ?upstream_journals
@@ -112,7 +112,7 @@ where
         {
             // Get journal ID for debugging
             let journal_id = journal.id();
-            tracing::info!(
+            tracing::debug!(
                 target: "flowip-080o",
                 stage_id = ?stage_id,
                 stage_name = stage_name,

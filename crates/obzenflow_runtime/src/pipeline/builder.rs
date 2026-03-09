@@ -244,13 +244,13 @@ impl SupervisorBuilder for PipelineBuilder {
         let system_id = SystemId::new();
 
         // DEBUG: Print topology information
-        tracing::info!("=== TOPOLOGY DEBUG ===");
+        tracing::debug!("=== TOPOLOGY DEBUG ===");
         let stages: Vec<_> = self.topology.stages().collect();
-        tracing::info!("Topology stages count: {}", stages.len());
+        tracing::debug!("Topology stages count: {}", stages.len());
         for stage in stages {
             let upstreams = self.topology.upstream_stages(stage.id);
             let downstreams = self.topology.downstream_stages(stage.id);
-            tracing::info!(
+            tracing::debug!(
                 "Stage '{}' (id={:?}): upstreams={:?}, downstreams={:?}",
                 stage.name,
                 stage.id,
@@ -258,7 +258,7 @@ impl SupervisorBuilder for PipelineBuilder {
                 downstreams
             );
         }
-        tracing::info!("=== END TOPOLOGY DEBUG ===");
+        tracing::debug!("=== END TOPOLOGY DEBUG ===");
 
         // Identify source stages (no upstreams)
         let expected_sources: Vec<StageId> = self
@@ -382,7 +382,7 @@ impl SupervisorBuilder for PipelineBuilder {
         let metrics_exporter = self.metrics_exporter.clone();
 
         // Spawn the supervisor task with proper FSM lifecycle
-        tracing::info!("About to create pipeline supervisor task");
+        tracing::debug!("About to create pipeline supervisor task");
 
         // Wrap the supervisor so external control events can be injected
         // consistently (FLOWIP-086i, FLOWIP-051m Phase 1c).
@@ -396,7 +396,7 @@ impl SupervisorBuilder for PipelineBuilder {
             "pipeline_supervisor",
         )
         .spawn(move || async move {
-            tracing::info!("Pipeline supervisor task starting");
+            tracing::debug!("Pipeline supervisor task starting");
 
             // Run the supervisor with FSM control
             let result = SelfSupervisedExt::run(
@@ -412,19 +412,19 @@ impl SupervisorBuilder for PipelineBuilder {
             }
             result
         });
-        tracing::info!("Pipeline supervisor task handle created");
+        tracing::debug!("Pipeline supervisor task handle created");
 
         // Give the supervisor task a chance to start before sending events
         tokio::task::yield_now().await;
-        tracing::info!("Yielded to allow pipeline supervisor to start");
+        tracing::debug!("Yielded to allow pipeline supervisor to start");
 
         // Send initial Materialize event to bootstrap the pipeline
-        tracing::info!("About to send Materialize event");
+        tracing::debug!("About to send Materialize event");
         event_sender
             .send(PipelineEvent::Materialize)
             .await
             .map_err(|_| BuilderError::Other("Failed to send materialize event".to_string()))?;
-        tracing::info!("Materialize event sent");
+        tracing::debug!("Materialize event sent");
 
         // Build the standard handle first
         let standard_handle = HandleBuilder::new()

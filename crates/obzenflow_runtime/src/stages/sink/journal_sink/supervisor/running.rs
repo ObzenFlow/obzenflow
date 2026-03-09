@@ -297,7 +297,7 @@ async fn dispatch_control_event<
                         );
                     }
                     None => {
-                        tracing::info!(
+                        tracing::debug!(
                             target: "flowip-080o",
                             stage_name = %ctx.stage_name,
                             event_type = envelope.event.event_type(),
@@ -342,7 +342,7 @@ async fn dispatch_control_event<
             let _ = subscription.take_last_eof_outcome();
 
             if let Some(outcome) = last_eof_outcome {
-                tracing::info!(
+                tracing::debug!(
                     target: "flowip-080o",
                     stage_name = %ctx.stage_name,
                     upstream_stage_id = ?outcome.stage_id,
@@ -356,7 +356,7 @@ async fn dispatch_control_event<
                 );
             }
 
-            tracing::info!(
+            tracing::debug!(
                 target: "flowip-080o",
                 stage_name = %ctx.stage_name,
                 "Sink EOF is final; triggering FSM transition to Drained"

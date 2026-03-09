@@ -350,14 +350,8 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
     }
 
     async fn write_completion_event(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let event = SystemEvent::stage_completed(self.stage_id);
-        if let Err(e) = self.system_journal.append(event, None).await {
-            tracing::error!(
-                stage_id = %self.stage_id,
-                journal_error = %e,
-                "Failed to write completion event; continuing without system journal entry"
-            );
-        }
+        // The FSM already emits terminal lifecycle events for both success and failure paths.
+        let _ = &self.system_journal;
         Ok(())
     }
 

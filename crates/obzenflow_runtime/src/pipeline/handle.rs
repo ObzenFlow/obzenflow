@@ -138,7 +138,7 @@ impl FlowHandle {
             "FlowHandle::start() - Current pipeline state: {:?}",
             current_state
         );
-        tracing::info!("FlowHandle::start() - Sending PipelineEvent::Run to start flow");
+        tracing::debug!("FlowHandle::start() - Sending PipelineEvent::Run to start flow");
         self.send_event(PipelineEvent::Run).await
     }
 
@@ -152,16 +152,16 @@ impl FlowHandle {
             "FlowHandle::run() - Current pipeline state: {:?}",
             current_state
         );
-        tracing::info!("FlowHandle::run() - Sending PipelineEvent::Run to start flow");
+        tracing::debug!("FlowHandle::run() - Sending PipelineEvent::Run to start flow");
         self.send_event(PipelineEvent::Run).await?;
-        tracing::info!("FlowHandle::run() - Run event sent, waiting for completion");
+        tracing::debug!("FlowHandle::run() - Run event sent, waiting for completion");
 
         // Capture state receiver before consuming self so we can inspect the terminal state
         let state_rx = self.state_receiver();
 
         // Now wait for it to complete
         let result = self.wait_for_completion().await;
-        tracing::info!(
+        tracing::debug!(
             "FlowHandle::run() - wait_for_completion returned: {:?}",
             result
         );

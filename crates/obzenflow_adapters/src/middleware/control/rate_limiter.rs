@@ -552,7 +552,7 @@ impl Middleware for RateLimiterMiddleware {
                 }
             }
 
-            info!(
+            debug!(
                 event_id = %event_id,
                 event_type = %event_type,
                 "Rate limit released - attempting to process event"

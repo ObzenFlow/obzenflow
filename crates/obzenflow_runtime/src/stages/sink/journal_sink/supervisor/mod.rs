@@ -345,31 +345,8 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
     }
 
     async fn write_completion_event(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let event = SystemEvent::stage_completed(self.stage_id);
-        tracing::info!(
-            target: "flowip-080o",
-            stage_name = %self.stage_name,
-            stage_id = ?self.stage_id,
-            "sink: HandlerSupervised writing stage_completed"
-        );
-
-        if let Err(e) = self.system_journal.append(event, None).await {
-            tracing::error!(
-                target: "flowip-080o",
-                stage_name = %self.stage_name,
-                stage_id = ?self.stage_id,
-                journal_error = %e,
-                "sink: HandlerSupervised failed to append stage_completed; continuing without system journal entry"
-            );
-        } else {
-            tracing::info!(
-                target: "flowip-080o",
-                stage_name = %self.stage_name,
-                stage_id = ?self.stage_id,
-                "sink: HandlerSupervised stage_completed append succeeded"
-            );
-        }
-
+        // The FSM already emits terminal lifecycle events for both success and failure paths.
+        let _ = (&self.system_journal, &self.stage_name);
         Ok(())
     }
 

@@ -167,7 +167,7 @@ pub trait HandlerSupervisedExt: HandlerSupervised {
                 }
 
                 EventLoopDirective::Transition(event) => {
-                    tracing::info!(
+                    tracing::trace!(
                         target: "flowip-080o",
                         iteration = loop_iteration,
                         event = ?event,
@@ -178,14 +178,14 @@ pub trait HandlerSupervisedExt: HandlerSupervised {
                         .await
                         .map_err(|e| format!("FSM error: {e}"))?;
 
-                    tracing::info!(
+                    tracing::trace!(
                         target: "flowip-080o",
                         iteration = loop_iteration,
                         action_count = actions.len(),
                         "HandlerSupervised: FSM returned actions, executing sequentially"
                     );
                     for (i, action) in actions.into_iter().enumerate() {
-                        tracing::info!(
+                        tracing::trace!(
                             target: "flowip-080o",
                             iteration = loop_iteration,
                             action_index = i,
@@ -235,14 +235,14 @@ pub trait HandlerSupervisedExt: HandlerSupervised {
                             // the appropriate terminal behaviour.
                             break;
                         }
-                        tracing::info!(
+                        tracing::trace!(
                             target: "flowip-080o",
                             iteration = loop_iteration,
                             action_index = i,
                             "HandlerSupervised: action completed"
                         );
                     }
-                    tracing::info!(
+                    tracing::trace!(
                         target: "flowip-080o",
                         iteration = loop_iteration,
                         "HandlerSupervised: all actions completed"
