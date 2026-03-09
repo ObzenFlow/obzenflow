@@ -29,8 +29,9 @@ pub use observability::{
 pub use ports::{ChatClient, EmbeddingClient};
 pub use structured_output::{StructuredOutputSchema, StructuredOutputSpec, ValidationHook};
 pub use token_estimation::{
-    remaining_budget, split_to_budget, EstimateSource, HeuristicTokenEstimator, SplitGroup,
-    TokenCount, TokenEstimate, TokenEstimationError, TokenEstimator,
+    remaining_budget, split_to_budget, EstimateSource, HeuristicTokenEstimator,
+    ResolvedTokenEstimator, SplitGroup, TokenCount, TokenEstimate, TokenEstimationError,
+    TokenEstimator, TokenEstimatorFallbackReason, TokenEstimatorResolutionInfo,
 };
 pub use types::{
     AiProvider, ChatMessage, ChatParams, ChatRequest, ChatResponse, ChatResponseFormat, ChatRole,

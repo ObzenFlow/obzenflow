@@ -13,5 +13,6 @@ pub use circuit_breaker::{
 };
 pub use provider::ControlMiddlewareAggregator;
 pub use rate_limiter::{
-    rate_limit, rate_limit_with_burst, RateLimiterFactory, RateLimiterMiddleware,
+    rate_limit, rate_limit_with_burst, RateLimiterBuilder, RateLimiterFactory,
+    RateLimiterMiddleware,
 };

@@ -18,7 +18,7 @@ use tokio::task::JoinHandle;
 /// Trait for handler-supervised components
 /// This ensures they provide handler access while still going through FSM
 #[async_trait::async_trait]
-pub trait HandlerSupervised: Supervisor {
+pub trait HandlerSupervised: Supervisor + Sync {
     type Handler: Send + Sync;
 
     /// Dispatch state logic with access to handler
@@ -35,8 +35,12 @@ pub trait HandlerSupervised: Supervisor {
     /// Get the stage ID for this component
     fn stage_id(&self) -> StageId;
 
-    /// Write a completion event when the stage terminates
-    async fn write_completion_event(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
+    /// Optional termination hook for components that need a final marker after the
+    /// FSM reaches a terminal state. Most stage supervisors rely on FSM-emitted
+    /// lifecycle events and therefore use the default no-op implementation.
+    async fn write_completion_event(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        Ok(())
+    }
 
     /// Map an action error into a stage-specific failure event.
     ///
@@ -167,7 +171,7 @@ pub trait HandlerSupervisedExt: HandlerSupervised {
                 }
 
                 EventLoopDirective::Transition(event) => {
-                    tracing::info!(
+                    tracing::trace!(
                         target: "flowip-080o",
                         iteration = loop_iteration,
                         event = ?event,
@@ -178,14 +182,14 @@ pub trait HandlerSupervisedExt: HandlerSupervised {
                         .await
                         .map_err(|e| format!("FSM error: {e}"))?;
 
-                    tracing::info!(
+                    tracing::trace!(
                         target: "flowip-080o",
                         iteration = loop_iteration,
                         action_count = actions.len(),
                         "HandlerSupervised: FSM returned actions, executing sequentially"
                     );
                     for (i, action) in actions.into_iter().enumerate() {
-                        tracing::info!(
+                        tracing::trace!(
                             target: "flowip-080o",
                             iteration = loop_iteration,
                             action_index = i,
@@ -235,14 +239,14 @@ pub trait HandlerSupervisedExt: HandlerSupervised {
                             // the appropriate terminal behaviour.
                             break;
                         }
-                        tracing::info!(
+                        tracing::trace!(
                             target: "flowip-080o",
                             iteration = loop_iteration,
                             action_index = i,
                             "HandlerSupervised: action completed"
                         );
                     }
-                    tracing::info!(
+                    tracing::trace!(
                         target: "flowip-080o",
                         iteration = loop_iteration,
                         "HandlerSupervised: all actions completed"

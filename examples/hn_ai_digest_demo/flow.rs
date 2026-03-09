@@ -9,12 +9,13 @@ use super::util::{env_bool, env_usize, truncate_chars};
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use obzenflow::ai::{
-    estimator_for_model, split_to_budget, ChatTransform, ChatTransformExt, EstimateSource,
+    resolve_estimator_for_model, split_to_budget, ChatTransform, ChatTransformExt, EstimateSource,
     SplitGroup, TokenCount, TokenEstimator,
 };
 use obzenflow::sinks::ConsoleSink;
 use obzenflow::sources::{HeaderMap, HttpPullConfig, HttpPullSource, Url};
 use obzenflow_adapters::middleware::control::ai_circuit_breaker;
+use obzenflow_adapters::middleware::RateLimiterBuilder;
 use obzenflow_core::event::chain_event::ChainEventFactory;
 use obzenflow_core::event::status::processing_status::ErrorKind;
 use obzenflow_core::{ChainEvent, TypedPayload};
@@ -29,6 +30,12 @@ use obzenflow_runtime::stages::transform::TryMapWith;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Duration;
+
+const DEFAULT_HN_SOURCE_RATE_LIMIT: f64 = 10.0;
+
+fn env_f64(key: &str) -> Option<f64> {
+    std::env::var(key).ok().and_then(|v| v.parse().ok())
+}
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct HnTopStories {
@@ -157,6 +164,10 @@ async fn run_example_async() -> Result<()> {
     let max_stories = env_usize("HN_MAX_STORIES").unwrap_or(30);
     let poll_timeout_secs = env_usize("HN_POLL_TIMEOUT_SECS").unwrap_or(120);
     let live = env_bool("HN_LIVE").unwrap_or(false);
+    let source_rate_limit = env_f64("HN_SOURCE_RATE_LIMIT").unwrap_or(DEFAULT_HN_SOURCE_RATE_LIMIT);
+    if source_rate_limit <= 0.0 {
+        return Err(anyhow!("HN_SOURCE_RATE_LIMIT must be greater than zero"));
+    }
 
     let mut _mock_server = None;
     let (base_url, mode_label) = if live {
@@ -214,7 +225,8 @@ async fn run_example_async() -> Result<()> {
         n => Some(n),
     };
 
-    let estimator: Arc<dyn TokenEstimator> = Arc::from(estimator_for_model(&ai_model_label));
+    let estimator_resolution = resolve_estimator_for_model(&ai_model_label);
+    let estimator = estimator_resolution.estimator();
 
     println!("HN AI Digest Demo (FLOWIP-086r)");
     println!("===============================");
@@ -228,12 +240,22 @@ async fn run_example_async() -> Result<()> {
     println!("  poll_timeout: {poll_timeout_secs}s");
     println!("  ai_provider: {ai_provider_label}");
     println!("  ai_model: {ai_model_label}");
-    println!("  token_estimator: {:?}", estimator.source());
+    println!("  token_estimator: {:?}", estimator_resolution.source());
+    if let Some(tokenizer_backend) = estimator_resolution.info().tokenizer_backend.as_deref() {
+        println!("  token_estimator_backend: {tokenizer_backend}");
+    }
+    if let Some(fallback_reason) = estimator_resolution.info().fallback_reason.as_ref() {
+        println!("  token_estimator_fallback_reason: {fallback_reason}");
+    }
+    if let Some(fallback_detail) = estimator_resolution.info().fallback_detail.as_deref() {
+        println!("  token_estimator_fallback_detail: {fallback_detail}");
+    }
     println!("  group_budget_tokens: {budget_per_group_tokens}");
     match max_stories_per_group {
         None => println!("  group_max_stories: unlimited"),
         Some(v) => println!("  group_max_stories: {v}"),
     }
+    println!("  source_rate_limit: {source_rate_limit} events/sec");
     println!();
 
     let decoder = HnStoryDecoder::new(base_url, max_stories);
@@ -365,7 +387,7 @@ async fn run_example_async() -> Result<()> {
             ))
         })
         .await?
-        .with_estimator(estimator.clone());
+        .with_resolved_estimator(estimator_resolution.clone());
 
     let map_router = HnDigestMapRouter::new(map_llm);
 
@@ -413,7 +435,7 @@ async fn run_example_async() -> Result<()> {
             ))
         })
         .await?
-        .with_estimator(estimator.clone());
+        .with_resolved_estimator(estimator_resolution.clone());
 
     let oversize_map_router = HnDigestOversizeMapRouter::new(oversize_map_llm);
 
@@ -501,10 +523,9 @@ async fn run_example_async() -> Result<()> {
             ))
         })
         .await?
-        .with_estimator(estimator.clone());
+        .with_resolved_estimator(estimator_resolution.clone());
 
     FlowApplication::builder()
-        .with_console_subscriber()
         .with_log_level(LogLevel::Info)
         .run_async(flow! {
             name: "hn_ai_digest_demo",
@@ -515,7 +536,9 @@ async fn run_example_async() -> Result<()> {
                 source = async_source!("hn_stories" => (
                     HttpPullSource::new(decoder, config),
                     Some(Duration::from_secs(poll_timeout_secs as u64))
-                ));
+                ), [
+                    RateLimiterBuilder::new(source_rate_limit).build()
+                ]);
                 formatter = transform!("formatter" => formatter);
                 batch = stateful!("batch" => digest_seed);
                 split = transform!("split_to_budget" => splitter);

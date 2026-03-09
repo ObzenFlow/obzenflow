@@ -286,7 +286,7 @@ impl StageResourcesBuilder {
                 })
                 .collect();
 
-            tracing::info!(
+            tracing::debug!(
                 target: "flowip-080o",
                 stage_name = %stage_info.name,
                 stage_id = ?stage_id,
@@ -302,7 +302,7 @@ impl StageResourcesBuilder {
                     let journal_opt = self.stage_journals.get(&upstream_id);
 
                     if let Some(journal) = journal_opt {
-                        tracing::info!(
+                        tracing::debug!(
                             target: "flowip-080o",
                             stage_name = %stage_info.name,
                             upstream_id = ?upstream_id,
@@ -411,7 +411,7 @@ impl StageResourcesBuilder {
                 replay_archive: self.replay_archive.clone(),
             };
 
-            tracing::info!(
+            tracing::debug!(
                 target: "flowip-080o",
                 stage_name = %stage_info.name,
                 stage_id = ?stage_id,

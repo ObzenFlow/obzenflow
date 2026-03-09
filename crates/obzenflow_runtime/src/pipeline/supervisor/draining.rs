@@ -170,7 +170,7 @@ pub(super) async fn dispatch_draining(
             idle_backoff().await;
             if supervisor.should_log_barrier() {
                 let snapshot = supervisor.barrier_snapshot(context);
-                tracing::info!(
+                tracing::debug!(
                     pending_stages = ?snapshot.pending_stages,
                     missing_contracts = ?snapshot.missing_contracts,
                     completed_stages = snapshot.completed,

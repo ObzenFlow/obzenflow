@@ -24,7 +24,7 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
-use obzenflow_adapters::middleware::rate_limit;
+use obzenflow_adapters::middleware::RateLimiterBuilder;
 use obzenflow_core::{
     event::chain_event::{ChainEvent, ChainEventFactory},
     event::status::processing_status::ErrorKind,
@@ -184,14 +184,11 @@ fn main() -> Result<()> {
     println!("Usage:");
     println!("  Basic:              cargo run --package obzenflow --example prometheus_100k_demo");
     println!("  With metrics:       cargo run --package obzenflow --example prometheus_100k_demo --features obzenflow_infra/warp-server -- --server");
-    println!("  With console:       cargo run --package obzenflow --example prometheus_100k_demo --features console,obzenflow_infra/warp-server -- --server");
     println!("  Custom port:        cargo run --package obzenflow --example prometheus_100k_demo --features obzenflow_infra/warp-server -- --server --server-port 8080");
     println!();
 
-    // Use FlowApplication builder - handles runtime, observability, and features automatically
-    // No #[cfg] needed! with_console_subscriber() is a no-op if 'console' feature is disabled
+    // Use FlowApplication builder - handles runtime, observability, and features automatically.
     FlowApplication::builder()
-        .with_console_subscriber()  // Enables tokio-console if --features console is used
         .with_log_level(obzenflow_infra::application::LogLevel::Info)
         .run_blocking(flow! {
             name: "prometheus_100k_demo",
@@ -199,7 +196,7 @@ fn main() -> Result<()> {
 
             // Flow-level rate limiting (1000 events/sec) for fast processing
             middleware: [
-                rate_limit(1000.0)
+                RateLimiterBuilder::new(1000.0).build()
             ],
 
             stages: {

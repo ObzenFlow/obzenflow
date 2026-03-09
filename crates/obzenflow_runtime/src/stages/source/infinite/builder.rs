@@ -106,7 +106,6 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
         let supervisor = InfiniteSourceSupervisor {
             name: format!("infinite_source_{}", self.config.stage_name),
             handler,
-            context: Arc::new(context.clone()),
             system_journal: self.resources.system_journal.clone(),
             stage_id: self.config.stage_id,
             idle_backoff: crate::supervised_base::idle_backoff::IdleBackoff::exponential_with_cap(

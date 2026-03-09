@@ -10,6 +10,7 @@
 
 use super::{AiProvider, ChatMessage, ChatParams, ChatRequest, ChatResponseFormat, ToolDefinition};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 /// A token count, as a newtype over u64.
 ///
@@ -54,6 +55,115 @@ pub enum EstimateSource {
     Heuristic,
     /// Model-specific tokenizer (e.g., tiktoken for OpenAI models). Higher precision.
     Tokenizer,
+}
+
+/// Why a heuristic estimator was selected instead of a tokenizer-backed estimator.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TokenEstimatorFallbackReason {
+    /// Tokenizer support is not compiled into the current build.
+    TokenizerFeatureUnavailable,
+    /// A tokenizer backend exists, but it does not recognize the selected model label.
+    ModelNotSupportedByTokenizer,
+    /// A heuristic estimator was selected intentionally by the caller.
+    ExplicitHeuristic,
+}
+
+impl TokenEstimatorFallbackReason {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::TokenizerFeatureUnavailable => "tokenizer_feature_unavailable",
+            Self::ModelNotSupportedByTokenizer => "model_not_supported_by_tokenizer",
+            Self::ExplicitHeuristic => "explicit_heuristic",
+        }
+    }
+}
+
+impl std::fmt::Display for TokenEstimatorFallbackReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// One-time estimator-selection metadata for a specific model target.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TokenEstimatorResolutionInfo {
+    pub source: EstimateSource,
+    pub model: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tokenizer_backend: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fallback_reason: Option<TokenEstimatorFallbackReason>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fallback_detail: Option<String>,
+}
+
+impl TokenEstimatorResolutionInfo {
+    pub fn tokenizer(model: impl Into<String>, tokenizer_backend: impl Into<String>) -> Self {
+        Self {
+            source: EstimateSource::Tokenizer,
+            model: model.into(),
+            tokenizer_backend: Some(tokenizer_backend.into()),
+            fallback_reason: None,
+            fallback_detail: None,
+        }
+    }
+
+    pub fn heuristic(
+        model: impl Into<String>,
+        fallback_reason: TokenEstimatorFallbackReason,
+        fallback_detail: Option<String>,
+    ) -> Self {
+        Self {
+            source: EstimateSource::Heuristic,
+            model: model.into(),
+            tokenizer_backend: None,
+            fallback_reason: Some(fallback_reason),
+            fallback_detail,
+        }
+    }
+
+    pub fn with_tokenizer_backend(mut self, tokenizer_backend: impl Into<String>) -> Self {
+        self.tokenizer_backend = Some(tokenizer_backend.into());
+        self
+    }
+}
+
+/// A shared estimator plus one-time resolution metadata.
+#[derive(Clone)]
+pub struct ResolvedTokenEstimator {
+    estimator: Arc<dyn TokenEstimator>,
+    info: TokenEstimatorResolutionInfo,
+}
+
+impl std::fmt::Debug for ResolvedTokenEstimator {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ResolvedTokenEstimator")
+            .field("info", &self.info)
+            .finish()
+    }
+}
+
+impl ResolvedTokenEstimator {
+    pub fn new(estimator: Arc<dyn TokenEstimator>, info: TokenEstimatorResolutionInfo) -> Self {
+        Self { estimator, info }
+    }
+
+    pub fn estimator(&self) -> Arc<dyn TokenEstimator> {
+        self.estimator.clone()
+    }
+
+    pub fn info(&self) -> &TokenEstimatorResolutionInfo {
+        &self.info
+    }
+
+    pub fn source(&self) -> EstimateSource {
+        self.info.source
+    }
+
+    pub fn into_parts(self) -> (Arc<dyn TokenEstimator>, TokenEstimatorResolutionInfo) {
+        (self.estimator, self.info)
+    }
 }
 
 /// A token count estimate with provenance.
@@ -350,6 +460,32 @@ mod tests {
         let json_value = serde_json::to_string(&estimate).expect("serialize");
         let decoded: TokenEstimate = serde_json::from_str(&json_value).expect("deserialize");
         assert_eq!(decoded, estimate);
+    }
+
+    #[test]
+    fn token_estimator_fallback_reason_display_is_machine_readable() {
+        assert_eq!(
+            TokenEstimatorFallbackReason::ModelNotSupportedByTokenizer.to_string(),
+            "model_not_supported_by_tokenizer"
+        );
+    }
+
+    #[test]
+    fn token_estimator_resolution_info_heuristic_captures_reason() {
+        let info = TokenEstimatorResolutionInfo::heuristic(
+            "llama3.1:8b",
+            TokenEstimatorFallbackReason::ModelNotSupportedByTokenizer,
+            Some("no encoding".to_string()),
+        );
+
+        assert_eq!(info.source, EstimateSource::Heuristic);
+        assert_eq!(info.model, "llama3.1:8b");
+        assert_eq!(info.tokenizer_backend, None);
+        assert_eq!(
+            info.fallback_reason,
+            Some(TokenEstimatorFallbackReason::ModelNotSupportedByTokenizer)
+        );
+        assert_eq!(info.fallback_detail.as_deref(), Some("no encoding"));
     }
 
     #[test]

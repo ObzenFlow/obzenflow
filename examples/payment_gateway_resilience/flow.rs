@@ -25,7 +25,7 @@ use super::sources::{AsyncScrapedGlitchyPaymentCommandSource, ScrapedGlitchyPaym
 use anyhow::Result;
 use async_trait::async_trait;
 use obzenflow_adapters::middleware::circuit_breaker::{HalfOpenPolicy, OpenPolicy};
-use obzenflow_adapters::middleware::{backpressure, rate_limit, CircuitBreakerBuilder};
+use obzenflow_adapters::middleware::{backpressure, CircuitBreakerBuilder, RateLimiterBuilder};
 use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
 use obzenflow_core::{
     event::chain_event::{ChainEvent, ChainEventFactory},
@@ -223,7 +223,7 @@ fn build_flow() -> obzenflow_dsl::FlowDefinition {
         // At 1.0 events/sec you can easily watch RED metrics and
         // circuit breaker gauges change over time.
         middleware: [
-            rate_limit(1.0)
+            RateLimiterBuilder::new(1.0).build()
         ],
 
         stages: {
@@ -375,7 +375,7 @@ fn build_glitchy_flow(config: GlitchyFlowConfig) -> obzenflow_dsl::FlowDefinitio
         journals: disk_journals(std::path::PathBuf::from("target/payment-gateway-logs-glitchy")),
 
         middleware: [
-            rate_limit(rate_limit_events_per_sec)
+            RateLimiterBuilder::new(rate_limit_events_per_sec).build()
         ],
 
         stages: {
@@ -416,7 +416,7 @@ fn build_glitchy_flow(config: GlitchyFlowConfig) -> obzenflow_dsl::FlowDefinitio
 
 #[cfg(not(test))]
 pub fn run_example() -> Result<()> {
-    println!("💳 FlowState RS - Payment Gateway Resilience Demo");
+    println!("💳 ObzenFlow - Payment Gateway Resilience Demo");
     println!("{}", "=".repeat(60));
     println!("This example shows how circuit breakers and rate limits");
     println!("work together to protect an unreliable dependency.");
@@ -541,7 +541,6 @@ pub fn run_example() -> Result<()> {
     };
 
     obzenflow_infra::application::FlowApplication::builder()
-        .with_console_subscriber()
         .with_log_level(obzenflow_infra::application::LogLevel::Info)
         .run_blocking(flow)?;
 
@@ -584,7 +583,7 @@ fn build_strict_flow() -> obzenflow_dsl::FlowDefinition {
         journals: disk_journals(std::path::PathBuf::from("target/payment-gateway-logs-strict")),
 
         middleware: [
-            rate_limit(1.0)
+            RateLimiterBuilder::new(1.0).build()
         ],
 
         stages: {

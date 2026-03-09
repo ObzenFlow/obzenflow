@@ -367,6 +367,21 @@ pub(crate) fn compute_flow_lifecycle_metrics(
     }
 }
 
+fn record_stage_completion(
+    completed_stages: &mut Vec<StageId>,
+    stage_id: StageId,
+    total_stages: usize,
+) -> (bool, bool) {
+    let is_new_completion = if completed_stages.contains(&stage_id) {
+        false
+    } else {
+        completed_stages.push(stage_id);
+        true
+    };
+    let all_stages_completed_now = is_new_completion && completed_stages.len() >= total_stages;
+    (is_new_completion, all_stages_completed_now)
+}
+
 // Implement FsmAction for PipelineAction
 #[async_trait::async_trait]
 impl FsmAction for PipelineAction {
@@ -1091,13 +1106,6 @@ impl FsmAction for PipelineAction {
                         .map(|info| info.name.clone())
                         .unwrap_or_else(|| "unknown".to_string());
 
-                    tracing::info!("Stage completed: {} ({})", stage_name, stage_id);
-
-                    // Add to completed stages
-                    if !context.completed_stages.contains(&stage_id) {
-                        context.completed_stages.push(stage_id);
-                    }
-
                     // Check if all expected stages have completed
                     let expected_stages: std::collections::HashSet<StageId> = context
                         .topology
@@ -1106,13 +1114,29 @@ impl FsmAction for PipelineAction {
                         .collect();
                     let total_stages = expected_stages.len();
 
+                    let (is_new_completion, all_stages_completed_now) = record_stage_completion(
+                        &mut context.completed_stages,
+                        stage_id,
+                        total_stages,
+                    );
+
+                    if is_new_completion {
+                        tracing::info!("Stage completed: {} ({})", stage_name, stage_id);
+                    } else {
+                        tracing::debug!(
+                            "Ignoring duplicate stage completion: {} ({})",
+                            stage_name,
+                            stage_id
+                        );
+                    }
+
                     tracing::debug!(
                         "Stage completion: {} of {} stages completed",
                         context.completed_stages.len(),
                         total_stages
                     );
 
-                    if context.completed_stages.len() >= total_stages {
+                    if all_stages_completed_now {
                         tracing::info!("All {} stages have completed!", total_stages);
 
                         // Write a SystemEvent that the pipeline supervisor will pick up
@@ -1891,5 +1915,22 @@ mod tests {
             !SUPERVISOR_MOD.contains("fsm!"),
             "pipeline supervisor must not contain an inline fsm! definition; keep the FSM single-sourced in pipeline/fsm.rs"
         );
+    }
+
+    #[test]
+    fn record_stage_completion_is_idempotent_for_duplicate_terminal_events() {
+        let stage_a = StageId::new();
+        let stage_b = StageId::new();
+        let mut completed = vec![stage_a];
+
+        let (is_new, all_completed_now) = record_stage_completion(&mut completed, stage_b, 2);
+        assert!(is_new);
+        assert!(all_completed_now);
+        assert_eq!(completed, vec![stage_a, stage_b]);
+
+        let (is_new, all_completed_now) = record_stage_completion(&mut completed, stage_b, 2);
+        assert!(!is_new);
+        assert!(!all_completed_now);
+        assert_eq!(completed, vec![stage_a, stage_b]);
     }
 }

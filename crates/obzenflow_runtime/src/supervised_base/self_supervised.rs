@@ -20,7 +20,7 @@ use obzenflow_fsm::{FsmAction, StateVariant};
 /// - Free run() method via SelfSupervisedExt
 /// - No way to bypass the supervised pattern
 #[async_trait::async_trait]
-pub trait SelfSupervised: Supervisor {
+pub trait SelfSupervised: Supervisor + Sync {
     /// Run the state dispatch logic for the current state
     /// Returns a directive indicating what to do next
     async fn dispatch_state(
@@ -32,8 +32,11 @@ pub trait SelfSupervised: Supervisor {
     /// Get the writer ID for this component
     fn writer_id(&self) -> WriterId;
 
-    /// Write a completion event when the component terminates
-    async fn write_completion_event(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
+    /// Optional termination hook for components that need a final marker after the
+    /// FSM reaches a terminal state.
+    async fn write_completion_event(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        Ok(())
+    }
 
     /// Map an action error into a supervisor-specific failure event.
     ///

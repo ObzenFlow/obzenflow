@@ -412,20 +412,20 @@ impl<H: SinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAction<H> 
             }
 
             JournalSinkAction::FlushBuffers => {
-                tracing::info!(
+                tracing::trace!(
                     target: "flowip-080o",
                     stage_name = %ctx.stage_name,
                     "sink: FlushBuffers action - starting flush"
                 );
 
-                tracing::info!(
+                tracing::trace!(
                     target: "flowip-080o",
                     stage_name = %ctx.stage_name,
                     "sink: FlushBuffers action - acquiring handler lock"
                 );
                 let handler = &mut ctx.handler;
 
-                tracing::info!(
+                tracing::trace!(
                     target: "flowip-080o",
                     stage_name = %ctx.stage_name,
                     "sink: FlushBuffers action - calling handler.flush()"
@@ -433,7 +433,7 @@ impl<H: SinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAction<H> 
                 match handler.flush().await {
                     Ok(Some(mut payload)) => {
                         payload.destination = ctx.stage_name.clone();
-                        tracing::info!(
+                        tracing::trace!(
                             target: "flowip-080o",
                             stage_name = %ctx.stage_name,
                             "sink: FlushBuffers action - flush returned payload, writing delivery"
@@ -460,7 +460,7 @@ impl<H: SinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAction<H> 
                         })?;
                     }
                     Ok(None) => {
-                        tracing::info!(
+                        tracing::trace!(
                             target: "flowip-080o",
                             stage_name = %ctx.stage_name,
                             "sink: FlushBuffers action - flush returned None (no payload)"
@@ -472,7 +472,7 @@ impl<H: SinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAction<H> 
                         )))
                     }
                 }
-                tracing::info!(
+                tracing::trace!(
                     target: "flowip-080o",
                     stage_name = %ctx.stage_name,
                     "sink: FlushBuffers action - acquiring subscription lock for contract check"
@@ -483,13 +483,13 @@ impl<H: SinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAction<H> 
                 if let Some(mut subscription) = maybe_subscription {
                     // Take contract_state out so we don't borrow ctx across await
                     let mut contract_state = std::mem::take(&mut ctx.contract_state);
-                    tracing::info!(
+                    tracing::trace!(
                         target: "flowip-080o",
                         stage_name = %ctx.stage_name,
                         "sink: FlushBuffers action - calling check_contracts"
                     );
                     drop(subscription.check_contracts(&mut contract_state[..]).await);
-                    tracing::info!(
+                    tracing::trace!(
                         target: "flowip-080o",
                         stage_name = %ctx.stage_name,
                         "sink: FlushBuffers action - putting subscription back"
@@ -500,7 +500,7 @@ impl<H: SinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAction<H> 
                     ctx.contract_state = contract_state;
                 }
 
-                tracing::info!(
+                tracing::trace!(
                     target: "flowip-080o",
                     stage_name = %ctx.stage_name,
                     "sink: FlushBuffers action - COMPLETE (flush + contract check)"
@@ -511,14 +511,14 @@ impl<H: SinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAction<H> 
             JournalSinkAction::Cleanup => {
                 let stage_name = ctx.stage_name.clone();
                 lifecycle_actions::cleanup_with_result("Sink", &stage_name, || async {
-                    tracing::info!(
+                    tracing::trace!(
                         target: "flowip-080o",
                         stage_name = %stage_name,
                         "sink: Cleanup action - acquiring handler lock"
                     );
                     // Call handler drain before stopping tasks
                     let handler = &mut ctx.handler;
-                    tracing::info!(
+                    tracing::trace!(
                         target: "flowip-080o",
                         stage_name = %stage_name,
                         "sink: Cleanup action - calling handler.drain()"
@@ -554,12 +554,12 @@ impl<H: SinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAction<H> 
                             ))
                         })?;
                     }
-                    tracing::info!(
+                    tracing::trace!(
                         target: "flowip-080o",
                         stage_name = %stage_name,
                         "sink: Cleanup action - handler.drain() complete, dropping handler lock"
                     );
-                    tracing::info!(
+                    tracing::trace!(
                         target: "flowip-080o",
                         stage_name = %stage_name,
                         "sink: Cleanup action - COMPLETE (handler drained)"

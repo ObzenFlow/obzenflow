@@ -29,7 +29,7 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
-use obzenflow_adapters::middleware::rate_limit;
+use obzenflow_adapters::middleware::RateLimiterBuilder;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::{event::chain_event::ChainEvent, TypedPayload};
 use obzenflow_dsl::{flow, sink, source, transform};
@@ -138,7 +138,7 @@ async fn main() -> Result<()> {
         middleware: [
                 // Flow-level rate limit: 1.0 events/sec
                 // All stages inherit this unless they override
-                rate_limit(1.0)
+                RateLimiterBuilder::new(1.0).build()
             ],
 
             stages: {
@@ -158,7 +158,7 @@ async fn main() -> Result<()> {
 
                     Some(CounterEvent { count })
                 }), [
-                    rate_limit(10.0)
+                    RateLimiterBuilder::new(10.0).build()
                 ]);
 
                 // Transform with NO override

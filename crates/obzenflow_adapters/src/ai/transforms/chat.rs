@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use obzenflow_core::ai::{
     attach_llm_observability, params_hash_for_chat, prompt_hash_for_chat,
     schema_hash_for_response_format, ChatClient, ChatRequest, ChatResponse, LlmHashes,
-    LlmObservability, TokenEstimator,
+    LlmObservability, ResolvedTokenEstimator, TokenEstimator, TokenEstimatorResolutionInfo,
 };
 use obzenflow_core::event::chain_event::ChainEventContent;
 use obzenflow_core::ChainEvent;
@@ -16,6 +16,7 @@ use obzenflow_runtime::stages::common::handlers::AsyncTransformHandler;
 use serde_json::json;
 use std::fmt;
 use std::sync::Arc;
+use std::time::Instant;
 
 type ChatRequestBuilder =
     dyn Fn(&ChainEvent) -> Result<ChatRequest, HandlerError> + Send + Sync + 'static;
@@ -29,6 +30,7 @@ type ChatOutputMapper = dyn Fn(&ChainEvent, ChatResponse) -> Result<Vec<ChainEve
 pub struct ChatTransform {
     client: Arc<dyn ChatClient>,
     estimator: Option<Arc<dyn TokenEstimator>>,
+    estimator_resolution: Option<TokenEstimatorResolutionInfo>,
     request_builder: Arc<ChatRequestBuilder>,
     output_mapper: Arc<ChatOutputMapper>,
 }
@@ -47,6 +49,7 @@ impl ChatTransform {
         Self {
             client,
             estimator: None,
+            estimator_resolution: None,
             request_builder: Arc::new(request_builder),
             output_mapper: Arc::new(default_chat_output_mapper),
         }
@@ -54,6 +57,14 @@ impl ChatTransform {
 
     pub fn with_estimator(mut self, estimator: Arc<dyn TokenEstimator>) -> Self {
         self.estimator = Some(estimator);
+        self.estimator_resolution = None;
+        self
+    }
+
+    pub fn with_resolved_estimator(mut self, resolved: ResolvedTokenEstimator) -> Self {
+        let (estimator, info) = resolved.into_parts();
+        self.estimator = Some(estimator);
+        self.estimator_resolution = Some(info);
         self
     }
 
@@ -73,6 +84,12 @@ impl ChatTransform {
 impl AsyncTransformHandler for ChatTransform {
     async fn process(&self, event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
         let request = (self.request_builder)(&event)?;
+        let input_event_id = event.id;
+        let input_event_type = event.event_type();
+        let provider = request.provider.clone();
+        let model = request.model.clone();
+        let message_count = request.messages.len();
+        let tool_count = request.tools.len();
 
         let prompt_hash = prompt_hash_for_chat(&request.messages).map_err(|err| {
             HandlerError::Validation(format!("chat request canonicalization failed: {err}"))
@@ -89,14 +106,61 @@ impl AsyncTransformHandler for ChatTransform {
             .estimator
             .as_ref()
             .map(|estimator| estimator.estimate_chat_request(&request));
+        let estimated_input_token_count = estimated_input_tokens.as_ref().map(|e| e.tokens.get());
+        let estimated_input_source = estimated_input_tokens.as_ref().map(|e| e.source);
+        let estimator_backend = self
+            .estimator_resolution
+            .as_ref()
+            .and_then(|info| info.tokenizer_backend.as_deref());
+        let estimator_fallback_reason = self
+            .estimator_resolution
+            .as_ref()
+            .and_then(|info| info.fallback_reason.as_ref())
+            .map(|reason| reason.as_str());
+        let estimator_fallback_detail = self
+            .estimator_resolution
+            .as_ref()
+            .and_then(|info| info.fallback_detail.as_deref());
 
-        let response = self
-            .client
-            .chat(request.clone())
-            .await
-            .map_err(|err| ai_client_error_to_handler_error_with_context(err, Some("chat")))?;
+        tracing::info!(
+            event_id = %input_event_id,
+            input_event_type = %input_event_type,
+            provider = %provider,
+            model = %model,
+            message_count,
+            tool_count,
+            estimated_input_tokens = estimated_input_token_count,
+            estimated_input_source = ?estimated_input_source,
+            estimator_backend = estimator_backend,
+            estimator_fallback_reason = estimator_fallback_reason,
+            estimator_fallback_detail = estimator_fallback_detail,
+            "AI chat request started"
+        );
+
+        let started_at = Instant::now();
+
+        let response = match self.client.chat(request.clone()).await {
+            Ok(response) => response,
+            Err(err) => {
+                tracing::warn!(
+                    event_id = %input_event_id,
+                    input_event_type = %input_event_type,
+                    provider = %provider,
+                    model = %model,
+                    elapsed_ms = started_at.elapsed().as_millis() as u64,
+                    error = %err,
+                    "AI chat request failed"
+                );
+                return Err(ai_client_error_to_handler_error_with_context(
+                    err,
+                    Some("chat"),
+                ));
+            }
+        };
 
         let usage = response.usage.clone();
+        let response_text_bytes = response.text.len();
+        let tool_call_count = response.tool_calls.len();
         let mut outputs = (self.output_mapper)(&event, response)?;
 
         let mut hashes = LlmHashes::new(prompt_hash, params_hash);
@@ -104,14 +168,30 @@ impl AsyncTransformHandler for ChatTransform {
 
         let mut llm =
             LlmObservability::new(request.provider.clone(), request.model.clone(), hashes);
-        llm.usage = usage;
+        llm.usage = usage.clone();
         llm.estimated_input_tokens = estimated_input_tokens;
+        llm.estimated_input_resolution = self.estimator_resolution.clone();
 
         for output in &mut outputs {
             attach_llm_observability(output, llm.clone()).map_err(|err| {
                 HandlerError::Validation(format!("failed to attach llm metadata: {err}"))
             })?;
         }
+
+        tracing::info!(
+            event_id = %input_event_id,
+            input_event_type = %input_event_type,
+            provider = %provider,
+            model = %model,
+            elapsed_ms = started_at.elapsed().as_millis() as u64,
+            output_event_count = outputs.len(),
+            response_text_bytes,
+            tool_call_count,
+            usage_input_tokens = usage.as_ref().map(|u| u.input_tokens),
+            usage_output_tokens = usage.as_ref().map(|u| u.output_tokens),
+            usage_total_tokens = usage.as_ref().map(|u| u.total_tokens),
+            "AI chat request completed"
+        );
 
         Ok(outputs)
     }
@@ -146,7 +226,8 @@ mod tests {
     use super::*;
     use obzenflow_core::ai::{
         AiClientError, AiProvider, ChatMessage, ChatParams, ChatResponseFormat, ChatRole,
-        EstimateSource, TokenCount, TokenEstimate, TokenEstimator, Usage, UsageSource,
+        EstimateSource, ResolvedTokenEstimator, TokenCount, TokenEstimate, TokenEstimator,
+        TokenEstimatorFallbackReason, TokenEstimatorResolutionInfo, Usage, UsageSource,
     };
     use obzenflow_core::event::ChainEventFactory;
     use obzenflow_core::{StageId, WriterId};
@@ -304,6 +385,63 @@ mod tests {
                 tokens: TokenCount::new(123),
                 source: EstimateSource::Heuristic
             })
+        );
+        assert_eq!(llm.estimated_input_resolution, None);
+    }
+
+    #[tokio::test]
+    async fn chat_transform_attaches_estimator_resolution_when_present() {
+        let client = Arc::new(QueueChatClient::default());
+        client.enqueue_ok(ChatResponse {
+            text: "ok".to_string(),
+            tool_calls: vec![],
+            usage: None,
+            raw: None,
+        });
+
+        let resolved = ResolvedTokenEstimator::new(
+            Arc::new(FixedTokenEstimator {
+                tokens: TokenCount::new(77),
+                source: EstimateSource::Heuristic,
+            }),
+            TokenEstimatorResolutionInfo::heuristic(
+                "llama3.1:8b",
+                TokenEstimatorFallbackReason::ModelNotSupportedByTokenizer,
+                Some("no tiktoken encoding for model 'llama3.1:8b'".to_string()),
+            ),
+        );
+
+        let transform = ChatTransform::new(client, |_event| {
+            Ok(ChatRequest {
+                provider: AiProvider::new("ollama"),
+                model: "llama3.1:8b".to_string(),
+                messages: vec![ChatMessage {
+                    role: ChatRole::user(),
+                    content: "hello".to_string(),
+                }],
+                params: ChatParams::default(),
+                tools: vec![],
+                response_format: None,
+            })
+        })
+        .with_resolved_estimator(resolved);
+
+        let outputs = transform
+            .process(test_event())
+            .await
+            .expect("chat transform should succeed");
+
+        let llm = obzenflow_core::ai::read_llm_observability(&outputs[0])
+            .expect("llm read should parse")
+            .expect("llm metadata should exist");
+
+        assert_eq!(
+            llm.estimated_input_resolution,
+            Some(TokenEstimatorResolutionInfo::heuristic(
+                "llama3.1:8b",
+                TokenEstimatorFallbackReason::ModelNotSupportedByTokenizer,
+                Some("no tiktoken encoding for model 'llama3.1:8b'".to_string()),
+            ))
         );
     }
 

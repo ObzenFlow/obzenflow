@@ -673,7 +673,7 @@ impl MetricsAggregatorContext {
         let store = &self.metrics_store;
         let mut snapshot = obzenflow_core::metrics::AppMetricsSnapshot::default();
 
-        tracing::info!(
+        tracing::debug!(
             "Exporting metrics: {} stage entries",
             store.stage_metrics.len()
         );
@@ -1125,7 +1125,7 @@ impl FsmAction for MetricsAggregatorAction {
             }
 
             MetricsAggregatorAction::ProcessSystemEvent { envelope } => {
-                tracing::info!(
+                tracing::trace!(
                     event_id = %envelope.event.id(),
                     event_type = envelope.event.event_type_name(),
                     "Metrics aggregator ProcessSystemEvent action"
@@ -1667,7 +1667,7 @@ impl FsmAction for MetricsAggregatorAction {
             }
 
             MetricsAggregatorAction::ExportMetrics => {
-                tracing::info!("ExportMetrics action triggered");
+                tracing::debug!("ExportMetrics action triggered");
                 // Refresh in-memory stage metrics from journal tails before export so
                 // `/metrics` reflects delivery truth even if subscriptions lag.
                 for (stage_id, data_journal) in &ctx.stage_data_journals {
@@ -1768,12 +1768,12 @@ impl FsmAction for MetricsAggregatorAction {
 
                 if let Some(exporter) = &ctx.exporter {
                     let snapshot = ctx.build_app_metrics_snapshot();
-                    tracing::info!("Pushing metrics snapshot to exporter");
+                    tracing::debug!("Pushing metrics snapshot to exporter");
 
                     if let Err(e) = exporter.update_app_metrics(snapshot) {
                         tracing::warn!("Failed to export metrics: {}", e);
                     } else {
-                        tracing::info!("Successfully exported metrics");
+                        tracing::debug!("Successfully exported metrics");
                     }
                 }
 

@@ -223,7 +223,7 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                     result = system_recv => {
                         match result {
                             Ok(Some(envelope)) => {
-                                tracing::info!(
+                                tracing::debug!(
                                     event_id = %envelope.event.id(),
                                     event_type = envelope.event.event_type_name(),
                                     "Metrics aggregator received system event"
@@ -342,7 +342,7 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                     result = error_recv => {
                         match result {
                             Ok(Some(envelope)) => {
-                                tracing::info!(
+                                tracing::debug!(
                                     event_id = %envelope.event.id(),
                                     event_type = envelope.event.event_type(),
                                     "Metrics aggregator received error event"
@@ -387,7 +387,7 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
 
                     // Export periodically
                     _ = timer_tick => {
-                        tracing::info!("Metrics aggregator export timer tick");
+                        tracing::debug!("Metrics aggregator export timer tick");
                         directive = Ok(EventLoopDirective::Transition(MetricsAggregatorEvent::ExportMetrics))
                     }
                 }
@@ -415,7 +415,7 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                 if let Some(sub) = system_subscription.as_mut() {
                     match sub.poll_next().await {
                         PollResult::Event(envelope) => {
-                            tracing::info!(
+                            tracing::debug!(
                                 event_id = %envelope.event.id(),
                                 event_type = envelope.event.event_type_name(),
                                 "Metrics aggregator draining received system event"
@@ -497,7 +497,7 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                 if let Some(sub) = error_subscription.as_mut() {
                     match sub.poll_next_with_state(state.variant_name(), None).await {
                         PollResult::Event(envelope) => {
-                            tracing::info!(
+                            tracing::debug!(
                                 event_id = %envelope.event.id(),
                                 event_type = envelope.event.event_type(),
                                 "Metrics aggregator draining received error event"

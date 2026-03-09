@@ -39,9 +39,6 @@ pub(crate) struct InfiniteSourceSupervisor<
     /// The handler instance that implements source logic
     pub(crate) handler: H,
 
-    /// The FSM context containing all mutable state
-    pub(crate) context: Arc<InfiniteSourceContext<H>>,
-
     /// System journal for lifecycle events
     pub(crate) system_journal: Arc<dyn Journal<SystemEvent>>,
 
@@ -311,18 +308,6 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
 
     fn event_for_action_error(&self, msg: String) -> InfiniteSourceEvent<H> {
         InfiniteSourceEvent::Error(msg)
-    }
-
-    async fn write_completion_event(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let event = SystemEvent::stage_completed(self.stage_id);
-        if let Err(e) = self.system_journal.append(event, None).await {
-            tracing::error!(
-                stage_name = %self.context.stage_name,
-                journal_error = %e,
-                "Failed to write completion event; continuing without system journal entry"
-            );
-        }
-        Ok(())
     }
 
     async fn dispatch_state(

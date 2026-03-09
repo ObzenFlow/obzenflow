@@ -2,14 +2,17 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Rig-backed AI transform builders
+//! Rig-backed AI transform builders.
 //!
-//! This module lives in the top-level `obzenflow` crate to avoid creating a
-//! dependency cycle (`obzenflow_infra` depends on `obzenflow_adapters`).
+//! This module lives in `obzenflow_infra` because it wires infrastructure-level
+//! Rig clients into adapter-layer AI transforms. The top-level `obzenflow::ai`
+//! module should remain a facade that only re-exports these types.
 
-use super::{ChatTransform, EmbeddingTransform};
+use crate::ai::rig::{RigChatClient, RigEmbeddingClient};
 use async_trait::async_trait;
-use obzenflow_adapters::ai::ai_client_error_to_handler_error_with_context;
+use obzenflow_adapters::ai::{
+    ai_client_error_to_handler_error_with_context, ChatTransform, EmbeddingTransform,
+};
 use obzenflow_core::ai::{
     AiClientError, AiProvider, ChatClient, ChatMessage, ChatParams, ChatRequest, ChatResponse,
     ChatResponseFormat, EmbeddingClient, EmbeddingParams, EmbeddingRequest, EmbeddingResponse,
@@ -17,7 +20,6 @@ use obzenflow_core::ai::{
 };
 use obzenflow_core::http_client::Url;
 use obzenflow_core::ChainEvent;
-use obzenflow_infra::ai::rig::{RigChatClient, RigEmbeddingClient};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -43,7 +45,11 @@ type TemplateFn =
 type EmbeddingInputsFn =
     Arc<dyn Fn(&ChainEvent) -> Result<Vec<String>, HandlerError> + Send + Sync + 'static>;
 
-/// Extension trait that provides `ChatTransform::builder()` when the `ai-rig` feature is enabled.
+/// Extension trait that provides `ChatTransform::builder()` when Rig-backed AI
+/// builder support is enabled.
+///
+/// The top-level `obzenflow::ai` facade re-exports this trait so callers can
+/// keep using `ChatTransform::builder()` without depending on infra details.
 pub trait ChatTransformExt {
     fn builder() -> ChatTransformBuilder;
 }
@@ -54,7 +60,12 @@ impl ChatTransformExt for ChatTransform {
     }
 }
 
-/// Extension trait that provides `EmbeddingTransform::builder()` when the `ai-rig` feature is enabled.
+/// Extension trait that provides `EmbeddingTransform::builder()` when
+/// Rig-backed AI builder support is enabled.
+///
+/// The top-level `obzenflow::ai` facade re-exports this trait so callers can
+/// keep using `EmbeddingTransform::builder()` without depending on infra
+/// details.
 pub trait EmbeddingTransformExt {
     fn builder() -> EmbeddingTransformBuilder;
 }
@@ -185,9 +196,9 @@ impl ChatClient for LazyRigChatClient {
 #[derive(Clone)]
 /// Fluent builder for constructing a [`ChatTransform`] backed by Rig providers.
 ///
-/// This lives in the top-level `obzenflow` crate to avoid leaking infra types
-/// (e.g. `RigChatClient`) into user code and to preserve the onion dependency
-/// direction.
+/// This lives in `obzenflow_infra` because provider construction is
+/// infrastructure work. The top-level `obzenflow::ai` module re-exports it as
+/// part of the public facade.
 pub struct ChatTransformBuilder {
     provider: Option<ChatProviderConfig>,
     base_url: Option<String>,

@@ -23,7 +23,6 @@ use crate::supervised_base::{
     EventLoopDirective, ExternalEventMode, ExternalEventPolicy, HandlerSupervised,
 };
 use obzenflow_core::event::context::FlowContext;
-use obzenflow_core::event::SystemEvent;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::EventEnvelope;
 use obzenflow_core::{ChainEvent, StageId};
@@ -41,9 +40,6 @@ pub(crate) struct TransformSupervisor<
 
     /// Data journal for chain events
     pub(crate) data_journal: Arc<dyn Journal<ChainEvent>>,
-
-    /// System journal for lifecycle events
-    pub(crate) system_journal: Arc<dyn Journal<SystemEvent>>,
 
     /// Stage ID
     pub(crate) stage_id: StageId,
@@ -347,18 +343,6 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
 
     fn event_for_action_error(&self, msg: String) -> TransformEvent<H> {
         TransformEvent::Error(msg)
-    }
-
-    async fn write_completion_event(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let event = SystemEvent::stage_completed(self.stage_id);
-        if let Err(e) = self.system_journal.append(event, None).await {
-            tracing::error!(
-                stage_id = %self.stage_id,
-                journal_error = %e,
-                "Failed to write completion event; continuing without system journal entry"
-            );
-        }
-        Ok(())
     }
 
     async fn dispatch_state(

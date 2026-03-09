@@ -9,11 +9,13 @@
 //! - A small transform that formats stories for display
 //! - `ConsoleSink` output
 //!
+//! Tutorials: `https://obzenflow.dev/tutorials/`
+//!
 //! Run (default: local mock server):
-//! `cargo run -p obzenflow --example hn_ingestion_demo --features obzenflow_infra/reqwest-client`
+//! `cargo run -p obzenflow --example hn_ingestion_demo --features http-pull`
 //!
 //! Run against the real HN Firebase API (requires network):
-//! `HN_LIVE=1 cargo run -p obzenflow --example hn_ingestion_demo --features obzenflow_infra/reqwest-client`
+//! `HN_LIVE=1 cargo run -p obzenflow --example hn_ingestion_demo --features http-pull`
 //!
 //! Optional env vars:
 //! - `HN_MAX_STORIES=30` (default 30)

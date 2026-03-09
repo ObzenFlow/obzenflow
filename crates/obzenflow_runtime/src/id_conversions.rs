@@ -12,7 +12,7 @@
 //! 2. obzenflow_topology::StageId - Uses obzenflow-idkit (type-only, no generation)
 //!
 //! Why this bridge exists:
-//! - Backend (flowstate_rs) generates real ULIDs for production use
+//! - The ObzenFlow runtime generates real ULIDs for production use
 //! - Frontend (obzen-flow-ui) uses sequential IDs due to WASM limitations  
 //! - Topology acts as a type-safe bridge between both worlds
 //!

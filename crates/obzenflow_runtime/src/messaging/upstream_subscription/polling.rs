@@ -271,7 +271,7 @@ where
                             is_final,
                         };
                         self.last_eof_outcome = Some(outcome.clone());
-                        tracing::info!(
+                        tracing::debug!(
                             target: "flowip-080o",
                             owner = %self.owner_label,
                             stage_id = ?stage_id,
@@ -283,7 +283,7 @@ where
                             "Received EOF from stage"
                         );
                     } else if is_drain {
-                        tracing::info!(
+                        tracing::debug!(
                             target: "flowip-080o",
                             owner = %self.owner_label,
                             stage_id = ?stage_id,

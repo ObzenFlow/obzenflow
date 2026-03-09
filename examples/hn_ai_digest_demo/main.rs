@@ -12,8 +12,10 @@
 //! These route through `oversize_sub_split` → `oversize_map` (LLM) and feed a condensed result back
 //! into the main splitter via `<|`.
 //!
+//! Tutorials: `https://obzenflow.dev/tutorials/`
+//!
 //! Run (default: local mock HN server + Ollama; requires Ollama running):
-//! `cargo run -p obzenflow --example hn_ai_digest_demo --features "http-pull ai-rig"`
+//! `cargo run -p obzenflow --example hn_ai_digest_demo --features "http-pull ai"`
 //!
 //! Ollama quickstart (macOS):
 //! - Install: `brew install ollama`
@@ -31,12 +33,13 @@
 //! When using a hosted provider, your prompts and story text will be sent to that provider.
 //!
 //! Run against the real HN Firebase API (requires network):
-//! `HN_LIVE=1 cargo run -p obzenflow --example hn_ai_digest_demo --features "http-pull ai-rig"`
+//! `HN_LIVE=1 cargo run -p obzenflow --example hn_ai_digest_demo --features "http-pull ai"`
 //!
 //! Optional env vars (HN fetch):
 //! - `HN_MAX_STORIES=30` (default 30)
 //! - `HN_LIVE=1` (default 0)
 //! - `HN_POLL_TIMEOUT_SECS=120` (default 120)
+//! - `HN_SOURCE_RATE_LIMIT=10.0` (default 10.0 events/sec)
 //!
 //! Optional env vars (AI):
 //! - `HN_AI_PROVIDER=ollama|openai` (default `ollama`)

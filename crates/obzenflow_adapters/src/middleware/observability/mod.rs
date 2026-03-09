@@ -5,7 +5,7 @@
 //! Observability middleware for monitoring and metrics
 //!
 //! This module contains middleware implementations that enhance the observability
-//! of FlowState pipelines by adding timing, logging, and other instrumentation.
+//! of ObzenFlow pipelines by adding timing, logging, and other instrumentation.
 
 pub mod flow_boundary;
 pub mod logging_middleware;

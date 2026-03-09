@@ -21,11 +21,8 @@ use crate::supervised_base::{
     EventLoopDirective, ExternalEventMode, ExternalEventPolicy, HandlerSupervised,
 };
 use obzenflow_core::event::context::StageType;
-use obzenflow_core::event::SystemEvent;
-use obzenflow_core::journal::Journal;
 use obzenflow_core::{ChainEvent, EventEnvelope, StageId};
 use obzenflow_fsm::{fsm, EventVariant, StateVariant, Transition};
-use std::sync::Arc;
 
 use super::fsm::{StatefulAction, StatefulContext, StatefulEvent, StatefulState};
 
@@ -35,9 +32,6 @@ pub(crate) struct StatefulSupervisor<
 > {
     /// Supervisor name (for logging)
     pub(crate) name: String,
-
-    /// System journal for lifecycle events
-    pub(crate) system_journal: Arc<dyn Journal<SystemEvent>>,
 
     /// Stage ID
     pub(crate) stage_id: StageId,
@@ -341,18 +335,6 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
 
     fn event_for_action_error(&self, msg: String) -> StatefulEvent<H> {
         StatefulEvent::Error(msg)
-    }
-
-    async fn write_completion_event(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let event = SystemEvent::stage_completed(self.stage_id);
-        if let Err(e) = self.system_journal.append(event, None).await {
-            tracing::error!(
-                stage_id = %self.stage_id,
-                journal_error = %e,
-                "Failed to write completion event; continuing without system journal entry"
-            );
-        }
-        Ok(())
     }
 
     async fn dispatch_state(

@@ -21,7 +21,7 @@ const DEFAULT_METRIC_CHANNEL_CAPACITY: usize = 1024;
 /// - How to calculate their saturation ratio
 /// - When to report state changes
 ///
-/// FlowState just stores and reports the value as a ratio (0.0 to 1.0).
+/// ObzenFlow just stores and reports the value as a ratio (0.0 to 1.0).
 pub struct SaturationMetric {
     name: String,
     current_ratio: AtomicU64, // Store as fixed-point (multiply by 10000 for 4 decimal places)
@@ -104,7 +104,7 @@ impl StatefulMetric for SaturationMetric {}
 /// - What thresholds to use for warnings/alerts
 /// - When to report state changes
 ///
-/// FlowState just provides the reporting mechanism.
+/// ObzenFlow just provides the reporting mechanism.
 pub trait SaturationSupport {
     /// Get the saturation metric instance for this stage
     fn saturation_metric(&self) -> &SaturationMetric;

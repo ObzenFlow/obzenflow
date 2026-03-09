@@ -76,7 +76,6 @@ async fn run_example_async() -> Result<()> {
         .on_error_with(|event, err| Some(event.mark_as_error(err, ErrorKind::Deserialization)));
 
     FlowApplication::builder()
-        .with_console_subscriber()
         .with_log_level(LogLevel::Info)
         .run_async(flow! {
             name: "hn_ingestion_demo",

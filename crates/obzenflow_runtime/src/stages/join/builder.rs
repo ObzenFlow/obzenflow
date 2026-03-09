@@ -149,9 +149,7 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
         // Create supervisor
         let supervisor = JoinSupervisor {
             name: format!("join_{}", self.config.stage_name),
-            system_journal: self.resources.system_journal.clone(),
             stage_id: self.config.stage_id,
-            stage_name: self.config.stage_name.clone(),
             reference_subscription: None,
             stream_subscription: None,
             _marker: std::marker::PhantomData,

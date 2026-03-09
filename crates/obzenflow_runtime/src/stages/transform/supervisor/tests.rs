@@ -147,7 +147,6 @@ async fn build_cycle_entry_harness<
     let supervisor = TransformSupervisor::<H> {
         name: "transform_test".to_string(),
         data_journal: data_journal.clone(),
-        system_journal,
         stage_id: t,
         subscription: None,
         cycle_guard: Some(CycleGuard::new(
@@ -430,7 +429,6 @@ async fn build_transform_harness<
     let supervisor = TransformSupervisor::<H> {
         name: "transform_test".to_string(),
         data_journal: data_journal.clone(),
-        system_journal,
         stage_id: t,
         subscription: None,
         cycle_guard: None,

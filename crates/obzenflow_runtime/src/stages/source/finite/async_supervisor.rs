@@ -319,18 +319,6 @@ impl<H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
         FiniteSourceEvent::Error(msg)
     }
 
-    async fn write_completion_event(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let event = SystemEvent::stage_completed(self.stage_id);
-        if let Err(e) = self.system_journal.append(event, None).await {
-            tracing::error!(
-                stage_name = %self.name,
-                journal_error = %e,
-                "Failed to write completion event; continuing without system journal entry"
-            );
-        }
-        Ok(())
-    }
-
     async fn dispatch_state(
         &mut self,
         state: &Self::State,

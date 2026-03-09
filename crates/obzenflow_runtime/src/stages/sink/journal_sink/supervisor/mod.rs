@@ -8,12 +8,9 @@ use crate::stages::common::handlers::SinkHandler;
 use crate::supervised_base::base::Supervisor;
 use crate::supervised_base::{ExternalEventMode, ExternalEventPolicy, HandlerSupervised};
 use crate::{messaging::UpstreamSubscription, supervised_base::EventLoopDirective};
-use obzenflow_core::event::SystemEvent;
-use obzenflow_core::journal::Journal;
 use obzenflow_core::ChainEvent;
 use obzenflow_core::{StageId, WriterId};
 use obzenflow_fsm::{fsm, EventVariant, StateVariant, Transition};
-use std::sync::Arc;
 
 use super::fsm::{JournalSinkAction, JournalSinkContext, JournalSinkEvent, JournalSinkState};
 
@@ -26,14 +23,8 @@ pub(crate) struct JournalSinkSupervisor<
     /// Supervisor name (for logging)
     pub(crate) name: String,
 
-    /// System journal for lifecycle events
-    pub(crate) system_journal: Arc<dyn Journal<SystemEvent>>,
-
     /// Stage ID
     pub(crate) stage_id: StageId,
-
-    /// Human-readable stage name (for logging in methods that don't see Context)
-    pub(crate) stage_name: String,
 
     /// Upstream subscription moved off the FSM context (Phase 1b follow-up).
     ///
@@ -342,35 +333,6 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
 
     fn event_for_action_error(&self, msg: String) -> JournalSinkEvent<H> {
         JournalSinkEvent::Error(msg)
-    }
-
-    async fn write_completion_event(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let event = SystemEvent::stage_completed(self.stage_id);
-        tracing::info!(
-            target: "flowip-080o",
-            stage_name = %self.stage_name,
-            stage_id = ?self.stage_id,
-            "sink: HandlerSupervised writing stage_completed"
-        );
-
-        if let Err(e) = self.system_journal.append(event, None).await {
-            tracing::error!(
-                target: "flowip-080o",
-                stage_name = %self.stage_name,
-                stage_id = ?self.stage_id,
-                journal_error = %e,
-                "sink: HandlerSupervised failed to append stage_completed; continuing without system journal entry"
-            );
-        } else {
-            tracing::info!(
-                target: "flowip-080o",
-                stage_name = %self.stage_name,
-                stage_id = ?self.stage_id,
-                "sink: HandlerSupervised stage_completed append succeeded"
-            );
-        }
-
-        Ok(())
     }
 
     async fn dispatch_state(
