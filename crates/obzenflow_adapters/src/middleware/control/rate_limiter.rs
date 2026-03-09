@@ -29,6 +29,7 @@ use tracing::{debug, info, trace};
 
 const ACTIVITY_PULSE_WINDOW_MS: u64 = 1000;
 const ACTIVITY_PULSE_WINDOW: Duration = Duration::from_secs(1);
+const DEFAULT_COST_PER_EVENT: f64 = 1.0;
 
 const MODE_ENTER_THRESHOLD_PCT: f64 = 100.0;
 const MODE_EXIT_THRESHOLD_PCT: f64 = 80.0;
@@ -579,7 +580,51 @@ impl Middleware for RateLimiterMiddleware {
     }
 }
 
-/// Factory for creating rate limiter middleware
+/// Builder for constructing rate limiter middleware factories.
+#[derive(Clone)]
+pub struct RateLimiterBuilder {
+    events_per_second: f64,
+    burst_capacity: Option<f64>,
+    cost_per_event: f64,
+}
+
+impl RateLimiterBuilder {
+    /// Create a basic rate limiter builder.
+    pub fn new(events_per_second: f64) -> Self {
+        Self {
+            events_per_second,
+            burst_capacity: None,
+            cost_per_event: DEFAULT_COST_PER_EVENT,
+        }
+    }
+
+    /// Set burst capacity (defaults to `events_per_second`).
+    pub fn with_burst(mut self, capacity: f64) -> Self {
+        self.burst_capacity = Some(capacity);
+        self
+    }
+
+    /// Set cost per event (for weighted rate limiting).
+    pub fn with_cost_per_event(mut self, cost: f64) -> Self {
+        self.cost_per_event = cost;
+        self
+    }
+
+    /// Backward-compatible alias for `with_cost_per_event`.
+    pub fn with_cost(self, cost: f64) -> Self {
+        self.with_cost_per_event(cost)
+    }
+
+    /// Build the boxed middleware factory.
+    pub fn build(self) -> Box<dyn MiddlewareFactory> {
+        Box::new(RateLimiterFactory::from(self))
+    }
+}
+
+/// Factory for creating rate limiter middleware.
+///
+/// `RateLimiterFactory` remains available for direct construction and testing,
+/// but caller-facing configuration should prefer `RateLimiterBuilder`.
 #[derive(Clone)]
 pub struct RateLimiterFactory {
     events_per_second: f64,
@@ -593,7 +638,7 @@ impl RateLimiterFactory {
         Self {
             events_per_second,
             burst_capacity: None,
-            cost_per_event: 1.0,
+            cost_per_event: DEFAULT_COST_PER_EVENT,
         }
     }
 
@@ -603,10 +648,25 @@ impl RateLimiterFactory {
         self
     }
 
-    /// Set cost per event (for weighted rate limiting)
-    pub fn with_cost(mut self, cost: f64) -> Self {
+    /// Set cost per event (for weighted rate limiting).
+    pub fn with_cost_per_event(mut self, cost: f64) -> Self {
         self.cost_per_event = cost;
         self
+    }
+
+    /// Backward-compatible alias for `with_cost_per_event`.
+    pub fn with_cost(self, cost: f64) -> Self {
+        self.with_cost_per_event(cost)
+    }
+}
+
+impl From<RateLimiterBuilder> for RateLimiterFactory {
+    fn from(builder: RateLimiterBuilder) -> Self {
+        Self {
+            events_per_second: builder.events_per_second,
+            burst_capacity: builder.burst_capacity,
+            cost_per_event: builder.cost_per_event,
+        }
     }
 }
 
@@ -666,12 +726,14 @@ impl MiddlewareFactory for RateLimiterFactory {
 
 /// Helper function for common module
 pub fn rate_limit(events_per_second: f64) -> Box<dyn MiddlewareFactory> {
-    Box::new(RateLimiterFactory::new(events_per_second))
+    RateLimiterBuilder::new(events_per_second).build()
 }
 
 /// Helper function with burst capacity
 pub fn rate_limit_with_burst(events_per_second: f64, burst: f64) -> Box<dyn MiddlewareFactory> {
-    Box::new(RateLimiterFactory::new(events_per_second).with_burst(burst))
+    RateLimiterBuilder::new(events_per_second)
+        .with_burst(burst)
+        .build()
 }
 
 #[cfg(test)]
@@ -811,6 +873,37 @@ mod tests {
             "Expected windowing strategy for rate limiter"
         );
         // Can't easily test the window duration without exposing internals
+    }
+
+    #[test]
+    fn test_rate_limiter_builder_preserves_config() {
+        let factory = RateLimiterFactory::from(
+            RateLimiterBuilder::new(100.0)
+                .with_burst(500.0)
+                .with_cost_per_event(2.0),
+        );
+
+        assert_eq!(factory.events_per_second, 100.0);
+        assert_eq!(factory.burst_capacity, Some(500.0));
+        assert_eq!(factory.cost_per_event, 2.0);
+    }
+
+    #[test]
+    fn test_rate_limit_helpers_use_builder_defaults() {
+        assert_eq!(
+            rate_limit(25.0).config_snapshot(),
+            Some(json!({
+                "tokens_per_sec": 25.0,
+                "burst_capacity": 25.0,
+            }))
+        );
+        assert_eq!(
+            rate_limit_with_burst(25.0, 50.0).config_snapshot(),
+            Some(json!({
+                "tokens_per_sec": 25.0,
+                "burst_capacity": 50.0,
+            }))
+        );
     }
 
     #[test]

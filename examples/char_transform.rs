@@ -20,7 +20,7 @@
 //! Run with: `cargo run -p obzenflow --example char_transform`
 
 use anyhow::Result;
-use obzenflow_adapters::middleware::rate_limit;
+use obzenflow_adapters::middleware::RateLimiterBuilder;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, stateful, transform};
 use obzenflow_infra::application::{FlowApplication, LogLevel};
@@ -149,7 +149,7 @@ async fn main() -> Result<()> {
             name: "char_transform",
             journals: disk_journals(std::path::PathBuf::from("target/char-transform-logs")),
             middleware: [
-                rate_limit(CHAR_TRANSFORM_RATE_LIMIT)
+                RateLimiterBuilder::new(CHAR_TRANSFORM_RATE_LIMIT).build()
             ],
 
             stages: {

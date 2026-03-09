@@ -24,7 +24,7 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
-use obzenflow_adapters::middleware::rate_limit;
+use obzenflow_adapters::middleware::RateLimiterBuilder;
 use obzenflow_core::{
     event::chain_event::{ChainEvent, ChainEventFactory},
     event::status::processing_status::ErrorKind,
@@ -196,7 +196,7 @@ fn main() -> Result<()> {
 
             // Flow-level rate limiting (1000 events/sec) for fast processing
             middleware: [
-                rate_limit(1000.0)
+                RateLimiterBuilder::new(1000.0).build()
             ],
 
             stages: {

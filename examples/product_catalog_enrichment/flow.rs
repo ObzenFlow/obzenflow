@@ -6,7 +6,7 @@ use super::domain::*;
 use super::sinks::{per_order_printer, summary_printer, CatalogAnalyticsSummary};
 use super::sources::*;
 use anyhow::Result;
-use obzenflow_adapters::middleware::rate_limit;
+use obzenflow_adapters::middleware::RateLimiterBuilder;
 use obzenflow_dsl::{flow, join, sink, source, stateful, with_ref};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::join::{InnerJoinBuilder, LeftJoinBuilder, StrictJoinBuilder};
@@ -165,7 +165,10 @@ fn build_flow() -> obzenflow_dsl::FlowDefinition {
                 )
             );
 
-            per_order = sink!("per_order_printer" => per_order_printer(), [rate_limit(0.5)]);
+            per_order = sink!(
+                "per_order_printer" => per_order_printer(),
+                [RateLimiterBuilder::new(0.5).build()]
+            );
 
             stats = stateful!("catalog_stats" =>
                 ReduceTyped::new(

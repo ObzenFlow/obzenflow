@@ -1110,8 +1110,7 @@ impl<H: InfiniteSourceHandler> InfiniteSourceMiddlewareBuilder<H> {
 mod tests {
     use super::*;
     use crate::middleware::control::{
-        circuit_breaker::CircuitBreakerMiddleware, ControlMiddlewareAggregator,
-        RateLimiterFactory,
+        circuit_breaker::CircuitBreakerMiddleware, ControlMiddlewareAggregator, RateLimiterBuilder,
     };
     use crate::middleware::MiddlewareFactory;
     use async_trait::async_trait;
@@ -1340,19 +1339,22 @@ mod tests {
             flow_name: "source_middleware_tests".to_string(),
             cycle_guard: None,
         };
-        let rate_limiter = RateLimiterFactory::new(20.0)
+        let rate_limiter = RateLimiterBuilder::new(20.0)
             .with_burst(1.0)
+            .build()
             .create(&config, Arc::new(ControlMiddlewareAggregator::new()));
 
-        let mut wrapped = MiddlewareAsyncFiniteSource::new(inner, writer_id)
-            .with_middleware(rate_limiter);
+        let mut wrapped =
+            MiddlewareAsyncFiniteSource::new(inner, writer_id).with_middleware(rate_limiter);
 
         let first = wrapped
             .next()
             .await
             .expect("first async finite source poll should succeed");
         assert!(
-            first.as_ref().is_some_and(|events| events.iter().any(ChainEvent::is_data)),
+            first
+                .as_ref()
+                .is_some_and(|events| events.iter().any(ChainEvent::is_data)),
             "first poll should produce a data event"
         );
 

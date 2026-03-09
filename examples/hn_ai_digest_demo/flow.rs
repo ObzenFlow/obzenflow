@@ -14,8 +14,8 @@ use obzenflow::ai::{
 };
 use obzenflow::sinks::ConsoleSink;
 use obzenflow::sources::{HeaderMap, HttpPullConfig, HttpPullSource, Url};
-use obzenflow_adapters::middleware::rate_limit;
 use obzenflow_adapters::middleware::control::ai_circuit_breaker;
+use obzenflow_adapters::middleware::RateLimiterBuilder;
 use obzenflow_core::event::chain_event::ChainEventFactory;
 use obzenflow_core::event::status::processing_status::ErrorKind;
 use obzenflow_core::{ChainEvent, TypedPayload};
@@ -245,9 +245,7 @@ async fn run_example_async() -> Result<()> {
         None => println!("  group_max_stories: unlimited"),
         Some(v) => println!("  group_max_stories: {v}"),
     }
-    println!(
-        "  source_rate_limit: {source_rate_limit} events/sec"
-    );
+    println!("  source_rate_limit: {source_rate_limit} events/sec");
     println!();
 
     let decoder = HnStoryDecoder::new(base_url, max_stories);
@@ -529,7 +527,7 @@ async fn run_example_async() -> Result<()> {
                     HttpPullSource::new(decoder, config),
                     Some(Duration::from_secs(poll_timeout_secs as u64))
                 ), [
-                    rate_limit(source_rate_limit)
+                    RateLimiterBuilder::new(source_rate_limit).build()
                 ]);
                 formatter = transform!("formatter" => formatter);
                 batch = stateful!("batch" => digest_seed);

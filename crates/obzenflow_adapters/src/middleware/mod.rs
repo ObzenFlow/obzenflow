@@ -192,7 +192,7 @@ pub use state::windowing::{WindowingMiddleware, WindowingMiddlewareFactory};
 // Control middleware
 pub use control::{
     circuit_breaker, rate_limit, rate_limit_with_burst, CircuitBreakerBuilder,
-    CircuitBreakerMiddleware, RateLimiterFactory, RateLimiterMiddleware,
+    CircuitBreakerMiddleware, RateLimiterBuilder, RateLimiterFactory, RateLimiterMiddleware,
 };
 
 // Backpressure (config + topology observability; FLOWIP-086k)

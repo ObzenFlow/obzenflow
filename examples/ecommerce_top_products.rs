@@ -10,7 +10,7 @@
 //! Run with: cargo run --package obzenflow --example ecommerce_top_products
 
 use anyhow::Result;
-use obzenflow_adapters::middleware::rate_limit;
+use obzenflow_adapters::middleware::RateLimiterBuilder;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, stateful};
 use obzenflow_infra::application::FlowApplication;
@@ -252,7 +252,7 @@ async fn main() -> Result<()> {
                         |order: &OrderEvent| order.product_id.clone(),  // Key extractor
                         |order: &OrderEvent| order.total_value          // Score extractor
                     ).emit_every_n(5),
-                    [rate_limit(3.0)]   // Process max 3 orders per second for demo visibility
+                    [RateLimiterBuilder::new(3.0).build()]   // Process max 3 orders per second for demo visibility
                 );
 
                 dashboard = sink!("dashboard" => |update: TopProductsUpdate| {
