@@ -9,7 +9,7 @@ use super::util::{env_bool, env_usize, truncate_chars};
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use obzenflow::ai::{
-    estimator_for_model, split_to_budget, ChatTransform, ChatTransformExt, EstimateSource,
+    resolve_estimator_for_model, split_to_budget, ChatTransform, ChatTransformExt, EstimateSource,
     SplitGroup, TokenCount, TokenEstimator,
 };
 use obzenflow::sinks::ConsoleSink;
@@ -225,7 +225,8 @@ async fn run_example_async() -> Result<()> {
         n => Some(n),
     };
 
-    let estimator = estimator_for_model(&ai_model_label);
+    let estimator_resolution = resolve_estimator_for_model(&ai_model_label);
+    let estimator = estimator_resolution.estimator();
 
     println!("HN AI Digest Demo (FLOWIP-086r)");
     println!("===============================");
@@ -239,7 +240,16 @@ async fn run_example_async() -> Result<()> {
     println!("  poll_timeout: {poll_timeout_secs}s");
     println!("  ai_provider: {ai_provider_label}");
     println!("  ai_model: {ai_model_label}");
-    println!("  token_estimator: {:?}", estimator.source());
+    println!("  token_estimator: {:?}", estimator_resolution.source());
+    if let Some(tokenizer_backend) = estimator_resolution.info().tokenizer_backend.as_deref() {
+        println!("  token_estimator_backend: {tokenizer_backend}");
+    }
+    if let Some(fallback_reason) = estimator_resolution.info().fallback_reason.as_ref() {
+        println!("  token_estimator_fallback_reason: {fallback_reason}");
+    }
+    if let Some(fallback_detail) = estimator_resolution.info().fallback_detail.as_deref() {
+        println!("  token_estimator_fallback_detail: {fallback_detail}");
+    }
     println!("  group_budget_tokens: {budget_per_group_tokens}");
     match max_stories_per_group {
         None => println!("  group_max_stories: unlimited"),
@@ -377,7 +387,7 @@ async fn run_example_async() -> Result<()> {
             ))
         })
         .await?
-        .with_estimator(estimator.clone());
+        .with_resolved_estimator(estimator_resolution.clone());
 
     let map_router = HnDigestMapRouter::new(map_llm);
 
@@ -425,7 +435,7 @@ async fn run_example_async() -> Result<()> {
             ))
         })
         .await?
-        .with_estimator(estimator.clone());
+        .with_resolved_estimator(estimator_resolution.clone());
 
     let oversize_map_router = HnDigestOversizeMapRouter::new(oversize_map_llm);
 
@@ -513,7 +523,7 @@ async fn run_example_async() -> Result<()> {
             ))
         })
         .await?
-        .with_estimator(estimator.clone());
+        .with_resolved_estimator(estimator_resolution.clone());
 
     FlowApplication::builder()
         .with_log_level(LogLevel::Info)

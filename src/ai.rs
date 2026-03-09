@@ -13,16 +13,19 @@
 pub use obzenflow_adapters::ai::{ChatTransform, EmbeddingTransform};
 
 pub use obzenflow_core::ai::{
-    remaining_budget, split_to_budget, EstimateSource, HeuristicTokenEstimator, SplitGroup,
-    TokenCount, TokenEstimate, TokenEstimationError, TokenEstimator,
+    remaining_budget, split_to_budget, EstimateSource, HeuristicTokenEstimator,
+    ResolvedTokenEstimator, SplitGroup, TokenCount, TokenEstimate, TokenEstimationError,
+    TokenEstimator, TokenEstimatorFallbackReason, TokenEstimatorResolutionInfo,
 };
 
-pub use obzenflow_infra::ai::{boxed_estimator_for_model, estimator_for_model};
+pub use obzenflow_infra::ai::{
+    boxed_estimator_for_model, estimator_for_model, resolve_estimator_for_model,
+};
 
-#[cfg(feature = "ai-tiktoken")]
+#[cfg(feature = "ai")]
 pub use obzenflow_infra::ai::TiktokenEstimator;
 
-#[cfg(feature = "ai-rig")]
+#[cfg(feature = "ai")]
 pub use obzenflow_infra::ai::{
     ChatRequestTemplate, ChatTransformBuilder, ChatTransformExt, EmbeddingTransformBuilder,
     EmbeddingTransformExt,

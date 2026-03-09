@@ -27,232 +27,33 @@
 //! - The stateful stage emits a `bank.checkbook` snapshot for every posted entry.
 //! - The `{accepted,rejected}` response is per-request (single POST => accepted=1). For cumulative counts, check `/metrics`.
 
+use super::domain::*;
+use super::handlers::Checkbook;
 use anyhow::Result;
-use async_trait::async_trait;
 use obzenflow_adapters::sinks::{ConsoleSink, SnapshotTableFormatter};
 use obzenflow_adapters::sources::http::HttpSource;
-use obzenflow_core::event::schema::TypedPayload;
-use obzenflow_core::{ChainEvent, StageId, WriterId};
 use obzenflow_dsl::{async_infinite_source, flow, join, sink, stateful, with_ref};
 use obzenflow_infra::application::{FlowApplication, LogLevel};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_infra::web::endpoints::event_ingestion::{
     create_ingestion_endpoints, IngestionConfig, TypedValidator, ValidationConfig,
 };
-use obzenflow_runtime::stages::common::handler_error::HandlerError;
-use obzenflow_runtime::stages::common::handlers::{StatefulHandler, StatefulHandlerExt};
+use obzenflow_runtime::stages::common::handlers::StatefulHandlerExt;
 use obzenflow_runtime::stages::join::strategies::InnerJoinBuilder;
 use obzenflow_runtime::stages::stateful::strategies::emissions::EmitAlways;
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-// ---------------------------------------------------------------------------
-// Domain events
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct AccountOpened {
-    account_id: String,
-    owner: String,
-    initial_balance_cents: i64,
+pub fn run_example() -> Result<()> {
+    tokio::runtime::Runtime::new()?.block_on(run())
 }
 
-impl TypedPayload for AccountOpened {
-    const EVENT_TYPE: &'static str = "bank.account_opened";
+#[cfg(test)]
+pub fn run_example_in_tests() -> Result<()> {
+    Ok(())
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-enum EntryKind {
-    Credit,
-    Debit,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct LedgerEntry {
-    account_id: String,
-    kind: EntryKind,
-    amount_cents: u64,
-    #[serde(default)]
-    note: Option<String>,
-}
-
-impl TypedPayload for LedgerEntry {
-    const EVENT_TYPE: &'static str = "bank.ledger_entry";
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct PostedEntry {
-    account_id: String,
-    owner: String,
-    kind: EntryKind,
-    amount_cents: u64,
-    initial_balance_cents: i64,
-    #[serde(default)]
-    note: Option<String>,
-}
-
-impl TypedPayload for PostedEntry {
-    const EVENT_TYPE: &'static str = "bank.posted_entry";
-}
-
-// ---------------------------------------------------------------------------
-// Projection types
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct CheckbookEntry {
-    index: u64,
-    kind: EntryKind,
-    amount_cents: u64,
-    balance_cents: i64,
-    #[serde(default)]
-    note: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct CheckbookSnapshot {
-    account_id: String,
-    owner: String,
-    current_balance_cents: i64,
-    available_balance_cents: i64,
-    total_credits_cents: i64,
-    total_debits_cents: i64,
-    transactions: Vec<CheckbookEntry>,
-}
-
-impl TypedPayload for CheckbookSnapshot {
-    const EVENT_TYPE: &'static str = "bank.checkbook";
-}
-
-// ---------------------------------------------------------------------------
-// Stateful handler — accumulates posted entries into a checkbook projection
-// ---------------------------------------------------------------------------
-
-#[derive(Clone, Debug, Default)]
-struct CheckbookState {
-    ledgers: HashMap<String, AccountLedger>,
-    last_snapshot: Option<CheckbookSnapshot>,
-}
-
-#[derive(Clone, Debug, Default)]
-struct AccountLedger {
-    owner: String,
-    current_balance_cents: i64,
-    total_credits_cents: i64,
-    total_debits_cents: i64,
-    transactions: Vec<CheckbookEntry>,
-}
-
-#[derive(Clone, Debug)]
-struct Checkbook {
-    writer_id: WriterId,
-}
-
-impl Checkbook {
-    fn new() -> Self {
-        Self {
-            writer_id: WriterId::from(StageId::new()),
-        }
-    }
-}
-
-#[async_trait]
-impl StatefulHandler for Checkbook {
-    type State = CheckbookState;
-
-    fn accumulate(&mut self, state: &mut Self::State, event: ChainEvent) {
-        let Some(entry) = PostedEntry::from_event(&event) else {
-            return;
-        };
-
-        let ledger = state
-            .ledgers
-            .entry(entry.account_id.clone())
-            .or_insert_with(|| AccountLedger {
-                owner: entry.owner.clone(),
-                current_balance_cents: entry.initial_balance_cents,
-                total_credits_cents: 0,
-                total_debits_cents: 0,
-                transactions: Vec::new(),
-            });
-
-        ledger.owner = entry.owner.clone();
-
-        match entry.kind {
-            EntryKind::Credit => {
-                ledger.total_credits_cents = ledger
-                    .total_credits_cents
-                    .saturating_add(entry.amount_cents as i64);
-                ledger.current_balance_cents = ledger
-                    .current_balance_cents
-                    .saturating_add(entry.amount_cents as i64);
-            }
-            EntryKind::Debit => {
-                ledger.total_debits_cents = ledger
-                    .total_debits_cents
-                    .saturating_add(entry.amount_cents as i64);
-                ledger.current_balance_cents = ledger
-                    .current_balance_cents
-                    .saturating_sub(entry.amount_cents as i64);
-            }
-        }
-
-        let checkbook_entry = CheckbookEntry {
-            index: ledger.transactions.len() as u64 + 1,
-            kind: entry.kind,
-            amount_cents: entry.amount_cents,
-            balance_cents: ledger.current_balance_cents,
-            note: entry.note,
-        };
-        ledger.transactions.push(checkbook_entry);
-
-        state.last_snapshot = Some(CheckbookSnapshot {
-            account_id: entry.account_id,
-            owner: ledger.owner.clone(),
-            current_balance_cents: ledger.current_balance_cents,
-            available_balance_cents: ledger.current_balance_cents,
-            total_credits_cents: ledger.total_credits_cents,
-            total_debits_cents: ledger.total_debits_cents,
-            transactions: ledger.transactions.clone(),
-        });
-    }
-
-    fn initial_state(&self) -> Self::State {
-        CheckbookState::default()
-    }
-
-    fn create_events(
-        &self,
-        state: &Self::State,
-    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
-        let Some(snapshot) = state.last_snapshot.as_ref() else {
-            return Ok(Vec::new());
-        };
-        Ok(vec![snapshot.clone().to_event(self.writer_id)])
-    }
-
-    fn emit(&self, state: &mut Self::State) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
-        let Some(snapshot) = state.last_snapshot.take() else {
-            return Ok(Vec::new());
-        };
-        Ok(vec![snapshot.to_event(self.writer_id)])
-    }
-}
-
-fn format_cents(cents: i64) -> String {
-    let sign = if cents < 0 { "-" } else { "" };
-    let abs = cents.abs();
-    format!("{sign}${}.{:02}", abs / 100, abs % 100)
-}
-
-fn format_unsigned_cents(cents: u64) -> String {
-    format!("${}.{:02}", cents / 100, cents % 100)
-}
-
-#[tokio::main]
-async fn main() -> Result<()> {
+async fn run() -> Result<()> {
     // Required for --server mode (FlowApplication enforces metrics for extra endpoints).
     std::env::set_var("OBZENFLOW_METRICS_EXPORTER", "prometheus");
 

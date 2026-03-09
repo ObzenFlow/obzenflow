@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use obzenflow_core::ai::{
     attach_llm_observability, params_hash_for_chat, prompt_hash_for_chat,
     schema_hash_for_response_format, ChatClient, ChatRequest, ChatResponse, LlmHashes,
-    LlmObservability, TokenEstimator,
+    LlmObservability, ResolvedTokenEstimator, TokenEstimator, TokenEstimatorResolutionInfo,
 };
 use obzenflow_core::event::chain_event::ChainEventContent;
 use obzenflow_core::ChainEvent;
@@ -30,6 +30,7 @@ type ChatOutputMapper = dyn Fn(&ChainEvent, ChatResponse) -> Result<Vec<ChainEve
 pub struct ChatTransform {
     client: Arc<dyn ChatClient>,
     estimator: Option<Arc<dyn TokenEstimator>>,
+    estimator_resolution: Option<TokenEstimatorResolutionInfo>,
     request_builder: Arc<ChatRequestBuilder>,
     output_mapper: Arc<ChatOutputMapper>,
 }
@@ -48,6 +49,7 @@ impl ChatTransform {
         Self {
             client,
             estimator: None,
+            estimator_resolution: None,
             request_builder: Arc::new(request_builder),
             output_mapper: Arc::new(default_chat_output_mapper),
         }
@@ -55,6 +57,14 @@ impl ChatTransform {
 
     pub fn with_estimator(mut self, estimator: Arc<dyn TokenEstimator>) -> Self {
         self.estimator = Some(estimator);
+        self.estimator_resolution = None;
+        self
+    }
+
+    pub fn with_resolved_estimator(mut self, resolved: ResolvedTokenEstimator) -> Self {
+        let (estimator, info) = resolved.into_parts();
+        self.estimator = Some(estimator);
+        self.estimator_resolution = Some(info);
         self
     }
 
@@ -98,6 +108,19 @@ impl AsyncTransformHandler for ChatTransform {
             .map(|estimator| estimator.estimate_chat_request(&request));
         let estimated_input_token_count = estimated_input_tokens.as_ref().map(|e| e.tokens.get());
         let estimated_input_source = estimated_input_tokens.as_ref().map(|e| e.source);
+        let estimator_backend = self
+            .estimator_resolution
+            .as_ref()
+            .and_then(|info| info.tokenizer_backend.as_deref());
+        let estimator_fallback_reason = self
+            .estimator_resolution
+            .as_ref()
+            .and_then(|info| info.fallback_reason.as_ref())
+            .map(|reason| reason.as_str());
+        let estimator_fallback_detail = self
+            .estimator_resolution
+            .as_ref()
+            .and_then(|info| info.fallback_detail.as_deref());
 
         tracing::info!(
             event_id = %input_event_id,
@@ -108,6 +131,9 @@ impl AsyncTransformHandler for ChatTransform {
             tool_count,
             estimated_input_tokens = estimated_input_token_count,
             estimated_input_source = ?estimated_input_source,
+            estimator_backend = estimator_backend,
+            estimator_fallback_reason = estimator_fallback_reason,
+            estimator_fallback_detail = estimator_fallback_detail,
             "AI chat request started"
         );
 
@@ -144,6 +170,7 @@ impl AsyncTransformHandler for ChatTransform {
             LlmObservability::new(request.provider.clone(), request.model.clone(), hashes);
         llm.usage = usage.clone();
         llm.estimated_input_tokens = estimated_input_tokens;
+        llm.estimated_input_resolution = self.estimator_resolution.clone();
 
         for output in &mut outputs {
             attach_llm_observability(output, llm.clone()).map_err(|err| {
@@ -199,7 +226,8 @@ mod tests {
     use super::*;
     use obzenflow_core::ai::{
         AiClientError, AiProvider, ChatMessage, ChatParams, ChatResponseFormat, ChatRole,
-        EstimateSource, TokenCount, TokenEstimate, TokenEstimator, Usage, UsageSource,
+        EstimateSource, ResolvedTokenEstimator, TokenCount, TokenEstimate, TokenEstimator,
+        TokenEstimatorFallbackReason, TokenEstimatorResolutionInfo, Usage, UsageSource,
     };
     use obzenflow_core::event::ChainEventFactory;
     use obzenflow_core::{StageId, WriterId};
@@ -357,6 +385,63 @@ mod tests {
                 tokens: TokenCount::new(123),
                 source: EstimateSource::Heuristic
             })
+        );
+        assert_eq!(llm.estimated_input_resolution, None);
+    }
+
+    #[tokio::test]
+    async fn chat_transform_attaches_estimator_resolution_when_present() {
+        let client = Arc::new(QueueChatClient::default());
+        client.enqueue_ok(ChatResponse {
+            text: "ok".to_string(),
+            tool_calls: vec![],
+            usage: None,
+            raw: None,
+        });
+
+        let resolved = ResolvedTokenEstimator::new(
+            Arc::new(FixedTokenEstimator {
+                tokens: TokenCount::new(77),
+                source: EstimateSource::Heuristic,
+            }),
+            TokenEstimatorResolutionInfo::heuristic(
+                "llama3.1:8b",
+                TokenEstimatorFallbackReason::ModelNotSupportedByTokenizer,
+                Some("no tiktoken encoding for model 'llama3.1:8b'".to_string()),
+            ),
+        );
+
+        let transform = ChatTransform::new(client, |_event| {
+            Ok(ChatRequest {
+                provider: AiProvider::new("ollama"),
+                model: "llama3.1:8b".to_string(),
+                messages: vec![ChatMessage {
+                    role: ChatRole::user(),
+                    content: "hello".to_string(),
+                }],
+                params: ChatParams::default(),
+                tools: vec![],
+                response_format: None,
+            })
+        })
+        .with_resolved_estimator(resolved);
+
+        let outputs = transform
+            .process(test_event())
+            .await
+            .expect("chat transform should succeed");
+
+        let llm = obzenflow_core::ai::read_llm_observability(&outputs[0])
+            .expect("llm read should parse")
+            .expect("llm metadata should exist");
+
+        assert_eq!(
+            llm.estimated_input_resolution,
+            Some(TokenEstimatorResolutionInfo::heuristic(
+                "llama3.1:8b",
+                TokenEstimatorFallbackReason::ModelNotSupportedByTokenizer,
+                Some("no tiktoken encoding for model 'llama3.1:8b'".to_string()),
+            ))
         );
     }
 

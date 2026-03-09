@@ -15,7 +15,9 @@ mod token_estimation;
 #[cfg(feature = "ai-tiktoken")]
 mod tiktoken;
 
-pub use token_estimation::{boxed_estimator_for_model, estimator_for_model};
+pub use token_estimation::{
+    boxed_estimator_for_model, estimator_for_model, resolve_estimator_for_model,
+};
 
 #[cfg(feature = "ai-tiktoken")]
 pub use tiktoken::TiktokenEstimator;

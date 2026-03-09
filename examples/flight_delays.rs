@@ -6,8 +6,10 @@
 //!
 //! Run with: `cargo run --package obzenflow --example flight_delays_simple`
 
-mod flight_delays_simple;
-
-fn main() -> anyhow::Result<()> {
-    flight_delays_simple::main()
+fn main() {
+    eprintln!(
+        "This example has been renamed to `flight_delays_simple`.\n\
+         Run: cargo run --package obzenflow --example flight_delays_simple"
+    );
+    std::process::exit(1);
 }

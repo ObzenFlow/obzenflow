@@ -135,9 +135,7 @@ futures = { workspace = true }
 [features]
 console = ["obzenflow_infra/console"]
 http-pull = ["obzenflow_infra/reqwest-client"]
-ai = ["ai-rig", "ai-tiktoken"]
-ai-rig = ["obzenflow_infra/ai-rig"]
-ai-tiktoken = ["obzenflow_infra/ai-tiktoken"]
+ai = ["obzenflow_infra/ai-rig", "obzenflow_infra/ai-tiktoken"]
 
 [profile.release]
 lto = true
@@ -148,7 +146,11 @@ codegen-units = 1
 
 [[example]]
 name = "flight_delays_simple"
-path = "examples/flight_delays_simple.rs"
+path = "examples/flight_delays_simple/main.rs"
+
+[[example]]
+name = "http_ingestion_piggy_bank_demo"
+path = "examples/http_ingestion_piggy_bank_demo/main.rs"
 
 [[example]]
 name = "char_transform"

@@ -30,7 +30,7 @@ These are the flagship examples and the best place to start. Each one has a comp
   - Tutorial: [Model Bank Transactions as a Flow](https://obzenflow.dev/tutorials/model-bank-transactions/)
   - Pillars: [Service-Like Streaming](https://obzenflow.dev/pillars/service-like-streaming/), [Composable Stage Primitives](https://obzenflow.dev/pillars/composable-stages/), [Replayability and Durability](https://obzenflow.dev/pillars/replay-auditability/), [Operational Zen](https://obzenflow.dev/pillars/no-platform-required/)
   - Run: `cargo run -p obzenflow --example http_ingestion_piggy_bank_demo --features obzenflow_infra/warp-server -- --server --server-port 9090`
-  - Code: [`examples/http_ingestion_piggy_bank_demo.rs`](http_ingestion_piggy_bank_demo.rs)
+  - Code: [`examples/http_ingestion_piggy_bank_demo/flow.rs`](http_ingestion_piggy_bank_demo/flow.rs)
 
 - **`hn_ai_digest_demo`** — The canonical AI example: live HTTP pull, token budgeting, chunking, accumulation, and Rig-backed LLM inference with replayable evidence.
   - Tutorial: [Run Live AI Inference from a Real Endpoint](https://obzenflow.dev/tutorials/live-ai-inference/)
@@ -66,7 +66,7 @@ These examples don't have tutorials, but they demonstrate concrete framework con
 - **`flight_delays_simple`** — The shortest path to understanding stream-table joins. Use this when you want one clean reference-enrichment example before moving on to larger join graphs.
   - Pillars: [Composable Stage Primitives](https://obzenflow.dev/pillars/composable-stages/)
   - Run: `cargo run -p obzenflow --example flight_delays_simple`
-  - Code: [`examples/flight_delays_simple.rs`](flight_delays_simple.rs)
+  - Code: [`examples/flight_delays_simple/flow.rs`](flight_delays_simple/flow.rs)
 
 ## Reference shelf
 

@@ -2,7 +2,9 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use crate::ai::{AiProvider, TokenEstimate, Usage, LLM_HASH_VERSION_SHA256_V1};
+use crate::ai::{
+    AiProvider, TokenEstimate, TokenEstimatorResolutionInfo, Usage, LLM_HASH_VERSION_SHA256_V1,
+};
 use crate::event::chain_event::ChainEvent;
 use crate::event::context::observability_context::ObservabilityContext;
 use serde::{Deserialize, Serialize};
@@ -55,6 +57,8 @@ pub struct LlmObservability {
     pub usage: Option<Usage>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub estimated_input_tokens: Option<TokenEstimate>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimated_input_resolution: Option<TokenEstimatorResolutionInfo>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cache: Option<LlmCacheInfo>,
 }
@@ -70,6 +74,7 @@ impl LlmObservability {
             hashes,
             usage: None,
             estimated_input_tokens: None,
+            estimated_input_resolution: None,
             cache: None,
         }
     }
@@ -143,7 +148,9 @@ pub fn read_llm_observability(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ai::{LlmHashes, UsageSource};
+    use crate::ai::{
+        LlmHashes, TokenEstimatorFallbackReason, TokenEstimatorResolutionInfo, UsageSource,
+    };
     use crate::event::ChainEventFactory;
     use crate::id::StageId;
     use crate::WriterId;
@@ -166,6 +173,11 @@ mod tests {
             output_tokens: 20,
             total_tokens: 30,
         });
+        llm.estimated_input_resolution = Some(TokenEstimatorResolutionInfo::heuristic(
+            "llama3.1:8b",
+            TokenEstimatorFallbackReason::ModelNotSupportedByTokenizer,
+            Some("no tiktoken encoding".to_string()),
+        ));
 
         attach_llm_observability(&mut event, llm.clone()).expect("attach should succeed");
         let decoded = read_llm_observability(&event)
