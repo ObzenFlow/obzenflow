@@ -121,7 +121,6 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Supe
         let supervisor = TransformSupervisor {
             name: format!("transform_{}", self.config.stage_name),
             data_journal: self.resources.data_journal.clone(),
-            system_journal: self.resources.system_journal.clone(),
             stage_id: self.config.stage_id,
             subscription: None,
             cycle_guard: cycle_guard_config.as_ref().map(|cfg| {
@@ -273,7 +272,6 @@ impl<H: AsyncTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
         let supervisor = TransformSupervisor {
             name: format!("transform_{}", self.config.stage_name),
             data_journal: self.resources.data_journal.clone(),
-            system_journal: self.resources.system_journal.clone(),
             stage_id: self.config.stage_id,
             subscription: None,
             cycle_guard: cycle_guard_config.as_ref().map(|cfg| {

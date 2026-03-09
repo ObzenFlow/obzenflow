@@ -118,7 +118,6 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Super
         // Create supervisor (private - not exposed)
         let supervisor = StatefulSupervisor {
             name: format!("stateful_{}", self.config.stage_name),
-            system_journal: self.resources.system_journal.clone(),
             stage_id: self.config.stage_id,
             subscription: None,
             _marker: std::marker::PhantomData,

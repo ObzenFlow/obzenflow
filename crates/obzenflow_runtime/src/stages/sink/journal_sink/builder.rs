@@ -92,9 +92,7 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
         // Create supervisor (private - not exposed)
         let supervisor = JournalSinkSupervisor {
             name: format!("sink_{}", self.config.stage_name),
-            system_journal: self.resources.system_journal.clone(),
             stage_id: self.config.stage_id,
-            stage_name: self.config.stage_name.clone(),
             subscription: None,
             _marker: std::marker::PhantomData,
         };

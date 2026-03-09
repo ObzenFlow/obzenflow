@@ -319,11 +319,6 @@ impl<H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
         FiniteSourceEvent::Error(msg)
     }
 
-    async fn write_completion_event(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        // The FSM already emits terminal lifecycle events for both success and failure paths.
-        Ok(())
-    }
-
     async fn dispatch_state(
         &mut self,
         state: &Self::State,
