@@ -16,6 +16,7 @@ use obzenflow_runtime::stages::common::handlers::AsyncTransformHandler;
 use serde_json::json;
 use std::fmt;
 use std::sync::Arc;
+use std::time::Instant;
 
 type ChatRequestBuilder =
     dyn Fn(&ChainEvent) -> Result<ChatRequest, HandlerError> + Send + Sync + 'static;
@@ -73,6 +74,12 @@ impl ChatTransform {
 impl AsyncTransformHandler for ChatTransform {
     async fn process(&self, event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
         let request = (self.request_builder)(&event)?;
+        let input_event_id = event.id;
+        let input_event_type = event.event_type();
+        let provider = request.provider.clone();
+        let model = request.model.clone();
+        let message_count = request.messages.len();
+        let tool_count = request.tools.len();
 
         let prompt_hash = prompt_hash_for_chat(&request.messages).map_err(|err| {
             HandlerError::Validation(format!("chat request canonicalization failed: {err}"))
@@ -89,14 +96,45 @@ impl AsyncTransformHandler for ChatTransform {
             .estimator
             .as_ref()
             .map(|estimator| estimator.estimate_chat_request(&request));
+        let estimated_input_token_count = estimated_input_tokens.as_ref().map(|e| e.tokens.get());
+        let estimated_input_source = estimated_input_tokens.as_ref().map(|e| e.source);
 
-        let response = self
-            .client
-            .chat(request.clone())
-            .await
-            .map_err(|err| ai_client_error_to_handler_error_with_context(err, Some("chat")))?;
+        tracing::info!(
+            event_id = %input_event_id,
+            input_event_type = %input_event_type,
+            provider = %provider,
+            model = %model,
+            message_count,
+            tool_count,
+            estimated_input_tokens = estimated_input_token_count,
+            estimated_input_source = ?estimated_input_source,
+            "AI chat request started"
+        );
+
+        let started_at = Instant::now();
+
+        let response = match self.client.chat(request.clone()).await {
+            Ok(response) => response,
+            Err(err) => {
+                tracing::warn!(
+                    event_id = %input_event_id,
+                    input_event_type = %input_event_type,
+                    provider = %provider,
+                    model = %model,
+                    elapsed_ms = started_at.elapsed().as_millis() as u64,
+                    error = %err,
+                    "AI chat request failed"
+                );
+                return Err(ai_client_error_to_handler_error_with_context(
+                    err,
+                    Some("chat"),
+                ));
+            }
+        };
 
         let usage = response.usage.clone();
+        let response_text_bytes = response.text.len();
+        let tool_call_count = response.tool_calls.len();
         let mut outputs = (self.output_mapper)(&event, response)?;
 
         let mut hashes = LlmHashes::new(prompt_hash, params_hash);
@@ -104,7 +142,7 @@ impl AsyncTransformHandler for ChatTransform {
 
         let mut llm =
             LlmObservability::new(request.provider.clone(), request.model.clone(), hashes);
-        llm.usage = usage;
+        llm.usage = usage.clone();
         llm.estimated_input_tokens = estimated_input_tokens;
 
         for output in &mut outputs {
@@ -112,6 +150,21 @@ impl AsyncTransformHandler for ChatTransform {
                 HandlerError::Validation(format!("failed to attach llm metadata: {err}"))
             })?;
         }
+
+        tracing::info!(
+            event_id = %input_event_id,
+            input_event_type = %input_event_type,
+            provider = %provider,
+            model = %model,
+            elapsed_ms = started_at.elapsed().as_millis() as u64,
+            output_event_count = outputs.len(),
+            response_text_bytes,
+            tool_call_count,
+            usage_input_tokens = usage.as_ref().map(|u| u.input_tokens),
+            usage_output_tokens = usage.as_ref().map(|u| u.output_tokens),
+            usage_total_tokens = usage.as_ref().map(|u| u.total_tokens),
+            "AI chat request completed"
+        );
 
         Ok(outputs)
     }

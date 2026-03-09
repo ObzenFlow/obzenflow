@@ -1,14 +1,6 @@
 # ObzenFlow examples
 
-This directory is a runnable example catalog.
-
-If you want a guided walkthrough, start with the tutorials first:
-
-- [Getting Started](https://obzenflow.dev/tutorials/getting-started/)
-- [Model Bank Transactions as a Flow](https://obzenflow.dev/tutorials/model-bank-transactions/)
-- [Run Live AI Inference from a Real Endpoint](https://obzenflow.dev/tutorials/live-ai-inference/)
-
-The tutorials are the teaching surface. This README is the map of runnable examples once you want to explore beyond those walkthroughs. Each example links to the [pillars](https://obzenflow.dev/pillars/) it demonstrates so you can navigate by capability.
+This directory is a runnable example catalog. Each example links to the [pillars](https://obzenflow.dev/pillars/) it demonstrates so you can navigate by capability.
 
 ## How to run examples
 
@@ -24,9 +16,11 @@ Some examples require feature flags:
 - `--features http-pull` for HTTP pull sources
 - `--features "http-pull ai"` for the AI digest example
 
-## Start here
+## Canonical examples
 
-- **`char_transform`** — The smallest ObzenFlow example. It shows `FlowApplication`, `flow!`, typed stages, and reduction without extra infrastructure.
+These are the flagship examples and the best place to start. Each one has a companion [tutorial](https://obzenflow.dev/tutorials/) that walks through how to leverage key features of the framework in detail. The listings below link to both the tutorial and the [pillars](https://obzenflow.dev/pillars/) each example exercises so you can see which framework capabilities are in play.
+
+- **`char_transform`** — The smallest ObzenFlow example. Despite its size, it is a proper stateful flow with accumulation, ordering, and typed reduction across stages.
   - Tutorial: [Getting Started](https://obzenflow.dev/tutorials/getting-started/)
   - Pillars: [Beautifully Expressive](https://obzenflow.dev/pillars/dsl/), [Composable Stage Primitives](https://obzenflow.dev/pillars/composable-stages/)
   - Run: `cargo run -p obzenflow --example char_transform`
@@ -45,6 +39,8 @@ Some examples require feature flags:
   - Code: [`examples/hn_ai_digest_demo/flow.rs`](hn_ai_digest_demo/flow.rs)
 
 ## Problem-focused examples
+
+These examples don't have tutorials, but they demonstrate concrete framework concepts that the canonical examples don't cover in isolation: joins, CSV batch processing, resilience middleware, and ranked aggregation. Each one is a self-contained flow you can read and run without extra context.
 
 - **`product_catalog_enrichment`** — Multi-way enrichment across inner, left, and strict joins. Use this when you want the most realistic catalog-style dimension pipeline in the repo.
   - Pillars: [Composable Stage Primitives](https://obzenflow.dev/pillars/composable-stages/)
@@ -73,6 +69,8 @@ Some examples require feature flags:
   - Code: [`examples/flight_delays_simple.rs`](flight_delays_simple.rs)
 
 ## Reference shelf
+
+More niche examples that target specific API surfaces or topology patterns. We use these to validate the developer experience as we add features, and they're useful if you want to explore a particular capability in isolation.
 
 - **`web_analytics_pipeline`** — Group/reduce stateful patterns with multiple emission strategies
 - **`topology_patterns_demo`** — Fan-in, fan-out, and diamond topologies

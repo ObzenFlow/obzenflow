@@ -74,7 +74,7 @@ impl ChainEventFactory {
             observability: None,
         };
 
-        event.processing_info.event_time = chrono::Utc::now().timestamp_millis() as u64;
+        event.processing_info.event_time = current_timestamp();
         event
     }
 }

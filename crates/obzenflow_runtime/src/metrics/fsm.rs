@@ -673,7 +673,7 @@ impl MetricsAggregatorContext {
         let store = &self.metrics_store;
         let mut snapshot = obzenflow_core::metrics::AppMetricsSnapshot::default();
 
-        tracing::info!(
+        tracing::debug!(
             "Exporting metrics: {} stage entries",
             store.stage_metrics.len()
         );
