@@ -287,16 +287,14 @@ async fn main() -> Result<()> {
         .catalog_key(|account: &AccountOpened| account.account_id.clone())
         .stream_key(|entry: &LedgerEntry| entry.account_id.clone())
         .live()
-        .build(
-            |account: AccountOpened, entry: LedgerEntry| PostedEntry {
-                account_id: entry.account_id,
-                owner: account.owner,
-                kind: entry.kind,
-                amount_cents: entry.amount_cents,
-                initial_balance_cents: account.initial_balance_cents,
-                note: entry.note,
-            },
-        );
+        .build(|account: AccountOpened, entry: LedgerEntry| PostedEntry {
+            account_id: entry.account_id,
+            owner: account.owner,
+            kind: entry.kind,
+            amount_cents: entry.amount_cents,
+            initial_balance_cents: account.initial_balance_cents,
+            note: entry.note,
+        });
 
     FlowApplication::builder()
         .with_log_level(LogLevel::Info)

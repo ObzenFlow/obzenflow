@@ -8,6 +8,7 @@
 //! Rig clients into adapter-layer AI transforms. The top-level `obzenflow::ai`
 //! module should remain a facade that only re-exports these types.
 
+use crate::ai::rig::{RigChatClient, RigEmbeddingClient};
 use async_trait::async_trait;
 use obzenflow_adapters::ai::{
     ai_client_error_to_handler_error_with_context, ChatTransform, EmbeddingTransform,
@@ -19,7 +20,6 @@ use obzenflow_core::ai::{
 };
 use obzenflow_core::http_client::Url;
 use obzenflow_core::ChainEvent;
-use crate::ai::rig::{RigChatClient, RigEmbeddingClient};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use serde_json::Value;
 use std::collections::BTreeMap;
