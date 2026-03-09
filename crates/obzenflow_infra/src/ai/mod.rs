@@ -7,12 +7,21 @@
 #[cfg(feature = "ai-rig")]
 pub mod rig;
 
+#[cfg(feature = "ai-rig")]
+mod rig_builder;
+
 mod token_estimation;
 
 #[cfg(feature = "ai-tiktoken")]
 mod tiktoken;
 
-pub use token_estimation::estimator_for_model;
+pub use token_estimation::{boxed_estimator_for_model, estimator_for_model};
 
 #[cfg(feature = "ai-tiktoken")]
 pub use tiktoken::TiktokenEstimator;
+
+#[cfg(feature = "ai-rig")]
+pub use rig_builder::{
+    ChatRequestTemplate, ChatTransformBuilder, ChatTransformExt, EmbeddingTransformBuilder,
+    EmbeddingTransformExt,
+};

@@ -156,9 +156,9 @@ These examples connect ObzenFlow to the outside world through HTTP push ingestio
   Code: `examples/hn_ingestion_demo/flow.rs`
 
 - **`hn_ai_digest_demo`** — The most advanced example in the repo. Pulls stories from HN, groups and budgets them by token count, and feeds them to an LLM (via Rig) to produce a markdown digest. You will learn how to integrate AI/LLM transforms into a typed pipeline.
-  Run (mock HN + Ollama): `cargo run -p obzenflow --example hn_ai_digest_demo --features "http-pull ai-rig"`
-  Optional (real HN): `HN_LIVE=1 cargo run -p obzenflow --example hn_ai_digest_demo --features "http-pull ai-rig"`
-  Optional (OpenAI): `HN_AI_PROVIDER=openai OPENAI_API_KEY=... cargo run -p obzenflow --example hn_ai_digest_demo --features "http-pull ai-rig"`
+  Run (mock HN + Ollama): `cargo run -p obzenflow --example hn_ai_digest_demo --features "http-pull ai"`
+  Optional (real HN): `HN_LIVE=1 cargo run -p obzenflow --example hn_ai_digest_demo --features "http-pull ai"`
+  Optional (OpenAI): `HN_AI_PROVIDER=openai OPENAI_API_KEY=... cargo run -p obzenflow --example hn_ai_digest_demo --features "http-pull ai"`
   Ollama setup (macOS): `brew install ollama`, then start the server with `ollama serve` (or open the Ollama desktop app), then `ollama pull llama3.1:8b`
   Requirements: Ollama running locally (default `http://localhost:11434`) or a configured OpenAI/OpenAI-compatible endpoint. This example preflights the provider at startup and fails fast if it cannot connect or the model is not available.
   Third-party terms note: ObzenFlow only provides a client-side integration (via `rig-core`). It does not redistribute Ollama, model weights, or hosted LLM services. You are responsible for complying with any third-party licences/terms (including model weight licences and hosted-provider ToS/usage limits). When using a hosted provider, your prompts and story text will be sent to that provider.

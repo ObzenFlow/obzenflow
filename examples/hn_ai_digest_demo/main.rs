@@ -13,7 +13,7 @@
 //! into the main splitter via `<|`.
 //!
 //! Run (default: local mock HN server + Ollama; requires Ollama running):
-//! `cargo run -p obzenflow --example hn_ai_digest_demo --features "http-pull ai-rig"`
+//! `cargo run -p obzenflow --example hn_ai_digest_demo --features "http-pull ai"`
 //!
 //! Ollama quickstart (macOS):
 //! - Install: `brew install ollama`
@@ -31,7 +31,7 @@
 //! When using a hosted provider, your prompts and story text will be sent to that provider.
 //!
 //! Run against the real HN Firebase API (requires network):
-//! `HN_LIVE=1 cargo run -p obzenflow --example hn_ai_digest_demo --features "http-pull ai-rig"`
+//! `HN_LIVE=1 cargo run -p obzenflow --example hn_ai_digest_demo --features "http-pull ai"`
 //!
 //! Optional env vars (HN fetch):
 //! - `HN_MAX_STORIES=30` (default 30)

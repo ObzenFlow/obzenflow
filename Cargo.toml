@@ -135,6 +135,7 @@ futures = { workspace = true }
 [features]
 console = ["obzenflow_infra/console"]
 http-pull = ["obzenflow_infra/reqwest-client"]
+ai = ["ai-rig", "ai-tiktoken"]
 ai-rig = ["obzenflow_infra/ai-rig"]
 ai-tiktoken = ["obzenflow_infra/ai-tiktoken"]
 
@@ -176,4 +177,4 @@ path = "examples/hn_ingestion_demo/main.rs"
 [[example]]
 name = "hn_ai_digest_demo"
 path = "examples/hn_ai_digest_demo/main.rs"
-required-features = ["ai-rig"]
+required-features = ["ai"]

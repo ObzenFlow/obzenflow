@@ -225,7 +225,7 @@ async fn run_example_async() -> Result<()> {
         n => Some(n),
     };
 
-    let estimator: Arc<dyn TokenEstimator> = Arc::from(estimator_for_model(&ai_model_label));
+    let estimator = estimator_for_model(&ai_model_label);
 
     println!("HN AI Digest Demo (FLOWIP-086r)");
     println!("===============================");

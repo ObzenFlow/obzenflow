@@ -5,9 +5,10 @@
 //! AI facade for ObzenFlow
 //!
 //! This module re-exports the provider-agnostic AI transforms from the adapters
-//! layer. When the `ai-rig` feature is enabled, it also provides a fluent
-//! builder API that constructs Rig-backed clients and wires them into
-//! transforms without exposing infra types in user code.
+//! layer, generic AI traits from the core layer, and infrastructure-backed
+//! provider integrations from `obzenflow_infra`. This crate should remain a
+//! facade: the actual Rig-backed builder implementation lives in the infra
+//! layer and is re-exported here.
 
 pub use obzenflow_adapters::ai::{ChatTransform, EmbeddingTransform};
 
@@ -16,16 +17,13 @@ pub use obzenflow_core::ai::{
     TokenCount, TokenEstimate, TokenEstimationError, TokenEstimator,
 };
 
-pub use obzenflow_infra::ai::estimator_for_model;
+pub use obzenflow_infra::ai::{boxed_estimator_for_model, estimator_for_model};
 
 #[cfg(feature = "ai-tiktoken")]
 pub use obzenflow_infra::ai::TiktokenEstimator;
 
 #[cfg(feature = "ai-rig")]
-mod rig_builder;
-
-#[cfg(feature = "ai-rig")]
-pub use rig_builder::{
+pub use obzenflow_infra::ai::{
     ChatRequestTemplate, ChatTransformBuilder, ChatTransformExt, EmbeddingTransformBuilder,
     EmbeddingTransformExt,
 };
