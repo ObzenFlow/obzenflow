@@ -10,9 +10,11 @@ use obzenflow_core::event::payloads::observability_payload::{
     MetricsLifecycle, ObservabilityPayload,
 };
 use obzenflow_core::event::ChainEventFactory;
-use obzenflow_core::{ChainEvent, WriterId};
+use obzenflow_core::{ChainEvent, TypedPayload, WriterId};
 use obzenflow_runtime::stages::common::handlers::AsyncInfiniteSourceHandler;
 use obzenflow_runtime::stages::SourceError;
+use obzenflow_runtime::typing::SourceTyping;
+use std::marker::PhantomData;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
@@ -113,6 +115,20 @@ impl HttpSource {
         }
     }
 
+    /// Mark this ingestion source as producing a single typed payload.
+    ///
+    /// This is a pure authoring-time contract used by the typed DSL macros.
+    /// It does not change runtime behaviour.
+    pub fn typed<T>(self) -> HttpSourceTyped<T>
+    where
+        T: TypedPayload + Send + Sync + 'static,
+    {
+        HttpSourceTyped {
+            inner: self,
+            _phantom: PhantomData,
+        }
+    }
+
     fn submission_to_event(&self, submission: EventSubmission) -> ChainEvent {
         let writer_id = self
             .writer_id
@@ -144,6 +160,40 @@ impl HttpSource {
                 tags: None,
             }),
         ))
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct HttpSourceTyped<T>
+where
+    T: TypedPayload + Send + Sync + 'static,
+{
+    inner: HttpSource,
+    _phantom: PhantomData<fn() -> T>,
+}
+
+impl<T> SourceTyping for HttpSourceTyped<T>
+where
+    T: TypedPayload + Send + Sync + 'static,
+{
+    type Output = T;
+}
+
+#[async_trait]
+impl<T> AsyncInfiniteSourceHandler for HttpSourceTyped<T>
+where
+    T: TypedPayload + Send + Sync + 'static,
+{
+    fn bind_writer_id(&mut self, id: WriterId) {
+        self.inner.bind_writer_id(id);
+    }
+
+    async fn next(&mut self) -> Result<Vec<ChainEvent>, SourceError> {
+        self.inner.next().await
+    }
+
+    async fn drain(&mut self) -> Result<(), SourceError> {
+        self.inner.drain().await
     }
 }
 

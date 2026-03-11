@@ -17,6 +17,8 @@ use serde::{de::DeserializeOwned, Serialize};
 use std::future::Future;
 use std::marker::PhantomData;
 
+type AsyncMapTypedPhantom<T, O, Fut> = PhantomData<(T, O, fn() -> Fut)>;
+
 /// Async Map helper for `ChainEvent` mode.
 ///
 /// Wraps an async function `Fn(ChainEvent) -> Future<Output = ChainEvent>`.
@@ -84,7 +86,7 @@ where
     Fut: Future<Output = O> + Send,
 {
     mapper: F,
-    _phantom: PhantomData<(T, O, fn() -> Fut)>,
+    _phantom: AsyncMapTypedPhantom<T, O, Fut>,
 }
 
 impl<T, O, F, Fut> AsyncMapTyped<T, O, F, Fut>
@@ -175,4 +177,3 @@ where
         Ok(())
     }
 }
-

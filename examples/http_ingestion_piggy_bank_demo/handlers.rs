@@ -8,6 +8,7 @@ use obzenflow_core::event::schema::TypedPayload;
 use obzenflow_core::{ChainEvent, StageId, WriterId};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::StatefulHandler;
+use obzenflow_runtime::typing::StatefulTyping;
 use std::collections::HashMap;
 
 #[derive(Clone, Debug, Default)]
@@ -119,4 +120,9 @@ impl StatefulHandler for Checkbook {
         };
         Ok(vec![snapshot.to_event(self.writer_id)])
     }
+}
+
+impl StatefulTyping for Checkbook {
+    type Input = PostedEntry;
+    type Output = CheckbookSnapshot;
 }

@@ -22,6 +22,8 @@ use std::marker::PhantomData;
 
 use super::try_map_with::ErrorStrategy;
 
+type AsyncTryMapWithTypedPhantom<T, O, Fut> = PhantomData<(T, O, fn() -> Fut)>;
+
 /// Async TryMapWith helper for `ChainEvent` mode.
 ///
 /// The converter returns `Result<ChainEvent, String>`, and errors are handled
@@ -167,7 +169,7 @@ where
 {
     converter: F,
     error_strategy: ErrorStrategy,
-    _phantom: PhantomData<(T, O, fn() -> Fut)>,
+    _phantom: AsyncTryMapWithTypedPhantom<T, O, Fut>,
 }
 
 impl<T, O, F, Fut> AsyncTryMapWithTyped<T, O, F, Fut>
@@ -333,4 +335,3 @@ where
         Ok(())
     }
 }
-

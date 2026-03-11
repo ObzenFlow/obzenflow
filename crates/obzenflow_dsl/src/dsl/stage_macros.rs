@@ -303,6 +303,20 @@ macro_rules! __obzenflow_async_source_typed {
 #[macro_export]
 macro_rules! async_source {
     // ── untyped (binding-derived name) ──
+    (($handler:expr, $poll_timeout:expr)) => {
+        $crate::__obzenflow_async_source_untyped!(
+            name = "__obzenflow_binding_derived_name__",
+            handler = ($handler, $poll_timeout),
+            middleware = []
+        )
+    };
+    (($handler:expr, $poll_timeout:expr), [$($mw:expr),*]) => {
+        $crate::__obzenflow_async_source_untyped!(
+            name = "__obzenflow_binding_derived_name__",
+            handler = ($handler, $poll_timeout),
+            middleware = [$($mw),*]
+        )
+    };
     ($handler:expr) => {
         $crate::__obzenflow_async_source_untyped!(name = "__obzenflow_binding_derived_name__", handler = $handler, middleware = [])
     };
@@ -311,6 +325,20 @@ macro_rules! async_source {
     };
 
     // ── untyped (explicit name override) ──
+    (name: $name:literal, ($handler:expr, $poll_timeout:expr)) => {
+        $crate::__obzenflow_async_source_untyped!(
+            name = $name,
+            handler = ($handler, $poll_timeout),
+            middleware = []
+        )
+    };
+    (name: $name:literal, ($handler:expr, $poll_timeout:expr), [$($mw:expr),*]) => {
+        $crate::__obzenflow_async_source_untyped!(
+            name = $name,
+            handler = ($handler, $poll_timeout),
+            middleware = [$($mw),*]
+        )
+    };
     (name: $name:literal, $handler:expr) => {
         $crate::__obzenflow_async_source_untyped!(name = $name, handler = $handler, middleware = [])
     };
@@ -331,6 +359,12 @@ macro_rules! async_source {
     ($out:ty => placeholder!($msg:expr), [$($mw:expr),*]) => {
         $crate::__obzenflow_async_source_typed!(output = $out, name = "__obzenflow_binding_derived_name__", handler = placeholder!($msg), middleware = [$($mw),*])
     };
+    ($out:ty => ($handler:expr, $poll_timeout:expr)) => {
+        $crate::__obzenflow_async_source_typed!(output = $out, name = "__obzenflow_binding_derived_name__", handler = ($handler, $poll_timeout), middleware = [])
+    };
+    ($out:ty => ($handler:expr, $poll_timeout:expr), [$($mw:expr),*]) => {
+        $crate::__obzenflow_async_source_typed!(output = $out, name = "__obzenflow_binding_derived_name__", handler = ($handler, $poll_timeout), middleware = [$($mw),*])
+    };
     ($out:ty => $handler:expr) => {
         $crate::__obzenflow_async_source_typed!(output = $out, name = "__obzenflow_binding_derived_name__", handler = $handler, middleware = [])
     };
@@ -350,6 +384,12 @@ macro_rules! async_source {
     };
     (name: $name:literal, $out:ty => placeholder!($msg:expr), [$($mw:expr),*]) => {
         $crate::__obzenflow_async_source_typed!(output = $out, name = $name, handler = placeholder!($msg), middleware = [$($mw),*])
+    };
+    (name: $name:literal, $out:ty => ($handler:expr, $poll_timeout:expr)) => {
+        $crate::__obzenflow_async_source_typed!(output = $out, name = $name, handler = ($handler, $poll_timeout), middleware = [])
+    };
+    (name: $name:literal, $out:ty => ($handler:expr, $poll_timeout:expr), [$($mw:expr),*]) => {
+        $crate::__obzenflow_async_source_typed!(output = $out, name = $name, handler = ($handler, $poll_timeout), middleware = [$($mw),*])
     };
     (name: $name:literal, $out:ty => $handler:expr) => {
         $crate::__obzenflow_async_source_typed!(output = $out, name = $name, handler = $handler, middleware = [])
@@ -635,6 +675,20 @@ macro_rules! __obzenflow_async_infinite_source_typed {
 #[macro_export]
 macro_rules! async_infinite_source {
     // ── untyped (binding-derived name) ──
+    (($handler:expr, $poll_timeout:expr)) => {
+        $crate::__obzenflow_async_infinite_source_untyped!(
+            name = "__obzenflow_binding_derived_name__",
+            handler = ($handler, $poll_timeout),
+            middleware = []
+        )
+    };
+    (($handler:expr, $poll_timeout:expr), [$($mw:expr),*]) => {
+        $crate::__obzenflow_async_infinite_source_untyped!(
+            name = "__obzenflow_binding_derived_name__",
+            handler = ($handler, $poll_timeout),
+            middleware = [$($mw),*]
+        )
+    };
     ($handler:expr) => {
         $crate::__obzenflow_async_infinite_source_untyped!(
             name = "__obzenflow_binding_derived_name__",
@@ -651,6 +705,20 @@ macro_rules! async_infinite_source {
     };
 
     // ── untyped (explicit name override) ──
+    (name: $name:literal, ($handler:expr, $poll_timeout:expr)) => {
+        $crate::__obzenflow_async_infinite_source_untyped!(
+            name = $name,
+            handler = ($handler, $poll_timeout),
+            middleware = []
+        )
+    };
+    (name: $name:literal, ($handler:expr, $poll_timeout:expr), [$($mw:expr),*]) => {
+        $crate::__obzenflow_async_infinite_source_untyped!(
+            name = $name,
+            handler = ($handler, $poll_timeout),
+            middleware = [$($mw),*]
+        )
+    };
     (name: $name:literal, $handler:expr) => {
         $crate::__obzenflow_async_infinite_source_untyped!(name = $name, handler = $handler, middleware = [])
     };
@@ -688,6 +756,22 @@ macro_rules! async_infinite_source {
             output = $out,
             name = "__obzenflow_binding_derived_name__",
             handler = placeholder!($msg),
+            middleware = [$($mw),*]
+        )
+    };
+    ($out:ty => ($handler:expr, $poll_timeout:expr)) => {
+        $crate::__obzenflow_async_infinite_source_typed!(
+            output = $out,
+            name = "__obzenflow_binding_derived_name__",
+            handler = ($handler, $poll_timeout),
+            middleware = []
+        )
+    };
+    ($out:ty => ($handler:expr, $poll_timeout:expr), [$($mw:expr),*]) => {
+        $crate::__obzenflow_async_infinite_source_typed!(
+            output = $out,
+            name = "__obzenflow_binding_derived_name__",
+            handler = ($handler, $poll_timeout),
             middleware = [$($mw),*]
         )
     };
@@ -738,6 +822,22 @@ macro_rules! async_infinite_source {
             output = $out,
             name = $name,
             handler = placeholder!($msg),
+            middleware = [$($mw),*]
+        )
+    };
+    (name: $name:literal, $out:ty => ($handler:expr, $poll_timeout:expr)) => {
+        $crate::__obzenflow_async_infinite_source_typed!(
+            output = $out,
+            name = $name,
+            handler = ($handler, $poll_timeout),
+            middleware = []
+        )
+    };
+    (name: $name:literal, $out:ty => ($handler:expr, $poll_timeout:expr), [$($mw:expr),*]) => {
+        $crate::__obzenflow_async_infinite_source_typed!(
+            output = $out,
+            name = $name,
+            handler = ($handler, $poll_timeout),
             middleware = [$($mw),*]
         )
     };

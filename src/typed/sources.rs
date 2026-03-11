@@ -5,10 +5,7 @@
 //! Typed source helper facades.
 
 use obzenflow_core::TypedPayload;
-use obzenflow_runtime::stages::common::handlers::{
-    AsyncFiniteSourceHandler, AsyncInfiniteSourceHandler, FiniteSourceHandler,
-    InfiniteSourceHandler,
-};
+use obzenflow_runtime::stages::common::handlers::FiniteSourceHandler;
 use obzenflow_runtime::stages::source::{
     AsyncFiniteSourceTyped, AsyncInfiniteSourceTyped, FiniteSourceTyped, InfiniteSourceTyped,
 };
@@ -20,12 +17,21 @@ use std::future::Future;
 /// Create a finite typed source from an iterator (convenience wrapper).
 pub fn finite<T, I>(
     iter: I,
-) -> impl FiniteSourceHandler + SourceTyping<Output = T> + Clone + Debug + Send + Sync + 'static
+) -> impl FiniteSourceHandler + SourceTyping<Output = T> + Clone + Debug + 'static
 where
     T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
     I: IntoIterator<Item = T>,
 {
-    FiniteSourceTyped::new(iter)
+    let items: Vec<T> = iter.into_iter().collect();
+    let total = items.len();
+
+    FiniteSourceTyped::from_producer(move |index| {
+        if index >= total {
+            None
+        } else {
+            Some(vec![items[index].clone()])
+        }
+    })
 }
 
 /// Create an async finite typed source from an async batch producer.

@@ -14,14 +14,14 @@ pub fn inner<C, S, E, K, CatalogKeyFn, StreamKeyFn, JoinFn>(
     catalog_key: CatalogKeyFn,
     stream_key: StreamKeyFn,
     join_fn: JoinFn,
-) -> impl JoinHandler + JoinTyping<Reference = C, Stream = S, Output = E> + Clone + std::fmt::Debug + Send + Sync
+) -> impl JoinHandler + JoinTyping<Reference = C, Stream = S, Output = E> + std::fmt::Debug
 where
     C: TypedPayload + Clone + Send + Sync,
     S: TypedPayload + Clone + Send + Sync,
     E: TypedPayload + Clone + Send + Sync,
     K: Eq + Hash + Clone + Send + Sync + std::fmt::Debug,
-    CatalogKeyFn: Fn(&C) -> K + Send + Sync + Clone,
-    StreamKeyFn: Fn(&S) -> K + Send + Sync + Clone,
+    CatalogKeyFn: Fn(&C) -> K + Send + Sync + Clone + 'static,
+    StreamKeyFn: Fn(&S) -> K + Send + Sync + Clone + 'static,
     JoinFn: Fn(C, S) -> E + Send + Sync + Clone,
 {
     InnerJoinBuilder::<C, S, E>::new()
@@ -34,14 +34,14 @@ pub fn left<C, S, E, K, CatalogKeyFn, StreamKeyFn, JoinFn>(
     catalog_key: CatalogKeyFn,
     stream_key: StreamKeyFn,
     join_fn: JoinFn,
-) -> impl JoinHandler + JoinTyping<Reference = C, Stream = S, Output = E> + Clone + std::fmt::Debug + Send + Sync
+) -> impl JoinHandler + JoinTyping<Reference = C, Stream = S, Output = E> + std::fmt::Debug
 where
     C: TypedPayload + Clone + Send + Sync,
     S: TypedPayload + Clone + Send + Sync,
     E: TypedPayload + Clone + Send + Sync,
     K: Eq + Hash + Clone + Send + Sync + std::fmt::Debug,
-    CatalogKeyFn: Fn(&C) -> K + Send + Sync + Clone,
-    StreamKeyFn: Fn(&S) -> K + Send + Sync + Clone,
+    CatalogKeyFn: Fn(&C) -> K + Send + Sync + Clone + 'static,
+    StreamKeyFn: Fn(&S) -> K + Send + Sync + Clone + 'static,
     JoinFn: Fn(Option<C>, S) -> E + Send + Sync + Clone,
 {
     LeftJoinBuilder::<C, S, E>::new()
@@ -54,14 +54,14 @@ pub fn strict<C, S, E, K, CatalogKeyFn, StreamKeyFn, JoinFn>(
     catalog_key: CatalogKeyFn,
     stream_key: StreamKeyFn,
     join_fn: JoinFn,
-) -> impl JoinHandler + JoinTyping<Reference = C, Stream = S, Output = E> + Clone + std::fmt::Debug + Send + Sync
+) -> impl JoinHandler + JoinTyping<Reference = C, Stream = S, Output = E> + std::fmt::Debug
 where
     C: TypedPayload + Clone + Send + Sync,
     S: TypedPayload + Clone + Send + Sync,
     E: TypedPayload + Clone + Send + Sync,
     K: Eq + Hash + Clone + Send + Sync + std::fmt::Debug,
-    CatalogKeyFn: Fn(&C) -> K + Send + Sync + Clone,
-    StreamKeyFn: Fn(&S) -> K + Send + Sync + Clone,
+    CatalogKeyFn: Fn(&C) -> K + Send + Sync + Clone + 'static,
+    StreamKeyFn: Fn(&S) -> K + Send + Sync + Clone + 'static,
     JoinFn: Fn(C, S) -> E + Send + Sync + Clone,
 {
     StrictJoinBuilder::<C, S, E>::new()

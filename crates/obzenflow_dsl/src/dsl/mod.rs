@@ -21,4 +21,3 @@ mod tests;
 // Re-export all public items
 pub use error::FlowBuildError;
 pub use flow_definition::FlowDefinition;
-pub use stage_macros::*;

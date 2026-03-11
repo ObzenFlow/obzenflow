@@ -110,6 +110,7 @@ obzenflow_runtime = { workspace = true }
 obzenflow_adapters = { workspace = true }
 obzenflow_dsl = { workspace = true }
 obzenflow_infra = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 async-trait = { workspace = true }
 

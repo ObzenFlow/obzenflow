@@ -67,7 +67,8 @@ async fn run() -> Result<()> {
     let (accounts_endpoints, accounts_rx, accounts_state) =
         create_ingestion_endpoints(accounts_config);
     let accounts_hook_state = accounts_state.clone();
-    let accounts_source = HttpSource::with_telemetry(accounts_rx, accounts_state.telemetry());
+    let accounts_source = HttpSource::with_telemetry(accounts_rx, accounts_state.telemetry())
+        .typed::<AccountOpened>();
 
     let tx_config = IngestionConfig {
         base_path: "/api/bank/tx".to_string(),
@@ -78,7 +79,7 @@ async fn run() -> Result<()> {
     };
     let (tx_endpoints, tx_rx, tx_state) = create_ingestion_endpoints(tx_config);
     let tx_hook_state = tx_state.clone();
-    let tx_source = HttpSource::with_telemetry(tx_rx, tx_state.telemetry());
+    let tx_source = HttpSource::with_telemetry(tx_rx, tx_state.telemetry()).typed::<LedgerEntry>();
 
     let mut endpoints = Vec::new();
     endpoints.extend(accounts_endpoints);

@@ -15,7 +15,7 @@ where
     T: TypedPayload + DeserializeOwned + Send + Sync + 'static,
     F: Formatter<T>,
 {
-    ConsoleSink::<T, _>::new(formatter)
+    ConsoleSink::<T>::new(formatter)
 }
 
 pub fn json<T>() -> ConsoleSink<T, JsonFormatter>
@@ -23,7 +23,7 @@ where
     T: TypedPayload + DeserializeOwned + Send + Sync + 'static,
     T: serde::Serialize,
 {
-    ConsoleSink::<T, _>::json()
+    ConsoleSink::<T>::json()
 }
 
 pub fn json_pretty<T>() -> ConsoleSink<T, JsonPrettyFormatter>
@@ -31,7 +31,7 @@ where
     T: TypedPayload + DeserializeOwned + Send + Sync + 'static,
     T: serde::Serialize,
 {
-    ConsoleSink::<T, _>::json_pretty()
+    ConsoleSink::<T>::json_pretty()
 }
 
 pub fn debug<T>() -> ConsoleSink<T, DebugFormatter>
@@ -39,7 +39,7 @@ where
     T: TypedPayload + DeserializeOwned + Send + Sync + 'static,
     T: std::fmt::Debug,
 {
-    ConsoleSink::<T, _>::debug()
+    ConsoleSink::<T>::debug()
 }
 
 pub fn table<T, E>(columns: &[&str], extractor: E) -> ConsoleSink<T, TableFormatter<T, E>>
@@ -47,6 +47,5 @@ where
     T: TypedPayload + DeserializeOwned + Send + Sync + 'static,
     E: Fn(&T) -> Vec<String> + Send + Sync + Clone,
 {
-    ConsoleSink::<T, _>::table(columns, extractor)
+    ConsoleSink::<T>::table(columns, extractor)
 }
-

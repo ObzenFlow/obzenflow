@@ -16,6 +16,7 @@ use csv::{Reader, ReaderBuilder, StringRecord};
 use obzenflow_core::event::ChainEventFactory;
 use obzenflow_core::{ChainEvent, TypedPayload, WriterId};
 use obzenflow_runtime::stages::{FiniteSourceHandler, SourceError};
+use obzenflow_runtime::typing::SourceTyping;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -225,6 +226,13 @@ where
             .field("writer_id_bound", &self.writer_id.is_some())
             .finish()
     }
+}
+
+impl<T> SourceTyping for CsvSource<T>
+where
+    T: TypedPayload + Send + Sync + 'static,
+{
+    type Output = T;
 }
 
 impl CsvSource<CsvRow> {

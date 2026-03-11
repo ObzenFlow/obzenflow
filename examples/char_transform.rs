@@ -122,7 +122,7 @@ async fn main() -> Result<()> {
             characters = source!(CharInput => sources::finite(char_inputs));
 
             transform_text = transform!(
-                CharInput -> TextChunk => transforms::map(|input| TextChunk {
+                CharInput -> TextChunk => transforms::map(|input: CharInput| TextChunk {
                     text: transform_char(input.character),
                 })
             );
@@ -130,7 +130,7 @@ async fn main() -> Result<()> {
             collect_text = stateful!(
                 TextChunk -> TransformedText => typed_stateful::reduce(
                     TransformedText::default(),
-                    |text, chunk| {
+                    |text, chunk: &TextChunk| {
                         text.text.push_str(&chunk.text);
                         text.character_count += chunk.text.chars().count();
 
