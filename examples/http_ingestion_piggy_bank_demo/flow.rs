@@ -32,7 +32,7 @@ use super::handlers::Checkbook;
 use anyhow::Result;
 use obzenflow_adapters::sinks::{ConsoleSink, SnapshotTableFormatter};
 use obzenflow_adapters::sources::http::HttpSource;
-use obzenflow_dsl::{async_infinite_source, flow, join, sink, stateful, with_ref};
+use obzenflow_dsl::{async_infinite_source, flow, join, sink, stateful};
 use obzenflow_infra::application::{FlowApplication, LogLevel};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_infra::web::endpoints::event_ingestion::{
@@ -112,14 +112,14 @@ async fn run() -> Result<()> {
             middleware: [],
 
             stages: {
-                accounts = async_infinite_source!("accounts" => accounts_source);
-                tx = async_infinite_source!("tx" => tx_source);
+                accounts = async_infinite_source!(AccountOpened => accounts_source);
+                tx = async_infinite_source!(LedgerEntry => tx_source);
 
-                posted = join!("posted" => with_ref!(accounts, join_handler));
+                posted = join!(catalog accounts: AccountOpened, LedgerEntry -> PostedEntry => join_handler);
 
-                checkbook = stateful!("checkbook" => Checkbook::new().with_emission(EmitAlways));
+                checkbook = stateful!(PostedEntry -> CheckbookSnapshot => Checkbook::new().with_emission(EmitAlways));
 
-                printer = sink!("printer" => ConsoleSink::<CheckbookSnapshot>::new(
+                printer = sink!(CheckbookSnapshot => ConsoleSink::<CheckbookSnapshot>::new(
                     SnapshotTableFormatter::new(
                         &["#", "Kind", "Amount", "Credit", "Debit", "Balance", "Note"],
                         |snapshot: &CheckbookSnapshot| {

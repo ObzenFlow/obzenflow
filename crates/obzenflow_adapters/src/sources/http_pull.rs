@@ -386,7 +386,7 @@ impl std::fmt::Debug for HttpPollConfig {
 ///
 /// NOTE: This source may perform in-handler waits (e.g., honoring `Retry-After` and backoff).
 /// When mounted via `async_source!`, configure the stage poll timeout accordingly (IC-1):
-/// `async_source!("http_pull" => (source, Some(Duration::from_secs(120))))` or disable it with `None`.
+/// `async_source!(name: "http_pull", (source, Some(Duration::from_secs(120))))` or disable it with `None`.
 #[derive(Debug, Clone)]
 pub struct HttpPullSource<D: PullDecoder> {
     inner: Arc<Mutex<HttpPullSourceInner<D>>>,

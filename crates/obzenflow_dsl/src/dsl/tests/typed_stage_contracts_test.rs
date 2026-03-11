@@ -25,7 +25,6 @@ mod tests {
     use std::collections::HashMap;
     use std::time::Duration;
 
-    use crate::with_ref;
     use crate::dsl::stage_descriptor::StageDescriptor;
     use crate::dsl::typing::{collect_edge_warnings, EdgeInputRole, TypeHint};
 
@@ -297,56 +296,62 @@ mod tests {
 
     #[test]
     fn typed_macros_attach_metadata_for_exact_handlers() {
-        let source = crate::source!(out: InputEvent; "source" => SyncExactSource);
+        let source = crate::source!(name: "source", InputEvent => SyncExactSource);
         assert_eq!(
             source.typing_metadata().unwrap().output_type,
             exact("InputEvent")
         );
 
-        let async_source = crate::async_source!(out: InputEvent; "async_source" => AsyncExactSource);
+        let async_source = crate::async_source!(name: "async_source", InputEvent => AsyncExactSource);
         assert_eq!(
             async_source.typing_metadata().unwrap().output_type,
             exact("InputEvent")
         );
 
-        let infinite = crate::infinite_source!(out: InputEvent; "infinite" => InfiniteExactSource);
+        let infinite = crate::infinite_source!(name: "infinite", InputEvent => InfiniteExactSource);
         assert_eq!(
             infinite.typing_metadata().unwrap().output_type,
             exact("InputEvent")
         );
 
-        let async_infinite =
-            crate::async_infinite_source!(out: InputEvent; "async_infinite" => AsyncInfiniteExactSource);
+        let async_infinite = crate::async_infinite_source!(
+            name: "async_infinite",
+            InputEvent => AsyncInfiniteExactSource
+        );
         assert_eq!(
             async_infinite.typing_metadata().unwrap().output_type,
             exact("InputEvent")
         );
 
-        let transform = crate::transform!(input: InputEvent, out: OutputEvent; "transform" => ExactTransform);
+        let transform = crate::transform!(name: "transform", InputEvent -> OutputEvent => ExactTransform);
         let transform_meta = transform.typing_metadata().unwrap();
         assert_eq!(transform_meta.input_type, exact("InputEvent"));
         assert_eq!(transform_meta.output_type, exact("OutputEvent"));
 
-        let async_transform =
-            crate::async_transform!(input: InputEvent, out: OutputEvent; "async_transform" => ExactAsyncTransform);
+        let async_transform = crate::async_transform!(
+            name: "async_transform",
+            InputEvent -> OutputEvent => ExactAsyncTransform
+        );
         let async_transform_meta = async_transform.typing_metadata().unwrap();
         assert_eq!(async_transform_meta.input_type, exact("InputEvent"));
         assert_eq!(async_transform_meta.output_type, exact("OutputEvent"));
 
         let stateful = crate::stateful!(
-            input: InputEvent, out: OutputEvent; "stateful" => ExactStateful,
+            name: "stateful",
+            InputEvent -> OutputEvent => ExactStateful,
             emit_interval = Duration::from_secs(5)
         );
         let stateful_meta = stateful.typing_metadata().unwrap();
         assert_eq!(stateful_meta.input_type, exact("InputEvent"));
         assert_eq!(stateful_meta.output_type, exact("OutputEvent"));
 
-        let sink = crate::sink!(input: OutputEvent; "sink" => ExactSink);
+        let sink = crate::sink!(name: "sink", OutputEvent => ExactSink);
         assert_eq!(sink.typing_metadata().unwrap().input_type, exact("OutputEvent"));
 
         let join = crate::join!(
-            reference: ReferenceEvent, stream: StreamEvent, out: JoinedEvent; "join" =>
-            with_ref!(reference, ExactJoin)
+            name: "join",
+            catalog reference: ReferenceEvent,
+            StreamEvent -> JoinedEvent => ExactJoin
         );
         let join_meta = join.typing_metadata().unwrap();
         assert_eq!(join_meta.reference_type, exact("ReferenceEvent"));
@@ -356,44 +361,27 @@ mod tests {
     }
 
     #[test]
-    fn typed_macros_support_comma_form() {
-        let source = crate::source!(out: InputEvent, "source" => SyncExactSource);
+    fn stage_macros_default_to_binding_derived_name_marker() {
+        let source = crate::source!(InputEvent => SyncExactSource);
+        assert_eq!(source.name(), crate::dsl::stage_descriptor::BINDING_DERIVED_NAME_SENTINEL);
+
+        let transform = crate::transform!(InputEvent -> OutputEvent => ExactTransform);
         assert_eq!(
-            source.typing_metadata().unwrap().output_type,
-            exact("InputEvent")
+            transform.name(),
+            crate::dsl::stage_descriptor::BINDING_DERIVED_NAME_SENTINEL
         );
 
-        let transform =
-            crate::transform!(input: InputEvent, out: OutputEvent, "transform" => ExactTransform);
-        let transform_meta = transform.typing_metadata().unwrap();
-        assert_eq!(transform_meta.input_type, exact("InputEvent"));
-        assert_eq!(transform_meta.output_type, exact("OutputEvent"));
+        let sink = crate::sink!(OutputEvent => ExactSink);
+        assert_eq!(sink.name(), crate::dsl::stage_descriptor::BINDING_DERIVED_NAME_SENTINEL);
 
-        let stateful = crate::stateful!(
-            input: InputEvent, out: OutputEvent, "stateful" => ExactStateful,
-            emit_interval = Duration::from_secs(5)
-        );
-        let stateful_meta = stateful.typing_metadata().unwrap();
-        assert_eq!(stateful_meta.input_type, exact("InputEvent"));
-        assert_eq!(stateful_meta.output_type, exact("OutputEvent"));
-
-        let sink = crate::sink!(input: OutputEvent, "sink" => ExactSink);
-        assert_eq!(sink.typing_metadata().unwrap().input_type, exact("OutputEvent"));
-
-        let join = crate::join!(
-            reference: ReferenceEvent, stream: StreamEvent, out: JoinedEvent, "join" =>
-            with_ref!(reference, ExactJoin)
-        );
-        let join_meta = join.typing_metadata().unwrap();
-        assert_eq!(join_meta.reference_type, exact("ReferenceEvent"));
-        assert_eq!(join_meta.stream_type, exact("StreamEvent"));
-        assert_eq!(join_meta.output_type, exact("JoinedEvent"));
-        assert!(!join_meta.is_placeholder);
+        let join =
+            crate::join!(catalog reference: ReferenceEvent, StreamEvent -> JoinedEvent => ExactJoin);
+        assert_eq!(join.name(), crate::dsl::stage_descriptor::BINDING_DERIVED_NAME_SENTINEL);
     }
 
     #[test]
     fn placeholders_and_mixed_inputs_capture_metadata() {
-        let source = crate::source!(out: InputEvent; "source" => placeholder!("awaiting source"));
+        let source = crate::source!(name: "source", InputEvent => placeholder!("awaiting source"));
         let source_meta = source.typing_metadata().unwrap();
         assert!(source_meta.is_placeholder);
         assert_eq!(
@@ -401,14 +389,17 @@ mod tests {
             Some("awaiting source")
         );
 
-        let async_transform =
-            crate::async_transform!(input: InputEvent, out: OutputEvent; "transform" => placeholder!());
+        let async_transform = crate::async_transform!(
+            name: "transform",
+            InputEvent -> OutputEvent => placeholder!()
+        );
         let async_transform_meta = async_transform.typing_metadata().unwrap();
         assert!(async_transform_meta.is_placeholder);
         assert_eq!(async_transform_meta.input_type, exact("InputEvent"));
         assert_eq!(async_transform_meta.output_type, exact("OutputEvent"));
 
-        let mixed_sink = crate::sink!(input: mixed; "audit" => placeholder!("route everything"));
+        let mixed_sink =
+            crate::sink!(name: "audit", mixed => placeholder!("route everything"));
         let mixed_sink_meta = mixed_sink.typing_metadata().unwrap();
         assert!(mixed_sink_meta.is_placeholder);
         assert_eq!(mixed_sink_meta.input_type, TypeHint::Mixed);
@@ -420,13 +411,14 @@ mod tests {
 
     #[test]
     fn mixed_input_macros_only_assert_exact_positions() {
-        let transform = crate::transform!(input: mixed, out: OutputEvent; "router" => MixedTransform);
+        let transform =
+            crate::transform!(name: "router", mixed -> OutputEvent => MixedTransform);
         let transform_meta = transform.typing_metadata().unwrap();
         assert_eq!(transform_meta.input_type, TypeHint::Mixed);
         assert_eq!(transform_meta.output_type, exact("OutputEvent"));
         assert!(!transform_meta.is_placeholder);
 
-        let sink = crate::sink!(input: mixed; "audit" => MixedAuditSink);
+        let sink = crate::sink!(name: "audit", mixed => MixedAuditSink);
         let sink_meta = sink.typing_metadata().unwrap();
         assert_eq!(sink_meta.input_type, TypeHint::Mixed);
         assert_eq!(sink_meta.output_type, TypeHint::Unspecified);
@@ -442,15 +434,15 @@ mod tests {
         let mut descriptors: HashMap<String, Box<dyn StageDescriptor>> = HashMap::new();
         descriptors.insert(
             "source".to_string(),
-            crate::source!(out: InputEvent; "source" => placeholder!()),
+            crate::source!(name: "source", InputEvent => placeholder!()),
         );
         descriptors.insert(
             "exact_sink".to_string(),
-            crate::sink!(input: OutputEvent; "exact_sink" => placeholder!()),
+            crate::sink!(name: "exact_sink", OutputEvent => placeholder!()),
         );
         descriptors.insert(
             "mixed_sink".to_string(),
-            crate::sink!(input: mixed; "mixed_sink" => placeholder!()),
+            crate::sink!(name: "mixed_sink", mixed => placeholder!()),
         );
 
         let mut name_to_id = HashMap::new();
@@ -497,19 +489,20 @@ mod tests {
         let join_id = StageId::new();
 
         let mut join = crate::join!(
-            reference: ReferenceEvent, stream: StreamEvent, out: JoinedEvent; "join" =>
-            with_ref!(reference, placeholder!())
+            name: "join",
+            catalog reference: ReferenceEvent,
+            StreamEvent -> JoinedEvent => placeholder!()
         );
         join.set_reference_stage_id(reference_id);
 
         let mut descriptors: HashMap<String, Box<dyn StageDescriptor>> = HashMap::new();
         descriptors.insert(
             "reference".to_string(),
-            crate::source!(out: InputEvent; "reference" => placeholder!()),
+            crate::source!(name: "reference", InputEvent => placeholder!()),
         );
         descriptors.insert(
             "stream".to_string(),
-            crate::source!(out: AlternateEvent; "stream" => placeholder!()),
+            crate::source!(name: "stream", AlternateEvent => placeholder!()),
         );
         descriptors.insert("join".to_string(), join);
 

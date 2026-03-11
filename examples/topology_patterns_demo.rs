@@ -367,84 +367,88 @@ async fn main() -> Result<()> {
         journals: disk_journals(journal_path.clone()),
         middleware: [],
 
-            stages: {
-                // FAN-IN: Three sources feeding into one aggregator
-                kafka = source!("kafka_source" => FiniteSourceTyped::from_item_fn({
-                    let source = "kafka".to_string();
-                    move |index| {
-                        if index >= 5 {
-                            return None;
-                        }
-                        let id = index + 1;
-                        Some(RawDataEvent {
-                            source: source.clone(),
-                            id,
-                            value: (id * 20) as i64,
-                        })
+        stages: {
+            // FAN-IN: Three sources feeding into one aggregator
+            kafka_source = source!(RawDataEvent => FiniteSourceTyped::from_item_fn({
+                let source = "kafka".to_string();
+                move |index| {
+                    if index >= 5 {
+                        return None;
                     }
-                }));
-                api = source!("api_source" => FiniteSourceTyped::from_item_fn({
-                    let source = "api".to_string();
-                    move |index| {
-                        if index >= 4 {
-                            return None;
-                        }
-                        let id = index + 1;
-                        Some(RawDataEvent {
-                            source: source.clone(),
-                            id,
-                            value: (id * 20) as i64,
-                        })
+                    let id = index + 1;
+                    Some(RawDataEvent {
+                        source: source.clone(),
+                        id,
+                        value: (id * 20) as i64,
+                    })
+                }
+            }));
+            api_source = source!(RawDataEvent => FiniteSourceTyped::from_item_fn({
+                let source = "api".to_string();
+                move |index| {
+                    if index >= 4 {
+                        return None;
                     }
-                }));
-                file_src = source!("file_source" => FiniteSourceTyped::from_item_fn({
-                    let source = "file".to_string();
-                    move |index| {
-                        if index >= 4 {
-                            return None;
-                        }
-                        let id = index + 1;
-                        Some(RawDataEvent {
-                            source: source.clone(),
-                            id,
-                            value: (id * 20) as i64,
-                        })
+                    let id = index + 1;
+                    Some(RawDataEvent {
+                        source: source.clone(),
+                        id,
+                        value: (id * 20) as i64,
+                    })
+                }
+            }));
+            file_source = source!(RawDataEvent => FiniteSourceTyped::from_item_fn({
+                let source = "file".to_string();
+                move |index| {
+                    if index >= 4 {
+                        return None;
                     }
-                }));
+                    let id = index + 1;
+                    Some(RawDataEvent {
+                        source: source.clone(),
+                        id,
+                        value: (id * 20) as i64,
+                    })
+                }
+            }));
 
-                // Aggregator demonstrates fan-in with StatefulHandler
-                aggregator = stateful!("aggregator" => MultiSourceAggregator::new().with_expected({
-                    let mut m = BTreeMap::new();
-                    m.insert("kafka".to_string(), 5);
-                    m.insert("api".to_string(), 4);
-                    m.insert("file".to_string(), 4);
-                    m
-                }));
+            // Aggregator demonstrates fan-in with StatefulHandler
+            aggregator = stateful!(MultiSourceAggregator::new().with_expected({
+                let mut m = BTreeMap::new();
+                m.insert("kafka".to_string(), 5);
+                m.insert("api".to_string(), 4);
+                m.insert("file".to_string(), 4);
+                m
+            }));
 
-                // ✨ FLOWIP-080h: Router distributes to multiple sinks using Map helper
-                router = transform!("router" => smart_router());
+            // ✨ FLOWIP-080h: Router distributes to multiple sinks using Map helper
+            router = transform!(smart_router());
 
-                // FAN-OUT: Three sinks receiving from one router
-                low_priority = sink!("low_sink" => PrioritySink::new("LOW", "low", low_counter_flow.clone()));
-                med_priority = sink!("med_sink" => PrioritySink::new("MEDIUM", "medium", med_counter_flow.clone()));
-                high_priority = sink!("high_sink" => PrioritySink::new("HIGH", "high", high_counter_flow.clone()));
-            },
+            // FAN-OUT: Three sinks receiving from one router
+            low_sink = sink!(PrioritySink::new("LOW", "low", low_counter_flow.clone()));
+            med_sink = sink!(PrioritySink::new(
+                "MEDIUM",
+                "medium",
+                med_counter_flow.clone()
+            ));
+            high_sink = sink!(PrioritySink::new("HIGH", "high", high_counter_flow.clone()));
+        },
 
-            topology: {
-                // FAN-IN: Multiple sources to single aggregator
-                kafka |> aggregator;
-                api |> aggregator;
-                file_src |> aggregator;
+        topology: {
+            // FAN-IN: Multiple sources to single aggregator
+            kafka_source |> aggregator;
+            api_source |> aggregator;
+            file_source |> aggregator;
 
-                // Processing chain
-                aggregator |> router;
+            // Processing chain
+            aggregator |> router;
 
-                // FAN-OUT: Single router to multiple sinks
-                // Each sink creates its own independent journal reader
-                router |> low_priority;
-                router |> med_priority;
-                router |> high_priority;
-            }
+            // FAN-OUT: Single router to multiple sinks
+            // Each sink creates its own independent journal reader
+            router |> low_sink;
+            router |> med_sink;
+            router |> high_sink;
+        }
     })
     .await
     ?;

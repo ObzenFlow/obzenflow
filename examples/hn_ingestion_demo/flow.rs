@@ -83,12 +83,12 @@ async fn run_example_async() -> Result<()> {
             middleware: [],
 
             stages: {
-                source = async_source!("hn_stories" => (
+                hn_stories = async_source!((
                     HttpPullSource::new(decoder, config),
                     Some(Duration::from_secs(poll_timeout_secs as u64))
                 ));
-                formatter = transform!("formatter" => formatter);
-                output = sink!("console" => ConsoleSink::<FormattedStory>::table(
+                formatter = transform!(formatter);
+                console = sink!(ConsoleSink::<FormattedStory>::table(
                     &["#", "Title", "Author", "Pts", "URL"],
                     |story| vec![
                         story.id.to_string(),
@@ -101,8 +101,8 @@ async fn run_example_async() -> Result<()> {
             },
 
             topology: {
-                source |> formatter;
-                formatter |> output;
+                hn_stories |> formatter;
+                formatter |> console;
             }
         })
         .await?;

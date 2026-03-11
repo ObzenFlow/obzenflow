@@ -163,9 +163,9 @@ async fn run_char_transform(base: &Path) -> Result<()> {
                 middleware: [],
 
                 stages: {
-                    src = source!("source" => TextCharSource::new());
+                    src = source!(TextCharSource::new());
 
-                    mapper = transform!("char_mapper" =>
+                    mapper = transform!(CharEvent -> TransformedChar =>
                         MapTyped::new(|char_event: CharEvent| {
                             let ch = char_event.value.chars().next().unwrap_or(' ');
                             TransformedChar {
@@ -175,7 +175,7 @@ async fn run_char_transform(base: &Path) -> Result<()> {
                         })
                     );
 
-                    reducer = stateful!("text_accumulator" =>
+                    reducer = stateful!(
                         ReduceTyped::new(
                             TextAccumulator {
                                 transformed_text: String::new(),
@@ -188,7 +188,7 @@ async fn run_char_transform(base: &Path) -> Result<()> {
                         )
                     );
 
-                    sink = sink!("stdout_sink" => TextSink);
+                    sink = sink!(TextSink);
                 },
 
                 links: {

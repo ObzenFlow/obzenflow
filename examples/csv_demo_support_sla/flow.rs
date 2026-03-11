@@ -11,14 +11,14 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use obzenflow::sinks::CsvSink;
 use obzenflow::sources::CsvSource;
+use obzenflow::typed::joins;
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::TypedPayload;
-use obzenflow_dsl::{flow, join, sink, source, transform, with_ref};
+use obzenflow_dsl::{flow, join, sink, source, transform};
 use obzenflow_infra::application::{FlowApplication, LogLevel};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::TransformHandler;
-use obzenflow_runtime::stages::join::InnerJoinBuilder;
 use std::path::PathBuf;
 
 #[derive(Clone, Debug)]
@@ -75,48 +75,49 @@ fn build_flow(
     output_sink: CsvSink,
     journals_dir: PathBuf,
 ) -> obzenflow_dsl::FlowDefinition {
+    let join_handler = joins::inner(
+        |c: &Customer| c.customer_id.clone(),
+        |t: &TriagedTicket| t.customer_id.clone(),
+        |customer: Customer, ticket: TriagedTicket| {
+            let cap_hours = plan_sla_cap_hours(&customer.plan);
+            let effective_sla_hours = ticket.priority_sla_hours.min(cap_hours);
+            let due_bucket = due_bucket(effective_sla_hours).to_string();
+
+            EnrichedTicket {
+                ticket_id: ticket.ticket_id,
+                customer_id: ticket.customer_id,
+                plan: customer.plan,
+                region: customer.region,
+                created_at: ticket.created_at,
+                priority: ticket.priority,
+                category: ticket.category,
+                priority_sla_hours: ticket.priority_sla_hours,
+                effective_sla_hours,
+                due_bucket,
+            }
+        },
+    );
+
     flow! {
         name: "csv_demo_support_sla",
         journals: disk_journals(journals_dir),
         middleware: [],
 
         stages: {
-            customers = source!("customers" => customers);
-            tickets = source!("tickets" => tickets);
+            customers = source!(Customer => customers);
+            tickets = source!(Ticket => tickets);
 
-            triage = transform!("triage" => TicketTriage::new());
+            triage = transform!(TicketTriage::new());
 
-            enrich = join!("enrich" => with_ref!(customers,
-                InnerJoinBuilder::<Customer, TriagedTicket, EnrichedTicket>::new()
-                    .catalog_key(|c: &Customer| c.customer_id.clone())
-                    .stream_key(|t: &TriagedTicket| t.customer_id.clone())
-                    .build(|customer: Customer, ticket: TriagedTicket| {
-                        let cap_hours = plan_sla_cap_hours(&customer.plan);
-                        let effective_sla_hours = ticket.priority_sla_hours.min(cap_hours);
-                        let due_bucket = due_bucket(effective_sla_hours).to_string();
+            enrich = join!(catalog customers: Customer, TriagedTicket -> EnrichedTicket => join_handler);
 
-                        EnrichedTicket {
-                            ticket_id: ticket.ticket_id,
-                            customer_id: ticket.customer_id,
-                            plan: customer.plan,
-                            region: customer.region,
-                            created_at: ticket.created_at,
-                            priority: ticket.priority,
-                            category: ticket.category,
-                            priority_sla_hours: ticket.priority_sla_hours,
-                            effective_sla_hours,
-                            due_bucket,
-                        }
-                    })
-            ));
-
-            out = sink!("csv_out" => output_sink);
+            csv_out = sink!(output_sink);
         },
 
         topology: {
             tickets |> triage;
             triage |> enrich;
-            enrich |> out;
+            enrich |> csv_out;
         }
     }
 }

@@ -187,14 +187,14 @@ async fn prometheus_100k_error_processor_error_kinds_are_domain_only() -> Result
         middleware: [],
 
         stages: {
-            src = source!("high_volume_source" => source);
-            processor = transform!("error_processor" => transform);
-            completion = sink!("completion_sink" => sink);
+            high_volume_source = source!(source);
+            error_processor = transform!(transform);
+            completion_sink = sink!(sink);
         },
 
         topology: {
-            src |> processor;
-            processor |> completion;
+            high_volume_source |> error_processor;
+            error_processor |> completion_sink;
         }
     }
     .await

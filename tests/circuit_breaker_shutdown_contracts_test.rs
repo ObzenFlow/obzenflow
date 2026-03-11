@@ -153,7 +153,7 @@ async fn breaker_driven_shutdown_emits_poison_eof_and_contract() -> Result<()> {
     // After a few failures, the breaker should open and the flow should shut
     // down before all source events are processed.
 
-    let source = FiniteTestSource::new(20);
+    let source_handler = FiniteTestSource::new(20);
     let transform = FailingTransform::new(3);
     let (sink_handler, delivered_count) = CountingSink::new();
 
@@ -165,18 +165,18 @@ async fn breaker_driven_shutdown_emits_poison_eof_and_contract() -> Result<()> {
         middleware: [],
 
         stages: {
-            src = source!("source" => source, [
+            source = source!(source_handler, [
                 circuit_breaker(2) // Open after 2 failures
             ]);
-            trans = transform!("failing_transform" => transform, [
+            failing_transform = transform!(transform, [
                 circuit_breaker(2)
             ]);
-            snk = sink!("sink" => sink_handler);
+            sink = sink!(sink_handler);
         },
 
         topology: {
-            src |> trans;
-            trans |> snk;
+            source |> failing_transform;
+            failing_transform |> sink;
         }
     }
     .await

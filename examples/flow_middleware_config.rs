@@ -136,43 +136,41 @@ async fn main() -> Result<()> {
         name: "middleware_config_demo",
         journals: disk_journals(journal_path.clone()),
         middleware: [
-                // Flow-level rate limit: 1.0 events/sec
-                // All stages inherit this unless they override
-                RateLimiterBuilder::new(1.0).build()
-            ],
+            // Flow-level rate limit: 1.0 events/sec
+            // All stages inherit this unless they override
+            RateLimiterBuilder::new(1.0).build()
+        ],
 
-            stages: {
-                // Source with stage-level override: 10 events/sec
-                // This overrides the flow-level 1.0 events/sec
-                src = source!("fast_source" => FiniteSourceTyped::from_item_fn(|index| {
-                    if index >= 120 {
-                        return None;
-                    }
+        stages: {
+            // Source with stage-level override: 10 events/sec
+            // This overrides the flow-level 1.0 events/sec
+            fast_source = source!(CounterEvent => FiniteSourceTyped::from_item_fn(|index| {
+                if index >= 120 {
+                    return None;
+                }
 
-                    let count = index + 1;
+                let count = index + 1;
 
-                    // Log progress every 20 events
-                    if count % 20 == 0 {
-                        println!("[SOURCE] Generated {count} events");
-                    }
+                // Log progress every 20 events
+                if count % 20 == 0 {
+                    println!("[SOURCE] Generated {count} events");
+                }
 
-                    Some(CounterEvent { count })
-                }), [
-                    RateLimiterBuilder::new(10.0).build()
-                ]);
+                Some(CounterEvent { count })
+            }), [RateLimiterBuilder::new(10.0).build()]);
 
-                // Transform with NO override
-                // Inherits flow-level rate limit of 1.0 events/sec
-                trans = transform!("throttled_transform" => PassthroughTransform::new());
+            // Transform with NO override
+            // Inherits flow-level rate limit of 1.0 events/sec
+            throttled_transform = transform!(PassthroughTransform::new());
 
-                // Sink
-                snk = sink!("counting_sink" => CountingSink::new());
-            },
+            // Sink
+            counting_sink = sink!(CountingSink::new());
+        },
 
-            topology: {
-                src |> trans;
-                trans |> snk;
-            }
+        topology: {
+            fast_source |> throttled_transform;
+            throttled_transform |> counting_sink;
+        }
     })
     .await?;
 

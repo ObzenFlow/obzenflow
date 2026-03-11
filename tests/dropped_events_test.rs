@@ -159,14 +159,14 @@ async fn test_dropped_events_detection() -> Result<()> {
         middleware: [],
 
         stages: {
-            src = source!("correlated_source" => source);
-            trans = transform!("dropping_transform" => transform);
-            snk = sink!("collector_sink" => sink);
+            correlated_source = source!(source);
+            dropping_transform = transform!(transform);
+            collector_sink = sink!(sink);
         },
 
         topology: {
-            src |> trans;
-            trans |> snk;
+            correlated_source |> dropping_transform;
+            dropping_transform |> collector_sink;
         }
     }
     .await

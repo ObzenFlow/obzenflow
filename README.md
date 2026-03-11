@@ -19,13 +19,13 @@ FlowApplication::run(flow! {
     middleware: [rate_limit(100.0)],
 
     stages: {
-        src   = source!("input" => my_source);
-        xform = transform!("enrich" => my_transform);
-        out   = sink!("output" => my_sink);
+        input = source!(my_source);
+        enrich = transform!(my_transform);
+        output = sink!(my_sink);
     },
 
     topology: {
-        src |> xform |> out;
+        input |> enrich |> output;
     }
 })
 .await?;
@@ -59,7 +59,7 @@ Observe:
 - Metrics: `curl http://127.0.0.1:9090/metrics`
 - Topology: `curl http://127.0.0.1:9090/api/topology`
 
-Code: `examples/http_ingestion_piggy_bank_demo.rs`
+Code: `examples/http_ingestion_piggy_bank_demo/flow.rs`
 
 ## More examples
 

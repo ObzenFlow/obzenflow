@@ -282,12 +282,10 @@ async fn flowip_051n_buffers_external_eof_until_scc_quiescent() -> Result<()> {
         middleware: [],
 
         stages: {
-            src = source!("src" => SingleSeedSource::new(target_iterations));
-            entry = transform!("entry" => EntryConvergeTransform::new(entry_processed_for_flow));
-            iter = async_transform!(
-                "iter" => IterationTransform::new(iter_processed_for_flow, iter_delay)
-            );
-            snk = sink!("snk" => sink);
+            src = source!(SingleSeedSource::new(target_iterations));
+            entry = transform!(EntryConvergeTransform::new(entry_processed_for_flow));
+            iter = async_transform!(IterationTransform::new(iter_processed_for_flow, iter_delay));
+            snk = sink!(sink);
         },
 
         topology: {
@@ -441,14 +439,10 @@ async fn flowip_051n_buffers_drain_until_scc_quiescent() -> Result<()> {
         middleware: [],
 
         stages: {
-            src = async_source!(
-                "src" => SeedThenDrainSource::new(target_iterations, drain_delay)
-            );
-            entry = transform!("entry" => EntryConvergeTransform::new(entry_processed_for_flow));
-            iter = async_transform!(
-                "iter" => IterationTransform::new(iter_processed_for_flow, iter_delay)
-            );
-            snk = sink!("snk" => sink);
+            src = async_source!(SeedThenDrainSource::new(target_iterations, drain_delay));
+            entry = transform!(EntryConvergeTransform::new(entry_processed_for_flow));
+            iter = async_transform!(IterationTransform::new(iter_processed_for_flow, iter_delay));
+            snk = sink!(sink);
         },
 
         topology: {
@@ -507,12 +501,10 @@ async fn flowip_051n_max_iterations_exceeded_routes_to_error_journal() -> Result
         middleware: [],
 
         stages: {
-            src = source!("src" => DualSeedSource::new(converge_target, diverge_target));
-            entry = transform!("entry" => EntryConvergeTransform::new(entry_processed_for_flow));
-            iter = async_transform!(
-                "iter" => IterationTransform::new(iter_processed_for_flow, Duration::ZERO)
-            );
-            snk = sink!("snk" => sink);
+            src = source!(DualSeedSource::new(converge_target, diverge_target));
+            entry = transform!(EntryConvergeTransform::new(entry_processed_for_flow));
+            iter = async_transform!(IterationTransform::new(iter_processed_for_flow, Duration::ZERO));
+            snk = sink!(sink);
         },
 
         topology: {
@@ -563,11 +555,11 @@ async fn flowip_051n_rejects_sccs_with_multiple_entry_points() {
         middleware: [],
 
         stages: {
-            src1 = source!("src1" => SingleSeedSource::new(1));
-            src2 = source!("src2" => SingleSeedSource::new(1));
-            a = transform!("a" => EntryConvergeTransform::new(Arc::new(AtomicU64::new(0))));
-            b = transform!("b" => EntryConvergeTransform::new(Arc::new(AtomicU64::new(0))));
-            snk = sink!("snk" => DoneCounterSink::new().0);
+            src1 = source!(SingleSeedSource::new(1));
+            src2 = source!(SingleSeedSource::new(1));
+            a = transform!(EntryConvergeTransform::new(Arc::new(AtomicU64::new(0))));
+            b = transform!(EntryConvergeTransform::new(Arc::new(AtomicU64::new(0))));
+            snk = sink!(DoneCounterSink::new().0);
         },
 
         topology: {

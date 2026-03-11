@@ -152,12 +152,12 @@ async fn async_finite_source_emits_events_and_calls_drain() -> Result<()> {
         middleware: [],
 
         stages: {
-            src = async_source!("source" => source);
-            snk = sink!("sink" => sink);
+            source = async_source!(source);
+            sink = sink!(sink);
         },
 
         topology: {
-            src |> snk;
+            source |> sink;
         }
     }
     .await
@@ -199,14 +199,14 @@ async fn async_finite_source_applies_stage_middleware() -> Result<()> {
         middleware: [],
 
         stages: {
-            src = async_source!("source" => source, [
+            source = async_source!(source, [
                 InjectFieldFactory
             ]);
-            snk = sink!("sink" => sink);
+            sink = sink!(sink);
         },
 
         topology: {
-            src |> snk;
+            source |> sink;
         }
     }
     .await

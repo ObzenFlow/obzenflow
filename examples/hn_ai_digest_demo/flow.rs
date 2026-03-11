@@ -533,36 +533,36 @@ async fn run_example_async() -> Result<()> {
             middleware: [],
 
             stages: {
-                source = async_source!("hn_stories" => (
+                hn_stories = async_source!((
                     HttpPullSource::new(decoder, config),
                     Some(Duration::from_secs(poll_timeout_secs as u64))
                 ), [
                     RateLimiterBuilder::new(source_rate_limit).build()
                 ]);
-                formatter = transform!("formatter" => formatter);
-                batch = stateful!("batch" => digest_seed);
-                split = transform!("split_to_budget" => splitter);
-                map = async_transform!("map_llm" => map_router, [ai_circuit_breaker()]);
-                oversize_sub_split = transform!("oversize_sub_split" => oversize_sub_splitter);
-                oversize_map = async_transform!("oversize_map_llm" => oversize_map_router, [ai_circuit_breaker()]);
-                reduce = stateful!("reduce" => chunk_summaries);
-                digest = async_transform!("digest_llm" => digest_llm, [ai_circuit_breaker()]);
-                output = sink!("digest_summary" => ConsoleSink::<HnDigestSummary>::new(format_digest_summary_for_console));
+                formatter = transform!(formatter);
+                batch = stateful!(digest_seed);
+                split_to_budget = transform!(splitter);
+                map_llm = async_transform!(map_router, [ai_circuit_breaker()]);
+                oversize_sub_split = transform!(oversize_sub_splitter);
+                oversize_map_llm = async_transform!(oversize_map_router, [ai_circuit_breaker()]);
+                reduce = stateful!(chunk_summaries);
+                digest_llm = async_transform!(digest_llm, [ai_circuit_breaker()]);
+                digest_summary = sink!(ConsoleSink::<HnDigestSummary>::new(format_digest_summary_for_console));
             },
 
             topology: {
-                source |> formatter;
+                hn_stories |> formatter;
                 formatter |> batch;
-                batch |> split;
-                split |> map;
-                split |> reduce;
-                map |> reduce;
-                reduce |> digest;
-                digest |> output;
+                batch |> split_to_budget;
+                split_to_budget |> map_llm;
+                split_to_budget |> reduce;
+                map_llm |> reduce;
+                reduce |> digest_llm;
+                digest_llm |> digest_summary;
 
-                split |> oversize_sub_split;
-                oversize_sub_split |> oversize_map;
-                split <| oversize_map;
+                split_to_budget |> oversize_sub_split;
+                oversize_sub_split |> oversize_map_llm;
+                split_to_budget <| oversize_map_llm;
             }
         })
         .await?;

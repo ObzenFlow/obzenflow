@@ -286,9 +286,9 @@ async fn counter_emits_single_event_on_drain() {
         middleware: [],
 
         stages: {
-            src = source!("numbers" => NumberSource::new(5));
-            counter = stateful!("counter" => CounterHandler::new());
-            sink = sink!("sink" => sink);
+            src = source!(NumberSource::new(5));
+            counter = stateful!(CounterHandler::new());
+            sink = sink!(sink);
         },
 
         topology: {
@@ -318,9 +318,9 @@ async fn accumulator_emits_one_event_per_input_on_drain() {
         middleware: [],
 
         stages: {
-            src = source!("numbers" => NumberSource::new(5));
-            acc = stateful!("accumulator" => AccumulatorHandler::new());
-            sink = sink!("sink" => sink);
+            src = source!(NumberSource::new(5));
+            acc = stateful!(AccumulatorHandler::new());
+            sink = sink!(sink);
         },
 
         topology: {
@@ -348,9 +348,9 @@ async fn sum_handler_emits_aggregated_result_on_drain() {
         middleware: [],
 
         stages: {
-            src = source!("numbers" => NumberSource::new(10));
-            summer = stateful!("sum" => SumHandler::new());
-            sink = sink!("sink" => sink);
+            src = source!(NumberSource::new(10));
+            summer = stateful!(SumHandler::new());
+            sink = sink!(sink);
         },
 
         topology: {
@@ -380,9 +380,9 @@ async fn immediate_emitter_emits_during_accumulating() {
         middleware: [],
 
         stages: {
-            src = source!("numbers" => NumberSource::new(5));
-            emitter = stateful!("emitter" => ImmediateEmitter::new());
-            sink = sink!("sink" => sink);
+            src = source!(NumberSource::new(5));
+            emitter = stateful!(ImmediateEmitter::new());
+            sink = sink!(sink);
         },
 
         topology: {
@@ -410,9 +410,9 @@ async fn empty_source_still_triggers_drain_for_stateful_handler() {
         middleware: [],
 
         stages: {
-            src = source!("empty" => EmptySource::new());
-            counter = stateful!("counter" => CounterHandler::new());
-            sink = sink!("sink" => sink);
+            src = source!(EmptySource::new());
+            counter = stateful!(CounterHandler::new());
+            sink = sink!(sink);
         },
 
         topology: {

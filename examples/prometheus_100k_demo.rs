@@ -201,7 +201,7 @@ fn main() -> Result<()> {
 
             stages: {
                 // Source generating 100k events
-                src = source!("high_volume_source" =>
+                high_volume_source = source!(DataRequest =>
                     FiniteSourceTyped::from_item_fn(move |index| {
                         let total = 100_000usize;
                         if index >= total {
@@ -226,12 +226,12 @@ fn main() -> Result<()> {
 
                 // Error-prone transform (every 100th event fails)
                 // ✨ FLOWIP-080h: Using Map helper instead of ErrorProneTransform struct
-                processor = transform!("error_processor" => error_prone_transform());
+                error_processor = transform!(error_prone_transform());
 
                 // Fan-out branch 1: Type-safe event counter (FLOWIP-080j)
                 // Replaces 59-line EventCounter StatefulHandler with ReduceTyped!
                 // Counts ProcessedEvent domain objects from the stream
-                counter = stateful!("event_counter" =>
+                event_counter = stateful!(ProcessedEvent -> EventCountState =>
                     ReduceTyped::new(
                         EventCountState::default(),
                         |state: &mut EventCountState, _event: &ProcessedEvent| {
@@ -243,7 +243,7 @@ fn main() -> Result<()> {
                         }
                     ).emit_on_eof()
                 );
-                counter_sink = sink!("summary_sink" => |summary: EventCountState| {
+                summary_sink = sink!(|summary: EventCountState| {
                     let count = summary.event_count;
                     let errors = 100_000usize.saturating_sub(count);
 
@@ -268,19 +268,19 @@ fn main() -> Result<()> {
                 });
 
                 // Fan-out branch 2: Completion sink
-                completion = sink!("completion_sink" => CompletionSink::new());
+                completion_sink = sink!(CompletionSink::new());
             },
 
             topology: {
                 // Linear processing
-                src |> processor;
+                high_volume_source |> error_processor;
 
                 // Fan-out: processor feeds both branches
-                processor |> counter;
-                processor |> completion;
+                error_processor |> event_counter;
+                error_processor |> completion_sink;
 
                 // Counter emits summary to its sink
-                counter |> counter_sink;
+                event_counter |> summary_sink;
             }
         })?;
 

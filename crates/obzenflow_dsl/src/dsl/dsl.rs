@@ -9,7 +9,7 @@
 
 /// Parse topology edges supporting both |> and <| operators (single collector)
 /// Note: Join stages only accept stream inputs in topology.
-/// Reference stages are specified via with_reference() in the join builder.
+/// Reference stages are specified via `join!(catalog ...)` (or the join tuple syntax).
 #[macro_export]
 macro_rules! parse_topology {
     // Base case - no more edges
@@ -134,9 +134,9 @@ macro_rules! parse_topology_with_joins {
 ///     middleware: [],
 ///
 ///     stages: {
-///         src = source!("input" => FiniteSourceTyped::new(vec![MyEvent { value: 1 }]));
-///         map = transform!("double" => MapTyped::new(|e: MyEvent| Doubled { value: e.value * 2 }));
-///         out = sink!("output" => |d: Doubled| { println!("{}", d.value); });
+///         src = source!(MyEvent => FiniteSourceTyped::new(vec![MyEvent { value: 1 }]));
+///         map = transform!(MyEvent -> Doubled => MapTyped::new(|e: MyEvent| Doubled { value: e.value * 2 }));
+///         out = sink!(|d: Doubled| { println!("{}", d.value); });
 ///     },
 ///
 ///     topology: {
@@ -179,6 +179,17 @@ macro_rules! flow {
                 let descriptor = $descriptor;
                 stages.insert(stringify!($stage_name).to_string(), descriptor);
             )*
+
+            // FLOWIP-105g-part-2: resolve binding-derived runtime stage names.
+            //
+            // Stage macros can request name derivation by setting the descriptor name to
+            // `BINDING_DERIVED_NAME_SENTINEL`. Resolve those to the left-hand binding
+            // before uniqueness checks and build phases run.
+            for (binding, descriptor) in stages.iter_mut() {
+                if descriptor.name() == BINDING_DERIVED_NAME_SENTINEL {
+                    descriptor.set_name(binding.clone());
+                }
+            }
 
             // Create connections
             let mut connections: Vec<(String, String, obzenflow_topology::EdgeKind)> = Vec::new();
@@ -228,6 +239,17 @@ macro_rules! flow {
                 let descriptor = $descriptor;
                 stages.insert(stringify!($stage_name).to_string(), descriptor);
             )*
+
+            // FLOWIP-105g-part-2: resolve binding-derived runtime stage names.
+            //
+            // Stage macros can request name derivation by setting the descriptor name to
+            // `BINDING_DERIVED_NAME_SENTINEL`. Resolve those to the left-hand binding
+            // before uniqueness checks and build phases run.
+            for (binding, descriptor) in stages.iter_mut() {
+                if descriptor.name() == BINDING_DERIVED_NAME_SENTINEL {
+                    descriptor.set_name(binding.clone());
+                }
+            }
 
             // Create connections
             let mut connections: Vec<(String, String, obzenflow_topology::EdgeKind)> = Vec::new();

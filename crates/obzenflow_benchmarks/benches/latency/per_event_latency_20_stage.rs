@@ -166,27 +166,27 @@ async fn run_20_stage_pipeline() -> anyhow::Result<Duration> {
         middleware: [],
 
         stages: {
-            src = source!("source" => source);
-            s1 = transform!("stage1" => PassthroughStage::new("stage1"));
-            s2 = transform!("stage2" => PassthroughStage::new("stage2"));
-            s3 = transform!("stage3" => PassthroughStage::new("stage3"));
-            s4 = transform!("stage4" => PassthroughStage::new("stage4"));
-            s5 = transform!("stage5" => PassthroughStage::new("stage5"));
-            s6 = transform!("stage6" => PassthroughStage::new("stage6"));
-            s7 = transform!("stage7" => PassthroughStage::new("stage7"));
-            s8 = transform!("stage8" => PassthroughStage::new("stage8"));
-            s9 = transform!("stage9" => PassthroughStage::new("stage9"));
-            s10 = transform!("stage10" => PassthroughStage::new("stage10"));
-            s11 = transform!("stage11" => PassthroughStage::new("stage11"));
-            s12 = transform!("stage12" => PassthroughStage::new("stage12"));
-            s13 = transform!("stage13" => PassthroughStage::new("stage13"));
-            s14 = transform!("stage14" => PassthroughStage::new("stage14"));
-            s15 = transform!("stage15" => PassthroughStage::new("stage15"));
-            s16 = transform!("stage16" => PassthroughStage::new("stage16"));
-            s17 = transform!("stage17" => PassthroughStage::new("stage17"));
-            s18 = transform!("stage18" => PassthroughStage::new("stage18"));
-            s19 = transform!("stage19" => PassthroughStage::new("stage19"));
-            snk = sink!("sink" => sink);
+            src = source!(source);
+            s1 = transform!(PassthroughStage::new("stage1"));
+            s2 = transform!(PassthroughStage::new("stage2"));
+            s3 = transform!(PassthroughStage::new("stage3"));
+            s4 = transform!(PassthroughStage::new("stage4"));
+            s5 = transform!(PassthroughStage::new("stage5"));
+            s6 = transform!(PassthroughStage::new("stage6"));
+            s7 = transform!(PassthroughStage::new("stage7"));
+            s8 = transform!(PassthroughStage::new("stage8"));
+            s9 = transform!(PassthroughStage::new("stage9"));
+            s10 = transform!(PassthroughStage::new("stage10"));
+            s11 = transform!(PassthroughStage::new("stage11"));
+            s12 = transform!(PassthroughStage::new("stage12"));
+            s13 = transform!(PassthroughStage::new("stage13"));
+            s14 = transform!(PassthroughStage::new("stage14"));
+            s15 = transform!(PassthroughStage::new("stage15"));
+            s16 = transform!(PassthroughStage::new("stage16"));
+            s17 = transform!(PassthroughStage::new("stage17"));
+            s18 = transform!(PassthroughStage::new("stage18"));
+            s19 = transform!(PassthroughStage::new("stage19"));
+            snk = sink!(sink);
         },
 
         topology: {

@@ -281,14 +281,14 @@ async fn async_transform_routes_error_kinds_to_correct_journal() -> Result<()> {
         middleware: [],
 
         stages: {
-            src = source!("source" => TestEventSource::new());
-            trn = async_transform!("async_errors" => transform);
-            snk = sink!("sink" => counter_sink);
+            source = source!(TestEventSource::new());
+            async_errors = async_transform!(transform);
+            sink = sink!(counter_sink);
         },
 
         topology: {
-            src |> trn;
-            trn |> snk;
+            source |> async_errors;
+            async_errors |> sink;
         }
     }
     .await
@@ -436,16 +436,16 @@ async fn async_transform_applies_stage_middleware() -> Result<()> {
         middleware: [],
 
         stages: {
-            src = source!("source" => TestEventSource::new());
-            trn = async_transform!("mw_transform" => AsyncPassThroughTransform, [
+            source = source!(TestEventSource::new());
+            mw_transform = async_transform!(AsyncPassThroughTransform, [
                 InjectFieldFactory
             ]);
-            snk = sink!("sink" => sink);
+            sink = sink!(sink);
         },
 
         topology: {
-            src |> trn;
-            trn |> snk;
+            source |> mw_transform;
+            mw_transform |> sink;
         }
     }
     .await
@@ -490,14 +490,14 @@ async fn async_transform_drain_failure_is_stage_level_failure() -> Result<()> {
         middleware: [],
 
         stages: {
-            src = source!("source" => TestEventSource::new());
-            trn = async_transform!("drain_fail_transform" => transform);
-            snk = sink!("sink" => sink);
+            source = source!(TestEventSource::new());
+            drain_fail_transform = async_transform!(transform);
+            sink = sink!(sink);
         },
 
         topology: {
-            src |> trn;
-            trn |> snk;
+            source |> drain_fail_transform;
+            drain_fail_transform |> sink;
         }
     }
     .await

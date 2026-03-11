@@ -13,14 +13,11 @@
 //! Run with: `cargo run -p obzenflow --example char_transform`
 
 use anyhow::Result;
-use obzenflow::sinks::ConsoleSink;
+use obzenflow::typed::{sinks, sources, stateful as typed_stateful, transforms};
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, stateful, transform};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::stages::source::FiniteSourceTyped;
-use obzenflow_runtime::stages::stateful::strategies::accumulators::ReduceTyped;
-use obzenflow_runtime::stages::transform::MapTyped;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -122,29 +119,31 @@ async fn main() -> Result<()> {
         middleware: [],
 
         stages: {
-            characters = source!(out: CharInput, "characters" => FiniteSourceTyped::new(char_inputs));
+            characters = source!(CharInput => sources::finite(char_inputs));
 
-            transform_text = transform!(input: CharInput, out: TextChunk, "transform_text" => MapTyped::new(|input: CharInput| {
-                TextChunk {
+            transform_text = transform!(
+                CharInput -> TextChunk => transforms::map(|input| TextChunk {
                     text: transform_char(input.character),
-                }
-            }));
+                })
+            );
 
-            collect_text = stateful!(input: TextChunk, out: TransformedText, "collect_text" => ReduceTyped::new(
-                TransformedText::default(),
-                |text: &mut TransformedText, chunk: &TextChunk| {
-                    text.text.push_str(&chunk.text);
-                    text.character_count += chunk.text.chars().count();
+            collect_text = stateful!(
+                TextChunk -> TransformedText => typed_stateful::reduce(
+                    TransformedText::default(),
+                    |text, chunk| {
+                        text.text.push_str(&chunk.text);
+                        text.character_count += chunk.text.chars().count();
 
-                    let ends_sentence = matches!(chunk.text.as_str(), "." | "!" | "?");
-                    if ends_sentence && !text.last_was_sentence_end {
-                        text.sentence_count += 1;
+                        let ends_sentence = matches!(chunk.text.as_str(), "." | "!" | "?");
+                        if ends_sentence && !text.last_was_sentence_end {
+                            text.sentence_count += 1;
+                        }
+                        text.last_was_sentence_end = ends_sentence;
                     }
-                    text.last_was_sentence_end = ends_sentence;
-                }
-            ).emit_on_eof());
+                ).emit_on_eof()
+            );
 
-            output = sink!(input: TransformedText, "output" => ConsoleSink::<TransformedText>::new(format_output));
+            output = sink!(TransformedText => sinks::console(format_output));
         },
 
         topology: {

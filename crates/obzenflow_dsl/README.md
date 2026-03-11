@@ -27,8 +27,8 @@ FlowApplication::run(flow! {
     middleware: [],
 
     stages: {
-        src = source!("input" => my_source);
-        out = sink!("output" => my_sink);
+        src = source!(my_source);
+        out = sink!(my_sink);
     },
 
     topology: {

@@ -165,9 +165,9 @@ async fn run_2_stage_pipeline() -> anyhow::Result<Duration> {
         middleware: [],
 
         stages: {
-            src = source!("source" => source);
-            s1 = transform!("stage1" => PassthroughStage::new("stage1"));
-            snk = sink!("sink" => sink);
+            src = source!(source);
+            s1 = transform!(PassthroughStage::new("stage1"));
+            snk = sink!(sink);
         },
 
         topology: {

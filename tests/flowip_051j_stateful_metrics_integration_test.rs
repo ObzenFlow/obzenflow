@@ -13,7 +13,7 @@ use async_trait::async_trait;
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::metrics::MetricsExporter;
 use obzenflow_core::{StageId, WriterId};
-use obzenflow_dsl::{flow, join, sink, source, stateful, with_ref};
+use obzenflow_dsl::{flow, join, sink, source, stateful};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
@@ -269,9 +269,9 @@ async fn flowip_051j_stateful_metrics_accumulate_is_instrumented() -> Result<()>
         middleware: [],
 
         stages: {
-            src = source!("src" => BurstSource::new(total_events));
-            counter = stateful!("counter" => SlowAccumulator::new(sleep_per_event));
-            snk = sink!("snk" => sink_handler);
+            src = source!(BurstSource::new(total_events));
+            counter = stateful!(SlowAccumulator::new(sleep_per_event));
+            snk = sink!(sink_handler);
         },
 
         topology: {
@@ -467,10 +467,10 @@ async fn flowip_051j_join_metrics_counts_hydration_as_accumulation() -> Result<(
         middleware: [],
 
         stages: {
-            ref_src = source!("ref_src" => BurstSource::new(reference_events));
-            stream_src = source!("stream_src" => BurstSource::new(stream_events));
-            joiner = join!("joiner" => with_ref!(ref_src, NoopJoin));
-            snk = sink!("snk" => CollectingSink::new().0);
+            ref_src = source!(BurstSource::new(reference_events));
+            stream_src = source!(BurstSource::new(stream_events));
+            joiner = join!(catalog ref_src => NoopJoin);
+            snk = sink!(CollectingSink::new().0);
         },
 
         topology: {

@@ -593,6 +593,10 @@ impl StageDescriptor for TypedStageDescriptor {
         self.inner.name()
     }
 
+    fn set_name(&mut self, name: String) {
+        self.inner.set_name(name);
+    }
+
     fn stage_type(&self) -> StageType {
         self.inner.stage_type()
     }

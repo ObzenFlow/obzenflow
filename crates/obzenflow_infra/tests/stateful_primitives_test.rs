@@ -116,8 +116,8 @@ async fn groupby_with_on_eof_emits_one_aggregate_per_key() {
         middleware: [],
 
         stages: {
-            src = source!("transactions" => TransactionSource::new(10));
-            sales_by_product = stateful!("sales_aggregator" =>
+            src = source!(TransactionSource::new(10));
+            sales_by_product = stateful!(
                 GroupBy::new("product_id", |event: &ChainEvent, stats: &mut ProductStats| {
                     stats.quantity_sold += event.payload()["quantity"].as_u64().unwrap_or(0);
                     stats.revenue += event.payload()["revenue"].as_f64().unwrap_or(0.0);
@@ -125,7 +125,7 @@ async fn groupby_with_on_eof_emits_one_aggregate_per_key() {
                 })
                 .emit_on_eof()
             );
-            sink = sink!("sink" => sink);
+            sink = sink!(sink);
         },
 
         topology: {
@@ -162,8 +162,8 @@ async fn reduce_with_on_eof_emits_single_total() {
         middleware: [],
 
         stages: {
-            src = source!("transactions" => TransactionSource::new(5));
-            totals = stateful!("totals" =>
+            src = source!(TransactionSource::new(5));
+            totals = stateful!(
                 Reduce::new(
                     TotalStats { total_revenue: 0.0, total_transactions: 0, total_quantity: 0 },
                     |stats: &mut TotalStats, event: &ChainEvent| {
@@ -174,7 +174,7 @@ async fn reduce_with_on_eof_emits_single_total() {
                 )
                 .emit_on_eof()
             );
-            sink = sink!("sink" => sink);
+            sink = sink!(sink);
         },
 
         topology: {
@@ -203,12 +203,12 @@ async fn conflate_emits_latest_value_per_key() {
         middleware: [],
 
         stages: {
-            src = source!("transactions" => TransactionSource::new(8));
-            latest_by_product = stateful!("latest_snapshot" =>
+            src = source!(TransactionSource::new(8));
+            latest_by_product = stateful!(
                 Conflate::new("product_id")
                     .emit_within(Duration::from_millis(1))
             );
-            sink = sink!("sink" => sink);
+            sink = sink!(sink);
         },
 
         topology: {
