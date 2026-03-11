@@ -11,6 +11,7 @@ use super::Accumulator;
 use crate::stages::common::handler_error::HandlerError;
 use crate::stages::common::handlers::StatefulHandler;
 use crate::stages::stateful::strategies::emissions::EmissionStrategy;
+use crate::typing::StatefulTyping;
 use obzenflow_core::event::context::causality_context::CausalityContext;
 use obzenflow_core::event::context::ReplayContext;
 use obzenflow_core::event::payloads::correlation_payload::CorrelationPayload;
@@ -157,6 +158,15 @@ where
             initial_emission: emission,
         }
     }
+}
+
+impl<A, E> StatefulTyping for StatefulWithEmission<A, E>
+where
+    A: Accumulator + StatefulTyping,
+    E: EmissionStrategy,
+{
+    type Input = A::Input;
+    type Output = A::Output;
 }
 
 #[async_trait::async_trait]

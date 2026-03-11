@@ -8,6 +8,7 @@
 //! descriptor that encapsulates both the handler and how to create its supervisor.
 
 use crate::stage_handle_adapter::StageHandleAdapter;
+use crate::dsl::typing::StageTypingMetadata;
 use async_trait::async_trait;
 use obzenflow_adapters::middleware::control::ControlMiddlewareAggregator;
 use obzenflow_adapters::middleware::{
@@ -179,6 +180,11 @@ pub trait StageDescriptor: Send + Sync {
     /// Get a debug representation
     fn debug_info(&self) -> String {
         format!("Stage[{}]", self.name())
+    }
+
+    /// Optional types-first metadata captured by typed stage macros.
+    fn typing_metadata(&self) -> Option<&StageTypingMetadata> {
+        None
     }
 }
 

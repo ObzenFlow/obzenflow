@@ -122,15 +122,15 @@ async fn main() -> Result<()> {
         middleware: [],
 
         stages: {
-            characters = source!("characters" => FiniteSourceTyped::new(char_inputs));
+            characters = source!(<CharInput> "characters" => FiniteSourceTyped::new(char_inputs));
 
-            transform_text = transform!("transform_text" => MapTyped::new(|input: CharInput| {
+            transform_text = transform!(<CharInput, TextChunk> "transform_text" => MapTyped::new(|input: CharInput| {
                 TextChunk {
                     text: transform_char(input.character),
                 }
             }));
 
-            collect_text = stateful!("collect_text" => ReduceTyped::new(
+            collect_text = stateful!(<TextChunk, TransformedText> "collect_text" => ReduceTyped::new(
                 TransformedText::default(),
                 |text: &mut TransformedText, chunk: &TextChunk| {
                     text.text.push_str(&chunk.text);
@@ -144,7 +144,7 @@ async fn main() -> Result<()> {
                 }
             ).emit_on_eof());
 
-            output = sink!("output" => ConsoleSink::<TransformedText>::new(format_output));
+            output = sink!(<TransformedText> "output" => ConsoleSink::<TransformedText>::new(format_output));
         },
 
         topology: {

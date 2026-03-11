@@ -12,6 +12,7 @@ use obzenflow_core::event::ChainEventContent;
 use obzenflow_core::{ChainEvent, TypedPayload};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::SinkHandler;
+use obzenflow_runtime::typing::SinkTyping;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::marker::PhantomData;
@@ -605,6 +606,13 @@ impl<T, F> ConsoleSink<T, F> {
         self.include_non_data = true;
         self
     }
+}
+
+impl<T, F> SinkTyping for ConsoleSink<T, F>
+where
+    T: TypedPayload + DeserializeOwned + Send + Sync + 'static,
+{
+    type Input = T;
 }
 
 #[async_trait]

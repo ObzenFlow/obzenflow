@@ -7,6 +7,7 @@
 use crate::stages::common::handler_error::HandlerError;
 use crate::stages::common::handlers::JoinHandler;
 use crate::stages::join::config::JoinReferenceMode;
+use crate::typing::JoinTyping;
 use obzenflow_core::event::context::causality_context::CausalityContext;
 use obzenflow_core::event::schema::TypedPayload;
 use obzenflow_core::StageId;
@@ -145,6 +146,15 @@ where
             .field("reference_batch_cap", &self.reference_batch_cap)
             .finish()
     }
+}
+
+impl<S, CatalogKeyFn, StreamKeyFn> JoinTyping for JoinWithStrategy<S, CatalogKeyFn, StreamKeyFn>
+where
+    S: JoinStrategy + Clone + Send + Sync,
+{
+    type Reference = S::CatalogType;
+    type Stream = S::StreamType;
+    type Output = S::EnrichedType;
 }
 
 #[async_trait::async_trait]

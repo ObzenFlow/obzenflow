@@ -13,6 +13,7 @@ pub mod error;
 mod flow_definition;
 pub mod stage_descriptor;
 mod stage_macros;
+pub mod typing;
 
 #[cfg(test)]
 mod tests;

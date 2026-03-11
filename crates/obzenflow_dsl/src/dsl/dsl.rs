@@ -418,6 +418,22 @@ macro_rules! build_typed_flow {
                 .map_err(FlowBuildError::TopologyValidationFailed)?,
         );
 
+        let edge_warnings = $crate::dsl::typing::collect_edge_warnings(
+            &topology,
+            &descriptors,
+            &name_to_id,
+        );
+        for warning in &edge_warnings {
+            tracing::warn!(
+                upstream_stage = %warning.upstream_stage,
+                downstream_stage = %warning.downstream_stage,
+                upstream_type = %warning.upstream_type,
+                expected_type = %warning.expected_type,
+                input_role = %warning.input_role.as_str(),
+                "Typed edge compatibility mismatch"
+            );
+        }
+
         // FLOWIP-051l (P0): backflow cycles are currently only supported for transform stages.
         // Reject any topology where a cycle-member stage is not a transform so we do not silently
         // drop cycle protection for other stage types when the middleware-based guard is removed.

@@ -14,6 +14,7 @@
 
 use crate::stages::common::handler_error::HandlerError;
 use crate::stages::common::handlers::SinkHandler;
+use crate::typing::SinkTyping;
 use async_trait::async_trait;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::event::ChainEventContent;
@@ -178,6 +179,15 @@ where
     }
 }
 
+impl<T, F, Fut> SinkTyping for SinkTyped<T, F, Fut>
+where
+    T: TypedPayload + DeserializeOwned + Send + Sync + 'static,
+    F: FnMut(T) -> Fut + Send + Sync + Clone,
+    Fut: Future<Output = ()> + Send,
+{
+    type Input = T;
+}
+
 /// Typed sink handler for fallible async handlers.
 ///
 /// Unlike `SinkTyped`, the handler returns `Result<(), HandlerError>`. Errors are
@@ -240,6 +250,15 @@ where
         self.allow_skip = true;
         self
     }
+}
+
+impl<T, F, Fut> SinkTyping for FallibleSinkTyped<T, F, Fut>
+where
+    T: TypedPayload + DeserializeOwned + Send + Sync + 'static,
+    F: FnMut(T) -> Fut + Send + Sync + Clone,
+    Fut: Future<Output = Result<(), HandlerError>> + Send,
+{
+    type Input = T;
 }
 
 #[async_trait]

@@ -12,6 +12,7 @@ use crate::stages::stateful::strategies::accumulators::wrapper::StatefulWithEmis
 use crate::stages::stateful::strategies::emissions::{
     EmissionStrategy, EmitAlways, EveryN, OnEOF, TimeWindow,
 };
+use crate::typing::StatefulTyping;
 use obzenflow_core::event::ChainEventFactory;
 use obzenflow_core::id::StageId;
 use obzenflow_core::{ChainEvent, TypedPayload, WriterId};
@@ -369,6 +370,16 @@ where
         self.writer_id = writer_id;
         self
     }
+}
+
+impl<T, K, FKey> StatefulTyping for ConflateTyped<T, K, FKey>
+where
+    T: DeserializeOwned + Serialize + Send + Sync + Clone + Debug + TypedPayload,
+    K: Hash + Eq + Clone + Debug + Send + Sync,
+    FKey: Fn(&T) -> K + Send + Sync + Clone,
+{
+    type Input = T;
+    type Output = T;
 }
 
 impl<T, K, FKey> Accumulator for ConflateTyped<T, K, FKey>
