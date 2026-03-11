@@ -2,80 +2,65 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Character Transform Demo - Using FLOWIP-080h, FLOWIP-080j, FLOWIP-081, FLOWIP-081c & FLOWIP-082a
+//! Character Transform Demo
 //!
-//! Pipeline: Source → Transformer → Sink
-//!   • Source: Emits individual characters from sample sentences
-//!   • Transformer: Uses ReduceTyped for type-safe character accumulation
-//!   • Sink: Prints the final transformed text
-//!
-//! This demonstrates:
-//!   - Character-level processing pipeline
-//!   - FLOWIP-080h: MapTyped for type-safe character transformations
-//!   - FLOWIP-080j: ReduceTyped for type-safe accumulation
-//!   - FLOWIP-082a: TypedPayload for strongly-typed events
-//!   - Zero ChainEvent manipulation in business logic
-//!   - Processing multiple sentences with proper formatting
+//! A small end-to-end flow that:
+//! - emits characters from a few input lines
+//! - transforms each character
+//! - rebuilds the final text in a stateful stage
+//! - prints the final result with `ConsoleSink`
 //!
 //! Run with: `cargo run -p obzenflow --example char_transform`
 
 use anyhow::Result;
-use obzenflow_adapters::middleware::RateLimiterBuilder;
+use obzenflow::sinks::ConsoleSink;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, stateful, transform};
-use obzenflow_infra::application::{FlowApplication, LogLevel};
+use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::source::FiniteSourceTyped;
-// FLOWIP-080h: Typed transform helpers
-use obzenflow_runtime::stages::transform::MapTyped;
-// FLOWIP-080j: Typed stateful accumulators
 use obzenflow_runtime::stages::stateful::strategies::accumulators::ReduceTyped;
+use obzenflow_runtime::stages::transform::MapTyped;
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
-const CHAR_TRANSFORM_RATE_LIMIT: f64 = 10.0;
+const INPUT_LINES: [&str; 3] = ["hello 2024 world!", "42 is the answer.", "rust 1 python 0."];
 
-// FLOWIP-080h & FLOWIP-082a: Domain types for type-safe transformations
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct CharEvent {
-    value: String,
-    sentence_idx: usize,
-    char_idx: usize,
+struct CharInput {
+    character: char,
 }
 
-impl TypedPayload for CharEvent {
-    const EVENT_TYPE: &'static str = "char";
+impl TypedPayload for CharInput {
+    const EVENT_TYPE: &'static str = "char.input";
     const SCHEMA_VERSION: u32 = 1;
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct TransformedChar {
-    value: String,
-    is_newline: bool,
+struct TextChunk {
+    text: String,
 }
 
-impl TypedPayload for TransformedChar {
-    const EVENT_TYPE: &'static str = "transformed_char";
+impl TypedPayload for TextChunk {
+    const EVENT_TYPE: &'static str = "text.chunk";
     const SCHEMA_VERSION: u32 = 1;
 }
 
-// FLOWIP-080j: Accumulated state for the reducer
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
-struct TextAccumulator {
-    transformed_text: String,
+struct TransformedText {
+    text: String,
     sentence_count: usize,
-    total_chars: usize,
-    last_was_punctuation: bool, // Track consecutive punctuation to avoid double-counting
+    character_count: usize,
+    last_was_sentence_end: bool,
 }
 
-impl TypedPayload for TextAccumulator {
-    const EVENT_TYPE: &'static str = "text_accumulator";
+impl TypedPayload for TransformedText {
+    const EVENT_TYPE: &'static str = "text.output";
     const SCHEMA_VERSION: u32 = 1;
 }
 
-// Pure function: Transform a character (no ChainEvent!)
 fn transform_char(ch: char) -> String {
     if ch.is_ascii_digit() {
-        // Convert digit to word
         match ch {
             '0' => "zero",
             '1' => "one",
@@ -91,147 +76,84 @@ fn transform_char(ch: char) -> String {
         }
         .to_string()
     } else if ch.is_ascii_lowercase() {
-        // Capitalize letters
         ch.to_uppercase().to_string()
     } else {
-        // Keep everything else as-is (including newlines, punctuation, spaces)
         ch.to_string()
     }
 }
 
-fn build_char_events(sentences: &[&str]) -> Vec<CharEvent> {
-    let mut char_events = Vec::new();
-    for (sentence_idx, sentence) in sentences.iter().enumerate() {
-        let mut char_idx = 0usize;
-        for ch in sentence.chars() {
-            char_events.push(CharEvent {
-                value: ch.to_string(),
-                sentence_idx,
-                char_idx,
-            });
-            char_idx += 1;
+fn build_char_inputs(lines: &[&str]) -> Vec<CharInput> {
+    let mut char_inputs = Vec::new();
+    for (line_index, line) in lines.iter().enumerate() {
+        for ch in line.chars() {
+            char_inputs.push(CharInput { character: ch });
         }
 
-        if sentence_idx + 1 < sentences.len() {
-            char_events.push(CharEvent {
-                value: "\n".to_string(),
-                sentence_idx,
-                char_idx,
-            });
+        if line_index + 1 < lines.len() {
+            char_inputs.push(CharInput { character: '\n' });
         }
     }
-    char_events
+
+    char_inputs
+}
+
+fn format_output(output: &TransformedText) -> String {
+    format!(
+        "Input\n{}\n\nOutput\n{}\n\n{} sentences, {} characters",
+        INPUT_LINES.join("\n"),
+        output.text,
+        output.sentence_count,
+        output.character_count,
+    )
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Set environment to use console exporter for nice summaries
+    if std::env::var_os("RUST_LOG").is_none() {
+        std::env::set_var("RUST_LOG", "warn");
+    }
     std::env::set_var("OBZENFLOW_METRICS_EXPORTER", "console");
 
-    println!("🚀 Character Transform Demo");
-    println!("===========================\n");
-    println!("Demonstrating:");
-    println!("  • Character-level processing with StatefulHandler");
-    println!("  • Capitalize letters + convert digits to words");
-    println!("  • Flow-level middleware with a gentle rate limit");
-    println!("  • Clean accumulation and transformation pattern\n");
-    println!("Input sentences:");
-    println!("  1. \"hello 2024 world!\"");
-    println!("  2. \"42 is the answer.\"");
-    println!("  3. \"rust 1 python 0.\"\n");
+    let char_inputs = build_char_inputs(&INPUT_LINES);
 
-    let sentences = ["hello 2024 world!", "42 is the answer.", "rust 1 python 0."];
-    let char_events = build_char_events(&sentences);
+    FlowApplication::run(flow! {
+        name: "char_transform",
+        journals: disk_journals(PathBuf::from("target/char-transform-logs")),
+        middleware: [],
 
-    FlowApplication::builder()
-        .with_log_level(LogLevel::Info)
-        .run_async(flow! {
-            name: "char_transform",
-            journals: disk_journals(std::path::PathBuf::from("target/char-transform-logs")),
-            middleware: [
-                RateLimiterBuilder::new(CHAR_TRANSFORM_RATE_LIMIT).build()
-            ],
+        stages: {
+            characters = source!("characters" => FiniteSourceTyped::new(char_inputs));
 
-            stages: {
-                // FLOWIP-081: Typed finite sources (no WriterId/ChainEvent boilerplate)
-                src = source!("source" => FiniteSourceTyped::new(char_events));
+            transform_text = transform!("transform_text" => MapTyped::new(|input: CharInput| {
+                TextChunk {
+                    text: transform_char(input.character),
+                }
+            }));
 
-                // FLOWIP-080h: MapTyped for type-safe character transformation
-                mapper = transform!("char_mapper" =>
-                    MapTyped::new(|char_event: CharEvent| {
-                        let ch = char_event.value.chars().next().unwrap_or(' ');
-                        TransformedChar {
-                            value: transform_char(ch),
-                            is_newline: ch == '\n',
-                        }
-                    })
-                );
+            collect_text = stateful!("collect_text" => ReduceTyped::new(
+                TransformedText::default(),
+                |text: &mut TransformedText, chunk: &TextChunk| {
+                    text.text.push_str(&chunk.text);
+                    text.character_count += chunk.text.chars().count();
 
-                // FLOWIP-080j: ReduceTyped for type-safe accumulation
-                reducer = stateful!("text_accumulator" =>
-                    ReduceTyped::new(
-                        TextAccumulator {
-                            transformed_text: String::new(),
-                            total_chars: 0,
-                            sentence_count: 0,
-                            last_was_punctuation: false,
-                        },
-                        |acc: &mut TextAccumulator, transformed: &TransformedChar| {
-                            acc.transformed_text.push_str(&transformed.value);
-                            acc.total_chars += transformed.value.len();
+                    let ends_sentence = matches!(chunk.text.as_str(), "." | "!" | "?");
+                    if ends_sentence && !text.last_was_sentence_end {
+                        text.sentence_count += 1;
+                    }
+                    text.last_was_sentence_end = ends_sentence;
+                }
+            ).emit_on_eof());
 
-                            let is_sentence_end = transformed.value == "."
-                                || transformed.value == "!"
-                                || transformed.value == "?";
-                            let is_content = transformed.value.chars().any(|c| c.is_alphanumeric());
+            output = sink!("output" => ConsoleSink::<TransformedText>::new(format_output));
+        },
 
-                            if is_sentence_end && !acc.last_was_punctuation {
-                                acc.sentence_count += 1;
-                            }
-
-                            if is_content {
-                                acc.last_was_punctuation = false;
-                            } else if is_sentence_end {
-                                acc.last_was_punctuation = true;
-                            }
-                        }
-                    ).emit_on_eof()
-                );
-
-                output = sink!("output" => |final_state: TextAccumulator| {
-                    println!("\n🔍 Transformed output:\n");
-                    println!("{}", final_state.transformed_text);
-
-                    println!(
-                        "\n📊 Stats: {} sentences, {} characters total",
-                        final_state.sentence_count,
-                        final_state.total_chars
-                    );
-                });
-            },
-
-            topology: {
-                src |> mapper;
-                mapper |> reducer;
-                reducer |> output;
-            }
-        })
-        .await?;
-
-    println!("\n✅ Pipeline completed!");
-    println!("\n💡 Key Improvements (FLOWIP-080h, 080j & 082a):");
-    println!("   FLOWIP-082a TypedPayload:");
-    println!("   • CharEvent::EVENT_TYPE instead of \"char\"");
-    println!("   • SCHEMA_VERSION for evolution tracking");
-    println!("   • Strongly-typed event structs");
-    println!("\n   FLOWIP-080h MapTyped:");
-    println!("   • Type-safe: CharEvent → TransformedChar");
-    println!("   • No ChainEvent manipulation");
-    println!("   • Pure function: transform_char(ch)");
-    println!("\n   FLOWIP-080j ReduceTyped:");
-    println!("   • Type-safe: TransformedChar + TextAccumulator");
-    println!("   • Declarative: .emit_on_eof()");
-    println!("   • Zero boilerplate compared to custom StatefulHandler!");
+        topology: {
+            characters |> transform_text;
+            transform_text |> collect_text;
+            collect_text |> output;
+        }
+    })
+    .await?;
 
     Ok(())
 }
