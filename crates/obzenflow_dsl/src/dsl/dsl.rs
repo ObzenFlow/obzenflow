@@ -200,7 +200,6 @@ macro_rules! flow {
     }};
 
     // Pattern without explicit flow name (uses "default")
-    // (stage descriptors as expressions)
     {
         journals: $journals:expr,
         middleware: [$($flow_mw:expr),*],
