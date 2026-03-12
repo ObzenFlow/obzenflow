@@ -48,10 +48,11 @@ pub enum OversizeExhaustion {
     Exclude,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum OversizePolicy {
     /// Treat any oversize item as a planning error.
+    #[default]
     Error,
     /// Re-render oversize items at increasing decomposition depths.
     Rerender {
@@ -59,12 +60,6 @@ pub enum OversizePolicy {
         min_progress_tokens: TokenCount,
         exhaustion: OversizeExhaustion,
     },
-}
-
-impl Default for OversizePolicy {
-    fn default() -> Self {
-        Self::Error
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -228,7 +223,7 @@ where
     }
 
     let mut pending: Option<PendingChunk<T>> = None;
-    let mut planned_chunks: Vec<(u32, TokenCount, Vec<usize>, Vec<T>, Vec<String>)> = Vec::new();
+    let mut planned_chunks: Vec<PendingChunk<T>> = Vec::new();
 
     for (ordinal, item) in items.into_iter().enumerate() {
         let mut depth: u32 = 0;
@@ -329,7 +324,7 @@ where
             .is_some_and(|p| !p.is_empty() && p.depth != depth)
         {
             let p = pending.take().expect("pending exists");
-            planned_chunks.push((p.depth, p.estimated_tokens, p.ordinals, p.items, p.rendered));
+            planned_chunks.push(p);
         }
 
         let max_items = config.max_items_per_chunk.unwrap_or(usize::MAX);
@@ -339,7 +334,7 @@ where
                     || p.estimated_tokens.saturating_add(tokens) > config.budget)
             {
                 let p = pending.take().expect("pending exists");
-                planned_chunks.push((p.depth, p.estimated_tokens, p.ordinals, p.items, p.rendered));
+                planned_chunks.push(p);
             }
         }
 
@@ -355,7 +350,7 @@ where
 
     if let Some(p) = pending.take() {
         if !p.is_empty() {
-            planned_chunks.push((p.depth, p.estimated_tokens, p.ordinals, p.items, p.rendered));
+            planned_chunks.push(p);
         }
     }
 
@@ -371,18 +366,16 @@ where
     let chunks = planned_chunks
         .into_iter()
         .enumerate()
-        .map(
-            |(chunk_index, (depth, estimated_tokens, ordinals, items, rendered))| ChunkEnvelope {
-                chunk_index,
-                chunk_count,
-                estimated_tokens,
-                decomposition_depth: depth,
-                planning: summary.clone(),
-                item_ordinals: ordinals,
-                items,
-                rendered_items: rendered,
-            },
-        )
+        .map(|(chunk_index, p)| ChunkEnvelope {
+            chunk_index,
+            chunk_count,
+            estimated_tokens: p.estimated_tokens,
+            decomposition_depth: p.depth,
+            planning: summary.clone(),
+            item_ordinals: p.ordinals,
+            items: p.items,
+            rendered_items: p.rendered,
+        })
         .collect();
 
     Ok(ChunkPlan {

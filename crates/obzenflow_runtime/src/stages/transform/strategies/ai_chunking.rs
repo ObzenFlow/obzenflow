@@ -22,11 +22,14 @@ use serde::{de::DeserializeOwned, Serialize};
 use std::fmt;
 use std::sync::Arc;
 
+type ItemExtractor<In, Item> = Arc<dyn Fn(&In) -> Vec<Item> + Send + Sync + 'static>;
+type ItemRenderer<Item> = Arc<dyn Fn(&Item, ChunkRenderContext) -> String + Send + Sync + 'static>;
+
 #[derive(Clone)]
 pub struct ChunkByBudgetBuilder<In, Item> {
     estimator: Arc<dyn TokenEstimator>,
-    items: Option<Arc<dyn Fn(&In) -> Vec<Item> + Send + Sync + 'static>>,
-    render: Option<Arc<dyn Fn(&Item, ChunkRenderContext) -> String + Send + Sync + 'static>>,
+    items: Option<ItemExtractor<In, Item>>,
+    render: Option<ItemRenderer<Item>>,
     budget: Option<TokenCount>,
     max_items_per_chunk: Option<usize>,
     oversize_policy: OversizePolicy,
@@ -140,8 +143,8 @@ impl<In, Item> Default for ChunkByBudgetBuilder<In, Item> {
 #[derive(Clone)]
 pub struct ChunkByBudgetTyped<In, Item> {
     estimator: Arc<dyn TokenEstimator>,
-    items: Arc<dyn Fn(&In) -> Vec<Item> + Send + Sync + 'static>,
-    render: Arc<dyn Fn(&Item, ChunkRenderContext) -> String + Send + Sync + 'static>,
+    items: ItemExtractor<In, Item>,
+    render: ItemRenderer<Item>,
     budget: TokenCount,
     max_items_per_chunk: Option<usize>,
     oversize_policy: OversizePolicy,
