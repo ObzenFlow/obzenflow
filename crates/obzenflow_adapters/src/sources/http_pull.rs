@@ -14,6 +14,7 @@ use obzenflow_runtime::stages::common::handlers::{
     AsyncFiniteSourceHandler, AsyncInfiniteSourceHandler,
 };
 use obzenflow_runtime::stages::SourceError;
+use obzenflow_runtime::typing::SourceTyping;
 use serde::Serialize;
 use std::collections::VecDeque;
 use std::fmt::Debug;
@@ -405,6 +406,14 @@ pub struct HttpPollSource<D: PullDecoder> {
     decoder: D,
     writer_id: Option<WriterId>,
     config: HttpPollConfig,
+}
+
+impl<D: PullDecoder> SourceTyping for HttpPullSource<D> {
+    type Output = D::Item;
+}
+
+impl<D: PullDecoder> SourceTyping for HttpPollSource<D> {
+    type Output = D::Item;
 }
 
 #[derive(Debug)]

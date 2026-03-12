@@ -76,8 +76,3 @@ More niche examples that target specific API surfaces or topology patterns. We u
 - **`topology_patterns_demo`** — Fan-in, fan-out, and diamond topologies
 - **`flow_middleware_config`** — Flow-level versus stage-level middleware inheritance
 - **`prometheus_100k_demo`** — High-volume Prometheus `/metrics` demo
-- **`hn_ingestion_demo`** — HTTP pull without the AI layer
-
-## Deprecated aliases
-
-- **`flight_delays`** — Deprecated alias for `flight_delays_simple`. Use `flight_delays_simple` instead.

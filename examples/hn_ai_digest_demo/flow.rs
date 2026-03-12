@@ -13,11 +13,10 @@ use obzenflow::ai::{
     SplitGroup, TokenCount, TokenEstimator,
 };
 use obzenflow::sources::{HeaderMap, HttpPullConfig, HttpPullSource, Url};
-use obzenflow::typed::{sinks, stateful as typed_stateful};
+use obzenflow::typed::{sinks, stateful as typed_stateful, transforms as typed_transforms};
 use obzenflow_adapters::middleware::control::ai_circuit_breaker;
 use obzenflow_adapters::middleware::RateLimiterBuilder;
 use obzenflow_core::event::chain_event::ChainEventFactory;
-use obzenflow_core::event::status::processing_status::ErrorKind;
 use obzenflow_core::{ChainEvent, TypedPayload};
 use obzenflow_dsl::{async_source, async_transform, flow, sink, stateful, transform};
 use obzenflow_infra::application::{FlowApplication, LogLevel};
@@ -25,8 +24,9 @@ use obzenflow_infra::http_client::default_http_client;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{AsyncTransformHandler, TransformHandler};
-use obzenflow_runtime::stages::transform::TryMapWith;
+use obzenflow_runtime::typing::TransformTyping;
 use serde::{Deserialize, Serialize};
+use std::marker::PhantomData;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -77,9 +77,27 @@ impl TypedPayload for HnDigestOversizeChunk {
     const EVENT_TYPE: &'static str = "hn.digest_oversize_chunk";
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+enum HnDigestSplitOut {
+    Chunk(HnDigestChunk),
+    Oversize(HnDigestOversizeChunk),
+}
+
+impl TypedPayload for HnDigestSplitOut {
+    const EVENT_TYPE: &'static str = "hn.digest_split_out";
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+enum HnDigestOversizeSplitOut {
+    Chunk(HnDigestChunk),
+    Oversize(HnDigestOversizeChunk),
+}
+
+impl TypedPayload for HnDigestOversizeSplitOut {
+    const EVENT_TYPE: &'static str = "hn.digest_oversize_split_out";
+}
+
 /// A condensed chunk produced by the oversize sub-pipeline.
-///
-/// This is fed back into the main pipeline via the `<|` backflow edge.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct HnDigestCondensedChunk {
     parent_group_index: usize,
@@ -267,8 +285,8 @@ async fn run_example_async() -> Result<()> {
         retry: Default::default(),
     };
 
-    let formatter = TryMapWith::new(format_story_event)
-        .on_error_with(|event, err| Some(event.mark_as_error(err, ErrorKind::Deserialization)));
+    let formatter =
+        typed_transforms::try_map_with(|story: HnStory| Ok(format_story(story))).on_error_drop();
 
     let digest_seed =
         typed_stateful::reduce(HnTopStories::default(), |acc, story: &FormattedStory| {
@@ -386,7 +404,7 @@ async fn run_example_async() -> Result<()> {
         .await?
         .with_resolved_estimator(estimator_resolution.clone());
 
-    let map_router = HnDigestMapRouter::new(map_llm);
+    let map_llm_handler = TypedChatTransform::<HnDigestChunk, HnDigestChunkSummary>::new(map_llm);
 
     let oversize_map_llm = make_llm_builder()
         .system(system_prompt.clone())
@@ -434,7 +452,8 @@ async fn run_example_async() -> Result<()> {
         .await?
         .with_resolved_estimator(estimator_resolution.clone());
 
-    let oversize_map_router = HnDigestOversizeMapRouter::new(oversize_map_llm);
+    let oversize_map_llm_handler =
+        TypedChatTransform::<HnDigestChunk, HnDigestCondensedChunk>::new(oversize_map_llm);
 
     let chunk_summaries = typed_stateful::reduce(
         HnDigestChunkSummaries::default(),
@@ -522,6 +541,9 @@ async fn run_example_async() -> Result<()> {
         .await?
         .with_resolved_estimator(estimator_resolution.clone());
 
+    let digest_llm_handler =
+        TypedChatTransform::<HnDigestChunkSummaries, HnDigestSummary>::new(digest_llm);
+
     FlowApplication::builder()
         .with_log_level(LogLevel::Info)
         .run_async(flow! {
@@ -530,20 +552,53 @@ async fn run_example_async() -> Result<()> {
             middleware: [],
 
             stages: {
-                hn_stories = async_source!((
+                hn_stories = async_source!(HnStory => (
                     HttpPullSource::new(decoder, config),
                     Some(Duration::from_secs(poll_timeout_secs as u64))
                 ), [
                     RateLimiterBuilder::new(source_rate_limit).build()
                 ]);
-                formatter = transform!(formatter);
+                formatter = transform!(HnStory -> FormattedStory => formatter);
                 batch = stateful!(FormattedStory -> HnTopStories => digest_seed);
-                split_to_budget = transform!(splitter);
-                map_llm = async_transform!(map_router, [ai_circuit_breaker()]);
-                oversize_sub_split = transform!(oversize_sub_splitter);
-                oversize_map_llm = async_transform!(oversize_map_router, [ai_circuit_breaker()]);
+                split_to_budget = transform!(HnTopStories -> HnDigestSplitOut => splitter);
+                split_chunks = transform!(HnDigestSplitOut -> HnDigestChunk => typed_transforms::filter_map(|out: HnDigestSplitOut| match out {
+                    HnDigestSplitOut::Chunk(chunk) => Some(chunk),
+                    HnDigestSplitOut::Oversize(_) => None,
+                }));
+                split_oversize = transform!(HnDigestSplitOut -> HnDigestOversizeChunk => typed_transforms::filter_map(|out: HnDigestSplitOut| match out {
+                    HnDigestSplitOut::Oversize(chunk) => Some(chunk),
+                    HnDigestSplitOut::Chunk(_) => None,
+                }));
+                map_llm = async_transform!(HnDigestChunk -> HnDigestChunkSummary => map_llm_handler, [ai_circuit_breaker()]);
+                oversize_sub_split = transform!(HnDigestOversizeChunk -> HnDigestOversizeSplitOut => oversize_sub_splitter);
+                oversize_chunks = transform!(HnDigestOversizeSplitOut -> HnDigestChunk => typed_transforms::filter_map(|out: HnDigestOversizeSplitOut| match out {
+                    HnDigestOversizeSplitOut::Chunk(chunk) => Some(chunk),
+                    HnDigestOversizeSplitOut::Oversize(_) => None,
+                }));
+                oversize_loop = transform!(HnDigestOversizeSplitOut -> HnDigestOversizeChunk => typed_transforms::filter_map(|out: HnDigestOversizeSplitOut| match out {
+                    HnDigestOversizeSplitOut::Oversize(chunk) => Some(chunk),
+                    HnDigestOversizeSplitOut::Chunk(_) => None,
+                }));
+                oversize_map_llm = async_transform!(HnDigestChunk -> HnDigestCondensedChunk => oversize_map_llm_handler, [ai_circuit_breaker()]);
+                condensed_to_summary = transform!(HnDigestCondensedChunk -> HnDigestChunkSummary => typed_transforms::map(|condensed: HnDigestCondensedChunk| {
+                    let depth = condensed.decomposition_depth;
+                    HnDigestChunkSummary {
+                        group_index: condensed.parent_group_index,
+                        group_count: condensed.parent_group_count,
+                        budget_per_group: condensed.budget_per_group,
+                        estimated_tokens: condensed.estimated_tokens,
+                        oversize: true,
+                        decomposition_depth: depth,
+                        story_numbers: condensed.story_numbers,
+                        stories: condensed.stories,
+                        chat_prompt_user: format!(
+                            "Oversize backflow (decomposition_depth={depth})"
+                        ),
+                        output_markdown: condensed.condensed_markdown,
+                    }
+                }));
                 reduce = stateful!(HnDigestChunkSummary -> HnDigestChunkSummaries => chunk_summaries);
-                digest_llm = async_transform!(digest_llm, [ai_circuit_breaker()]);
+                digest_llm = async_transform!(HnDigestChunkSummaries -> HnDigestSummary => digest_llm_handler, [ai_circuit_breaker()]);
                 digest_summary = sink!(HnDigestSummary => sinks::console(format_digest_summary_for_console));
             },
 
@@ -551,15 +606,24 @@ async fn run_example_async() -> Result<()> {
                 hn_stories |> formatter;
                 formatter |> batch;
                 batch |> split_to_budget;
-                split_to_budget |> map_llm;
-                split_to_budget |> reduce;
+
+                split_to_budget |> split_chunks;
+                split_to_budget |> split_oversize;
+
+                split_chunks |> map_llm;
                 map_llm |> reduce;
+
+                split_oversize |> oversize_sub_split;
+                oversize_sub_split |> oversize_chunks;
+                oversize_chunks |> oversize_map_llm;
+                oversize_map_llm |> condensed_to_summary;
+                condensed_to_summary |> reduce;
+
+                oversize_sub_split |> oversize_loop;
+                oversize_sub_split <| oversize_loop;
+
                 reduce |> digest_llm;
                 digest_llm |> digest_summary;
-
-                split_to_budget |> oversize_sub_split;
-                oversize_sub_split |> oversize_map_llm;
-                split_to_budget <| oversize_map_llm;
             }
         })
         .await?;
@@ -672,54 +736,16 @@ impl HnDigestSplitter {
     }
 }
 
+impl TransformTyping for HnDigestSplitter {
+    type Input = HnTopStories;
+    type Output = HnDigestSplitOut;
+}
+
 #[async_trait]
 impl TransformHandler for HnDigestSplitter {
     fn process(&self, event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
-        if HnDigestOversizeChunk::event_type_matches(&event.event_type()) {
-            let payload = event.payload().clone();
-            return Ok(vec![ChainEventFactory::derived_data_event(
-                event.writer_id,
-                &event,
-                HnDigestOversizeChunk::versioned_event_type(),
-                payload,
-            )]);
-        }
-
-        if HnDigestCondensedChunk::event_type_matches(&event.event_type()) {
-            let condensed = HnDigestCondensedChunk::try_from_event(&event).map_err(|err| {
-                HandlerError::Validation(format!("hn digest condensed chunk decode failed: {err}"))
-            })?;
-
-            let summary = HnDigestChunkSummary {
-                group_index: condensed.parent_group_index,
-                group_count: condensed.parent_group_count,
-                budget_per_group: condensed.budget_per_group,
-                estimated_tokens: condensed.estimated_tokens,
-                oversize: true,
-                decomposition_depth: condensed.decomposition_depth,
-                story_numbers: condensed.story_numbers.clone(),
-                stories: condensed.stories.clone(),
-                chat_prompt_user: format!(
-                    "Oversize backflow (decomposition_depth={})",
-                    condensed.decomposition_depth
-                ),
-                output_markdown: condensed.condensed_markdown,
-            };
-
-            let payload = serde_json::to_value(&summary).map_err(|err| {
-                HandlerError::Validation(format!("chunk summary payload encode failed: {err}"))
-            })?;
-
-            return Ok(vec![ChainEventFactory::derived_data_event(
-                event.writer_id,
-                &event,
-                HnDigestChunkSummary::versioned_event_type(),
-                payload,
-            )]);
-        }
-
         if !HnTopStories::event_type_matches(&event.event_type()) {
-            return Ok(vec![event]);
+            return Ok(Vec::new());
         }
 
         let seed = HnTopStories::try_from_event(&event).map_err(|err| {
@@ -768,7 +794,7 @@ impl TransformHandler for HnDigestSplitter {
                 stories.push(story.clone());
             }
 
-            if group.oversize {
+            let out = if group.oversize {
                 let oversize = HnDigestOversizeChunk {
                     parent_group_index: group_index,
                     parent_group_count: group_count,
@@ -779,18 +805,7 @@ impl TransformHandler for HnDigestSplitter {
                     decomposition_depth: 0,
                 };
 
-                let payload = serde_json::to_value(&oversize).map_err(|err| {
-                    HandlerError::Validation(format!(
-                        "hn digest oversize chunk payload encode failed: {err}"
-                    ))
-                })?;
-
-                outputs.push(ChainEventFactory::derived_data_event(
-                    event.writer_id,
-                    &event,
-                    HnDigestOversizeChunk::versioned_event_type(),
-                    payload,
-                ));
+                HnDigestSplitOut::Oversize(oversize)
             } else {
                 let chunk = HnDigestChunk {
                     group_index,
@@ -803,19 +818,19 @@ impl TransformHandler for HnDigestSplitter {
                     stories,
                 };
 
-                let payload = serde_json::to_value(&chunk).map_err(|err| {
-                    HandlerError::Validation(format!(
-                        "hn digest chunk payload encode failed: {err}"
-                    ))
-                })?;
+                HnDigestSplitOut::Chunk(chunk)
+            };
 
-                outputs.push(ChainEventFactory::derived_data_event(
-                    event.writer_id,
-                    &event,
-                    HnDigestChunk::versioned_event_type(),
-                    payload,
-                ));
-            }
+            let payload = serde_json::to_value(&out).map_err(|err| {
+                HandlerError::Validation(format!("hn digest split payload encode failed: {err}"))
+            })?;
+
+            outputs.push(ChainEventFactory::derived_data_event(
+                event.writer_id,
+                &event,
+                HnDigestSplitOut::versioned_event_type(),
+                payload,
+            ));
         }
 
         Ok(outputs)
@@ -848,6 +863,11 @@ impl HnDigestOversizeSubSplitter {
             budget_per_group,
         }
     }
+}
+
+impl TransformTyping for HnDigestOversizeSubSplitter {
+    type Input = HnDigestOversizeChunk;
+    type Output = HnDigestOversizeSplitOut;
 }
 
 #[async_trait]
@@ -897,7 +917,7 @@ impl TransformHandler for HnDigestOversizeSubSplitter {
                 stories.push(story.clone());
             }
 
-            if group.oversize {
+            let out = if group.oversize {
                 let oversize = HnDigestOversizeChunk {
                     parent_group_index: seed.parent_group_index,
                     parent_group_count: seed.parent_group_count,
@@ -908,18 +928,7 @@ impl TransformHandler for HnDigestOversizeSubSplitter {
                     decomposition_depth: seed.decomposition_depth.saturating_add(1),
                 };
 
-                let payload = serde_json::to_value(&oversize).map_err(|err| {
-                    HandlerError::Validation(format!(
-                        "hn digest oversize chunk payload encode failed: {err}"
-                    ))
-                })?;
-
-                outputs.push(ChainEventFactory::derived_data_event(
-                    event.writer_id,
-                    &event,
-                    HnDigestOversizeChunk::versioned_event_type(),
-                    payload,
-                ));
+                HnDigestOversizeSplitOut::Oversize(oversize)
             } else {
                 let chunk = HnDigestChunk {
                     group_index: seed.parent_group_index,
@@ -932,19 +941,21 @@ impl TransformHandler for HnDigestOversizeSubSplitter {
                     stories,
                 };
 
-                let payload = serde_json::to_value(&chunk).map_err(|err| {
-                    HandlerError::Validation(format!(
-                        "hn digest chunk payload encode failed: {err}"
-                    ))
-                })?;
+                HnDigestOversizeSplitOut::Chunk(chunk)
+            };
 
-                outputs.push(ChainEventFactory::derived_data_event(
-                    event.writer_id,
-                    &event,
-                    HnDigestChunk::versioned_event_type(),
-                    payload,
-                ));
-            }
+            let payload = serde_json::to_value(&out).map_err(|err| {
+                HandlerError::Validation(format!(
+                    "hn digest oversize split payload encode failed: {err}"
+                ))
+            })?;
+
+            outputs.push(ChainEventFactory::derived_data_event(
+                event.writer_id,
+                &event,
+                HnDigestOversizeSplitOut::versioned_event_type(),
+                payload,
+            ));
         }
 
         Ok(outputs)
@@ -955,73 +966,34 @@ impl TransformHandler for HnDigestOversizeSubSplitter {
     }
 }
 
-#[derive(Clone)]
-struct HnDigestMapRouter {
+#[derive(Clone, Debug)]
+struct TypedChatTransform<In, Out> {
     inner: ChatTransform,
+    _phantom: PhantomData<(In, Out)>,
 }
 
-impl std::fmt::Debug for HnDigestMapRouter {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("HnDigestMapRouter").finish()
-    }
-}
-
-impl HnDigestMapRouter {
+impl<In, Out> TypedChatTransform<In, Out> {
     fn new(inner: ChatTransform) -> Self {
-        Self { inner }
+        Self {
+            inner,
+            _phantom: PhantomData,
+        }
     }
+}
+
+impl<In, Out> TransformTyping for TypedChatTransform<In, Out> {
+    type Input = In;
+    type Output = Out;
 }
 
 #[async_trait]
-impl AsyncTransformHandler for HnDigestMapRouter {
+impl<In, Out> AsyncTransformHandler for TypedChatTransform<In, Out>
+where
+    In: Send + Sync + 'static,
+    Out: Send + Sync + 'static,
+{
     async fn process(&self, event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
-        if !HnDigestChunk::event_type_matches(&event.event_type()) {
-            return Ok(Vec::new());
-        }
-
         self.inner.process(event).await
-    }
-
-    async fn drain(&mut self) -> Result<(), HandlerError> {
-        self.inner.drain().await
-    }
-}
-
-#[derive(Clone)]
-struct HnDigestOversizeMapRouter {
-    inner: ChatTransform,
-}
-
-impl std::fmt::Debug for HnDigestOversizeMapRouter {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("HnDigestOversizeMapRouter").finish()
-    }
-}
-
-impl HnDigestOversizeMapRouter {
-    fn new(inner: ChatTransform) -> Self {
-        Self { inner }
-    }
-}
-
-#[async_trait]
-impl AsyncTransformHandler for HnDigestOversizeMapRouter {
-    async fn process(&self, event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
-        if HnDigestChunk::event_type_matches(&event.event_type()) {
-            return self.inner.process(event).await;
-        }
-
-        if HnDigestOversizeChunk::event_type_matches(&event.event_type()) {
-            let payload = event.payload().clone();
-            return Ok(vec![ChainEventFactory::derived_data_event(
-                event.writer_id,
-                &event,
-                HnDigestOversizeChunk::versioned_event_type(),
-                payload,
-            )]);
-        }
-
-        Ok(Vec::new())
     }
 
     async fn drain(&mut self) -> Result<(), HandlerError> {
@@ -1226,13 +1198,8 @@ fn render_story_line(n: usize, story: &FormattedStory, decomposition_depth: u32)
     }
 }
 
-fn format_story_event(event: ChainEvent) -> std::result::Result<ChainEvent, String> {
-    if !HnStory::event_type_matches(&event.event_type()) {
-        return Ok(event);
-    }
-
-    let story = HnStory::try_from_event(&event).map_err(|e| e.to_string())?;
-    let formatted = FormattedStory {
+fn format_story(story: HnStory) -> FormattedStory {
+    FormattedStory {
         id: story.id,
         title: story
             .title
@@ -1245,13 +1212,5 @@ fn format_story_event(event: ChainEvent) -> std::result::Result<ChainEvent, Stri
         author: story.by.unwrap_or_else(|| "(anonymous)".to_string()),
         points: story.score.unwrap_or(0),
         comments: story.descendants.unwrap_or(0),
-    };
-
-    let payload = serde_json::to_value(&formatted).map_err(|e| e.to_string())?;
-    Ok(ChainEventFactory::derived_data_event(
-        event.writer_id,
-        &event,
-        FormattedStory::versioned_event_type(),
-        payload,
-    ))
+    }
 }
