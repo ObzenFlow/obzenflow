@@ -33,6 +33,8 @@ fn env_f64(key: &str) -> Option<f64> {
     std::env::var(key).ok().and_then(|v| v.parse().ok())
 }
 
+type StoryChunkEnvelope = ChunkEnvelope<FormattedStory>;
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct HnTopStories {
     stories: Vec<FormattedStory>,
@@ -460,8 +462,8 @@ async fn run_example_async() -> Result<()> {
                 ]);
                 formatter = transform!(HnStory -> FormattedStory => formatter);
                 batch = stateful!(FormattedStory -> HnTopStories => digest_seed);
-                chunk_by_budget = transform!(HnTopStories -> ChunkEnvelope<FormattedStory> => chunker);
-                envelope_to_chunk = transform!(ChunkEnvelope<FormattedStory> -> HnDigestChunk => typed_transforms::map(move |envelope: ChunkEnvelope<FormattedStory>| {
+                chunk_by_budget = transform!(HnTopStories -> StoryChunkEnvelope => chunker);
+                envelope_to_chunk = transform!(StoryChunkEnvelope -> HnDigestChunk => typed_transforms::map(move |envelope: StoryChunkEnvelope| {
                     debug_assert_eq!(envelope.item_ordinals.len(), envelope.items.len());
                     let story_numbers = envelope
                         .item_ordinals
