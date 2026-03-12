@@ -352,22 +352,25 @@ fn build_glitchy_flow(config: GlitchyFlowConfig) -> obzenflow_dsl::FlowDefinitio
         )
         .build()
     } else {
-        source!(ScrapedGlitchyPaymentCommandSource::with_cycle(
-            total_events,
-            warmup_events,
-            outage_events,
-            recovery_events,
-        ), [
-            backpressure(BACKPRESSURE_WINDOW),
-            CircuitBreakerBuilder::new(2)
-                .cooldown(std::time::Duration::from_secs(2))
-                .open_policy(OpenPolicy::Skip)
-                .half_open_policy(HalfOpenPolicy::new(
-                    NonZeroU32::new(1).expect("permitted_probes must be non-zero"),
-                    OpenPolicy::Skip,
-                ))
-                .build()
-        ])
+        source!(
+            ScrapedGlitchyPaymentCommandSource::with_cycle(
+                total_events,
+                warmup_events,
+                outage_events,
+                recovery_events,
+            ),
+            [
+                backpressure(BACKPRESSURE_WINDOW),
+                CircuitBreakerBuilder::new(2)
+                    .cooldown(std::time::Duration::from_secs(2))
+                    .open_policy(OpenPolicy::Skip)
+                    .half_open_policy(HalfOpenPolicy::new(
+                        NonZeroU32::new(1).expect("permitted_probes must be non-zero"),
+                        OpenPolicy::Skip,
+                    ))
+                    .build()
+            ]
+        )
     };
 
     flow! {

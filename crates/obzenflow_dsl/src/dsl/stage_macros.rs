@@ -1559,6 +1559,52 @@ macro_rules! __obzenflow_sink_typed {
         );
         $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
     }};
+
+    // ── exact input, real handler (facade call anchoring) ──
+    //
+    // Like joins, sink facade helpers often need the contract type injected to avoid
+    // turbofish/annotations at the call site (e.g., `sinks::json()` and `sinks::table(...)`).
+    (input = exact($in:ty), name = $name:literal, handler = sinks::console($formatter:expr $(,)?), middleware = [$($mw:expr),*]) => {
+        $crate::__obzenflow_sink_typed!(
+            input = exact($in),
+            name = $name,
+            handler = sinks::console::<$in, _>($formatter),
+            middleware = [$($mw),*]
+        )
+    };
+    (input = exact($in:ty), name = $name:literal, handler = sinks::table($columns:expr, $extractor:expr $(,)?), middleware = [$($mw:expr),*]) => {
+        $crate::__obzenflow_sink_typed!(
+            input = exact($in),
+            name = $name,
+            handler = sinks::table::<$in, _>($columns, $extractor),
+            middleware = [$($mw),*]
+        )
+    };
+    (input = exact($in:ty), name = $name:literal, handler = sinks::json(), middleware = [$($mw:expr),*]) => {
+        $crate::__obzenflow_sink_typed!(
+            input = exact($in),
+            name = $name,
+            handler = sinks::json::<$in>(),
+            middleware = [$($mw),*]
+        )
+    };
+    (input = exact($in:ty), name = $name:literal, handler = sinks::json_pretty(), middleware = [$($mw:expr),*]) => {
+        $crate::__obzenflow_sink_typed!(
+            input = exact($in),
+            name = $name,
+            handler = sinks::json_pretty::<$in>(),
+            middleware = [$($mw),*]
+        )
+    };
+    (input = exact($in:ty), name = $name:literal, handler = sinks::debug(), middleware = [$($mw:expr),*]) => {
+        $crate::__obzenflow_sink_typed!(
+            input = exact($in),
+            name = $name,
+            handler = sinks::debug::<$in>(),
+            middleware = [$($mw),*]
+        )
+    };
+
     // ── exact input, real handler ──
     (input = exact($in:ty), name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*]) => {{
         let __handler = $handler;
@@ -1671,6 +1717,86 @@ macro_rules! sink {
     ($in:ty => placeholder!($msg:expr), [$($mw:expr),*]) => {
         $crate::__obzenflow_sink_typed!(input = exact($in), name = "__obzenflow_binding_derived_name__", handler = placeholder!($msg), middleware = [$($mw),*])
     };
+    ($in:ty => sinks::console($formatter:expr $(,)?)) => {
+        $crate::__obzenflow_sink_typed!(
+            input = exact($in),
+            name = "__obzenflow_binding_derived_name__",
+            handler = sinks::console::<$in, _>($formatter),
+            middleware = []
+        )
+    };
+    ($in:ty => sinks::console($formatter:expr $(,)?), [$($mw:expr),*]) => {
+        $crate::__obzenflow_sink_typed!(
+            input = exact($in),
+            name = "__obzenflow_binding_derived_name__",
+            handler = sinks::console::<$in, _>($formatter),
+            middleware = [$($mw),*]
+        )
+    };
+    ($in:ty => sinks::table($columns:expr, $extractor:expr $(,)?)) => {
+        $crate::__obzenflow_sink_typed!(
+            input = exact($in),
+            name = "__obzenflow_binding_derived_name__",
+            handler = sinks::table::<$in, _>($columns, $extractor),
+            middleware = []
+        )
+    };
+    ($in:ty => sinks::table($columns:expr, $extractor:expr $(,)?), [$($mw:expr),*]) => {
+        $crate::__obzenflow_sink_typed!(
+            input = exact($in),
+            name = "__obzenflow_binding_derived_name__",
+            handler = sinks::table::<$in, _>($columns, $extractor),
+            middleware = [$($mw),*]
+        )
+    };
+    ($in:ty => sinks::json()) => {
+        $crate::__obzenflow_sink_typed!(
+            input = exact($in),
+            name = "__obzenflow_binding_derived_name__",
+            handler = sinks::json::<$in>(),
+            middleware = []
+        )
+    };
+    ($in:ty => sinks::json(), [$($mw:expr),*]) => {
+        $crate::__obzenflow_sink_typed!(
+            input = exact($in),
+            name = "__obzenflow_binding_derived_name__",
+            handler = sinks::json::<$in>(),
+            middleware = [$($mw),*]
+        )
+    };
+    ($in:ty => sinks::json_pretty()) => {
+        $crate::__obzenflow_sink_typed!(
+            input = exact($in),
+            name = "__obzenflow_binding_derived_name__",
+            handler = sinks::json_pretty::<$in>(),
+            middleware = []
+        )
+    };
+    ($in:ty => sinks::json_pretty(), [$($mw:expr),*]) => {
+        $crate::__obzenflow_sink_typed!(
+            input = exact($in),
+            name = "__obzenflow_binding_derived_name__",
+            handler = sinks::json_pretty::<$in>(),
+            middleware = [$($mw),*]
+        )
+    };
+    ($in:ty => sinks::debug()) => {
+        $crate::__obzenflow_sink_typed!(
+            input = exact($in),
+            name = "__obzenflow_binding_derived_name__",
+            handler = sinks::debug::<$in>(),
+            middleware = []
+        )
+    };
+    ($in:ty => sinks::debug(), [$($mw:expr),*]) => {
+        $crate::__obzenflow_sink_typed!(
+            input = exact($in),
+            name = "__obzenflow_binding_derived_name__",
+            handler = sinks::debug::<$in>(),
+            middleware = [$($mw),*]
+        )
+    };
     ($in:ty => $handler:expr) => {
         $crate::__obzenflow_sink_typed!(input = exact($in), name = "__obzenflow_binding_derived_name__", handler = $handler, middleware = [])
     };
@@ -1732,6 +1858,86 @@ macro_rules! sink {
     };
     (name: $name:literal, $in:ty => placeholder!($msg:expr), [$($mw:expr),*]) => {
         $crate::__obzenflow_sink_typed!(input = exact($in), name = $name, handler = placeholder!($msg), middleware = [$($mw),*])
+    };
+    (name: $name:literal, $in:ty => sinks::console($formatter:expr $(,)?)) => {
+        $crate::__obzenflow_sink_typed!(
+            input = exact($in),
+            name = $name,
+            handler = sinks::console::<$in, _>($formatter),
+            middleware = []
+        )
+    };
+    (name: $name:literal, $in:ty => sinks::console($formatter:expr $(,)?), [$($mw:expr),*]) => {
+        $crate::__obzenflow_sink_typed!(
+            input = exact($in),
+            name = $name,
+            handler = sinks::console::<$in, _>($formatter),
+            middleware = [$($mw),*]
+        )
+    };
+    (name: $name:literal, $in:ty => sinks::table($columns:expr, $extractor:expr $(,)?)) => {
+        $crate::__obzenflow_sink_typed!(
+            input = exact($in),
+            name = $name,
+            handler = sinks::table::<$in, _>($columns, $extractor),
+            middleware = []
+        )
+    };
+    (name: $name:literal, $in:ty => sinks::table($columns:expr, $extractor:expr $(,)?), [$($mw:expr),*]) => {
+        $crate::__obzenflow_sink_typed!(
+            input = exact($in),
+            name = $name,
+            handler = sinks::table::<$in, _>($columns, $extractor),
+            middleware = [$($mw),*]
+        )
+    };
+    (name: $name:literal, $in:ty => sinks::json()) => {
+        $crate::__obzenflow_sink_typed!(
+            input = exact($in),
+            name = $name,
+            handler = sinks::json::<$in>(),
+            middleware = []
+        )
+    };
+    (name: $name:literal, $in:ty => sinks::json(), [$($mw:expr),*]) => {
+        $crate::__obzenflow_sink_typed!(
+            input = exact($in),
+            name = $name,
+            handler = sinks::json::<$in>(),
+            middleware = [$($mw),*]
+        )
+    };
+    (name: $name:literal, $in:ty => sinks::json_pretty()) => {
+        $crate::__obzenflow_sink_typed!(
+            input = exact($in),
+            name = $name,
+            handler = sinks::json_pretty::<$in>(),
+            middleware = []
+        )
+    };
+    (name: $name:literal, $in:ty => sinks::json_pretty(), [$($mw:expr),*]) => {
+        $crate::__obzenflow_sink_typed!(
+            input = exact($in),
+            name = $name,
+            handler = sinks::json_pretty::<$in>(),
+            middleware = [$($mw),*]
+        )
+    };
+    (name: $name:literal, $in:ty => sinks::debug()) => {
+        $crate::__obzenflow_sink_typed!(
+            input = exact($in),
+            name = $name,
+            handler = sinks::debug::<$in>(),
+            middleware = []
+        )
+    };
+    (name: $name:literal, $in:ty => sinks::debug(), [$($mw:expr),*]) => {
+        $crate::__obzenflow_sink_typed!(
+            input = exact($in),
+            name = $name,
+            handler = sinks::debug::<$in>(),
+            middleware = [$($mw),*]
+        )
     };
     (name: $name:literal, $in:ty => $handler:expr) => {
         $crate::__obzenflow_sink_typed!(input = exact($in), name = $name, handler = $handler, middleware = [])
@@ -2256,6 +2462,60 @@ macro_rules! __obzenflow_join_typed {
         $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
     }};
 
+    // ── real handler: both exact (facade call anchoring) ──
+    //
+    // Rust cannot always infer the generic parameters of helper *functions* like
+    // `joins::inner(...)` from trait bounds on an opaque `impl JoinTyping` return.
+    // Anchor those helpers by injecting the stage-contract types in the expansion.
+    (reference = exact, stream = exact, output = $out:ty,
+     ref_type = ($ref_ty:ty), stream_type = ($str_ty:ty),
+     name = $name:literal, ref_var = $ref_var:ident, handler = joins::inner($catalog_key:expr, $stream_key:expr, $join_fn:expr $(,)?),
+     middleware = [$($mw:expr),*]) => {
+        $crate::__obzenflow_join_typed!(
+            reference = exact,
+            stream = exact,
+            output = $out,
+            ref_type = ($ref_ty),
+            stream_type = ($str_ty),
+            name = $name,
+            ref_var = $ref_var,
+            handler = joins::inner::<$ref_ty, $str_ty, $out, _, _, _, _>($catalog_key, $stream_key, $join_fn),
+            middleware = [$($mw),*]
+        )
+    };
+    (reference = exact, stream = exact, output = $out:ty,
+     ref_type = ($ref_ty:ty), stream_type = ($str_ty:ty),
+     name = $name:literal, ref_var = $ref_var:ident, handler = joins::left($catalog_key:expr, $stream_key:expr, $join_fn:expr $(,)?),
+     middleware = [$($mw:expr),*]) => {
+        $crate::__obzenflow_join_typed!(
+            reference = exact,
+            stream = exact,
+            output = $out,
+            ref_type = ($ref_ty),
+            stream_type = ($str_ty),
+            name = $name,
+            ref_var = $ref_var,
+            handler = joins::left::<$ref_ty, $str_ty, $out, _, _, _, _>($catalog_key, $stream_key, $join_fn),
+            middleware = [$($mw),*]
+        )
+    };
+    (reference = exact, stream = exact, output = $out:ty,
+     ref_type = ($ref_ty:ty), stream_type = ($str_ty:ty),
+     name = $name:literal, ref_var = $ref_var:ident, handler = joins::strict($catalog_key:expr, $stream_key:expr, $join_fn:expr $(,)?),
+     middleware = [$($mw:expr),*]) => {
+        $crate::__obzenflow_join_typed!(
+            reference = exact,
+            stream = exact,
+            output = $out,
+            ref_type = ($ref_ty),
+            stream_type = ($str_ty),
+            name = $name,
+            ref_var = $ref_var,
+            handler = joins::strict::<$ref_ty, $str_ty, $out, _, _, _, _>($catalog_key, $stream_key, $join_fn),
+            middleware = [$($mw),*]
+        )
+    };
+
     // ── real handler: both exact ──
     (reference = exact, stream = exact, output = $out:ty,
      ref_type = ($ref_ty:ty), stream_type = ($str_ty:ty),
@@ -2388,16 +2648,28 @@ macro_rules! __obzenflow_join_typed {
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __obzenflow_join_hint {
-    (mixed) => { $crate::dsl::typing::TypeHint::Mixed };
-    (exact, $ty:ty) => { $crate::dsl::typing::TypeHint::exact(stringify!($ty)) };
-    (exact) => { compile_error!("__obzenflow_join_hint!(exact) requires a type; this is a bug in the macro dispatch") };
+    (mixed) => {
+        $crate::dsl::typing::TypeHint::Mixed
+    };
+    (exact, $ty:ty) => {
+        $crate::dsl::typing::TypeHint::exact(stringify!($ty))
+    };
+    (exact) => {
+        compile_error!(
+            "__obzenflow_join_hint!(exact) requires a type; this is a bug in the macro dispatch"
+        )
+    };
 }
 
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __obzenflow_join_phantom_type {
-    (mixed) => { ::obzenflow_runtime::typing::MixedInput };
-    (exact, $ty:ty) => { $ty };
+    (mixed) => {
+        ::obzenflow_runtime::typing::MixedInput
+    };
+    (exact, $ty:ty) => {
+        $ty
+    };
 }
 
 #[doc(hidden)]
@@ -2506,6 +2778,147 @@ macro_rules! __obzenflow_join_exact_stream_contract {
     (@collect
      name = $name:literal,
      ref_var = $ref_var:ident,
+     reference = exact,
+     ref_type = ($reference:ty),
+     stream = ($($stream:tt)+),
+     -> $out:ty => joins::inner($catalog_key:expr, $stream_key:expr, $join_fn:expr $(,)?)) => {
+        $crate::__obzenflow_join_typed!(
+            reference = exact,
+            stream = exact,
+            output = $out,
+            ref_type = ($reference),
+            stream_type = ($($stream)+),
+            name = $name,
+            ref_var = $ref_var,
+            handler = joins::inner::<$reference, $($stream)+, $out, _, _, _, _>(
+                $catalog_key,
+                $stream_key,
+                $join_fn
+            ),
+            middleware = []
+        )
+    };
+    (@collect
+     name = $name:literal,
+     ref_var = $ref_var:ident,
+     reference = exact,
+     ref_type = ($reference:ty),
+     stream = ($($stream:tt)+),
+     -> $out:ty => joins::left($catalog_key:expr, $stream_key:expr, $join_fn:expr $(,)?)) => {
+        $crate::__obzenflow_join_typed!(
+            reference = exact,
+            stream = exact,
+            output = $out,
+            ref_type = ($reference),
+            stream_type = ($($stream)+),
+            name = $name,
+            ref_var = $ref_var,
+            handler = joins::left::<$reference, $($stream)+, $out, _, _, _, _>(
+                $catalog_key,
+                $stream_key,
+                $join_fn
+            ),
+            middleware = []
+        )
+    };
+    (@collect
+     name = $name:literal,
+     ref_var = $ref_var:ident,
+     reference = exact,
+     ref_type = ($reference:ty),
+     stream = ($($stream:tt)+),
+     -> $out:ty => joins::strict($catalog_key:expr, $stream_key:expr, $join_fn:expr $(,)?)) => {
+        $crate::__obzenflow_join_typed!(
+            reference = exact,
+            stream = exact,
+            output = $out,
+            ref_type = ($reference),
+            stream_type = ($($stream)+),
+            name = $name,
+            ref_var = $ref_var,
+            handler = joins::strict::<$reference, $($stream)+, $out, _, _, _, _>(
+                $catalog_key,
+                $stream_key,
+                $join_fn
+            ),
+            middleware = []
+        )
+    };
+    (@collect
+     name = $name:literal,
+     ref_var = $ref_var:ident,
+     reference = exact,
+     ref_type = ($reference:ty),
+     stream = ($($stream:tt)+),
+     -> $out:ty => joins::inner($catalog_key:expr, $stream_key:expr, $join_fn:expr $(,)?),
+     [$($mw:expr),*]) => {
+        $crate::__obzenflow_join_typed!(
+            reference = exact,
+            stream = exact,
+            output = $out,
+            ref_type = ($reference),
+            stream_type = ($($stream)+),
+            name = $name,
+            ref_var = $ref_var,
+            handler = joins::inner::<$reference, $($stream)+, $out, _, _, _, _>(
+                $catalog_key,
+                $stream_key,
+                $join_fn
+            ),
+            middleware = [$($mw),*]
+        )
+    };
+    (@collect
+     name = $name:literal,
+     ref_var = $ref_var:ident,
+     reference = exact,
+     ref_type = ($reference:ty),
+     stream = ($($stream:tt)+),
+     -> $out:ty => joins::left($catalog_key:expr, $stream_key:expr, $join_fn:expr $(,)?),
+     [$($mw:expr),*]) => {
+        $crate::__obzenflow_join_typed!(
+            reference = exact,
+            stream = exact,
+            output = $out,
+            ref_type = ($reference),
+            stream_type = ($($stream)+),
+            name = $name,
+            ref_var = $ref_var,
+            handler = joins::left::<$reference, $($stream)+, $out, _, _, _, _>(
+                $catalog_key,
+                $stream_key,
+                $join_fn
+            ),
+            middleware = [$($mw),*]
+        )
+    };
+    (@collect
+     name = $name:literal,
+     ref_var = $ref_var:ident,
+     reference = exact,
+     ref_type = ($reference:ty),
+     stream = ($($stream:tt)+),
+     -> $out:ty => joins::strict($catalog_key:expr, $stream_key:expr, $join_fn:expr $(,)?),
+     [$($mw:expr),*]) => {
+        $crate::__obzenflow_join_typed!(
+            reference = exact,
+            stream = exact,
+            output = $out,
+            ref_type = ($reference),
+            stream_type = ($($stream)+),
+            name = $name,
+            ref_var = $ref_var,
+            handler = joins::strict::<$reference, $($stream)+, $out, _, _, _, _>(
+                $catalog_key,
+                $stream_key,
+                $join_fn
+            ),
+            middleware = [$($mw),*]
+        )
+    };
+    (@collect
+     name = $name:literal,
+     ref_var = $ref_var:ident,
      reference = $ref_hint:tt,
      ref_type = $ref_type:tt,
      stream = ($($stream:tt)+),
@@ -2584,6 +2997,58 @@ macro_rules! __obzenflow_join_exact_stream_contract {
 #[macro_export]
 macro_rules! join {
     // ── typed (binding-derived name) ──
+    (catalog $ref_var:ident : $reference:ty, mixed -> $out:ty => placeholder!()) => {
+        $crate::__obzenflow_join_typed!(
+            reference = exact,
+            stream = mixed,
+            output = $out,
+            ref_type = ($reference),
+            stream_type = (),
+            name = "__obzenflow_binding_derived_name__",
+            ref_var = $ref_var,
+            handler = placeholder!(),
+            middleware = []
+        )
+    };
+    (catalog $ref_var:ident : $reference:ty, mixed -> $out:ty => placeholder!($msg:expr)) => {
+        $crate::__obzenflow_join_typed!(
+            reference = exact,
+            stream = mixed,
+            output = $out,
+            ref_type = ($reference),
+            stream_type = (),
+            name = "__obzenflow_binding_derived_name__",
+            ref_var = $ref_var,
+            handler = placeholder!($msg),
+            middleware = []
+        )
+    };
+    (catalog $ref_var:ident : $reference:ty, mixed -> $out:ty => placeholder!(), [$($mw:expr),*]) => {
+        $crate::__obzenflow_join_typed!(
+            reference = exact,
+            stream = mixed,
+            output = $out,
+            ref_type = ($reference),
+            stream_type = (),
+            name = "__obzenflow_binding_derived_name__",
+            ref_var = $ref_var,
+            handler = placeholder!(),
+            middleware = [$($mw),*]
+        )
+    };
+    (catalog $ref_var:ident : $reference:ty, mixed -> $out:ty => placeholder!($msg:expr), [$($mw:expr),*]) => {
+        $crate::__obzenflow_join_typed!(
+            reference = exact,
+            stream = mixed,
+            output = $out,
+            ref_type = ($reference),
+            stream_type = (),
+            name = "__obzenflow_binding_derived_name__",
+            ref_var = $ref_var,
+            handler = placeholder!($msg),
+            middleware = [$($mw),*]
+        )
+    };
     (catalog $ref_var:ident : $reference:ty, mixed -> $out:ty => $handler:expr) => {
         $crate::__obzenflow_join_typed!(
             reference = exact,
@@ -2607,6 +3072,58 @@ macro_rules! join {
             name = "__obzenflow_binding_derived_name__",
             ref_var = $ref_var,
             handler = $handler,
+            middleware = [$($mw),*]
+        )
+    };
+    (catalog $ref_var:ident : mixed, mixed -> $out:ty => placeholder!()) => {
+        $crate::__obzenflow_join_typed!(
+            reference = mixed,
+            stream = mixed,
+            output = $out,
+            ref_type = (),
+            stream_type = (),
+            name = "__obzenflow_binding_derived_name__",
+            ref_var = $ref_var,
+            handler = placeholder!(),
+            middleware = []
+        )
+    };
+    (catalog $ref_var:ident : mixed, mixed -> $out:ty => placeholder!($msg:expr)) => {
+        $crate::__obzenflow_join_typed!(
+            reference = mixed,
+            stream = mixed,
+            output = $out,
+            ref_type = (),
+            stream_type = (),
+            name = "__obzenflow_binding_derived_name__",
+            ref_var = $ref_var,
+            handler = placeholder!($msg),
+            middleware = []
+        )
+    };
+    (catalog $ref_var:ident : mixed, mixed -> $out:ty => placeholder!(), [$($mw:expr),*]) => {
+        $crate::__obzenflow_join_typed!(
+            reference = mixed,
+            stream = mixed,
+            output = $out,
+            ref_type = (),
+            stream_type = (),
+            name = "__obzenflow_binding_derived_name__",
+            ref_var = $ref_var,
+            handler = placeholder!(),
+            middleware = [$($mw),*]
+        )
+    };
+    (catalog $ref_var:ident : mixed, mixed -> $out:ty => placeholder!($msg:expr), [$($mw:expr),*]) => {
+        $crate::__obzenflow_join_typed!(
+            reference = mixed,
+            stream = mixed,
+            output = $out,
+            ref_type = (),
+            stream_type = (),
+            name = "__obzenflow_binding_derived_name__",
+            ref_var = $ref_var,
+            handler = placeholder!($msg),
             middleware = [$($mw),*]
         )
     };
@@ -2656,6 +3173,58 @@ macro_rules! join {
     };
 
     // ── typed (explicit name override) ──
+    (name: $name:literal, catalog $ref_var:ident : $reference:ty, mixed -> $out:ty => placeholder!()) => {
+        $crate::__obzenflow_join_typed!(
+            reference = exact,
+            stream = mixed,
+            output = $out,
+            ref_type = ($reference),
+            stream_type = (),
+            name = $name,
+            ref_var = $ref_var,
+            handler = placeholder!(),
+            middleware = []
+        )
+    };
+    (name: $name:literal, catalog $ref_var:ident : $reference:ty, mixed -> $out:ty => placeholder!($msg:expr)) => {
+        $crate::__obzenflow_join_typed!(
+            reference = exact,
+            stream = mixed,
+            output = $out,
+            ref_type = ($reference),
+            stream_type = (),
+            name = $name,
+            ref_var = $ref_var,
+            handler = placeholder!($msg),
+            middleware = []
+        )
+    };
+    (name: $name:literal, catalog $ref_var:ident : $reference:ty, mixed -> $out:ty => placeholder!(), [$($mw:expr),*]) => {
+        $crate::__obzenflow_join_typed!(
+            reference = exact,
+            stream = mixed,
+            output = $out,
+            ref_type = ($reference),
+            stream_type = (),
+            name = $name,
+            ref_var = $ref_var,
+            handler = placeholder!(),
+            middleware = [$($mw),*]
+        )
+    };
+    (name: $name:literal, catalog $ref_var:ident : $reference:ty, mixed -> $out:ty => placeholder!($msg:expr), [$($mw:expr),*]) => {
+        $crate::__obzenflow_join_typed!(
+            reference = exact,
+            stream = mixed,
+            output = $out,
+            ref_type = ($reference),
+            stream_type = (),
+            name = $name,
+            ref_var = $ref_var,
+            handler = placeholder!($msg),
+            middleware = [$($mw),*]
+        )
+    };
     (name: $name:literal, catalog $ref_var:ident : $reference:ty, mixed -> $out:ty => $handler:expr) => {
         $crate::__obzenflow_join_typed!(
             reference = exact,
@@ -2679,6 +3248,58 @@ macro_rules! join {
             name = $name,
             ref_var = $ref_var,
             handler = $handler,
+            middleware = [$($mw),*]
+        )
+    };
+    (name: $name:literal, catalog $ref_var:ident : mixed, mixed -> $out:ty => placeholder!()) => {
+        $crate::__obzenflow_join_typed!(
+            reference = mixed,
+            stream = mixed,
+            output = $out,
+            ref_type = (),
+            stream_type = (),
+            name = $name,
+            ref_var = $ref_var,
+            handler = placeholder!(),
+            middleware = []
+        )
+    };
+    (name: $name:literal, catalog $ref_var:ident : mixed, mixed -> $out:ty => placeholder!($msg:expr)) => {
+        $crate::__obzenflow_join_typed!(
+            reference = mixed,
+            stream = mixed,
+            output = $out,
+            ref_type = (),
+            stream_type = (),
+            name = $name,
+            ref_var = $ref_var,
+            handler = placeholder!($msg),
+            middleware = []
+        )
+    };
+    (name: $name:literal, catalog $ref_var:ident : mixed, mixed -> $out:ty => placeholder!(), [$($mw:expr),*]) => {
+        $crate::__obzenflow_join_typed!(
+            reference = mixed,
+            stream = mixed,
+            output = $out,
+            ref_type = (),
+            stream_type = (),
+            name = $name,
+            ref_var = $ref_var,
+            handler = placeholder!(),
+            middleware = [$($mw),*]
+        )
+    };
+    (name: $name:literal, catalog $ref_var:ident : mixed, mixed -> $out:ty => placeholder!($msg:expr), [$($mw:expr),*]) => {
+        $crate::__obzenflow_join_typed!(
+            reference = mixed,
+            stream = mixed,
+            output = $out,
+            ref_type = (),
+            stream_type = (),
+            name = $name,
+            ref_var = $ref_var,
+            handler = placeholder!($msg),
             middleware = [$($mw),*]
         )
     };

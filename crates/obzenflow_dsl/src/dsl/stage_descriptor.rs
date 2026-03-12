@@ -7,8 +7,8 @@
 //! This is the core of the let bindings approach - each stage macro creates a
 //! descriptor that encapsulates both the handler and how to create its supervisor.
 
-use crate::stage_handle_adapter::StageHandleAdapter;
 use crate::dsl::typing::StageTypingMetadata;
+use crate::stage_handle_adapter::StageHandleAdapter;
 use async_trait::async_trait;
 use obzenflow_adapters::middleware::control::ControlMiddlewareAggregator;
 use obzenflow_adapters::middleware::{

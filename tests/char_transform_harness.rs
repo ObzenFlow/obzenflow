@@ -9,6 +9,7 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
+use obzenflow::typed::{stateful as typed_stateful, transforms};
 use obzenflow_core::{
     event::chain_event::{ChainEvent, ChainEventFactory},
     event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload},
@@ -19,8 +20,6 @@ use obzenflow_dsl::{flow, sink, source, stateful, transform};
 use obzenflow_infra::application::{FlowApplication, LogLevel};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handlers::{FiniteSourceHandler, SinkHandler};
-use obzenflow_runtime::stages::stateful::strategies::accumulators::ReduceTyped;
-use obzenflow_runtime::stages::transform::MapTyped;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{BufRead, BufReader};
@@ -166,7 +165,7 @@ async fn run_char_transform(base: &Path) -> Result<()> {
                     src = source!(TextCharSource::new());
 
                     mapper = transform!(CharEvent -> TransformedChar =>
-                        MapTyped::new(|char_event: CharEvent| {
+                        transforms::map(|char_event: CharEvent| {
                             let ch = char_event.value.chars().next().unwrap_or(' ');
                             TransformedChar {
                                 value: transform_char(ch),
@@ -175,17 +174,16 @@ async fn run_char_transform(base: &Path) -> Result<()> {
                         })
                     );
 
-                    reducer = stateful!(
-                        ReduceTyped::new(
+                    reducer = stateful!(TransformedChar -> TextAccumulator =>
+                        typed_stateful::reduce(
                             TextAccumulator {
                                 transformed_text: String::new(),
                                 total_chars: 0,
                             },
-                            |state: &mut TextAccumulator, input: TransformedChar| {
-                                state.apply(input);
-                                None::<TransformedChar>
+                            |state: &mut TextAccumulator, input: &TransformedChar| {
+                                state.apply(input.clone());
                             }
-                        )
+                        ).emit_on_eof()
                     );
 
                     sink = sink!(TextSink);

@@ -125,8 +125,7 @@ macro_rules! parse_topology_with_joins {
 /// ```rust,ignore
 /// use obzenflow_dsl::{flow, source, transform, sink};
 /// use obzenflow_infra::journal::memory_journals;
-/// use obzenflow_runtime::stages::source::FiniteSourceTyped;
-/// use obzenflow_runtime::stages::transform::MapTyped;
+/// use obzenflow::typed::{sources, transforms};
 ///
 /// let pipeline = flow! {
 ///     name: "example",
@@ -134,9 +133,9 @@ macro_rules! parse_topology_with_joins {
 ///     middleware: [],
 ///
 ///     stages: {
-///         src = source!(MyEvent => FiniteSourceTyped::new(vec![MyEvent { value: 1 }]));
-///         map = transform!(MyEvent -> Doubled => MapTyped::new(|e: MyEvent| Doubled { value: e.value * 2 }));
-///         out = sink!(|d: Doubled| { println!("{}", d.value); });
+///         src = source!(MyEvent => sources::finite(vec![MyEvent { value: 1 }]));
+///         map = transform!(MyEvent -> Doubled => transforms::map(|e: MyEvent| Doubled { value: e.value * 2 }));
+///         out = sink!(Doubled => |d: Doubled| { println!("{}", d.value); });
 ///     },
 ///
 ///     topology: {

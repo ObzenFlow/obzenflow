@@ -12,12 +12,12 @@ use obzenflow_core::event::payloads::delivery_payload::DeliveryPayload;
 use obzenflow_core::{ChainEvent, StageId, WriterId};
 use obzenflow_runtime::pipeline::config::StageConfig;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
+use obzenflow_runtime::stages::common::handlers::source::SourceError;
 use obzenflow_runtime::stages::common::handlers::{
     AsyncFiniteSourceHandler, AsyncInfiniteSourceHandler, AsyncTransformHandler,
     FiniteSourceHandler, InfiniteSourceHandler, JoinHandler, SinkHandler, StatefulHandler,
     TransformHandler,
 };
-use obzenflow_runtime::stages::common::handlers::source::SourceError;
 use obzenflow_runtime::stages::common::stage_handle::BoxedStageHandle;
 use obzenflow_runtime::stages::StageResources;
 use obzenflow_runtime::typing::{
@@ -317,10 +317,7 @@ where
     T: Send + Sync + 'static,
 {
     fn next(&mut self) -> Result<Vec<ChainEvent>, SourceError> {
-        panic!(
-            "{}",
-            placeholder_message("infinite source", self.message)
-        );
+        panic!("{}", placeholder_message("infinite source", self.message));
     }
 }
 
@@ -654,7 +651,10 @@ fn select_downstream_input_hint<'a>(
 ) -> (EdgeInputRole, &'a TypeHint) {
     if downstream_descriptor.stage_type() == StageType::Join {
         if downstream_descriptor.reference_stage_id() == Some(upstream_stage_id) {
-            return (EdgeInputRole::Reference, &downstream_metadata.reference_type);
+            return (
+                EdgeInputRole::Reference,
+                &downstream_metadata.reference_type,
+            );
         }
 
         return (EdgeInputRole::Stream, &downstream_metadata.stream_type);

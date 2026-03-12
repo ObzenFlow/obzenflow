@@ -21,6 +21,7 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
+use obzenflow::typed::sources;
 use obzenflow_core::{
     event::chain_event::{ChainEvent, ChainEventFactory},
     id::StageId,
@@ -31,7 +32,6 @@ use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{SinkHandler, StatefulHandler};
-use obzenflow_runtime::stages::source::FiniteSourceTyped;
 // ✨ FLOWIP-080h: Import Map helper
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_runtime::stages::transform::Map;
@@ -369,7 +369,7 @@ async fn main() -> Result<()> {
 
         stages: {
             // FAN-IN: Three sources feeding into one aggregator
-            kafka_source = source!(RawDataEvent => FiniteSourceTyped::from_item_fn({
+            kafka_source = source!(RawDataEvent => sources::finite_from_fn({
                 let source = "kafka".to_string();
                 move |index| {
                     if index >= 5 {
@@ -383,7 +383,7 @@ async fn main() -> Result<()> {
                     })
                 }
             }));
-            api_source = source!(RawDataEvent => FiniteSourceTyped::from_item_fn({
+            api_source = source!(RawDataEvent => sources::finite_from_fn({
                 let source = "api".to_string();
                 move |index| {
                     if index >= 4 {
@@ -397,7 +397,7 @@ async fn main() -> Result<()> {
                     })
                 }
             }));
-            file_source = source!(RawDataEvent => FiniteSourceTyped::from_item_fn({
+            file_source = source!(RawDataEvent => sources::finite_from_fn({
                 let source = "file".to_string();
                 move |index| {
                     if index >= 4 {
@@ -450,8 +450,7 @@ async fn main() -> Result<()> {
             router |> high_sink;
         }
     })
-    .await
-    ?;
+    .await?;
 
     // Deterministic, consolidated fan-out summaries
     print_sink_summary("LOW", "low", low_counter.load(Ordering::Relaxed));

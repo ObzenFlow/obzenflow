@@ -6,11 +6,10 @@ use super::domain::*;
 use super::sinks::{per_order_printer, summary_printer, CatalogAnalyticsSummary};
 use super::sources::*;
 use anyhow::Result;
-use obzenflow::typed::joins;
+use obzenflow::typed::{joins, stateful as typed_stateful};
 use obzenflow_adapters::middleware::RateLimiterBuilder;
 use obzenflow_dsl::{flow, join, sink, source, stateful};
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::stages::stateful::strategies::accumulators::ReduceTyped;
 
 fn build_flow() -> obzenflow_dsl::FlowDefinition {
     let sku_products_handler = joins::inner(
@@ -180,7 +179,7 @@ fn build_flow() -> obzenflow_dsl::FlowDefinition {
 
             catalog_stats = stateful!(
                 EnrichedOrderWithPromo -> CatalogAnalyticsSummary =>
-                    ReduceTyped::new(
+                    typed_stateful::reduce(
                         CatalogAnalyticsSummary::default(),
                         |summary: &mut CatalogAnalyticsSummary, order: &EnrichedOrderWithPromo| {
                             summary.order_count += 1;

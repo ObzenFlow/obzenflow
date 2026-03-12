@@ -7,8 +7,8 @@ use super::domain::{FormattedStory, HnStory};
 use super::mock_server::spawn_mock_hn_server;
 use super::util::{env_bool, env_usize, truncate_chars};
 use anyhow::{anyhow, Result};
-use obzenflow::sinks::ConsoleSink;
 use obzenflow::sources::{HeaderMap, HttpPullConfig, HttpPullSource, Url};
+use obzenflow::typed::sinks;
 use obzenflow_core::event::chain_event::ChainEventFactory;
 use obzenflow_core::event::status::processing_status::ErrorKind;
 use obzenflow_core::TypedPayload;
@@ -88,7 +88,7 @@ async fn run_example_async() -> Result<()> {
                     Some(Duration::from_secs(poll_timeout_secs as u64))
                 ));
                 formatter = transform!(formatter);
-                console = sink!(ConsoleSink::<FormattedStory>::table(
+                console = sink!(FormattedStory => sinks::table(
                     &["#", "Title", "Author", "Pts", "URL"],
                     |story| vec![
                         story.id.to_string(),
@@ -96,7 +96,7 @@ async fn run_example_async() -> Result<()> {
                         story.author.clone(),
                         story.points.to_string(),
                         truncate_chars(&story.url, 40),
-                    ]
+                    ],
                 ));
             },
 

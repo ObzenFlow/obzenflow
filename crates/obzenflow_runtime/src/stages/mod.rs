@@ -24,5 +24,5 @@ pub use common::{
 pub use common::handlers::JoinHandler;
 
 // Re-export resources builder
-pub use resources_builder::{StageResources, StageResourcesBuilder, StageResourcesSet};
 pub use crate::typing::{JoinTyping, SinkTyping, SourceTyping, StatefulTyping, TransformTyping};
+pub use resources_builder::{StageResources, StageResourcesBuilder, StageResourcesSet};

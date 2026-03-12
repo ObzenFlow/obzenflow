@@ -233,11 +233,7 @@ mod tests {
     #[async_trait]
     impl SinkHandler for ExactSink {
         async fn consume(&mut self, _event: ChainEvent) -> Result<DeliveryPayload, HandlerError> {
-            Ok(DeliveryPayload::success(
-                "sink",
-                DeliveryMethod::Noop,
-                None,
-            ))
+            Ok(DeliveryPayload::success("sink", DeliveryMethod::Noop, None))
         }
     }
 
@@ -302,7 +298,8 @@ mod tests {
             exact("InputEvent")
         );
 
-        let async_source = crate::async_source!(name: "async_source", InputEvent => AsyncExactSource);
+        let async_source =
+            crate::async_source!(name: "async_source", InputEvent => AsyncExactSource);
         assert_eq!(
             async_source.typing_metadata().unwrap().output_type,
             exact("InputEvent")
@@ -323,7 +320,8 @@ mod tests {
             exact("InputEvent")
         );
 
-        let transform = crate::transform!(name: "transform", InputEvent -> OutputEvent => ExactTransform);
+        let transform =
+            crate::transform!(name: "transform", InputEvent -> OutputEvent => ExactTransform);
         let transform_meta = transform.typing_metadata().unwrap();
         assert_eq!(transform_meta.input_type, exact("InputEvent"));
         assert_eq!(transform_meta.output_type, exact("OutputEvent"));
@@ -346,7 +344,10 @@ mod tests {
         assert_eq!(stateful_meta.output_type, exact("OutputEvent"));
 
         let sink = crate::sink!(name: "sink", OutputEvent => ExactSink);
-        assert_eq!(sink.typing_metadata().unwrap().input_type, exact("OutputEvent"));
+        assert_eq!(
+            sink.typing_metadata().unwrap().input_type,
+            exact("OutputEvent")
+        );
 
         let join = crate::join!(
             name: "join",
@@ -363,7 +364,10 @@ mod tests {
     #[test]
     fn stage_macros_default_to_binding_derived_name_marker() {
         let source = crate::source!(InputEvent => SyncExactSource);
-        assert_eq!(source.name(), crate::dsl::stage_descriptor::BINDING_DERIVED_NAME_SENTINEL);
+        assert_eq!(
+            source.name(),
+            crate::dsl::stage_descriptor::BINDING_DERIVED_NAME_SENTINEL
+        );
 
         let transform = crate::transform!(InputEvent -> OutputEvent => ExactTransform);
         assert_eq!(
@@ -372,11 +376,16 @@ mod tests {
         );
 
         let sink = crate::sink!(OutputEvent => ExactSink);
-        assert_eq!(sink.name(), crate::dsl::stage_descriptor::BINDING_DERIVED_NAME_SENTINEL);
+        assert_eq!(
+            sink.name(),
+            crate::dsl::stage_descriptor::BINDING_DERIVED_NAME_SENTINEL
+        );
 
-        let join =
-            crate::join!(catalog reference: ReferenceEvent, StreamEvent -> JoinedEvent => ExactJoin);
-        assert_eq!(join.name(), crate::dsl::stage_descriptor::BINDING_DERIVED_NAME_SENTINEL);
+        let join = crate::join!(catalog reference: ReferenceEvent, StreamEvent -> JoinedEvent => ExactJoin);
+        assert_eq!(
+            join.name(),
+            crate::dsl::stage_descriptor::BINDING_DERIVED_NAME_SENTINEL
+        );
     }
 
     #[test]
@@ -398,8 +407,7 @@ mod tests {
         assert_eq!(async_transform_meta.input_type, exact("InputEvent"));
         assert_eq!(async_transform_meta.output_type, exact("OutputEvent"));
 
-        let mixed_sink =
-            crate::sink!(name: "audit", mixed => placeholder!("route everything"));
+        let mixed_sink = crate::sink!(name: "audit", mixed => placeholder!("route everything"));
         let mixed_sink_meta = mixed_sink.typing_metadata().unwrap();
         assert!(mixed_sink_meta.is_placeholder);
         assert_eq!(mixed_sink_meta.input_type, TypeHint::Mixed);
@@ -411,8 +419,7 @@ mod tests {
 
     #[test]
     fn mixed_input_macros_only_assert_exact_positions() {
-        let transform =
-            crate::transform!(name: "router", mixed -> OutputEvent => MixedTransform);
+        let transform = crate::transform!(name: "router", mixed -> OutputEvent => MixedTransform);
         let transform_meta = transform.typing_metadata().unwrap();
         assert_eq!(transform_meta.input_type, TypeHint::Mixed);
         assert_eq!(transform_meta.output_type, exact("OutputEvent"));

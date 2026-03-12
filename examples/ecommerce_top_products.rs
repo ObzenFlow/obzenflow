@@ -10,13 +10,12 @@
 //! Run with: cargo run --package obzenflow --example ecommerce_top_products
 
 use anyhow::Result;
+use obzenflow::typed::{sources, stateful as typed_stateful};
 use obzenflow_adapters::middleware::RateLimiterBuilder;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, stateful};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::stages::source::FiniteSourceTyped;
-use obzenflow_runtime::stages::stateful::strategies::accumulators::TopNByTyped;
 use serde::{Deserialize, Serialize};
 
 // FLOWIP-082a: Strongly-typed event with schema version
@@ -224,7 +223,7 @@ async fn main() -> Result<()> {
 
         stages: {
             // FLOWIP-081: Typed finite sources (no WriterId/ChainEvent boilerplate)
-            orders = source!(OrderEvent => FiniteSourceTyped::from_item_fn(move |index| {
+            orders = source!(OrderEvent => sources::finite_from_fn(move |index| {
                 let (product_id, product_name, unit_price, quantity, category) =
                     orders.get(index)?;
                 let order_number = index + 1;
@@ -247,7 +246,7 @@ async fn main() -> Result<()> {
             // FLOWIP-080j: TopNByTyped - Type-safe accumulation with no ChainEvent!
             // Type-safe extraction functions instead of string field names
             top_products = stateful!(
-                TopNByTyped::new(
+                typed_stateful::top_n_by(
                     5,
                     |order: &OrderEvent| order.product_id.clone(), // Key extractor
                     |order: &OrderEvent| order.total_value,        // Score extractor

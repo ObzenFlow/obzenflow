@@ -6,7 +6,7 @@
 
 use obzenflow_core::TypedPayload;
 use obzenflow_runtime::stages::transform::{
-    AsyncMapTyped, AsyncTryMapWithTyped, MapTyped, TryMapWithTyped,
+    AsyncMapTyped, AsyncTryMapWithTyped, FilterMapTyped, MapTyped, TryMapWithTyped,
 };
 use serde::{de::DeserializeOwned, Serialize};
 use std::future::Future;
@@ -18,6 +18,15 @@ where
     F: Fn(T) -> O + Send + Sync + Clone,
 {
     MapTyped::new(mapper)
+}
+
+pub fn filter_map<T, O, F>(mapper: F) -> FilterMapTyped<T, O, F>
+where
+    T: DeserializeOwned + Send + Sync,
+    O: Serialize + Send + Sync + TypedPayload,
+    F: Fn(T) -> Option<O> + Send + Sync + Clone,
+{
+    FilterMapTyped::new(mapper)
 }
 
 pub fn try_map_with<T, O, F>(converter: F) -> TryMapWithTyped<T, O, F>
@@ -48,4 +57,3 @@ where
 {
     AsyncTryMapWithTyped::new(converter)
 }
-

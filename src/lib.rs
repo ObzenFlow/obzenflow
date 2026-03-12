@@ -36,22 +36,23 @@
 //! Handlers contain the processing logic for each stage. The framework provides
 //! several handler traits, each matching a different stage role.
 //!
-//! **Sources** produce events. [`obzenflow_runtime::stages::source::FiniteSourceTyped`]
-//! is the easiest way to emit a `Vec<T>` of typed payloads:
+//! **Sources** produce events. [`crate::typed::sources::finite`] is the easiest way
+//! to emit a `Vec<T>` (or any iterator) of typed payloads:
 //!
 //! ```rust,ignore
-//! use obzenflow_runtime::stages::source::FiniteSourceTyped;
+//! use obzenflow::typed::sources;
 //!
 //! let readings = vec![
 //!     TemperatureReading { sensor_id: "A1".into(), celsius: 22.5 },
 //!     TemperatureReading { sensor_id: "B2".into(), celsius: 35.1 },
 //! ];
-//! let source = FiniteSourceTyped::new(readings);
+//! let source = sources::finite(readings);
 //! ```
 //!
 //! **Transforms** process events one at a time. Implement
 //! [`obzenflow_runtime::stages::TransformHandler`] for full control, or use
-//! the typed helpers like `MapTyped` for simple one-to-one mappings.
+//! the typed helper facades like [`crate::typed::transforms::map`] for simple
+//! one-to-one mappings.
 //!
 //! **Sinks** consume events at the end of a pipeline. Implement
 //! [`obzenflow_runtime::stages::SinkHandler`], or use a closure with the

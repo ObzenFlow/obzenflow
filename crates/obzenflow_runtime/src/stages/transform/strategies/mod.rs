@@ -51,6 +51,7 @@
 pub mod async_map;
 pub mod async_try_map_with;
 pub mod filter;
+pub mod filter_map;
 pub mod map;
 pub mod try_map;
 pub mod try_map_with;
@@ -58,6 +59,7 @@ pub mod try_map_with;
 pub use async_map::{AsyncMap, AsyncMapTyped};
 pub use async_try_map_with::{AsyncTryMapWith, AsyncTryMapWithTyped};
 pub use filter::{Filter, FilterTyped};
+pub use filter_map::{FilterMap, FilterMapTyped};
 pub use map::{Map, MapTyped};
 pub use try_map::TryMap;
 pub use try_map_with::{ErrorStrategy, TryMapWith, TryMapWithTyped};

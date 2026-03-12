@@ -19,13 +19,11 @@
 //! Run with: `cargo run -p obzenflow --example web_analytics_pipeline`
 
 use anyhow::Result;
+use obzenflow::typed::{sources, stateful as typed_stateful};
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, stateful};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::stages::source::FiniteSourceTyped;
-// FLOWIP-080j: Typed stateful accumulators
-use obzenflow_runtime::stages::stateful::strategies::accumulators::{GroupByTyped, ReduceTyped};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::Duration;
@@ -208,7 +206,7 @@ async fn main() -> Result<()> {
 
         stages: {
             // User event stream
-            user_events = source!(UserEvent => FiniteSourceTyped::from_item_fn(move |index| {
+            user_events = source!(UserEvent => sources::finite_from_fn(move |index| {
                 if index >= 200 {
                     return None;
                 }
@@ -275,7 +273,7 @@ async fn main() -> Result<()> {
             }));
 
             // FLOWIP-080j: GroupByTyped for per-user session tracking
-            session_tracker = stateful!(GroupByTyped::new(
+            session_tracker = stateful!(typed_stateful::group_by(
                 |event: &UserEvent| event.user_id.clone(),
                 |session: &mut SessionData, event: &UserEvent| {
                     event.update_session(session);
@@ -284,22 +282,26 @@ async fn main() -> Result<()> {
             .emit_within(Duration::from_secs(3)));
 
             // FLOWIP-080j: ReduceTyped for funnel analysis
-            funnel_tracker = stateful!(ReduceTyped::new(
-                FunnelState::default(),
-                |state: &mut FunnelState, event: &UserEvent| {
-                    event.update_funnel(state);
-                },
-            )
-            .emit_every_n(50));
+            funnel_tracker = stateful!(
+                UserEvent -> FunnelState => typed_stateful::reduce(
+                    FunnelState::default(),
+                    |state: &mut FunnelState, event: &UserEvent| {
+                        event.update_funnel(state);
+                    },
+                )
+                .emit_every_n(50)
+            );
 
             // FLOWIP-080j: ReduceTyped for overall metrics
-            metrics = stateful!(ReduceTyped::new(
-                MetricsState::default(),
-                |state: &mut MetricsState, event: &UserEvent| {
-                    event.update_metrics(state);
-                },
-            )
-            .emit_on_eof());
+            metrics = stateful!(
+                UserEvent -> MetricsState => typed_stateful::reduce(
+                    MetricsState::default(),
+                    |state: &mut MetricsState, event: &UserEvent| {
+                        event.update_metrics(state);
+                    },
+                )
+                .emit_on_eof()
+            );
 
             // Sinks for each analysis type
             sessions = sink!(|update: SessionUpdate| {

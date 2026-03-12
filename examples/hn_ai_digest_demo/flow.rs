@@ -12,8 +12,8 @@ use obzenflow::ai::{
     resolve_estimator_for_model, split_to_budget, ChatTransform, ChatTransformExt, EstimateSource,
     SplitGroup, TokenCount, TokenEstimator,
 };
-use obzenflow::sinks::ConsoleSink;
 use obzenflow::sources::{HeaderMap, HttpPullConfig, HttpPullSource, Url};
+use obzenflow::typed::{sinks, stateful as typed_stateful};
 use obzenflow_adapters::middleware::control::ai_circuit_breaker;
 use obzenflow_adapters::middleware::RateLimiterBuilder;
 use obzenflow_core::event::chain_event::ChainEventFactory;
@@ -25,7 +25,6 @@ use obzenflow_infra::http_client::default_http_client;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{AsyncTransformHandler, TransformHandler};
-use obzenflow_runtime::stages::stateful::strategies::accumulators::ReduceTyped;
 use obzenflow_runtime::stages::transform::TryMapWith;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -271,13 +270,11 @@ async fn run_example_async() -> Result<()> {
     let formatter = TryMapWith::new(format_story_event)
         .on_error_with(|event, err| Some(event.mark_as_error(err, ErrorKind::Deserialization)));
 
-    let digest_seed = ReduceTyped::new(
-        HnTopStories::default(),
-        |acc: &mut HnTopStories, story: &FormattedStory| {
-            acc.stories.push(story.clone());
-        },
-    )
-    .emit_on_eof();
+    let digest_seed =
+        typed_stateful::reduce(HnTopStories::default(), |acc, story: &FormattedStory| {
+            acc.stories.push(story.clone())
+        })
+        .emit_on_eof();
 
     let interests = std::env::var("HN_AI_INTERESTS").ok();
     let interests_for_map_request = interests.clone();
@@ -439,9 +436,9 @@ async fn run_example_async() -> Result<()> {
 
     let oversize_map_router = HnDigestOversizeMapRouter::new(oversize_map_llm);
 
-    let chunk_summaries = ReduceTyped::new(
+    let chunk_summaries = typed_stateful::reduce(
         HnDigestChunkSummaries::default(),
-        |acc: &mut HnDigestChunkSummaries, summary: &HnDigestChunkSummary| {
+        |acc, summary: &HnDigestChunkSummary| {
             if acc.budget_per_group == TokenCount::ZERO {
                 acc.budget_per_group = summary.budget_per_group;
             }
@@ -540,14 +537,14 @@ async fn run_example_async() -> Result<()> {
                     RateLimiterBuilder::new(source_rate_limit).build()
                 ]);
                 formatter = transform!(formatter);
-                batch = stateful!(digest_seed);
+                batch = stateful!(FormattedStory -> HnTopStories => digest_seed);
                 split_to_budget = transform!(splitter);
                 map_llm = async_transform!(map_router, [ai_circuit_breaker()]);
                 oversize_sub_split = transform!(oversize_sub_splitter);
                 oversize_map_llm = async_transform!(oversize_map_router, [ai_circuit_breaker()]);
-                reduce = stateful!(chunk_summaries);
+                reduce = stateful!(HnDigestChunkSummary -> HnDigestChunkSummaries => chunk_summaries);
                 digest_llm = async_transform!(digest_llm, [ai_circuit_breaker()]);
-                digest_summary = sink!(ConsoleSink::<HnDigestSummary>::new(format_digest_summary_for_console));
+                digest_summary = sink!(HnDigestSummary => sinks::console(format_digest_summary_for_console));
             },
 
             topology: {

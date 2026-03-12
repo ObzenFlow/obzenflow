@@ -24,6 +24,7 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
+use obzenflow::typed::{sources, stateful as typed_stateful};
 use obzenflow_adapters::middleware::RateLimiterBuilder;
 use obzenflow_core::{
     event::chain_event::{ChainEvent, ChainEventFactory},
@@ -35,12 +36,10 @@ use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::SinkHandler;
-use obzenflow_runtime::stages::source::FiniteSourceTyped;
 // ✨ FLOWIP-080h: Import Map helper
 use obzenflow_runtime::stages::transform::Map;
 // ✨ FLOWIP-080j: Import ReduceTyped for type-safe accumulation
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
-use obzenflow_runtime::stages::stateful::strategies::accumulators::ReduceTyped;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -202,7 +201,7 @@ fn main() -> Result<()> {
             stages: {
                 // Source generating 100k events
                 high_volume_source = source!(DataRequest =>
-                    FiniteSourceTyped::from_item_fn(move |index| {
+                    sources::finite_from_fn(move |index| {
                         let total = 100_000usize;
                         if index >= total {
                             println!("🏁 Source complete: Generated {index} total events");
@@ -232,7 +231,7 @@ fn main() -> Result<()> {
                 // Replaces 59-line EventCounter StatefulHandler with ReduceTyped!
                 // Counts ProcessedEvent domain objects from the stream
                 event_counter = stateful!(ProcessedEvent -> EventCountState =>
-                    ReduceTyped::new(
+                    typed_stateful::reduce(
                         EventCountState::default(),
                         |state: &mut EventCountState, _event: &ProcessedEvent| {
                             state.event_count += 1;

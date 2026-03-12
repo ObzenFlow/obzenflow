@@ -30,7 +30,8 @@
 use super::domain::*;
 use super::handlers::Checkbook;
 use anyhow::Result;
-use obzenflow_adapters::sinks::{ConsoleSink, SnapshotTableFormatter};
+use obzenflow::typed::{joins, sinks};
+use obzenflow_adapters::sinks::SnapshotTableFormatter;
 use obzenflow_adapters::sources::http::HttpSource;
 use obzenflow_dsl::{async_infinite_source, flow, join, sink, stateful};
 use obzenflow_infra::application::{FlowApplication, LogLevel};
@@ -39,7 +40,6 @@ use obzenflow_infra::web::endpoints::event_ingestion::{
     create_ingestion_endpoints, IngestionConfig, TypedValidator, ValidationConfig,
 };
 use obzenflow_runtime::stages::common::handlers::StatefulHandlerExt;
-use obzenflow_runtime::stages::join::strategies::InnerJoinBuilder;
 use obzenflow_runtime::stages::stateful::strategies::emissions::EmitAlways;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -85,19 +85,6 @@ async fn run() -> Result<()> {
     endpoints.extend(accounts_endpoints);
     endpoints.extend(tx_endpoints);
 
-    let join_handler = InnerJoinBuilder::<AccountOpened, LedgerEntry, PostedEntry>::new()
-        .catalog_key(|account: &AccountOpened| account.account_id.clone())
-        .stream_key(|entry: &LedgerEntry| entry.account_id.clone())
-        .live()
-        .build(|account: AccountOpened, entry: LedgerEntry| PostedEntry {
-            account_id: entry.account_id,
-            owner: account.owner,
-            kind: entry.kind,
-            amount_cents: entry.amount_cents,
-            initial_balance_cents: account.initial_balance_cents,
-            note: entry.note,
-        });
-
     FlowApplication::builder()
         .with_log_level(LogLevel::Info)
         .with_web_endpoints(endpoints)
@@ -116,11 +103,25 @@ async fn run() -> Result<()> {
                 accounts = async_infinite_source!(AccountOpened => accounts_source);
                 tx = async_infinite_source!(LedgerEntry => tx_source);
 
-                posted = join!(catalog accounts: AccountOpened, LedgerEntry -> PostedEntry => join_handler);
+                posted = join!(
+                    catalog accounts: AccountOpened,
+                    LedgerEntry -> PostedEntry => joins::inner(
+                        |account| account.account_id.clone(),
+                        |entry| entry.account_id.clone(),
+                        |account, entry| PostedEntry {
+                            account_id: entry.account_id,
+                            owner: account.owner,
+                            kind: entry.kind,
+                            amount_cents: entry.amount_cents,
+                            initial_balance_cents: account.initial_balance_cents,
+                            note: entry.note,
+                        },
+                    )
+                );
 
                 checkbook = stateful!(PostedEntry -> CheckbookSnapshot => Checkbook::new().with_emission(EmitAlways));
 
-                printer = sink!(CheckbookSnapshot => ConsoleSink::<CheckbookSnapshot>::new(
+                printer = sink!(CheckbookSnapshot => sinks::console(
                     SnapshotTableFormatter::new(
                         &["#", "Kind", "Amount", "Credit", "Debit", "Balance", "Note"],
                         |snapshot: &CheckbookSnapshot| {

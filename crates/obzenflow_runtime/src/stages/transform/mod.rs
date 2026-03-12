@@ -30,8 +30,8 @@ pub use handle::{TransformHandle, TransformHandleExt};
 
 // Re-export transform strategies for ergonomic imports (FLOWIP-080h)
 pub use strategies::{
-    AsyncMap, AsyncMapTyped, AsyncTryMapWith, AsyncTryMapWithTyped, Filter, FilterTyped, Map,
-    MapTyped, TryMap, TryMapWith, TryMapWithTyped,
+    AsyncMap, AsyncMapTyped, AsyncTryMapWith, AsyncTryMapWithTyped, Filter, FilterMap,
+    FilterMapTyped, FilterTyped, Map, MapTyped, TryMap, TryMapWith, TryMapWithTyped,
 };
 
 // Re-export control strategies for convenience

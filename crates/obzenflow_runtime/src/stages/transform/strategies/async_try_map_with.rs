@@ -12,8 +12,8 @@ use crate::stages::common::handler_error::HandlerError;
 use crate::stages::common::handlers::AsyncTransformHandler;
 use crate::typing::TransformTyping;
 use async_trait::async_trait;
-use obzenflow_core::event::ChainEventFactory;
 use obzenflow_core::event::status::processing_status::ProcessingStatus;
+use obzenflow_core::event::ChainEventFactory;
 use obzenflow_core::{ChainEvent, TypedPayload};
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::json;
@@ -306,27 +306,25 @@ where
         };
 
         match (self.converter)(input).await {
-            Ok(output_value) => {
-                match serde_json::to_value(&output_value) {
-                    Ok(payload) => {
-                        let event_type = O::versioned_event_type();
-                        Ok(vec![ChainEventFactory::derived_data_event(
-                            event.writer_id,
-                            &event,
-                            &event_type,
-                            payload,
-                        )])
-                    }
-                    Err(e) => {
-                        let error_msg = format!(
-                            "Failed to serialize {} into payload: {}",
-                            std::any::type_name::<O>(),
-                            e
-                        );
-                        Ok(self.handle_error(event, error_msg))
-                    }
+            Ok(output_value) => match serde_json::to_value(&output_value) {
+                Ok(payload) => {
+                    let event_type = O::versioned_event_type();
+                    Ok(vec![ChainEventFactory::derived_data_event(
+                        event.writer_id,
+                        &event,
+                        &event_type,
+                        payload,
+                    )])
                 }
-            }
+                Err(e) => {
+                    let error_msg = format!(
+                        "Failed to serialize {} into payload: {}",
+                        std::any::type_name::<O>(),
+                        e
+                    );
+                    Ok(self.handle_error(event, error_msg))
+                }
+            },
             Err(error_msg) => Ok(self.handle_error(event, error_msg)),
         }
     }

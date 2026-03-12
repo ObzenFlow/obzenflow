@@ -34,6 +34,20 @@ where
     })
 }
 
+/// Create a finite typed source from a per-item producer.
+///
+/// This is the facade equivalent of `FiniteSourceTyped::from_item_fn(...)`.
+pub fn finite_from_fn<T, F>(
+    producer: F,
+) -> impl FiniteSourceHandler + SourceTyping<Output = T> + Clone + Debug + 'static
+where
+    T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
+    F: FnMut(usize) -> Option<T> + Send + Sync + Clone + 'static,
+{
+    let mut producer = producer;
+    FiniteSourceTyped::from_producer(move |index| producer(index).map(|item| vec![item]))
+}
+
 /// Create an async finite typed source from an async batch producer.
 pub fn async_finite<T, F, Fut>(producer: F) -> AsyncFiniteSourceTyped<T, F, Fut>
 where

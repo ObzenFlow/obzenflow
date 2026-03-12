@@ -29,6 +29,7 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
+use obzenflow::typed::sources;
 use obzenflow_adapters::middleware::RateLimiterBuilder;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::{event::chain_event::ChainEvent, TypedPayload};
@@ -37,7 +38,6 @@ use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{SinkHandler, TransformHandler};
-use obzenflow_runtime::stages::source::FiniteSourceTyped;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -144,7 +144,7 @@ async fn main() -> Result<()> {
         stages: {
             // Source with stage-level override: 10 events/sec
             // This overrides the flow-level 1.0 events/sec
-            fast_source = source!(CounterEvent => FiniteSourceTyped::from_item_fn(|index| {
+            fast_source = source!(CounterEvent => sources::finite_from_fn(|index| {
                 if index >= 120 {
                     return None;
                 }
