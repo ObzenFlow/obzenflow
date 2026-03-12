@@ -54,14 +54,17 @@ impl LogLevel {
     }
 }
 
-/// Builder for configuring and running a FlowApplication
+/// Builder for advanced FlowApplication configuration.
 ///
-/// # Example with console-subscriber
+/// **Prefer `FlowApplication::run()` with `#[tokio::main]` for most use cases.** The builder
+/// is only needed when you require web endpoints, flow handle hooks, or console-subscriber
+/// integration. If you only need a log level, set the `RUST_LOG` environment variable instead.
+///
+/// # Example
 /// ```ignore
 /// fn main() -> Result<(), Box<dyn std::error::Error>> {
 ///     FlowApplication::builder()
-///         .with_console_subscriber()
-///         .with_log_level(LogLevel::Info)
+///         .with_web_endpoint(my_endpoint)
 ///         .run_blocking(flow! {
 ///             name: "my_flow",
 ///             // ... flow definition

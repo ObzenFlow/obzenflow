@@ -20,7 +20,7 @@ use obzenflow_adapters::middleware::RateLimiterBuilder;
 use obzenflow_core::event::chain_event::ChainEventFactory;
 use obzenflow_core::{ChainEvent, TypedPayload};
 use obzenflow_dsl::{async_source, async_transform, flow, sink, stateful, transform};
-use obzenflow_infra::application::{FlowApplication, LogLevel};
+use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::http_client::default_http_client;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
@@ -110,16 +110,7 @@ impl TypedPayload for HnDigestSummary {
     const EVENT_TYPE: &'static str = "hn.digest_summary";
 }
 
-pub fn run_example() -> Result<()> {
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| anyhow!("failed to create tokio runtime: {e:?}"))?;
-
-    runtime.block_on(run_example_async())
-}
-
-async fn run_example_async() -> Result<()> {
+pub async fn run_example() -> Result<()> {
     if std::env::var("OBZENFLOW_METRICS_EXPORTER").is_err() {
         std::env::set_var("OBZENFLOW_METRICS_EXPORTER", "console");
     }
@@ -446,9 +437,7 @@ async fn run_example_async() -> Result<()> {
         .await?
         .with_resolved_estimator(estimator_resolution.clone());
 
-    FlowApplication::builder()
-        .with_log_level(LogLevel::Info)
-        .run_async(flow! {
+    FlowApplication::run(flow! {
             name: "hn_ai_digest_demo",
             journals: disk_journals(std::path::PathBuf::from("target/hn-ai-digest-logs")),
             middleware: [],
