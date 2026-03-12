@@ -7,13 +7,14 @@ use super::domain::{FormattedStory, HnStory};
 use super::mock_server::spawn_mock_hn_server;
 use super::util::{env_bool, env_usize, truncate_chars};
 use anyhow::{anyhow, Result};
-use async_trait::async_trait;
 use obzenflow::ai::{
-    resolve_estimator_for_model, split_to_budget, ChatTransform, ChatTransformExt, EstimateSource,
-    SplitGroup, TokenCount, TokenEstimator,
+    resolve_estimator_for_model, ChatTransform, ChatTransformExt, ChunkEnvelope, EstimateSource,
+    OversizeExhaustion, OversizePolicy, TokenCount,
 };
 use obzenflow::sources::{HeaderMap, HttpPullConfig, HttpPullSource, Url};
-use obzenflow::typed::{sinks, stateful as typed_stateful, transforms as typed_transforms};
+use obzenflow::typed::{
+    ai as typed_ai, sinks, stateful as typed_stateful, transforms as typed_transforms,
+};
 use obzenflow_adapters::middleware::control::ai_circuit_breaker;
 use obzenflow_adapters::middleware::RateLimiterBuilder;
 use obzenflow_core::event::chain_event::ChainEventFactory;
@@ -23,9 +24,7 @@ use obzenflow_infra::application::{FlowApplication, LogLevel};
 use obzenflow_infra::http_client::default_http_client;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
-use obzenflow_runtime::stages::common::handlers::TransformHandler;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 use std::time::Duration;
 
 const DEFAULT_HN_SOURCE_RATE_LIMIT: f64 = 10.0;
@@ -57,59 +56,6 @@ struct HnDigestChunk {
 
 impl TypedPayload for HnDigestChunk {
     const EVENT_TYPE: &'static str = "hn.digest_chunk";
-}
-
-/// An oversize chunk that needs further decomposition before it is safe to send to the LLM.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct HnDigestOversizeChunk {
-    parent_group_index: usize,
-    parent_group_count: usize,
-    budget_per_group: TokenCount,
-    estimated_tokens: TokenCount,
-    story_numbers: Vec<usize>,
-    stories: Vec<FormattedStory>,
-    decomposition_depth: u32,
-}
-
-impl TypedPayload for HnDigestOversizeChunk {
-    const EVENT_TYPE: &'static str = "hn.digest_oversize_chunk";
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-enum HnDigestSplitOut {
-    Chunk(HnDigestChunk),
-    Oversize(HnDigestOversizeChunk),
-}
-
-impl TypedPayload for HnDigestSplitOut {
-    const EVENT_TYPE: &'static str = "hn.digest_split_out";
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-enum HnDigestOversizeSplitOut {
-    Chunk(HnDigestChunk),
-    Oversize(HnDigestOversizeChunk),
-}
-
-impl TypedPayload for HnDigestOversizeSplitOut {
-    const EVENT_TYPE: &'static str = "hn.digest_oversize_split_out";
-}
-
-/// A condensed chunk produced by the oversize sub-pipeline.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct HnDigestCondensedChunk {
-    parent_group_index: usize,
-    parent_group_count: usize,
-    budget_per_group: TokenCount,
-    estimated_tokens: TokenCount,
-    story_numbers: Vec<usize>,
-    stories: Vec<FormattedStory>,
-    condensed_markdown: String,
-    decomposition_depth: u32,
-}
-
-impl TypedPayload for HnDigestCondensedChunk {
-    const EVENT_TYPE: &'static str = "hn.digest_condensed_chunk";
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -243,7 +189,7 @@ async fn run_example_async() -> Result<()> {
     let estimator_resolution = resolve_estimator_for_model(&ai_model_label);
     let estimator = estimator_resolution.estimator();
 
-    println!("HN AI Digest Demo (FLOWIP-086r)");
+    println!("HN AI Digest Demo (FLOWIP-086z)");
     println!("===============================");
     println!(
         "Fetch top HN stories, then generate a markdown digest via Rig-backed LLM transforms."
@@ -295,7 +241,6 @@ async fn run_example_async() -> Result<()> {
     let interests = std::env::var("HN_AI_INTERESTS").ok();
     let interests_for_map_request = interests.clone();
     let interests_for_map_summary = interests.clone();
-    let interests_for_oversize_request = interests.clone();
     let interests_for_reduce_request = interests.clone();
     let interests_for_reduce_summary = interests.clone();
 
@@ -349,10 +294,21 @@ async fn run_example_async() -> Result<()> {
         _ => unreachable!("provider label validated above"),
     };
 
-    let splitter =
-        HnDigestSplitter::new(estimator.clone(), budget_per_group, max_stories_per_group);
-    let oversize_sub_splitter =
-        HnDigestOversizeSubSplitter::new(estimator.clone(), budget_per_group);
+    let chunker = typed_ai::chunk_by_budget::<HnTopStories, FormattedStory>()
+        .estimator(estimator.clone())
+        .items(|seed: &HnTopStories| seed.stories.clone())
+        .render(|story: &FormattedStory, ctx| {
+            render_story_line(ctx.item_ordinal + 1, story, ctx.decomposition_depth)
+        })
+        .budget(budget_per_group)
+        .max_items_per_chunk(max_stories_per_group)
+        .oversize(OversizePolicy::Rerender {
+            max_depth: 5,
+            min_progress_tokens: TokenCount::new(1),
+            exhaustion: OversizeExhaustion::Fail,
+        })
+        .snapshot_excluded_items_limit(25)
+        .build();
 
     let map_llm_handler = make_llm_builder()
         .system(system_prompt.clone())
@@ -397,52 +353,6 @@ async fn run_example_async() -> Result<()> {
             Ok(build_chunk_prompt(
                 &chunk,
                 interests_for_map_request.as_deref(),
-            ))
-        })
-        .await?
-        .with_resolved_estimator(estimator_resolution.clone());
-
-    let oversize_map_llm_handler = make_llm_builder()
-        .system(system_prompt.clone())
-        .temperature(0.1)
-        .max_tokens(400)
-        .output_mapper(move |input: &ChainEvent, response| {
-            let chunk = HnDigestChunk::try_from_event(input).map_err(|err| {
-                HandlerError::Validation(format!("hn digest chunk decode failed: {err}"))
-            })?;
-
-            let condensed = HnDigestCondensedChunk {
-                parent_group_index: chunk.group_index,
-                parent_group_count: chunk.group_count,
-                budget_per_group: chunk.budget_per_group,
-                estimated_tokens: chunk.estimated_tokens,
-                story_numbers: chunk.story_numbers.clone(),
-                stories: chunk.stories.clone(),
-                condensed_markdown: response.text,
-                decomposition_depth: chunk.decomposition_depth,
-            };
-
-            let payload = serde_json::to_value(&condensed).map_err(|err| {
-                HandlerError::Validation(format!(
-                    "hn digest condensed chunk payload encode failed: {err}"
-                ))
-            })?;
-
-            Ok(vec![ChainEventFactory::derived_data_event(
-                input.writer_id,
-                input,
-                HnDigestCondensedChunk::versioned_event_type(),
-                payload,
-            )])
-        })
-        .build(move |event: &ChainEvent| {
-            let chunk = HnDigestChunk::try_from_event(event).map_err(|err| {
-                HandlerError::Validation(format!("hn digest chunk decode failed: {err}"))
-            })?;
-
-            Ok(build_oversize_chunk_prompt(
-                &chunk,
-                interests_for_oversize_request.as_deref(),
             ))
         })
         .await?
@@ -550,43 +460,27 @@ async fn run_example_async() -> Result<()> {
                 ]);
                 formatter = transform!(HnStory -> FormattedStory => formatter);
                 batch = stateful!(FormattedStory -> HnTopStories => digest_seed);
-                split_to_budget = transform!(HnTopStories -> HnDigestSplitOut => splitter);
-                split_chunks = transform!(HnDigestSplitOut -> HnDigestChunk => typed_transforms::filter_map(|out: HnDigestSplitOut| match out {
-                    HnDigestSplitOut::Chunk(chunk) => Some(chunk),
-                    HnDigestSplitOut::Oversize(_) => None,
-                }));
-                split_oversize = transform!(HnDigestSplitOut -> HnDigestOversizeChunk => typed_transforms::filter_map(|out: HnDigestSplitOut| match out {
-                    HnDigestSplitOut::Oversize(chunk) => Some(chunk),
-                    HnDigestSplitOut::Chunk(_) => None,
-                }));
-                map_llm = async_transform!(HnDigestChunk -> HnDigestChunkSummary => map_llm_handler, [ai_circuit_breaker()]);
-                oversize_sub_split = transform!(HnDigestOversizeChunk -> HnDigestOversizeSplitOut => oversize_sub_splitter);
-                oversize_chunks = transform!(HnDigestOversizeSplitOut -> HnDigestChunk => typed_transforms::filter_map(|out: HnDigestOversizeSplitOut| match out {
-                    HnDigestOversizeSplitOut::Chunk(chunk) => Some(chunk),
-                    HnDigestOversizeSplitOut::Oversize(_) => None,
-                }));
-                oversize_loop = transform!(HnDigestOversizeSplitOut -> HnDigestOversizeChunk => typed_transforms::filter_map(|out: HnDigestOversizeSplitOut| match out {
-                    HnDigestOversizeSplitOut::Oversize(chunk) => Some(chunk),
-                    HnDigestOversizeSplitOut::Chunk(_) => None,
-                }));
-                oversize_map_llm = async_transform!(HnDigestChunk -> HnDigestCondensedChunk => oversize_map_llm_handler, [ai_circuit_breaker()]);
-                condensed_to_summary = transform!(HnDigestCondensedChunk -> HnDigestChunkSummary => typed_transforms::map(|condensed: HnDigestCondensedChunk| {
-                    let depth = condensed.decomposition_depth;
-                    HnDigestChunkSummary {
-                        group_index: condensed.parent_group_index,
-                        group_count: condensed.parent_group_count,
-                        budget_per_group: condensed.budget_per_group,
-                        estimated_tokens: condensed.estimated_tokens,
-                        oversize: true,
-                        decomposition_depth: depth,
-                        story_numbers: condensed.story_numbers,
-                        stories: condensed.stories,
-                        chat_prompt_user: format!(
-                            "Oversize backflow (decomposition_depth={depth})"
-                        ),
-                        output_markdown: condensed.condensed_markdown,
+                chunk_by_budget = transform!(HnTopStories -> ChunkEnvelope<FormattedStory> => chunker);
+                envelope_to_chunk = transform!(ChunkEnvelope<FormattedStory> -> HnDigestChunk => typed_transforms::map(move |envelope: ChunkEnvelope<FormattedStory>| {
+                    debug_assert_eq!(envelope.item_ordinals.len(), envelope.items.len());
+                    let story_numbers = envelope
+                        .item_ordinals
+                        .iter()
+                        .map(|ordinal| ordinal + 1)
+                        .collect::<Vec<_>>();
+
+                    HnDigestChunk {
+                        group_index: envelope.chunk_index,
+                        group_count: envelope.chunk_count,
+                        budget_per_group,
+                        estimated_tokens: envelope.estimated_tokens,
+                        oversize: envelope.decomposition_depth > 0,
+                        decomposition_depth: envelope.decomposition_depth,
+                        story_numbers,
+                        stories: envelope.items,
                     }
                 }));
+                map_llm = async_transform!(HnDigestChunk -> HnDigestChunkSummary => map_llm_handler, [ai_circuit_breaker()]);
                 reduce = stateful!(HnDigestChunkSummary -> HnDigestChunkSummaries => chunk_summaries);
                 digest_llm = async_transform!(HnDigestChunkSummaries -> HnDigestSummary => digest_llm_handler, [ai_circuit_breaker()]);
                 digest_summary = sink!(HnDigestSummary => sinks::console(format_digest_summary_for_console));
@@ -595,22 +489,10 @@ async fn run_example_async() -> Result<()> {
             topology: {
                 hn_stories |> formatter;
                 formatter |> batch;
-                batch |> split_to_budget;
-
-                split_to_budget |> split_chunks;
-                split_to_budget |> split_oversize;
-
-                split_chunks |> map_llm;
+                batch |> chunk_by_budget;
+                chunk_by_budget |> envelope_to_chunk;
+                envelope_to_chunk |> map_llm;
                 map_llm |> reduce;
-
-                split_oversize |> oversize_sub_split;
-                oversize_sub_split |> oversize_chunks;
-                oversize_chunks |> oversize_map_llm;
-                oversize_map_llm |> condensed_to_summary;
-                condensed_to_summary |> reduce;
-
-                oversize_sub_split |> oversize_loop;
-                oversize_sub_split <| oversize_loop;
 
                 reduce |> digest_llm;
                 digest_llm |> digest_summary;
@@ -695,257 +577,6 @@ fn format_digest_summary_for_console(summary: &HnDigestSummary) -> String {
     out
 }
 
-#[derive(Clone)]
-struct HnDigestSplitter {
-    estimator: Arc<dyn TokenEstimator>,
-    budget_per_group: TokenCount,
-    max_stories_per_group: Option<usize>,
-}
-
-impl std::fmt::Debug for HnDigestSplitter {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("HnDigestSplitter")
-            .field("estimator_source", &self.estimator.source())
-            .field("budget_per_group", &self.budget_per_group)
-            .field("max_stories_per_group", &self.max_stories_per_group)
-            .finish()
-    }
-}
-
-impl HnDigestSplitter {
-    fn new(
-        estimator: Arc<dyn TokenEstimator>,
-        budget_per_group: TokenCount,
-        max_stories_per_group: Option<usize>,
-    ) -> Self {
-        Self {
-            estimator,
-            budget_per_group,
-            max_stories_per_group,
-        }
-    }
-}
-
-#[async_trait]
-impl TransformHandler for HnDigestSplitter {
-    fn process(&self, event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
-        if !HnTopStories::event_type_matches(&event.event_type()) {
-            return Ok(Vec::new());
-        }
-
-        let seed = HnTopStories::try_from_event(&event).map_err(|err| {
-            HandlerError::Validation(format!("hn digest seed decode failed: {err}"))
-        })?;
-
-        let story_lines = seed
-            .stories
-            .iter()
-            .enumerate()
-            .map(|(idx, story)| render_story_line(idx + 1, story, 0))
-            .collect::<Vec<_>>();
-
-        let story_line_tokens = story_lines
-            .iter()
-            .map(|s| self.estimator.estimate_text(s).tokens)
-            .collect::<Vec<_>>();
-
-        let story_line_refs = story_lines.iter().map(|s| s.as_str()).collect::<Vec<_>>();
-        let mut groups = split_to_budget(
-            self.estimator.as_ref(),
-            &story_line_refs,
-            self.budget_per_group,
-        )
-        .map_err(|err| HandlerError::Validation(format!("split_to_budget failed: {err}")))?;
-
-        if let Some(max_stories_per_group) = self.max_stories_per_group {
-            groups =
-                enforce_max_group_story_count(groups, max_stories_per_group, &story_line_tokens);
-        }
-
-        let group_count = groups.len();
-        let mut outputs = Vec::with_capacity(group_count);
-
-        for (group_index, group) in groups.into_iter().enumerate() {
-            let mut story_numbers = Vec::with_capacity(group.indices.len());
-            let mut stories = Vec::with_capacity(group.indices.len());
-
-            for idx in group.indices {
-                let Some(story) = seed.stories.get(idx) else {
-                    return Err(HandlerError::Validation(format!(
-                        "split_to_budget returned out-of-range index: {idx}"
-                    )));
-                };
-                story_numbers.push(idx + 1);
-                stories.push(story.clone());
-            }
-
-            let out = if group.oversize {
-                let oversize = HnDigestOversizeChunk {
-                    parent_group_index: group_index,
-                    parent_group_count: group_count,
-                    budget_per_group: self.budget_per_group,
-                    estimated_tokens: group.estimated_tokens,
-                    story_numbers,
-                    stories,
-                    decomposition_depth: 0,
-                };
-
-                HnDigestSplitOut::Oversize(oversize)
-            } else {
-                let chunk = HnDigestChunk {
-                    group_index,
-                    group_count,
-                    budget_per_group: self.budget_per_group,
-                    estimated_tokens: group.estimated_tokens,
-                    oversize: false,
-                    decomposition_depth: 0,
-                    story_numbers,
-                    stories,
-                };
-
-                HnDigestSplitOut::Chunk(chunk)
-            };
-
-            let payload = serde_json::to_value(&out).map_err(|err| {
-                HandlerError::Validation(format!("hn digest split payload encode failed: {err}"))
-            })?;
-
-            outputs.push(ChainEventFactory::derived_data_event(
-                event.writer_id,
-                &event,
-                HnDigestSplitOut::versioned_event_type(),
-                payload,
-            ));
-        }
-
-        Ok(outputs)
-    }
-
-    async fn drain(&mut self) -> Result<(), HandlerError> {
-        Ok(())
-    }
-}
-
-#[derive(Clone)]
-struct HnDigestOversizeSubSplitter {
-    estimator: Arc<dyn TokenEstimator>,
-    budget_per_group: TokenCount,
-}
-
-impl std::fmt::Debug for HnDigestOversizeSubSplitter {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("HnDigestOversizeSubSplitter")
-            .field("estimator_source", &self.estimator.source())
-            .field("budget_per_group", &self.budget_per_group)
-            .finish()
-    }
-}
-
-impl HnDigestOversizeSubSplitter {
-    fn new(estimator: Arc<dyn TokenEstimator>, budget_per_group: TokenCount) -> Self {
-        Self {
-            estimator,
-            budget_per_group,
-        }
-    }
-}
-
-#[async_trait]
-impl TransformHandler for HnDigestOversizeSubSplitter {
-    fn process(&self, event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
-        if !HnDigestOversizeChunk::event_type_matches(&event.event_type()) {
-            return Ok(Vec::new());
-        }
-
-        let seed = HnDigestOversizeChunk::try_from_event(&event).map_err(|err| {
-            HandlerError::Validation(format!("hn digest oversize chunk decode failed: {err}"))
-        })?;
-
-        let story_lines = seed
-            .stories
-            .iter()
-            .zip(seed.story_numbers.iter())
-            .map(|(story, n)| render_story_line(*n, story, seed.decomposition_depth))
-            .collect::<Vec<_>>();
-
-        let story_line_refs = story_lines.iter().map(|s| s.as_str()).collect::<Vec<_>>();
-        let groups = split_to_budget(
-            self.estimator.as_ref(),
-            &story_line_refs,
-            self.budget_per_group,
-        )
-        .map_err(|err| HandlerError::Validation(format!("split_to_budget failed: {err}")))?;
-
-        let mut outputs = Vec::new();
-
-        for group in groups {
-            let mut story_numbers = Vec::with_capacity(group.indices.len());
-            let mut stories = Vec::with_capacity(group.indices.len());
-
-            for idx in group.indices {
-                let Some(n) = seed.story_numbers.get(idx) else {
-                    return Err(HandlerError::Validation(format!(
-                        "split_to_budget returned out-of-range index: {idx}"
-                    )));
-                };
-                let Some(story) = seed.stories.get(idx) else {
-                    return Err(HandlerError::Validation(format!(
-                        "split_to_budget returned out-of-range index: {idx}"
-                    )));
-                };
-                story_numbers.push(*n);
-                stories.push(story.clone());
-            }
-
-            let out = if group.oversize {
-                let oversize = HnDigestOversizeChunk {
-                    parent_group_index: seed.parent_group_index,
-                    parent_group_count: seed.parent_group_count,
-                    budget_per_group: seed.budget_per_group,
-                    estimated_tokens: group.estimated_tokens,
-                    story_numbers,
-                    stories,
-                    decomposition_depth: seed.decomposition_depth.saturating_add(1),
-                };
-
-                HnDigestOversizeSplitOut::Oversize(oversize)
-            } else {
-                let chunk = HnDigestChunk {
-                    group_index: seed.parent_group_index,
-                    group_count: seed.parent_group_count,
-                    budget_per_group: seed.budget_per_group,
-                    estimated_tokens: group.estimated_tokens,
-                    oversize: false,
-                    decomposition_depth: seed.decomposition_depth,
-                    story_numbers,
-                    stories,
-                };
-
-                HnDigestOversizeSplitOut::Chunk(chunk)
-            };
-
-            let payload = serde_json::to_value(&out).map_err(|err| {
-                HandlerError::Validation(format!(
-                    "hn digest oversize split payload encode failed: {err}"
-                ))
-            })?;
-
-            outputs.push(ChainEventFactory::derived_data_event(
-                event.writer_id,
-                &event,
-                HnDigestOversizeSplitOut::versioned_event_type(),
-                payload,
-            ));
-        }
-
-        Ok(outputs)
-    }
-
-    async fn drain(&mut self) -> Result<(), HandlerError> {
-        Ok(())
-    }
-}
-
 fn build_chunk_prompt(chunk: &HnDigestChunk, interests: Option<&str>) -> String {
     let mut out = String::new();
 
@@ -990,77 +621,6 @@ fn build_chunk_prompt(chunk: &HnDigestChunk, interests: Option<&str>) -> String 
         out.push('\n');
     }
     out.push_str("```\n");
-
-    out
-}
-
-fn build_oversize_chunk_prompt(chunk: &HnDigestChunk, interests: Option<&str>) -> String {
-    let mut out = String::new();
-
-    if let Some(interests) = interests {
-        out.push_str("My interests: ");
-        out.push_str(interests.trim());
-        out.push_str("\n\n");
-    }
-
-    out.push_str(
-        "Summarise the following stories very aggressively so they can be reduced later.\n",
-    );
-    out.push_str("- Do not invent facts that are not implied by the title.\n");
-    out.push_str("- Cite stories only by number like (12); do not paste URLs.\n");
-    out.push_str("- Keep the output short.\n\n");
-
-    out.push_str("Output format:\n");
-    out.push_str(&format!(
-        "## Chunk {}/{}\n",
-        chunk.group_index + 1,
-        chunk.group_count
-    ));
-    out.push_str("- (n) 1 sentence\n");
-    out.push_str("- (n) 1 sentence\n\n");
-
-    out.push_str("Input stories (numbered; do not repeat):\n");
-    out.push_str("```text\n");
-    for (n, story) in chunk.story_numbers.iter().zip(chunk.stories.iter()) {
-        out.push_str(&render_story_line(*n, story, chunk.decomposition_depth));
-        out.push('\n');
-    }
-    out.push_str("```\n");
-
-    out
-}
-
-fn enforce_max_group_story_count(
-    groups: Vec<SplitGroup>,
-    max_stories_per_group: usize,
-    item_tokens: &[TokenCount],
-) -> Vec<SplitGroup> {
-    if max_stories_per_group == 0 {
-        return groups;
-    }
-
-    let mut out = Vec::new();
-    for group in groups {
-        if group.oversize || group.indices.len() <= max_stories_per_group {
-            out.push(group);
-            continue;
-        }
-
-        for indices in group.indices.chunks(max_stories_per_group) {
-            let mut estimated_tokens = TokenCount::ZERO;
-            for idx in indices {
-                if let Some(tokens) = item_tokens.get(*idx) {
-                    estimated_tokens = estimated_tokens.saturating_add(*tokens);
-                }
-            }
-
-            out.push(SplitGroup {
-                indices: indices.to_vec(),
-                estimated_tokens,
-                oversize: false,
-            });
-        }
-    }
 
     out
 }
