@@ -2030,6 +2030,166 @@ impl PrometheusExporter {
             writeln!(output)?;
         }
 
+        // AI chunking metrics (FLOWIP-086z).
+        if !snapshot.ai_chunking_metrics.is_empty() {
+            writeln!(
+                output,
+                "# HELP obzenflow_ai_chunking_jobs_total Total AI chunk planning jobs by stage"
+            )?;
+            writeln!(output, "# TYPE obzenflow_ai_chunking_jobs_total counter")?;
+            for (stage_id, metrics) in &snapshot.ai_chunking_metrics {
+                if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
+                    writeln!(
+                        output,
+                        "obzenflow_ai_chunking_jobs_total{{{}}} {}",
+                        format_stage_labels(stage_id, metadata),
+                        metrics.jobs_total
+                    )?;
+                }
+            }
+            writeln!(output)?;
+
+            writeln!(
+                output,
+                "# HELP obzenflow_ai_chunking_input_items_total Total input items seen by chunk planner"
+            )?;
+            writeln!(
+                output,
+                "# TYPE obzenflow_ai_chunking_input_items_total counter"
+            )?;
+            for (stage_id, metrics) in &snapshot.ai_chunking_metrics {
+                if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
+                    writeln!(
+                        output,
+                        "obzenflow_ai_chunking_input_items_total{{{}}} {}",
+                        format_stage_labels(stage_id, metadata),
+                        metrics.input_items_total
+                    )?;
+                }
+            }
+            writeln!(output)?;
+
+            writeln!(
+                output,
+                "# HELP obzenflow_ai_chunking_planned_items_total Total planned items emitted into chunks"
+            )?;
+            writeln!(
+                output,
+                "# TYPE obzenflow_ai_chunking_planned_items_total counter"
+            )?;
+            for (stage_id, metrics) in &snapshot.ai_chunking_metrics {
+                if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
+                    writeln!(
+                        output,
+                        "obzenflow_ai_chunking_planned_items_total{{{}}} {}",
+                        format_stage_labels(stage_id, metadata),
+                        metrics.planned_items_total
+                    )?;
+                }
+            }
+            writeln!(output)?;
+
+            writeln!(
+                output,
+                "# HELP obzenflow_ai_chunking_excluded_items_total Total excluded items (degraded success)"
+            )?;
+            writeln!(
+                output,
+                "# TYPE obzenflow_ai_chunking_excluded_items_total counter"
+            )?;
+            for (stage_id, metrics) in &snapshot.ai_chunking_metrics {
+                if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
+                    writeln!(
+                        output,
+                        "obzenflow_ai_chunking_excluded_items_total{{{}}} {}",
+                        format_stage_labels(stage_id, metadata),
+                        metrics.excluded_items_total
+                    )?;
+                }
+            }
+            writeln!(output)?;
+
+            writeln!(
+                output,
+                "# HELP obzenflow_ai_chunking_chunks_emitted_total Total chunks emitted by chunk planner"
+            )?;
+            writeln!(
+                output,
+                "# TYPE obzenflow_ai_chunking_chunks_emitted_total counter"
+            )?;
+            for (stage_id, metrics) in &snapshot.ai_chunking_metrics {
+                if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
+                    writeln!(
+                        output,
+                        "obzenflow_ai_chunking_chunks_emitted_total{{{}}} {}",
+                        format_stage_labels(stage_id, metadata),
+                        metrics.chunks_emitted_total
+                    )?;
+                }
+            }
+            writeln!(output)?;
+
+            writeln!(
+                output,
+                "# HELP obzenflow_ai_chunking_rerender_attempts_total Total oversize rerender attempts by stage"
+            )?;
+            writeln!(
+                output,
+                "# TYPE obzenflow_ai_chunking_rerender_attempts_total counter"
+            )?;
+            for (stage_id, metrics) in &snapshot.ai_chunking_metrics {
+                if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
+                    writeln!(
+                        output,
+                        "obzenflow_ai_chunking_rerender_attempts_total{{{}}} {}",
+                        format_stage_labels(stage_id, metadata),
+                        metrics.rerender_attempts_total
+                    )?;
+                }
+            }
+            writeln!(output)?;
+
+            writeln!(
+                output,
+                "# HELP obzenflow_ai_chunking_max_depth_reached Maximum decomposition depth reached by stage"
+            )?;
+            writeln!(
+                output,
+                "# TYPE obzenflow_ai_chunking_max_depth_reached gauge"
+            )?;
+            for (stage_id, metrics) in &snapshot.ai_chunking_metrics {
+                if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
+                    writeln!(
+                        output,
+                        "obzenflow_ai_chunking_max_depth_reached{{{}}} {}",
+                        format_stage_labels(stage_id, metadata),
+                        metrics.max_depth_reached
+                    )?;
+                }
+            }
+            writeln!(output)?;
+
+            writeln!(
+                output,
+                "# HELP obzenflow_ai_chunking_budget_overhead_tokens Estimated chat budget overhead tokens (latest job)"
+            )?;
+            writeln!(
+                output,
+                "# TYPE obzenflow_ai_chunking_budget_overhead_tokens gauge"
+            )?;
+            for (stage_id, metrics) in &snapshot.ai_chunking_metrics {
+                if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
+                    writeln!(
+                        output,
+                        "obzenflow_ai_chunking_budget_overhead_tokens{{{}}} {}",
+                        format_stage_labels(stage_id, metadata),
+                        metrics.budget_overhead_tokens
+                    )?;
+                }
+            }
+            writeln!(output)?;
+        }
+
         Ok(())
     }
 
@@ -2300,6 +2460,7 @@ mod tests {
     use super::*;
     use obzenflow_core::event::ingestion::IngestionTelemetrySnapshot;
     use obzenflow_core::event::observability::{HttpPullState, HttpPullTelemetry, WaitReason};
+    use obzenflow_core::metrics::AiChunkingMetricsSnapshot;
     use std::collections::HashMap;
 
     #[test]
@@ -2447,6 +2608,62 @@ mod tests {
         )));
         assert!(output.contains(&format!(
             "http_pull_events_decoded_total{{flow=\"order_flow\",stage=\"http_pull\",stage_id=\"{stage_id}\"}} 42"
+        )));
+    }
+
+    #[test]
+    fn test_ai_chunking_metrics_rendered() {
+        let exporter = PrometheusExporter::new();
+
+        let stage_id = StageId::new();
+        let mut stage_metadata = HashMap::new();
+        stage_metadata.insert(
+            stage_id,
+            StageMetadata {
+                name: "chunk".to_string(),
+                flow_name: "order_flow".to_string(),
+                stage_type: obzenflow_core::event::context::StageType::Transform,
+                reference_mode: None,
+                flow_id: None,
+            },
+        );
+
+        let mut ai_chunking_metrics = HashMap::new();
+        ai_chunking_metrics.insert(
+            stage_id,
+            AiChunkingMetricsSnapshot {
+                jobs_total: 2,
+                input_items_total: 10,
+                planned_items_total: 9,
+                excluded_items_total: 1,
+                chunks_emitted_total: 3,
+                rerender_attempts_total: 4,
+                max_depth_reached: 2,
+                budget_overhead_tokens: 123,
+            },
+        );
+
+        let snapshot = AppMetricsSnapshot {
+            stage_metadata,
+            ai_chunking_metrics,
+            ..Default::default()
+        };
+
+        exporter.update_app_metrics(snapshot).unwrap();
+        let output = exporter.render_metrics().unwrap();
+
+        let stage_id = escape_label(&stage_id.to_string());
+        assert!(output.contains("# TYPE obzenflow_ai_chunking_jobs_total counter"));
+        assert!(output.contains(&format!(
+            "obzenflow_ai_chunking_jobs_total{{flow=\"order_flow\",stage=\"chunk\",stage_id=\"{stage_id}\"}} 2"
+        )));
+        assert!(output.contains("# TYPE obzenflow_ai_chunking_max_depth_reached gauge"));
+        assert!(output.contains(&format!(
+            "obzenflow_ai_chunking_max_depth_reached{{flow=\"order_flow\",stage=\"chunk\",stage_id=\"{stage_id}\"}} 2"
+        )));
+        assert!(output.contains("# TYPE obzenflow_ai_chunking_budget_overhead_tokens gauge"));
+        assert!(output.contains(&format!(
+            "obzenflow_ai_chunking_budget_overhead_tokens{{flow=\"order_flow\",stage=\"chunk\",stage_id=\"{stage_id}\"}} 123"
         )));
     }
 }

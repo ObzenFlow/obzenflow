@@ -162,6 +162,20 @@ mod tests {
     }
 
     #[derive(Clone, Debug)]
+    struct UntypedTransform;
+
+    #[async_trait]
+    impl TransformHandler for UntypedTransform {
+        fn process(&self, _event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
+            Ok(vec![])
+        }
+
+        async fn drain(&mut self) -> Result<(), HandlerError> {
+            Ok(())
+        }
+    }
+
+    #[derive(Clone, Debug)]
     struct ExactAsyncTransform;
 
     impl TransformTyping for ExactAsyncTransform {
@@ -171,6 +185,20 @@ mod tests {
 
     #[async_trait]
     impl AsyncTransformHandler for ExactAsyncTransform {
+        async fn process(&self, _event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
+            Ok(vec![])
+        }
+
+        async fn drain(&mut self) -> Result<(), HandlerError> {
+            Ok(())
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct UntypedAsyncTransform;
+
+    #[async_trait]
+    impl AsyncTransformHandler for UntypedAsyncTransform {
         async fn process(&self, _event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
             Ok(vec![])
         }
@@ -326,6 +354,14 @@ mod tests {
         assert_eq!(transform_meta.input_type, exact("InputEvent"));
         assert_eq!(transform_meta.output_type, exact("OutputEvent"));
 
+        let untyped_transform = crate::transform!(
+            name: "untyped_transform",
+            InputEvent -> OutputEvent => UntypedTransform
+        );
+        let untyped_transform_meta = untyped_transform.typing_metadata().unwrap();
+        assert_eq!(untyped_transform_meta.input_type, exact("InputEvent"));
+        assert_eq!(untyped_transform_meta.output_type, exact("OutputEvent"));
+
         let async_transform = crate::async_transform!(
             name: "async_transform",
             InputEvent -> OutputEvent => ExactAsyncTransform
@@ -333,6 +369,17 @@ mod tests {
         let async_transform_meta = async_transform.typing_metadata().unwrap();
         assert_eq!(async_transform_meta.input_type, exact("InputEvent"));
         assert_eq!(async_transform_meta.output_type, exact("OutputEvent"));
+
+        let untyped_async_transform = crate::async_transform!(
+            name: "untyped_async_transform",
+            InputEvent -> OutputEvent => UntypedAsyncTransform
+        );
+        let untyped_async_transform_meta = untyped_async_transform.typing_metadata().unwrap();
+        assert_eq!(untyped_async_transform_meta.input_type, exact("InputEvent"));
+        assert_eq!(
+            untyped_async_transform_meta.output_type,
+            exact("OutputEvent")
+        );
 
         let stateful = crate::stateful!(
             name: "stateful",

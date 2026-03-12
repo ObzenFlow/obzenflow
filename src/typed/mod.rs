@@ -8,6 +8,7 @@
 //! constructing typed stage handlers. They are intended to be used on the
 //! right-hand side of typed stage macros.
 
+pub mod ai;
 pub mod joins;
 pub mod sinks;
 pub mod sources;

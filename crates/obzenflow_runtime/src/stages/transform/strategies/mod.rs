@@ -48,6 +48,7 @@
 //! All helpers implement `TransformHandler` and work seamlessly with the
 //! existing `transform!` macro from the DSL.
 
+pub mod ai_chunking;
 pub mod async_map;
 pub mod async_try_map_with;
 pub mod filter;
@@ -56,6 +57,7 @@ pub mod map;
 pub mod try_map;
 pub mod try_map_with;
 
+pub use ai_chunking::{ChunkByBudgetBuilder, ChunkByBudgetTyped};
 pub use async_map::{AsyncMap, AsyncMapTyped};
 pub use async_try_map_with::{AsyncTryMapWith, AsyncTryMapWithTyped};
 pub use filter::{Filter, FilterTyped};

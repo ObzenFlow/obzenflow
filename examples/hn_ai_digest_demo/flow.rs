@@ -23,10 +23,8 @@ use obzenflow_infra::application::{FlowApplication, LogLevel};
 use obzenflow_infra::http_client::default_http_client;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
-use obzenflow_runtime::stages::common::handlers::{AsyncTransformHandler, TransformHandler};
-use obzenflow_runtime::typing::TransformTyping;
+use obzenflow_runtime::stages::common::handlers::TransformHandler;
 use serde::{Deserialize, Serialize};
-use std::marker::PhantomData;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -356,7 +354,7 @@ async fn run_example_async() -> Result<()> {
     let oversize_sub_splitter =
         HnDigestOversizeSubSplitter::new(estimator.clone(), budget_per_group);
 
-    let map_llm = make_llm_builder()
+    let map_llm_handler = make_llm_builder()
         .system(system_prompt.clone())
         .temperature(0.2)
         .max_tokens(800)
@@ -404,9 +402,7 @@ async fn run_example_async() -> Result<()> {
         .await?
         .with_resolved_estimator(estimator_resolution.clone());
 
-    let map_llm_handler = TypedChatTransform::<HnDigestChunk, HnDigestChunkSummary>::new(map_llm);
-
-    let oversize_map_llm = make_llm_builder()
+    let oversize_map_llm_handler = make_llm_builder()
         .system(system_prompt.clone())
         .temperature(0.1)
         .max_tokens(400)
@@ -452,9 +448,6 @@ async fn run_example_async() -> Result<()> {
         .await?
         .with_resolved_estimator(estimator_resolution.clone());
 
-    let oversize_map_llm_handler =
-        TypedChatTransform::<HnDigestChunk, HnDigestCondensedChunk>::new(oversize_map_llm);
-
     let chunk_summaries = typed_stateful::reduce(
         HnDigestChunkSummaries::default(),
         |acc, summary: &HnDigestChunkSummary| {
@@ -466,7 +459,7 @@ async fn run_example_async() -> Result<()> {
     )
     .emit_on_eof();
 
-    let digest_llm = make_llm_builder()
+    let digest_llm_handler = make_llm_builder()
         .system(system_prompt)
         .temperature(0.2)
         .max_tokens(800)
@@ -540,9 +533,6 @@ async fn run_example_async() -> Result<()> {
         })
         .await?
         .with_resolved_estimator(estimator_resolution.clone());
-
-    let digest_llm_handler =
-        TypedChatTransform::<HnDigestChunkSummaries, HnDigestSummary>::new(digest_llm);
 
     FlowApplication::builder()
         .with_log_level(LogLevel::Info)
@@ -736,11 +726,6 @@ impl HnDigestSplitter {
     }
 }
 
-impl TransformTyping for HnDigestSplitter {
-    type Input = HnTopStories;
-    type Output = HnDigestSplitOut;
-}
-
 #[async_trait]
 impl TransformHandler for HnDigestSplitter {
     fn process(&self, event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
@@ -865,11 +850,6 @@ impl HnDigestOversizeSubSplitter {
     }
 }
 
-impl TransformTyping for HnDigestOversizeSubSplitter {
-    type Input = HnDigestOversizeChunk;
-    type Output = HnDigestOversizeSplitOut;
-}
-
 #[async_trait]
 impl TransformHandler for HnDigestOversizeSubSplitter {
     fn process(&self, event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
@@ -963,41 +943,6 @@ impl TransformHandler for HnDigestOversizeSubSplitter {
 
     async fn drain(&mut self) -> Result<(), HandlerError> {
         Ok(())
-    }
-}
-
-#[derive(Clone, Debug)]
-struct TypedChatTransform<In, Out> {
-    inner: ChatTransform,
-    _phantom: PhantomData<(In, Out)>,
-}
-
-impl<In, Out> TypedChatTransform<In, Out> {
-    fn new(inner: ChatTransform) -> Self {
-        Self {
-            inner,
-            _phantom: PhantomData,
-        }
-    }
-}
-
-impl<In, Out> TransformTyping for TypedChatTransform<In, Out> {
-    type Input = In;
-    type Output = Out;
-}
-
-#[async_trait]
-impl<In, Out> AsyncTransformHandler for TypedChatTransform<In, Out>
-where
-    In: Send + Sync + 'static,
-    Out: Send + Sync + 'static,
-{
-    async fn process(&self, event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
-        self.inner.process(event).await
-    }
-
-    async fn drain(&mut self) -> Result<(), HandlerError> {
-        self.inner.drain().await
     }
 }
 
