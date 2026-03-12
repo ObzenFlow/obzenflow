@@ -13,13 +13,19 @@
 pub use obzenflow_adapters::ai::{ChatTransform, EmbeddingTransform};
 
 pub use obzenflow_core::ai::{
-    remaining_budget, split_to_budget, EstimateSource, HeuristicTokenEstimator,
-    ResolvedTokenEstimator, SplitGroup, TokenCount, TokenEstimate, TokenEstimationError,
-    TokenEstimator, TokenEstimatorFallbackReason, TokenEstimatorResolutionInfo,
+    plan_chat_input_budget, plan_chunks_by_budget, remaining_budget, split_to_budget,
+    ChatBudgetError, ChatBudgetMessage, ChatBudgetPlan, ChatBudgetSpec, ChatBudgetTemplate,
+    ChatModelProfile, ChunkEnvelope, ChunkExclusionReason, ChunkPlan, ChunkPlanningConfig,
+    ChunkPlanningError, ChunkPlanningStats, ChunkPlanningSummary, ChunkRenderContext,
+    ContextWindowSource, EstimateSource, HeuristicTokenEstimator, OversizeExhaustion,
+    OversizePolicy, ResolvedTokenEstimator, SplitGroup, TokenCount, TokenEstimate,
+    TokenEstimationError, TokenEstimator, TokenEstimatorFallbackReason,
+    TokenEstimatorResolutionInfo,
 };
 
 pub use obzenflow_infra::ai::{
-    boxed_estimator_for_model, estimator_for_model, resolve_estimator_for_model,
+    boxed_estimator_for_model, estimator_for_model, resolve_chat_model_profile,
+    resolve_estimator_for_model,
 };
 
 #[cfg(feature = "ai")]

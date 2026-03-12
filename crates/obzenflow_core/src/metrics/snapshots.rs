@@ -170,6 +170,11 @@ pub struct AppMetricsSnapshot {
     /// Keyed by stage ID (labels attach via `stage_metadata`).
     pub http_pull_metrics: HashMap<StageId, crate::event::observability::HttpPullTelemetry>,
 
+    /// AI chunking metrics derived from `ai_chunking.snapshot` wide events (FLOWIP-086z).
+    ///
+    /// Keyed by stage ID.
+    pub ai_chunking_metrics: HashMap<StageId, AiChunkingMetricsSnapshot>,
+
     /// Flow-level metrics (if journey events are implemented)
     pub flow_metrics: Option<FlowMetricsSnapshot>,
 
@@ -234,6 +239,19 @@ pub struct InfraMetricsSnapshot {
 
     /// Stage-level infrastructure metrics
     pub stage_metrics: HashMap<StageId, StageInfraMetrics>,
+}
+
+/// Aggregated AI chunk planning metrics per stage.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AiChunkingMetricsSnapshot {
+    pub jobs_total: u64,
+    pub input_items_total: u64,
+    pub planned_items_total: u64,
+    pub excluded_items_total: u64,
+    pub chunks_emitted_total: u64,
+    pub rerender_attempts_total: u64,
+    pub max_depth_reached: u32,
+    pub budget_overhead_tokens: u64,
 }
 
 /// Histogram data for a single metric
@@ -440,6 +458,7 @@ impl Default for AppMetricsSnapshot {
             contract_metrics: ContractMetricsSnapshot::default(),
             ingestion_metrics: HashMap::new(),
             http_pull_metrics: HashMap::new(),
+            ai_chunking_metrics: HashMap::new(),
             flow_metrics: None,
             stage_metadata: HashMap::new(),
             stage_first_event_time: HashMap::new(),

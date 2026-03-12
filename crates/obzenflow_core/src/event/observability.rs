@@ -3,6 +3,7 @@
 // https://obzenflow.dev
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 /// HTTP pull telemetry snapshot emitted via `MetricsLifecycle::Custom` wide events (FLOWIP-084e).
 ///
@@ -72,4 +73,23 @@ pub enum WaitReason {
     RateLimit,
     PollInterval,
     Backoff,
+}
+
+/// AI chunking planning snapshot emitted via `MetricsLifecycle::Custom` wide events (FLOWIP-086z).
+///
+/// This is written to the chunk stage data journal under `ai_chunking.snapshot` and is intended
+/// for durable observability, journal tailing, and metrics aggregation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AiChunkingSnapshot {
+    pub input_items_total: usize,
+    pub planned_items_total: usize,
+    pub excluded_items_total: usize,
+    pub chunk_count: usize,
+    pub rerender_attempts_total: u64,
+    pub max_decomposition_depth_reached: u32,
+    pub budget_overhead_tokens: u64,
+    pub oversize_policy: String,
+    pub exclusions_by_reason: HashMap<String, u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub excluded_items: Option<Vec<usize>>,
 }

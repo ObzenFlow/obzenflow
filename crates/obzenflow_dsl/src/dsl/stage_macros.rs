@@ -911,6 +911,8 @@ macro_rules! __obzenflow_transform_typed {
     // ── mixed input, real handler ──
     (input = mixed, output = $out:ty, name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*]) => {{
         let __handler = $handler;
+        let __handler =
+            $crate::dsl::typing::BoundTransform::<::obzenflow_runtime::typing::MixedInput, $out, _>::new(__handler);
         ::obzenflow_runtime::typing::assert_transform_output::<_, $out>(&__handler);
         let __metadata = $crate::dsl::typing::StageTypingMetadata::transform(
             $crate::dsl::typing::TypeHint::Mixed,
@@ -953,6 +955,8 @@ macro_rules! __obzenflow_transform_typed {
     // ── exact input, real handler ──
     (input = exact($in:ty), output = $out:ty, name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*]) => {{
         let __handler = $handler;
+        let __handler =
+            $crate::dsl::typing::BoundTransform::<$in, $out, _>::new(__handler);
         ::obzenflow_runtime::typing::assert_transform_contract::<_, $in, $out>(&__handler);
         let __metadata = $crate::dsl::typing::StageTypingMetadata::transform(
             $crate::dsl::typing::TypeHint::exact(stringify!($in)),
@@ -1208,6 +1212,8 @@ macro_rules! __obzenflow_async_transform_typed {
     // ── mixed input, real handler ──
     (input = mixed, output = $out:ty, name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*]) => {{
         let __handler = $handler;
+        let __handler =
+            $crate::dsl::typing::BoundAsyncTransform::<::obzenflow_runtime::typing::MixedInput, $out, _>::new(__handler);
         ::obzenflow_runtime::typing::assert_transform_output::<_, $out>(&__handler);
         let __metadata = $crate::dsl::typing::StageTypingMetadata::transform(
             $crate::dsl::typing::TypeHint::Mixed,
@@ -1250,6 +1256,8 @@ macro_rules! __obzenflow_async_transform_typed {
     // ── exact input, real handler ──
     (input = exact($in:ty), output = $out:ty, name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*]) => {{
         let __handler = $handler;
+        let __handler =
+            $crate::dsl::typing::BoundAsyncTransform::<$in, $out, _>::new(__handler);
         ::obzenflow_runtime::typing::assert_transform_contract::<_, $in, $out>(&__handler);
         let __metadata = $crate::dsl::typing::StageTypingMetadata::transform(
             $crate::dsl::typing::TypeHint::exact(stringify!($in)),

@@ -8,20 +8,33 @@
 //! request/response DTOs, client ports, structured output helpers, and stable
 //! observability/hash conventions.
 
+mod chat_budget;
+mod chunking;
 mod error;
 mod hashing;
+mod model_profile;
 mod observability;
 mod ports;
 mod structured_output;
 mod token_estimation;
 mod types;
 
+pub use chat_budget::{
+    plan_chat_input_budget, ChatBudgetError, ChatBudgetMessage, ChatBudgetPlan, ChatBudgetSpec,
+    ChatBudgetTemplate,
+};
+pub use chunking::{
+    plan_chunks_by_budget, ChunkEnvelope, ChunkExclusionReason, ChunkPlan, ChunkPlanningConfig,
+    ChunkPlanningError, ChunkPlanningStats, ChunkPlanningSummary, ChunkRenderContext,
+    OversizeExhaustion, OversizePolicy,
+};
 pub use error::{AiClientError, StructuredOutputError};
 pub use hashing::{
     params_hash_for_chat, params_hash_for_embedding, prompt_hash_for_chat,
     prompt_hash_for_embedding_inputs, schema_hash_for_response_format, schema_hash_from_json,
     schema_hash_from_text, AiHashError, LLM_HASH_VERSION_SHA256_V1,
 };
+pub use model_profile::{ChatModelProfile, ContextWindowSource};
 pub use observability::{
     attach_llm_observability, read_llm_observability, LlmCacheInfo, LlmCacheMode, LlmHashes,
     LlmObservability, LlmObservabilityError, LLM_METADATA_KEY,

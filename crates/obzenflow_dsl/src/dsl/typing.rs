@@ -417,6 +417,111 @@ where
     }
 }
 
+// ============================================================================
+// Contract-bound handler wrappers (FLOWIP-086z)
+// ============================================================================
+
+/// Wrapper that binds a declared `In -> Out` contract to an arbitrary transform handler.
+///
+/// The handler only needs to implement [`TransformHandler`]. The typed stage macros use this
+/// wrapper internally so application handlers do not have to implement `TransformTyping`.
+#[doc(hidden)]
+#[derive(Clone)]
+pub struct BoundTransform<In, Out, H> {
+    inner: H,
+    _phantom: PhantomData<(In, Out)>,
+}
+
+impl<In, Out, H> BoundTransform<In, Out, H> {
+    pub fn new(inner: H) -> Self {
+        Self {
+            inner,
+            _phantom: PhantomData,
+        }
+    }
+}
+
+impl<In, Out, H> fmt::Debug for BoundTransform<In, Out, H>
+where
+    H: fmt::Debug,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BoundTransform")
+            .field("inner", &self.inner)
+            .finish()
+    }
+}
+
+impl<In, Out, H> TransformTyping for BoundTransform<In, Out, H> {
+    type Input = In;
+    type Output = Out;
+}
+
+#[async_trait]
+impl<In, Out, H> TransformHandler for BoundTransform<In, Out, H>
+where
+    In: Send + Sync + 'static,
+    Out: Send + Sync + 'static,
+    H: TransformHandler + Send + Sync,
+{
+    fn process(&self, event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
+        self.inner.process(event)
+    }
+
+    async fn drain(&mut self) -> Result<(), HandlerError> {
+        self.inner.drain().await
+    }
+}
+
+/// Wrapper that binds a declared `In -> Out` contract to an arbitrary async transform handler.
+#[doc(hidden)]
+#[derive(Clone)]
+pub struct BoundAsyncTransform<In, Out, H> {
+    inner: H,
+    _phantom: PhantomData<(In, Out)>,
+}
+
+impl<In, Out, H> BoundAsyncTransform<In, Out, H> {
+    pub fn new(inner: H) -> Self {
+        Self {
+            inner,
+            _phantom: PhantomData,
+        }
+    }
+}
+
+impl<In, Out, H> fmt::Debug for BoundAsyncTransform<In, Out, H>
+where
+    H: fmt::Debug,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BoundAsyncTransform")
+            .field("inner", &self.inner)
+            .finish()
+    }
+}
+
+impl<In, Out, H> TransformTyping for BoundAsyncTransform<In, Out, H> {
+    type Input = In;
+    type Output = Out;
+}
+
+#[async_trait]
+impl<In, Out, H> AsyncTransformHandler for BoundAsyncTransform<In, Out, H>
+where
+    In: Send + Sync + 'static,
+    Out: Send + Sync + 'static,
+    H: AsyncTransformHandler + Send + Sync,
+{
+    async fn process(&self, event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
+        self.inner.process(event).await
+    }
+
+    async fn drain(&mut self) -> Result<(), HandlerError> {
+        self.inner.drain().await
+    }
+}
+
 pub struct PlaceholderStateful<In, Out> {
     _phantom: PhantomData<(In, Out)>,
     message: Option<&'static str>,

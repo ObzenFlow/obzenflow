@@ -213,6 +213,9 @@ pub struct MetricsStore {
     // HTTP pull telemetry (FLOWIP-084e)
     pub http_pull_metrics: HashMap<StageId, HttpPullTelemetry>,
 
+    // AI chunking telemetry (FLOWIP-086z)
+    pub ai_chunking_metrics: HashMap<StageId, obzenflow_core::metrics::AiChunkingMetricsSnapshot>,
+
     // System event tracking (FLOWIP-059b - essential events only)
     // Track all states each stage has been in: (StageId, state_name) -> true
     pub stage_lifecycle_states: HashMap<(StageId, String), bool>,
@@ -891,6 +894,9 @@ impl MetricsAggregatorContext {
         // FLOWIP-084e: HTTP pull telemetry (wide events)
         snapshot.http_pull_metrics = store.http_pull_metrics.clone();
 
+        // FLOWIP-086z: AI chunking telemetry (wide events)
+        snapshot.ai_chunking_metrics = store.ai_chunking_metrics.clone();
+
         // FLOWIP-059b: Add lifecycle states
         snapshot.stage_lifecycle_states = store.stage_lifecycle_states.clone();
         snapshot.pipeline_state = store.pipeline_state.clone();
@@ -1456,6 +1462,40 @@ impl FsmAction for MetricsAggregatorAction {
                             Err(e) => tracing::warn!(
                                 error = %e,
                                 "Failed to decode http_pull.snapshot payload; ignoring"
+                            ),
+                        }
+                    } else if name == "ai_chunking.snapshot" {
+                        match serde_json::from_value::<
+                            obzenflow_core::event::observability::AiChunkingSnapshot,
+                        >(value.clone())
+                        {
+                            Ok(snapshot) => {
+                                let entry = store.ai_chunking_metrics.entry(stage_id).or_default();
+                                entry.jobs_total = entry.jobs_total.saturating_add(1);
+                                entry.input_items_total = entry
+                                    .input_items_total
+                                    .saturating_add(snapshot.input_items_total as u64);
+                                entry.planned_items_total = entry
+                                    .planned_items_total
+                                    .saturating_add(snapshot.planned_items_total as u64);
+                                entry.excluded_items_total = entry
+                                    .excluded_items_total
+                                    .saturating_add(snapshot.excluded_items_total as u64);
+                                entry.chunks_emitted_total = entry
+                                    .chunks_emitted_total
+                                    .saturating_add(snapshot.chunk_count as u64);
+                                entry.rerender_attempts_total = entry
+                                    .rerender_attempts_total
+                                    .saturating_add(snapshot.rerender_attempts_total);
+                                entry.max_depth_reached = entry
+                                    .max_depth_reached
+                                    .max(snapshot.max_decomposition_depth_reached);
+                                // Gauge: overwrite with latest.
+                                entry.budget_overhead_tokens = snapshot.budget_overhead_tokens;
+                            }
+                            Err(e) => tracing::warn!(
+                                error = %e,
+                                "Failed to decode ai_chunking.snapshot payload; ignoring"
                             ),
                         }
                     }
