@@ -75,8 +75,8 @@ async fn measure_waiting_for_gun_cpu() -> anyhow::Result<f64> {
         middleware: [],
 
         stages: {
-            src = source!("source" => IdleSource::new());
-            snk = sink!("sink" => NoopSink);
+            src = source!(IdleSource::new());
+            snk = sink!(NoopSink);
         },
 
         topology: {

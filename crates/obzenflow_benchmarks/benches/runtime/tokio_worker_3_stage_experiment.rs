@@ -172,10 +172,10 @@ async fn run_3_stage_pipeline_with_runtime(
                 middleware: [],
 
                 stages: {
-                    src = source!("source" => source);
-                    s1 = transform!("stage1" => PassthroughStage::new("stage1"));
-                    s2 = transform!("stage2" => PassthroughStage::new("stage2"));
-                    snk = sink!("sink" => sink);
+                    src = source!(source);
+                    s1 = transform!(PassthroughStage::new("stage1"));
+                    s2 = transform!(PassthroughStage::new("stage2"));
+                    snk = sink!(sink);
                 },
 
                 topology: {
@@ -362,12 +362,12 @@ fn bench_5_stage_control(c: &mut Criterion) {
                     middleware: [],
 
                     stages: {
-                        src = source!("source" => source);
-                        s1 = transform!("stage1" => PassthroughStage::new("stage1"));
-                        s2 = transform!("stage2" => PassthroughStage::new("stage2"));
-                        s3 = transform!("stage3" => PassthroughStage::new("stage3"));
-                        s4 = transform!("stage4" => PassthroughStage::new("stage4"));
-                        snk = sink!("sink" => sink);
+                        src = source!(source);
+                        s1 = transform!(PassthroughStage::new("stage1"));
+                        s2 = transform!(PassthroughStage::new("stage2"));
+                        s3 = transform!(PassthroughStage::new("stage3"));
+                        s4 = transform!(PassthroughStage::new("stage4"));
+                        snk = sink!(sink);
                     },
 
                     topology: {

@@ -29,7 +29,10 @@ pub use fsm::{TransformEvent, TransformState};
 pub use handle::{TransformHandle, TransformHandleExt};
 
 // Re-export transform strategies for ergonomic imports (FLOWIP-080h)
-pub use strategies::{Filter, FilterTyped, Map, MapTyped, TryMap, TryMapWith, TryMapWithTyped};
+pub use strategies::{
+    AsyncMap, AsyncMapTyped, AsyncTryMapWith, AsyncTryMapWithTyped, Filter, FilterMap,
+    FilterMapTyped, FilterTyped, Map, MapTyped, TryMap, TryMapWith, TryMapWithTyped,
+};
 
 // Re-export control strategies for convenience
 pub use crate::stages::common::control_strategies::{

@@ -14,6 +14,7 @@ pub mod message_bus;
 pub mod replay;
 pub(crate) mod runtime_resource_limits;
 pub mod supervised_base;
+pub mod typing;
 
 // Major subsystems
 pub mod messaging;
@@ -84,6 +85,9 @@ pub mod prelude {
     pub use crate::stages::{
         FiniteSourceHandler, InfiniteSourceHandler, ObserverHandler, ResourceManaged, SinkHandler,
         SourceError, StatefulHandler, TransformHandler,
+    };
+    pub use crate::typing::{
+        JoinTyping, SinkTyping, SourceTyping, StatefulTyping, TransformTyping,
     };
 
     // Event flow

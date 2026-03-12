@@ -7,10 +7,11 @@
 //! Pipeline (batch + map-reduce):
 //! `HttpPullSource` → format stories → accumulate → split_to_budget → map (LLM) → reduce → digest (LLM) → print markdown digest
 //!
-//! Oversize backflow (FLOWIP-086x):
+//! Oversize decomposition loop (FLOWIP-086x):
 //! `split_to_budget` emits oversize chunks when a single item exceeds the per-group token budget.
-//! These route through `oversize_sub_split` → `oversize_map` (LLM) and feed a condensed result back
-//! into the main splitter via `<|`.
+//! These route through `oversize_sub_split`, which may emit another oversize chunk (with a higher
+//! decomposition depth) back into itself via `<|` until it can emit regular chunks.
+//! Those chunks are summarized by `oversize_map_llm` (LLM) and converted into summaries for reduction.
 //!
 //! Tutorials: `https://obzenflow.dev/tutorials/`
 //!

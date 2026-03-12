@@ -290,14 +290,14 @@ async fn flowip_059a_all_stage_metrics_include_flow_id_label() -> Result<()> {
         middleware: [],
 
         stages: {
-            src = source!("src" => BurstSource::new(50), [
+            src = source!(BurstSource::new(50), [
                 // No summaries/threshold crossings required; utilization is derived from bucket state.
                 rate_limit_with_burst(10_000.0, 10_000.0)
             ]);
-            trans = transform!("trans" => DropTransform, [
+            trans = transform!(DropTransform, [
                 circuit_breaker(10)
             ]);
-            snk = sink!("snk" => CountingSink::new().0);
+            snk = sink!(CountingSink::new().0);
         },
 
         topology: {
@@ -354,9 +354,9 @@ async fn flowip_059a_processing_time_sum_tracks_actual_work() -> Result<()> {
         middleware: [],
 
         stages: {
-            src = source!("src" => BurstSource::new(total_events));
-            trans = transform!("trans" => PassthroughTransform);
-            snk = sink!("snk" => SleepingSink::new(per_event));
+            src = source!(BurstSource::new(total_events));
+            trans = transform!(PassthroughTransform);
+            snk = sink!(SleepingSink::new(per_event));
         },
 
         topology: {
@@ -446,13 +446,13 @@ async fn flowip_059a_circuit_breaker_counters_are_exported_with_joinable_labels(
         stages: {
             // 1000 events triggers a CircuitBreaker summary (>=1000 processed requests).
             // Use 1001 so the summary is not emitted on the final stage output.
-            src = source!("src" => BurstSource::new(1001));
+            src = source!(BurstSource::new(1001));
             // Drop downstream data outputs to keep journaling light; the circuit breaker
             // still observes successful processing and emits a summary at 1000.
-            trans = transform!("trans" => DropTransform, [
+            trans = transform!(DropTransform, [
                 circuit_breaker(10)
             ]);
-            snk = sink!("snk" => CountingSink::new().0);
+            snk = sink!(CountingSink::new().0);
         },
 
         topology: {
@@ -522,12 +522,12 @@ async fn flowip_059a_circuit_breaker_cumulative_metrics_are_exported_and_trippab
 
         stages: {
             // 1001 events ensures the 1000-threshold summary is emitted before the run completes.
-            src = source!("src" => BurstSource::new(1001));
+            src = source!(BurstSource::new(1001));
             // First event succeeds, second event fails (Timeout), opening the breaker.
-            trans = transform!("trans" => TimeoutAfterFirstTransform, [
+            trans = transform!(TimeoutAfterFirstTransform, [
                 circuit_breaker(1)
             ]);
-            snk = sink!("snk" => CountingSink::new().0);
+            snk = sink!(CountingSink::new().0);
         },
 
         topology: {
@@ -651,7 +651,7 @@ async fn flowip_059a_rate_limiter_metrics_are_exported_with_joinable_labels() ->
 
         stages: {
             // Use 1001 so the summary is not emitted on the final stage output.
-            src = source!("src" => BurstSource::new(1001), [
+            src = source!(BurstSource::new(1001), [
                 // Force deterministic backpressure: small burst + low rate so at least
                 // one event must block, while still reaching 1000 events well under the
                 // 10s time-based summary threshold.
@@ -659,8 +659,8 @@ async fn flowip_059a_rate_limiter_metrics_are_exported_with_joinable_labels() ->
             ]);
             // Drop downstream data outputs to keep journaling light; rate limiting
             // metrics are emitted from the source stage.
-            trans = transform!("trans" => DropTransform);
-            snk = sink!("snk" => CountingSink::new().0);
+            trans = transform!(DropTransform);
+            snk = sink!(CountingSink::new().0);
         },
 
         topology: {
@@ -810,11 +810,11 @@ async fn flowip_059a2_circuit_breaker_requests_total_is_accurate_without_summari
         middleware: [],
 
         stages: {
-            src = source!("src" => BurstSource::new(total_events));
-            trans = transform!("trans" => DropTransform, [
+            src = source!(BurstSource::new(total_events));
+            trans = transform!(DropTransform, [
                 circuit_breaker(10)
             ]);
-            snk = sink!("snk" => CountingSink::new().0);
+            snk = sink!(CountingSink::new().0);
         },
 
         topology: {
@@ -878,13 +878,13 @@ async fn flowip_059a2_rate_limiter_events_total_is_accurate_without_summaries() 
         middleware: [],
 
         stages: {
-            src = source!("src" => BurstSource::new(total_events), [
+            src = source!(BurstSource::new(total_events), [
                 // High rate + high burst ensures no time-based (10s) or count-based (1000)
                 // WindowUtilization summary is *not* required for correct totals or utilization.
                 rate_limit_with_burst(10_000.0, 10_000.0)
             ]);
-            trans = transform!("trans" => DropTransform);
-            snk = sink!("snk" => CountingSink::new().0);
+            trans = transform!(DropTransform);
+            snk = sink!(CountingSink::new().0);
         },
 
         topology: {
@@ -982,8 +982,8 @@ async fn flowip_059a_contract_metrics_are_exported_and_joinable_to_topology() ->
         middleware: [],
 
         stages: {
-            src = source!("src" => BurstSource::new(10));
-            snk = sink!("snk" => CountingSink::new().0);
+            src = source!(BurstSource::new(10));
+            snk = sink!(CountingSink::new().0);
         },
 
         topology: {

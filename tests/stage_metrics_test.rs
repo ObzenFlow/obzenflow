@@ -141,14 +141,14 @@ async fn test_stage_level_metrics_automatic() -> Result<()> {
         middleware: [],
 
         stages: {
-            src = source!("test_source" => source);
-            trans = transform!("uppercase_transform" => transform);
-            snk = sink!("collector_sink" => sink);
+            test_source = source!(source);
+            uppercase_transform = transform!(transform);
+            collector_sink = sink!(sink);
         },
 
         topology: {
-            src |> trans;
-            trans |> snk;
+            test_source |> uppercase_transform;
+            uppercase_transform |> collector_sink;
         }
     }
     .await

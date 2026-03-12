@@ -45,8 +45,8 @@ async fn csv_source_to_sink_roundtrip_skips_bad_rows() -> anyhow::Result<()> {
         middleware: [],
 
         stages: {
-            src = source!("src" => source);
-            csv = sink!("csv" => sink);
+            src = source!(source);
+            csv = sink!(sink);
         },
 
         topology: {
@@ -89,8 +89,8 @@ async fn csv_untyped_source_to_sink_roundtrip_preserves_strings() -> anyhow::Res
         middleware: [],
 
         stages: {
-            src = source!("src" => source);
-            csv = sink!("csv" => sink);
+            src = source!(source);
+            csv = sink!(sink);
         },
 
         topology: {

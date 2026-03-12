@@ -7,6 +7,7 @@
 //! This is the core of the let bindings approach - each stage macro creates a
 //! descriptor that encapsulates both the handler and how to create its supervisor.
 
+use crate::dsl::typing::StageTypingMetadata;
 use crate::stage_handle_adapter::StageHandleAdapter;
 use async_trait::async_trait;
 use obzenflow_adapters::middleware::control::ControlMiddlewareAggregator;
@@ -63,6 +64,14 @@ use std::time::Duration;
 
 const DEFAULT_ASYNC_SOURCE_POLL_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Marker name used by stage macros when the runtime name should be derived from the enclosing
+/// `flow!` binding.
+///
+/// This is intentionally a weird, non-user-facing value. `flow!` resolves it to the left-hand
+/// binding before any uniqueness checks or topology build steps run.
+#[doc(hidden)]
+pub const BINDING_DERIVED_NAME_SENTINEL: &str = "__obzenflow_binding_derived_name__";
+
 /// Create system middleware for a stage
 fn create_system_middleware(
     config: &StageConfig,
@@ -114,6 +123,14 @@ fn create_control_strategy_from_middleware_specs(
 pub trait StageDescriptor: Send + Sync {
     /// Get the stage name
     fn name(&self) -> &str;
+
+    /// Update the stage's runtime name.
+    ///
+    /// Implementations that carry an internal name field should override this.
+    /// Default: no-op (for descriptors that do not own a mutable name).
+    fn set_name(&mut self, _name: String) {
+        // Default: no-op
+    }
 
     /// Get the stage type
     fn stage_type(&self) -> StageType;
@@ -180,6 +197,11 @@ pub trait StageDescriptor: Send + Sync {
     fn debug_info(&self) -> String {
         format!("Stage[{}]", self.name())
     }
+
+    /// Optional types-first metadata captured by typed stage macros.
+    fn typing_metadata(&self) -> Option<&StageTypingMetadata> {
+        None
+    }
 }
 
 /// Descriptor for finite source stages
@@ -195,6 +217,10 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> S
 {
     fn name(&self) -> &str {
         &self.name
+    }
+
+    fn set_name(&mut self, name: String) {
+        self.name = name;
     }
 
     fn stage_type(&self) -> StageType {
@@ -371,6 +397,10 @@ impl<H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
         &self.name
     }
 
+    fn set_name(&mut self, name: String) {
+        self.name = name;
+    }
+
     fn stage_type(&self) -> StageType {
         StageType::FiniteSource
     }
@@ -506,6 +536,10 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
 {
     fn name(&self) -> &str {
         &self.name
+    }
+
+    fn set_name(&mut self, name: String) {
+        self.name = name;
     }
 
     fn stage_type(&self) -> StageType {
@@ -684,6 +718,10 @@ impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
         &self.name
     }
 
+    fn set_name(&mut self, name: String) {
+        self.name = name;
+    }
+
     fn stage_type(&self) -> StageType {
         StageType::InfiniteSource
     }
@@ -814,6 +852,10 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stag
 {
     fn name(&self) -> &str {
         &self.name
+    }
+
+    fn set_name(&mut self, name: String) {
+        self.name = name;
     }
 
     fn stage_type(&self) -> StageType {
@@ -953,6 +995,10 @@ impl<H: AsyncTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
         &self.name
     }
 
+    fn set_name(&mut self, name: String) {
+        self.name = name;
+    }
+
     fn stage_type(&self) -> StageType {
         StageType::Transform
     }
@@ -1087,6 +1133,10 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
 {
     fn name(&self) -> &str {
         &self.name
+    }
+
+    fn set_name(&mut self, name: String) {
+        self.name = name;
     }
 
     fn stage_type(&self) -> StageType {
@@ -1374,6 +1424,10 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stage
         &self.name
     }
 
+    fn set_name(&mut self, name: String) {
+        self.name = name;
+    }
+
     fn stage_type(&self) -> StageType {
         StageType::Stateful
     }
@@ -1536,6 +1590,10 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
 {
     fn name(&self) -> &str {
         &self.name
+    }
+
+    fn set_name(&mut self, name: String) {
+        self.name = name;
     }
 
     fn stage_type(&self) -> StageType {

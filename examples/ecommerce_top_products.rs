@@ -10,13 +10,12 @@
 //! Run with: cargo run --package obzenflow --example ecommerce_top_products
 
 use anyhow::Result;
+use obzenflow::typed::{sources, stateful as typed_stateful};
 use obzenflow_adapters::middleware::RateLimiterBuilder;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, stateful};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::stages::source::FiniteSourceTyped;
-use obzenflow_runtime::stages::stateful::strategies::accumulators::TopNByTyped;
 use serde::{Deserialize, Serialize};
 
 // FLOWIP-082a: Strongly-typed event with schema version
@@ -222,78 +221,79 @@ async fn main() -> Result<()> {
         journals: disk_journals(std::path::PathBuf::from("target/ecommerce-logs")),
         middleware: [],
 
-            stages: {
-                // FLOWIP-081: Typed finite sources (no WriterId/ChainEvent boilerplate)
-                orders = source!("orders" => FiniteSourceTyped::from_item_fn(move |index| {
-                    let (product_id, product_name, unit_price, quantity, category) =
-                        orders.get(index)?;
-                    let order_number = index + 1;
-                    let total_value = unit_price * (*quantity as f64);
+        stages: {
+            // FLOWIP-081: Typed finite sources (no WriterId/ChainEvent boilerplate)
+            orders = source!(OrderEvent => sources::finite_from_fn(move |index| {
+                let (product_id, product_name, unit_price, quantity, category) =
+                    orders.get(index)?;
+                let order_number = index + 1;
+                let total_value = unit_price * (*quantity as f64);
 
-                    println!("📦 Order #{order_number}: {product_name} x{quantity} ({product_id}) = ${total_value:.2}");
+                println!("📦 Order #{order_number}: {product_name} x{quantity} ({product_id}) = ${total_value:.2}");
 
-                    Some(OrderEvent {
-                        order_id: format!("ORD-{order_number:04}"),
-                        product_id: product_id.clone(),
-                        product_name: product_name.clone(),
-                        category: category.clone(),
-                        unit_price: *unit_price,
-                        quantity: *quantity,
-                        total_value,
-                        timestamp: order_number, // Simulated timestamp
-                    })
-                }));
+                Some(OrderEvent {
+                    order_id: format!("ORD-{order_number:04}"),
+                    product_id: product_id.clone(),
+                    product_name: product_name.clone(),
+                    category: category.clone(),
+                    unit_price: *unit_price,
+                    quantity: *quantity,
+                    total_value,
+                    timestamp: order_number, // Simulated timestamp
+                })
+            }));
 
-                // FLOWIP-080j: TopNByTyped - Type-safe accumulation with no ChainEvent!
-                // Type-safe extraction functions instead of string field names
-                top_products = stateful!("top_products" =>
-                    TopNByTyped::new(
-                        5,
-                        |order: &OrderEvent| order.product_id.clone(),  // Key extractor
-                        |order: &OrderEvent| order.total_value          // Score extractor
-                    ).emit_every_n(5),
-                    [RateLimiterBuilder::new(3.0).build()]   // Process max 3 orders per second for demo visibility
-                );
+            // FLOWIP-080j: TopNByTyped - Type-safe accumulation with no ChainEvent!
+            // Type-safe extraction functions instead of string field names
+            top_products = stateful!(
+                typed_stateful::top_n_by(
+                    5,
+                    |order: &OrderEvent| order.product_id.clone(), // Key extractor
+                    |order: &OrderEvent| order.total_value,        // Score extractor
+                )
+                .emit_every_n(5),
+                [RateLimiterBuilder::new(3.0).build()] // Process max 3 orders per second for demo visibility
+            );
 
-                dashboard = sink!("dashboard" => |update: TopProductsUpdate| {
-                    println!("\n📊 TOP SELLING PRODUCTS DASHBOARD 📊");
-                    println!("====================================");
-                    println!("Total Unique Products Sold: {}\n", update.total_items);
+            dashboard = sink!(|update: TopProductsUpdate| {
+                println!("\n📊 TOP SELLING PRODUCTS DASHBOARD 📊");
+                println!("====================================");
+                println!("Total Unique Products Sold: {}\n", update.total_items);
 
-                    let mut total_revenue = 0.0;
-                    for entry in &update.top_n {
-                        total_revenue += entry.total_score;
+                let mut total_revenue = 0.0;
+                for entry in &update.top_n {
+                    total_revenue += entry.total_score;
 
-                        let medal = match entry.rank {
-                            1 => "🥇",
-                            2 => "🥈",
-                            3 => "🥉",
-                            _ => "  ",
-                        };
+                    let medal = match entry.rank {
+                        1 => "🥇",
+                        2 => "🥈",
+                        3 => "🥉",
+                        _ => "  ",
+                    };
 
-                        println!(
-                            "{} #{}: {} ({})",
-                            medal, entry.rank, entry.metadata.product_name, entry.key
-                        );
-                        println!("      Category: {}", entry.metadata.category);
-                        println!(
-                            "      Revenue: ${:.2} from {} orders",
-                            entry.total_score, entry.count
-                        );
-                        println!("      Avg Order Value: ${:.2}", entry.avg_score);
-                        println!();
-                    }
+                    println!(
+                        "{} #{}: {} ({})",
+                        medal, entry.rank, entry.metadata.product_name, entry.key
+                    );
+                    println!("      Category: {}", entry.metadata.category);
+                    println!(
+                        "      Revenue: ${:.2} from {} orders",
+                        entry.total_score, entry.count
+                    );
+                    println!("      Avg Order Value: ${:.2}", entry.avg_score);
+                    println!();
+                }
 
-                    println!("------------------------------------");
-                    println!("Top 5 Products Revenue: ${total_revenue:.2}");
-                    println!("====================================\n");
-                });
-            },
+                println!("------------------------------------");
+                println!("Top 5 Products Revenue: ${total_revenue:.2}");
+                println!("====================================\n");
+            });
+        },
 
-            topology: {
-                orders |> top_products;
-                top_products |> dashboard;
-            }
+        topology: {
+            orders |> top_products;
+            top_products |> dashboard;
+        }
     })
     .await?;
 

@@ -36,22 +36,23 @@
 //! Handlers contain the processing logic for each stage. The framework provides
 //! several handler traits, each matching a different stage role.
 //!
-//! **Sources** produce events. [`obzenflow_runtime::stages::source::FiniteSourceTyped`]
-//! is the easiest way to emit a `Vec<T>` of typed payloads:
+//! **Sources** produce events. [`crate::typed::sources::finite`] is the easiest way
+//! to emit a `Vec<T>` (or any iterator) of typed payloads:
 //!
 //! ```rust,ignore
-//! use obzenflow_runtime::stages::source::FiniteSourceTyped;
+//! use obzenflow::typed::sources;
 //!
 //! let readings = vec![
 //!     TemperatureReading { sensor_id: "A1".into(), celsius: 22.5 },
 //!     TemperatureReading { sensor_id: "B2".into(), celsius: 35.1 },
 //! ];
-//! let source = FiniteSourceTyped::new(readings);
+//! let source = sources::finite(readings);
 //! ```
 //!
 //! **Transforms** process events one at a time. Implement
 //! [`obzenflow_runtime::stages::TransformHandler`] for full control, or use
-//! the typed helpers like `MapTyped` for simple one-to-one mappings.
+//! the typed helper facades like [`crate::typed::transforms::map`] for simple
+//! one-to-one mappings.
 //!
 //! **Sinks** consume events at the end of a pipeline. Implement
 //! [`obzenflow_runtime::stages::SinkHandler`], or use a closure with the
@@ -78,19 +79,19 @@
 //!
 //! ### `stages:`
 //! Let-bindings that produce stage descriptors via macros:
-//! - `source!("name" => handler)` for a finite source.
-//! - `async_source!("name" => handler)` for an async finite source.
-//! - `infinite_source!("name" => handler)` for an infinite source.
-//! - `async_infinite_source!("name" => handler)` for an async infinite source.
-//! - `transform!("name" => handler)` for a synchronous transform.
-//! - `async_transform!("name" => handler)` for an async transform.
-//! - `sink!("name" => handler)` for a sink (struct or closure).
-//! - `stateful!("name" => handler)` for stateful aggregation.
-//! - `join!("name" => with_ref!(ref_stage, handler))` for joining with
+//! - `source!(Out => handler)` for a finite source.
+//! - `async_source!(Out => handler)` for an async finite source.
+//! - `infinite_source!(Out => handler)` for an infinite source.
+//! - `async_infinite_source!(Out => handler)` for an async infinite source.
+//! - `transform!(In -> Out => handler)` for a synchronous transform.
+//! - `async_transform!(In -> Out => handler)` for an async transform.
+//! - `sink!(In => handler)` for a sink.
+//! - `stateful!(In -> Out => handler)` for stateful aggregation.
+//! - `join!(catalog ref_stage: Ref, Stream -> Out => handler)` for joining with
 //!   reference data.
 //!
 //! All stage macros accept an optional middleware array:
-//! `source!("name" => handler, [rate_limit(10.0)])`.
+//! `source!(Out => handler, [rate_limit(10.0)])`.
 //!
 //! ### `topology:`
 //! Edges connecting stages:
@@ -122,11 +123,10 @@
 //! ```rust,ignore
 //! use anyhow::Result;
 //! use obzenflow_core::TypedPayload;
+//! use obzenflow::typed::{sources, transforms};
 //! use obzenflow_dsl::{flow, sink, source, transform};
 //! use obzenflow_infra::application::FlowApplication;
 //! use obzenflow_infra::journal::disk_journals;
-//! use obzenflow_runtime::stages::transform::MapTyped;
-//! use obzenflow_runtime::stages::source::FiniteSourceTyped;
 //! use serde::{Deserialize, Serialize};
 //!
 //! #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -163,8 +163,8 @@
 //!         middleware: [],
 //!
 //!         stages: {
-//!             src = source!("readings" => FiniteSourceTyped::new(readings));
-//!             check = transform!("threshold_check" => MapTyped::new(|m: Measurement| {
+//!             src = source!(Measurement => sources::finite(readings));
+//!             check = transform!(Measurement -> Alert => transforms::map(|m| {
 //!                 Alert {
 //!                     sensor: m.sensor.clone(),
 //!                     message: if m.celsius > 50.0 {
@@ -174,9 +174,7 @@
 //!                     },
 //!                 }
 //!             }));
-//!             out = sink!("alerts" => |alert: Alert| {
-//!                 println!("[ALERT] {}", alert.message);
-//!             });
+//!             out = sink!(|alert: Alert| { println!("[ALERT] {}", alert.message); });
 //!         },
 //!
 //!         topology: {
@@ -210,3 +208,4 @@
 pub mod ai;
 pub mod sinks;
 pub mod sources;
+pub mod typed;

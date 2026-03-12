@@ -9,7 +9,7 @@
 
 /// Parse topology edges supporting both |> and <| operators (single collector)
 /// Note: Join stages only accept stream inputs in topology.
-/// Reference stages are specified via with_reference() in the join builder.
+/// Reference stages are specified via `join!(catalog ...)` (or the join tuple syntax).
 #[macro_export]
 macro_rules! parse_topology {
     // Base case - no more edges
@@ -125,8 +125,7 @@ macro_rules! parse_topology_with_joins {
 /// ```rust,ignore
 /// use obzenflow_dsl::{flow, source, transform, sink};
 /// use obzenflow_infra::journal::memory_journals;
-/// use obzenflow_runtime::stages::source::FiniteSourceTyped;
-/// use obzenflow_runtime::stages::transform::MapTyped;
+/// use obzenflow::typed::{sources, transforms};
 ///
 /// let pipeline = flow! {
 ///     name: "example",
@@ -134,9 +133,9 @@ macro_rules! parse_topology_with_joins {
 ///     middleware: [],
 ///
 ///     stages: {
-///         src = source!("input" => FiniteSourceTyped::new(vec![MyEvent { value: 1 }]));
-///         map = transform!("double" => MapTyped::new(|e: MyEvent| Doubled { value: e.value * 2 }));
-///         out = sink!("output" => |d: Doubled| { println!("{}", d.value); });
+///         src = source!(MyEvent => sources::finite(vec![MyEvent { value: 1 }]));
+///         map = transform!(MyEvent -> Doubled => transforms::map(|e: MyEvent| Doubled { value: e.value * 2 }));
+///         out = sink!(Doubled => |d: Doubled| { println!("{}", d.value); });
 ///     },
 ///
 ///     topology: {
@@ -180,6 +179,17 @@ macro_rules! flow {
                 stages.insert(stringify!($stage_name).to_string(), descriptor);
             )*
 
+            // FLOWIP-105g-part-2: resolve binding-derived runtime stage names.
+            //
+            // Stage macros can request name derivation by setting the descriptor name to
+            // `BINDING_DERIVED_NAME_SENTINEL`. Resolve those to the left-hand binding
+            // before uniqueness checks and build phases run.
+            for (binding, descriptor) in stages.iter_mut() {
+                if descriptor.name() == BINDING_DERIVED_NAME_SENTINEL {
+                    descriptor.set_name(binding.clone());
+                }
+            }
+
             // Create connections
             let mut connections: Vec<(String, String, obzenflow_topology::EdgeKind)> = Vec::new();
 
@@ -200,7 +210,6 @@ macro_rules! flow {
     }};
 
     // Pattern without explicit flow name (uses "default")
-    // (stage descriptors as expressions)
     {
         journals: $journals:expr,
         middleware: [$($flow_mw:expr),*],
@@ -229,6 +238,17 @@ macro_rules! flow {
                 let descriptor = $descriptor;
                 stages.insert(stringify!($stage_name).to_string(), descriptor);
             )*
+
+            // FLOWIP-105g-part-2: resolve binding-derived runtime stage names.
+            //
+            // Stage macros can request name derivation by setting the descriptor name to
+            // `BINDING_DERIVED_NAME_SENTINEL`. Resolve those to the left-hand binding
+            // before uniqueness checks and build phases run.
+            for (binding, descriptor) in stages.iter_mut() {
+                if descriptor.name() == BINDING_DERIVED_NAME_SENTINEL {
+                    descriptor.set_name(binding.clone());
+                }
+            }
 
             // Create connections
             let mut connections: Vec<(String, String, obzenflow_topology::EdgeKind)> = Vec::new();
@@ -417,6 +437,22 @@ macro_rules! build_typed_flow {
             obzenflow_topology::Topology::new(topology_stages.clone(), topology_edges.clone())
                 .map_err(FlowBuildError::TopologyValidationFailed)?,
         );
+
+        let edge_warnings = $crate::dsl::typing::collect_edge_warnings(
+            &topology,
+            &descriptors,
+            &name_to_id,
+        );
+        for warning in &edge_warnings {
+            tracing::warn!(
+                upstream_stage = %warning.upstream_stage,
+                downstream_stage = %warning.downstream_stage,
+                upstream_type = %warning.upstream_type,
+                expected_type = %warning.expected_type,
+                input_role = %warning.input_role.as_str(),
+                "Typed edge compatibility mismatch"
+            );
+        }
 
         // FLOWIP-051l (P0): backflow cycles are currently only supported for transform stages.
         // Reject any topology where a cycle-member stage is not a transform so we do not silently

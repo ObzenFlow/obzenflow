@@ -188,12 +188,12 @@ async fn async_infinite_source_stop_interrupts_blocked_next_and_calls_drain() ->
         middleware: [],
 
         stages: {
-            src = async_infinite_source!("source" => source);
-            snk = sink!("sink" => sink);
+            source = async_infinite_source!(source);
+            sink = sink!(sink);
         },
 
         topology: {
-            src |> snk;
+            source |> sink;
         }
     }
     .await
@@ -242,14 +242,14 @@ async fn async_infinite_source_emits_events_and_applies_stage_middleware() -> Re
         middleware: [],
 
         stages: {
-            src = async_infinite_source!("source" => source, [
+            source = async_infinite_source!(source, [
                 InjectFieldFactory
             ]);
-            snk = sink!("sink" => sink);
+            sink = sink!(sink);
         },
 
         topology: {
-            src |> snk;
+            source |> sink;
         }
     }
     .await

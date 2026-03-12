@@ -104,12 +104,12 @@ async fn test_basic_flow() -> Result<()> {
         middleware: [],
 
         stages: {
-            src = source!("source" => TestEventSource::new(10));
-            snk = sink!("sink" => counter_sink);
+            source = source!(TestEventSource::new(10));
+            sink = sink!(counter_sink);
         },
 
         topology: {
-            src |> snk;
+            source |> sink;
         }
     }
     .await
@@ -160,14 +160,14 @@ async fn test_multi_stage_flow() -> Result<()> {
         middleware: [],
 
         stages: {
-            src = source!("source" => TestEventSource::new(5));
-            dbl = transform!("doubler" => Doubler::new());
-            snk = sink!("sink" => counter_sink);
+            source = source!(TestEventSource::new(5));
+            doubler = transform!(Doubler::new());
+            sink = sink!(counter_sink);
         },
 
         topology: {
-            src |> dbl;
-            dbl |> snk;
+            source |> doubler;
+            doubler |> sink;
         }
     }
     .await
@@ -300,14 +300,14 @@ async fn test_pipeline_topology() -> Result<()> {
         middleware: [],
 
         stages: {
-            src = source!("source" => NumberSource::new(3));
-            dbl = transform!("doubler" => NumberDoubler::new());
-            snk = sink!("sink" => sum_sink);
+            source = source!(NumberSource::new(3));
+            doubler = transform!(NumberDoubler::new());
+            sink = sink!(sum_sink);
         },
 
         topology: {
-            src |> dbl;
-            dbl |> snk;
+            source |> doubler;
+            doubler |> sink;
         }
     }
     .await

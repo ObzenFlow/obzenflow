@@ -210,8 +210,8 @@ async fn stop_infinite_source_reports_cancelled() -> Result<()> {
         middleware: [],
 
         stages: {
-            src = infinite_source!("src" => SlowInfiniteSource::new(Duration::from_millis(5)));
-            snk = sink!("snk" => NoopSink);
+            src = infinite_source!(SlowInfiniteSource::new(Duration::from_millis(5)));
+            snk = sink!(NoopSink);
         },
 
         topology: {
@@ -264,8 +264,8 @@ async fn stop_finite_source_reports_cancelled() -> Result<()> {
 
         stages: {
             // Large upper bound so the source is still active when Stop is issued.
-            src = source!("src" => SlowFiniteSource::new(10_000, Duration::from_millis(5)));
-            snk = sink!("snk" => NoopSink);
+            src = source!(SlowFiniteSource::new(10_000, Duration::from_millis(5)));
+            snk = sink!(NoopSink);
         },
 
         topology: {
@@ -317,8 +317,8 @@ async fn stop_cancel_timeout_overrides_cancel_reason() -> Result<()> {
         middleware: [],
 
         stages: {
-            src = infinite_source!("src" => SlowInfiniteSource::new(Duration::from_millis(1)));
-            snk = sink!("snk" => SlowSink::new(Duration::from_millis(250)));
+            src = infinite_source!(SlowInfiniteSource::new(Duration::from_millis(1)));
+            snk = sink!(SlowSink::new(Duration::from_millis(250)));
         },
 
         topology: {

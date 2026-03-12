@@ -17,6 +17,7 @@ use crate::stages::common::handlers::{
     AsyncFiniteSourceHandler, AsyncInfiniteSourceHandler, FiniteSourceHandler,
     InfiniteSourceHandler,
 };
+use crate::typing::SourceTyping;
 use async_trait::async_trait;
 use futures::{Stream, StreamExt};
 use obzenflow_core::event::ChainEventFactory;
@@ -1188,6 +1189,74 @@ where
     async fn drain(&mut self) -> Result<(), SourceError> {
         Ok(())
     }
+}
+
+impl<T, F> SourceTyping for FiniteSourceTyped<T, F>
+where
+    T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
+    F: FnMut(usize) -> Option<Vec<T>> + Send + Sync + Clone,
+{
+    type Output = T;
+}
+
+impl<T, F> SourceTyping for FallibleFiniteSourceTyped<T, F>
+where
+    T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
+    F: FnMut(usize) -> Result<Option<Vec<T>>, SourceError> + Send + Sync + Clone,
+{
+    type Output = T;
+}
+
+impl<T, F, Fut> SourceTyping for AsyncFiniteSourceTyped<T, F, Fut>
+where
+    T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
+    F: FnMut(usize) -> Fut + Send + Sync + Clone,
+    Fut: Future<Output = Option<Vec<T>>> + Send,
+{
+    type Output = T;
+}
+
+impl<T, F, Fut> SourceTyping for FallibleAsyncFiniteSourceTyped<T, F, Fut>
+where
+    T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
+    F: FnMut(usize) -> Fut + Send + Sync + Clone,
+    Fut: Future<Output = Result<Option<Vec<T>>, SourceError>> + Send,
+{
+    type Output = T;
+}
+
+impl<T, F> SourceTyping for InfiniteSourceTyped<T, F>
+where
+    T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
+    F: FnMut(usize) -> Vec<T> + Send + Sync + Clone,
+{
+    type Output = T;
+}
+
+impl<T, F> SourceTyping for FallibleInfiniteSourceTyped<T, F>
+where
+    T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
+    F: FnMut(usize) -> Result<Vec<T>, SourceError> + Send + Sync + Clone,
+{
+    type Output = T;
+}
+
+impl<T, F, Fut> SourceTyping for AsyncInfiniteSourceTyped<T, F, Fut>
+where
+    T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
+    F: FnMut(usize) -> Fut + Send + Sync + Clone,
+    Fut: Future<Output = Vec<T>> + Send,
+{
+    type Output = T;
+}
+
+impl<T, F, Fut> SourceTyping for FallibleAsyncInfiniteSourceTyped<T, F, Fut>
+where
+    T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
+    F: FnMut(usize) -> Fut + Send + Sync + Clone,
+    Fut: Future<Output = Result<Vec<T>, SourceError>> + Send,
+{
+    type Output = T;
 }
 
 #[cfg(test)]

@@ -69,6 +69,7 @@
 
 use crate::stages::common::handler_error::HandlerError;
 use crate::stages::common::handlers::TransformHandler;
+use crate::typing::TransformTyping;
 use async_trait::async_trait;
 use obzenflow_core::event::{status::processing_status::ProcessingStatus, ChainEventFactory};
 use obzenflow_core::ChainEvent;
@@ -551,6 +552,16 @@ where
     converter: F,
     error_strategy: ErrorStrategy,
     _phantom: PhantomData<(T, O)>,
+}
+
+impl<T, O, F> TransformTyping for TryMapWithTyped<T, O, F>
+where
+    T: DeserializeOwned + Send + Sync,
+    O: Serialize + Send + Sync + TypedPayload,
+    F: Fn(T) -> Result<O, String> + Send + Sync + Clone,
+{
+    type Input = T;
+    type Output = O;
 }
 
 impl<T, O, F> TryMapWithTyped<T, O, F>

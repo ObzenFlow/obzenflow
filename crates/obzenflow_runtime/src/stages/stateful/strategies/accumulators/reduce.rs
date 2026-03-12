@@ -12,6 +12,7 @@ use crate::stages::stateful::strategies::accumulators::wrapper::StatefulWithEmis
 use crate::stages::stateful::strategies::emissions::{
     EmissionStrategy, EmitAlways, EveryN, OnEOF, TimeWindow,
 };
+use crate::typing::StatefulTyping;
 use obzenflow_core::event::ChainEventFactory;
 use obzenflow_core::id::StageId;
 use obzenflow_core::{ChainEvent, TypedPayload, WriterId};
@@ -385,6 +386,16 @@ where
         self.writer_id = writer_id;
         self
     }
+}
+
+impl<T, S, F> StatefulTyping for ReduceTyped<T, S, F>
+where
+    T: DeserializeOwned + Send + Sync,
+    S: Clone + Send + Sync + Debug + Serialize + TypedPayload,
+    F: Fn(&mut S, &T) + Send + Sync + Clone,
+{
+    type Input = T;
+    type Output = S;
 }
 
 impl<T, S, F> Accumulator for ReduceTyped<T, S, F>

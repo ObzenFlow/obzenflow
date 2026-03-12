@@ -137,14 +137,14 @@ async fn test_dsl_pipeline() -> Result<()> {
         middleware: [],
 
         stages: {
-            gen = source!("generator" => EventGenerator::new());
-            dbl = transform!("doubler" => Doubler::new());
-            sum = sink!("summer" => summer);
+            generator = source!(EventGenerator::new());
+            doubler = transform!(Doubler::new());
+            summer = sink!(summer);
         },
 
         topology: {
-            gen |> dbl;
-            dbl |> sum;
+            generator |> doubler;
+            doubler |> summer;
         }
     }
     .await

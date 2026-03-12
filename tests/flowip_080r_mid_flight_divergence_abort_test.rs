@@ -283,10 +283,10 @@ async fn flowip_080r_aborts_on_mid_flight_divergence_violation() -> Result<()> {
         middleware: [],
 
         stages: {
-            src = source!("src" => SeedSource::new(30));
-            entry = async_transform!("entry" => SlowEntryTransform::new(Duration::from_millis(10)));
-            iter = transform!("iter" => SignalStormTransform::new(50));
-            snk = sink!("snk" => CountingSink);
+            src = source!(SeedSource::new(30));
+            entry = async_transform!(SlowEntryTransform::new(Duration::from_millis(10)));
+            iter = transform!(SignalStormTransform::new(50));
+            snk = sink!(CountingSink);
         },
 
         topology: {
@@ -370,9 +370,9 @@ async fn flowip_080r_emits_mid_flight_contract_health_heartbeats() -> Result<()>
         middleware: [],
 
         stages: {
-            src = source!("src" => SeedSource::new(50));
-            delay = async_transform!("delay" => SlowEntryTransform::new(Duration::from_millis(1)));
-            snk = sink!("snk" => CountingSink);
+            src = source!(SeedSource::new(50));
+            delay = async_transform!(SlowEntryTransform::new(Duration::from_millis(1)));
+            snk = sink!(CountingSink);
         },
 
         topology: {
@@ -442,12 +442,12 @@ async fn flowip_080r_does_not_false_positive_on_fan_in_inside_cycle() -> Result<
         middleware: [],
 
         stages: {
-            src = source!("src" => SeedSource::new(50));
-            entry = transform!("entry" => FanInEntryTransform);
-            a = transform!("a" => PassThroughTransform);
-            b = transform!("b" => PassThroughTransform);
-            merge = transform!("merge" => PassThroughTransform);
-            snk = sink!("snk" => CountingSink);
+            src = source!(SeedSource::new(50));
+            entry = transform!(FanInEntryTransform);
+            a = transform!(PassThroughTransform);
+            b = transform!(PassThroughTransform);
+            merge = transform!(PassThroughTransform);
+            snk = sink!(CountingSink);
         },
 
         topology: {
@@ -534,10 +534,10 @@ async fn flowip_080r_aborts_on_cycle_depth_divergence_violation() -> Result<()> 
         middleware: [],
 
         stages: {
-            src = source!("src" => SeedSource::new(10));
-            entry = async_transform!("entry" => CycleDepthInjectionEntryTransform::new(Duration::from_millis(5), 100));
-            iter = transform!("iter" => DropAllDataTransform);
-            snk = sink!("snk" => CountingSink);
+            src = source!(SeedSource::new(10));
+            entry = async_transform!(CycleDepthInjectionEntryTransform::new(Duration::from_millis(5), 100));
+            iter = transform!(DropAllDataTransform);
+            snk = sink!(CountingSink);
         },
 
         topology: {

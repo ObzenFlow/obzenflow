@@ -13,7 +13,7 @@ use uuid::Uuid;
 
 #[tokio::test]
 async fn debug_flight_delays_issue() {
-    // Test the same setup as flight_delays.rs
+    // Test the same setup as the flight_delays_simple example.
     let test_id = Uuid::new_v4();
     let journal_dir = PathBuf::from(format!("target/debug-journal-test-{test_id}"));
     std::fs::create_dir_all(&journal_dir).unwrap();

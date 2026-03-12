@@ -166,14 +166,14 @@ async fn test_basic_throughput() -> Result<()> {
         middleware: [],
 
         stages: {
-            src = source!("source" => EventGenerator::new(1000, 1000, "TestEvent".to_string()));
-            pass = transform!("passthrough" => PassthroughStage::new());
-            snk = sink!("sink" => counter_sink);
+            source = source!(EventGenerator::new(1000, 1000, "TestEvent".to_string()));
+            passthrough = transform!(PassthroughStage::new());
+            sink = sink!(counter_sink);
         },
 
         topology: {
-            src |> pass;
-            pass |> snk;
+            source |> passthrough;
+            passthrough |> sink;
         }
     }
     .await
@@ -216,14 +216,14 @@ async fn test_backpressure() -> Result<()> {
         middleware: [],
 
         stages: {
-            src = source!("source" => EventGenerator::new(1000, 100, "TestEvent".to_string()));
-            cpu = transform!("cpu_intensive" => CpuIntensiveStage::new(Duration::from_micros(100)));
-            snk = sink!("sink" => counter_sink);
+            source = source!(EventGenerator::new(1000, 100, "TestEvent".to_string()));
+            cpu_intensive = transform!(CpuIntensiveStage::new(Duration::from_micros(100)));
+            sink = sink!(counter_sink);
         },
 
         topology: {
-            src |> cpu;
-            cpu |> snk;
+            source |> cpu_intensive;
+            cpu_intensive |> sink;
         }
     }
     .await
@@ -262,14 +262,14 @@ async fn test_memory_pressure() -> Result<()> {
         middleware: [],
 
         stages: {
-            src = source!("source" => EventGenerator::new(100, 50, "TestEvent".to_string()));
-            mem = transform!("memory_intensive" => MemoryIntensiveStage::new(1024 * 1024)); // 1MB per event
-            snk = sink!("sink" => counter_sink);
+            source = source!(EventGenerator::new(100, 50, "TestEvent".to_string()));
+            memory_intensive = transform!(MemoryIntensiveStage::new(1024 * 1024)); // 1MB per event
+            sink = sink!(counter_sink);
         },
 
         topology: {
-            src |> mem;
-            mem |> snk;
+            source |> memory_intensive;
+            memory_intensive |> sink;
         }
     }
     .await

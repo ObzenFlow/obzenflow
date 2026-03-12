@@ -48,6 +48,7 @@
 
 use crate::stages::common::handler_error::HandlerError;
 use crate::stages::common::handlers::TransformHandler;
+use crate::typing::TransformTyping;
 use async_trait::async_trait;
 use obzenflow_core::event::ChainEventFactory;
 use obzenflow_core::ChainEvent;
@@ -245,6 +246,16 @@ where
             .field("output_type", &std::any::type_name::<O>())
             .finish()
     }
+}
+
+impl<T, O, F> TransformTyping for MapTyped<T, O, F>
+where
+    T: DeserializeOwned + Send + Sync,
+    O: Serialize + Send + Sync + TypedPayload,
+    F: Fn(T) -> O + Send + Sync + Clone,
+{
+    type Input = T;
+    type Output = O;
 }
 
 #[async_trait]

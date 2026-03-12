@@ -49,6 +49,7 @@
 
 use crate::stages::common::handler_error::HandlerError;
 use crate::stages::common::handlers::TransformHandler;
+use crate::typing::TransformTyping;
 use async_trait::async_trait;
 use obzenflow_core::ChainEvent;
 use serde::de::DeserializeOwned;
@@ -223,6 +224,15 @@ where
             .field("predicate", &"<closure>")
             .finish()
     }
+}
+
+impl<T, F> TransformTyping for FilterTyped<T, F>
+where
+    T: DeserializeOwned + Send + Sync,
+    F: Fn(&T) -> bool + Send + Sync + Clone,
+{
+    type Input = T;
+    type Output = T;
 }
 
 #[async_trait]

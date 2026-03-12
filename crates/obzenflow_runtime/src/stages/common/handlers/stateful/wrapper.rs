@@ -7,6 +7,7 @@
 use super::traits::StatefulHandler;
 use crate::stages::common::handler_error::HandlerError;
 use crate::stages::stateful::strategies::emissions::{EmissionStrategy, OnEOF};
+use crate::typing::StatefulTyping;
 use async_trait::async_trait;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::ChainEventContent;
@@ -164,4 +165,13 @@ where
     ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
         self.handler.drain(&state.handler_state).await
     }
+}
+
+impl<H, E> StatefulTyping for StatefulHandlerWithEmission<H, E>
+where
+    H: StatefulHandler + Clone + StatefulTyping,
+    E: EmissionStrategy + Clone,
+{
+    type Input = H::Input;
+    type Output = H::Output;
 }

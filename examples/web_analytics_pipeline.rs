@@ -19,13 +19,11 @@
 //! Run with: `cargo run -p obzenflow --example web_analytics_pipeline`
 
 use anyhow::Result;
+use obzenflow::typed::{sources, stateful as typed_stateful};
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, stateful};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::stages::source::FiniteSourceTyped;
-// FLOWIP-080j: Typed stateful accumulators
-use obzenflow_runtime::stages::stateful::strategies::accumulators::{GroupByTyped, ReduceTyped};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::Duration;
@@ -206,164 +204,165 @@ async fn main() -> Result<()> {
         journals: disk_journals(std::path::PathBuf::from("target/web_analytics")),
         middleware: [],
 
-            stages: {
-                // User event stream
-                events = source!("user_events" => FiniteSourceTyped::from_item_fn(move |index| {
-                    if index >= 200 {
-                        return None;
-                    }
+        stages: {
+            // User event stream
+            user_events = source!(UserEvent => sources::finite_from_fn(move |index| {
+                if index >= 200 {
+                    return None;
+                }
 
-                    let user_id = USERS[index % USERS.len()].to_string();
+                let user_id = USERS[index % USERS.len()].to_string();
 
-                    // Simulate realistic user journey patterns with cart abandonment
-                    // Pattern repeats every 20 events to create ~40% cart-to-purchase conversion
-                    Some(match index % 20 {
-                        // Home page visits (30% of traffic)
-                        0..=5 => UserEvent {
-                            page: Some(PAGES[0].to_string()),
-                            duration_ms: Some((3000 + (index * 17) % 2000) as u64),
-                            ..base_event(user_id, "page_view")
-                        },
-                        // Product browsing (25% of traffic)
-                        6..=9 => UserEvent {
-                            page: Some(PAGES[1].to_string()),
-                            duration_ms: Some((5000 + (index * 23) % 5000) as u64),
-                            ..base_event(user_id, "page_view")
-                        },
-                        // Product interactions (15% of traffic)
-                        10..=12 => UserEvent {
-                            element: Some("product_card".to_string()),
-                            page: Some(PAGES[1].to_string()),
-                            ..base_event(user_id, "click")
-                        },
-                        // Cart page views (10% - not everyone adds to cart)
-                        13 | 14 => UserEvent {
-                            page: Some(PAGES[2].to_string()),
-                            duration_ms: Some((2000 + (index * 13) % 1000) as u64),
-                            ..base_event(user_id, "page_view")
-                        },
-                        // Scroll events (5%)
-                        15 => UserEvent {
-                            depth: Some(50 + (index % 50) as u32),
-                            page: Some(PAGES[1].to_string()),
-                            ..base_event(user_id, "scroll")
-                        },
-                        // Checkout button clicks (5%)
-                        16 => UserEvent {
-                            element: Some("checkout_button".to_string()),
-                            page: Some(PAGES[2].to_string()),
-                            ..base_event(user_id, "click")
-                        },
-                        // Bounces/abandoned carts (5%)
-                        17 => UserEvent {
-                            page: Some(PAGES[4].to_string()),
-                            duration_ms: Some((1000 + (index * 7) % 500) as u64),
-                            ..base_event(user_id, "page_view")
-                        },
-                        // Actual conversions (5% - realistic cart abandonment ~60%)
-                        18 => UserEvent {
-                            value: Some(49.99 + (index as f64 * 1.23) % 150.0),
-                            ..base_event(user_id, "conversion")
-                        },
-                        // Additional product views (5%)
-                        _ => UserEvent {
-                            page: Some(PAGES[1].to_string()),
-                            duration_ms: Some((4000 + (index * 19) % 3000) as u64),
-                            ..base_event(user_id, "page_view")
-                        },
-                    })
-                }));
+                // Simulate realistic user journey patterns with cart abandonment
+                // Pattern repeats every 20 events to create ~40% cart-to-purchase conversion
+                Some(match index % 20 {
+                    // Home page visits (30% of traffic)
+                    0..=5 => UserEvent {
+                        page: Some(PAGES[0].to_string()),
+                        duration_ms: Some((3000 + (index * 17) % 2000) as u64),
+                        ..base_event(user_id, "page_view")
+                    },
+                    // Product browsing (25% of traffic)
+                    6..=9 => UserEvent {
+                        page: Some(PAGES[1].to_string()),
+                        duration_ms: Some((5000 + (index * 23) % 5000) as u64),
+                        ..base_event(user_id, "page_view")
+                    },
+                    // Product interactions (15% of traffic)
+                    10..=12 => UserEvent {
+                        element: Some("product_card".to_string()),
+                        page: Some(PAGES[1].to_string()),
+                        ..base_event(user_id, "click")
+                    },
+                    // Cart page views (10% - not everyone adds to cart)
+                    13 | 14 => UserEvent {
+                        page: Some(PAGES[2].to_string()),
+                        duration_ms: Some((2000 + (index * 13) % 1000) as u64),
+                        ..base_event(user_id, "page_view")
+                    },
+                    // Scroll events (5%)
+                    15 => UserEvent {
+                        depth: Some(50 + (index % 50) as u32),
+                        page: Some(PAGES[1].to_string()),
+                        ..base_event(user_id, "scroll")
+                    },
+                    // Checkout button clicks (5%)
+                    16 => UserEvent {
+                        element: Some("checkout_button".to_string()),
+                        page: Some(PAGES[2].to_string()),
+                        ..base_event(user_id, "click")
+                    },
+                    // Bounces/abandoned carts (5%)
+                    17 => UserEvent {
+                        page: Some(PAGES[4].to_string()),
+                        duration_ms: Some((1000 + (index * 7) % 500) as u64),
+                        ..base_event(user_id, "page_view")
+                    },
+                    // Actual conversions (5% - realistic cart abandonment ~60%)
+                    18 => UserEvent {
+                        value: Some(49.99 + (index as f64 * 1.23) % 150.0),
+                        ..base_event(user_id, "conversion")
+                    },
+                    // Additional product views (5%)
+                    _ => UserEvent {
+                        page: Some(PAGES[1].to_string()),
+                        duration_ms: Some((4000 + (index * 19) % 3000) as u64),
+                        ..base_event(user_id, "page_view")
+                    },
+                })
+            }));
 
-                // FLOWIP-080j: GroupByTyped for per-user session tracking
-                sessions = stateful!("session_tracker" =>
-                    GroupByTyped::new(
-                        |event: &UserEvent| event.user_id.clone(),
-                        |session: &mut SessionData, event: &UserEvent| {  // CORRECTED: state first
-                            event.update_session(session);
-                        }
-                    ).emit_within(Duration::from_secs(3))  // Time window emission
-                );
+            // FLOWIP-080j: GroupByTyped for per-user session tracking
+            session_tracker = stateful!(typed_stateful::group_by(
+                |event: &UserEvent| event.user_id.clone(),
+                |session: &mut SessionData, event: &UserEvent| {
+                    event.update_session(session);
+                },
+            )
+            .emit_within(Duration::from_secs(3)));
 
-                // FLOWIP-080j: ReduceTyped for funnel analysis
-                funnel = stateful!("funnel_tracker" =>
-                    ReduceTyped::new(
-                        FunnelState::default(),
-                        |state: &mut FunnelState, event: &UserEvent| {  // CORRECTED: state first
-                            event.update_funnel(state);
-                        }
-                    ).emit_every_n(50)  // Periodic updates
-                );
+            // FLOWIP-080j: ReduceTyped for funnel analysis
+            funnel_tracker = stateful!(
+                UserEvent -> FunnelState => typed_stateful::reduce(
+                    FunnelState::default(),
+                    |state: &mut FunnelState, event: &UserEvent| {
+                        event.update_funnel(state);
+                    },
+                )
+                .emit_every_n(50)
+            );
 
-                // FLOWIP-080j: ReduceTyped for overall metrics
-                metrics = stateful!("metrics" =>
-                    ReduceTyped::new(
-                        MetricsState::default(),
-                        |state: &mut MetricsState, event: &UserEvent| {  // CORRECTED: state first
-                            event.update_metrics(state);
-                        }
-                    ).emit_on_eof()  // Only at end
-                );
+            // FLOWIP-080j: ReduceTyped for overall metrics
+            metrics = stateful!(
+                UserEvent -> MetricsState => typed_stateful::reduce(
+                    MetricsState::default(),
+                    |state: &mut MetricsState, event: &UserEvent| {
+                        event.update_metrics(state);
+                    },
+                )
+                .emit_on_eof()
+            );
 
-                // Sinks for each analysis type
-                session_sink = sink!("sessions" => |update: SessionUpdate| {
-                    println!("\n📊 [Sessions] Session Update:");
-                    println!("   User: {}", update.key);
-                    println!("   - Events: {}", update.result.event_count);
-                    println!("   - Pages: {}", update.result.pages_viewed.len());
-                    println!("   - Clicks: {}", update.result.clicks);
-                    println!("   - Duration: {}ms", update.result.total_duration_ms);
-                });
+            // Sinks for each analysis type
+            sessions = sink!(|update: SessionUpdate| {
+                println!("\n📊 [Sessions] Session Update:");
+                println!("   User: {}", update.key);
+                println!("   - Events: {}", update.result.event_count);
+                println!("   - Pages: {}", update.result.pages_viewed.len());
+                println!("   - Clicks: {}", update.result.clicks);
+                println!("   - Duration: {}ms", update.result.total_duration_ms);
+            });
 
-                funnel_sink = sink!("funnel" => |funnel: FunnelState| {
-                    println!("\n🎯 [Funnel] Funnel Progress:");
-                    println!("   Unique users: {}", funnel.total_users.len());
+            funnel = sink!(|funnel: FunnelState| {
+                println!("\n🎯 [Funnel] Funnel Progress:");
+                println!("   Unique users: {}", funnel.total_users.len());
 
-                    let home = *funnel.funnel_stages.get("/home").unwrap_or(&0);
-                    let products = *funnel.funnel_stages.get("/products").unwrap_or(&0);
-                    let cart = *funnel.funnel_stages.get("/cart").unwrap_or(&0);
-                    let conversions = funnel.conversions.len();
-                    let total_revenue: f64 = funnel.conversions.iter().copied().sum();
+                let home = *funnel.funnel_stages.get("/home").unwrap_or(&0);
+                let products = *funnel.funnel_stages.get("/products").unwrap_or(&0);
+                let cart = *funnel.funnel_stages.get("/cart").unwrap_or(&0);
+                let conversions = funnel.conversions.len();
+                let total_revenue: f64 = funnel.conversions.iter().copied().sum();
 
-                    if home > 0 {
-                        println!(
-                            "   Home → Product: {:.1}%",
-                            (products as f64 / home as f64) * 100.0
-                        );
-                    }
-                    if products > 0 {
-                        println!(
-                            "   Product → Cart: {:.1}%",
-                            (cart as f64 / products as f64) * 100.0
-                        );
-                    }
-                    if cart > 0 {
-                        println!(
-                            "   Cart → Purchase: {:.1}%",
-                            (conversions as f64 / cart as f64) * 100.0
-                        );
-                    }
-                    println!("   Revenue: ${total_revenue:.2}");
-                });
+                if home > 0 {
+                    println!(
+                        "   Home → Product: {:.1}%",
+                        (products as f64 / home as f64) * 100.0
+                    );
+                }
+                if products > 0 {
+                    println!(
+                        "   Product → Cart: {:.1}%",
+                        (cart as f64 / products as f64) * 100.0
+                    );
+                }
+                if cart > 0 {
+                    println!(
+                        "   Cart → Purchase: {:.1}%",
+                        (conversions as f64 / cart as f64) * 100.0
+                    );
+                }
+                println!("   Revenue: ${total_revenue:.2}");
+            });
 
-                metrics_sink = sink!("metrics" => |metrics: MetricsState| {
-                    println!("\n📈 [Metrics] Daily Summary:");
-                    println!("   Total events: {}", metrics.total_events);
-                    println!("   Total revenue: ${:.2}", metrics.total_revenue);
-                    println!("   Event types: {} unique", metrics.events_by_type.len());
-                });
-            },
+            metrics_printer = sink!(|metrics: MetricsState| {
+                println!("\n📈 [Metrics] Daily Summary:");
+                println!("   Total events: {}", metrics.total_events);
+                println!("   Total revenue: ${:.2}", metrics.total_revenue);
+                println!("   Event types: {} unique", metrics.events_by_type.len());
+            });
+        },
 
-            topology: {
-                // Fan out to all analyzers
-                events |> sessions;
-                events |> funnel;
-                events |> metrics;
+        topology: {
+            // Fan out to all analyzers
+            user_events |> session_tracker;
+            user_events |> funnel_tracker;
+            user_events |> metrics;
 
-                // Each analyzer to its sink
-                sessions |> session_sink;
-                funnel |> funnel_sink;
-                metrics |> metrics_sink;
-            }
+            // Each analyzer to its sink
+            session_tracker |> sessions;
+            funnel_tracker |> funnel;
+            metrics |> metrics_printer;
+        }
     })
     .await?;
 

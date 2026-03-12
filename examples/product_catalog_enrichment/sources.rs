@@ -3,30 +3,30 @@
 // https://obzenflow.dev
 
 use super::fixtures;
+use obzenflow::typed::sources;
 use obzenflow_runtime::stages::common::handlers::FiniteSourceHandler;
-use obzenflow_runtime::stages::source::FiniteSourceTyped;
 
 pub fn categories_source() -> impl FiniteSourceHandler + Clone + std::fmt::Debug + 'static {
-    FiniteSourceTyped::new(fixtures::categories())
+    sources::finite(fixtures::categories())
 }
 
 pub fn products_source() -> impl FiniteSourceHandler + Clone + std::fmt::Debug + 'static {
-    FiniteSourceTyped::new(fixtures::products())
+    sources::finite(fixtures::products())
 }
 
 pub fn skus_source() -> impl FiniteSourceHandler + Clone + std::fmt::Debug + 'static {
-    FiniteSourceTyped::new(fixtures::skus())
+    sources::finite(fixtures::skus())
 }
 
 pub fn promotions_source() -> impl FiniteSourceHandler + Clone + std::fmt::Debug + 'static {
-    FiniteSourceTyped::new(fixtures::promotions())
+    sources::finite(fixtures::promotions())
 }
 
 pub fn payment_methods_source() -> impl FiniteSourceHandler + Clone + std::fmt::Debug + 'static {
-    FiniteSourceTyped::new(fixtures::payments())
+    sources::finite(fixtures::payments())
 }
 
 pub fn orders_source() -> impl FiniteSourceHandler + Clone + std::fmt::Debug + 'static {
     let inject_bad = std::env::var("INJECT_BAD_PAYMENT").is_ok();
-    FiniteSourceTyped::new(fixtures::orders(inject_bad))
+    sources::finite(fixtures::orders(inject_bad))
 }

@@ -110,6 +110,7 @@ obzenflow_runtime = { workspace = true }
 obzenflow_adapters = { workspace = true }
 obzenflow_dsl = { workspace = true }
 obzenflow_infra = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 async-trait = { workspace = true }
 
@@ -171,10 +172,6 @@ path = "examples/csv_demo_support_sla/main.rs"
 [[example]]
 name = "payment_gateway_resilience"
 path = "examples/payment_gateway_resilience/main.rs"
-
-[[example]]
-name = "hn_ingestion_demo"
-path = "examples/hn_ingestion_demo/main.rs"
 
 [[example]]
 name = "hn_ai_digest_demo"

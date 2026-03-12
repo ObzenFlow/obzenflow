@@ -119,12 +119,12 @@ async fn sink_edge_emits_passed_delivery_contract_result() -> Result<()> {
         middleware: [],
 
         stages: {
-            src = source!("source" => TestEventSource::new(10));
-            snk = sink!("sink" => sink_handler);
+            source = source!(TestEventSource::new(10));
+            sink = sink!(sink_handler);
         },
 
         topology: {
-            src |> snk;
+            source |> sink;
         }
     }
     .await

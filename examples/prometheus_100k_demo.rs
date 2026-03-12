@@ -24,6 +24,7 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
+use obzenflow::typed::{sources, stateful as typed_stateful};
 use obzenflow_adapters::middleware::RateLimiterBuilder;
 use obzenflow_core::{
     event::chain_event::{ChainEvent, ChainEventFactory},
@@ -35,12 +36,10 @@ use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::SinkHandler;
-use obzenflow_runtime::stages::source::FiniteSourceTyped;
 // ✨ FLOWIP-080h: Import Map helper
 use obzenflow_runtime::stages::transform::Map;
 // ✨ FLOWIP-080j: Import ReduceTyped for type-safe accumulation
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
-use obzenflow_runtime::stages::stateful::strategies::accumulators::ReduceTyped;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -201,8 +200,8 @@ fn main() -> Result<()> {
 
             stages: {
                 // Source generating 100k events
-                src = source!("high_volume_source" =>
-                    FiniteSourceTyped::from_item_fn(move |index| {
+                high_volume_source = source!(DataRequest =>
+                    sources::finite_from_fn(move |index| {
                         let total = 100_000usize;
                         if index >= total {
                             println!("🏁 Source complete: Generated {index} total events");
@@ -226,13 +225,13 @@ fn main() -> Result<()> {
 
                 // Error-prone transform (every 100th event fails)
                 // ✨ FLOWIP-080h: Using Map helper instead of ErrorProneTransform struct
-                processor = transform!("error_processor" => error_prone_transform());
+                error_processor = transform!(error_prone_transform());
 
                 // Fan-out branch 1: Type-safe event counter (FLOWIP-080j)
                 // Replaces 59-line EventCounter StatefulHandler with ReduceTyped!
                 // Counts ProcessedEvent domain objects from the stream
-                counter = stateful!("event_counter" =>
-                    ReduceTyped::new(
+                event_counter = stateful!(ProcessedEvent -> EventCountState =>
+                    typed_stateful::reduce(
                         EventCountState::default(),
                         |state: &mut EventCountState, _event: &ProcessedEvent| {
                             state.event_count += 1;
@@ -243,7 +242,7 @@ fn main() -> Result<()> {
                         }
                     ).emit_on_eof()
                 );
-                counter_sink = sink!("summary_sink" => |summary: EventCountState| {
+                summary_sink = sink!(|summary: EventCountState| {
                     let count = summary.event_count;
                     let errors = 100_000usize.saturating_sub(count);
 
@@ -268,19 +267,19 @@ fn main() -> Result<()> {
                 });
 
                 // Fan-out branch 2: Completion sink
-                completion = sink!("completion_sink" => CompletionSink::new());
+                completion_sink = sink!(CompletionSink::new());
             },
 
             topology: {
                 // Linear processing
-                src |> processor;
+                high_volume_source |> error_processor;
 
                 // Fan-out: processor feeds both branches
-                processor |> counter;
-                processor |> completion;
+                error_processor |> event_counter;
+                error_processor |> completion_sink;
 
                 // Counter emits summary to its sink
-                counter |> counter_sink;
+                event_counter |> summary_sink;
             }
         })?;
 

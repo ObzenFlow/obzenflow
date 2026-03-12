@@ -13,12 +13,10 @@ use super::domain::*;
 use super::fixtures;
 use super::handlers::*;
 use anyhow::Result;
-use obzenflow::sinks::ConsoleSink;
-use obzenflow_dsl::{flow, join, sink, source, stateful, transform, with_ref};
+use obzenflow::typed::{joins, sinks, sources};
+use obzenflow_dsl::{flow, join, sink, source, stateful, transform};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::stages::join::InnerJoinBuilder;
-use obzenflow_runtime::stages::source::FiniteSourceTyped;
 
 pub fn run_example() -> Result<()> {
     tokio::runtime::Runtime::new()?.block_on(run())
@@ -41,17 +39,18 @@ async fn run() -> Result<()> {
         middleware: [],
 
         stages: {
-            carriers = source!("carriers" => FiniteSourceTyped::new(carriers));
-            flights = source!("flights" => FiniteSourceTyped::new(flights));
+            carriers = source!(CarrierDetails => sources::finite(carriers));
+            flights = source!(FlightRecord => sources::finite(flights));
 
-            val = transform!("validator" => FlightValidator::new());
-            calc = transform!("calculator" => DelayCalculator::new());
+            val = transform!(FlightValidator::new());
+            calc = transform!(DelayCalculator::new());
 
-            enricher = join!("enricher" => with_ref!(carriers,
-                InnerJoinBuilder::<CarrierDetails, FlightRecord, EnrichedFlight>::new()
-                    .catalog_key(|carrier: &CarrierDetails| carrier.carrier_code.clone())
-                    .stream_key(|flight: &FlightRecord| flight.carrier.clone())
-                    .build(|carrier: CarrierDetails, flight: FlightRecord| EnrichedFlight {
+            enricher = join!(
+                catalog carriers: CarrierDetails,
+                FlightRecord -> EnrichedFlight => joins::inner(
+                    |carrier| carrier.carrier_code.clone(),
+                    |flight| flight.carrier.clone(),
+                    |carrier, flight| EnrichedFlight {
                         carrier_code: flight.carrier.clone(),
                         carrier_name: carrier.carrier_name.clone(),
                         carrier_country: carrier.country.clone(),
@@ -62,11 +61,12 @@ async fn run() -> Result<()> {
                         delay_minutes: flight.delay_minutes,
                         flight_number: flight.flight_number.clone(),
                         delay_category: flight.delay_category.clone(),
-                    })
-            ));
+                    },
+                )
+            );
 
-            agg = stateful!("aggregator" => CarrierAggregator::new());
-            printer = sink!("printer" => ConsoleSink::<CarrierStatistics>::table(
+            agg = stateful!(CarrierAggregator::new());
+            printer = sink!(CarrierStatistics => sinks::table(
                 &["status", "carrier", "avg_delay", "flights"],
                 |stats| {
                     let status = if stats.average_delay < 10.0 {
@@ -83,7 +83,7 @@ async fn run() -> Result<()> {
                         format!("{:.1} min", stats.average_delay),
                         stats.flight_count.to_string(),
                     ]
-                }
+                },
             ));
         },
 

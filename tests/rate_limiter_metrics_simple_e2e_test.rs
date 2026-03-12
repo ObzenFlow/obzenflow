@@ -147,16 +147,16 @@ async fn test_rate_limiter_metrics_simple() -> Result<()> {
 
         stages: {
             // Apply rate limiter at the source stage
-            src = source!("burst_source" => source, [
+            burst_source = source!(source, [
                 rate_limit(5.0)  // 5 events per second
             ]);
-            trans = transform!("passthrough" => transform);
-            snk = sink!("counting_sink" => sink);
+            passthrough = transform!(transform);
+            counting_sink = sink!(sink);
         },
 
         topology: {
-            src |> trans;
-            trans |> snk;
+            burst_source |> passthrough;
+            passthrough |> counting_sink;
         }
     }
     .await
