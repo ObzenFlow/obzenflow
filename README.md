@@ -19,9 +19,9 @@ FlowApplication::run(flow! {
     middleware: [rate_limit(100.0)],
 
     stages: {
-        input = source!(my_source);
-        enrich = transform!(my_transform);
-        output = sink!(my_sink);
+        input = source!(InputEvent => my_source);
+        enrich = transform!(InputEvent -> OutputEvent => my_transform);
+        output = sink!(OutputEvent => my_sink);
     },
 
     topology: {
