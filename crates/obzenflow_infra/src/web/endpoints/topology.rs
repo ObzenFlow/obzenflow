@@ -305,6 +305,7 @@ fn parse_include_flags(_request: &Request) -> IncludeFlags {
 
 impl TopologyHttpEndpoint {
     /// Create a new topology endpoint
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         topology: Arc<obzenflow_topology::Topology>,
         stages_metadata: Arc<StageMetadataMap>,

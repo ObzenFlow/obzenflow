@@ -51,6 +51,7 @@ pub struct CompositeLowering {
     pub artifacts: LoweringArtifacts,
 }
 
+#[allow(clippy::result_large_err)]
 pub fn lower_composites(
     stages: &mut HashMap<String, Box<dyn StageDescriptor>>,
     connections: &mut Vec<(String, String, EdgeKind)>,

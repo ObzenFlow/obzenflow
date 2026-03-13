@@ -213,6 +213,7 @@ pub trait StageDescriptor: Send + Sync {
     /// Lower a composite descriptor into concrete stages + edges.
     ///
     /// Default: returns `Ok(None)` for non-composite descriptors.
+    #[allow(clippy::result_large_err)]
     fn try_lower_composite(
         self: Box<Self>,
         _binding: &str,

@@ -50,6 +50,7 @@ struct JobFailurePayload {
 }
 
 #[derive(Clone)]
+#[allow(clippy::type_complexity)]
 struct PlanningHook<Collected>(Arc<dyn Fn(&mut Collected, &ChunkPlanningSummary) + Send + Sync>);
 
 impl<Collected> fmt::Debug for PlanningHook<Collected> {
@@ -59,6 +60,7 @@ impl<Collected> fmt::Debug for PlanningHook<Collected> {
 }
 
 #[derive(Clone)]
+#[allow(clippy::type_complexity)]
 struct ManifestHook<Collected>(
     Arc<
         dyn Fn(&mut Collected, &AiMapReducePlanningManifest) -> Result<(), HandlerError>
@@ -74,6 +76,7 @@ impl<Collected> fmt::Debug for ManifestHook<Collected> {
 }
 
 #[derive(Clone)]
+#[allow(clippy::type_complexity)]
 struct Accumulator<Partial, Collected>(
     Arc<dyn Fn(&mut Collected, &Partial) + Send + Sync + 'static>,
 );
@@ -255,14 +258,15 @@ impl<Partial, Collected> CollectByInput<Partial, Collected> {
             return;
         };
 
-        if manifest.chunk_count == 0 || job.seen_chunk_indexes.len() == manifest.chunk_count {
-            if !job.queued_for_emit {
-                job.queued_for_emit = true;
-                state.ready.push_back(job_key);
-            }
+        if (manifest.chunk_count == 0 || job.seen_chunk_indexes.len() == manifest.chunk_count)
+            && !job.queued_for_emit
+        {
+            job.queued_for_emit = true;
+            state.ready.push_back(job_key);
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn fail_job(
         &self,
         state: &mut CollectByInputState<Partial, Collected>,
