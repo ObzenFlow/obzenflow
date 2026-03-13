@@ -238,10 +238,17 @@ where
             excluded_items_total: 0,
         });
 
+        let (seed_payload, seed_event_type) = match &event.content {
+            ChainEventContent::Data { event_type, payload } => (payload.clone(), event_type.clone()),
+            _ => (json!(null), event.event_type()),
+        };
+
         let manifest = AiMapReducePlanningManifest {
             job_key: event.id,
             chunk_count,
             planning,
+            seed_payload,
+            seed_event_type,
         };
 
         let Ok(payload) = serde_json::to_value(&manifest) else {
@@ -714,6 +721,8 @@ mod tests {
         let manifest = AiMapReducePlanningManifest::try_from_event(&ctx.control_events[0])
             .expect("manifest should decode");
         assert_eq!(manifest.chunk_count, 1);
+        assert_eq!(manifest.seed_event_type, "job");
+        assert_eq!(manifest.seed_payload, json!({}));
         assert_eq!(
             manifest.planning,
             ChunkPlanningSummary {
@@ -746,6 +755,8 @@ mod tests {
                 planned_items_total: 1,
                 excluded_items_total: 0,
             },
+            seed_payload: json!({ "seed": true }),
+            seed_event_type: "seed.event".to_string(),
         }
         .to_event(writer_id());
 

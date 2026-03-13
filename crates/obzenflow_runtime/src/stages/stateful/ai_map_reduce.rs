@@ -19,8 +19,8 @@ use crate::stages::common::handlers::StatefulHandler;
 use crate::typing::StatefulTyping;
 use async_trait::async_trait;
 use obzenflow_core::ai::{
-    AiMapReduceChunkFailed, AiMapReducePlanningManifest, AiMapReduceTaggedPartial,
-    ChunkPlanningSummary,
+    AiMapReduceChunkFailed, AiMapReducePlanningManifest, AiMapReduceReduceInput,
+    AiMapReduceTaggedPartial, ChunkPlanningSummary,
 };
 use obzenflow_core::event::chain_event::ChainEventFactory;
 use obzenflow_core::event::status::processing_status::ErrorKind;
@@ -59,6 +59,21 @@ impl<Collected> fmt::Debug for PlanningHook<Collected> {
 }
 
 #[derive(Clone)]
+struct ManifestHook<Collected>(
+    Arc<
+        dyn Fn(&mut Collected, &AiMapReducePlanningManifest) -> Result<(), HandlerError>
+            + Send
+            + Sync,
+    >,
+);
+
+impl<Collected> fmt::Debug for ManifestHook<Collected> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("ManifestHook").field(&"<closure>").finish()
+    }
+}
+
+#[derive(Clone)]
 struct Accumulator<Partial, Collected>(
     Arc<dyn Fn(&mut Collected, &Partial) + Send + Sync + 'static>,
 );
@@ -70,11 +85,12 @@ impl<Partial, Collected> fmt::Debug for Accumulator<Partial, Collected> {
 }
 
 #[derive(Debug, Clone)]
-struct PendingJob<Collected> {
+struct PendingJob<Partial, Collected> {
     manifest: Option<AiMapReducePlanningManifest>,
     // Optional before the manifest arrives; validated once both surfaces are present.
     declared_chunk_count: Option<usize>,
     seen_chunk_indexes: BTreeSet<usize>,
+    partials_by_index: Vec<Option<Partial>>,
     collected: Collected,
     created_at: Instant,
     lineage_parent: ChainEvent,
@@ -83,13 +99,13 @@ struct PendingJob<Collected> {
 }
 
 #[derive(Debug, Clone)]
-pub struct CollectByInputState<Collected> {
-    jobs: HashMap<EventId, PendingJob<Collected>>,
+pub struct CollectByInputState<Partial, Collected> {
+    jobs: HashMap<EventId, PendingJob<Partial, Collected>>,
     ready: VecDeque<EventId>,
     pending_errors: VecDeque<ChainEvent>,
 }
 
-impl<Collected> CollectByInputState<Collected> {
+impl<Partial, Collected> CollectByInputState<Partial, Collected> {
     fn new() -> Self {
         Self {
             jobs: HashMap::new(),
@@ -104,6 +120,7 @@ pub struct CollectByInput<Partial, Collected> {
     initial: Collected,
     accumulate: Accumulator<Partial, Collected>,
     planning_hook: Option<PlanningHook<Collected>>,
+    manifest_hook: Option<ManifestHook<Collected>>,
     job_ttl: Duration,
     max_open_jobs: usize,
     _phantom: PhantomData<Partial>,
@@ -130,6 +147,7 @@ impl<Partial, Collected> CollectByInput<Partial, Collected> {
             initial,
             accumulate: Accumulator(Arc::new(accumulate)),
             planning_hook: None,
+            manifest_hook: None,
             job_ttl: DEFAULT_JOB_TTL,
             max_open_jobs: DEFAULT_MAX_OPEN_JOBS,
             _phantom: PhantomData,
@@ -144,6 +162,83 @@ impl<Partial, Collected> CollectByInput<Partial, Collected> {
         self
     }
 
+    pub fn with_manifest_hook<F>(mut self, hook: F) -> Self
+    where
+        F: Fn(&mut Collected, &AiMapReducePlanningManifest) -> Result<(), HandlerError>
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.manifest_hook = Some(ManifestHook(Arc::new(hook)));
+        self
+    }
+
+    /// Wrap this collector so its output payload becomes `AiMapReduceReduceInput<Seed, Collected>`.
+    ///
+    /// The reduce handler surface for map-reduce is `(Seed, Collected) -> Out`.
+    /// This helper injects the seed payload (from the planning manifest) into the
+    /// collected output so downstream stages do not need to reconstruct it.
+    pub fn with_seed<Seed>(
+        self,
+    ) -> CollectByInput<Partial, AiMapReduceReduceInput<Seed, Collected>>
+    where
+        Seed: DeserializeOwned + Serialize + Send + Sync + 'static,
+        Partial: DeserializeOwned + Send + Sync + 'static,
+        Collected: Clone + Serialize + TypedPayload + Send + Sync + 'static,
+    {
+        let CollectByInput {
+            initial,
+            accumulate,
+            planning_hook,
+            manifest_hook: _,
+            job_ttl,
+            max_open_jobs,
+            _phantom: _,
+        } = self;
+
+        let wrapped = AiMapReduceReduceInput::<Seed, Collected> {
+            seed: None,
+            collected: initial,
+            planning: ChunkPlanningSummary {
+                input_items_total: 0,
+                planned_items_total: 0,
+                excluded_items_total: 0,
+            },
+        };
+
+        let inner_accumulate = accumulate.0;
+        let inner_planning_hook = planning_hook.map(|hook| hook.0);
+
+        let mut out = CollectByInput::<Partial, AiMapReduceReduceInput<Seed, Collected>>::new(
+            wrapped,
+            move |acc, partial| {
+                (inner_accumulate)(&mut acc.collected, partial);
+            },
+        )
+        .with_manifest_hook(|acc, manifest| {
+            let seed: Seed = serde_json::from_value(manifest.seed_payload.clone()).map_err(
+                |err| {
+                    HandlerError::Deserialization(format!(
+                        "ai_map_reduce: seed decode failed (seed_event_type={}): {err}",
+                        manifest.seed_event_type
+                    ))
+                },
+            )?;
+            acc.seed = Some(seed);
+            Ok(())
+        })
+        .with_planning_summary(move |acc, planning| {
+            acc.planning = planning.clone();
+            if let Some(hook) = inner_planning_hook.as_ref() {
+                (hook)(&mut acc.collected, planning);
+            }
+        });
+
+        out.job_ttl = job_ttl;
+        out.max_open_jobs = max_open_jobs;
+        out
+    }
+
     pub fn with_job_ttl(mut self, ttl: Duration) -> Self {
         self.job_ttl = ttl;
         self
@@ -154,7 +249,7 @@ impl<Partial, Collected> CollectByInput<Partial, Collected> {
         self
     }
 
-    fn queue_job_if_ready(state: &mut CollectByInputState<Collected>, job_key: EventId) {
+    fn queue_job_if_ready(state: &mut CollectByInputState<Partial, Collected>, job_key: EventId) {
         let Some(job) = state.jobs.get_mut(&job_key) else {
             return;
         };
@@ -173,7 +268,7 @@ impl<Partial, Collected> CollectByInput<Partial, Collected> {
 
     fn fail_job(
         &self,
-        state: &mut CollectByInputState<Collected>,
+        state: &mut CollectByInputState<Partial, Collected>,
         job_key: EventId,
         parent: &ChainEvent,
         reason: impl Into<String>,
@@ -200,7 +295,7 @@ impl<Partial, Collected> CollectByInput<Partial, Collected> {
     }
 
     fn push_internal_decode_error(
-        state: &mut CollectByInputState<Collected>,
+        state: &mut CollectByInputState<Partial, Collected>,
         event: &ChainEvent,
         reason: impl Into<String>,
     ) {
@@ -212,11 +307,11 @@ impl<Partial, Collected> CollectByInput<Partial, Collected> {
 
     fn open_or_get_job<'a>(
         &self,
-        state: &'a mut CollectByInputState<Collected>,
+        state: &'a mut CollectByInputState<Partial, Collected>,
         job_key: EventId,
         parent: &ChainEvent,
         declared_chunk_count: Option<usize>,
-    ) -> Option<&'a mut PendingJob<Collected>>
+    ) -> Option<&'a mut PendingJob<Partial, Collected>>
     where
         Collected: Clone,
     {
@@ -240,6 +335,7 @@ impl<Partial, Collected> CollectByInput<Partial, Collected> {
                     }
                 } else {
                     job.declared_chunk_count = Some(count);
+                    job.partials_by_index = (0..count).map(|_| None).collect();
                 }
             }
 
@@ -267,6 +363,9 @@ impl<Partial, Collected> CollectByInput<Partial, Collected> {
             manifest: None,
             declared_chunk_count,
             seen_chunk_indexes: BTreeSet::new(),
+            partials_by_index: declared_chunk_count
+                .map(|count| (0..count).map(|_| None).collect())
+                .unwrap_or_default(),
             collected: self.initial.clone(),
             created_at: Instant::now(),
             lineage_parent: parent.clone(),
@@ -287,10 +386,10 @@ impl<Partial, Collected> StatefulTyping for CollectByInput<Partial, Collected> {
 #[async_trait]
 impl<Partial, Collected> StatefulHandler for CollectByInput<Partial, Collected>
 where
-    Partial: DeserializeOwned + Send + Sync + 'static,
+    Partial: DeserializeOwned + Clone + Send + Sync + 'static,
     Collected: Clone + Serialize + TypedPayload + Send + Sync + 'static,
 {
-    type State = CollectByInputState<Collected>;
+    type State = CollectByInputState<Partial, Collected>;
 
     fn accumulate(&mut self, state: &mut Self::State, event: ChainEvent) {
         let ChainEventContent::Data { event_type, .. } = &event.content else {
@@ -368,6 +467,23 @@ where
                     (hook.0)(&mut job.collected, &manifest.planning);
                 }
                 job.planning_applied = true;
+            }
+
+            let manifest_hook_err = self.manifest_hook.as_ref().and_then(|hook| {
+                (hook.0)(&mut job.collected, &manifest).err()
+            });
+
+            if let Some(err) = manifest_hook_err {
+                self.fail_job(
+                    state,
+                    job_key,
+                    &event,
+                    format!("ai_map_reduce: manifest hook failed: {err}"),
+                    JOB_FAILED_EVENT_TYPE,
+                    ErrorKind::Deserialization,
+                    None,
+                );
+                return;
             }
 
             Self::queue_job_if_ready(state, job_key);
@@ -480,7 +596,19 @@ where
             }
 
             job.seen_chunk_indexes.insert(tagged.chunk_index);
-            (self.accumulate.0)(&mut job.collected, &partial);
+            if tagged.chunk_index >= job.partials_by_index.len() {
+                self.fail_job(
+                    state,
+                    tagged.job_key,
+                    &event,
+                    "ai_map_reduce: tagged partial chunk_index out of range for collector storage",
+                    JOB_FAILED_EVENT_TYPE,
+                    ErrorKind::PermanentFailure,
+                    None,
+                );
+                return;
+            }
+            job.partials_by_index[tagged.chunk_index] = Some(partial);
             job.lineage_parent = event.clone();
 
             Self::queue_job_if_ready(state, tagged.job_key);
@@ -534,11 +662,15 @@ where
         }
 
         while let Some(job_key) = state.ready.pop_front() {
-            let Some(job) = state.jobs.remove(&job_key) else {
+            let Some(mut job) = state.jobs.remove(&job_key) else {
                 continue;
             };
 
-            let payload = serde_json::to_value(&job.collected).map_err(|err| {
+            for partial in job.partials_by_index.iter().flatten() {
+                (self.accumulate.0)(&mut job.collected, partial);
+            }
+
+            let payload = serde_json::to_value(job.collected).map_err(|err| {
                 HandlerError::Validation(format!("ai_map_reduce: collected encode failed: {err}"))
             })?;
 
@@ -590,7 +722,12 @@ where
             if let Some(manifest) = job.manifest.as_ref() {
                 if manifest.chunk_count == 0 || job.seen_chunk_indexes.len() == manifest.chunk_count
                 {
-                    let payload = serde_json::to_value(&job.collected).map_err(|err| {
+                    let mut collected = job.collected.clone();
+                    for partial in job.partials_by_index.iter().flatten() {
+                        (self.accumulate.0)(&mut collected, partial);
+                    }
+
+                    let payload = serde_json::to_value(collected).map_err(|err| {
                         HandlerError::Validation(format!(
                             "ai_map_reduce: collected encode failed during drain: {err}"
                         ))
@@ -667,6 +804,11 @@ mod tests {
         const EVENT_TYPE: &'static str = "test.ai_map_reduce.collected";
     }
 
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+    struct TestSeed {
+        seed: bool,
+    }
+
     fn writer_id() -> WriterId {
         WriterId::from(StageId::new())
     }
@@ -680,6 +822,8 @@ mod tests {
                 planned_items_total: 3,
                 excluded_items_total: 2,
             },
+            seed_payload: serde_json::json!({ "seed": true }),
+            seed_event_type: "seed.event".to_string(),
         };
 
         ChainEventFactory::data_event_from(
@@ -769,6 +913,46 @@ mod tests {
         assert_eq!(collected.input_items_total, 5);
         assert_eq!(collected.planned_items_total, 3);
         assert_eq!(collected.excluded_items_total, 2);
+    }
+
+    #[test]
+    fn collector_with_seed_emits_reduce_input_with_seed_and_planning() {
+        let mut collector = CollectByInput::<TestPartial, TestCollected>::new(
+            TestCollected::default(),
+            |acc, partial| acc.values.push(partial.value),
+        )
+        .with_planning_summary(|acc, planning| {
+            acc.input_items_total = planning.input_items_total;
+            acc.planned_items_total = planning.planned_items_total;
+            acc.excluded_items_total = planning.excluded_items_total;
+        })
+        .with_seed::<TestSeed>();
+
+        let mut state = collector.initial_state();
+        let job_key = EventId::new();
+
+        collector.accumulate(
+            &mut state,
+            tagged_partial_event(job_key, 0, 1, TestPartial { value: 10 }),
+        );
+        collector.accumulate(&mut state, manifest_event(job_key, 1));
+
+        assert!(collector.should_emit(&state));
+        let out = collector.emit(&mut state).expect("emit should succeed");
+        assert_eq!(out.len(), 1);
+        assert_eq!(
+            out[0].event_type(),
+            AiMapReduceReduceInput::<TestSeed, TestCollected>::versioned_event_type()
+        );
+
+        let decoded = AiMapReduceReduceInput::<TestSeed, TestCollected>::try_from_event(&out[0])
+            .expect("reduce input decode");
+
+        assert_eq!(decoded.seed, Some(TestSeed { seed: true }));
+        assert_eq!(decoded.collected.values, vec![10]);
+        assert_eq!(decoded.planning.input_items_total, 5);
+        assert_eq!(decoded.planning.planned_items_total, 3);
+        assert_eq!(decoded.planning.excluded_items_total, 2);
     }
 
     #[test]

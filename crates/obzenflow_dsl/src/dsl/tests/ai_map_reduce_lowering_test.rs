@@ -88,6 +88,20 @@ mod tests {
     #[derive(Debug, Clone)]
     struct TestOut;
 
+    #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+    struct TestSeed {
+        items: Vec<TestItem>,
+    }
+
+    impl TypedPayload for TestSeed {
+        const EVENT_TYPE: &'static str = "test.ai_map_reduce.seed";
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    struct TestItem {
+        value: u32,
+    }
+
     #[derive(Debug, Clone, Serialize, Deserialize)]
     struct TestChunk {
         chunk_index: usize,
@@ -255,6 +269,66 @@ mod tests {
 
         lower_composites(&mut stages, &mut connections)
             .expect("lowering should succeed for ai_map_reduce composite from ai_map_reduce!()");
+
+        let map_stage = stages
+            .get("digest__map")
+            .expect("map stage should exist after lowering");
+        assert!(
+            map_stage
+                .stage_middleware_names()
+                .contains(&"test_map_mw".to_string()),
+            "map stage should include map-scoped middleware from macro surface"
+        );
+
+        let finalize_stage = stages
+            .get("digest__finalize")
+            .expect("finalize stage should exist after lowering");
+        assert!(
+            finalize_stage
+                .stage_middleware_names()
+                .contains(&"test_reduce_mw".to_string()),
+            "finalise stage should include reduce-scoped middleware from macro surface"
+        );
+    }
+
+    #[test]
+    fn ai_map_reduce_cadillac_macro_is_typed_and_lowers_composite() {
+        let digest = crate::ai_map_reduce!(
+            TestSeed -> TestOut => {
+                map: [TestItem] -> TestPartial => NoopAsyncTransform,
+                reduce: (TestSeed, [TestPartial]) -> TestOut => NoopAsyncTransform,
+            },
+            chunking: by_budget {
+                items: |seed: &TestSeed| seed.items.clone(),
+                render: |item: &TestItem, _ctx| format!("{}", item.value),
+                budget: ::obzenflow_core::ai::TokenCount::new(100),
+                max_items: None,
+                oversize: error,
+            },
+            middleware: {
+                map: TestMiddlewareFactory("test_map_mw"),
+                reduce: TestMiddlewareFactory("test_reduce_mw"),
+            }
+        );
+
+        let metadata = digest
+            .typing_metadata()
+            .expect("ai_map_reduce! should return a typed descriptor wrapper");
+        assert_eq!(metadata.input_type, TypeHint::exact("TestSeed"));
+        assert_eq!(metadata.output_type, TypeHint::exact("TestOut"));
+
+        let mut stages: HashMap<String, Box<dyn StageDescriptor>> = HashMap::new();
+        stages.insert("batch".to_string(), mk_transform("batch"));
+        stages.insert("out".to_string(), mk_transform("out"));
+        stages.insert("digest".to_string(), digest);
+
+        let mut connections = vec![
+            ("batch".to_string(), "digest".to_string(), EdgeKind::Forward),
+            ("digest".to_string(), "out".to_string(), EdgeKind::Forward),
+        ];
+
+        lower_composites(&mut stages, &mut connections)
+            .expect("lowering should succeed for ai_map_reduce composite from Cadillac ai_map_reduce!()");
 
         let map_stage = stages
             .get("digest__map")

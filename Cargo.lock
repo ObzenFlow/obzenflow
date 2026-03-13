@@ -1639,6 +1639,7 @@ dependencies = [
  "obzenflow_core",
  "obzenflow_runtime",
  "serde",
+ "serde_json",
  "thiserror 1.0.69",
  "tokio",
  "tokio-test",

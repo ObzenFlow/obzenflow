@@ -47,6 +47,27 @@ type TemplateFn =
 type EmbeddingInputsFn =
     Arc<dyn Fn(&ChainEvent) -> Result<Vec<String>, HandlerError> + Send + Sync + 'static>;
 
+/// Typed authoring surface for LLM chat transforms.
+///
+/// This keeps user code out of `ChainEvent` and JSON glue, while still allowing
+/// domain code to control prompt construction and output mapping.
+pub trait AiChatTask: Send + Sync + 'static {
+    type Input: DeserializeOwned + Send + Sync + 'static;
+    type Output: Serialize + TypedPayload + Send + Sync + 'static;
+
+    fn prompt(&self, input: &Self::Input) -> Result<String, HandlerError>;
+    fn parse(&self, input: Self::Input, response: ChatResponse)
+        -> Result<Self::Output, HandlerError>;
+}
+
+/// Convenience facade for `ChatTransformBuilder::build_task_lazy(..)`.
+pub fn llm_chat<T>(spec: ChatTransformBuilder, task: T) -> Result<ChatTransform, HandlerError>
+where
+    T: AiChatTask,
+{
+    spec.build_task_lazy(task)
+}
+
 /// Extension trait that provides `ChatTransform::builder()` when Rig-backed AI
 /// builder support is enabled.
 ///
@@ -661,6 +682,26 @@ impl ChatTransformBuilder {
                 (prompt_extractor)(&input)
             }
         })
+    }
+
+    /// Build a typed `ChatTransform` from an [`AiChatTask`] without provider/model preflight.
+    ///
+    /// This is the ergonomic counterpart to `build_typed_lazy(..)` that avoids
+    /// closure-heavy call sites. The transform is still backed by the same
+    /// adapter-layer `ChatTransform` and therefore integrates with journalling,
+    /// middleware, and observability in the same way as the lower-level APIs.
+    pub fn build_task_lazy<T>(self, task: T) -> Result<ChatTransform, HandlerError>
+    where
+        T: AiChatTask,
+    {
+        let task = Arc::new(task);
+        let prompt_task = task.clone();
+        let parse_task = task.clone();
+
+        self.build_typed_lazy::<T::Input, T::Output>(
+            move |input| prompt_task.prompt(input),
+            move |input, response| parse_task.parse(input, response),
+        )
     }
 
     fn chat_request_target(&self) -> Result<(AiProvider, String), HandlerError> {
