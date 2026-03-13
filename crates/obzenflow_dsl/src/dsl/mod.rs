@@ -65,6 +65,7 @@
 
 #[path = "dsl.rs"]
 mod dsl_impl;
+pub mod composites;
 pub mod error;
 mod flow_definition;
 pub mod stage_descriptor;

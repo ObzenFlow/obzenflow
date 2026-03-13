@@ -27,6 +27,7 @@ use obzenflow_core::id::{FlowId, SystemId};
 use obzenflow_core::journal::Journal;
 use obzenflow_core::journal::JournalStorageKind;
 use obzenflow_core::metrics::MetricsExporter;
+use obzenflow_core::topology::subgraphs::{StageSubgraphMembership, TopologySubgraphInfo};
 use obzenflow_core::StageId;
 use obzenflow_core::{DeliveryContract, SourceContract, TransportContract};
 use obzenflow_topology::Topology;
@@ -51,6 +52,8 @@ pub struct PipelineBuilder {
     middleware_stacks: Option<HashMap<StageId, MiddlewareStackConfig>>,
     contract_attachments: Option<HashMap<(StageId, StageId), Vec<String>>>,
     join_metadata: Option<HashMap<StageId, crate::pipeline::JoinMetadata>>,
+    subgraph_membership: Option<HashMap<StageId, StageSubgraphMembership>>,
+    subgraphs: Option<Vec<TopologySubgraphInfo>>,
     backpressure_registry: Option<Arc<BackpressureRegistry>>,
 }
 
@@ -74,6 +77,8 @@ impl PipelineBuilder {
             middleware_stacks: None,
             contract_attachments: None,
             join_metadata: None,
+            subgraph_membership: None,
+            subgraphs: None,
             backpressure_registry: None,
         }
     }
@@ -138,6 +143,17 @@ impl PipelineBuilder {
         join_metadata: HashMap<StageId, crate::pipeline::JoinMetadata>,
     ) -> Self {
         self.join_metadata = Some(join_metadata);
+        self
+    }
+
+    /// Attach logical subgraph metadata for topology export (FLOWIP-086z-part-2).
+    pub fn with_subgraphs(
+        mut self,
+        membership: HashMap<StageId, StageSubgraphMembership>,
+        subgraphs: Vec<TopologySubgraphInfo>,
+    ) -> Self {
+        self.subgraph_membership = Some(membership);
+        self.subgraphs = Some(subgraphs);
         self
     }
 
@@ -447,6 +463,13 @@ impl SupervisorBuilder for PipelineBuilder {
         let join_metadata = self
             .join_metadata
             .map(|map| Arc::new(map) as Arc<HashMap<StageId, crate::pipeline::JoinMetadata>>);
+
+        let subgraph_membership = self
+            .subgraph_membership
+            .map(|map| Arc::new(map) as Arc<HashMap<StageId, StageSubgraphMembership>>);
+        let subgraphs = self
+            .subgraphs
+            .map(|list| Arc::new(list) as Arc<Vec<TopologySubgraphInfo>>);
         Ok(FlowHandle::new(
             standard_handle,
             metrics_exporter,
@@ -456,6 +479,8 @@ impl SupervisorBuilder for PipelineBuilder {
                 middleware_stacks,
                 contract_attachments,
                 join_metadata,
+                subgraph_membership,
+                subgraphs,
                 system_journal: Some(self.system_journal.clone()),
             },
         ))

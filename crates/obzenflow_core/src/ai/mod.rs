@@ -13,6 +13,7 @@ mod chunking;
 mod error;
 mod hashing;
 mod model_profile;
+mod map_reduce;
 mod observability;
 mod ports;
 mod structured_output;
@@ -35,6 +36,9 @@ pub use hashing::{
     schema_hash_from_text, AiHashError, LLM_HASH_VERSION_SHA256_V1,
 };
 pub use model_profile::{ChatModelProfile, ContextWindowSource};
+pub use map_reduce::{
+    AiMapReduceChunkFailed, AiMapReducePlanningManifest, AiMapReduceTaggedPartial,
+};
 pub use observability::{
     attach_llm_observability, read_llm_observability, LlmCacheInfo, LlmCacheMode, LlmHashes,
     LlmObservability, LlmObservabilityError, LLM_METADATA_KEY,

@@ -202,6 +202,24 @@ pub trait StageDescriptor: Send + Sync {
     fn typing_metadata(&self) -> Option<&StageTypingMetadata> {
         None
     }
+
+    /// Whether this descriptor is a composite that must be lowered during `flow!` materialisation.
+    ///
+    /// Default: `false` for ordinary stages.
+    fn is_composite(&self) -> bool {
+        false
+    }
+
+    /// Lower a composite descriptor into concrete stages + edges.
+    ///
+    /// Default: returns `Ok(None)` for non-composite descriptors.
+    fn try_lower_composite(
+        self: Box<Self>,
+        _binding: &str,
+    ) -> Result<Option<crate::dsl::composites::CompositeLowering>, crate::dsl::FlowBuildError>
+    {
+        Ok(None)
+    }
 }
 
 /// Descriptor for finite source stages

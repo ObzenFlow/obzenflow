@@ -8,6 +8,7 @@ use crate::messaging::PollResult;
 use crate::metrics::instrumentation::process_with_instrumentation_no_count;
 use crate::stages::common::handlers::StatefulHandler;
 use crate::stages::common::supervision::backpressure_drain::{drain_one_pending, DrainOutcome};
+use crate::stages::common::supervision::error_routing::route_to_error_journal;
 use crate::stages::common::supervision::control_resolution::{
     resolve_control_event, resolve_forward_control_event, ControlResolution,
 };
@@ -518,7 +519,28 @@ pub(super) async fn dispatch_emitting<
 
             for mut event in events {
                 event.writer_id = stage_writer_id;
-                ctx.pending_outputs.push_back(event);
+                if route_to_error_journal(&event) {
+                    tracing::info!(
+                        stage_name = %ctx.stage_name,
+                        event_id = %event.id,
+                        "Writing stateful emitted error event to error journal (FLOWIP-082h)"
+                    );
+
+                    // Error events are still data for output accounting.
+                    if event.is_data() {
+                        ctx.instrumentation.record_output_event(&event);
+                        if let Some(subscription) = sup.subscription.as_mut() {
+                            subscription.track_output_event();
+                        }
+                    }
+
+                    ctx.error_journal
+                        .append(event, ctx.last_consumed_envelope.as_ref())
+                        .await
+                        .map_err(|e| format!("Failed to write stateful error event: {e}"))?;
+                } else {
+                    ctx.pending_outputs.push_back(event);
+                }
             }
 
             ctx.pending_transition = Some(PendingTransition::EmitComplete);

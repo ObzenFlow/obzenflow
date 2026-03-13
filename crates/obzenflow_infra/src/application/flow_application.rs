@@ -736,6 +736,8 @@ impl FlowApplication {
             let middleware_stacks = _flow_handle.middleware_stacks();
             let contract_attachments = _flow_handle.contract_attachments();
             let join_metadata = _flow_handle.join_metadata();
+            let subgraph_membership = _flow_handle.subgraph_membership();
+            let subgraphs = _flow_handle.subgraphs();
 
             let handle = start_web_server_with_config(
                 WebServerResources {
@@ -744,6 +746,8 @@ impl FlowApplication {
                     middleware_stacks,
                     contract_attachments,
                     join_metadata,
+                    subgraph_membership,
+                    subgraphs,
                     metrics_exporter: metrics,
                     flow_handle: Some(_flow_handle.clone()),
                     extra_endpoints,
