@@ -305,8 +305,7 @@ pub async fn run_example() -> Result<()> {
                 .map(|ordinal| *ordinal + 1)
                 .collect::<Vec<_>>();
 
-            let user_prompt =
-                build_chunk_prompt(&envelope, interests_for_map_summary.as_deref());
+            let user_prompt = build_chunk_prompt(&envelope, interests_for_map_summary.as_deref());
 
             let summary = HnDigestChunkSummary {
                 group_index: envelope.chunk_index,
@@ -337,7 +336,10 @@ pub async fn run_example() -> Result<()> {
                 HandlerError::Validation(format!("hn digest chunk envelope decode failed: {err}"))
             })?;
 
-            Ok(build_chunk_prompt(&envelope, interests_for_map_request.as_deref()))
+            Ok(build_chunk_prompt(
+                &envelope,
+                interests_for_map_request.as_deref(),
+            ))
         })
         .await?
         .with_resolved_estimator(estimator_resolution.clone());
@@ -456,9 +458,9 @@ pub async fn run_example() -> Result<()> {
                         acc.excluded_items_total = planning.excluded_items_total;
                     }),
                 )
-                .finalise(digest_llm_handler)
+                .finalize(digest_llm_handler)
                 .map_middleware([ai_circuit_breaker()])
-                .finalise_middleware([ai_circuit_breaker()])
+                .finalize_middleware([ai_circuit_breaker()])
                 .build();
                 digest_summary = sink!(HnDigestSummary => sinks::console(format_digest_summary_for_console));
             },
@@ -591,7 +593,11 @@ fn build_chunk_prompt(envelope: &StoryChunkEnvelope, interests: Option<&str>) ->
     debug_assert_eq!(envelope.item_ordinals.len(), envelope.items.len());
     for (ordinal, story) in envelope.item_ordinals.iter().zip(envelope.items.iter()) {
         let story_number = *ordinal + 1;
-        out.push_str(&render_story_line(story_number, story, envelope.decomposition_depth));
+        out.push_str(&render_story_line(
+            story_number,
+            story,
+            envelope.decomposition_depth,
+        ));
         out.push('\n');
     }
     out.push_str("```\n");

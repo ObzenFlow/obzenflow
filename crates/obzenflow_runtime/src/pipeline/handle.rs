@@ -21,8 +21,7 @@ type ContractAttachments = Arc<HashMap<(StageId, StageId), Vec<String>>>;
 type JoinMetadataMap = Arc<HashMap<StageId, crate::pipeline::JoinMetadata>>;
 type StageSubgraphMembershipMap =
     Arc<HashMap<StageId, obzenflow_core::topology::subgraphs::StageSubgraphMembership>>;
-type SubgraphRegistry =
-    Arc<Vec<obzenflow_core::topology::subgraphs::TopologySubgraphInfo>>;
+type SubgraphRegistry = Arc<Vec<obzenflow_core::topology::subgraphs::TopologySubgraphInfo>>;
 
 pub(crate) struct FlowHandleExtras {
     pub topology: Option<Arc<Topology>>,

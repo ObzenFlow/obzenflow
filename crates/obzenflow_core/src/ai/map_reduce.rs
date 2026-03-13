@@ -48,4 +48,3 @@ impl TypedPayload for AiMapReduceChunkFailed {
     const EVENT_TYPE: &'static str = "ai.map_reduce.chunk_failed";
     const SCHEMA_VERSION: u32 = 1;
 }
-

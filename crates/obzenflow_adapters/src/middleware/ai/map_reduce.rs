@@ -16,7 +16,9 @@ use obzenflow_core::ai::{
 };
 use obzenflow_core::event::chain_event::ChainEventFactory;
 use obzenflow_core::event::observability::AiChunkingSnapshot;
-use obzenflow_core::event::payloads::observability_payload::{MetricsLifecycle, ObservabilityPayload};
+use obzenflow_core::event::payloads::observability_payload::{
+    MetricsLifecycle, ObservabilityPayload,
+};
 use obzenflow_core::event::status::processing_status::ErrorKind;
 use obzenflow_core::event::ChainEventContent;
 use obzenflow_core::{ChainEvent, EventId, TypedPayload};
@@ -58,14 +60,11 @@ struct ChunkEnvelopeIndexCount {
 }
 
 fn remove_control_events_by_type(ctx: &mut MiddlewareContext, event_type: &str) {
-    ctx.control_events.retain(|e| {
-        match &e.content {
-            ChainEventContent::Data {
-                event_type: actual,
-                ..
-            } => actual != event_type,
-            _ => true,
-        }
+    ctx.control_events.retain(|e| match &e.content {
+        ChainEventContent::Data {
+            event_type: actual, ..
+        } => actual != event_type,
+        _ => true,
     });
 }
 
@@ -92,7 +91,10 @@ fn update_chunk_failed_reason(
     }
 
     let (event_type, payload) = match &mut event.content {
-        ChainEventContent::Data { event_type, payload } => (event_type, payload),
+        ChainEventContent::Data {
+            event_type,
+            payload,
+        } => (event_type, payload),
         _ => return,
     };
 
@@ -207,7 +209,11 @@ where
         if planning.is_none() {
             // Fall back to a best-effort parse from the first chunk envelope.
             for out in outputs {
-                let ChainEventContent::Data { event_type, payload } = &out.content else {
+                let ChainEventContent::Data {
+                    event_type,
+                    payload,
+                } = &out.content
+                else {
                     continue;
                 };
                 if !Chunk::event_type_matches(event_type) {
@@ -322,7 +328,11 @@ where
     }
 
     fn pre_handle(&self, event: &ChainEvent, ctx: &mut MiddlewareContext) -> MiddlewareAction {
-        let ChainEventContent::Data { event_type, payload } = &event.content else {
+        let ChainEventContent::Data {
+            event_type,
+            payload,
+        } = &event.content
+        else {
             return MiddlewareAction::Skip(vec![]);
         };
 
@@ -397,7 +407,12 @@ where
         MiddlewareAction::Continue
     }
 
-    fn post_handle(&self, _event: &ChainEvent, outputs: &[ChainEvent], ctx: &mut MiddlewareContext) {
+    fn post_handle(
+        &self,
+        _event: &ChainEvent,
+        outputs: &[ChainEvent],
+        ctx: &mut MiddlewareContext,
+    ) {
         // Integrated retry: do not surface chunk_failed markers until the terminal attempt.
         if should_retry(ctx) {
             remove_control_events_by_type(ctx, CHUNK_FAILED_EVENT_TYPE);
@@ -416,7 +431,11 @@ where
     fn pre_write(&self, event: &mut ChainEvent, ctx: &MiddlewareContext) {
         update_chunk_failed_reason(event, ctx, "map produced no partial output");
 
-        let ChainEventContent::Data { event_type, payload } = &mut event.content else {
+        let ChainEventContent::Data {
+            event_type,
+            payload,
+        } = &mut event.content
+        else {
             return;
         };
 
@@ -498,11 +517,13 @@ mod tests {
     use super::*;
     use crate::middleware::control::ControlMiddlewareAggregator;
     use crate::middleware::{MiddlewareAction, MiddlewareContext};
-    use obzenflow_core::event::chain_event::ChainEventFactory;
-    use obzenflow_core::event::payloads::observability_payload::{MetricsLifecycle, ObservabilityPayload};
-    use obzenflow_core::event::status::processing_status::ErrorKind;
-    use obzenflow_core::event::observability::AiChunkingSnapshot;
     use obzenflow_core::ai::ChunkPlanningSummary;
+    use obzenflow_core::event::chain_event::ChainEventFactory;
+    use obzenflow_core::event::observability::AiChunkingSnapshot;
+    use obzenflow_core::event::payloads::observability_payload::{
+        MetricsLifecycle, ObservabilityPayload,
+    };
+    use obzenflow_core::event::status::processing_status::ErrorKind;
     use obzenflow_core::{EventId, StageId, TypedPayload, WriterId};
     use obzenflow_runtime::pipeline::config::StageConfig;
     use serde::{Deserialize, Serialize};
@@ -548,17 +569,13 @@ mod tests {
     }
 
     fn mk_chunk_manifest_middleware() -> Box<dyn Middleware> {
-        AiMapReduceChunkManifestFactory::<TestChunkEnvelope>::new().create(
-            &stage_config(),
-            control_aggregator(),
-        )
+        AiMapReduceChunkManifestFactory::<TestChunkEnvelope>::new()
+            .create(&stage_config(), control_aggregator())
     }
 
     fn mk_map_middleware() -> Box<dyn Middleware> {
-        AiMapReduceMapFactory::<TestChunkEnvelope, TestPartial>::new().create(
-            &stage_config(),
-            control_aggregator(),
-        )
+        AiMapReduceMapFactory::<TestChunkEnvelope, TestPartial>::new()
+            .create(&stage_config(), control_aggregator())
     }
 
     #[test]
@@ -764,7 +781,10 @@ mod tests {
             panic!("expected Skip(...)");
         };
         assert_eq!(events.len(), 1);
-        assert_eq!(events[0].processing_info.status.kind(), Some(&ErrorKind::Deserialization));
+        assert_eq!(
+            events[0].processing_info.status.kind(),
+            Some(&ErrorKind::Deserialization)
+        );
         assert!(ctx.control_events.is_empty());
     }
 
@@ -803,11 +823,13 @@ mod tests {
             .expect("job_key baggage");
         assert_eq!(baggage_job_key, job_key);
         assert_eq!(
-            ctx.get_baggage(BAGGAGE_CHUNK_INDEX).and_then(|v| v.as_u64()),
+            ctx.get_baggage(BAGGAGE_CHUNK_INDEX)
+                .and_then(|v| v.as_u64()),
             Some(1)
         );
         assert_eq!(
-            ctx.get_baggage(BAGGAGE_CHUNK_COUNT).and_then(|v| v.as_u64()),
+            ctx.get_baggage(BAGGAGE_CHUNK_COUNT)
+                .and_then(|v| v.as_u64()),
             Some(3)
         );
 
@@ -835,8 +857,8 @@ mod tests {
             Some(&ErrorKind::PermanentFailure)
         );
 
-        let decoded: AiMapReduceMapFailed = serde_json::from_value(map_failed.payload())
-            .expect("map_failed payload should decode");
+        let decoded: AiMapReduceMapFailed =
+            serde_json::from_value(map_failed.payload()).expect("map_failed payload should decode");
         assert_eq!(decoded.job_key, job_key);
         assert_eq!(decoded.chunk_index, 1);
         assert_eq!(decoded.chunk_count, 3);
@@ -943,12 +965,8 @@ mod tests {
             MiddlewareAction::Continue
         ));
 
-        let other_output = ChainEventFactory::derived_data_event(
-            writer_id(),
-            &chunk_event,
-            "other",
-            json!({}),
-        );
+        let other_output =
+            ChainEventFactory::derived_data_event(writer_id(), &chunk_event, "other", json!({}));
 
         middleware.post_handle(&chunk_event, &[other_output], &mut ctx);
         assert_eq!(ctx.control_events.len(), 2);
@@ -1046,8 +1064,8 @@ mod tests {
 
         middleware.pre_write(&mut marker, &ctx);
 
-        let updated = AiMapReduceChunkFailed::try_from_event(&marker)
-            .expect("chunk_failed should decode");
+        let updated =
+            AiMapReduceChunkFailed::try_from_event(&marker).expect("chunk_failed should decode");
         assert_eq!(updated.reason, "circuit_breaker:open");
     }
 
@@ -1095,8 +1113,8 @@ mod tests {
 
         middleware.pre_write(&mut marker, &ctx);
 
-        let updated = AiMapReduceChunkFailed::try_from_event(&marker)
-            .expect("chunk_failed should decode");
+        let updated =
+            AiMapReduceChunkFailed::try_from_event(&marker).expect("chunk_failed should decode");
         assert_eq!(updated.reason, "rate_limiter:bucket_empty");
     }
 
@@ -1128,7 +1146,8 @@ mod tests {
             MiddlewareAction::Continue
         ));
 
-        let mut other = ChainEventFactory::derived_data_event(writer_id(), &chunk_event, "other", json!({}));
+        let mut other =
+            ChainEventFactory::derived_data_event(writer_id(), &chunk_event, "other", json!({}));
         middleware.pre_write(&mut other, &ctx);
         assert_eq!(other.event_type(), "other");
     }

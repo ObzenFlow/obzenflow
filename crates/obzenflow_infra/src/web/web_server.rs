@@ -22,8 +22,7 @@ pub type ContractAttachments = Arc<HashMap<(StageId, StageId), Vec<String>>>;
 pub type JoinMetadataMap = Arc<HashMap<StageId, obzenflow_runtime::pipeline::JoinMetadata>>;
 pub type StageSubgraphMembershipMap =
     Arc<HashMap<StageId, obzenflow_core::topology::subgraphs::StageSubgraphMembership>>;
-pub type SubgraphRegistry =
-    Arc<Vec<obzenflow_core::topology::subgraphs::TopologySubgraphInfo>>;
+pub type SubgraphRegistry = Arc<Vec<obzenflow_core::topology::subgraphs::TopologySubgraphInfo>>;
 
 pub struct WebServerResources {
     pub topology: Arc<Topology>,

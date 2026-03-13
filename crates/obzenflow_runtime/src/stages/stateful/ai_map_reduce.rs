@@ -23,8 +23,8 @@ use obzenflow_core::ai::{
     ChunkPlanningSummary,
 };
 use obzenflow_core::event::chain_event::ChainEventFactory;
-use obzenflow_core::event::ChainEventContent;
 use obzenflow_core::event::status::processing_status::ErrorKind;
+use obzenflow_core::event::ChainEventContent;
 use obzenflow_core::{ChainEvent, EventId, TypedPayload};
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::json;
@@ -189,9 +189,11 @@ impl<Partial, Collected> CollectByInput<Partial, Collected> {
             details,
         };
 
-        let payload = serde_json::to_value(payload).unwrap_or_else(|_| json!({ "job_key": job_key }));
-        let error_event = ChainEventFactory::derived_data_event(parent.writer_id, parent, event_type, payload)
-            .mark_as_error(reason, kind);
+        let payload =
+            serde_json::to_value(payload).unwrap_or_else(|_| json!({ "job_key": job_key }));
+        let error_event =
+            ChainEventFactory::derived_data_event(parent.writer_id, parent, event_type, payload)
+                .mark_as_error(reason, kind);
         state.pending_errors.push_back(error_event);
 
         state.jobs.remove(&job_key);
@@ -313,13 +315,15 @@ where
 
             let job_key = manifest.job_key;
 
-            let Some(job) = self.open_or_get_job(state, job_key, &event, Some(manifest.chunk_count))
+            let Some(job) =
+                self.open_or_get_job(state, job_key, &event, Some(manifest.chunk_count))
             else {
                 return;
             };
 
             if let Some(existing) = job.manifest.as_ref() {
-                if existing.chunk_count != manifest.chunk_count || existing.planning != manifest.planning
+                if existing.chunk_count != manifest.chunk_count
+                    || existing.planning != manifest.planning
                 {
                     self.fail_job(
                         state,
@@ -438,12 +442,9 @@ where
             };
 
             let manifest_chunk_count = {
-                let Some(job) = self.open_or_get_job(
-                    state,
-                    tagged.job_key,
-                    &event,
-                    Some(tagged.chunk_count),
-                ) else {
+                let Some(job) =
+                    self.open_or_get_job(state, tagged.job_key, &event, Some(tagged.chunk_count))
+                else {
                     return;
                 };
                 job.manifest.as_ref().map(|manifest| manifest.chunk_count)
@@ -503,7 +504,9 @@ where
             };
 
             // Record the marker as a structured failure in the collector's error journal.
-            let err = event.clone().mark_as_error(failed.reason, ErrorKind::PermanentFailure);
+            let err = event
+                .clone()
+                .mark_as_error(failed.reason, ErrorKind::PermanentFailure);
             state.pending_errors.push_back(err);
 
             state.jobs.remove(&failed.job_key);
@@ -535,12 +538,9 @@ where
                 continue;
             };
 
-            let payload =
-                serde_json::to_value(&job.collected).map_err(|err| {
-                    HandlerError::Validation(format!(
-                        "ai_map_reduce: collected encode failed: {err}"
-                    ))
-                })?;
+            let payload = serde_json::to_value(&job.collected).map_err(|err| {
+                HandlerError::Validation(format!("ai_map_reduce: collected encode failed: {err}"))
+            })?;
 
             let event_type = Collected::versioned_event_type();
             let out = ChainEventFactory::derived_data_event(
@@ -553,18 +553,17 @@ where
             return Ok(vec![out]);
         }
 
-        if let Some(expired_key) = state
-            .jobs
-            .iter()
-            .find_map(|(k, job)| {
-                if job.created_at.elapsed() >= self.job_ttl {
-                    Some(*k)
-                } else {
-                    None
-                }
-            })
-        {
-            let job = state.jobs.remove(&expired_key).expect("expired job present");
+        if let Some(expired_key) = state.jobs.iter().find_map(|(k, job)| {
+            if job.created_at.elapsed() >= self.job_ttl {
+                Some(*k)
+            } else {
+                None
+            }
+        }) {
+            let job = state
+                .jobs
+                .remove(&expired_key)
+                .expect("expired job present");
             self.fail_job(
                 state,
                 expired_key,
@@ -627,7 +626,10 @@ where
                     JOB_FAILED_EVENT_TYPE,
                     payload,
                 )
-                .mark_as_error("ai_map_reduce: job incomplete at drain", ErrorKind::PermanentFailure),
+                .mark_as_error(
+                    "ai_map_reduce: job incomplete at drain",
+                    ErrorKind::PermanentFailure,
+                ),
             );
         }
 
@@ -638,8 +640,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use obzenflow_core::event::ChainEventFactory;
     use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
+    use obzenflow_core::event::ChainEventFactory;
     use obzenflow_core::id::StageId;
     use obzenflow_core::WriterId;
     use serde::{Deserialize, Serialize};
@@ -843,7 +845,10 @@ mod tests {
         assert!(collector.should_emit(&state));
         let out = collector.emit(&mut state).expect("emit should succeed");
         assert_eq!(out.len(), 1);
-        assert_eq!(out[0].event_type(), AiMapReduceChunkFailed::versioned_event_type());
+        assert_eq!(
+            out[0].event_type(),
+            AiMapReduceChunkFailed::versioned_event_type()
+        );
         assert!(matches!(
             out[0].processing_info.status,
             ProcessingStatus::Error { .. }

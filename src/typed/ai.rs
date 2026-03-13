@@ -7,8 +7,8 @@
 //! These helpers construct handlers intended for use with typed stage macros.
 
 pub use obzenflow_dsl::dsl::composites::ai_map_reduce::{map_reduce, AiMapReduceBuilder};
-use obzenflow_runtime::stages::transform::ChunkByBudgetBuilder;
 pub use obzenflow_runtime::stages::stateful::CollectByInput;
+use obzenflow_runtime::stages::transform::ChunkByBudgetBuilder;
 
 pub fn chunk_by_budget<In, Item>() -> ChunkByBudgetBuilder<In, Item> {
     ChunkByBudgetBuilder::new()

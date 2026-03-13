@@ -12,8 +12,8 @@ mod chat_budget;
 mod chunking;
 mod error;
 mod hashing;
-mod model_profile;
 mod map_reduce;
+mod model_profile;
 mod observability;
 mod ports;
 mod structured_output;
@@ -35,10 +35,10 @@ pub use hashing::{
     prompt_hash_for_embedding_inputs, schema_hash_for_response_format, schema_hash_from_json,
     schema_hash_from_text, AiHashError, LLM_HASH_VERSION_SHA256_V1,
 };
-pub use model_profile::{ChatModelProfile, ContextWindowSource};
 pub use map_reduce::{
     AiMapReduceChunkFailed, AiMapReducePlanningManifest, AiMapReduceTaggedPartial,
 };
+pub use model_profile::{ChatModelProfile, ContextWindowSource};
 pub use observability::{
     attach_llm_observability, read_llm_observability, LlmCacheInfo, LlmCacheMode, LlmHashes,
     LlmObservability, LlmObservabilityError, LLM_METADATA_KEY,

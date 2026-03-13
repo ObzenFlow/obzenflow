@@ -8,10 +8,10 @@ use crate::messaging::PollResult;
 use crate::metrics::instrumentation::process_with_instrumentation_no_count;
 use crate::stages::common::handlers::StatefulHandler;
 use crate::stages::common::supervision::backpressure_drain::{drain_one_pending, DrainOutcome};
-use crate::stages::common::supervision::error_routing::route_to_error_journal;
 use crate::stages::common::supervision::control_resolution::{
     resolve_control_event, resolve_forward_control_event, ControlResolution,
 };
+use crate::stages::common::supervision::error_routing::route_to_error_journal;
 use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::supervised_base::EventLoopDirective;
 use obzenflow_core::event::context::StageType;

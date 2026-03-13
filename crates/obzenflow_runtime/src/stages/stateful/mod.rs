@@ -52,8 +52,8 @@ pub mod handle;
 pub mod supervisor;
 
 // FLOWIP-080c: Composable primitives
-pub mod strategies;
 pub mod ai_map_reduce;
+pub mod strategies;
 
 // Public API - only expose builder, handle, and essential types
 pub use crate::stages::common::handlers::StatefulHandler;

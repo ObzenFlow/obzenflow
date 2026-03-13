@@ -168,7 +168,9 @@ pub(super) async fn dispatch_draining<
 
                                             if out.is_data() {
                                                 ctx.instrumentation.record_output_event(&out);
-                                                if let Some(subscription) = sup.subscription.as_mut() {
+                                                if let Some(subscription) =
+                                                    sup.subscription.as_mut()
+                                                {
                                                     subscription.track_output_event();
                                                 }
                                             }
@@ -348,7 +350,9 @@ pub(super) async fn dispatch_draining<
                     ctx.error_journal
                         .append(event, ctx.last_consumed_envelope.as_ref())
                         .await
-                        .map_err(|e| format!("Failed to write stateful drain() error event: {e}"))?;
+                        .map_err(|e| {
+                            format!("Failed to write stateful drain() error event: {e}")
+                        })?;
                 } else {
                     ctx.pending_outputs.push_back(event);
                 }

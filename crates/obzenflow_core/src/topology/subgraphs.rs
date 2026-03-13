@@ -38,4 +38,3 @@ pub struct SubgraphInternalEdge {
     pub to_stage_id: StageId,
     pub role: String,
 }
-

@@ -14,8 +14,8 @@ mod tests {
     use obzenflow_topology::EdgeKind;
     use serde::{Deserialize, Serialize};
 
-    use crate::dsl::composites::lower_composites;
     use crate::dsl::composites::ai_map_reduce;
+    use crate::dsl::composites::lower_composites;
     use crate::dsl::stage_descriptor::{StageDescriptor, TransformDescriptor};
 
     #[derive(Debug, Clone)]
@@ -101,15 +101,16 @@ mod tests {
         stages.insert("batch".to_string(), mk_transform("batch"));
         stages.insert("out".to_string(), mk_transform("out"));
 
-        let digest = ai_map_reduce::map_reduce::<TestIn, TestChunk, TestPartial, TestCollected, TestOut>()
-            .chunker(NoopTransform)
-            .map(NoopAsyncTransform)
-            .collect(obzenflow_runtime::stages::stateful::CollectByInput::new(
-                TestCollected::default(),
-                |acc, partial: &TestPartial| acc.values.push(partial.value),
-            ))
-            .finalise(NoopAsyncTransform)
-            .build();
+        let digest =
+            ai_map_reduce::map_reduce::<TestIn, TestChunk, TestPartial, TestCollected, TestOut>()
+                .chunker(NoopTransform)
+                .map(NoopAsyncTransform)
+                .collect(obzenflow_runtime::stages::stateful::CollectByInput::new(
+                    TestCollected::default(),
+                    |acc, partial: &TestPartial| acc.values.push(partial.value),
+                ))
+                .finalize(NoopAsyncTransform)
+                .build();
 
         stages.insert("digest".to_string(), digest);
 
@@ -127,7 +128,7 @@ mod tests {
             "digest__chunk",
             "digest__map",
             "digest__collect",
-            "digest__finalise",
+            "digest__finalize",
         ] {
             assert!(
                 stages.contains_key(internal),
@@ -140,10 +141,12 @@ mod tests {
             from == "batch" && to == "digest__chunk" && *kind == EdgeKind::Forward
         }));
         assert!(connections.iter().any(|(from, to, kind)| {
-            from == "digest__finalise" && to == "out" && *kind == EdgeKind::Forward
+            from == "digest__finalize" && to == "out" && *kind == EdgeKind::Forward
         }));
         assert!(
-            !connections.iter().any(|(from, to, _)| from == "digest" || to == "digest"),
+            !connections
+                .iter()
+                .any(|(from, to, _)| from == "digest" || to == "digest"),
             "no edge should reference the logical composite binding after lowering"
         );
 
@@ -174,7 +177,7 @@ mod tests {
                 "digest__chunk".to_string(),
                 "digest__map".to_string(),
                 "digest__collect".to_string(),
-                "digest__finalise".to_string(),
+                "digest__finalize".to_string(),
             ]
         );
         assert!(
@@ -211,7 +214,7 @@ mod tests {
                     TestCollected::default(),
                     |acc, partial: &TestPartial| acc.values.push(partial.value),
                 ))
-                .finalise(NoopAsyncTransform)
+                .finalize(NoopAsyncTransform)
                 .build(),
         );
 

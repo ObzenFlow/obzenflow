@@ -216,8 +216,7 @@ pub trait StageDescriptor: Send + Sync {
     fn try_lower_composite(
         self: Box<Self>,
         _binding: &str,
-    ) -> Result<Option<crate::dsl::composites::CompositeLowering>, crate::dsl::FlowBuildError>
-    {
+    ) -> Result<Option<crate::dsl::composites::CompositeLowering>, crate::dsl::FlowBuildError> {
         Ok(None)
     }
 }

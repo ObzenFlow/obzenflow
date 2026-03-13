@@ -8,4 +8,3 @@
 //! to safely interoperate with stage-scoped subscriptions.
 
 pub mod map_reduce;
-

@@ -10,8 +10,8 @@
 
 pub mod ai_map_reduce;
 
-use crate::dsl::FlowBuildError;
 use crate::dsl::stage_descriptor::StageDescriptor;
+use crate::dsl::FlowBuildError;
 use obzenflow_core::topology::subgraphs::StageSubgraphMembership;
 use obzenflow_topology::EdgeKind;
 use std::collections::{HashMap, HashSet};
@@ -68,13 +68,17 @@ pub fn lower_composites(
     let mut artifacts = LoweringArtifacts::default();
 
     for binding in composite_bindings {
-        let descriptor = stages
-            .remove(&binding)
-            .ok_or_else(|| FlowBuildError::StageResourcesFailed(format!("Missing composite stage '{binding}' during lowering")))?;
+        let descriptor = stages.remove(&binding).ok_or_else(|| {
+            FlowBuildError::StageResourcesFailed(format!(
+                "Missing composite stage '{binding}' during lowering"
+            ))
+        })?;
 
-        let lowering = descriptor
-            .try_lower_composite(&binding)?
-            .ok_or_else(|| FlowBuildError::StageResourcesFailed(format!("Stage '{binding}' reported is_composite() but did not produce a lowering result")))?;
+        let lowering = descriptor.try_lower_composite(&binding)?.ok_or_else(|| {
+            FlowBuildError::StageResourcesFailed(format!(
+                "Stage '{binding}' reported is_composite() but did not produce a lowering result"
+            ))
+        })?;
 
         // Collision detection: internal stage bindings must not collide with any existing stage
         // binding names (including other composites not yet lowered).

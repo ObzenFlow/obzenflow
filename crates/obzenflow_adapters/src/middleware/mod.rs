@@ -146,9 +146,9 @@ mod function;
 mod hints;
 
 // Middleware categories
+pub mod ai;
 pub mod control;
 pub mod observability;
-pub mod ai;
 pub mod state;
 mod system;
 // Dangerous middleware examples moved to examples/dangerous_examples.rs

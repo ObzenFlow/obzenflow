@@ -5,14 +5,16 @@
 //! AI map-reduce composite descriptor (FLOWIP-086z-part-2).
 //!
 //! This is a DSL-level authoring surface that lowers into ordinary stages:
-//! `<binding>__chunk`, `<binding>__map`, `<binding>__collect`, `<binding>__finalise`.
+//! `<binding>__chunk`, `<binding>__map`, `<binding>__collect`, `<binding>__finalize`.
 
 use super::{CompositeLowering, LoweringArtifacts, SubgraphInternalEdgeSpec, TopologySubgraphSpec};
 use crate::dsl::stage_descriptor::{
-    AsyncTransformDescriptor, BINDING_DERIVED_NAME_SENTINEL, StatefulDescriptor, StageDescriptor,
-    TransformDescriptor,
+    AsyncTransformDescriptor, StageDescriptor, StatefulDescriptor, TransformDescriptor,
+    BINDING_DERIVED_NAME_SENTINEL,
 };
-use crate::dsl::typing::{wrap_typed_descriptor, BoundAsyncTransform, BoundTransform, StageTypingMetadata, TypeHint};
+use crate::dsl::typing::{
+    wrap_typed_descriptor, BoundAsyncTransform, BoundTransform, StageTypingMetadata, TypeHint,
+};
 use obzenflow_adapters::middleware::ai::map_reduce::{
     AiMapReduceChunkManifestFactory, AiMapReduceMapFactory,
 };
@@ -64,8 +66,9 @@ impl TransformHandler for DynTransformHandler {
     }
 
     async fn drain(&mut self) -> Result<(), HandlerError> {
-        let inner = Arc::get_mut(&mut self.inner)
-            .ok_or_else(|| HandlerError::Validation("DynTransformHandler: drain requires unique Arc".to_string()))?;
+        let inner = Arc::get_mut(&mut self.inner).ok_or_else(|| {
+            HandlerError::Validation("DynTransformHandler: drain requires unique Arc".to_string())
+        })?;
         inner.drain().await
     }
 }
@@ -106,13 +109,17 @@ impl AsyncTransformHandler for DynAsyncTransformHandler {
     }
 
     async fn drain(&mut self) -> Result<(), HandlerError> {
-        let inner = Arc::get_mut(&mut self.inner)
-            .ok_or_else(|| HandlerError::Validation("DynAsyncTransformHandler: drain requires unique Arc".to_string()))?;
+        let inner = Arc::get_mut(&mut self.inner).ok_or_else(|| {
+            HandlerError::Validation(
+                "DynAsyncTransformHandler: drain requires unique Arc".to_string(),
+            )
+        })?;
         inner.drain().await
     }
 }
 
-pub fn map_reduce<In, Chunk, Partial, Collected, Out>() -> AiMapReduceBuilder<In, Chunk, Partial, Collected, Out> {
+pub fn map_reduce<In, Chunk, Partial, Collected, Out>(
+) -> AiMapReduceBuilder<In, Chunk, Partial, Collected, Out> {
     AiMapReduceBuilder::new()
 }
 
@@ -120,11 +127,11 @@ pub struct AiMapReduceBuilder<In, Chunk, Partial, Collected, Out> {
     chunker: Option<DynTransformHandler>,
     map: Option<DynAsyncTransformHandler>,
     collect: Option<CollectByInput<Partial, Collected>>,
-    finalise: Option<DynAsyncTransformHandler>,
+    finalize: Option<DynAsyncTransformHandler>,
     chunk_middleware: Vec<Box<dyn MiddlewareFactory>>,
     map_middleware: Vec<Box<dyn MiddlewareFactory>>,
     collect_middleware: Vec<Box<dyn MiddlewareFactory>>,
-    finalise_middleware: Vec<Box<dyn MiddlewareFactory>>,
+    finalize_middleware: Vec<Box<dyn MiddlewareFactory>>,
     _phantom: PhantomData<(In, Chunk, Partial, Collected, Out)>,
 }
 
@@ -134,11 +141,11 @@ impl<In, Chunk, Partial, Collected, Out> AiMapReduceBuilder<In, Chunk, Partial, 
             chunker: None,
             map: None,
             collect: None,
-            finalise: None,
+            finalize: None,
             chunk_middleware: Vec::new(),
             map_middleware: Vec::new(),
             collect_middleware: Vec::new(),
-            finalise_middleware: Vec::new(),
+            finalize_middleware: Vec::new(),
             _phantom: PhantomData,
         }
     }
@@ -164,11 +171,11 @@ impl<In, Chunk, Partial, Collected, Out> AiMapReduceBuilder<In, Chunk, Partial, 
         self
     }
 
-    pub fn finalise<H>(mut self, handler: H) -> Self
+    pub fn finalize<H>(mut self, handler: H) -> Self
     where
         H: AsyncTransformHandler + Send + Sync + 'static,
     {
-        self.finalise = Some(DynAsyncTransformHandler::new(handler));
+        self.finalize = Some(DynAsyncTransformHandler::new(handler));
         self
     }
 
@@ -211,12 +218,12 @@ impl<In, Chunk, Partial, Collected, Out> AiMapReduceBuilder<In, Chunk, Partial, 
         self
     }
 
-    pub fn finalise_middleware<I, M>(mut self, middleware: I) -> Self
+    pub fn finalize_middleware<I, M>(mut self, middleware: I) -> Self
     where
         I: IntoIterator<Item = M>,
         M: MiddlewareFactory + 'static,
     {
-        self.finalise_middleware.extend(
+        self.finalize_middleware.extend(
             middleware
                 .into_iter()
                 .map(|mw| Box::new(mw) as Box<dyn MiddlewareFactory>),
@@ -229,21 +236,26 @@ impl<In, Chunk, Partial, Collected, Out> AiMapReduceBuilder<In, Chunk, Partial, 
         In: Clone + Send + Sync + 'static,
         Chunk: Clone + TypedPayload + Send + Sync + 'static,
         Partial: TypedPayload + serde::de::DeserializeOwned + Clone + Send + Sync + 'static,
-        Collected: Clone + serde::Serialize + TypedPayload + std::fmt::Debug + Send + Sync + 'static,
+        Collected:
+            Clone + serde::Serialize + TypedPayload + std::fmt::Debug + Send + Sync + 'static,
         Out: Clone + Send + Sync + 'static,
     {
-        Box::new(AiMapReduceCompositeDescriptor::<In, Chunk, Partial, Collected, Out> {
-            name: BINDING_DERIVED_NAME_SENTINEL.to_string(),
-            chunker: self.chunker.expect("ai::map_reduce: missing chunker(...)"),
-            map: self.map.expect("ai::map_reduce: missing map(...)"),
-            collect: self.collect.expect("ai::map_reduce: missing collect(...)"),
-            finalise: self.finalise.expect("ai::map_reduce: missing finalise(...)"),
-            chunk_middleware: self.chunk_middleware,
-            map_middleware: self.map_middleware,
-            collect_middleware: self.collect_middleware,
-            finalise_middleware: self.finalise_middleware,
-            _phantom: PhantomData,
-        })
+        Box::new(
+            AiMapReduceCompositeDescriptor::<In, Chunk, Partial, Collected, Out> {
+                name: BINDING_DERIVED_NAME_SENTINEL.to_string(),
+                chunker: self.chunker.expect("ai::map_reduce: missing chunker(...)"),
+                map: self.map.expect("ai::map_reduce: missing map(...)"),
+                collect: self.collect.expect("ai::map_reduce: missing collect(...)"),
+                finalize: self
+                    .finalize
+                    .expect("ai::map_reduce: missing finalize(...)"),
+                chunk_middleware: self.chunk_middleware,
+                map_middleware: self.map_middleware,
+                collect_middleware: self.collect_middleware,
+                finalize_middleware: self.finalize_middleware,
+                _phantom: PhantomData,
+            },
+        )
     }
 }
 
@@ -252,11 +264,11 @@ struct AiMapReduceCompositeDescriptor<In, Chunk, Partial, Collected, Out> {
     chunker: DynTransformHandler,
     map: DynAsyncTransformHandler,
     collect: CollectByInput<Partial, Collected>,
-    finalise: DynAsyncTransformHandler,
+    finalize: DynAsyncTransformHandler,
     chunk_middleware: Vec<Box<dyn MiddlewareFactory>>,
     map_middleware: Vec<Box<dyn MiddlewareFactory>>,
     collect_middleware: Vec<Box<dyn MiddlewareFactory>>,
-    finalise_middleware: Vec<Box<dyn MiddlewareFactory>>,
+    finalize_middleware: Vec<Box<dyn MiddlewareFactory>>,
     _phantom: PhantomData<(In, Chunk, Partial, Collected, Out)>,
 }
 
@@ -293,7 +305,7 @@ where
         let chunk_stage = format!("{binding}__chunk");
         let map_stage = format!("{binding}__map");
         let collect_stage = format!("{binding}__collect");
-        let finalise_stage = format!("{binding}__finalise");
+        let finalize_stage = format!("{binding}__finalize");
 
         let subgraph_id = format!("ai_map_reduce:{binding}");
 
@@ -364,14 +376,14 @@ where
         // ---------------------------------------------------------------------
         // Finalise stage: Collected -> Out
         // ---------------------------------------------------------------------
-        let finalise_handler = BoundAsyncTransform::<Collected, Out, _>::new(self.finalise);
-        let finalise_descriptor = AsyncTransformDescriptor {
-            name: finalise_stage.clone(),
-            handler: finalise_handler,
-            middleware: self.finalise_middleware,
+        let finalize_handler = BoundAsyncTransform::<Collected, Out, _>::new(self.finalize);
+        let finalize_descriptor = AsyncTransformDescriptor {
+            name: finalize_stage.clone(),
+            handler: finalize_handler,
+            middleware: self.finalize_middleware,
         };
-        let finalise_descriptor = wrap_typed_descriptor(
-            Box::new(finalise_descriptor),
+        let finalize_descriptor = wrap_typed_descriptor(
+            Box::new(finalize_descriptor),
             StageTypingMetadata::transform(
                 TypeHint::exact(type_name::<Collected>()),
                 TypeHint::exact(type_name::<Out>()),
@@ -385,9 +397,17 @@ where
         // ---------------------------------------------------------------------
         let edges = vec![
             (chunk_stage.clone(), map_stage.clone(), EdgeKind::Forward),
-            (chunk_stage.clone(), collect_stage.clone(), EdgeKind::Forward),
+            (
+                chunk_stage.clone(),
+                collect_stage.clone(),
+                EdgeKind::Forward,
+            ),
             (map_stage.clone(), collect_stage.clone(), EdgeKind::Forward),
-            (collect_stage.clone(), finalise_stage.clone(), EdgeKind::Forward),
+            (
+                collect_stage.clone(),
+                finalize_stage.clone(),
+                EdgeKind::Forward,
+            ),
         ];
 
         let mut stage_subgraphs = std::collections::HashMap::new();
@@ -428,12 +448,12 @@ where
             },
         );
         stage_subgraphs.insert(
-            finalise_stage.clone(),
+            finalize_stage.clone(),
             StageSubgraphMembership {
                 subgraph_id: subgraph_id.clone(),
                 kind: "ai_map_reduce".to_string(),
                 binding: binding.to_string(),
-                role: "finalise".to_string(),
+                role: "finalize".to_string(),
                 order: 3,
                 is_entry: false,
                 is_exit: true,
@@ -449,7 +469,7 @@ where
                 chunk_stage.clone(),
                 map_stage.clone(),
                 collect_stage.clone(),
-                finalise_stage.clone(),
+                finalize_stage.clone(),
             ],
             internal_edges: vec![
                 SubgraphInternalEdgeSpec {
@@ -469,12 +489,12 @@ where
                 },
                 SubgraphInternalEdgeSpec {
                     from_stage: collect_stage.clone(),
-                    to_stage: finalise_stage.clone(),
+                    to_stage: finalize_stage.clone(),
                     role: "data".to_string(),
                 },
             ],
             entry_stage_names: vec![chunk_stage.clone()],
-            exit_stage_names: vec![finalise_stage.clone()],
+            exit_stage_names: vec![finalize_stage.clone()],
             parent_subgraph_id: None,
             collapsible: true,
         };
@@ -484,11 +504,11 @@ where
                 (chunk_stage, chunk_descriptor),
                 (map_stage, map_descriptor),
                 (collect_stage, collect_descriptor),
-                (finalise_stage, finalise_descriptor),
+                (finalize_stage, finalize_descriptor),
             ],
             edges,
             entry_stage: format!("{binding}__chunk"),
-            exit_stage: format!("{binding}__finalise"),
+            exit_stage: format!("{binding}__finalize"),
             artifacts: LoweringArtifacts {
                 stage_subgraphs,
                 subgraphs: vec![subgraph],
@@ -501,8 +521,13 @@ where
         _config: obzenflow_runtime::pipeline::config::StageConfig,
         _resources: obzenflow_runtime::stages::StageResources,
         _flow_middleware: Vec<Box<dyn MiddlewareFactory>>,
-        _control_middleware: Arc<obzenflow_adapters::middleware::control::ControlMiddlewareAggregator>,
+        _control_middleware: Arc<
+            obzenflow_adapters::middleware::control::ControlMiddlewareAggregator,
+        >,
     ) -> Result<obzenflow_runtime::stages::common::stage_handle::BoxedStageHandle, String> {
-        Err("ai::map_reduce composite descriptors must be lowered during flow! materialisation".to_string())
+        Err(
+            "ai::map_reduce composite descriptors must be lowered during flow! materialisation"
+                .to_string(),
+        )
     }
 }

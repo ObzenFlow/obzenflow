@@ -8,4 +8,3 @@
 //! without requiring `obzenflow-topology` to depend on ObzenFlow-specific domain concepts.
 
 pub mod subgraphs;
-

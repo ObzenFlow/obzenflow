@@ -26,8 +26,7 @@ type StageSubgraphMembershipMap = Arc<
         obzenflow_core::topology::subgraphs::StageSubgraphMembership,
     >,
 >;
-type SubgraphRegistry =
-    Arc<Vec<obzenflow_core::topology::subgraphs::TopologySubgraphInfo>>;
+type SubgraphRegistry = Arc<Vec<obzenflow_core::topology::subgraphs::TopologySubgraphInfo>>;
 
 /// JSON representation of flow topology for the API
 #[derive(Debug, Clone, Serialize, Deserialize)]
