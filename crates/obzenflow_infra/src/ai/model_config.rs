@@ -54,16 +54,9 @@ impl ProviderKind {
 
 #[derive(Debug, Clone)]
 enum ProviderConfig {
-    Ollama {
-        base_url: Option<String>,
-    },
-    OpenAi {
-        api_key: String,
-    },
-    OpenAiCompatible {
-        api_key: String,
-        base_url: String,
-    },
+    Ollama { base_url: Option<String> },
+    OpenAi { api_key: String },
+    OpenAiCompatible { api_key: String, base_url: String },
 }
 
 #[derive(Debug, Clone)]
@@ -208,7 +201,8 @@ impl ModelConfig {
     pub fn chat_builder(&self) -> ChatTransformBuilder {
         match &self.provider {
             ProviderConfig::Ollama { base_url } => {
-                let mut builder = ChatTransformBuilder::new().ollama(self.model_label().to_string());
+                let mut builder =
+                    ChatTransformBuilder::new().ollama(self.model_label().to_string());
                 if let Some(base_url) = base_url.as_ref() {
                     builder = builder.base_url(base_url.clone());
                 }
@@ -218,7 +212,11 @@ impl ModelConfig {
                 ChatTransformBuilder::new().openai(self.model_label().to_string(), api_key.clone())
             }
             ProviderConfig::OpenAiCompatible { api_key, base_url } => ChatTransformBuilder::new()
-                .openai_compatible(self.model_label().to_string(), api_key.clone(), base_url.clone()),
+                .openai_compatible(
+                    self.model_label().to_string(),
+                    api_key.clone(),
+                    base_url.clone(),
+                ),
         }
     }
 
@@ -246,43 +244,35 @@ impl ModelConfig {
 
 impl std::fmt::Display for ModelConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut wrote_any = false;
-        macro_rules! line {
-            ($($arg:tt)*) => {{
-                if wrote_any {
-                    writeln!(f)?;
-                } else {
-                    wrote_any = true;
-                }
-                write!(f, $($arg)*)?;
-            }};
-        }
+        let mut lines = Vec::new();
 
-        line!("provider: {}", self.provider_label());
-        line!("model: {}", self.model_label());
+        lines.push(format!("provider: {}", self.provider_label()));
+        lines.push(format!("model: {}", self.model_label()));
         if let Some(base_url) = self.base_url_for_display() {
-            line!("base_url: {base_url}");
+            lines.push(format!("base_url: {base_url}"));
         }
 
         let info = self.resolved_estimator().info();
-        line!("token_estimator: {:?}", self.resolved_estimator().source());
+        lines.push(format!(
+            "token_estimator: {:?}",
+            self.resolved_estimator().source()
+        ));
         if let Some(tokenizer_backend) = info.tokenizer_backend.as_deref() {
-            line!("token_estimator_backend: {tokenizer_backend}");
+            lines.push(format!("token_estimator_backend: {tokenizer_backend}"));
         }
         if let Some(reason) = info.fallback_reason.as_ref() {
-            line!("token_estimator_fallback_reason: {reason}");
+            lines.push(format!("token_estimator_fallback_reason: {reason}"));
         }
         if let Some(detail) = info.fallback_detail.as_deref() {
-            line!("token_estimator_fallback_detail: {detail}");
+            lines.push(format!("token_estimator_fallback_detail: {detail}"));
         }
 
         match self.context_window() {
-            Some(context_window) => line!("context_window: {context_window}"),
-            None => line!("context_window: unknown"),
+            Some(context_window) => lines.push(format!("context_window: {context_window}")),
+            None => lines.push("context_window: unknown".to_string()),
         }
 
-        let _ = wrote_any;
-        Ok(())
+        f.write_str(&lines.join("\n"))
     }
 }
 

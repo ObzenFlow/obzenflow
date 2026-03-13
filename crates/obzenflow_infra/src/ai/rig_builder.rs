@@ -716,7 +716,9 @@ impl ChatTransformBuilder {
 
         match config {
             ChatProviderConfig::Ollama { model } => Ok((AiProvider::new("ollama"), model.clone())),
-            ChatProviderConfig::OpenAi { model, .. } => Ok((AiProvider::new("openai"), model.clone())),
+            ChatProviderConfig::OpenAi { model, .. } => {
+                Ok((AiProvider::new("openai"), model.clone()))
+            }
             ChatProviderConfig::OpenAiCompatible { model, .. } => {
                 Ok((AiProvider::new("openai_compatible"), model.clone()))
             }
@@ -1223,7 +1225,9 @@ impl EmbeddingTransformBuilder {
             EmbeddingProviderConfig::Ollama { model } => {
                 Ok((AiProvider::new("ollama"), model.clone()))
             }
-            EmbeddingProviderConfig::OpenAi { model, .. } => Ok((AiProvider::new("openai"), model.clone())),
+            EmbeddingProviderConfig::OpenAi { model, .. } => {
+                Ok((AiProvider::new("openai"), model.clone()))
+            }
             EmbeddingProviderConfig::OpenAiCompatible { model, .. } => {
                 Ok((AiProvider::new("openai_compatible"), model.clone()))
             }
@@ -1629,7 +1633,11 @@ mod tests {
     #[test]
     fn embedding_request_target_distinguishes_openai_compatible() {
         let (provider, model) = EmbeddingTransformBuilder::new()
-            .openai_compatible("text-embedding-3-small", "sk-test", "http://localhost:9999/v1")
+            .openai_compatible(
+                "text-embedding-3-small",
+                "sk-test",
+                "http://localhost:9999/v1",
+            )
             .embedding_request_target()
             .expect("should resolve target");
 
