@@ -10,9 +10,13 @@
 use super::{llm_chat, resolve_chat_model_profile, AiChatTask, ChatTransformBuilder};
 use anyhow::anyhow;
 use obzenflow_adapters::ai::ChatTransform;
-use obzenflow_core::ai::{ChatModelProfile, ResolvedTokenEstimator, TokenCount, TokenEstimator};
+use obzenflow_core::ai::{
+    ChatModelProfile, ChatResponseFormat, ResolvedTokenEstimator, TokenCount, TokenEstimator,
+    ToolDefinition,
+};
 use obzenflow_core::http_client::Url;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
+use serde_json::Value;
 use std::sync::Arc;
 
 const ENV_PROVIDER: &str = "OBZENFLOW_AI_PROVIDER";
@@ -198,6 +202,16 @@ impl ModelConfig {
         &self.profile.estimator
     }
 
+    /// Return a pre-configured chat builder for advanced cases where
+    /// `ModelChatBuilder` does not expose enough control (custom response
+    /// formats, tool definitions, multi-message conversations).
+    ///
+    /// Advanced callers must attach the estimator themselves:
+    ///
+    /// ```ignore
+    /// let handler = llm_chat(ai.chat_builder().system(prompt), task)?
+    ///     .with_resolved_estimator(ai.resolved_estimator().clone());
+    /// ```
     pub fn chat_builder(&self) -> ChatTransformBuilder {
         match &self.provider {
             ProviderConfig::Ollama { base_url } => {
@@ -220,17 +234,24 @@ impl ModelConfig {
         }
     }
 
-    pub fn llm_chat<T>(
-        &self,
-        config_fn: impl FnOnce(ChatTransformBuilder) -> ChatTransformBuilder,
-        task: T,
-    ) -> Result<ChatTransform, HandlerError>
-    where
-        T: AiChatTask,
-    {
-        let builder = config_fn(self.chat_builder());
-        let transform = llm_chat(builder, task)?;
-        Ok(transform.with_resolved_estimator(self.resolved_estimator().clone()))
+    /// Return a builder for constructing an LLM chat handler.
+    ///
+    /// The returned `ModelChatBuilder` is pre-configured with provider, model,
+    /// credentials, and base URL from this `ModelConfig`. Chain per-handler
+    /// settings and finish with `build_task`:
+    ///
+    /// ```ignore
+    /// let handler = ai.chat()
+    ///     .system(system_prompt)
+    ///     .temperature(0.2)
+    ///     .max_tokens(800)
+    ///     .build_task(MyTask { ... })?;
+    /// ```
+    pub fn chat(&self) -> ModelChatBuilder {
+        ModelChatBuilder {
+            inner: self.chat_builder(),
+            resolved_estimator: self.resolved_estimator().clone(),
+        }
     }
 
     fn base_url_for_display(&self) -> Option<&str> {
@@ -239,6 +260,68 @@ impl ModelConfig {
             ProviderConfig::OpenAi { .. } => None,
             ProviderConfig::OpenAiCompatible { base_url, .. } => Some(base_url.as_str()),
         }
+    }
+}
+
+/// Pre-configured chat builder that carries estimator metadata from a
+/// `ModelConfig`. Finish with [`build_task`](Self::build_task) to produce a
+/// ready `ChatTransform` handler with automatic estimator attachment.
+pub struct ModelChatBuilder {
+    inner: ChatTransformBuilder,
+    resolved_estimator: ResolvedTokenEstimator,
+}
+
+impl ModelChatBuilder {
+    pub fn system(mut self, text: impl Into<String>) -> Self {
+        self.inner = self.inner.system(text);
+        self
+    }
+
+    pub fn temperature(mut self, temperature: f32) -> Self {
+        self.inner = self.inner.temperature(temperature);
+        self
+    }
+
+    pub fn max_tokens(mut self, max_tokens: u32) -> Self {
+        self.inner = self.inner.max_tokens(max_tokens);
+        self
+    }
+
+    pub fn top_p(mut self, top_p: f32) -> Self {
+        self.inner = self.inner.top_p(top_p);
+        self
+    }
+
+    pub fn seed(mut self, seed: u64) -> Self {
+        self.inner = self.inner.seed(seed);
+        self
+    }
+
+    pub fn response_format(mut self, response_format: ChatResponseFormat) -> Self {
+        self.inner = self.inner.response_format(response_format);
+        self
+    }
+
+    pub fn tools(mut self, tools: Vec<ToolDefinition>) -> Self {
+        self.inner = self.inner.tools(tools);
+        self
+    }
+
+    pub fn extra_param(mut self, key: impl Into<String>, value: Value) -> Self {
+        self.inner = self.inner.extra_param(key, value);
+        self
+    }
+
+    /// Build a typed `ChatTransform` handler from an [`AiChatTask`].
+    ///
+    /// The resolved estimator from the parent `ModelConfig` is attached
+    /// automatically for token observability.
+    pub fn build_task<T>(self, task: T) -> Result<ChatTransform, HandlerError>
+    where
+        T: AiChatTask,
+    {
+        let transform = llm_chat(self.inner, task)?;
+        Ok(transform.with_resolved_estimator(self.resolved_estimator))
     }
 }
 

@@ -34,4 +34,4 @@ pub use rig_builder::{
 };
 
 #[cfg(feature = "ai-rig")]
-pub use model_config::ModelConfig;
+pub use model_config::{ModelChatBuilder, ModelConfig};

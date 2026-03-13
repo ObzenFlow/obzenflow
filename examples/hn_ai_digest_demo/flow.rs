@@ -248,24 +248,21 @@ pub async fn run_example() -> Result<()> {
         .to_string();
     let system_prompt_for_summary = system_prompt.clone();
 
-    let map_llm_handler = ai.llm_chat(
-        |b| {
-            b.system(system_prompt.clone())
-                .temperature(0.2)
-                .max_tokens(800)
-        },
-        MapDigestTask {
+    let map_llm_handler = ai
+        .chat()
+        .system(system_prompt.clone())
+        .temperature(0.2)
+        .max_tokens(800)
+        .build_task(MapDigestTask {
             interests: interests.clone(),
-        },
-    )?;
+        })?;
 
-    let digest_llm_handler = ai.llm_chat(
-        |b| {
-            b.system(system_prompt.clone())
-                .temperature(0.2)
-                .max_tokens(800)
-        },
-        ReduceDigestTask {
+    let digest_llm_handler = ai
+        .chat()
+        .system(system_prompt.clone())
+        .temperature(0.2)
+        .max_tokens(800)
+        .build_task(ReduceDigestTask {
             interests: interests.clone(),
             mode_label: mode_label_for_summary.clone(),
             base_url: base_url_for_summary.clone(),
@@ -274,8 +271,7 @@ pub async fn run_example() -> Result<()> {
             token_estimator: ai.resolved_estimator().source(),
             budget_per_group,
             chat_prompt_system: system_prompt_for_summary.clone(),
-        },
-    )?;
+        })?;
 
     FlowApplication::run(flow! {
             name: "hn_ai_digest_demo",
