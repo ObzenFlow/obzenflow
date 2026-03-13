@@ -492,3 +492,644 @@ where
         "ai_map_reduce.map_wrapper"
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::middleware::control::ControlMiddlewareAggregator;
+    use crate::middleware::{MiddlewareAction, MiddlewareContext};
+    use obzenflow_core::event::chain_event::ChainEventFactory;
+    use obzenflow_core::event::payloads::observability_payload::{MetricsLifecycle, ObservabilityPayload};
+    use obzenflow_core::event::status::processing_status::ErrorKind;
+    use obzenflow_core::event::observability::AiChunkingSnapshot;
+    use obzenflow_core::ai::ChunkPlanningSummary;
+    use obzenflow_core::{EventId, StageId, TypedPayload, WriterId};
+    use obzenflow_runtime::pipeline::config::StageConfig;
+    use serde::{Deserialize, Serialize};
+    use serde_json::json;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    struct TestChunkEnvelope {
+        chunk_index: usize,
+        chunk_count: usize,
+        planning: ChunkPlanningSummary,
+    }
+
+    impl TypedPayload for TestChunkEnvelope {
+        const EVENT_TYPE: &'static str = "test.ai_map_reduce.chunk";
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    struct TestPartial {
+        value: u32,
+    }
+
+    impl TypedPayload for TestPartial {
+        const EVENT_TYPE: &'static str = "test.ai_map_reduce.partial";
+    }
+
+    fn stage_config() -> StageConfig {
+        StageConfig {
+            stage_id: StageId::new(),
+            name: "stage".to_string(),
+            flow_name: "flow".to_string(),
+            cycle_guard: None,
+        }
+    }
+
+    fn control_aggregator() -> Arc<ControlMiddlewareAggregator> {
+        Arc::new(ControlMiddlewareAggregator::new())
+    }
+
+    fn writer_id() -> WriterId {
+        WriterId::from(StageId::new())
+    }
+
+    fn mk_chunk_manifest_middleware() -> Box<dyn Middleware> {
+        AiMapReduceChunkManifestFactory::<TestChunkEnvelope>::new().create(
+            &stage_config(),
+            control_aggregator(),
+        )
+    }
+
+    fn mk_map_middleware() -> Box<dyn Middleware> {
+        AiMapReduceMapFactory::<TestChunkEnvelope, TestPartial>::new().create(
+            &stage_config(),
+            control_aggregator(),
+        )
+    }
+
+    #[test]
+    fn chunk_manifest_factory_creates_middleware() {
+        let factory = AiMapReduceChunkManifestFactory::<TestChunkEnvelope>::new();
+        assert_eq!(factory.name(), "ai_map_reduce.chunk_manifest");
+
+        let middleware = factory.create(&stage_config(), control_aggregator());
+        assert_eq!(middleware.middleware_name(), "ai_map_reduce.chunk_manifest");
+    }
+
+    #[test]
+    fn chunk_manifest_emits_planning_manifest_from_snapshot() {
+        let middleware = mk_chunk_manifest_middleware();
+        let mut ctx = MiddlewareContext::new();
+
+        let input = ChainEventFactory::data_event(writer_id(), "job", json!({}));
+
+        let chunk_payload = TestChunkEnvelope {
+            chunk_index: 0,
+            chunk_count: 2,
+            planning: ChunkPlanningSummary {
+                input_items_total: 100,
+                planned_items_total: 80,
+                excluded_items_total: 20,
+            },
+        };
+
+        let chunk_event = ChainEventFactory::derived_data_event(
+            writer_id(),
+            &input,
+            TestChunkEnvelope::versioned_event_type(),
+            serde_json::to_value(chunk_payload).expect("chunk should serialize"),
+        );
+
+        let snapshot = AiChunkingSnapshot {
+            input_items_total: 10,
+            planned_items_total: 7,
+            excluded_items_total: 3,
+            chunk_count: 5,
+            rerender_attempts_total: 0,
+            max_decomposition_depth_reached: 0,
+            budget_overhead_tokens: 0,
+            oversize_policy: "exclude".to_string(),
+            exclusions_by_reason: HashMap::new(),
+            excluded_items: None,
+        };
+
+        let snapshot_event = ChainEventFactory::observability_event(
+            writer_id(),
+            ObservabilityPayload::Metrics(MetricsLifecycle::Custom {
+                name: "ai_chunking.snapshot".to_string(),
+                value: serde_json::to_value(snapshot).expect("snapshot should serialize"),
+                tags: None,
+            }),
+        );
+
+        middleware.post_handle(&input, &[chunk_event, snapshot_event], &mut ctx);
+
+        assert_eq!(ctx.control_events.len(), 1);
+        let manifest_event = &ctx.control_events[0];
+        assert_eq!(
+            manifest_event.event_type(),
+            AiMapReducePlanningManifest::versioned_event_type()
+        );
+        assert_eq!(manifest_event.causality.parent_ids.first(), Some(&input.id));
+
+        let manifest = AiMapReducePlanningManifest::try_from_event(manifest_event)
+            .expect("manifest should decode");
+        assert_eq!(manifest.job_key, input.id);
+        assert_eq!(manifest.chunk_count, 5);
+        assert_eq!(manifest.planning.input_items_total, 10);
+        assert_eq!(manifest.planning.planned_items_total, 7);
+        assert_eq!(manifest.planning.excluded_items_total, 3);
+    }
+
+    #[test]
+    fn chunk_manifest_falls_back_to_count_and_planning_from_first_chunk() {
+        let middleware = mk_chunk_manifest_middleware();
+        let mut ctx = MiddlewareContext::new();
+
+        let input = ChainEventFactory::data_event(writer_id(), "job", json!({}));
+
+        let planning = ChunkPlanningSummary {
+            input_items_total: 3,
+            planned_items_total: 2,
+            excluded_items_total: 1,
+        };
+
+        let outputs: Vec<_> = (0..3)
+            .map(|i| {
+                let chunk = TestChunkEnvelope {
+                    chunk_index: i,
+                    chunk_count: 3,
+                    planning: planning.clone(),
+                };
+                ChainEventFactory::derived_data_event(
+                    writer_id(),
+                    &input,
+                    TestChunkEnvelope::versioned_event_type(),
+                    serde_json::to_value(chunk).expect("chunk should serialize"),
+                )
+            })
+            .collect();
+
+        middleware.post_handle(&input, &outputs, &mut ctx);
+
+        assert_eq!(ctx.control_events.len(), 1);
+        let manifest = AiMapReducePlanningManifest::try_from_event(&ctx.control_events[0])
+            .expect("manifest should decode");
+        assert_eq!(manifest.job_key, input.id);
+        assert_eq!(manifest.chunk_count, 3);
+        assert_eq!(manifest.planning, planning);
+    }
+
+    #[test]
+    fn chunk_manifest_defaults_planning_to_zero_when_missing() {
+        let middleware = mk_chunk_manifest_middleware();
+        let mut ctx = MiddlewareContext::new();
+
+        let input = ChainEventFactory::data_event(writer_id(), "job", json!({}));
+
+        let chunk_event = ChainEventFactory::derived_data_event(
+            writer_id(),
+            &input,
+            TestChunkEnvelope::versioned_event_type(),
+            json!({
+                "chunk_index": 0,
+                "chunk_count": 1,
+            }),
+        );
+
+        middleware.post_handle(&input, &[chunk_event], &mut ctx);
+
+        assert_eq!(ctx.control_events.len(), 1);
+        let manifest = AiMapReducePlanningManifest::try_from_event(&ctx.control_events[0])
+            .expect("manifest should decode");
+        assert_eq!(manifest.chunk_count, 1);
+        assert_eq!(
+            manifest.planning,
+            ChunkPlanningSummary {
+                input_items_total: 0,
+                planned_items_total: 0,
+                excluded_items_total: 0
+            }
+        );
+    }
+
+    #[test]
+    fn map_factory_creates_middleware() {
+        let factory = AiMapReduceMapFactory::<TestChunkEnvelope, TestPartial>::new();
+        assert_eq!(factory.name(), "ai_map_reduce.map_wrapper");
+
+        let middleware = factory.create(&stage_config(), control_aggregator());
+        assert_eq!(middleware.middleware_name(), "ai_map_reduce.map_wrapper");
+    }
+
+    #[test]
+    fn map_wrapper_drops_planning_manifests_before_user_handler() {
+        let middleware = mk_map_middleware();
+        let mut ctx = MiddlewareContext::new();
+
+        let manifest = AiMapReducePlanningManifest {
+            job_key: EventId::new(),
+            chunk_count: 1,
+            planning: ChunkPlanningSummary {
+                input_items_total: 1,
+                planned_items_total: 1,
+                excluded_items_total: 0,
+            },
+        }
+        .to_event(writer_id());
+
+        let action = middleware.pre_handle(&manifest, &mut ctx);
+        assert!(matches!(action, MiddlewareAction::Skip(v) if v.is_empty()));
+        assert!(ctx.control_events.is_empty());
+    }
+
+    #[test]
+    fn map_wrapper_skips_non_chunk_data_events() {
+        let middleware = mk_map_middleware();
+        let mut ctx = MiddlewareContext::new();
+
+        let other = ChainEventFactory::data_event(writer_id(), "other", json!({}));
+        let action = middleware.pre_handle(&other, &mut ctx);
+        assert!(matches!(action, MiddlewareAction::Skip(v) if v.is_empty()));
+        assert!(ctx.control_events.is_empty());
+    }
+
+    #[test]
+    fn map_wrapper_reports_deserialization_error_when_chunk_header_decode_fails() {
+        let middleware = mk_map_middleware();
+        let mut ctx = MiddlewareContext::new();
+
+        let chunk = ChainEventFactory::data_event(
+            writer_id(),
+            TestChunkEnvelope::versioned_event_type(),
+            json!({ "oops": true }),
+        );
+
+        let action = middleware.pre_handle(&chunk, &mut ctx);
+        let MiddlewareAction::Skip(events) = action else {
+            panic!("expected Skip(...)");
+        };
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].processing_info.status.kind(), Some(&ErrorKind::Deserialization));
+        assert!(ctx.control_events.is_empty());
+    }
+
+    #[test]
+    fn map_wrapper_sets_baggage_and_preallocates_failure_markers() {
+        let middleware = mk_map_middleware();
+        let mut ctx = MiddlewareContext::new();
+
+        let parent = ChainEventFactory::data_event(writer_id(), "job", json!({}));
+        let job_key = parent.id;
+
+        let chunk_payload = TestChunkEnvelope {
+            chunk_index: 1,
+            chunk_count: 3,
+            planning: ChunkPlanningSummary {
+                input_items_total: 0,
+                planned_items_total: 0,
+                excluded_items_total: 0,
+            },
+        };
+
+        let chunk_event = ChainEventFactory::derived_data_event(
+            writer_id(),
+            &parent,
+            TestChunkEnvelope::versioned_event_type(),
+            serde_json::to_value(chunk_payload).expect("chunk should serialize"),
+        );
+
+        let action = middleware.pre_handle(&chunk_event, &mut ctx);
+        assert!(matches!(action, MiddlewareAction::Continue));
+
+        let baggage_job_key = ctx
+            .get_baggage(BAGGAGE_JOB_KEY)
+            .cloned()
+            .and_then(|v| serde_json::from_value::<EventId>(v).ok())
+            .expect("job_key baggage");
+        assert_eq!(baggage_job_key, job_key);
+        assert_eq!(
+            ctx.get_baggage(BAGGAGE_CHUNK_INDEX).and_then(|v| v.as_u64()),
+            Some(1)
+        );
+        assert_eq!(
+            ctx.get_baggage(BAGGAGE_CHUNK_COUNT).and_then(|v| v.as_u64()),
+            Some(3)
+        );
+
+        assert_eq!(ctx.control_events.len(), 2);
+
+        let chunk_failed = ctx
+            .control_events
+            .iter()
+            .find(|e| AiMapReduceChunkFailed::event_type_matches(&e.event_type()))
+            .expect("chunk_failed marker");
+        let failed = AiMapReduceChunkFailed::try_from_event(chunk_failed)
+            .expect("chunk_failed should decode");
+        assert_eq!(failed.job_key, job_key);
+        assert_eq!(failed.chunk_index, 1);
+        assert_eq!(failed.chunk_count, 3);
+        assert_eq!(failed.reason, "map produced no partial output");
+
+        let map_failed = ctx
+            .control_events
+            .iter()
+            .find(|e| e.event_type() == MAP_FAILURE_EVENT_TYPE)
+            .expect("map_failed marker");
+        assert_eq!(
+            map_failed.processing_info.status.kind(),
+            Some(&ErrorKind::PermanentFailure)
+        );
+
+        let decoded: AiMapReduceMapFailed = serde_json::from_value(map_failed.payload())
+            .expect("map_failed payload should decode");
+        assert_eq!(decoded.job_key, job_key);
+        assert_eq!(decoded.chunk_index, 1);
+        assert_eq!(decoded.chunk_count, 3);
+    }
+
+    #[test]
+    fn map_wrapper_clears_failure_markers_when_retry_will_happen() {
+        let middleware = mk_map_middleware();
+        let mut ctx = MiddlewareContext::new();
+
+        let parent = ChainEventFactory::data_event(writer_id(), "job", json!({}));
+        let chunk_payload = TestChunkEnvelope {
+            chunk_index: 0,
+            chunk_count: 1,
+            planning: ChunkPlanningSummary {
+                input_items_total: 0,
+                planned_items_total: 0,
+                excluded_items_total: 0,
+            },
+        };
+
+        let chunk_event = ChainEventFactory::derived_data_event(
+            writer_id(),
+            &parent,
+            TestChunkEnvelope::versioned_event_type(),
+            serde_json::to_value(chunk_payload).expect("chunk should serialize"),
+        );
+
+        assert!(matches!(
+            middleware.pre_handle(&chunk_event, &mut ctx),
+            MiddlewareAction::Continue
+        ));
+        assert_eq!(ctx.control_events.len(), 2);
+
+        ctx.set_baggage("circuit_breaker.should_retry", json!(true));
+        middleware.post_handle(&chunk_event, &[], &mut ctx);
+        assert!(ctx.control_events.is_empty());
+    }
+
+    #[test]
+    fn map_wrapper_clears_failure_markers_when_partial_output_is_observed() {
+        let middleware = mk_map_middleware();
+        let mut ctx = MiddlewareContext::new();
+
+        let parent = ChainEventFactory::data_event(writer_id(), "job", json!({}));
+        let chunk_payload = TestChunkEnvelope {
+            chunk_index: 0,
+            chunk_count: 1,
+            planning: ChunkPlanningSummary {
+                input_items_total: 0,
+                planned_items_total: 0,
+                excluded_items_total: 0,
+            },
+        };
+
+        let chunk_event = ChainEventFactory::derived_data_event(
+            writer_id(),
+            &parent,
+            TestChunkEnvelope::versioned_event_type(),
+            serde_json::to_value(chunk_payload).expect("chunk should serialize"),
+        );
+
+        assert!(matches!(
+            middleware.pre_handle(&chunk_event, &mut ctx),
+            MiddlewareAction::Continue
+        ));
+        assert_eq!(ctx.control_events.len(), 2);
+
+        let partial_event = ChainEventFactory::derived_data_event(
+            writer_id(),
+            &chunk_event,
+            TestPartial::versioned_event_type(),
+            json!({ "value": 1 }),
+        );
+        middleware.post_handle(&chunk_event, &[partial_event], &mut ctx);
+        assert!(ctx.control_events.is_empty());
+    }
+
+    #[test]
+    fn map_wrapper_retains_failure_markers_when_no_partial_outputs_are_emitted() {
+        let middleware = mk_map_middleware();
+        let mut ctx = MiddlewareContext::new();
+
+        let parent = ChainEventFactory::data_event(writer_id(), "job", json!({}));
+        let chunk_payload = TestChunkEnvelope {
+            chunk_index: 0,
+            chunk_count: 1,
+            planning: ChunkPlanningSummary {
+                input_items_total: 0,
+                planned_items_total: 0,
+                excluded_items_total: 0,
+            },
+        };
+
+        let chunk_event = ChainEventFactory::derived_data_event(
+            writer_id(),
+            &parent,
+            TestChunkEnvelope::versioned_event_type(),
+            serde_json::to_value(chunk_payload).expect("chunk should serialize"),
+        );
+
+        assert!(matches!(
+            middleware.pre_handle(&chunk_event, &mut ctx),
+            MiddlewareAction::Continue
+        ));
+
+        let other_output = ChainEventFactory::derived_data_event(
+            writer_id(),
+            &chunk_event,
+            "other",
+            json!({}),
+        );
+
+        middleware.post_handle(&chunk_event, &[other_output], &mut ctx);
+        assert_eq!(ctx.control_events.len(), 2);
+        assert!(ctx
+            .control_events
+            .iter()
+            .any(|e| e.event_type() == CHUNK_FAILED_EVENT_TYPE));
+    }
+
+    #[test]
+    fn map_wrapper_tags_partial_outputs_in_pre_write() {
+        let middleware = mk_map_middleware();
+        let mut ctx = MiddlewareContext::new();
+
+        let parent = ChainEventFactory::data_event(writer_id(), "job", json!({}));
+        let job_key = parent.id;
+
+        let chunk_payload = TestChunkEnvelope {
+            chunk_index: 0,
+            chunk_count: 2,
+            planning: ChunkPlanningSummary {
+                input_items_total: 0,
+                planned_items_total: 0,
+                excluded_items_total: 0,
+            },
+        };
+
+        let chunk_event = ChainEventFactory::derived_data_event(
+            writer_id(),
+            &parent,
+            TestChunkEnvelope::versioned_event_type(),
+            serde_json::to_value(chunk_payload).expect("chunk should serialize"),
+        );
+
+        assert!(matches!(
+            middleware.pre_handle(&chunk_event, &mut ctx),
+            MiddlewareAction::Continue
+        ));
+
+        let mut partial_event = ChainEventFactory::derived_data_event(
+            writer_id(),
+            &chunk_event,
+            TestPartial::versioned_event_type(),
+            json!({ "value": 7 }),
+        );
+
+        middleware.pre_write(&mut partial_event, &ctx);
+        assert_eq!(partial_event.event_type(), TAGGED_PARTIAL_EVENT_TYPE);
+
+        let tagged = AiMapReduceTaggedPartial::<serde_json::Value>::try_from_event(&partial_event)
+            .expect("tagged partial should decode");
+        assert_eq!(tagged.job_key, job_key);
+        assert_eq!(tagged.chunk_index, 0);
+        assert_eq!(tagged.chunk_count, 2);
+        assert_eq!(tagged.partial, json!({ "value": 7 }));
+    }
+
+    #[test]
+    fn map_wrapper_updates_chunk_failed_reason_from_cb_rejection() {
+        let middleware = mk_map_middleware();
+        let mut ctx = MiddlewareContext::new();
+
+        let parent = ChainEventFactory::data_event(writer_id(), "job", json!({}));
+        let chunk_payload = TestChunkEnvelope {
+            chunk_index: 0,
+            chunk_count: 1,
+            planning: ChunkPlanningSummary {
+                input_items_total: 0,
+                planned_items_total: 0,
+                excluded_items_total: 0,
+            },
+        };
+
+        let chunk_event = ChainEventFactory::derived_data_event(
+            writer_id(),
+            &parent,
+            TestChunkEnvelope::versioned_event_type(),
+            serde_json::to_value(chunk_payload).expect("chunk should serialize"),
+        );
+
+        assert!(matches!(
+            middleware.pre_handle(&chunk_event, &mut ctx),
+            MiddlewareAction::Continue
+        ));
+
+        ctx.emit_event("circuit_breaker", "rejected", json!({ "reason": "open" }));
+
+        let marker = ctx
+            .control_events
+            .iter()
+            .find(|e| AiMapReduceChunkFailed::event_type_matches(&e.event_type()))
+            .cloned()
+            .expect("chunk_failed marker");
+        let mut marker = marker;
+
+        middleware.pre_write(&mut marker, &ctx);
+
+        let updated = AiMapReduceChunkFailed::try_from_event(&marker)
+            .expect("chunk_failed should decode");
+        assert_eq!(updated.reason, "circuit_breaker:open");
+    }
+
+    #[test]
+    fn map_wrapper_updates_chunk_failed_reason_from_rate_limiter_throttle() {
+        let middleware = mk_map_middleware();
+        let mut ctx = MiddlewareContext::new();
+
+        let parent = ChainEventFactory::data_event(writer_id(), "job", json!({}));
+        let chunk_payload = TestChunkEnvelope {
+            chunk_index: 0,
+            chunk_count: 1,
+            planning: ChunkPlanningSummary {
+                input_items_total: 0,
+                planned_items_total: 0,
+                excluded_items_total: 0,
+            },
+        };
+
+        let chunk_event = ChainEventFactory::derived_data_event(
+            writer_id(),
+            &parent,
+            TestChunkEnvelope::versioned_event_type(),
+            serde_json::to_value(chunk_payload).expect("chunk should serialize"),
+        );
+
+        assert!(matches!(
+            middleware.pre_handle(&chunk_event, &mut ctx),
+            MiddlewareAction::Continue
+        ));
+
+        ctx.emit_event(
+            "rate_limiter",
+            "throttled",
+            json!({ "reason": "bucket_empty" }),
+        );
+
+        let marker = ctx
+            .control_events
+            .iter()
+            .find(|e| AiMapReduceChunkFailed::event_type_matches(&e.event_type()))
+            .cloned()
+            .expect("chunk_failed marker");
+        let mut marker = marker;
+
+        middleware.pre_write(&mut marker, &ctx);
+
+        let updated = AiMapReduceChunkFailed::try_from_event(&marker)
+            .expect("chunk_failed should decode");
+        assert_eq!(updated.reason, "rate_limiter:bucket_empty");
+    }
+
+    #[test]
+    fn map_wrapper_does_not_tag_non_partial_events() {
+        let middleware = mk_map_middleware();
+        let mut ctx = MiddlewareContext::new();
+
+        let parent = ChainEventFactory::data_event(writer_id(), "job", json!({}));
+        let chunk_payload = TestChunkEnvelope {
+            chunk_index: 0,
+            chunk_count: 1,
+            planning: ChunkPlanningSummary {
+                input_items_total: 0,
+                planned_items_total: 0,
+                excluded_items_total: 0,
+            },
+        };
+
+        let chunk_event = ChainEventFactory::derived_data_event(
+            writer_id(),
+            &parent,
+            TestChunkEnvelope::versioned_event_type(),
+            serde_json::to_value(chunk_payload).expect("chunk should serialize"),
+        );
+
+        assert!(matches!(
+            middleware.pre_handle(&chunk_event, &mut ctx),
+            MiddlewareAction::Continue
+        ));
+
+        let mut other = ChainEventFactory::derived_data_event(writer_id(), &chunk_event, "other", json!({}));
+        middleware.pre_write(&mut other, &ctx);
+        assert_eq!(other.event_type(), "other");
+    }
+}
