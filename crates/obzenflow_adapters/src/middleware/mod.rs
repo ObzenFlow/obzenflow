@@ -146,6 +146,7 @@ mod function;
 mod hints;
 
 // Middleware categories
+pub mod ai;
 pub mod control;
 pub mod observability;
 pub mod state;

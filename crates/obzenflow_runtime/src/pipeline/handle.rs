@@ -19,6 +19,9 @@ use std::time::Duration;
 type MiddlewareStacks = Arc<HashMap<StageId, MiddlewareStackConfig>>;
 type ContractAttachments = Arc<HashMap<(StageId, StageId), Vec<String>>>;
 type JoinMetadataMap = Arc<HashMap<StageId, crate::pipeline::JoinMetadata>>;
+type StageSubgraphMembershipMap =
+    Arc<HashMap<StageId, obzenflow_core::topology::subgraphs::StageSubgraphMembership>>;
+type SubgraphRegistry = Arc<Vec<obzenflow_core::topology::subgraphs::TopologySubgraphInfo>>;
 
 pub(crate) struct FlowHandleExtras {
     pub topology: Option<Arc<Topology>>,
@@ -26,6 +29,8 @@ pub(crate) struct FlowHandleExtras {
     pub middleware_stacks: Option<MiddlewareStacks>,
     pub contract_attachments: Option<ContractAttachments>,
     pub join_metadata: Option<JoinMetadataMap>,
+    pub subgraph_membership: Option<StageSubgraphMembershipMap>,
+    pub subgraphs: Option<SubgraphRegistry>,
     pub system_journal: Option<Arc<dyn Journal<SystemEvent>>>,
 }
 
@@ -94,6 +99,12 @@ pub struct FlowHandle {
     /// Join metadata per stage (catalog vs stream sources) for topology export (FLOWIP-082a)
     join_metadata: Option<JoinMetadataMap>,
 
+    /// Per-stage membership in a logical subgraph (FLOWIP-086z-part-2)
+    subgraph_membership: Option<StageSubgraphMembershipMap>,
+
+    /// Graph-level registry of logical subgraphs (FLOWIP-086z-part-2)
+    subgraphs: Option<SubgraphRegistry>,
+
     /// System journal for lifecycle events (for SSE / observability)
     system_journal: Option<Arc<dyn Journal<SystemEvent>>>,
 }
@@ -111,6 +122,8 @@ impl FlowHandle {
             middleware_stacks,
             contract_attachments,
             join_metadata,
+            subgraph_membership,
+            subgraphs,
             system_journal,
         } = extras;
 
@@ -123,6 +136,8 @@ impl FlowHandle {
             contract_attachments,
             system_journal,
             join_metadata,
+            subgraph_membership,
+            subgraphs,
         }
     }
 
@@ -353,6 +368,16 @@ impl FlowHandle {
     /// Get join metadata per stage (for topology endpoint, FLOWIP-082a)
     pub fn join_metadata(&self) -> Option<JoinMetadataMap> {
         self.join_metadata.clone()
+    }
+
+    /// Get per-stage subgraph membership (for topology endpoint, FLOWIP-086z-part-2)
+    pub fn subgraph_membership(&self) -> Option<StageSubgraphMembershipMap> {
+        self.subgraph_membership.clone()
+    }
+
+    /// Get the logical subgraph registry (for topology endpoint, FLOWIP-086z-part-2)
+    pub fn subgraphs(&self) -> Option<SubgraphRegistry> {
+        self.subgraphs.clone()
     }
 
     /// Get the system journal for lifecycle events (if available)

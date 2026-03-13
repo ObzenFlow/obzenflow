@@ -18,9 +18,11 @@ use obzenflow_core::ai::{
     ChatResponseFormat, EmbeddingClient, EmbeddingParams, EmbeddingRequest, EmbeddingResponse,
     ToolDefinition,
 };
+use obzenflow_core::event::chain_event::ChainEventFactory;
 use obzenflow_core::http_client::Url;
-use obzenflow_core::ChainEvent;
+use obzenflow_core::{ChainEvent, TypedPayload};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
+use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -44,6 +46,30 @@ type TemplateFn =
     Arc<dyn Fn(&ChainEvent) -> Result<ChatRequestTemplate, HandlerError> + Send + Sync + 'static>;
 type EmbeddingInputsFn =
     Arc<dyn Fn(&ChainEvent) -> Result<Vec<String>, HandlerError> + Send + Sync + 'static>;
+
+/// Typed authoring surface for LLM chat transforms.
+///
+/// This keeps user code out of `ChainEvent` and JSON glue, while still allowing
+/// domain code to control prompt construction and output mapping.
+pub trait AiChatTask: Send + Sync + 'static {
+    type Input: DeserializeOwned + Send + Sync + 'static;
+    type Output: Serialize + TypedPayload + Send + Sync + 'static;
+
+    fn prompt(&self, input: &Self::Input) -> Result<String, HandlerError>;
+    fn parse(
+        &self,
+        input: Self::Input,
+        response: ChatResponse,
+    ) -> Result<Self::Output, HandlerError>;
+}
+
+/// Convenience facade for `ChatTransformBuilder::build_task_lazy(..)`.
+pub fn llm_chat<T>(spec: ChatTransformBuilder, task: T) -> Result<ChatTransform, HandlerError>
+where
+    T: AiChatTask,
+{
+    spec.build_task_lazy(task)
+}
 
 /// Extension trait that provides `ChatTransform::builder()` when Rig-backed AI
 /// builder support is enabled.
@@ -498,6 +524,186 @@ impl ChatTransformBuilder {
             target.0,
             target.1,
             RequestMode::Template(Arc::new(template)),
+        )
+    }
+
+    /// Build a typed `ChatTransform` where closure arguments are domain types
+    /// instead of `ChainEvent`.
+    ///
+    /// This is a typed analogue of `.build(..).output_mapper(..)`. The builder
+    /// performs deserialization and derived-event construction internally so
+    /// user code does not need to touch JSON or `ChainEventFactory`.
+    pub async fn build_typed<In, Out>(
+        self,
+        prompt_extractor: impl Fn(&In) -> Result<String, HandlerError> + Send + Sync + 'static,
+        output_mapper: impl Fn(In, ChatResponse) -> Result<Out, HandlerError> + Send + Sync + 'static,
+    ) -> Result<ChatTransform, HandlerError>
+    where
+        In: DeserializeOwned + Send + Sync + 'static,
+        Out: Serialize + TypedPayload + Send + Sync + 'static,
+    {
+        if self.output_mapper.is_some() {
+            return Err(HandlerError::Validation(
+                "build_typed() cannot be combined with a custom `.output_mapper(..)`; use `.build(..)` + `.output_mapper(..)` for ChainEvent-level control".to_string(),
+            ));
+        }
+
+        let prompt_extractor = Arc::new(prompt_extractor);
+        let output_mapper = Arc::new(output_mapper);
+
+        self.output_mapper({
+            let output_mapper = output_mapper.clone();
+            move |event: &ChainEvent, response: ChatResponse| {
+                if !event.is_data() {
+                    return Err(HandlerError::Validation(format!(
+                        "build_typed output mapper expects data events (got {})",
+                        event.event_type()
+                    )));
+                }
+
+                let input: In = serde_json::from_value(event.payload()).map_err(|err| {
+                    HandlerError::Deserialization(format!(
+                        "build_typed failed to decode {} from payload (event_type={}): {err}",
+                        std::any::type_name::<In>(),
+                        event.event_type(),
+                    ))
+                })?;
+
+                let output: Out = (output_mapper)(input, response)?;
+
+                let payload = serde_json::to_value(&output).map_err(|err| {
+                    HandlerError::Other(format!(
+                        "build_typed failed to encode {} into payload: {err}",
+                        std::any::type_name::<Out>()
+                    ))
+                })?;
+
+                Ok(vec![ChainEventFactory::derived_data_event(
+                    event.writer_id,
+                    event,
+                    Out::versioned_event_type(),
+                    payload,
+                )])
+            }
+        })
+        .build({
+            let prompt_extractor = prompt_extractor.clone();
+            move |event: &ChainEvent| {
+                if !event.is_data() {
+                    return Err(HandlerError::Validation(format!(
+                        "build_typed prompt extractor expects data events (got {})",
+                        event.event_type()
+                    )));
+                }
+
+                let input: In = serde_json::from_value(event.payload()).map_err(|err| {
+                    HandlerError::Deserialization(format!(
+                        "build_typed failed to decode {} from payload (event_type={}): {err}",
+                        std::any::type_name::<In>(),
+                        event.event_type(),
+                    ))
+                })?;
+
+                (prompt_extractor)(&input)
+            }
+        })
+        .await
+    }
+
+    /// Lazy counterpart of [`Self::build_typed`] (no provider/model preflight).
+    pub fn build_typed_lazy<In, Out>(
+        self,
+        prompt_extractor: impl Fn(&In) -> Result<String, HandlerError> + Send + Sync + 'static,
+        output_mapper: impl Fn(In, ChatResponse) -> Result<Out, HandlerError> + Send + Sync + 'static,
+    ) -> Result<ChatTransform, HandlerError>
+    where
+        In: DeserializeOwned + Send + Sync + 'static,
+        Out: Serialize + TypedPayload + Send + Sync + 'static,
+    {
+        if self.output_mapper.is_some() {
+            return Err(HandlerError::Validation(
+                "build_typed_lazy() cannot be combined with a custom `.output_mapper(..)`; use `.build_lazy(..)` + `.output_mapper(..)` for ChainEvent-level control".to_string(),
+            ));
+        }
+
+        let prompt_extractor = Arc::new(prompt_extractor);
+        let output_mapper = Arc::new(output_mapper);
+
+        self.output_mapper({
+            let output_mapper = output_mapper.clone();
+            move |event: &ChainEvent, response: ChatResponse| {
+                if !event.is_data() {
+                    return Err(HandlerError::Validation(format!(
+                        "build_typed_lazy output mapper expects data events (got {})",
+                        event.event_type()
+                    )));
+                }
+
+                let input: In = serde_json::from_value(event.payload()).map_err(|err| {
+                    HandlerError::Deserialization(format!(
+                        "build_typed_lazy failed to decode {} from payload (event_type={}): {err}",
+                        std::any::type_name::<In>(),
+                        event.event_type(),
+                    ))
+                })?;
+
+                let output: Out = (output_mapper)(input, response)?;
+
+                let payload = serde_json::to_value(&output).map_err(|err| {
+                    HandlerError::Other(format!(
+                        "build_typed_lazy failed to encode {} into payload: {err}",
+                        std::any::type_name::<Out>()
+                    ))
+                })?;
+
+                Ok(vec![ChainEventFactory::derived_data_event(
+                    event.writer_id,
+                    event,
+                    Out::versioned_event_type(),
+                    payload,
+                )])
+            }
+        })
+        .build_lazy({
+            let prompt_extractor = prompt_extractor.clone();
+            move |event: &ChainEvent| {
+                if !event.is_data() {
+                    return Err(HandlerError::Validation(format!(
+                        "build_typed_lazy prompt extractor expects data events (got {})",
+                        event.event_type()
+                    )));
+                }
+
+                let input: In = serde_json::from_value(event.payload()).map_err(|err| {
+                    HandlerError::Deserialization(format!(
+                        "build_typed_lazy failed to decode {} from payload (event_type={}): {err}",
+                        std::any::type_name::<In>(),
+                        event.event_type(),
+                    ))
+                })?;
+
+                (prompt_extractor)(&input)
+            }
+        })
+    }
+
+    /// Build a typed `ChatTransform` from an [`AiChatTask`] without provider/model preflight.
+    ///
+    /// This is the ergonomic counterpart to `build_typed_lazy(..)` that avoids
+    /// closure-heavy call sites. The transform is still backed by the same
+    /// adapter-layer `ChatTransform` and therefore integrates with journalling,
+    /// middleware, and observability in the same way as the lower-level APIs.
+    pub fn build_task_lazy<T>(self, task: T) -> Result<ChatTransform, HandlerError>
+    where
+        T: AiChatTask,
+    {
+        let task = Arc::new(task);
+        let prompt_task = task.clone();
+        let parse_task = task.clone();
+
+        self.build_typed_lazy::<T::Input, T::Output>(
+            move |input| prompt_task.prompt(input),
+            move |input, response| parse_task.parse(input, response),
         )
     }
 

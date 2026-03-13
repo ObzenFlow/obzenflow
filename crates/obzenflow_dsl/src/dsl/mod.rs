@@ -63,6 +63,7 @@
 //! let _ = join!(reference: Carrier, stream: Order, out: Enriched; "enricher" => with_ref!(carriers, handler));
 //! ```
 
+pub mod composites;
 #[path = "dsl.rs"]
 mod dsl_impl;
 pub mod error;

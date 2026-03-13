@@ -703,6 +703,18 @@ impl StageDescriptor for TypedStageDescriptor {
         self.inner.stage_type()
     }
 
+    fn is_composite(&self) -> bool {
+        self.inner.is_composite()
+    }
+
+    fn try_lower_composite(
+        self: Box<Self>,
+        binding: &str,
+    ) -> Result<Option<crate::dsl::composites::CompositeLowering>, crate::dsl::FlowBuildError> {
+        let TypedStageDescriptor { inner, metadata: _ } = *self;
+        inner.try_lower_composite(binding)
+    }
+
     fn reference_stage_id(&self) -> Option<StageId> {
         self.inner.reference_stage_id()
     }

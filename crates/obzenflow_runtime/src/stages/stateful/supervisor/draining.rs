@@ -159,7 +159,33 @@ pub(super) async fn dispatch_draining<
 
                                     for mut out in events_to_emit {
                                         out.writer_id = stage_writer_id;
-                                        ctx.pending_outputs.push_back(out);
+                                        if route_to_error_journal(&out) {
+                                            tracing::info!(
+                                                stage_name = %ctx.stage_name,
+                                                event_id = %out.id,
+                                                "Writing stateful drain emitted error event to error journal (FLOWIP-082h)"
+                                            );
+
+                                            if out.is_data() {
+                                                ctx.instrumentation.record_output_event(&out);
+                                                if let Some(subscription) =
+                                                    sup.subscription.as_mut()
+                                                {
+                                                    subscription.track_output_event();
+                                                }
+                                            }
+
+                                            ctx.error_journal
+                                                .append(out, ctx.last_consumed_envelope.as_ref())
+                                                .await
+                                                .map_err(|e| {
+                                                    format!(
+                                                        "Failed to write stateful drain error event: {e}"
+                                                    )
+                                                })?;
+                                        } else {
+                                            ctx.pending_outputs.push_back(out);
+                                        }
                                     }
 
                                     if let Some(upstream) = upstream_stage {
@@ -307,7 +333,29 @@ pub(super) async fn dispatch_draining<
 
             for mut event in drain_events {
                 event.writer_id = stage_writer_id;
-                ctx.pending_outputs.push_back(event);
+                if route_to_error_journal(&event) {
+                    tracing::info!(
+                        stage_name = %ctx.stage_name,
+                        event_id = %event.id,
+                        "Writing stateful drain() error event to error journal (FLOWIP-082h)"
+                    );
+
+                    if event.is_data() {
+                        ctx.instrumentation.record_output_event(&event);
+                        if let Some(subscription) = sup.subscription.as_mut() {
+                            subscription.track_output_event();
+                        }
+                    }
+
+                    ctx.error_journal
+                        .append(event, ctx.last_consumed_envelope.as_ref())
+                        .await
+                        .map_err(|e| {
+                            format!("Failed to write stateful drain() error event: {e}")
+                        })?;
+                } else {
+                    ctx.pending_outputs.push_back(event);
+                }
             }
 
             ctx.pending_transition = Some(PendingTransition::DrainComplete);

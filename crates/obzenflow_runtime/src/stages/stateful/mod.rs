@@ -52,6 +52,7 @@ pub mod handle;
 pub mod supervisor;
 
 // FLOWIP-080c: Composable primitives
+pub mod ai_map_reduce;
 pub mod strategies;
 
 // Public API - only expose builder, handle, and essential types
@@ -64,6 +65,9 @@ pub use handle::{StatefulHandle, StatefulHandleExt};
 // FLOWIP-080c: Re-export commonly used strategies for convenience
 pub use strategies::accumulators::{Accumulator, Conflate, GroupBy, Reduce, StatefulWithEmission};
 pub use strategies::emissions::{EmissionStrategy, EmitAlways, EveryN, OnEOF, TimeWindow};
+
+// FLOWIP-086z-part-2: AI map-reduce keyed collector
+pub use ai_map_reduce::CollectByInput;
 
 // Re-export control strategies for convenience
 pub use crate::stages::common::control_strategies::{

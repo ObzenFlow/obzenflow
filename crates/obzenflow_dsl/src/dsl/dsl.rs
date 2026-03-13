@@ -196,6 +196,11 @@ macro_rules! flow {
             // Parse topology edges
             $crate::parse_topology!(connections, $($edge)*);
 
+            // FLOWIP-086z-part-2: lower composite descriptors (e.g. ai_map_reduce) into
+            // concrete stages + edges before topology validation and runtime build.
+            let lowering_artifacts =
+                $crate::dsl::composites::lower_composites(&mut stages, &mut connections)?;
+
             // Create closure for flow middleware
             let create_flow_middleware =
                 || -> Vec<Box<dyn obzenflow_adapters::middleware::MiddlewareFactory>> {
@@ -205,7 +210,14 @@ macro_rules! flow {
                 };
 
             // Build the flow
-            $crate::build_typed_flow!($flow_name, journals, stages, connections, create_flow_middleware)
+            $crate::build_typed_flow!(
+                $flow_name,
+                journals,
+                stages,
+                connections,
+                create_flow_middleware,
+                lowering_artifacts
+            )
         })
     }};
 
@@ -256,6 +268,11 @@ macro_rules! flow {
             // Parse topology edges
             $crate::parse_topology!(connections, $($edge)*);
 
+            // FLOWIP-086z-part-2: lower composite descriptors (e.g. ai_map_reduce) into
+            // concrete stages + edges before topology validation and runtime build.
+            let lowering_artifacts =
+                $crate::dsl::composites::lower_composites(&mut stages, &mut connections)?;
+
             // Create closure for flow middleware
             let create_flow_middleware =
                 || -> Vec<Box<dyn obzenflow_adapters::middleware::MiddlewareFactory>> {
@@ -265,7 +282,14 @@ macro_rules! flow {
                 };
 
             // Build the flow
-            $crate::build_typed_flow!("default", journals, stages, connections, create_flow_middleware)
+            $crate::build_typed_flow!(
+                "default",
+                journals,
+                stages,
+                connections,
+                create_flow_middleware,
+                lowering_artifacts
+            )
         })
     }};
 }
@@ -274,6 +298,17 @@ macro_rules! flow {
 #[macro_export]
 macro_rules! build_typed_flow {
     ($flow_name:expr, $journals:expr, $stages:expr, $connections:expr, $create_flow_middleware:expr) => {{
+        $crate::build_typed_flow!(
+            $flow_name,
+            $journals,
+            $stages,
+            $connections,
+            $create_flow_middleware,
+            $crate::dsl::composites::LoweringArtifacts::default()
+        )
+    }};
+
+    ($flow_name:expr, $journals:expr, $stages:expr, $connections:expr, $create_flow_middleware:expr, $lowering_artifacts:expr) => {{
         use $crate::prelude::*;
         use $crate::dsl::FlowBuildError;
         use std::collections::{HashMap, HashSet};
@@ -314,6 +349,7 @@ macro_rules! build_typed_flow {
         let stages = $stages;
         let connections = $connections;
         let create_flow_middleware = $create_flow_middleware;
+        let lowering_artifacts = $lowering_artifacts;
 
         // Build topology - Two-pass approach for join stages:
         // Pass 1: Create all stage IDs and build name_to_id mapping
@@ -599,6 +635,86 @@ macro_rules! build_typed_flow {
                     }
                 }
             }
+        }
+
+        // Collect logical subgraph metadata (FLOWIP-086z-part-2).
+        use obzenflow_core::topology::subgraphs::{StageSubgraphMembership, SubgraphInternalEdge, TopologySubgraphInfo};
+        let mut subgraph_membership_map: HashMap<StageId, StageSubgraphMembership> =
+            HashMap::new();
+        for (stage_name, membership) in lowering_artifacts.stage_subgraphs {
+            let stage_id = *name_to_id.get(&stage_name).ok_or_else(|| {
+                FlowBuildError::StageResourcesFailed(format!(
+                    "Lowering artifacts reference unknown stage '{stage_name}'"
+                ))
+            })?;
+            subgraph_membership_map.insert(stage_id, membership);
+        }
+
+        let mut subgraphs: Vec<TopologySubgraphInfo> = Vec::new();
+        for spec in lowering_artifacts.subgraphs {
+            let mut member_stage_ids = Vec::with_capacity(spec.member_stage_names.len());
+            for name in &spec.member_stage_names {
+                let id = *name_to_id.get(name).ok_or_else(|| {
+                    FlowBuildError::StageResourcesFailed(format!(
+                        "Lowering artifacts reference unknown stage '{name}'"
+                    ))
+                })?;
+                member_stage_ids.push(id);
+            }
+
+            let mut internal_edges = Vec::with_capacity(spec.internal_edges.len());
+            for edge in &spec.internal_edges {
+                let from_stage_id = *name_to_id.get(&edge.from_stage).ok_or_else(|| {
+                    FlowBuildError::StageResourcesFailed(format!(
+                        "Lowering artifacts reference unknown stage '{}'",
+                        edge.from_stage
+                    ))
+                })?;
+                let to_stage_id = *name_to_id.get(&edge.to_stage).ok_or_else(|| {
+                    FlowBuildError::StageResourcesFailed(format!(
+                        "Lowering artifacts reference unknown stage '{}'",
+                        edge.to_stage
+                    ))
+                })?;
+                internal_edges.push(SubgraphInternalEdge {
+                    from_stage_id,
+                    to_stage_id,
+                    role: edge.role.clone(),
+                });
+            }
+
+            let mut entry_stage_ids = Vec::with_capacity(spec.entry_stage_names.len());
+            for name in &spec.entry_stage_names {
+                let id = *name_to_id.get(name).ok_or_else(|| {
+                    FlowBuildError::StageResourcesFailed(format!(
+                        "Lowering artifacts reference unknown stage '{name}'"
+                    ))
+                })?;
+                entry_stage_ids.push(id);
+            }
+
+            let mut exit_stage_ids = Vec::with_capacity(spec.exit_stage_names.len());
+            for name in &spec.exit_stage_names {
+                let id = *name_to_id.get(name).ok_or_else(|| {
+                    FlowBuildError::StageResourcesFailed(format!(
+                        "Lowering artifacts reference unknown stage '{name}'"
+                    ))
+                })?;
+                exit_stage_ids.push(id);
+            }
+
+            subgraphs.push(TopologySubgraphInfo {
+                subgraph_id: spec.subgraph_id,
+                kind: spec.kind,
+                binding: spec.binding,
+                label: spec.label,
+                member_stage_ids,
+                internal_edges,
+                entry_stage_ids,
+                exit_stage_ids,
+                parent_subgraph_id: spec.parent_subgraph_id,
+                collapsible: spec.collapsible,
+            });
         }
 
         // Create services
@@ -1055,6 +1171,10 @@ macro_rules! build_typed_flow {
 
         if !join_metadata_map.is_empty() {
             builder = builder.with_join_metadata(join_metadata_map);
+        }
+
+        if !subgraph_membership_map.is_empty() || !subgraphs.is_empty() {
+            builder = builder.with_subgraphs(subgraph_membership_map, subgraphs);
         }
 
         let builder = if let Some(exporter) = metrics_exporter {
