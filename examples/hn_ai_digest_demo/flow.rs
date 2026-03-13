@@ -7,10 +7,7 @@ use super::domain::{FormattedStory, HnStory};
 use super::mock_server::spawn_mock_hn_server;
 use super::util::{env_bool, env_usize, truncate_chars};
 use anyhow::{anyhow, Result};
-use obzenflow::ai::{
-    llm_chat, resolve_estimator_for_model, AiChatTask, ChatTransform, ChatTransformExt,
-    EstimateSource, TokenCount,
-};
+use obzenflow::ai::{AiChatTask, EstimateSource, ModelConfig, TokenCount};
 use obzenflow::sources::{HeaderMap, HttpPullConfig, HttpPullSource, Url};
 use obzenflow::typed::{sinks, stateful as typed_stateful, transforms as typed_transforms};
 use obzenflow_adapters::middleware::control::ai_circuit_breaker;
@@ -179,29 +176,10 @@ pub async fn run_example() -> Result<()> {
     let base_url_for_summary = base_url.to_string();
     let mode_label_for_summary = mode_label.to_string();
 
-    let ai_provider_label = std::env::var("HN_AI_PROVIDER")
-        .unwrap_or_else(|_| "ollama".to_string())
-        .trim()
-        .to_ascii_lowercase();
-
-    let ai_provider_label = match ai_provider_label.as_str() {
-        "ollama" => "ollama".to_string(),
-        "openai" => "openai".to_string(),
-        other => {
-            return Err(anyhow!(
-                "unsupported HN_AI_PROVIDER='{other}' (expected 'ollama' or 'openai')"
-            ))
-        }
-    };
-
-    let ai_model_label = match ai_provider_label.as_str() {
-        "ollama" => std::env::var("HN_AI_MODEL").unwrap_or_else(|_| "llama3.1:8b".to_string()),
-        "openai" => std::env::var("HN_AI_MODEL").unwrap_or_else(|_| "gpt-4.1-mini".to_string()),
-        _ => unreachable!("provider label validated above"),
-    };
+    let ai = ModelConfig::from_env_with_prefix("HN_AI_")?;
 
     let budget_per_group_tokens =
-        env_usize("HN_AI_GROUP_BUDGET_TOKENS").unwrap_or(match ai_provider_label.as_str() {
+        env_usize("HN_AI_GROUP_BUDGET_TOKENS").unwrap_or(match ai.provider_label() {
             "ollama" => 2500,
             _ => 6000,
         }) as u64;
@@ -218,8 +196,7 @@ pub async fn run_example() -> Result<()> {
         n => Some(n),
     };
 
-    let estimator_resolution = resolve_estimator_for_model(&ai_model_label);
-    let estimator = estimator_resolution.estimator();
+    let estimator = ai.estimator();
 
     println!("HN AI Digest Demo (FLOWIP-086z)");
     println!("===============================");
@@ -231,17 +208,8 @@ pub async fn run_example() -> Result<()> {
     println!("  base_url: {base_url}");
     println!("  max_stories: {max_stories}");
     println!("  poll_timeout: {poll_timeout_secs}s");
-    println!("  ai_provider: {ai_provider_label}");
-    println!("  ai_model: {ai_model_label}");
-    println!("  token_estimator: {:?}", estimator_resolution.source());
-    if let Some(tokenizer_backend) = estimator_resolution.info().tokenizer_backend.as_deref() {
-        println!("  token_estimator_backend: {tokenizer_backend}");
-    }
-    if let Some(fallback_reason) = estimator_resolution.info().fallback_reason.as_ref() {
-        println!("  token_estimator_fallback_reason: {fallback_reason}");
-    }
-    if let Some(fallback_detail) = estimator_resolution.info().fallback_detail.as_deref() {
-        println!("  token_estimator_fallback_detail: {fallback_detail}");
+    for line in ai.to_string().lines() {
+        println!("  {line}");
     }
     println!("  group_budget_tokens: {budget_per_group_tokens}");
     match max_stories_per_group {
@@ -280,76 +248,30 @@ pub async fn run_example() -> Result<()> {
         .to_string();
     let system_prompt_for_summary = system_prompt.clone();
 
-    let openai_api_key = match ai_provider_label.as_str() {
-        "openai" => Some(
-            std::env::var("OPENAI_API_KEY")
-                .map_err(|_| anyhow!("OPENAI_API_KEY is required when HN_AI_PROVIDER=openai"))?,
-        ),
-        _ => None,
-    };
-
-    let openai_base_url = std::env::var("OPENAI_BASE_URL")
-        .ok()
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty());
-
-    let ollama_base_url = std::env::var("OLLAMA_BASE_URL")
-        .ok()
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty());
-
-    let make_llm_builder = || match ai_provider_label.as_str() {
-        "ollama" => {
-            let mut builder = ChatTransform::builder().ollama(ai_model_label.clone());
-            if let Some(base_url) = &ollama_base_url {
-                builder = builder.base_url(base_url.clone());
-            }
-            builder
-        }
-        "openai" => {
-            let api_key = openai_api_key
-                .clone()
-                .expect("api key must exist for openai");
-            match openai_base_url.as_deref() {
-                None => ChatTransform::builder().openai(ai_model_label.clone(), api_key),
-                Some(base_url) => ChatTransform::builder().openai_compatible(
-                    ai_model_label.clone(),
-                    api_key,
-                    base_url.to_string(),
-                ),
-            }
-        }
-        _ => unreachable!("provider label validated above"),
-    };
-
-    let map_llm_handler = llm_chat(
-        make_llm_builder()
-            .system(system_prompt.clone())
-            .temperature(0.2)
-            .max_tokens(800),
-        MapDigestTask {
+    let map_llm_handler = ai
+        .chat()
+        .system(system_prompt.clone())
+        .temperature(0.2)
+        .max_tokens(800)
+        .build_task(MapDigestTask {
             interests: interests.clone(),
-        },
-    )?
-    .with_resolved_estimator(estimator_resolution.clone());
+        })?;
 
-    let digest_llm_handler = llm_chat(
-        make_llm_builder()
-            .system(system_prompt.clone())
-            .temperature(0.2)
-            .max_tokens(800),
-        ReduceDigestTask {
+    let digest_llm_handler = ai
+        .chat()
+        .system(system_prompt.clone())
+        .temperature(0.2)
+        .max_tokens(800)
+        .build_task(ReduceDigestTask {
             interests: interests.clone(),
             mode_label: mode_label_for_summary.clone(),
             base_url: base_url_for_summary.clone(),
-            ai_provider: ai_provider_label.clone(),
-            ai_model: ai_model_label.clone(),
-            token_estimator: estimator.source(),
+            ai_provider: ai.provider_label().to_string(),
+            ai_model: ai.model_label().to_string(),
+            token_estimator: ai.resolved_estimator().source(),
             budget_per_group,
             chat_prompt_system: system_prompt_for_summary.clone(),
-        },
-    )?
-    .with_resolved_estimator(estimator_resolution.clone());
+        })?;
 
     FlowApplication::run(flow! {
             name: "hn_ai_digest_demo",

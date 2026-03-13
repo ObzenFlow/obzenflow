@@ -302,13 +302,12 @@ impl ChatTransformBuilder {
         self
     }
 
-    /// Returns the currently selected provider label (`"ollama"`, `"openai"`, or `"unknown"`).
+    /// Returns the currently selected provider label (`"ollama"`, `"openai"`, `"openai_compatible"`, or `"unknown"`).
     pub fn provider_label(&self) -> &str {
         match self.provider.as_ref() {
             Some(ChatProviderConfig::Ollama { .. }) => "ollama",
-            Some(
-                ChatProviderConfig::OpenAi { .. } | ChatProviderConfig::OpenAiCompatible { .. },
-            ) => "openai",
+            Some(ChatProviderConfig::OpenAi { .. }) => "openai",
+            Some(ChatProviderConfig::OpenAiCompatible { .. }) => "openai_compatible",
             None => "unknown",
         }
     }
@@ -717,9 +716,11 @@ impl ChatTransformBuilder {
 
         match config {
             ChatProviderConfig::Ollama { model } => Ok((AiProvider::new("ollama"), model.clone())),
-            ChatProviderConfig::OpenAi { model, .. }
-            | ChatProviderConfig::OpenAiCompatible { model, .. } => {
+            ChatProviderConfig::OpenAi { model, .. } => {
                 Ok((AiProvider::new("openai"), model.clone()))
+            }
+            ChatProviderConfig::OpenAiCompatible { model, .. } => {
+                Ok((AiProvider::new("openai_compatible"), model.clone()))
             }
         }
     }
@@ -1134,14 +1135,12 @@ impl EmbeddingTransformBuilder {
         self
     }
 
-    /// Returns the currently selected provider label (`"ollama"`, `"openai"`, or `"unknown"`).
+    /// Returns the currently selected provider label (`"ollama"`, `"openai"`, `"openai_compatible"`, or `"unknown"`).
     pub fn provider_label(&self) -> &str {
         match self.provider.as_ref() {
             Some(EmbeddingProviderConfig::Ollama { .. }) => "ollama",
-            Some(
-                EmbeddingProviderConfig::OpenAi { .. }
-                | EmbeddingProviderConfig::OpenAiCompatible { .. },
-            ) => "openai",
+            Some(EmbeddingProviderConfig::OpenAi { .. }) => "openai",
+            Some(EmbeddingProviderConfig::OpenAiCompatible { .. }) => "openai_compatible",
             None => "unknown",
         }
     }
@@ -1226,9 +1225,11 @@ impl EmbeddingTransformBuilder {
             EmbeddingProviderConfig::Ollama { model } => {
                 Ok((AiProvider::new("ollama"), model.clone()))
             }
-            EmbeddingProviderConfig::OpenAi { model, .. }
-            | EmbeddingProviderConfig::OpenAiCompatible { model, .. } => {
+            EmbeddingProviderConfig::OpenAi { model, .. } => {
                 Ok((AiProvider::new("openai"), model.clone()))
+            }
+            EmbeddingProviderConfig::OpenAiCompatible { model, .. } => {
+                Ok((AiProvider::new("openai_compatible"), model.clone()))
             }
         }
     }
@@ -1616,6 +1617,32 @@ mod tests {
             .openai_compatible("mixtral-8x7b", "sk-test", "http://localhost:9999/v1")
             .build_lazy(|_event| Ok("hi".to_string()))
             .expect("builder should succeed");
+    }
+
+    #[test]
+    fn chat_request_target_distinguishes_openai_compatible() {
+        let (provider, model) = ChatTransformBuilder::new()
+            .openai_compatible("mixtral-8x7b", "sk-test", "http://localhost:9999/v1")
+            .chat_request_target()
+            .expect("should resolve target");
+
+        assert_eq!(provider.as_str(), "openai_compatible");
+        assert_eq!(model, "mixtral-8x7b".to_string());
+    }
+
+    #[test]
+    fn embedding_request_target_distinguishes_openai_compatible() {
+        let (provider, model) = EmbeddingTransformBuilder::new()
+            .openai_compatible(
+                "text-embedding-3-small",
+                "sk-test",
+                "http://localhost:9999/v1",
+            )
+            .embedding_request_target()
+            .expect("should resolve target");
+
+        assert_eq!(provider.as_str(), "openai_compatible");
+        assert_eq!(model, "text-embedding-3-small".to_string());
     }
 
     #[test]

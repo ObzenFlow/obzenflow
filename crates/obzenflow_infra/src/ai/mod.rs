@@ -10,6 +10,9 @@ pub mod rig;
 #[cfg(feature = "ai-rig")]
 mod rig_builder;
 
+#[cfg(feature = "ai-rig")]
+mod model_config;
+
 mod model_profile;
 mod token_estimation;
 
@@ -29,3 +32,6 @@ pub use rig_builder::{
     llm_chat, AiChatTask, ChatRequestTemplate, ChatTransformBuilder, ChatTransformExt,
     EmbeddingTransformBuilder, EmbeddingTransformExt,
 };
+
+#[cfg(feature = "ai-rig")]
+pub use model_config::{ModelChatBuilder, ModelConfig};

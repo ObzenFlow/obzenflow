@@ -24,8 +24,8 @@
 //! - Pull the default model: `ollama pull llama3.1:8b`
 //!
 //! Provider preflight:
-//! This example checks provider reachability (and model availability where possible) at startup
-//! and fails fast with an actionable error if the provider isn't running/configured.
+//! This example uses lazy provider construction by default. Local configuration errors are
+//! surfaced at startup, but network/model availability errors will surface on the first LLM call.
 //!
 //! Third-party terms note:
 //! ObzenFlow only provides a client-side integration (via `rig-core`). It does not redistribute
@@ -43,14 +43,14 @@
 //! - `HN_SOURCE_RATE_LIMIT=10.0` (default 10.0 events/sec)
 //!
 //! Optional env vars (AI):
-//! - `HN_AI_PROVIDER=ollama|openai` (default `ollama`)
+//! - `HN_AI_PROVIDER=ollama|openai|openai_compatible` (default `ollama`)
 //! - `HN_AI_MODEL=llama3.1:8b` (default depends on provider)
 //! - `HN_AI_INTERESTS="rust, ai, security"` (optional personalization)
 //! - `HN_AI_GROUP_BUDGET_TOKENS=2500` (optional; per-chunk input budget used for map-reduce splitting)
 //! - `HN_AI_GROUP_MAX_STORIES=10` (optional; cap stories per chunk; set `0` for unlimited)
 //! - `OLLAMA_BASE_URL=http://localhost:11434` (optional; default rig provider base)
-//! - `OPENAI_API_KEY=...` (required for `HN_AI_PROVIDER=openai`)
-//! - `OPENAI_BASE_URL=http://localhost:8080/v1` (optional OpenAI-compatible base URL)
+//! - `OPENAI_API_KEY=...` (required for `HN_AI_PROVIDER=openai` and `HN_AI_PROVIDER=openai_compatible`)
+//! - `OPENAI_BASE_URL=http://localhost:8080/v1` (required for `HN_AI_PROVIDER=openai_compatible`)
 
 mod support;
 

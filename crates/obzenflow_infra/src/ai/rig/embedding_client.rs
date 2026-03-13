@@ -106,7 +106,7 @@ impl RigEmbeddingClient {
             })?;
 
         Ok(Self {
-            provider: AiProvider::new("openai"),
+            provider: AiProvider::new("openai_compatible"),
             model: model.into(),
             backend: RigEmbeddingBackend::OpenAi {
                 client: Arc::new(client),
