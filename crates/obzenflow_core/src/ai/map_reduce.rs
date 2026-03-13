@@ -8,6 +8,42 @@ use super::ChunkPlanningSummary;
 use crate::{EventId, TypedPayload};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
+#[derive(Clone, Serialize, Deserialize)]
+pub struct Many<T> {
+    pub items: Vec<T>,
+    pub planning: ChunkPlanningSummary,
+}
+
+impl<T> Default for Many<T> {
+    fn default() -> Self {
+        Self {
+            items: Vec::new(),
+            planning: ChunkPlanningSummary {
+                input_items_total: 0,
+                planned_items_total: 0,
+                excluded_items_total: 0,
+            },
+        }
+    }
+}
+
+impl<T> std::fmt::Debug for Many<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Many")
+            .field("items_len", &self.items.len())
+            .field("planning", &self.planning)
+            .finish()
+    }
+}
+
+impl<T> TypedPayload for Many<T>
+where
+    T: Serialize + DeserializeOwned,
+{
+    const EVENT_TYPE: &'static str = "ai.map_reduce.many";
+    const SCHEMA_VERSION: u32 = 1;
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AiMapReducePlanningManifest {
     pub job_key: EventId,

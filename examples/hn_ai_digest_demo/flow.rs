@@ -8,7 +8,7 @@ use super::mock_server::spawn_mock_hn_server;
 use super::util::{env_bool, env_usize, truncate_chars};
 use anyhow::{anyhow, Result};
 use obzenflow::ai::{
-    resolve_estimator_for_model, ChatTransform, ChatTransformExt, ChunkEnvelope, EstimateSource,
+    resolve_estimator_for_model, ChatTransform, ChatTransformExt, EstimateSource,
     OversizeExhaustion, OversizePolicy, TokenCount,
 };
 use obzenflow::sources::{HeaderMap, HttpPullConfig, HttpPullSource, Url};
@@ -17,13 +17,11 @@ use obzenflow::typed::{
 };
 use obzenflow_adapters::middleware::control::ai_circuit_breaker;
 use obzenflow_adapters::middleware::RateLimiterBuilder;
-use obzenflow_core::event::chain_event::ChainEventFactory;
-use obzenflow_core::{ChainEvent, TypedPayload};
+use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{ai_map_reduce, async_source, flow, sink, stateful, transform};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::http_client::default_http_client;
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
@@ -32,8 +30,6 @@ const DEFAULT_HN_SOURCE_RATE_LIMIT: f64 = 10.0;
 fn env_f64(key: &str) -> Option<f64> {
     std::env::var(key).ok().and_then(|v| v.parse().ok())
 }
-
-type StoryChunkEnvelope = ChunkEnvelope<FormattedStory>;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct HnTopStories {
@@ -60,19 +56,6 @@ struct HnDigestChunkSummary {
 
 impl TypedPayload for HnDigestChunkSummary {
     const EVENT_TYPE: &'static str = "hn.digest_chunk_summary";
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-struct HnDigestChunkSummaries {
-    budget_per_group: TokenCount,
-    input_items_total: usize,
-    planned_items_total: usize,
-    excluded_items_total: usize,
-    summaries: Vec<HnDigestChunkSummary>,
-}
-
-impl TypedPayload for HnDigestChunkSummaries {
-    const EVENT_TYPE: &'static str = "hn.digest_chunk_summaries";
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -294,53 +277,32 @@ pub async fn run_example() -> Result<()> {
         .system(system_prompt.clone())
         .temperature(0.2)
         .max_tokens(800)
-        .output_mapper(move |input: &ChainEvent, response| {
-            let envelope = StoryChunkEnvelope::try_from_event(input).map_err(|err| {
-                HandlerError::Validation(format!("hn digest chunk envelope decode failed: {err}"))
-            })?;
-            debug_assert_eq!(envelope.item_ordinals.len(), envelope.items.len());
-            let story_numbers = envelope
-                .item_ordinals
-                .iter()
-                .map(|ordinal| *ordinal + 1)
-                .collect::<Vec<_>>();
+        .build_typed::<typed_ai::Chunk<FormattedStory>, HnDigestChunkSummary>(
+            move |chunk| Ok(build_chunk_prompt(chunk, interests_for_map_request.as_deref())),
+            move |chunk, response| {
+                debug_assert_eq!(chunk.item_ordinals.len(), chunk.items.len());
+                let story_numbers = chunk
+                    .item_ordinals
+                    .iter()
+                    .map(|ordinal| *ordinal + 1)
+                    .collect::<Vec<_>>();
 
-            let user_prompt = build_chunk_prompt(&envelope, interests_for_map_summary.as_deref());
+                let user_prompt = build_chunk_prompt(&chunk, interests_for_map_summary.as_deref());
 
-            let summary = HnDigestChunkSummary {
-                group_index: envelope.chunk_index,
-                group_count: envelope.chunk_count,
-                budget_per_group,
-                estimated_tokens: envelope.estimated_tokens,
-                oversize: envelope.decomposition_depth > 0,
-                decomposition_depth: envelope.decomposition_depth,
-                story_numbers,
-                stories: envelope.items.clone(),
-                chat_prompt_user: user_prompt,
-                output_markdown: strip_accidental_story_echo(&response.text),
-            };
-
-            let payload = serde_json::to_value(&summary).map_err(|err| {
-                HandlerError::Validation(format!("chunk summary payload encode failed: {err}"))
-            })?;
-
-            Ok(vec![ChainEventFactory::derived_data_event(
-                input.writer_id,
-                input,
-                HnDigestChunkSummary::versioned_event_type(),
-                payload,
-            )])
-        })
-        .build(move |event: &ChainEvent| {
-            let envelope = StoryChunkEnvelope::try_from_event(event).map_err(|err| {
-                HandlerError::Validation(format!("hn digest chunk envelope decode failed: {err}"))
-            })?;
-
-            Ok(build_chunk_prompt(
-                &envelope,
-                interests_for_map_request.as_deref(),
-            ))
-        })
+                Ok(HnDigestChunkSummary {
+                    group_index: chunk.chunk_index,
+                    group_count: chunk.chunk_count,
+                    budget_per_group,
+                    estimated_tokens: chunk.estimated_tokens,
+                    oversize: chunk.decomposition_depth > 0,
+                    decomposition_depth: chunk.decomposition_depth,
+                    story_numbers,
+                    stories: chunk.items,
+                    chat_prompt_user: user_prompt,
+                    output_markdown: strip_accidental_story_echo(&response.text),
+                })
+            },
+        )
         .await?
         .with_resolved_estimator(estimator_resolution.clone());
 
@@ -348,74 +310,53 @@ pub async fn run_example() -> Result<()> {
         .system(system_prompt)
         .temperature(0.2)
         .max_tokens(800)
-        .output_mapper(move |input: &ChainEvent, response| {
-            let mut batch = HnDigestChunkSummaries::try_from_event(input).map_err(|err| {
-                HandlerError::Validation(format!("hn digest chunk summaries decode failed: {err}"))
-            })?;
+        .build_typed::<typed_ai::Many<HnDigestChunkSummary>, HnDigestSummary>(
+            move |many| Ok(build_reduce_prompt(&many.items, interests_for_reduce_request.as_deref())),
+            move |many, response| {
+                let mut summaries = many.items;
+                summaries.sort_by_key(|s| {
+                    (
+                        s.group_index,
+                        s.story_numbers.first().copied().unwrap_or(usize::MAX),
+                    )
+                });
+                let groups = summaries.len();
 
-            batch.summaries.sort_by_key(|s| {
-                (
-                    s.group_index,
-                    s.story_numbers.first().copied().unwrap_or(usize::MAX),
-                )
-            });
-            let groups = batch.summaries.len();
-
-            let mut numbered_stories: Vec<(usize, FormattedStory)> = Vec::new();
-            for summary in &batch.summaries {
-                for (n, story) in summary.story_numbers.iter().zip(summary.stories.iter()) {
-                    numbered_stories.push((*n, story.clone()));
+                let mut numbered_stories: Vec<(usize, FormattedStory)> = Vec::new();
+                for summary in &summaries {
+                    for (n, story) in summary.story_numbers.iter().zip(summary.stories.iter()) {
+                        numbered_stories.push((*n, story.clone()));
+                    }
                 }
-            }
-            numbered_stories.sort_by_key(|(n, _)| *n);
-            let seed = HnTopStories {
-                stories: numbered_stories
-                    .into_iter()
-                    .map(|(_, story)| story)
-                    .collect(),
-            };
+                numbered_stories.sort_by_key(|(n, _)| *n);
+                let seed = HnTopStories {
+                    stories: numbered_stories
+                        .into_iter()
+                        .map(|(_, story)| story)
+                        .collect(),
+                };
 
-            let stories_fetched = seed.stories.len();
-            let user_prompt = build_reduce_prompt(&batch, interests_for_reduce_summary.as_deref());
+                let stories_fetched = seed.stories.len();
+                let user_prompt = build_reduce_prompt(&summaries, interests_for_reduce_summary.as_deref());
 
-            let summary = HnDigestSummary {
-                mode: mode_label_for_summary.clone(),
-                base_url: base_url_for_summary.clone(),
-                ai_provider: ai_provider_for_summary.clone(),
-                ai_model: ai_model_for_summary.clone(),
-                token_estimator: token_estimator_for_summary,
-                stories_fetched,
-                budget_per_group: batch.budget_per_group,
-                groups,
-                interests: interests_for_reduce_summary.clone(),
-                chat_prompt_system: system_prompt_for_summary.clone(),
-                chat_prompt_user: user_prompt,
-                input: seed,
-                chunk_summaries: batch.summaries.clone(),
-                output_markdown: response.text,
-            };
-
-            let payload = serde_json::to_value(&summary).map_err(|err| {
-                HandlerError::Validation(format!("digest summary payload encode failed: {err}"))
-            })?;
-
-            Ok(vec![ChainEventFactory::derived_data_event(
-                input.writer_id,
-                input,
-                HnDigestSummary::versioned_event_type(),
-                payload,
-            )])
-        })
-        .build(move |event: &ChainEvent| {
-            let batch = HnDigestChunkSummaries::try_from_event(event).map_err(|err| {
-                HandlerError::Validation(format!("hn digest chunk summaries decode failed: {err}"))
-            })?;
-
-            Ok(build_reduce_prompt(
-                &batch,
-                interests_for_reduce_request.as_deref(),
-            ))
-        })
+                Ok(HnDigestSummary {
+                    mode: mode_label_for_summary.clone(),
+                    base_url: base_url_for_summary.clone(),
+                    ai_provider: ai_provider_for_summary.clone(),
+                    ai_model: ai_model_for_summary.clone(),
+                    token_estimator: token_estimator_for_summary,
+                    stories_fetched,
+                    budget_per_group,
+                    groups,
+                    interests: interests_for_reduce_summary.clone(),
+                    chat_prompt_system: system_prompt_for_summary.clone(),
+                    chat_prompt_user: user_prompt,
+                    input: seed,
+                    chunk_summaries: summaries.clone(),
+                    output_markdown: response.text,
+                })
+            },
+        )
         .await?
         .with_resolved_estimator(estimator_resolution.clone());
 
@@ -434,28 +375,12 @@ pub async fn run_example() -> Result<()> {
                 formatter = transform!(HnStory -> FormattedStory => formatter);
                 batch = stateful!(FormattedStory -> HnTopStories => digest_seed);
                 digest = ai_map_reduce!(
-                    HnTopStories -> HnDigestSummary => {
-                        chunk: StoryChunkEnvelope => chunker,
-                        map: HnDigestChunkSummary => map_llm_handler,
-                        collect: HnDigestChunkSummaries => typed_ai::collect_by_input(
-                            HnDigestChunkSummaries::default(),
-                            |acc, summary: &HnDigestChunkSummary| {
-                                if acc.budget_per_group == TokenCount::ZERO {
-                                    acc.budget_per_group = summary.budget_per_group;
-                                }
-                                acc.summaries.push(summary.clone());
-                            },
-                        )
-                        .with_planning_summary(|acc, planning| {
-                            acc.input_items_total = planning.input_items_total;
-                            acc.planned_items_total = planning.planned_items_total;
-                            acc.excluded_items_total = planning.excluded_items_total;
-                        }),
-                        finalize => digest_llm_handler,
-                    },
+                    chunk: HnTopStories -> typed_ai::Chunk<FormattedStory> => chunker,
+                    map: typed_ai::Chunk<FormattedStory> -> HnDigestChunkSummary => map_llm_handler,
+                    reduce: typed_ai::Many<HnDigestChunkSummary> -> HnDigestSummary => digest_llm_handler,
                     [
                         map: ai_circuit_breaker(),
-                        finalize: ai_circuit_breaker(),
+                        reduce: ai_circuit_breaker(),
                     ]
                 );
                 digest_summary = sink!(HnDigestSummary => sinks::console(format_digest_summary_for_console));
@@ -547,7 +472,7 @@ fn format_digest_summary_for_console(summary: &HnDigestSummary) -> String {
     out
 }
 
-fn build_chunk_prompt(envelope: &StoryChunkEnvelope, interests: Option<&str>) -> String {
+fn build_chunk_prompt(envelope: &typed_ai::Chunk<FormattedStory>, interests: Option<&str>) -> String {
     let mut out = String::new();
 
     if let Some(interests) = interests {
@@ -614,7 +539,7 @@ fn strip_accidental_story_echo(markdown: &str) -> String {
     out.trim_end().to_string()
 }
 
-fn build_reduce_prompt(batch: &HnDigestChunkSummaries, interests: Option<&str>) -> String {
+fn build_reduce_prompt(summaries: &[HnDigestChunkSummary], interests: Option<&str>) -> String {
     let mut out = String::new();
 
     if let Some(interests) = interests {
@@ -629,16 +554,16 @@ fn build_reduce_prompt(batch: &HnDigestChunkSummaries, interests: Option<&str>) 
     out.push_str("- Include: Thesis, Themes (cite story numbers), Notable stories, Watch.\n");
     out.push_str("- Avoid generic wrap-ups.\n\n");
 
-    let mut summaries = batch.summaries.clone();
-    summaries.sort_by_key(|s| {
+    out.push_str("Chunk summaries:\n");
+    let mut sorted: Vec<&HnDigestChunkSummary> = summaries.iter().collect();
+    sorted.sort_by_key(|s| {
         (
             s.group_index,
             s.story_numbers.first().copied().unwrap_or(usize::MAX),
         )
     });
 
-    out.push_str("Chunk summaries:\n");
-    for summary in &summaries {
+    for summary in sorted {
         let oversize_suffix = if summary.oversize {
             format!(" (oversize depth {})", summary.decomposition_depth)
         } else {

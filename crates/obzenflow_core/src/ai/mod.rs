@@ -36,7 +36,7 @@ pub use hashing::{
     schema_hash_from_text, AiHashError, LLM_HASH_VERSION_SHA256_V1,
 };
 pub use map_reduce::{
-    AiMapReduceChunkFailed, AiMapReducePlanningManifest, AiMapReduceTaggedPartial,
+    AiMapReduceChunkFailed, AiMapReducePlanningManifest, AiMapReduceTaggedPartial, Many,
 };
 pub use model_profile::{ChatModelProfile, ContextWindowSource};
 pub use observability::{

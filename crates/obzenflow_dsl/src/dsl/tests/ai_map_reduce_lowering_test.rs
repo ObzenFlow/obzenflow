@@ -224,18 +224,16 @@ mod tests {
     #[test]
     fn ai_map_reduce_macro_is_typed_and_lowers_composite() {
         let digest = crate::ai_map_reduce!(
-            TestIn -> TestOut => {
-                chunk: TestChunk => NoopTransform,
-                map: TestPartial => NoopAsyncTransform,
-                collect: TestCollected => obzenflow_runtime::stages::stateful::CollectByInput::new(
-                    TestCollected::default(),
-                    |acc, partial: &TestPartial| acc.values.push(partial.value),
-                ),
-                finalize => NoopAsyncTransform,
-            },
+            chunk: TestIn -> TestChunk => NoopTransform,
+            map: TestChunk -> TestPartial => NoopAsyncTransform,
+            collect: TestPartial -> TestCollected => obzenflow_runtime::stages::stateful::CollectByInput::new(
+                TestCollected::default(),
+                |acc, partial: &TestPartial| acc.values.push(partial.value),
+            ),
+            reduce: TestCollected -> TestOut => NoopAsyncTransform,
             [
                 map: TestMiddlewareFactory("test_map_mw"),
-                finalize: TestMiddlewareFactory("test_finalize_mw"),
+                reduce: TestMiddlewareFactory("test_reduce_mw"),
             ]
         );
 
@@ -274,8 +272,8 @@ mod tests {
         assert!(
             finalize_stage
                 .stage_middleware_names()
-                .contains(&"test_finalize_mw".to_string()),
-            "finalise stage should include finalize-scoped middleware from macro surface"
+                .contains(&"test_reduce_mw".to_string()),
+            "finalise stage should include reduce-scoped middleware from macro surface"
         );
     }
 
