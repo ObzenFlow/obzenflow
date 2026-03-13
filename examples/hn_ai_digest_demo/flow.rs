@@ -467,9 +467,7 @@ fn build_group_prompt(stories: &[NumberedStory], interests: Option<&str>) -> Str
     }
 
     let min_citations = stories.len().min(6);
-    out.push_str(
-        "Summarise these Hacker News stories (titles + URLs are provided as input).\n",
-    );
+    out.push_str("Summarise these Hacker News stories (titles + URLs are provided as input).\n");
     out.push_str("- Do not invent facts that are not implied by the titles.\n");
     out.push_str("- Use a neutral, specific tone.\n");
     out.push_str("- IMPORTANT: Do not repeat the input story list.\n");
@@ -530,10 +528,7 @@ fn build_reduce_prompt(summaries: &[HnDigestGroupSummary], interests: Option<&st
 
     out.push_str("Chunk summaries:\n");
     for (idx, summary) in summaries.iter().enumerate() {
-        out.push_str(&format!(
-            "\n### Group {}\n",
-            idx + 1
-        ));
+        out.push_str(&format!("\n### Group {}\n", idx + 1));
         out.push_str(summary.output_markdown.trim());
         out.push('\n');
     }

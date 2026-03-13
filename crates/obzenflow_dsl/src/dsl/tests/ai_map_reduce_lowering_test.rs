@@ -327,8 +327,9 @@ mod tests {
             ("digest".to_string(), "out".to_string(), EdgeKind::Forward),
         ];
 
-        lower_composites(&mut stages, &mut connections)
-            .expect("lowering should succeed for ai_map_reduce composite from Cadillac ai_map_reduce!()");
+        lower_composites(&mut stages, &mut connections).expect(
+            "lowering should succeed for ai_map_reduce composite from Cadillac ai_map_reduce!()",
+        );
 
         let map_stage = stages
             .get("digest__map")

@@ -64,12 +64,11 @@ where
             items: Vec<T>,
         }
 
-        let decoded: ItemsOnly<Item> =
-            serde_json::from_value(payload.clone()).map_err(|err| {
-                HandlerError::Deserialization(format!(
-                    "ai_map_reduce: failed to decode ChunkEnvelope.items: {err}"
-                ))
-            })?;
+        let decoded: ItemsOnly<Item> = serde_json::from_value(payload.clone()).map_err(|err| {
+            HandlerError::Deserialization(format!(
+                "ai_map_reduce: failed to decode ChunkEnvelope.items: {err}"
+            ))
+        })?;
 
         let items_payload = serde_json::to_value(decoded.items).map_err(|err| {
             HandlerError::Other(format!(
@@ -78,7 +77,8 @@ where
         })?;
 
         let mut items_event = event;
-        if let obzenflow_core::event::ChainEventContent::Data { payload, .. } = &mut items_event.content
+        if let obzenflow_core::event::ChainEventContent::Data { payload, .. } =
+            &mut items_event.content
         {
             *payload = items_payload;
         }
@@ -131,16 +131,14 @@ where
             HandlerError::Validation("ai_map_reduce: reduce_input missing seed".to_string())
         })?;
 
-        let tuple_payload = serde_json::to_value((seed, reduce_input.collected.items)).map_err(
-            |err| {
-                HandlerError::Other(format!(
-                    "ai_map_reduce: reduce tuple encode failed: {err}"
-                ))
-            },
-        )?;
+        let tuple_payload =
+            serde_json::to_value((seed, reduce_input.collected.items)).map_err(|err| {
+                HandlerError::Other(format!("ai_map_reduce: reduce tuple encode failed: {err}"))
+            })?;
 
         let mut tuple_event = event;
-        if let obzenflow_core::event::ChainEventContent::Data { payload, .. } = &mut tuple_event.content
+        if let obzenflow_core::event::ChainEventContent::Data { payload, .. } =
+            &mut tuple_event.content
         {
             *payload = tuple_payload;
         }
@@ -183,10 +181,10 @@ where
         let reduce_input =
             obzenflow_core::ai::AiMapReduceReduceInput::<Seed, Collected>::try_from_event(&event)
                 .map_err(|err| {
-                    HandlerError::Deserialization(format!(
-                        "ai_map_reduce: reduce_input decode failed: {err}"
-                    ))
-                })?;
+                HandlerError::Deserialization(format!(
+                    "ai_map_reduce: reduce_input decode failed: {err}"
+                ))
+            })?;
 
         let seed = reduce_input.seed.ok_or_else(|| {
             HandlerError::Validation("ai_map_reduce: reduce_input missing seed".to_string())
@@ -194,13 +192,12 @@ where
 
         let tuple_payload =
             serde_json::to_value((seed, reduce_input.collected)).map_err(|err| {
-                HandlerError::Other(format!(
-                    "ai_map_reduce: reduce tuple encode failed: {err}"
-                ))
+                HandlerError::Other(format!("ai_map_reduce: reduce tuple encode failed: {err}"))
             })?;
 
         let mut tuple_event = event;
-        if let obzenflow_core::event::ChainEventContent::Data { payload, .. } = &mut tuple_event.content
+        if let obzenflow_core::event::ChainEventContent::Data { payload, .. } =
+            &mut tuple_event.content
         {
             *payload = tuple_payload;
         }

@@ -178,9 +178,7 @@ impl<Partial, Collected> CollectByInput<Partial, Collected> {
     /// The reduce handler surface for map-reduce is `(Seed, Collected) -> Out`.
     /// This helper injects the seed payload (from the planning manifest) into the
     /// collected output so downstream stages do not need to reconstruct it.
-    pub fn with_seed<Seed>(
-        self,
-    ) -> CollectByInput<Partial, AiMapReduceReduceInput<Seed, Collected>>
+    pub fn with_seed<Seed>(self) -> CollectByInput<Partial, AiMapReduceReduceInput<Seed, Collected>>
     where
         Seed: DeserializeOwned + Serialize + Send + Sync + 'static,
         Partial: DeserializeOwned + Send + Sync + 'static,
@@ -216,14 +214,13 @@ impl<Partial, Collected> CollectByInput<Partial, Collected> {
             },
         )
         .with_manifest_hook(|acc, manifest| {
-            let seed: Seed = serde_json::from_value(manifest.seed_payload.clone()).map_err(
-                |err| {
+            let seed: Seed =
+                serde_json::from_value(manifest.seed_payload.clone()).map_err(|err| {
                     HandlerError::Deserialization(format!(
                         "ai_map_reduce: seed decode failed (seed_event_type={}): {err}",
                         manifest.seed_event_type
                     ))
-                },
-            )?;
+                })?;
             acc.seed = Some(seed);
             Ok(())
         })
@@ -469,9 +466,10 @@ where
                 job.planning_applied = true;
             }
 
-            let manifest_hook_err = self.manifest_hook.as_ref().and_then(|hook| {
-                (hook.0)(&mut job.collected, &manifest).err()
-            });
+            let manifest_hook_err = self
+                .manifest_hook
+                .as_ref()
+                .and_then(|hook| (hook.0)(&mut job.collected, &manifest).err());
 
             if let Some(err) = manifest_hook_err {
                 self.fail_job(

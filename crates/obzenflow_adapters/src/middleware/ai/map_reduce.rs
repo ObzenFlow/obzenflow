@@ -239,7 +239,10 @@ where
         });
 
         let (seed_payload, seed_event_type) = match &event.content {
-            ChainEventContent::Data { event_type, payload } => (payload.clone(), event_type.clone()),
+            ChainEventContent::Data {
+                event_type,
+                payload,
+            } => (payload.clone(), event_type.clone()),
             _ => (json!(null), event.event_type()),
         };
 

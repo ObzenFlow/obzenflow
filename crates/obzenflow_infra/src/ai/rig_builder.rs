@@ -56,8 +56,11 @@ pub trait AiChatTask: Send + Sync + 'static {
     type Output: Serialize + TypedPayload + Send + Sync + 'static;
 
     fn prompt(&self, input: &Self::Input) -> Result<String, HandlerError>;
-    fn parse(&self, input: Self::Input, response: ChatResponse)
-        -> Result<Self::Output, HandlerError>;
+    fn parse(
+        &self,
+        input: Self::Input,
+        response: ChatResponse,
+    ) -> Result<Self::Output, HandlerError>;
 }
 
 /// Convenience facade for `ChatTransformBuilder::build_task_lazy(..)`.
