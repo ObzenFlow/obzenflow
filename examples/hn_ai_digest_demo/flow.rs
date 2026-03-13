@@ -19,7 +19,7 @@ use obzenflow_adapters::middleware::control::ai_circuit_breaker;
 use obzenflow_adapters::middleware::RateLimiterBuilder;
 use obzenflow_core::event::chain_event::ChainEventFactory;
 use obzenflow_core::{ChainEvent, TypedPayload};
-use obzenflow_dsl::{async_source, flow, sink, stateful, transform};
+use obzenflow_dsl::{ai_map_reduce, async_source, flow, sink, stateful, transform};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::http_client::default_http_client;
 use obzenflow_infra::journal::disk_journals;
@@ -433,35 +433,31 @@ pub async fn run_example() -> Result<()> {
                 ]);
                 formatter = transform!(HnStory -> FormattedStory => formatter);
                 batch = stateful!(FormattedStory -> HnTopStories => digest_seed);
-                digest = typed_ai::map_reduce::<
-                    HnTopStories,
-                    StoryChunkEnvelope,
-                    HnDigestChunkSummary,
-                    HnDigestChunkSummaries,
-                    HnDigestSummary
-                >()
-                .chunker(chunker)
-                .map(map_llm_handler)
-                .collect(
-                    typed_ai::collect_by_input(
-                        HnDigestChunkSummaries::default(),
-                        |acc, summary: &HnDigestChunkSummary| {
-                            if acc.budget_per_group == TokenCount::ZERO {
-                                acc.budget_per_group = summary.budget_per_group;
-                            }
-                            acc.summaries.push(summary.clone());
-                        },
-                    )
-                    .with_planning_summary(|acc, planning| {
-                        acc.input_items_total = planning.input_items_total;
-                        acc.planned_items_total = planning.planned_items_total;
-                        acc.excluded_items_total = planning.excluded_items_total;
-                    }),
-                )
-                .finalize(digest_llm_handler)
-                .map_middleware([ai_circuit_breaker()])
-                .finalize_middleware([ai_circuit_breaker()])
-                .build();
+                digest = ai_map_reduce!(
+                    HnTopStories -> HnDigestSummary => {
+                        chunk: StoryChunkEnvelope => chunker,
+                        map: HnDigestChunkSummary => map_llm_handler,
+                        collect: HnDigestChunkSummaries => typed_ai::collect_by_input(
+                            HnDigestChunkSummaries::default(),
+                            |acc, summary: &HnDigestChunkSummary| {
+                                if acc.budget_per_group == TokenCount::ZERO {
+                                    acc.budget_per_group = summary.budget_per_group;
+                                }
+                                acc.summaries.push(summary.clone());
+                            },
+                        )
+                        .with_planning_summary(|acc, planning| {
+                            acc.input_items_total = planning.input_items_total;
+                            acc.planned_items_total = planning.planned_items_total;
+                            acc.excluded_items_total = planning.excluded_items_total;
+                        }),
+                        finalize => digest_llm_handler,
+                    },
+                    [
+                        map: ai_circuit_breaker(),
+                        finalize: ai_circuit_breaker(),
+                    ]
+                );
                 digest_summary = sink!(HnDigestSummary => sinks::console(format_digest_summary_for_console));
             },
 

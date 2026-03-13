@@ -8,15 +8,45 @@
 mod tests {
     use std::collections::HashMap;
 
+    use obzenflow_adapters::middleware::control::ControlMiddlewareAggregator;
+    use obzenflow_adapters::middleware::{Middleware, MiddlewareFactory};
     use obzenflow_core::TypedPayload;
+    use obzenflow_runtime::pipeline::config::StageConfig;
     use obzenflow_runtime::stages::common::handler_error::HandlerError;
     use obzenflow_runtime::stages::common::handlers::{AsyncTransformHandler, TransformHandler};
     use obzenflow_topology::EdgeKind;
     use serde::{Deserialize, Serialize};
+    use std::sync::Arc;
 
     use crate::dsl::composites::ai_map_reduce;
     use crate::dsl::composites::lower_composites;
     use crate::dsl::stage_descriptor::{StageDescriptor, TransformDescriptor};
+    use crate::dsl::typing::TypeHint;
+
+    struct TestMiddleware(&'static str);
+
+    impl Middleware for TestMiddleware {
+        fn middleware_name(&self) -> &'static str {
+            self.0
+        }
+    }
+
+    #[derive(Clone)]
+    struct TestMiddlewareFactory(&'static str);
+
+    impl MiddlewareFactory for TestMiddlewareFactory {
+        fn create(
+            &self,
+            _config: &StageConfig,
+            _control_middleware: Arc<ControlMiddlewareAggregator>,
+        ) -> Box<dyn Middleware> {
+            Box::new(TestMiddleware(self.0))
+        }
+
+        fn name(&self) -> &str {
+            self.0
+        }
+    }
 
     #[derive(Debug, Clone)]
     struct NoopTransform;
@@ -188,6 +218,64 @@ mod tests {
                     && edge.to_stage == "digest__collect"
                     && edge.role == "manifest"),
             "subgraph internal edges should include the manifest path"
+        );
+    }
+
+    #[test]
+    fn ai_map_reduce_macro_is_typed_and_lowers_composite() {
+        let digest = crate::ai_map_reduce!(
+            TestIn -> TestOut => {
+                chunk: TestChunk => NoopTransform,
+                map: TestPartial => NoopAsyncTransform,
+                collect: TestCollected => obzenflow_runtime::stages::stateful::CollectByInput::new(
+                    TestCollected::default(),
+                    |acc, partial: &TestPartial| acc.values.push(partial.value),
+                ),
+                finalize => NoopAsyncTransform,
+            },
+            [
+                map: TestMiddlewareFactory("test_map_mw"),
+                finalize: TestMiddlewareFactory("test_finalize_mw"),
+            ]
+        );
+
+        let metadata = digest
+            .typing_metadata()
+            .expect("ai_map_reduce! should return a typed descriptor wrapper");
+        assert_eq!(metadata.input_type, TypeHint::exact("TestIn"));
+        assert_eq!(metadata.output_type, TypeHint::exact("TestOut"));
+
+        let mut stages: HashMap<String, Box<dyn StageDescriptor>> = HashMap::new();
+        stages.insert("batch".to_string(), mk_transform("batch"));
+        stages.insert("out".to_string(), mk_transform("out"));
+        stages.insert("digest".to_string(), digest);
+
+        let mut connections = vec![
+            ("batch".to_string(), "digest".to_string(), EdgeKind::Forward),
+            ("digest".to_string(), "out".to_string(), EdgeKind::Forward),
+        ];
+
+        lower_composites(&mut stages, &mut connections)
+            .expect("lowering should succeed for ai_map_reduce composite from ai_map_reduce!()");
+
+        let map_stage = stages
+            .get("digest__map")
+            .expect("map stage should exist after lowering");
+        assert!(
+            map_stage
+                .stage_middleware_names()
+                .contains(&"test_map_mw".to_string()),
+            "map stage should include map-scoped middleware from macro surface"
+        );
+
+        let finalize_stage = stages
+            .get("digest__finalize")
+            .expect("finalize stage should exist after lowering");
+        assert!(
+            finalize_stage
+                .stage_middleware_names()
+                .contains(&"test_finalize_mw".to_string()),
+            "finalise stage should include finalize-scoped middleware from macro surface"
         );
     }
 

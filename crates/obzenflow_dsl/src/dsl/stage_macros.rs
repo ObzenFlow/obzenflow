@@ -3382,3 +3382,203 @@ macro_rules! join {
         $crate::__obzenflow_join_untyped!(name = $name, reference_stage_var = $ref_var, handler = $handler, middleware = [$($mw),*])
     };
 }
+
+// ============================================================================
+// ai_map_reduce!  +  __obzenflow_ai_map_reduce_typed!
+// ============================================================================
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __obzenflow_ai_map_reduce_apply_middleware {
+    ($builder:expr, []) => {
+        $builder
+    };
+
+    ($builder:expr, [chunk: $mw:expr, $($rest:tt)+]) => {
+        $crate::__obzenflow_ai_map_reduce_apply_middleware!($builder.chunk_middleware([$mw]), [$($rest)+])
+    };
+    ($builder:expr, [chunk: $mw:expr $(,)?]) => {
+        $builder.chunk_middleware([$mw])
+    };
+
+    ($builder:expr, [map: $mw:expr, $($rest:tt)+]) => {
+        $crate::__obzenflow_ai_map_reduce_apply_middleware!($builder.map_middleware([$mw]), [$($rest)+])
+    };
+    ($builder:expr, [map: $mw:expr $(,)?]) => {
+        $builder.map_middleware([$mw])
+    };
+
+    ($builder:expr, [collect: $mw:expr, $($rest:tt)+]) => {
+        $crate::__obzenflow_ai_map_reduce_apply_middleware!($builder.collect_middleware([$mw]), [$($rest)+])
+    };
+    ($builder:expr, [collect: $mw:expr $(,)?]) => {
+        $builder.collect_middleware([$mw])
+    };
+
+    ($builder:expr, [finalize: $mw:expr, $($rest:tt)+]) => {
+        $crate::__obzenflow_ai_map_reduce_apply_middleware!($builder.finalize_middleware([$mw]), [$($rest)+])
+    };
+    ($builder:expr, [finalize: $mw:expr $(,)?]) => {
+        $builder.finalize_middleware([$mw])
+    };
+
+    ($builder:expr, [$role:ident : $mw:expr, $($rest:tt)+]) => {
+        compile_error!("ai_map_reduce!: unsupported middleware role; expected one of: chunk, map, collect, finalize");
+    };
+    ($builder:expr, [$role:ident : $mw:expr $(,)?]) => {
+        compile_error!("ai_map_reduce!: unsupported middleware role; expected one of: chunk, map, collect, finalize");
+    };
+}
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __obzenflow_ai_map_reduce_typed {
+    (
+        name = $name:literal,
+        in_type = ($($in:tt)+),
+        chunk_type = ($chunk_ty:ty),
+        partial_type = ($partial_ty:ty),
+        collected_type = ($collected_ty:ty),
+        out_type = ($out:ty),
+        chunk_handler = ($chunk_handler:expr),
+        map_handler = ($map_handler:expr),
+        collect_handler = ($collect_handler:expr),
+        finalize_handler = ($finalize_handler:expr),
+        middleware = [ $($mw_role:ident : $mw_expr:expr),* $(,)? ]
+    ) => {{
+        let __metadata = $crate::dsl::typing::StageTypingMetadata::transform(
+            $crate::dsl::typing::TypeHint::exact(stringify!($($in)+)),
+            $crate::dsl::typing::TypeHint::exact(stringify!($out)),
+            false,
+            None,
+        );
+
+        let __chunk_handler = $chunk_handler;
+        let __chunk_handler =
+            $crate::dsl::typing::BoundTransform::<$($in)+, $chunk_ty, _>::new(__chunk_handler);
+
+        let __map_handler = $map_handler;
+        let __map_handler =
+            $crate::dsl::typing::BoundAsyncTransform::<$chunk_ty, $partial_ty, _>::new(
+                __map_handler,
+            );
+
+        let __collect_handler = $collect_handler;
+
+        let __finalize_handler = $finalize_handler;
+        let __finalize_handler =
+            $crate::dsl::typing::BoundAsyncTransform::<$collected_ty, $out, _>::new(
+                __finalize_handler,
+            );
+
+        let __builder = $crate::dsl::composites::ai_map_reduce::map_reduce::<
+            $($in)+,
+            $chunk_ty,
+            $partial_ty,
+            $collected_ty,
+            $out,
+        >()
+        .chunker(__chunk_handler)
+        .map(__map_handler)
+        .collect(__collect_handler)
+        .finalize(__finalize_handler);
+
+        let __builder = $crate::__obzenflow_ai_map_reduce_apply_middleware!(
+            __builder,
+            [ $($mw_role : $mw_expr),* ]
+        );
+
+        let mut __descriptor = __builder.build();
+        __descriptor.set_name($name.to_string());
+        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
+    }};
+}
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __obzenflow_ai_map_reduce_exact_contract {
+    (name = $name:literal, $($rest:tt)+) => {
+        $crate::__obzenflow_ai_map_reduce_exact_contract!(@collect name = $name, in = (), $($rest)+)
+    };
+
+    // ── exact input, no middleware ──
+    (@collect
+     name = $name:literal,
+     in = ($($in:tt)+),
+     -> $out:ty => {
+         chunk: $chunk_ty:ty => $chunk_handler:expr,
+         map: $partial_ty:ty => $map_handler:expr,
+         collect: $collected_ty:ty => $collect_handler:expr,
+         finalize => $finalize_handler:expr $(,)?
+     } $(,)?) => {
+        $crate::__obzenflow_ai_map_reduce_typed!(
+            name = $name,
+            in_type = ($($in)+),
+            chunk_type = ($chunk_ty),
+            partial_type = ($partial_ty),
+            collected_type = ($collected_ty),
+            out_type = ($out),
+            chunk_handler = ($chunk_handler),
+            map_handler = ($map_handler),
+            collect_handler = ($collect_handler),
+            finalize_handler = ($finalize_handler),
+            middleware = []
+        )
+    };
+
+    // ── exact input, with middleware ──
+    (@collect
+     name = $name:literal,
+     in = ($($in:tt)+),
+     -> $out:ty => {
+         chunk: $chunk_ty:ty => $chunk_handler:expr,
+         map: $partial_ty:ty => $map_handler:expr,
+         collect: $collected_ty:ty => $collect_handler:expr,
+         finalize => $finalize_handler:expr $(,)?
+     }, [ $($mw_role:ident : $mw_expr:expr),* $(,)? ]) => {
+        $crate::__obzenflow_ai_map_reduce_typed!(
+            name = $name,
+            in_type = ($($in)+),
+            chunk_type = ($chunk_ty),
+            partial_type = ($partial_ty),
+            collected_type = ($collected_ty),
+            out_type = ($out),
+            chunk_handler = ($chunk_handler),
+            map_handler = ($map_handler),
+            collect_handler = ($collect_handler),
+            finalize_handler = ($finalize_handler),
+            middleware = [ $($mw_role : $mw_expr),* ]
+        )
+    };
+
+    // ── input token collection ──
+    (@collect name = $name:literal, in = ($($in:tt)*), $tok:tt $($rest:tt)+) => {
+        $crate::__obzenflow_ai_map_reduce_exact_contract!(
+            @collect
+            name = $name,
+            in = ($($in)* $tok),
+            $($rest)+
+        )
+    };
+
+    (@collect name = $name:literal, in = (), -> $($rest:tt)*) => {
+        compile_error!("ai_map_reduce!: expected `InputType -> OutputType => { ... }`");
+    };
+    (@collect name = $name:literal, in = ($($in:tt)+), $($rest:tt)*) => {
+        compile_error!("ai_map_reduce!: expected `-> OutputType => { ... }` after input type");
+    };
+}
+
+/// Create an AI map-reduce composite stage descriptor.
+#[macro_export]
+macro_rules! ai_map_reduce {
+    (name: $name:literal, $($rest:tt)+) => {
+        $crate::__obzenflow_ai_map_reduce_exact_contract!(name = $name, $($rest)+)
+    };
+    ($($rest:tt)+) => {
+        $crate::__obzenflow_ai_map_reduce_exact_contract!(
+            name = "__obzenflow_binding_derived_name__",
+            $($rest)+
+        )
+    };
+}
