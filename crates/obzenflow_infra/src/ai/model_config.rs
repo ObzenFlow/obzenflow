@@ -326,3 +326,161 @@ fn resolve_provider_value(
 ) -> (String, String) {
     resolve_value(primary, fallback, default)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    struct EnvGuard {
+        saved: Vec<(String, Option<String>)>,
+    }
+
+    impl EnvGuard {
+        fn new(names: &[&str]) -> Self {
+            let mut saved = Vec::with_capacity(names.len());
+            for name in names {
+                saved.push(((*name).to_string(), std::env::var(name).ok()));
+            }
+            Self { saved }
+        }
+
+        fn set(&self, name: &str, value: &str) {
+            std::env::set_var(name, value);
+        }
+
+        fn remove(&self, name: &str) {
+            std::env::remove_var(name);
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (name, value) in self.saved.drain(..) {
+                match value {
+                    Some(value) => std::env::set_var(name, value),
+                    None => std::env::remove_var(name),
+                }
+            }
+        }
+    }
+
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("poisoned")
+    }
+
+    #[test]
+    fn from_env_defaults_to_ollama() {
+        let _lock = env_lock();
+        let guard = EnvGuard::new(&[
+            ENV_PROVIDER,
+            ENV_MODEL,
+            ENV_OPENAI_API_KEY,
+            ENV_OPENAI_BASE_URL,
+            ENV_OLLAMA_BASE_URL,
+        ]);
+        guard.remove(ENV_PROVIDER);
+        guard.remove(ENV_MODEL);
+        guard.remove(ENV_OPENAI_API_KEY);
+        guard.remove(ENV_OPENAI_BASE_URL);
+        guard.remove(ENV_OLLAMA_BASE_URL);
+
+        let ai = ModelConfig::from_env().expect("should construct defaults");
+        assert_eq!(ai.provider_label(), "ollama");
+        assert_eq!(ai.model_label(), DEFAULT_MODEL_OLLAMA);
+    }
+
+    #[test]
+    fn from_env_openai_requires_openai_api_key() {
+        let _lock = env_lock();
+        let guard = EnvGuard::new(&[
+            ENV_PROVIDER,
+            ENV_OPENAI_API_KEY,
+            ENV_OPENAI_BASE_URL,
+            ENV_OLLAMA_BASE_URL,
+        ]);
+        guard.set(ENV_PROVIDER, "openai");
+        guard.remove(ENV_OPENAI_API_KEY);
+        guard.remove(ENV_OPENAI_BASE_URL);
+        guard.remove(ENV_OLLAMA_BASE_URL);
+
+        let err = ModelConfig::from_env().expect_err("should reject missing api key");
+        let message = err.to_string();
+        assert!(message.contains("OPENAI_API_KEY is required when OBZENFLOW_AI_PROVIDER=openai"));
+    }
+
+    #[test]
+    fn from_env_with_prefix_prefers_prefixed_provider_and_model() {
+        let _lock = env_lock();
+        let guard = EnvGuard::new(&[
+            "TEST_AI_PROVIDER",
+            "TEST_AI_MODEL",
+            ENV_PROVIDER,
+            ENV_MODEL,
+            ENV_OPENAI_API_KEY,
+            ENV_OPENAI_BASE_URL,
+            ENV_OLLAMA_BASE_URL,
+        ]);
+        guard.set("TEST_AI_PROVIDER", "ollama");
+        guard.set("TEST_AI_MODEL", "llama3.1:8b");
+        guard.remove(ENV_PROVIDER);
+        guard.remove(ENV_MODEL);
+        guard.remove(ENV_OPENAI_API_KEY);
+        guard.remove(ENV_OPENAI_BASE_URL);
+        guard.remove(ENV_OLLAMA_BASE_URL);
+
+        let ai = ModelConfig::from_env_with_prefix("TEST_AI_")
+            .expect("should construct from prefixed vars");
+        assert_eq!(ai.provider_label(), "ollama");
+        assert_eq!(ai.model_label(), "llama3.1:8b");
+    }
+
+    #[test]
+    fn from_env_with_prefix_does_not_use_prefixed_credentials() {
+        let _lock = env_lock();
+        let guard = EnvGuard::new(&[
+            "TEST_AI_PROVIDER",
+            "TEST_AI_OPENAI_API_KEY",
+            ENV_PROVIDER,
+            ENV_OPENAI_API_KEY,
+            ENV_OPENAI_BASE_URL,
+            ENV_OLLAMA_BASE_URL,
+        ]);
+        guard.set("TEST_AI_PROVIDER", "openai");
+        guard.set("TEST_AI_OPENAI_API_KEY", "sk-prefixed");
+        guard.remove(ENV_PROVIDER);
+        guard.remove(ENV_OPENAI_API_KEY);
+        guard.remove(ENV_OPENAI_BASE_URL);
+        guard.remove(ENV_OLLAMA_BASE_URL);
+
+        let err = ModelConfig::from_env_with_prefix("TEST_AI_")
+            .expect_err("should still require OPENAI_API_KEY");
+        let message = err.to_string();
+        assert!(message.contains("OPENAI_API_KEY is required when TEST_AI_PROVIDER=openai"));
+    }
+
+    #[test]
+    fn from_env_openai_compatible_requires_openai_base_url() {
+        let _lock = env_lock();
+        let guard = EnvGuard::new(&[
+            ENV_PROVIDER,
+            ENV_OPENAI_API_KEY,
+            ENV_OPENAI_BASE_URL,
+            ENV_OLLAMA_BASE_URL,
+        ]);
+        guard.set(ENV_PROVIDER, "openai_compatible");
+        guard.set(ENV_OPENAI_API_KEY, "sk-test");
+        guard.remove(ENV_OPENAI_BASE_URL);
+        guard.remove(ENV_OLLAMA_BASE_URL);
+
+        let err = ModelConfig::from_env().expect_err("should require base url");
+        let message = err.to_string();
+        assert!(message
+            .contains("OPENAI_BASE_URL is required when OBZENFLOW_AI_PROVIDER=openai_compatible"));
+    }
+}
