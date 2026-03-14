@@ -147,6 +147,7 @@ pub(crate) struct RenderedBanner {
 
 pub struct Presentation {
     banner: Banner,
+    footer_banner: Option<Banner>,
     footer: Option<Box<dyn Fn(RunPresentationOutcome) -> String + Send + Sync + 'static>>,
 }
 
@@ -154,8 +155,14 @@ impl Presentation {
     pub fn new(banner: Banner) -> Self {
         Self {
             banner,
+            footer_banner: None,
             footer: None,
         }
+    }
+
+    pub fn with_footer_banner(mut self, banner: Banner) -> Self {
+        self.footer_banner = Some(banner);
+        self
     }
 
     pub fn with_footer<F>(mut self, footer: F) -> Self
@@ -168,6 +175,14 @@ impl Presentation {
 
     pub fn banner(&self) -> &Banner {
         &self.banner
+    }
+
+    pub fn footer_banner(&self) -> Option<&Banner> {
+        self.footer_banner.as_ref()
+    }
+
+    pub(crate) fn render_footer_banner(&self) -> Option<RenderedBanner> {
+        self.footer_banner.as_ref().map(Banner::render_for_stdout)
     }
 
     pub(crate) fn render_footer(&self, outcome: RunPresentationOutcome) -> String {
@@ -449,5 +464,18 @@ mod tests {
             failed_without_name.default_footer(),
             "Flow failed: err. Journal: tmp/run"
         );
+    }
+
+    #[test]
+    fn footer_banner_uses_same_rendering_pipeline() {
+        let presentation = Presentation::new(Banner::new("Start"))
+            .with_footer_banner(Banner::new("End").art("END ART"));
+
+        let rendered = presentation
+            .render_footer_banner()
+            .expect("footer banner should be present");
+
+        assert_eq!(rendered.text, "END ART\n\n");
+        assert!(rendered.warnings.is_empty());
     }
 }

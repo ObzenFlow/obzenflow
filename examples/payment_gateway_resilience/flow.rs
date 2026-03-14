@@ -33,7 +33,7 @@ use obzenflow_core::{
 };
 use obzenflow_dsl::{async_transform, flow, sink, source, transform};
 #[cfg(not(test))]
-use obzenflow_infra::application::{Banner, FlowApplication, LogLevel, Presentation};
+use obzenflow_infra::application::{FlowApplication, LogLevel, Presentation};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{AsyncTransformHandler, TransformHandler};
@@ -318,6 +318,74 @@ struct GlitchyFlowConfig {
 }
 
 #[cfg(not(test))]
+pub struct DemoConfig {
+    pub total_events: Option<usize>,
+    pub rate_limit_events_per_sec: f64,
+    pub warmup_events: usize,
+    pub outage_events: usize,
+    pub recovery_events: usize,
+    pub summary_progress_every: usize,
+    pub use_async_source: bool,
+    pub async_poll_timeout: Option<std::time::Duration>,
+    pub glitchy_reason: Option<&'static str>,
+}
+
+#[cfg(not(test))]
+impl DemoConfig {
+    pub fn from_env() -> Self {
+        let server_mode_requested = std::env::args().any(|arg| arg == "--server");
+
+        let mut total_events = env_usize("PAYMENT_GATEWAY_TOTAL_EVENTS");
+        let duration_secs = env_usize("PAYMENT_GATEWAY_DURATION_SECS");
+        let mut rate_limit_events_per_sec = env_f64("PAYMENT_GATEWAY_RATE_LIMIT");
+        let mut glitchy_reason: Option<&'static str> = None;
+
+        match (total_events, duration_secs, server_mode_requested) {
+            (Some(_), _, _) => {
+                glitchy_reason = Some("PAYMENT_GATEWAY_TOTAL_EVENTS");
+                rate_limit_events_per_sec.get_or_insert(1000.0);
+            }
+            (None, Some(duration_secs), _) => {
+                glitchy_reason = Some("PAYMENT_GATEWAY_DURATION_SECS");
+                let rate = rate_limit_events_per_sec.unwrap_or(200.0);
+                rate_limit_events_per_sec = Some(rate);
+                total_events = Some(((duration_secs as f64) * rate).round().max(1.0) as usize);
+            }
+            (None, None, true) => {
+                glitchy_reason = Some("--server default");
+                rate_limit_events_per_sec.get_or_insert(200.0);
+                total_events = Some(60_000);
+            }
+            (None, None, false) => {}
+        }
+
+        let rate_limit_events_per_sec = rate_limit_events_per_sec.unwrap_or(1.0).max(0.1);
+        let warmup_events = env_usize("PAYMENT_GATEWAY_WARMUP_EVENTS").unwrap_or(8_000);
+        let outage_events = env_usize("PAYMENT_GATEWAY_OUTAGE_EVENTS").unwrap_or(1_000);
+        let recovery_events = env_usize("PAYMENT_GATEWAY_RECOVERY_EVENTS").unwrap_or(1_000);
+        let summary_progress_every = env_usize("PAYMENT_GATEWAY_PROGRESS_EVERY").unwrap_or(5_000);
+        let use_async_source = env_bool("PAYMENT_GATEWAY_ASYNC_SOURCE").unwrap_or(false);
+        let async_poll_timeout =
+            match env_usize("PAYMENT_GATEWAY_ASYNC_POLL_TIMEOUT_SECS").unwrap_or(30) {
+                0 => None,
+                secs => Some(std::time::Duration::from_secs(secs as u64)),
+            };
+
+        Self {
+            total_events,
+            rate_limit_events_per_sec,
+            warmup_events,
+            outage_events,
+            recovery_events,
+            summary_progress_every,
+            use_async_source,
+            async_poll_timeout,
+            glitchy_reason,
+        }
+    }
+}
+
+#[cfg(not(test))]
 fn build_glitchy_flow(config: GlitchyFlowConfig) -> obzenflow_dsl::FlowDefinition {
     let GlitchyFlowConfig {
         total_events,
@@ -420,136 +488,19 @@ fn build_glitchy_flow(config: GlitchyFlowConfig) -> obzenflow_dsl::FlowDefinitio
 }
 
 #[cfg(not(test))]
-pub fn run_example() -> Result<()> {
-    // Use Prometheus exporter by default so it is trivial to inspect
-    // the circuit_breaker_* gauges for this example.
+pub fn run_example(config: DemoConfig, presentation: Presentation) -> Result<()> {
     std::env::set_var("OBZENFLOW_METRICS_EXPORTER", "prometheus");
 
-    let server_mode_requested = std::env::args().any(|arg| arg == "--server");
-
-    // Optional high-volume mode (similar to prometheus_100k_demo):
-    // - Set PAYMENT_GATEWAY_TOTAL_EVENTS=100000 (or any N) to switch the source
-    //   to a glitchy generator that periodically enters Outage.
-    // - Or set PAYMENT_GATEWAY_DURATION_SECS=300 to run for ~N seconds using a
-    //   derived total event count (based on PAYMENT_GATEWAY_RATE_LIMIT).
-    // - When running with `--server` and no env vars are provided, we default
-    //   to a ~5-minute glitchy run so you have time to scrape /metrics.
-    //
-    // Example (longer, server-friendly run):
-    //   PAYMENT_GATEWAY_DURATION_SECS=300 PAYMENT_GATEWAY_RATE_LIMIT=200 \
-    //     cargo run --example payment_gateway_resilience --features obzenflow_infra/warp-server -- --server
-    //
-    // Example (very high volume):
-    //   PAYMENT_GATEWAY_TOTAL_EVENTS=100000 PAYMENT_GATEWAY_RATE_LIMIT=1000 \
-    //     cargo run --example payment_gateway_resilience --features obzenflow_infra/warp-server -- --server
-    //
-    // Async source demo (FLOWIP-086f):
-    //   PAYMENT_GATEWAY_ASYNC_SOURCE=1 \
-    //   PAYMENT_GATEWAY_TOTAL_EVENTS=60000 PAYMENT_GATEWAY_RATE_LIMIT=200 \
-    //     cargo run --example payment_gateway_resilience --features obzenflow_infra/warp-server -- --server
-    //
-    // Optional async poll timeout override (seconds). Use 0 to disable the timeout:
-    //   PAYMENT_GATEWAY_ASYNC_POLL_TIMEOUT_SECS=20
-    let mut total_events = env_usize("PAYMENT_GATEWAY_TOTAL_EVENTS");
-    let duration_secs = env_usize("PAYMENT_GATEWAY_DURATION_SECS");
-    let mut rate_limit_events_per_sec = env_f64("PAYMENT_GATEWAY_RATE_LIMIT");
-    let mut glitchy_reason: Option<&'static str> = None;
-
-    match (total_events, duration_secs, server_mode_requested) {
-        (Some(_), _, _) => {
-            glitchy_reason = Some("PAYMENT_GATEWAY_TOTAL_EVENTS");
-            rate_limit_events_per_sec.get_or_insert(1000.0);
-        }
-        (None, Some(duration_secs), _) => {
-            glitchy_reason = Some("PAYMENT_GATEWAY_DURATION_SECS");
-            let rate = rate_limit_events_per_sec.unwrap_or(200.0);
-            rate_limit_events_per_sec = Some(rate);
-            total_events = Some(((duration_secs as f64) * rate).round().max(1.0) as usize);
-        }
-        (None, None, true) => {
-            glitchy_reason = Some("--server default");
-            rate_limit_events_per_sec.get_or_insert(200.0);
-            total_events = Some(60_000);
-        }
-        (None, None, false) => {}
-    }
-
-    let rate_limit_events_per_sec = rate_limit_events_per_sec.unwrap_or(1.0).max(0.1);
-
-    let warmup_events = env_usize("PAYMENT_GATEWAY_WARMUP_EVENTS").unwrap_or(8_000);
-    let outage_events = env_usize("PAYMENT_GATEWAY_OUTAGE_EVENTS").unwrap_or(1_000);
-    let recovery_events = env_usize("PAYMENT_GATEWAY_RECOVERY_EVENTS").unwrap_or(1_000);
-    let summary_progress_every = env_usize("PAYMENT_GATEWAY_PROGRESS_EVERY").unwrap_or(5_000);
-    let use_async_source = env_bool("PAYMENT_GATEWAY_ASYNC_SOURCE").unwrap_or(false);
-    let async_poll_timeout =
-        match env_usize("PAYMENT_GATEWAY_ASYNC_POLL_TIMEOUT_SECS").unwrap_or(30) {
-            0 => None,
-            secs => Some(std::time::Duration::from_secs(secs as u64)),
-        };
-
-    let mut banner = Banner::new("Payment Gateway Resilience Demo")
-        .description("Circuit breakers and rate limits protecting an unreliable dependency.")
-        .config_block("Highlights:\n• Local validation errors still show up in obzenflow_errors_total\n• The payments source simulates a semi-reliable upstream feed (MQTT/IOT style)\n  - When it glitches, the source circuit breaker opens and you can watch:\n    obzenflow_circuit_breaker_*{stage=\"payments\",...}\n• Gateway outages open the circuit breaker and increase:\n  - obzenflow_circuit_breaker_state\n  - obzenflow_circuit_breaker_rejection_rate\n  - obzenflow_circuit_breaker_consecutive_failures\n• Once open, the breaker stops hammering the gateway.");
-
-    if let Some(total_events) = total_events {
-        let payments_src = if use_async_source {
-            "async (086f)"
-        } else {
-            "sync"
-        };
-        banner = banner
-            .config("mode", "high-volume glitchy")
-            .config("enabled_by", glitchy_reason.unwrap_or("unknown"))
-            .config("payments_src", payments_src);
-
-        if use_async_source {
-            let poll_timeout = match async_poll_timeout {
-                Some(d) => format!("{}s", d.as_secs()),
-                None => "disabled".to_string(),
-            };
-            banner = banner.config("poll_timeout", poll_timeout);
-        }
-
-        banner = banner
-            .config("total_events", total_events)
-            .config(
-                "rate_limit",
-                format!("{rate_limit_events_per_sec} events/sec"),
-            )
-            .config(
-                "cycle",
-                format!(
-                    "warmup={warmup_events}, outage={outage_events}, recovery={recovery_events}"
-                ),
-            )
-            .config("flow_name", "payment_gateway_resilience_glitchy_demo")
-            .config("journal_dir", "target/payment-gateway-logs-glitchy")
-            .config(
-                "progress_log",
-                format!("every {summary_progress_every} events"),
-            );
-    } else {
-        banner = banner
-            .config("flow_name", "payment_gateway_resilience_demo")
-            .config("journal_dir", "target/payment-gateway-logs");
-    }
-
-    let presentation = Presentation::new(banner).with_footer(|outcome| {
-        let mut out = outcome.default_footer();
-        out.push_str("\n\n💡 Next step: scrape /metrics for obzenflow_circuit_breaker_* and obzenflow_errors_total.");
-        out
-    });
-
-    let flow = match total_events {
+    let flow = match config.total_events {
         Some(total) => build_glitchy_flow(GlitchyFlowConfig {
             total_events: total,
-            rate_limit_events_per_sec,
-            warmup_events,
-            outage_events,
-            recovery_events,
-            summary_progress_every,
-            use_async_source,
-            async_poll_timeout,
+            rate_limit_events_per_sec: config.rate_limit_events_per_sec,
+            warmup_events: config.warmup_events,
+            outage_events: config.outage_events,
+            recovery_events: config.recovery_events,
+            summary_progress_every: config.summary_progress_every,
+            use_async_source: config.use_async_source,
+            async_poll_timeout: config.async_poll_timeout,
         }),
         None => build_flow(),
     };

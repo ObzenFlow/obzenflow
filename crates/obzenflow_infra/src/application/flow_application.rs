@@ -850,24 +850,42 @@ impl FlowApplication {
                     } else {
                         RunPresentationOutcome::Completed { flow_name, run_dir }
                     };
+                    let rendered_footer_banner = presentation.render_footer_banner();
                     let footer = presentation.render_footer(outcome);
-                    if !footer.trim().is_empty() {
+                    if rendered_footer_banner.is_some() || !footer.trim().is_empty() {
                         println!();
-                        println!("{footer}");
+                        if let Some(rendered_banner) = rendered_footer_banner {
+                            for warning in rendered_banner.warnings {
+                                tracing::warn!("{warning}");
+                            }
+                            print!("{}", rendered_banner.text);
+                        }
+                        if !footer.trim().is_empty() {
+                            println!("{footer}");
+                        }
                     }
                 }
                 Ok(())
             }
             (Err(err), flow_name, run_dir, _) => {
                 if let Some(presentation) = &presentation {
+                    let rendered_footer_banner = presentation.render_footer_banner();
                     let footer = presentation.render_footer(RunPresentationOutcome::Failed {
                         flow_name,
                         error: err.to_string(),
                         run_dir,
                     });
-                    if !footer.trim().is_empty() {
+                    if rendered_footer_banner.is_some() || !footer.trim().is_empty() {
                         println!();
-                        println!("{footer}");
+                        if let Some(rendered_banner) = rendered_footer_banner {
+                            for warning in rendered_banner.warnings {
+                                tracing::warn!("{warning}");
+                            }
+                            print!("{}", rendered_banner.text);
+                        }
+                        if !footer.trim().is_empty() {
+                            println!("{footer}");
+                        }
                     }
                 }
                 Err(err)

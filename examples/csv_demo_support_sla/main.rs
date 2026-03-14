@@ -4,6 +4,18 @@
 
 mod support;
 
+use obzenflow_infra::application::{Banner, Presentation};
+
 fn main() -> anyhow::Result<()> {
-    support::flow::run_example()
+    let paths = support::flow::DemoPaths::resolve()?;
+
+    let presentation = Presentation::new(
+        Banner::new("CSV Demo: Support SLA")
+            .config("customers_csv", paths.customers_csv.display())
+            .config("tickets_csv", paths.tickets_csv.display())
+            .config("output_csv", paths.output_csv.display()),
+    )
+    .with_footer(|outcome| outcome.default_footer());
+
+    support::flow::run_example(paths, presentation)
 }

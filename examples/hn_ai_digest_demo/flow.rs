@@ -4,7 +4,7 @@
 
 use super::decoder::HnStoryDecoder;
 use super::domain::{FormattedStory, HnStory};
-use super::mock_server::spawn_mock_hn_server;
+use super::mock_server::{spawn_mock_hn_server, MockHnServer};
 use super::util::{env_bool, env_usize, truncate_chars};
 use anyhow::{anyhow, Result};
 use obzenflow::ai::{AiChatTask, EstimateSource, ModelConfig, TokenCount};
@@ -15,7 +15,7 @@ use obzenflow_adapters::middleware::RateLimiterBuilder;
 use obzenflow_core::ai::ChatResponse;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{ai_map_reduce, async_source, flow, sink, stateful, transform};
-use obzenflow_infra::application::{Banner, FlowApplication, Presentation};
+use obzenflow_infra::application::{FlowApplication, Presentation};
 use obzenflow_infra::http_client::default_http_client;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
@@ -146,77 +146,107 @@ impl AiChatTask for ReduceDigestTask {
     }
 }
 
-pub async fn run_example() -> Result<()> {
-    if std::env::var("OBZENFLOW_METRICS_EXPORTER").is_err() {
-        std::env::set_var("OBZENFLOW_METRICS_EXPORTER", "console");
+pub struct DemoConfig {
+    pub max_stories: usize,
+    pub poll_timeout_secs: usize,
+    pub source_rate_limit: f64,
+    pub ai: ModelConfig,
+    pub budget_per_group_tokens: u64,
+    pub budget_per_group: TokenCount,
+    pub max_stories_per_group: Option<usize>,
+    pub interests: Option<String>,
+    pub mode_label: String,
+    pub base_url: Url,
+    _mock_server: Option<MockHnServer>,
+}
+
+impl DemoConfig {
+    pub async fn from_env() -> Result<Self> {
+        let max_stories = env_usize("HN_MAX_STORIES").unwrap_or(30);
+        let poll_timeout_secs = env_usize("HN_POLL_TIMEOUT_SECS").unwrap_or(120);
+        let live = env_bool("HN_LIVE").unwrap_or(false);
+        let source_rate_limit =
+            env_f64("HN_SOURCE_RATE_LIMIT").unwrap_or(DEFAULT_HN_SOURCE_RATE_LIMIT);
+        if source_rate_limit <= 0.0 {
+            return Err(anyhow!("HN_SOURCE_RATE_LIMIT must be greater than zero"));
+        }
+
+        let mut mock_server = None;
+        let (base_url, mode_label) = if live {
+            (
+                Url::parse("https://hacker-news.firebaseio.com/")
+                    .map_err(|e| anyhow!("invalid HN base URL: {e}"))?,
+                "live".to_string(),
+            )
+        } else {
+            let server = spawn_mock_hn_server().await?;
+            let url = server.base_url();
+            mock_server = Some(server);
+            (url, "mock".to_string())
+        };
+
+        let ai = ModelConfig::from_env_with_prefix("HN_AI_")?;
+
+        let budget_per_group_tokens =
+            env_usize("HN_AI_GROUP_BUDGET_TOKENS").unwrap_or(match ai.provider_label() {
+                "ollama" => 2500,
+                _ => 6000,
+            }) as u64;
+        if budget_per_group_tokens == 0 {
+            return Err(anyhow!(
+                "HN_AI_GROUP_BUDGET_TOKENS must be greater than zero"
+            ));
+        }
+        let budget_per_group = TokenCount::new(budget_per_group_tokens);
+
+        let max_stories_per_group_raw = env_usize("HN_AI_GROUP_MAX_STORIES").unwrap_or(10);
+        let max_stories_per_group = match max_stories_per_group_raw {
+            0 => None,
+            n => Some(n),
+        };
+
+        let interests = std::env::var("HN_AI_INTERESTS").ok();
+
+        Ok(Self {
+            max_stories,
+            poll_timeout_secs,
+            source_rate_limit,
+            ai,
+            budget_per_group_tokens,
+            budget_per_group,
+            max_stories_per_group,
+            interests,
+            mode_label,
+            base_url,
+            _mock_server: mock_server,
+        })
     }
 
-    let max_stories = env_usize("HN_MAX_STORIES").unwrap_or(30);
-    let poll_timeout_secs = env_usize("HN_POLL_TIMEOUT_SECS").unwrap_or(120);
-    let live = env_bool("HN_LIVE").unwrap_or(false);
-    let source_rate_limit = env_f64("HN_SOURCE_RATE_LIMIT").unwrap_or(DEFAULT_HN_SOURCE_RATE_LIMIT);
-    if source_rate_limit <= 0.0 {
-        return Err(anyhow!("HN_SOURCE_RATE_LIMIT must be greater than zero"));
+    pub fn group_max_stories_label(&self) -> String {
+        match self.max_stories_per_group {
+            None => "unlimited".to_string(),
+            Some(v) => v.to_string(),
+        }
     }
+}
 
-    let mut _mock_server = None;
-    let (base_url, mode_label) = if live {
-        (
-            Url::parse("https://hacker-news.firebaseio.com/")
-                .map_err(|e| anyhow!("invalid HN base URL: {e}"))?,
-            "live",
-        )
-    } else {
-        let server = spawn_mock_hn_server().await?;
-        let base_url = server.base_url();
-        _mock_server = Some(server);
-        (base_url, "mock")
-    };
+pub async fn run_example(config: DemoConfig, presentation: Presentation) -> Result<()> {
+    let DemoConfig {
+        max_stories,
+        poll_timeout_secs,
+        source_rate_limit,
+        ai,
+        budget_per_group,
+        max_stories_per_group,
+        interests,
+        mode_label: mode_label_for_summary,
+        base_url,
+        _mock_server,
+        ..
+    } = config;
 
     let base_url_for_summary = base_url.to_string();
-    let mode_label_for_summary = mode_label.to_string();
-
-    let ai = ModelConfig::from_env_with_prefix("HN_AI_")?;
-
-    let budget_per_group_tokens =
-        env_usize("HN_AI_GROUP_BUDGET_TOKENS").unwrap_or(match ai.provider_label() {
-            "ollama" => 2500,
-            _ => 6000,
-        }) as u64;
-    if budget_per_group_tokens == 0 {
-        return Err(anyhow!(
-            "HN_AI_GROUP_BUDGET_TOKENS must be greater than zero"
-        ));
-    }
-    let budget_per_group = TokenCount::new(budget_per_group_tokens);
-
-    let max_stories_per_group_raw = env_usize("HN_AI_GROUP_MAX_STORIES").unwrap_or(10);
-    let max_stories_per_group = match max_stories_per_group_raw {
-        0 => None,
-        n => Some(n),
-    };
-
     let estimator = ai.estimator();
-
-    let group_max_stories_label = match max_stories_per_group {
-        None => "unlimited".to_string(),
-        Some(v) => v.to_string(),
-    };
-
-    let presentation = Presentation::new(
-        Banner::new("HN AI Digest Demo")
-            .description(
-                "Fetch top HN stories, then generate a markdown digest via Rig-backed LLM transforms.",
-            )
-            .config("mode", mode_label)
-            .config("base_url", base_url.to_string())
-            .config("max_stories", max_stories)
-            .config("poll_timeout", format!("{poll_timeout_secs}s"))
-            .config_block(&ai)
-            .config("group_budget_tokens", budget_per_group_tokens)
-            .config("group_max_stories", group_max_stories_label)
-            .config("source_rate_limit", format!("{source_rate_limit} events/sec")),
-    );
 
     let decoder = HnStoryDecoder::new(base_url, max_stories);
     let client = default_http_client().map_err(|e| anyhow!("HTTP client unavailable: {e}"))?;
@@ -240,8 +270,6 @@ pub async fn run_example() -> Result<()> {
             })
         })
         .emit_on_eof();
-
-    let interests = std::env::var("HN_AI_INTERESTS").ok();
 
     let system_prompt = "You write concise, skimmable Hacker News digests from a list of headlines + URLs. Be neutral, avoid hype, and do not invent facts beyond what the titles imply."
         .to_string();
