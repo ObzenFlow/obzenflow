@@ -7,7 +7,7 @@
 //! It centralises provider/model/env resolution and estimator attachment so
 //! examples do not repeat infrastructure boilerplate.
 
-use super::{llm_chat, resolve_chat_model_profile, AiChatTask, ChatTransformBuilder};
+use super::{resolve_chat_model_profile, ChatTransformBuilder};
 use anyhow::anyhow;
 use obzenflow_adapters::ai::ChatTransform;
 use obzenflow_core::ai::{
@@ -211,7 +211,10 @@ impl ModelConfig {
     /// Advanced callers must attach the estimator themselves:
     ///
     /// ```ignore
-    /// let handler = llm_chat(ai.chat_builder().system(prompt), task)?
+    /// let handler = ai
+    ///     .chat_builder()
+    ///     .system(prompt)
+    ///     .build_typed_lazy::<In, Out>(prompt_fn, parse_fn)?
     ///     .with_resolved_estimator(ai.resolved_estimator().clone());
     /// ```
     pub fn chat_builder(&self) -> ChatTransformBuilder {
@@ -240,14 +243,15 @@ impl ModelConfig {
     ///
     /// The returned `ModelChatBuilder` is pre-configured with provider, model,
     /// credentials, and base URL from this `ModelConfig`. Chain per-handler
-    /// settings and finish with `build_task`:
+    /// settings and finish with a terminal method such as `build_map_items`:
     ///
     /// ```ignore
     /// let handler = ai.chat()
     ///     .system(system_prompt)
     ///     .temperature(0.2)
     ///     .max_tokens(800)
-    ///     .build_task(MyTask { ... })?;
+    ///     .context(MyCtx { ... })
+    ///     .build_map_items(my_prompt, my_parse)?;
     /// ```
     pub fn chat(&self) -> ModelChatBuilder {
         ModelChatBuilder {
@@ -266,8 +270,11 @@ impl ModelConfig {
 }
 
 /// Pre-configured chat builder that carries estimator metadata from a
-/// `ModelConfig`. Finish with [`build_task`](Self::build_task) to produce a
-/// ready `ChatTransform` handler with automatic estimator attachment.
+/// `ModelConfig`.
+///
+/// Finish with one of the terminal methods (for example `build_map_items` or
+/// `build_reduce_seeded`) to produce a ready `ChatTransform` handler with
+/// automatic estimator attachment.
 pub struct ModelChatBuilder {
     inner: ChatTransformBuilder,
     resolved_estimator: ResolvedTokenEstimator,
@@ -323,18 +330,6 @@ impl ModelChatBuilder {
         self
     }
 
-    /// Build a typed `ChatTransform` handler from an [`AiChatTask`].
-    ///
-    /// The resolved estimator from the parent `ModelConfig` is attached
-    /// automatically for token observability.
-    pub fn build_task<T>(self, task: T) -> Result<ChatTransform, HandlerError>
-    where
-        T: AiChatTask,
-    {
-        let transform = llm_chat(self.inner, task)?;
-        Ok(transform.with_resolved_estimator(self.resolved_estimator))
-    }
-
     /// Bind a shared context value that will be passed to prompt and parse functions.
     pub fn context<Ctx>(self, ctx: Ctx) -> ModelChatBuilderWithContext<Ctx>
     where
@@ -349,6 +344,9 @@ impl ModelChatBuilder {
     /// Build a map-role `ChatTransform` over chunk items.
     ///
     /// The input payload is deserialised as `Vec<Item>`, but the prompt closure receives `&[Item]`.
+    ///
+    /// Type inference: using named functions for `prompt` and `parse` is usually enough for the
+    /// compiler to infer `Item` and `Out` at the call site.
     pub fn build_map_items<Item, Out>(
         self,
         prompt: impl Fn(&[Item]) -> Result<String, HandlerError> + Send + Sync + 'static,
@@ -388,6 +386,9 @@ impl ModelChatBuilder {
     ///
     /// The input payload is deserialised as `(Seed, Vec<Partial>)`, but the prompt closure receives
     /// `(&Seed, &[Partial])`.
+    ///
+    /// Type inference: using named functions for `prompt` and `parse` is usually enough for the
+    /// compiler to infer `Seed`, `Partial`, and `Out` at the call site.
     pub fn build_reduce_seeded<Seed, Partial, Out>(
         self,
         prompt: impl Fn(&Seed, &[Partial]) -> Result<String, HandlerError> + Send + Sync + 'static,

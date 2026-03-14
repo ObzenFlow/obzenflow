@@ -47,30 +47,6 @@ type TemplateFn =
 type EmbeddingInputsFn =
     Arc<dyn Fn(&ChainEvent) -> Result<Vec<String>, HandlerError> + Send + Sync + 'static>;
 
-/// Typed authoring surface for LLM chat transforms.
-///
-/// This keeps user code out of `ChainEvent` and JSON glue, while still allowing
-/// domain code to control prompt construction and output mapping.
-pub trait AiChatTask: Send + Sync + 'static {
-    type Input: DeserializeOwned + Send + Sync + 'static;
-    type Output: Serialize + TypedPayload + Send + Sync + 'static;
-
-    fn prompt(&self, input: &Self::Input) -> Result<String, HandlerError>;
-    fn parse(
-        &self,
-        input: Self::Input,
-        response: ChatResponse,
-    ) -> Result<Self::Output, HandlerError>;
-}
-
-/// Convenience facade for `ChatTransformBuilder::build_task_lazy(..)`.
-pub fn llm_chat<T>(spec: ChatTransformBuilder, task: T) -> Result<ChatTransform, HandlerError>
-where
-    T: AiChatTask,
-{
-    spec.build_task_lazy(task)
-}
-
 /// Extension trait that provides `ChatTransform::builder()` when Rig-backed AI
 /// builder support is enabled.
 ///
@@ -695,26 +671,6 @@ impl ChatTransformBuilder {
         })
     }
 
-    /// Build a typed `ChatTransform` from an [`AiChatTask`] without provider/model preflight.
-    ///
-    /// This is the ergonomic counterpart to `build_typed_lazy(..)` that avoids
-    /// closure-heavy call sites. The transform is still backed by the same
-    /// adapter-layer `ChatTransform` and therefore integrates with journalling,
-    /// middleware, and observability in the same way as the lower-level APIs.
-    pub fn build_task_lazy<T>(self, task: T) -> Result<ChatTransform, HandlerError>
-    where
-        T: AiChatTask,
-    {
-        let task = Arc::new(task);
-        let prompt_task = task.clone();
-        let parse_task = task.clone();
-
-        self.build_typed_lazy::<T::Input, T::Output>(
-            move |input| prompt_task.prompt(input),
-            move |input, response| parse_task.parse(input, response),
-        )
-    }
-
     /// Bind a shared context value that will be passed to prompt and parse functions.
     pub fn context<Ctx>(self, ctx: Ctx) -> ChatTransformBuilderWithContext<Ctx>
     where
@@ -729,6 +685,9 @@ impl ChatTransformBuilder {
     /// Build a map-role `ChatTransform` over chunk items (eager, with provider/model preflight).
     ///
     /// The input payload is deserialised as `Vec<Item>`, but the prompt closure receives `&[Item]`.
+    ///
+    /// Type inference: using named functions for `prompt` and `parse` is usually enough for the
+    /// compiler to infer `Item` and `Out` at the call site.
     pub async fn build_map_items<Item, Out>(
         self,
         prompt: impl Fn(&[Item]) -> Result<String, HandlerError> + Send + Sync + 'static,
@@ -793,6 +752,9 @@ impl ChatTransformBuilder {
     ///
     /// The input payload is deserialised as `(Seed, Vec<Partial>)`, but the prompt closure receives
     /// `(&Seed, &[Partial])`.
+    ///
+    /// Type inference: using named functions for `prompt` and `parse` is usually enough for the
+    /// compiler to infer `Seed`, `Partial`, and `Out` at the call site.
     pub async fn build_reduce_seeded<Seed, Partial, Out>(
         self,
         prompt: impl Fn(&Seed, &[Partial]) -> Result<String, HandlerError> + Send + Sync + 'static,
@@ -1877,6 +1839,93 @@ mod tests {
             .build_map_items_lazy::<Item, Out>(
                 |ctx, _items| Ok(format!("{}!", ctx.prefix)),
                 |_ctx, _response| Ok(Out { ok: true }),
+            )
+            .expect("builder should succeed");
+    }
+
+    #[test]
+    fn chat_builder_context_build_map_items_with_input_lazy_constructs_transform() {
+        #[derive(Debug)]
+        struct Ctx {
+            suffix: String,
+        }
+
+        #[derive(Debug, Clone, Serialize, Deserialize)]
+        struct Item {
+            x: i32,
+        }
+
+        #[derive(Debug, Clone, Serialize, Deserialize)]
+        struct Out {
+            marker: String,
+            count: usize,
+        }
+
+        impl TypedPayload for Out {
+            const EVENT_TYPE: &'static str = "test.context_map_items_with_input_out";
+        }
+
+        let _transform = ChatTransform::builder()
+            .ollama("llama3.1:8b")
+            .system("x")
+            .context(Ctx {
+                suffix: "!".to_string(),
+            })
+            .build_map_items_with_input_lazy::<Item, Out>(
+                |ctx, items| Ok(format!("items={}{}", items.len(), ctx.suffix)),
+                |ctx, items, _response| {
+                    Ok(Out {
+                        marker: ctx.suffix.clone(),
+                        count: items.len(),
+                    })
+                },
+            )
+            .expect("builder should succeed");
+    }
+
+    #[test]
+    fn chat_builder_context_build_reduce_seeded_lazy_constructs_transform() {
+        #[derive(Debug)]
+        struct Ctx {
+            prefix: String,
+        }
+
+        #[derive(Debug, Clone, Serialize, Deserialize)]
+        struct Seed {
+            id: u32,
+        }
+
+        #[derive(Debug, Clone, Serialize, Deserialize)]
+        struct Partial {
+            x: i32,
+        }
+
+        #[derive(Debug, Clone, Serialize, Deserialize)]
+        struct Out {
+            prefix: String,
+            seed_id: u32,
+            partials: usize,
+        }
+
+        impl TypedPayload for Out {
+            const EVENT_TYPE: &'static str = "test.context_reduce_seeded_out";
+        }
+
+        let _transform = ChatTransform::builder()
+            .ollama("llama3.1:8b")
+            .system("x")
+            .context(Ctx {
+                prefix: "p".to_string(),
+            })
+            .build_reduce_seeded_lazy::<Seed, Partial, Out>(
+                |ctx, seed, partials| Ok(format!("{}:{}:{}", ctx.prefix, seed.id, partials.len())),
+                |ctx, seed, partials, _response| {
+                    Ok(Out {
+                        prefix: ctx.prefix.clone(),
+                        seed_id: seed.id,
+                        partials: partials.len(),
+                    })
+                },
             )
             .expect("builder should succeed");
     }
