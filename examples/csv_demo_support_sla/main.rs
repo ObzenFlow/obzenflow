@@ -14,8 +14,7 @@ fn main() -> anyhow::Result<()> {
             .config("customers_csv", paths.customers_csv.display())
             .config("tickets_csv", paths.tickets_csv.display())
             .config("output_csv", paths.output_csv.display()),
-    )
-    .with_footer(|outcome| outcome.default_footer());
+    );
 
     support::flow::run_example(paths, presentation)
 }

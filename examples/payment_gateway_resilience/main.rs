@@ -17,7 +17,15 @@ fn main() -> anyhow::Result<()> {
 
     let mut banner = Banner::new("Payment Gateway Resilience Demo")
         .description("Circuit breakers and rate limits protecting an unreliable dependency.")
-        .config_block("Highlights:\n- Local validation errors still show up in obzenflow_errors_total\n- The payments source simulates a semi-reliable upstream feed (MQTT/IOT style)\n  When it glitches, the source circuit breaker opens and you can watch:\n  obzenflow_circuit_breaker_*{stage=\"payments\",...}\n- Gateway outages open the circuit breaker and increase:\n  obzenflow_circuit_breaker_state\n  obzenflow_circuit_breaker_rejection_rate\n  obzenflow_circuit_breaker_consecutive_failures\n- Once open, the breaker stops hammering the gateway.");
+        .bullets(
+            "Highlights",
+            [
+                "Local validation errors still show up in obzenflow_errors_total",
+                "The payments source simulates a semi-reliable upstream feed (MQTT/IOT style)\n  When it glitches, the source circuit breaker opens and you can watch:\n  obzenflow_circuit_breaker_*{stage=\"payments\",...}",
+                "Gateway outages open the circuit breaker and increase:\n  obzenflow_circuit_breaker_state\n  obzenflow_circuit_breaker_rejection_rate\n  obzenflow_circuit_breaker_consecutive_failures",
+                "Once open, the breaker stops hammering the gateway",
+            ],
+        );
 
     if let Some(total_events) = config.total_events {
         let payments_src = if config.use_async_source {
@@ -64,9 +72,9 @@ fn main() -> anyhow::Result<()> {
     }
 
     let presentation = Presentation::new(banner).with_footer(|outcome| {
-        let mut out = outcome.default_footer();
-        out.push_str("\n\nNext step: scrape /metrics for obzenflow_circuit_breaker_* and obzenflow_errors_total.");
-        out
+        outcome
+            .into_footer()
+            .paragraph("Next step: scrape /metrics for obzenflow_circuit_breaker_* and obzenflow_errors_total.")
     });
 
     support::flow::run_example(config, presentation)

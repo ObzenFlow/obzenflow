@@ -117,12 +117,47 @@ async fn main() -> Result<()> {
     let presentation = Presentation::new(
         Banner::new("Middleware Configuration Demo")
             .description("Flow-level vs stage-level middleware inheritance.")
-            .config_block("Demonstrating:\n• Flow-level rate limit: 1.0 events/sec (applies to all stages)\n• Source override: 10.0 events/sec (stage-level override)\n• Transform: inherits flow-level 1.0 events/sec\n• Result: Source produces at 10/sec, transform throttles to 1.0/sec\n\nHow to observe in real-time:\n1. Run with --server flag (requires warp-server feature):\n   cargo run -p obzenflow --example flow_middleware_config \\\n     --features obzenflow_infra/warp-server -- --server\n2. Query metrics while flow runs:\n   curl http://localhost:9090/metrics | grep events_processed_total\n3. Watch the rate differences between stages!\n\nRunning with 120 events (will take ~120 seconds due to 1.0/sec transform rate)..."),
+            .bullets(
+                "Demonstrating",
+                [
+                    "Flow-level rate limit: 1.0 events/sec (applies to all stages)",
+                    "Source override: 10.0 events/sec (stage-level override)",
+                    "Transform: inherits flow-level 1.0 events/sec",
+                    "Result: Source produces at 10/sec, transform throttles to 1.0/sec",
+                ],
+            )
+            .section(
+                "How to observe in real-time",
+                "1. Run with --server flag (requires warp-server feature):\n   cargo run -p obzenflow --example flow_middleware_config \\\n     --features obzenflow_infra/warp-server -- --server\n2. Query metrics while flow runs:\n   curl http://localhost:9090/metrics | grep events_processed_total\n3. Watch the rate differences between stages!",
+            )
+            .section(
+                "Run duration",
+                "Running with 120 events (will take ~120 seconds due to 1.0/sec transform rate)...",
+            ),
     )
     .with_footer(|outcome| {
-        let mut out = outcome.default_footer();
-        out.push_str("\n\nKey observations:\n• Source emitted at 10 events/sec (stage override worked)\n• Transform processed at 1.0 events/sec (inherited flow limit)\n• Sink received at 1.0 events/sec (bottlenecked by transform)\n• Backpressure naturally flowed upstream\n\nThis proves:\n1. Stage-level middleware overrides flow-level\n2. Stages without overrides inherit flow-level config\n3. Middleware inheritance works as designed!\n\nProduction tip:\nUse --server flag + /metrics endpoint to observe rate limiting in real time.");
-        out
+        outcome
+            .into_footer()
+            .bullets(
+                "Key observations",
+                [
+                    "Source emitted at 10 events/sec (stage override worked)",
+                    "Transform processed at 1.0 events/sec (inherited flow limit)",
+                    "Sink received at 1.0 events/sec (bottlenecked by transform)",
+                    "Backpressure naturally flowed upstream",
+                ],
+            )
+            .bullets(
+                "This proves",
+                [
+                    "Stage-level middleware overrides flow-level",
+                    "Stages without overrides inherit flow-level config",
+                    "Middleware inheritance works as designed",
+                ],
+            )
+            .paragraph(
+                "Production tip: Use --server flag + /metrics endpoint to observe rate limiting in real time.",
+            )
     });
 
     FlowApplication::run_with_presentation(

@@ -73,21 +73,21 @@ async fn main() -> anyhow::Result<()> {
             .config("base_url", config.base_url.to_string())
             .config("max_stories", config.max_stories)
             .config("poll_timeout", format!("{}s", config.poll_timeout_secs))
-            .config_block(&config.ai)
+            .section("AI", &config.ai)
             .config("group_budget_tokens", config.budget_per_group_tokens)
             .config("group_max_stories", config.group_max_stories_label())
             .config("source_rate_limit", format!("{} events/sec", config.source_rate_limit)),
     )
     .with_footer(|outcome| {
         let is_success = matches!(&outcome, RunPresentationOutcome::Completed { .. });
-        let mut out = outcome.default_footer();
+        let footer = outcome.into_footer();
         if is_success {
-            out.push_str(
-                "\n\nThe generated digest was printed above.\
-                 \nRe-run with HN_LIVE=1 to fetch from the real Hacker News API.",
-            );
+            footer.paragraph(
+                "The generated digest was printed above.\nRe-run with HN_LIVE=1 to fetch from the real Hacker News API.",
+            )
+        } else {
+            footer
         }
-        out
     });
 
     support::flow::run_example(config, presentation).await

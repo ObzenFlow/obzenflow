@@ -65,14 +65,31 @@ async fn main() -> Result<()> {
     let presentation = Presentation::new(
         Banner::new("E-commerce Top Products Analytics")
             .description("Real-time tracking of top products by total revenue.")
-            .config_block(
-                "✨ Using FLOWIP-080j TopNByTyped and FLOWIP-082a TypedPayload.\nProcessing order stream...",
+            .section(
+                "Highlights",
+                "Using FLOWIP-080j TopNByTyped and FLOWIP-082a TypedPayload.\nProcessing order stream...",
             ),
     )
     .with_footer(|outcome| {
-        let mut out = outcome.default_footer();
-        out.push_str("\n\n💡 Key Insights:\nFLOWIP-082a TypedPayload:\n• OrderEvent::EVENT_TYPE instead of \"order.placed\"\n• SCHEMA_VERSION for evolution tracking\n• Strongly-typed event structs\n\nFLOWIP-080j TopNByTyped:\n• Type-safe key and score extraction\n• No ChainEvent manipulation, work with OrderEvent directly\n• Compile-time safety for field access\n• Memory bounded to N items regardless of stream size");
-        out
+        outcome
+            .into_footer()
+            .bullets(
+                "FLOWIP-082a TypedPayload",
+                [
+                    "OrderEvent::EVENT_TYPE instead of \"order.placed\"",
+                    "SCHEMA_VERSION for evolution tracking",
+                    "Strongly-typed event structs",
+                ],
+            )
+            .bullets(
+                "FLOWIP-080j TopNByTyped",
+                [
+                    "Type-safe key and score extraction",
+                    "No ChainEvent manipulation, work with OrderEvent directly",
+                    "Compile-time safety for field access",
+                    "Memory is bounded to N items regardless of stream size",
+                ],
+            )
     });
 
     // Simulate a day of orders (some products appear multiple times)

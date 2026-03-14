@@ -15,4 +15,4 @@ mod presentation;
 pub use config::FlowConfig;
 pub use error::ApplicationError;
 pub use flow_application::{FlowApplication, FlowApplicationBuilder, LogLevel};
-pub use presentation::{Banner, Presentation, RunPresentationOutcome};
+pub use presentation::{Banner, Footer, Presentation, RunPresentationOutcome};

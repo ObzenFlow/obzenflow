@@ -9,6 +9,6 @@
 //! alone.
 
 pub use obzenflow_infra::application::{
-    ApplicationError, Banner, FlowApplication, FlowApplicationBuilder, FlowConfig, LogLevel,
-    Presentation, RunPresentationOutcome,
+    ApplicationError, Banner, FlowApplication, FlowApplicationBuilder, FlowConfig, Footer,
+    LogLevel, Presentation, RunPresentationOutcome,
 };

@@ -175,12 +175,24 @@ fn main() -> Result<()> {
     let presentation = Presentation::new(
         Banner::new("Prometheus 100k Demo")
             .description("100,000 events with rate limiting and fan-out.")
-            .config_block("Demonstrating:\n• Flow-level rate limiting middleware\n• Fan-out topology (processor → counter + sink)\n• StatefulHandler for business-level counting\n• Framework Prometheus metrics\n\nUsage:\nBasic:        cargo run --package obzenflow --example prometheus_100k_demo\nWith metrics: cargo run --package obzenflow --example prometheus_100k_demo --features obzenflow_infra/warp-server -- --server\nCustom port:  cargo run --package obzenflow --example prometheus_100k_demo --features obzenflow_infra/warp-server -- --server --server-port 8080"),
+            .bullets(
+                "Demonstrating",
+                [
+                    "Flow-level rate limiting middleware",
+                    "Fan-out topology (processor -> counter + sink)",
+                    "StatefulHandler for business-level counting",
+                    "Framework Prometheus metrics",
+                ],
+            )
+            .section(
+                "Usage",
+                "Basic:        cargo run --package obzenflow --example prometheus_100k_demo\nWith metrics: cargo run --package obzenflow --example prometheus_100k_demo --features obzenflow_infra/warp-server -- --server\nCustom port:  cargo run --package obzenflow --example prometheus_100k_demo --features obzenflow_infra/warp-server -- --server --server-port 8080",
+            ),
     )
     .with_footer(|outcome| {
-        let mut out = outcome.default_footer();
-        out.push_str("\n\nRun with --server flag and visit /metrics for Prometheus metrics.");
-        out
+        outcome
+            .into_footer()
+            .paragraph("Run with --server flag and visit /metrics for Prometheus metrics.")
     });
 
     // Use FlowApplication builder - handles runtime, observability, and features automatically.

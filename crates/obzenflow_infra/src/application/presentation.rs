@@ -7,16 +7,41 @@ use std::io::IsTerminal;
 use std::path::PathBuf;
 
 const INDENT: &str = "  ";
+const NESTED_INDENT: &str = "    ";
+const BULLET_CONTINUATION_INDENT: &str = "      ";
 const MAX_VISIBLE_COLUMNS: usize = 80;
 const MAX_LINES: usize = 25;
 
 pub struct Banner {
     title: String,
     description: Option<String>,
-    config_rows: Vec<(String, String)>,
-    config_blocks: Vec<String>,
+    items: Vec<BannerItem>,
     art: Option<String>,
     ansi_art: Option<String>,
+}
+
+enum BannerItem {
+    ConfigRow { key: String, value: String },
+    Block(String),
+    Section { title: String, body: String },
+    Bullets { title: String, items: Vec<String> },
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BannerItemKind {
+    Row,
+    Block,
+}
+
+impl BannerItem {
+    fn kind(&self) -> BannerItemKind {
+        match self {
+            Self::ConfigRow { .. } => BannerItemKind::Row,
+            Self::Block { .. } | Self::Section { .. } | Self::Bullets { .. } => {
+                BannerItemKind::Block
+            }
+        }
+    }
 }
 
 impl Banner {
@@ -24,8 +49,7 @@ impl Banner {
         Self {
             title: title.into(),
             description: None,
-            config_rows: Vec::new(),
-            config_blocks: Vec::new(),
+            items: Vec::new(),
             art: None,
             ansi_art: None,
         }
@@ -37,12 +61,51 @@ impl Banner {
     }
 
     pub fn config(mut self, key: impl Into<String>, value: impl Display) -> Self {
-        self.config_rows.push((key.into(), value.to_string()));
+        self.items.push(BannerItem::ConfigRow {
+            key: key.into(),
+            value: value.to_string(),
+        });
         self
     }
 
+    pub fn config_if(self, enabled: bool, key: impl Into<String>, value: impl Display) -> Self {
+        if enabled {
+            self.config(key, value)
+        } else {
+            self
+        }
+    }
+
     pub fn config_block(mut self, block: impl Display) -> Self {
-        self.config_blocks.push(block.to_string());
+        self.items.push(BannerItem::Block(block.to_string()));
+        self
+    }
+
+    pub fn config_block_if(self, enabled: bool, block: impl Display) -> Self {
+        if enabled {
+            self.config_block(block)
+        } else {
+            self
+        }
+    }
+
+    pub fn section(mut self, title: impl Into<String>, body: impl Display) -> Self {
+        self.items.push(BannerItem::Section {
+            title: title.into(),
+            body: body.to_string(),
+        });
+        self
+    }
+
+    pub fn bullets<I, S>(mut self, title: impl Into<String>, items: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.items.push(BannerItem::Bullets {
+            title: title.into(),
+            items: items.into_iter().map(Into::into).collect(),
+        });
         self
     }
 
@@ -84,39 +147,33 @@ impl Banner {
             out.push('\n');
         }
 
+        let mut content = String::new();
+
         if let Some(description) = &self.description {
             if !description.trim().is_empty() {
-                out.push_str(description.trim());
-                out.push('\n');
+                content.push_str(description.trim());
+                content.push('\n');
             }
         }
 
-        if self
-            .description
-            .as_ref()
-            .is_some_and(|d| !d.trim().is_empty())
-            || !self.config_rows.is_empty()
-            || !self.config_blocks.is_empty()
-        {
-            out.push('\n');
+        if !content.is_empty() && !self.items.is_empty() {
+            content.push('\n');
         }
 
-        for (key, value) in &self.config_rows {
-            out.push_str(INDENT);
-            out.push_str(key);
-            out.push_str(": ");
-            out.push_str(value);
-            out.push('\n');
-        }
-
-        for block in &self.config_blocks {
-            for line in block.lines() {
-                out.push_str(INDENT);
-                out.push_str(line);
-                out.push('\n');
+        let mut previous_kind = None;
+        for item in &self.items {
+            if let Some(previous_kind) = previous_kind {
+                if previous_kind != BannerItemKind::Row || item.kind() != BannerItemKind::Row {
+                    content.push('\n');
+                }
             }
+            render_banner_item(&mut content, item);
+            previous_kind = Some(item.kind());
         }
 
+        if !content.is_empty() {
+            out.push_str(&content);
+        }
         out.push('\n');
 
         RenderedBanner {
@@ -145,10 +202,83 @@ pub(crate) struct RenderedBanner {
     pub(crate) warnings: Vec<String>,
 }
 
+#[derive(Default)]
+pub struct Footer {
+    blocks: Vec<FooterBlock>,
+}
+
+enum FooterBlock {
+    Paragraph(String),
+    Section { title: String, body: String },
+    Bullets { title: String, items: Vec<String> },
+}
+
+impl Footer {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn paragraph(mut self, text: impl Display) -> Self {
+        self.blocks.push(FooterBlock::Paragraph(text.to_string()));
+        self
+    }
+
+    pub fn section(mut self, title: impl Into<String>, body: impl Display) -> Self {
+        self.blocks.push(FooterBlock::Section {
+            title: title.into(),
+            body: body.to_string(),
+        });
+        self
+    }
+
+    pub fn bullets<I, S>(mut self, title: impl Into<String>, items: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.blocks.push(FooterBlock::Bullets {
+            title: title.into(),
+            items: items.into_iter().map(Into::into).collect(),
+        });
+        self
+    }
+
+    pub fn finish(self) -> String {
+        let mut out = String::new();
+        let mut first = true;
+
+        for block in self.blocks {
+            if !first {
+                out.push_str("\n\n");
+            }
+            render_footer_block(&mut out, block);
+            first = false;
+        }
+
+        while out.ends_with('\n') {
+            out.pop();
+        }
+
+        out
+    }
+}
+
+impl From<String> for Footer {
+    fn from(value: String) -> Self {
+        Footer::new().paragraph(value)
+    }
+}
+
+impl From<&str> for Footer {
+    fn from(value: &str) -> Self {
+        Footer::new().paragraph(value)
+    }
+}
+
 pub struct Presentation {
     banner: Banner,
     footer_banner: Option<Banner>,
-    footer: Option<Box<dyn Fn(RunPresentationOutcome) -> String + Send + Sync + 'static>>,
+    footer: Option<Box<dyn Fn(RunPresentationOutcome) -> Footer + Send + Sync + 'static>>,
 }
 
 impl Presentation {
@@ -165,11 +295,12 @@ impl Presentation {
         self
     }
 
-    pub fn with_footer<F>(mut self, footer: F) -> Self
+    pub fn with_footer<F, T>(mut self, footer: F) -> Self
     where
-        F: Fn(RunPresentationOutcome) -> String + Send + Sync + 'static,
+        F: Fn(RunPresentationOutcome) -> T + Send + Sync + 'static,
+        T: Into<Footer>,
     {
-        self.footer = Some(Box::new(footer));
+        self.footer = Some(Box::new(move |outcome| footer(outcome).into()));
         self
     }
 
@@ -187,8 +318,8 @@ impl Presentation {
 
     pub(crate) fn render_footer(&self, outcome: RunPresentationOutcome) -> String {
         match &self.footer {
-            Some(custom) => custom(outcome),
-            None => outcome.default_footer(),
+            Some(custom) => custom(outcome).finish(),
+            None => outcome.into_footer().finish(),
         }
     }
 }
@@ -211,18 +342,24 @@ pub enum RunPresentationOutcome {
 
 impl RunPresentationOutcome {
     pub fn default_footer(&self) -> String {
+        self.to_footer().finish()
+    }
+
+    pub fn to_footer(&self) -> Footer {
         match self {
             Self::Completed { flow_name, run_dir } => match run_dir {
-                Some(run_dir) => format!(
+                Some(run_dir) => Footer::new().paragraph(format!(
                     "{flow_name} completed. Journal: {}\nTo replay, add: --replay-from {}\n(Source config env vars are ignored during replay)",
                     run_dir.display(),
                     run_dir.display(),
-                ),
-                None => format!("{flow_name} completed."),
+                )),
+                None => Footer::new().paragraph(format!("{flow_name} completed.")),
             },
             Self::Stopped { flow_name, run_dir } => match run_dir {
-                Some(run_dir) => format!("{flow_name} stopped. Journal: {}", run_dir.display()),
-                None => format!("{flow_name} stopped."),
+                Some(run_dir) => {
+                    Footer::new().paragraph(format!("{flow_name} stopped. Journal: {}", run_dir.display()))
+                }
+                None => Footer::new().paragraph(format!("{flow_name} stopped.")),
             },
             Self::Failed {
                 flow_name,
@@ -234,10 +371,142 @@ impl RunPresentationOutcome {
                     .map(|name| format!("{name} failed"))
                     .unwrap_or_else(|| "Flow failed".to_string());
                 match run_dir {
-                    Some(run_dir) => format!("{prefix}: {error}. Journal: {}", run_dir.display()),
-                    None => format!("{prefix}: {error}"),
+                    Some(run_dir) => {
+                        Footer::new().paragraph(format!("{prefix}: {error}. Journal: {}", run_dir.display()))
+                    }
+                    None => Footer::new().paragraph(format!("{prefix}: {error}")),
                 }
             }
+        }
+    }
+
+    pub fn into_footer(self) -> Footer {
+        match self {
+            Self::Completed { flow_name, run_dir } => match run_dir {
+                Some(run_dir) => Footer::new().paragraph(format!(
+                    "{flow_name} completed. Journal: {}\nTo replay, add: --replay-from {}\n(Source config env vars are ignored during replay)",
+                    run_dir.display(),
+                    run_dir.display(),
+                )),
+                None => Footer::new().paragraph(format!("{flow_name} completed.")),
+            },
+            Self::Stopped { flow_name, run_dir } => match run_dir {
+                Some(run_dir) => {
+                    Footer::new().paragraph(format!("{flow_name} stopped. Journal: {}", run_dir.display()))
+                }
+                None => Footer::new().paragraph(format!("{flow_name} stopped.")),
+            },
+            Self::Failed {
+                flow_name,
+                error,
+                run_dir,
+            } => {
+                let prefix = flow_name
+                    .map(|name| format!("{name} failed"))
+                    .unwrap_or_else(|| "Flow failed".to_string());
+                match run_dir {
+                    Some(run_dir) => {
+                        Footer::new().paragraph(format!("{prefix}: {error}. Journal: {}", run_dir.display()))
+                    }
+                    None => Footer::new().paragraph(format!("{prefix}: {error}")),
+                }
+            }
+        }
+    }
+}
+
+fn render_banner_item(out: &mut String, item: &BannerItem) {
+    match item {
+        BannerItem::ConfigRow { key, value } => {
+            out.push_str(INDENT);
+            out.push_str(key);
+            out.push_str(": ");
+            out.push_str(value);
+            out.push('\n');
+        }
+        BannerItem::Block(block) => push_prefixed_lines(out, block, INDENT),
+        BannerItem::Section { title, body } => {
+            out.push_str(INDENT);
+            out.push_str(title.trim());
+            out.push_str(":\n");
+            push_prefixed_lines(out, body, NESTED_INDENT);
+        }
+        BannerItem::Bullets { title, items } => {
+            out.push_str(INDENT);
+            out.push_str(title.trim());
+            out.push_str(":\n");
+            for item in items {
+                push_bullet_item(out, item, NESTED_INDENT, BULLET_CONTINUATION_INDENT);
+            }
+        }
+    }
+}
+
+fn render_footer_block(out: &mut String, block: FooterBlock) {
+    match block {
+        FooterBlock::Paragraph(text) => push_raw_lines(out, &text),
+        FooterBlock::Section { title, body } => {
+            out.push_str(title.trim());
+            out.push_str(":\n");
+            push_raw_lines(out, &body);
+        }
+        FooterBlock::Bullets { title, items } => {
+            out.push_str(title.trim());
+            out.push_str(":\n");
+            for item in items {
+                push_bullet_item(out, &item, "", "  ");
+            }
+        }
+    }
+}
+
+fn push_prefixed_lines(out: &mut String, text: &str, prefix: &str) {
+    if text.is_empty() {
+        out.push_str(prefix);
+        out.push('\n');
+        return;
+    }
+
+    for line in text.lines() {
+        out.push_str(prefix);
+        out.push_str(line);
+        out.push('\n');
+    }
+}
+
+fn push_raw_lines(out: &mut String, text: &str) {
+    if text.is_empty() {
+        out.push('\n');
+        return;
+    }
+
+    for line in text.lines() {
+        out.push_str(line);
+        out.push('\n');
+    }
+
+    if out.ends_with('\n') {
+        out.pop();
+    }
+}
+
+fn push_bullet_item(out: &mut String, item: &str, prefix: &str, continuation_prefix: &str) {
+    let mut lines = item.lines();
+    match lines.next() {
+        Some(first_line) => {
+            out.push_str(prefix);
+            out.push_str("- ");
+            out.push_str(first_line);
+            out.push('\n');
+            for line in lines {
+                out.push_str(continuation_prefix);
+                out.push_str(line);
+                out.push('\n');
+            }
+        }
+        None => {
+            out.push_str(prefix);
+            out.push_str("-\n");
         }
     }
 }
@@ -358,7 +627,34 @@ mod tests {
 
         assert_eq!(
             rendered.text,
-            "Title\n=====\nDesc\n\n  mode: test\n  line1\n  line2\n\n"
+            "Title\n=====\nDesc\n\n  mode: test\n\n  line1\n  line2\n\n"
+        );
+    }
+
+    #[test]
+    fn banner_preserves_item_order_across_rows_sections_and_blocks() {
+        let rendered = Banner::new("Title")
+            .config("first", "1")
+            .section("Second", "two")
+            .config("third", "3")
+            .render_with_stdout_is_tty(false);
+
+        assert_eq!(
+            rendered.text,
+            "Title\n=====\n  first: 1\n\n  Second:\n    two\n\n  third: 3\n\n"
+        );
+    }
+
+    #[test]
+    fn banner_sections_and_bullets_render_structured_content() {
+        let rendered = Banner::new("Title")
+            .section("Notes", "line1\nline2")
+            .bullets("Highlights", ["first", "second\ncontinued"])
+            .render_with_stdout_is_tty(false);
+
+        assert_eq!(
+            rendered.text,
+            "Title\n=====\n  Notes:\n    line1\n    line2\n\n  Highlights:\n    - first\n    - second\n      continued\n\n"
         );
     }
 
@@ -463,6 +759,20 @@ mod tests {
         assert_eq!(
             failed_without_name.default_footer(),
             "Flow failed: err. Journal: tmp/run"
+        );
+    }
+
+    #[test]
+    fn footer_builder_renders_paragraphs_sections_and_bullets() {
+        let footer = Footer::new()
+            .paragraph("done")
+            .section("Summary", "line1\nline2")
+            .bullets("Next", ["first", "second\ncontinued"])
+            .finish();
+
+        assert_eq!(
+            footer,
+            "done\n\nSummary:\nline1\nline2\n\nNext:\n- first\n- second\n  continued"
         );
     }
 

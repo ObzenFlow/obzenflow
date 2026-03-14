@@ -332,21 +332,44 @@ async fn main() -> Result<()> {
     let presentation = Presentation::new(
         Banner::new("Topology Patterns Demo")
             .description("Fan-in, fan-out, and diamond topology patterns.")
-            .config_block("Demonstrating:\n• Fan-in: Multiple sources → single aggregator\n• Fan-out: Single router → multiple sinks\n• Diamond pattern: Realistic ETL topology\n• StatefulHandler for aggregation (no Arc<Mutex>)\n• Independent journal readers\n\nTopology:\n  kafka_source (5 events)  ──┐\n  api_source (4 events)    ──┼──> aggregator (fan-in)\n  file_source (4 events)   ──┘            │\n                                           ▼\n                                        router\n                                           │\n                         ┌─────────────────┼─────────────────┐\n                         ▼                 ▼                 ▼\n                    low_sink          med_sink          high_sink\n                   (value<30)       (30≤value<70)      (value≥70)"),
+            .bullets(
+                "Demonstrating",
+                [
+                    "Fan-in: Multiple sources -> single aggregator",
+                    "Fan-out: Single router -> multiple sinks",
+                    "Diamond pattern: Realistic ETL topology",
+                    "StatefulHandler for aggregation (no Arc<Mutex>)",
+                    "Independent journal readers",
+                ],
+            )
+            .section(
+                "Topology",
+                "kafka_source (5 events)  --┐\napi_source (4 events)    --┼--> aggregator (fan-in)\nfile_source (4 events)   --┘            |\n                                        v\n                                     router\n                                        |\n                      ┌─────────────────┼─────────────────┐\n                      v                 v                 v\n                 low_sink          med_sink          high_sink\n                (value<30)       (30<=value<70)      (value>=70)",
+            ),
     )
     .with_footer(move |outcome| {
-        let mut out = outcome.default_footer();
-
         let low = footer_low.load(Ordering::Relaxed);
         let med = footer_med.load(Ordering::Relaxed);
         let high = footer_high.load(Ordering::Relaxed);
 
-        out.push_str(&format!(
-            "\n\nFAN-OUT sink summary:\n- LOW (value<30): {low}\n- MEDIUM (30≤value<70): {med}\n- HIGH (value≥70): {high}"
-        ));
-
-        out.push_str("\n\nKey insights:\n• Fan-in: Aggregator subscribed to 3 upstream journals\n  - Each source had independent journal reader\n  - Round-robin reading ensures fairness\n  - No special merge primitive needed\n• Fan-out: Each sink created its own journal reader\n  - Readers progress independently\n  - Natural backpressure (slow sinks do not block fast ones)\n  - All sinks see all events (broadcast behaviour)\n• Diamond pattern combines both:\n  - Multiple inputs merged and processed\n  - Results distributed to multiple outputs\n  - Common in ETL, event routing, microservices");
-        out
+        outcome
+            .into_footer()
+            .bullets(
+                "Fan-out sink summary",
+                [
+                    format!("LOW (value<30): {low}"),
+                    format!("MEDIUM (30<=value<70): {med}"),
+                    format!("HIGH (value>=70): {high}"),
+                ],
+            )
+            .bullets(
+                "Key insights",
+                [
+                    "Fan-in: Aggregator subscribed to 3 upstream journals\n  Each source had an independent journal reader\n  Round-robin reading ensures fairness\n  No special merge primitive is needed",
+                    "Fan-out: Each sink created its own journal reader\n  Readers progress independently\n  Natural backpressure means slow sinks do not block fast ones\n  All sinks see all events (broadcast behaviour)",
+                    "Diamond pattern combines both\n  Multiple inputs are merged and processed\n  Results are distributed to multiple outputs\n  Common in ETL, event routing, and microservices",
+                ],
+            )
     });
 
     // Use FlowApplication for modern pattern

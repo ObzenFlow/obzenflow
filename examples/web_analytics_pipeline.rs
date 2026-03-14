@@ -191,12 +191,37 @@ async fn main() -> Result<()> {
     let presentation = Presentation::new(
         Banner::new("Web Analytics Pipeline")
             .description("Processing user behaviour events with typed accumulators.")
-            .config_block("📊 Session Tracker   → GroupByTyped + TimeWindow(3s)\n🎯 Funnel Tracker    → ReduceTyped + EveryN(50)\n📈 Metrics           → ReduceTyped + OnEOF\n\nZero ChainEvent manipulation, all type-safe!"),
+            .bullets(
+                "Pipeline",
+                [
+                    "Session Tracker -> GroupByTyped + TimeWindow(3s)",
+                    "Funnel Tracker -> ReduceTyped + EveryN(50)",
+                    "Metrics -> ReduceTyped + OnEOF",
+                ],
+            )
+            .section("Why", "Zero ChainEvent manipulation, all type-safe!"),
     )
     .with_footer(|outcome| {
-        let mut out = outcome.default_footer();
-        out.push_str("\n\n💡 Key improvements:\nFLOWIP-082a TypedPayload:\n• UserEvent::EVENT_TYPE instead of \"user_event\"\n• SCHEMA_VERSION for all event types\n• Strongly-typed event structs\n\nFLOWIP-080j Typed accumulators:\n• GroupByTyped: Type-safe per-user session tracking\n• ReduceTyped: Type-safe funnel and metrics aggregation\n• Zero ChainEvent manipulation in business logic\n• Pure update functions: update_session(), update_funnel(), update_metrics()\n• ~150 lines of custom StatefulHandler code eliminated!");
-        out
+        outcome
+            .into_footer()
+            .bullets(
+                "FLOWIP-082a TypedPayload",
+                [
+                    "UserEvent::EVENT_TYPE instead of \"user_event\"",
+                    "SCHEMA_VERSION for all event types",
+                    "Strongly-typed event structs",
+                ],
+            )
+            .bullets(
+                "FLOWIP-080j Typed accumulators",
+                [
+                    "GroupByTyped: Type-safe per-user session tracking",
+                    "ReduceTyped: Type-safe funnel and metrics aggregation",
+                    "Zero ChainEvent manipulation in business logic",
+                    "Pure update functions: update_session(), update_funnel(), update_metrics()",
+                    "~150 lines of custom StatefulHandler code eliminated",
+                ],
+            )
     });
 
     FlowApplication::run_with_presentation(
