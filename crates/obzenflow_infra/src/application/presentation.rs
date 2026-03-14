@@ -321,3 +321,133 @@ fn strip_ansi_escape_codes(input: &str) -> String {
 
     String::from_utf8_lossy(&out).into_owned()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plain_title_renders_with_separator() {
+        let rendered = Banner::new("Hello").render_with_stdout_is_tty(false);
+        assert_eq!(rendered.text, "Hello\n=====\n\n");
+        assert!(rendered.warnings.is_empty());
+    }
+
+    #[test]
+    fn description_and_config_are_indented_and_separated() {
+        let rendered = Banner::new("Title")
+            .description("Desc")
+            .config("mode", "test")
+            .config_block("line1\nline2")
+            .render_with_stdout_is_tty(false);
+
+        assert_eq!(
+            rendered.text,
+            "Title\n=====\nDesc\n\n  mode: test\n  line1\n  line2\n\n"
+        );
+    }
+
+    #[test]
+    fn ascii_art_replaces_title_and_separator() {
+        let rendered = Banner::new("Title")
+            .art("ASCII")
+            .render_with_stdout_is_tty(false);
+        assert_eq!(rendered.text, "ASCII\n\n");
+    }
+
+    #[test]
+    fn ansi_art_only_renders_when_stdout_is_a_tty() {
+        let banner = Banner::new("Title")
+            .art("ASCII")
+            .ansi_art("\x1b[31mANSI\x1b[0m");
+
+        let tty_rendered = banner.render_with_stdout_is_tty(true);
+        assert!(tty_rendered.text.starts_with("\x1b[31mANSI\x1b[0m\n"));
+
+        let non_tty_rendered = banner.render_with_stdout_is_tty(false);
+        assert!(non_tty_rendered.text.starts_with("ASCII\n"));
+        assert!(!non_tty_rendered.text.contains("\x1b["));
+    }
+
+    #[test]
+    fn normalise_art_strips_single_leading_and_trailing_newline() {
+        assert_eq!(normalise_art_text("\nhello\n"), "hello");
+        assert_eq!(normalise_art_text("\n\nhi\n\n"), "\nhi\n");
+    }
+
+    #[test]
+    fn strip_ansi_escape_codes_strips_csi_and_osc_sequences() {
+        assert_eq!(
+            strip_ansi_escape_codes("\x1b[31mRED\x1b[0m"),
+            "RED".to_string()
+        );
+
+        let hyperlink = format!("\x1b]8;;{}\x07Hi\x1b]8;;\x07", "a".repeat(200));
+        assert_eq!(strip_ansi_escape_codes(&hyperlink), "Hi".to_string());
+    }
+
+    #[test]
+    fn art_size_warnings_trigger_for_wide_and_tall_art() {
+        let mut lines = Vec::new();
+        lines.push("X".repeat(81));
+        for _ in 0..25 {
+            lines.push("x".to_string());
+        }
+        let art = lines.join("\n");
+
+        let warnings = validate_art_size("ASCII", &art);
+        assert_eq!(warnings.len(), 2);
+        assert!(warnings[0].contains("ASCII banner art is 81 visible columns"));
+        assert!(warnings[1].contains("ASCII banner art is 26 lines"));
+    }
+
+    #[test]
+    fn ansi_size_warnings_are_based_on_visible_width() {
+        let art = format!("\x1b]8;;{}\x07Hi\x1b]8;;\x07", "a".repeat(200));
+
+        let warnings = validate_art_size("ANSI", &art);
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn default_footer_matches_outcomes() {
+        let completed = RunPresentationOutcome::Completed {
+            flow_name: "flow".to_string(),
+            run_dir: None,
+        };
+        assert_eq!(completed.default_footer(), "flow completed.");
+
+        let run_dir = PathBuf::from("tmp/run");
+        let completed_with_journal = RunPresentationOutcome::Completed {
+            flow_name: "flow".to_string(),
+            run_dir: Some(run_dir.clone()),
+        };
+        assert_eq!(
+            completed_with_journal.default_footer(),
+            "flow completed. Journal: tmp/run\nTo replay, add: --replay-from tmp/run\n(Source config env vars are ignored during replay)"
+        );
+
+        let stopped = RunPresentationOutcome::Stopped {
+            flow_name: "flow".to_string(),
+            run_dir: None,
+        };
+        assert_eq!(stopped.default_footer(), "flow stopped.");
+
+        let failed = RunPresentationOutcome::Failed {
+            flow_name: Some("flow".to_string()),
+            error: "err".to_string(),
+            run_dir: None,
+        };
+        assert_eq!(failed.default_footer(), "flow failed: err");
+
+        let failed_without_name = RunPresentationOutcome::Failed {
+            flow_name: None,
+            error: "err".to_string(),
+            run_dir: Some(run_dir),
+        };
+        assert_eq!(
+            failed_without_name.default_footer(),
+            "Flow failed: err. Journal: tmp/run"
+        );
+    }
+}
