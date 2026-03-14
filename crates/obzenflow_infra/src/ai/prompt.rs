@@ -257,7 +257,9 @@ mod tests {
     fn fenced_items_empty_slice_renders_empty_fence() {
         let mut p = Prompt::new();
         let items: Vec<usize> = Vec::new();
-        p.fenced_items("Input", &items, |_| unreachable!("render should not be called"));
+        p.fenced_items("Input", &items, |_| {
+            unreachable!("render should not be called")
+        });
         assert_eq!(p.finish().as_str(), "Input:\n```text\n```\n");
     }
 
@@ -276,7 +278,9 @@ mod tests {
     fn sections_skips_empty_heading() {
         let mut p = Prompt::new();
         let items = [0usize];
-        p.sections("Chunk summaries", &items, |_| (String::new(), "Body".to_string()));
+        p.sections("Chunk summaries", &items, |_| {
+            (String::new(), "Body".to_string())
+        });
         assert_eq!(p.finish().as_str(), "Chunk summaries:\n\nBody\n\n");
     }
 
@@ -306,10 +310,7 @@ mod tests {
         }
 
         let interests = Some("rust".to_string());
-        let stories = [
-            Story { n: 1, title: "One" },
-            Story { n: 2, title: "Two" },
-        ];
+        let stories = [Story { n: 1, title: "One" }, Story { n: 2, title: "Two" }];
 
         let min_citations = stories.len().min(6);
 
@@ -324,19 +325,23 @@ mod tests {
         ));
 
         let mut p = Prompt::new();
-        p.text_if(interests.as_deref(), |value| format!("My interests: {value}"))
-            .text("Summarise these Hacker News stories (titles + URLs are provided as input).")
-            .rules(rules)
-            .labeled(
-                "Output format (follow exactly)",
-                "Themes:\n\
+        p.text_if(interests.as_deref(), |value| {
+            format!("My interests: {value}")
+        })
+        .text("Summarise these Hacker News stories (titles + URLs are provided as input).")
+        .rules(rules)
+        .labeled(
+            "Output format (follow exactly)",
+            "Themes:\n\
 - <theme> (n, n, n): 1 sentence\n\
 Notable stories:\n\
 - (n) Title: 1 sentence",
-            )
-            .fenced_items("Input stories (numbered; do not repeat)", &stories, |story| {
-                render_story_line(story.n, story.title)
-            });
+        )
+        .fenced_items(
+            "Input stories (numbered; do not repeat)",
+            &stories,
+            |story| render_story_line(story.n, story.title),
+        );
 
         assert_eq!(
             p.finish().as_str(),
@@ -362,4 +367,3 @@ Notable stories:\n\
         );
     }
 }
-

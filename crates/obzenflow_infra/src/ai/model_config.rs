@@ -465,9 +465,7 @@ impl ModelChatBuilder {
             inner,
             resolved_estimator,
         } = self;
-        let transform = inner
-            .build_reduce_seeded_with_prompt(prompt, parse)
-            .await?;
+        let transform = inner.build_reduce_seeded_with_prompt(prompt, parse).await?;
         Ok(transform.with_resolved_estimator(resolved_estimator))
     }
 }
@@ -544,7 +542,10 @@ where
 
     pub async fn build_reduce_seeded<Seed, Partial, Out>(
         self,
-        prompt: impl Fn(&Ctx, &Seed, &[Partial]) -> Result<UserPrompt, HandlerError> + Send + Sync + 'static,
+        prompt: impl Fn(&Ctx, &Seed, &[Partial]) -> Result<UserPrompt, HandlerError>
+            + Send
+            + Sync
+            + 'static,
         parse: impl Fn(&Ctx, Seed, Vec<Partial>, ChatResponse) -> Result<Out, HandlerError>
             + Send
             + Sync
@@ -561,9 +562,7 @@ where
         inner
             .build_reduce_seeded(
                 move |seed, partials| prompt(ctx_prompt.as_ref(), seed, partials),
-                move |seed, partials, response| {
-                    parse(ctx_parse.as_ref(), seed, partials, response)
-                },
+                move |seed, partials, response| parse(ctx_parse.as_ref(), seed, partials, response),
             )
             .await
     }

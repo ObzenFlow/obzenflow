@@ -1274,7 +1274,10 @@ where
     /// Build a seeded reduce-role `ChatTransform` (eager, with provider/model preflight).
     pub async fn build_reduce_seeded<Seed, Partial, Out>(
         self,
-        prompt: impl Fn(&Ctx, &Seed, &[Partial]) -> Result<UserPrompt, HandlerError> + Send + Sync + 'static,
+        prompt: impl Fn(&Ctx, &Seed, &[Partial]) -> Result<UserPrompt, HandlerError>
+            + Send
+            + Sync
+            + 'static,
         parse: impl Fn(&Ctx, Seed, Vec<Partial>, ChatResponse) -> Result<Out, HandlerError>
             + Send
             + Sync
@@ -1333,7 +1336,10 @@ where
     /// Lazy counterpart of [`Self::build_reduce_seeded`] (no provider/model preflight).
     pub fn build_reduce_seeded_lazy<Seed, Partial, Out>(
         self,
-        prompt: impl Fn(&Ctx, &Seed, &[Partial]) -> Result<UserPrompt, HandlerError> + Send + Sync + 'static,
+        prompt: impl Fn(&Ctx, &Seed, &[Partial]) -> Result<UserPrompt, HandlerError>
+            + Send
+            + Sync
+            + 'static,
         parse: impl Fn(&Ctx, Seed, Vec<Partial>, ChatResponse) -> Result<Out, HandlerError>
             + Send
             + Sync
