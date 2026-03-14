@@ -343,11 +343,14 @@ impl ModelChatBuilder {
 
     /// Build a map-role `ChatTransform` over chunk items.
     ///
+    /// Runs provider preflight (verifies the AI provider is reachable and the model exists)
+    /// before constructing the transform. Errors surface at build time, not on first inference.
+    ///
     /// The input payload is deserialised as `Vec<Item>`, but the prompt closure receives `&[Item]`.
     ///
     /// Type inference: using named functions for `prompt` and `parse` is usually enough for the
     /// compiler to infer `Item` and `Out` at the call site.
-    pub fn build_map_items<Item, Out>(
+    pub async fn build_map_items<Item, Out>(
         self,
         prompt: impl Fn(&[Item]) -> Result<UserPrompt, HandlerError> + Send + Sync + 'static,
         parse: impl Fn(ChatResponse) -> Result<Out, HandlerError> + Send + Sync + 'static,
@@ -360,16 +363,18 @@ impl ModelChatBuilder {
             inner,
             resolved_estimator,
         } = self;
-        let transform = inner.build_map_items_lazy(prompt, parse)?;
+        let transform = inner.build_map_items(prompt, parse).await?;
         Ok(transform.with_resolved_estimator(resolved_estimator))
     }
 
     /// Build a map-role `ChatTransform` over chunk items, passing the prompt to `parse`.
     ///
+    /// Runs provider preflight before constructing the transform.
+    ///
     /// Determinism: this method calls `prompt` twice (once to build the request, once to
     /// provide the prompt to `parse`). Prompt functions must therefore be deterministic and
     /// side-effect free.
-    pub fn build_map_items_with_prompt<Item, Out>(
+    pub async fn build_map_items_with_prompt<Item, Out>(
         self,
         prompt: impl Fn(&[Item]) -> Result<UserPrompt, HandlerError> + Send + Sync + 'static,
         parse: impl Fn(UserPrompt, ChatResponse) -> Result<Out, HandlerError> + Send + Sync + 'static,
@@ -382,12 +387,14 @@ impl ModelChatBuilder {
             inner,
             resolved_estimator,
         } = self;
-        let transform = inner.build_map_items_with_prompt_lazy(prompt, parse)?;
+        let transform = inner.build_map_items_with_prompt(prompt, parse).await?;
         Ok(transform.with_resolved_estimator(resolved_estimator))
     }
 
     /// Build a map-role `ChatTransform` where parsing needs access to the input items.
-    pub fn build_map_items_with_input<Item, Out>(
+    ///
+    /// Runs provider preflight before constructing the transform.
+    pub async fn build_map_items_with_input<Item, Out>(
         self,
         prompt: impl Fn(&[Item]) -> Result<UserPrompt, HandlerError> + Send + Sync + 'static,
         parse: impl Fn(Vec<Item>, ChatResponse) -> Result<Out, HandlerError> + Send + Sync + 'static,
@@ -400,18 +407,20 @@ impl ModelChatBuilder {
             inner,
             resolved_estimator,
         } = self;
-        let transform = inner.build_map_items_with_input_lazy(prompt, parse)?;
+        let transform = inner.build_map_items_with_input(prompt, parse).await?;
         Ok(transform.with_resolved_estimator(resolved_estimator))
     }
 
     /// Build a seeded reduce-role `ChatTransform`.
+    ///
+    /// Runs provider preflight before constructing the transform.
     ///
     /// The input payload is deserialised as `(Seed, Vec<Partial>)`, but the prompt closure receives
     /// `(&Seed, &[Partial])`.
     ///
     /// Type inference: using named functions for `prompt` and `parse` is usually enough for the
     /// compiler to infer `Seed`, `Partial`, and `Out` at the call site.
-    pub fn build_reduce_seeded<Seed, Partial, Out>(
+    pub async fn build_reduce_seeded<Seed, Partial, Out>(
         self,
         prompt: impl Fn(&Seed, &[Partial]) -> Result<UserPrompt, HandlerError> + Send + Sync + 'static,
         parse: impl Fn(Seed, Vec<Partial>, ChatResponse) -> Result<Out, HandlerError>
@@ -428,16 +437,18 @@ impl ModelChatBuilder {
             inner,
             resolved_estimator,
         } = self;
-        let transform = inner.build_reduce_seeded_lazy(prompt, parse)?;
+        let transform = inner.build_reduce_seeded(prompt, parse).await?;
         Ok(transform.with_resolved_estimator(resolved_estimator))
     }
 
     /// Build a seeded reduce-role `ChatTransform`, passing the prompt to `parse`.
     ///
+    /// Runs provider preflight before constructing the transform.
+    ///
     /// Determinism: this method calls `prompt` twice (once to build the request, once to
     /// provide the prompt to `parse`). Prompt functions must therefore be deterministic and
     /// side-effect free.
-    pub fn build_reduce_seeded_with_prompt<Seed, Partial, Out>(
+    pub async fn build_reduce_seeded_with_prompt<Seed, Partial, Out>(
         self,
         prompt: impl Fn(&Seed, &[Partial]) -> Result<UserPrompt, HandlerError> + Send + Sync + 'static,
         parse: impl Fn(Seed, Vec<Partial>, UserPrompt, ChatResponse) -> Result<Out, HandlerError>
@@ -454,7 +465,9 @@ impl ModelChatBuilder {
             inner,
             resolved_estimator,
         } = self;
-        let transform = inner.build_reduce_seeded_with_prompt_lazy(prompt, parse)?;
+        let transform = inner
+            .build_reduce_seeded_with_prompt(prompt, parse)
+            .await?;
         Ok(transform.with_resolved_estimator(resolved_estimator))
     }
 }
@@ -463,7 +476,7 @@ impl<Ctx> ModelChatBuilderWithContext<Ctx>
 where
     Ctx: Send + Sync + 'static,
 {
-    pub fn build_map_items<Item, Out>(
+    pub async fn build_map_items<Item, Out>(
         self,
         prompt: impl Fn(&Ctx, &[Item]) -> Result<UserPrompt, HandlerError> + Send + Sync + 'static,
         parse: impl Fn(&Ctx, ChatResponse) -> Result<Out, HandlerError> + Send + Sync + 'static,
@@ -475,13 +488,15 @@ where
         let ModelChatBuilderWithContext { inner, ctx } = self;
         let ctx_prompt = ctx.clone();
         let ctx_parse = ctx.clone();
-        inner.build_map_items(
-            move |items| prompt(ctx_prompt.as_ref(), items),
-            move |response| parse(ctx_parse.as_ref(), response),
-        )
+        inner
+            .build_map_items(
+                move |items| prompt(ctx_prompt.as_ref(), items),
+                move |response| parse(ctx_parse.as_ref(), response),
+            )
+            .await
     }
 
-    pub fn build_map_items_with_prompt<Item, Out>(
+    pub async fn build_map_items_with_prompt<Item, Out>(
         self,
         prompt: impl Fn(&Ctx, &[Item]) -> Result<UserPrompt, HandlerError> + Send + Sync + 'static,
         parse: impl Fn(&Ctx, UserPrompt, ChatResponse) -> Result<Out, HandlerError>
@@ -496,13 +511,15 @@ where
         let ModelChatBuilderWithContext { inner, ctx } = self;
         let ctx_prompt = ctx.clone();
         let ctx_parse = ctx.clone();
-        inner.build_map_items_with_prompt(
-            move |items| prompt(ctx_prompt.as_ref(), items),
-            move |user_prompt, response| parse(ctx_parse.as_ref(), user_prompt, response),
-        )
+        inner
+            .build_map_items_with_prompt(
+                move |items| prompt(ctx_prompt.as_ref(), items),
+                move |user_prompt, response| parse(ctx_parse.as_ref(), user_prompt, response),
+            )
+            .await
     }
 
-    pub fn build_map_items_with_input<Item, Out>(
+    pub async fn build_map_items_with_input<Item, Out>(
         self,
         prompt: impl Fn(&Ctx, &[Item]) -> Result<UserPrompt, HandlerError> + Send + Sync + 'static,
         parse: impl Fn(&Ctx, Vec<Item>, ChatResponse) -> Result<Out, HandlerError>
@@ -517,13 +534,15 @@ where
         let ModelChatBuilderWithContext { inner, ctx } = self;
         let ctx_prompt = ctx.clone();
         let ctx_parse = ctx.clone();
-        inner.build_map_items_with_input(
-            move |items| prompt(ctx_prompt.as_ref(), items),
-            move |items, response| parse(ctx_parse.as_ref(), items, response),
-        )
+        inner
+            .build_map_items_with_input(
+                move |items| prompt(ctx_prompt.as_ref(), items),
+                move |items, response| parse(ctx_parse.as_ref(), items, response),
+            )
+            .await
     }
 
-    pub fn build_reduce_seeded<Seed, Partial, Out>(
+    pub async fn build_reduce_seeded<Seed, Partial, Out>(
         self,
         prompt: impl Fn(&Ctx, &Seed, &[Partial]) -> Result<UserPrompt, HandlerError> + Send + Sync + 'static,
         parse: impl Fn(&Ctx, Seed, Vec<Partial>, ChatResponse) -> Result<Out, HandlerError>
@@ -539,13 +558,17 @@ where
         let ModelChatBuilderWithContext { inner, ctx } = self;
         let ctx_prompt = ctx.clone();
         let ctx_parse = ctx.clone();
-        inner.build_reduce_seeded(
-            move |seed, partials| prompt(ctx_prompt.as_ref(), seed, partials),
-            move |seed, partials, response| parse(ctx_parse.as_ref(), seed, partials, response),
-        )
+        inner
+            .build_reduce_seeded(
+                move |seed, partials| prompt(ctx_prompt.as_ref(), seed, partials),
+                move |seed, partials, response| {
+                    parse(ctx_parse.as_ref(), seed, partials, response)
+                },
+            )
+            .await
     }
 
-    pub fn build_reduce_seeded_with_prompt<Seed, Partial, Out>(
+    pub async fn build_reduce_seeded_with_prompt<Seed, Partial, Out>(
         self,
         prompt: impl Fn(&Ctx, &Seed, &[Partial]) -> Result<UserPrompt, HandlerError>
             + Send
@@ -564,12 +587,14 @@ where
         let ModelChatBuilderWithContext { inner, ctx } = self;
         let ctx_prompt = ctx.clone();
         let ctx_parse = ctx.clone();
-        inner.build_reduce_seeded_with_prompt(
-            move |seed, partials| prompt(ctx_prompt.as_ref(), seed, partials),
-            move |seed, partials, user_prompt, response| {
-                parse(ctx_parse.as_ref(), seed, partials, user_prompt, response)
-            },
-        )
+        inner
+            .build_reduce_seeded_with_prompt(
+                move |seed, partials| prompt(ctx_prompt.as_ref(), seed, partials),
+                move |seed, partials, user_prompt, response| {
+                    parse(ctx_parse.as_ref(), seed, partials, user_prompt, response)
+                },
+            )
+            .await
     }
 }
 

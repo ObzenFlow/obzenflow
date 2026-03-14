@@ -237,7 +237,8 @@ pub async fn run_example(config: DemoConfig, presentation: Presentation) -> Resu
         .context(DigestMapCtx {
             interests: interests.clone(),
         })
-        .build_map_items(digest_map_prompt, digest_map_parse)?;
+        .build_map_items(digest_map_prompt, digest_map_parse)
+        .await?;
 
     let digest_llm_handler = ai
         .chat()
@@ -254,7 +255,8 @@ pub async fn run_example(config: DemoConfig, presentation: Presentation) -> Resu
             interests: interests.clone(),
             chat_prompt_system: system_prompt.clone(),
         })
-        .build_reduce_seeded_with_prompt(digest_reduce_prompt, digest_reduce_parse)?;
+        .build_reduce_seeded_with_prompt(digest_reduce_prompt, digest_reduce_parse)
+        .await?;
 
     FlowApplication::run_with_presentation(flow! {
             name: "hn_ai_digest_demo",
