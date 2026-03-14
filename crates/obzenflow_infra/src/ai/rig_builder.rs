@@ -772,11 +772,8 @@ impl ChatTransformBuilder {
         Item: DeserializeOwned + Send + Sync + 'static,
         Out: Serialize + TypedPayload + Send + Sync + 'static,
     {
-        self.build_typed::<Vec<Item>, Out>(
-            move |items| prompt(items.as_slice()),
-            move |items, response| parse(items, response),
-        )
-        .await
+        self.build_typed::<Vec<Item>, Out>(move |items| prompt(items.as_slice()), parse)
+            .await
     }
 
     /// Lazy counterpart of [`Self::build_map_items_with_input`] (no provider/model preflight).
@@ -789,10 +786,7 @@ impl ChatTransformBuilder {
         Item: DeserializeOwned + Send + Sync + 'static,
         Out: Serialize + TypedPayload + Send + Sync + 'static,
     {
-        self.build_typed_lazy::<Vec<Item>, Out>(
-            move |items| prompt(items.as_slice()),
-            move |items, response| parse(items, response),
-        )
+        self.build_typed_lazy::<Vec<Item>, Out>(move |items| prompt(items.as_slice()), parse)
     }
 
     /// Build a seeded reduce-role `ChatTransform` (eager, with provider/model preflight).
