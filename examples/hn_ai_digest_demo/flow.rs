@@ -7,7 +7,7 @@ use super::decoder::HnStoryDecoder;
 use super::domain::{FormattedStory, HnStory};
 use super::util::truncate_chars;
 use anyhow::{anyhow, Result};
-use obzenflow::ai::{AiChatTask, EstimateSource, TokenCount};
+use obzenflow::ai::{EstimateSource, TokenCount};
 use obzenflow::sources::{HeaderMap, HttpPullConfig, HttpPullSource};
 use obzenflow::typed::{sinks, stateful as typed_stateful, transforms as typed_transforms};
 use obzenflow_adapters::middleware::control::ai_circuit_breaker;
@@ -68,32 +68,27 @@ impl TypedPayload for HnDigestSummary {
     const EVENT_TYPE: &'static str = "hn.digest_summary";
 }
 
-#[derive(Clone)]
-struct MapDigestTask {
+struct DigestMapCtx {
     interests: Option<String>,
 }
 
-impl AiChatTask for MapDigestTask {
-    type Input = Vec<NumberedStory>;
-    type Output = HnDigestGroupSummary;
-
-    fn prompt(&self, stories: &Self::Input) -> Result<String, HandlerError> {
-        Ok(build_group_prompt(stories, self.interests.as_deref()))
-    }
-
-    fn parse(
-        &self,
-        _stories: Self::Input,
-        response: ChatResponse,
-    ) -> Result<Self::Output, HandlerError> {
-        Ok(HnDigestGroupSummary {
-            output_markdown: strip_accidental_story_echo(&response.text),
-        })
-    }
+fn digest_map_prompt(
+    ctx: &DigestMapCtx,
+    stories: &[NumberedStory],
+) -> Result<String, HandlerError> {
+    Ok(build_group_prompt(stories, ctx.interests.as_deref()))
 }
 
-#[derive(Clone)]
-struct ReduceDigestTask {
+fn digest_map_parse(
+    _ctx: &DigestMapCtx,
+    response: ChatResponse,
+) -> Result<HnDigestGroupSummary, HandlerError> {
+    Ok(HnDigestGroupSummary {
+        output_markdown: strip_accidental_story_echo(&response.text),
+    })
+}
+
+struct DigestReduceCtx {
     interests: Option<String>,
     mode_label: String,
     base_url: String,
@@ -104,40 +99,40 @@ struct ReduceDigestTask {
     chat_prompt_system: String,
 }
 
-impl AiChatTask for ReduceDigestTask {
-    type Input = (HnTopStories, Vec<HnDigestGroupSummary>);
-    type Output = HnDigestSummary;
+fn digest_reduce_prompt(
+    ctx: &DigestReduceCtx,
+    _seed: &HnTopStories,
+    summaries: &[HnDigestGroupSummary],
+) -> Result<String, HandlerError> {
+    Ok(build_reduce_prompt(summaries, ctx.interests.as_deref()))
+}
 
-    fn prompt(&self, (_, summaries): &Self::Input) -> Result<String, HandlerError> {
-        Ok(build_reduce_prompt(summaries, self.interests.as_deref()))
-    }
+fn digest_reduce_parse(
+    ctx: &DigestReduceCtx,
+    seed: HnTopStories,
+    summaries: Vec<HnDigestGroupSummary>,
+    response: ChatResponse,
+) -> Result<HnDigestSummary, HandlerError> {
+    let groups = summaries.len();
+    let stories_fetched = seed.stories.len();
+    let user_prompt = build_reduce_prompt(&summaries, ctx.interests.as_deref());
 
-    fn parse(
-        &self,
-        (seed, summaries): Self::Input,
-        response: ChatResponse,
-    ) -> Result<Self::Output, HandlerError> {
-        let groups = summaries.len();
-        let stories_fetched = seed.stories.len();
-        let user_prompt = build_reduce_prompt(&summaries, self.interests.as_deref());
-
-        Ok(HnDigestSummary {
-            mode: self.mode_label.clone(),
-            base_url: self.base_url.clone(),
-            ai_provider: self.ai_provider.clone(),
-            ai_model: self.ai_model.clone(),
-            token_estimator: self.token_estimator,
-            stories_fetched,
-            budget_per_group: self.budget_per_group,
-            groups,
-            interests: self.interests.clone(),
-            chat_prompt_system: self.chat_prompt_system.clone(),
-            chat_prompt_user: user_prompt,
-            input: seed,
-            group_summaries: summaries,
-            output_markdown: response.text,
-        })
-    }
+    Ok(HnDigestSummary {
+        mode: ctx.mode_label.clone(),
+        base_url: ctx.base_url.clone(),
+        ai_provider: ctx.ai_provider.clone(),
+        ai_model: ctx.ai_model.clone(),
+        token_estimator: ctx.token_estimator,
+        stories_fetched,
+        budget_per_group: ctx.budget_per_group,
+        groups,
+        interests: ctx.interests.clone(),
+        chat_prompt_system: ctx.chat_prompt_system.clone(),
+        chat_prompt_user: user_prompt,
+        input: seed,
+        group_summaries: summaries,
+        output_markdown: response.text,
+    })
 }
 
 pub async fn run_example(config: DemoConfig, presentation: Presentation) -> Result<()> {
@@ -183,32 +178,33 @@ pub async fn run_example(config: DemoConfig, presentation: Presentation) -> Resu
 
     let system_prompt = "You write concise, skimmable Hacker News digests from a list of headlines + URLs. Be neutral, avoid hype, and do not invent facts beyond what the titles imply."
         .to_string();
-    let system_prompt_for_summary = system_prompt.clone();
 
     let map_llm_handler = ai
         .chat()
         .system(system_prompt.clone())
         .temperature(0.2)
         .max_tokens(800)
-        .build_task(MapDigestTask {
+        .context(DigestMapCtx {
             interests: interests.clone(),
-        })?;
+        })
+        .build_map_items(digest_map_prompt, digest_map_parse)?;
 
     let digest_llm_handler = ai
         .chat()
         .system(system_prompt.clone())
         .temperature(0.2)
         .max_tokens(800)
-        .build_task(ReduceDigestTask {
-            interests: interests.clone(),
+        .context(DigestReduceCtx {
             mode_label: mode_label_for_summary.clone(),
             base_url: base_url_for_summary.clone(),
             ai_provider: ai.provider_label().to_string(),
             ai_model: ai.model_label().to_string(),
             token_estimator: ai.resolved_estimator().source(),
             budget_per_group,
-            chat_prompt_system: system_prompt_for_summary.clone(),
-        })?;
+            interests: interests.clone(),
+            chat_prompt_system: system_prompt.clone(),
+        })
+        .build_reduce_seeded(digest_reduce_prompt, digest_reduce_parse)?;
 
     FlowApplication::run_with_presentation(flow! {
             name: "hn_ai_digest_demo",

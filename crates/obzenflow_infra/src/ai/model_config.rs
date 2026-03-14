@@ -11,11 +11,13 @@ use super::{llm_chat, resolve_chat_model_profile, AiChatTask, ChatTransformBuild
 use anyhow::anyhow;
 use obzenflow_adapters::ai::ChatTransform;
 use obzenflow_core::ai::{
-    ChatModelProfile, ChatResponseFormat, ResolvedTokenEstimator, TokenCount, TokenEstimator,
-    ToolDefinition,
+    ChatModelProfile, ChatResponse, ChatResponseFormat, ResolvedTokenEstimator, TokenCount,
+    TokenEstimator, ToolDefinition,
 };
 use obzenflow_core::http_client::Url;
+use obzenflow_core::TypedPayload;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
+use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;
 use std::sync::Arc;
 
@@ -271,6 +273,15 @@ pub struct ModelChatBuilder {
     resolved_estimator: ResolvedTokenEstimator,
 }
 
+/// A [`ModelChatBuilder`] with a bound shared context value.
+///
+/// Returned by [`ModelChatBuilder::context`]. The context is stored as an
+/// `Arc<Ctx>` and passed to prompt/parse functions by reference.
+pub struct ModelChatBuilderWithContext<Ctx> {
+    inner: ModelChatBuilder,
+    ctx: Arc<Ctx>,
+}
+
 impl ModelChatBuilder {
     pub fn system(mut self, text: impl Into<String>) -> Self {
         self.inner = self.inner.system(text);
@@ -322,6 +333,146 @@ impl ModelChatBuilder {
     {
         let transform = llm_chat(self.inner, task)?;
         Ok(transform.with_resolved_estimator(self.resolved_estimator))
+    }
+
+    /// Bind a shared context value that will be passed to prompt and parse functions.
+    pub fn context<Ctx>(self, ctx: Ctx) -> ModelChatBuilderWithContext<Ctx>
+    where
+        Ctx: Send + Sync + 'static,
+    {
+        ModelChatBuilderWithContext {
+            inner: self,
+            ctx: Arc::new(ctx),
+        }
+    }
+
+    /// Build a map-role `ChatTransform` over chunk items.
+    ///
+    /// The input payload is deserialised as `Vec<Item>`, but the prompt closure receives `&[Item]`.
+    pub fn build_map_items<Item, Out>(
+        self,
+        prompt: impl Fn(&[Item]) -> Result<String, HandlerError> + Send + Sync + 'static,
+        parse: impl Fn(ChatResponse) -> Result<Out, HandlerError> + Send + Sync + 'static,
+    ) -> Result<ChatTransform, HandlerError>
+    where
+        Item: DeserializeOwned + Send + Sync + 'static,
+        Out: Serialize + TypedPayload + Send + Sync + 'static,
+    {
+        let ModelChatBuilder {
+            inner,
+            resolved_estimator,
+        } = self;
+        let transform = inner.build_map_items_lazy(prompt, parse)?;
+        Ok(transform.with_resolved_estimator(resolved_estimator))
+    }
+
+    /// Build a map-role `ChatTransform` where parsing needs access to the input items.
+    pub fn build_map_items_with_input<Item, Out>(
+        self,
+        prompt: impl Fn(&[Item]) -> Result<String, HandlerError> + Send + Sync + 'static,
+        parse: impl Fn(Vec<Item>, ChatResponse) -> Result<Out, HandlerError> + Send + Sync + 'static,
+    ) -> Result<ChatTransform, HandlerError>
+    where
+        Item: DeserializeOwned + Send + Sync + 'static,
+        Out: Serialize + TypedPayload + Send + Sync + 'static,
+    {
+        let ModelChatBuilder {
+            inner,
+            resolved_estimator,
+        } = self;
+        let transform = inner.build_map_items_with_input_lazy(prompt, parse)?;
+        Ok(transform.with_resolved_estimator(resolved_estimator))
+    }
+
+    /// Build a seeded reduce-role `ChatTransform`.
+    ///
+    /// The input payload is deserialised as `(Seed, Vec<Partial>)`, but the prompt closure receives
+    /// `(&Seed, &[Partial])`.
+    pub fn build_reduce_seeded<Seed, Partial, Out>(
+        self,
+        prompt: impl Fn(&Seed, &[Partial]) -> Result<String, HandlerError> + Send + Sync + 'static,
+        parse: impl Fn(Seed, Vec<Partial>, ChatResponse) -> Result<Out, HandlerError>
+            + Send
+            + Sync
+            + 'static,
+    ) -> Result<ChatTransform, HandlerError>
+    where
+        Seed: DeserializeOwned + Send + Sync + 'static,
+        Partial: DeserializeOwned + Send + Sync + 'static,
+        Out: Serialize + TypedPayload + Send + Sync + 'static,
+    {
+        let ModelChatBuilder {
+            inner,
+            resolved_estimator,
+        } = self;
+        let transform = inner.build_reduce_seeded_lazy(prompt, parse)?;
+        Ok(transform.with_resolved_estimator(resolved_estimator))
+    }
+}
+
+impl<Ctx> ModelChatBuilderWithContext<Ctx>
+where
+    Ctx: Send + Sync + 'static,
+{
+    pub fn build_map_items<Item, Out>(
+        self,
+        prompt: impl Fn(&Ctx, &[Item]) -> Result<String, HandlerError> + Send + Sync + 'static,
+        parse: impl Fn(&Ctx, ChatResponse) -> Result<Out, HandlerError> + Send + Sync + 'static,
+    ) -> Result<ChatTransform, HandlerError>
+    where
+        Item: DeserializeOwned + Send + Sync + 'static,
+        Out: Serialize + TypedPayload + Send + Sync + 'static,
+    {
+        let ModelChatBuilderWithContext { inner, ctx } = self;
+        let ctx_prompt = ctx.clone();
+        let ctx_parse = ctx.clone();
+        inner.build_map_items(
+            move |items| prompt(ctx_prompt.as_ref(), items),
+            move |response| parse(ctx_parse.as_ref(), response),
+        )
+    }
+
+    pub fn build_map_items_with_input<Item, Out>(
+        self,
+        prompt: impl Fn(&Ctx, &[Item]) -> Result<String, HandlerError> + Send + Sync + 'static,
+        parse: impl Fn(&Ctx, Vec<Item>, ChatResponse) -> Result<Out, HandlerError>
+            + Send
+            + Sync
+            + 'static,
+    ) -> Result<ChatTransform, HandlerError>
+    where
+        Item: DeserializeOwned + Send + Sync + 'static,
+        Out: Serialize + TypedPayload + Send + Sync + 'static,
+    {
+        let ModelChatBuilderWithContext { inner, ctx } = self;
+        let ctx_prompt = ctx.clone();
+        let ctx_parse = ctx.clone();
+        inner.build_map_items_with_input(
+            move |items| prompt(ctx_prompt.as_ref(), items),
+            move |items, response| parse(ctx_parse.as_ref(), items, response),
+        )
+    }
+
+    pub fn build_reduce_seeded<Seed, Partial, Out>(
+        self,
+        prompt: impl Fn(&Ctx, &Seed, &[Partial]) -> Result<String, HandlerError> + Send + Sync + 'static,
+        parse: impl Fn(&Ctx, Seed, Vec<Partial>, ChatResponse) -> Result<Out, HandlerError>
+            + Send
+            + Sync
+            + 'static,
+    ) -> Result<ChatTransform, HandlerError>
+    where
+        Seed: DeserializeOwned + Send + Sync + 'static,
+        Partial: DeserializeOwned + Send + Sync + 'static,
+        Out: Serialize + TypedPayload + Send + Sync + 'static,
+    {
+        let ModelChatBuilderWithContext { inner, ctx } = self;
+        let ctx_prompt = ctx.clone();
+        let ctx_parse = ctx.clone();
+        inner.build_reduce_seeded(
+            move |seed, partials| prompt(ctx_prompt.as_ref(), seed, partials),
+            move |seed, partials, response| parse(ctx_parse.as_ref(), seed, partials, response),
+        )
     }
 }
 

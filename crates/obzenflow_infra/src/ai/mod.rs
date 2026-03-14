@@ -29,9 +29,10 @@ pub use tiktoken::TiktokenEstimator;
 
 #[cfg(feature = "ai-rig")]
 pub use rig_builder::{
-    llm_chat, AiChatTask, ChatRequestTemplate, ChatTransformBuilder, ChatTransformExt,
-    EmbeddingTransformBuilder, EmbeddingTransformExt,
+    llm_chat, AiChatTask, ChatRequestTemplate, ChatTransformBuilder,
+    ChatTransformBuilderWithContext, ChatTransformExt, EmbeddingTransformBuilder,
+    EmbeddingTransformExt,
 };
 
 #[cfg(feature = "ai-rig")]
-pub use model_config::{ModelChatBuilder, ModelConfig};
+pub use model_config::{ModelChatBuilder, ModelChatBuilderWithContext, ModelConfig};

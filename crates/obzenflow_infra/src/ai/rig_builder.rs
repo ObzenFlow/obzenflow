@@ -235,6 +235,15 @@ pub struct ChatTransformBuilder {
     output_mapper: Option<Arc<ChatOutputMapper>>,
 }
 
+/// A [`ChatTransformBuilder`] with a bound shared context value.
+///
+/// Returned by [`ChatTransformBuilder::context`]. The context is stored as an
+/// `Arc<Ctx>` and passed to prompt/parse functions by reference.
+pub struct ChatTransformBuilderWithContext<Ctx> {
+    inner: ChatTransformBuilder,
+    ctx: Arc<Ctx>,
+}
+
 impl Default for ChatTransformBuilder {
     fn default() -> Self {
         Self::new()
@@ -706,6 +715,130 @@ impl ChatTransformBuilder {
         )
     }
 
+    /// Bind a shared context value that will be passed to prompt and parse functions.
+    pub fn context<Ctx>(self, ctx: Ctx) -> ChatTransformBuilderWithContext<Ctx>
+    where
+        Ctx: Send + Sync + 'static,
+    {
+        ChatTransformBuilderWithContext {
+            inner: self,
+            ctx: Arc::new(ctx),
+        }
+    }
+
+    /// Build a map-role `ChatTransform` over chunk items (eager, with provider/model preflight).
+    ///
+    /// The input payload is deserialised as `Vec<Item>`, but the prompt closure receives `&[Item]`.
+    pub async fn build_map_items<Item, Out>(
+        self,
+        prompt: impl Fn(&[Item]) -> Result<String, HandlerError> + Send + Sync + 'static,
+        parse: impl Fn(ChatResponse) -> Result<Out, HandlerError> + Send + Sync + 'static,
+    ) -> Result<ChatTransform, HandlerError>
+    where
+        Item: DeserializeOwned + Send + Sync + 'static,
+        Out: Serialize + TypedPayload + Send + Sync + 'static,
+    {
+        self.build_typed::<Vec<Item>, Out>(
+            move |items| prompt(items.as_slice()),
+            move |_items, response| parse(response),
+        )
+        .await
+    }
+
+    /// Lazy counterpart of [`Self::build_map_items`] (no provider/model preflight).
+    pub fn build_map_items_lazy<Item, Out>(
+        self,
+        prompt: impl Fn(&[Item]) -> Result<String, HandlerError> + Send + Sync + 'static,
+        parse: impl Fn(ChatResponse) -> Result<Out, HandlerError> + Send + Sync + 'static,
+    ) -> Result<ChatTransform, HandlerError>
+    where
+        Item: DeserializeOwned + Send + Sync + 'static,
+        Out: Serialize + TypedPayload + Send + Sync + 'static,
+    {
+        self.build_typed_lazy::<Vec<Item>, Out>(
+            move |items| prompt(items.as_slice()),
+            move |_items, response| parse(response),
+        )
+    }
+
+    /// Build a map-role `ChatTransform` where parsing needs access to the input items
+    /// (eager, with provider/model preflight).
+    pub async fn build_map_items_with_input<Item, Out>(
+        self,
+        prompt: impl Fn(&[Item]) -> Result<String, HandlerError> + Send + Sync + 'static,
+        parse: impl Fn(Vec<Item>, ChatResponse) -> Result<Out, HandlerError> + Send + Sync + 'static,
+    ) -> Result<ChatTransform, HandlerError>
+    where
+        Item: DeserializeOwned + Send + Sync + 'static,
+        Out: Serialize + TypedPayload + Send + Sync + 'static,
+    {
+        self.build_typed::<Vec<Item>, Out>(
+            move |items| prompt(items.as_slice()),
+            move |items, response| parse(items, response),
+        )
+        .await
+    }
+
+    /// Lazy counterpart of [`Self::build_map_items_with_input`] (no provider/model preflight).
+    pub fn build_map_items_with_input_lazy<Item, Out>(
+        self,
+        prompt: impl Fn(&[Item]) -> Result<String, HandlerError> + Send + Sync + 'static,
+        parse: impl Fn(Vec<Item>, ChatResponse) -> Result<Out, HandlerError> + Send + Sync + 'static,
+    ) -> Result<ChatTransform, HandlerError>
+    where
+        Item: DeserializeOwned + Send + Sync + 'static,
+        Out: Serialize + TypedPayload + Send + Sync + 'static,
+    {
+        self.build_typed_lazy::<Vec<Item>, Out>(
+            move |items| prompt(items.as_slice()),
+            move |items, response| parse(items, response),
+        )
+    }
+
+    /// Build a seeded reduce-role `ChatTransform` (eager, with provider/model preflight).
+    ///
+    /// The input payload is deserialised as `(Seed, Vec<Partial>)`, but the prompt closure receives
+    /// `(&Seed, &[Partial])`.
+    pub async fn build_reduce_seeded<Seed, Partial, Out>(
+        self,
+        prompt: impl Fn(&Seed, &[Partial]) -> Result<String, HandlerError> + Send + Sync + 'static,
+        parse: impl Fn(Seed, Vec<Partial>, ChatResponse) -> Result<Out, HandlerError>
+            + Send
+            + Sync
+            + 'static,
+    ) -> Result<ChatTransform, HandlerError>
+    where
+        Seed: DeserializeOwned + Send + Sync + 'static,
+        Partial: DeserializeOwned + Send + Sync + 'static,
+        Out: Serialize + TypedPayload + Send + Sync + 'static,
+    {
+        self.build_typed::<(Seed, Vec<Partial>), Out>(
+            move |input| prompt(&input.0, input.1.as_slice()),
+            move |(seed, partials), response| parse(seed, partials, response),
+        )
+        .await
+    }
+
+    /// Lazy counterpart of [`Self::build_reduce_seeded`] (no provider/model preflight).
+    pub fn build_reduce_seeded_lazy<Seed, Partial, Out>(
+        self,
+        prompt: impl Fn(&Seed, &[Partial]) -> Result<String, HandlerError> + Send + Sync + 'static,
+        parse: impl Fn(Seed, Vec<Partial>, ChatResponse) -> Result<Out, HandlerError>
+            + Send
+            + Sync
+            + 'static,
+    ) -> Result<ChatTransform, HandlerError>
+    where
+        Seed: DeserializeOwned + Send + Sync + 'static,
+        Partial: DeserializeOwned + Send + Sync + 'static,
+        Out: Serialize + TypedPayload + Send + Sync + 'static,
+    {
+        self.build_typed_lazy::<(Seed, Vec<Partial>), Out>(
+            move |input| prompt(&input.0, input.1.as_slice()),
+            move |(seed, partials), response| parse(seed, partials, response),
+        )
+    }
+
     fn chat_request_target(&self) -> Result<(AiProvider, String), HandlerError> {
         let Some(config) = &self.provider else {
             return Err(HandlerError::Validation(
@@ -901,6 +1034,146 @@ impl ChatTransformBuilder {
         }
 
         Ok(transform)
+    }
+}
+
+impl<Ctx> ChatTransformBuilderWithContext<Ctx>
+where
+    Ctx: Send + Sync + 'static,
+{
+    /// Build a map-role `ChatTransform` over chunk items (eager, with provider/model preflight).
+    pub async fn build_map_items<Item, Out>(
+        self,
+        prompt: impl Fn(&Ctx, &[Item]) -> Result<String, HandlerError> + Send + Sync + 'static,
+        parse: impl Fn(&Ctx, ChatResponse) -> Result<Out, HandlerError> + Send + Sync + 'static,
+    ) -> Result<ChatTransform, HandlerError>
+    where
+        Item: DeserializeOwned + Send + Sync + 'static,
+        Out: Serialize + TypedPayload + Send + Sync + 'static,
+    {
+        let ChatTransformBuilderWithContext { inner, ctx } = self;
+        let ctx_prompt = ctx.clone();
+        let ctx_parse = ctx.clone();
+        inner
+            .build_map_items(
+                move |items| prompt(ctx_prompt.as_ref(), items),
+                move |response| parse(ctx_parse.as_ref(), response),
+            )
+            .await
+    }
+
+    /// Lazy counterpart of [`Self::build_map_items`] (no provider/model preflight).
+    pub fn build_map_items_lazy<Item, Out>(
+        self,
+        prompt: impl Fn(&Ctx, &[Item]) -> Result<String, HandlerError> + Send + Sync + 'static,
+        parse: impl Fn(&Ctx, ChatResponse) -> Result<Out, HandlerError> + Send + Sync + 'static,
+    ) -> Result<ChatTransform, HandlerError>
+    where
+        Item: DeserializeOwned + Send + Sync + 'static,
+        Out: Serialize + TypedPayload + Send + Sync + 'static,
+    {
+        let ChatTransformBuilderWithContext { inner, ctx } = self;
+        let ctx_prompt = ctx.clone();
+        let ctx_parse = ctx.clone();
+        inner.build_map_items_lazy(
+            move |items| prompt(ctx_prompt.as_ref(), items),
+            move |response| parse(ctx_parse.as_ref(), response),
+        )
+    }
+
+    /// Build a map-role `ChatTransform` where parsing needs access to the input items
+    /// (eager, with provider/model preflight).
+    pub async fn build_map_items_with_input<Item, Out>(
+        self,
+        prompt: impl Fn(&Ctx, &[Item]) -> Result<String, HandlerError> + Send + Sync + 'static,
+        parse: impl Fn(&Ctx, Vec<Item>, ChatResponse) -> Result<Out, HandlerError>
+            + Send
+            + Sync
+            + 'static,
+    ) -> Result<ChatTransform, HandlerError>
+    where
+        Item: DeserializeOwned + Send + Sync + 'static,
+        Out: Serialize + TypedPayload + Send + Sync + 'static,
+    {
+        let ChatTransformBuilderWithContext { inner, ctx } = self;
+        let ctx_prompt = ctx.clone();
+        let ctx_parse = ctx.clone();
+        inner
+            .build_map_items_with_input(
+                move |items| prompt(ctx_prompt.as_ref(), items),
+                move |items, response| parse(ctx_parse.as_ref(), items, response),
+            )
+            .await
+    }
+
+    /// Lazy counterpart of [`Self::build_map_items_with_input`] (no provider/model preflight).
+    pub fn build_map_items_with_input_lazy<Item, Out>(
+        self,
+        prompt: impl Fn(&Ctx, &[Item]) -> Result<String, HandlerError> + Send + Sync + 'static,
+        parse: impl Fn(&Ctx, Vec<Item>, ChatResponse) -> Result<Out, HandlerError>
+            + Send
+            + Sync
+            + 'static,
+    ) -> Result<ChatTransform, HandlerError>
+    where
+        Item: DeserializeOwned + Send + Sync + 'static,
+        Out: Serialize + TypedPayload + Send + Sync + 'static,
+    {
+        let ChatTransformBuilderWithContext { inner, ctx } = self;
+        let ctx_prompt = ctx.clone();
+        let ctx_parse = ctx.clone();
+        inner.build_map_items_with_input_lazy(
+            move |items| prompt(ctx_prompt.as_ref(), items),
+            move |items, response| parse(ctx_parse.as_ref(), items, response),
+        )
+    }
+
+    /// Build a seeded reduce-role `ChatTransform` (eager, with provider/model preflight).
+    pub async fn build_reduce_seeded<Seed, Partial, Out>(
+        self,
+        prompt: impl Fn(&Ctx, &Seed, &[Partial]) -> Result<String, HandlerError> + Send + Sync + 'static,
+        parse: impl Fn(&Ctx, Seed, Vec<Partial>, ChatResponse) -> Result<Out, HandlerError>
+            + Send
+            + Sync
+            + 'static,
+    ) -> Result<ChatTransform, HandlerError>
+    where
+        Seed: DeserializeOwned + Send + Sync + 'static,
+        Partial: DeserializeOwned + Send + Sync + 'static,
+        Out: Serialize + TypedPayload + Send + Sync + 'static,
+    {
+        let ChatTransformBuilderWithContext { inner, ctx } = self;
+        let ctx_prompt = ctx.clone();
+        let ctx_parse = ctx.clone();
+        inner
+            .build_reduce_seeded(
+                move |seed, partials| prompt(ctx_prompt.as_ref(), seed, partials),
+                move |seed, partials, response| parse(ctx_parse.as_ref(), seed, partials, response),
+            )
+            .await
+    }
+
+    /// Lazy counterpart of [`Self::build_reduce_seeded`] (no provider/model preflight).
+    pub fn build_reduce_seeded_lazy<Seed, Partial, Out>(
+        self,
+        prompt: impl Fn(&Ctx, &Seed, &[Partial]) -> Result<String, HandlerError> + Send + Sync + 'static,
+        parse: impl Fn(&Ctx, Seed, Vec<Partial>, ChatResponse) -> Result<Out, HandlerError>
+            + Send
+            + Sync
+            + 'static,
+    ) -> Result<ChatTransform, HandlerError>
+    where
+        Seed: DeserializeOwned + Send + Sync + 'static,
+        Partial: DeserializeOwned + Send + Sync + 'static,
+        Out: Serialize + TypedPayload + Send + Sync + 'static,
+    {
+        let ChatTransformBuilderWithContext { inner, ctx } = self;
+        let ctx_prompt = ctx.clone();
+        let ctx_parse = ctx.clone();
+        inner.build_reduce_seeded_lazy(
+            move |seed, partials| prompt(ctx_prompt.as_ref(), seed, partials),
+            move |seed, partials, response| parse(ctx_parse.as_ref(), seed, partials, response),
+        )
     }
 }
 
@@ -1395,6 +1668,7 @@ mod tests {
     use obzenflow_core::event::ChainEventFactory;
     use obzenflow_core::{StageId, WriterId};
     use obzenflow_runtime::stages::common::handlers::AsyncTransformHandler;
+    use serde::{Deserialize, Serialize};
     use serde_json::json;
     use std::sync::Mutex;
 
@@ -1487,6 +1761,129 @@ mod tests {
             .ollama("llama3.1:8b")
             .system("x")
             .build_messages_lazy(|_event| Ok(vec![ChatMessage::user("hi")]))
+            .expect("builder should succeed");
+    }
+
+    #[test]
+    fn chat_builder_build_map_items_lazy_constructs_transform() {
+        #[derive(Debug, Clone, Serialize, Deserialize)]
+        struct Item {
+            x: i32,
+        }
+
+        #[derive(Debug, Clone, Serialize, Deserialize)]
+        struct Out {
+            ok: bool,
+        }
+
+        impl TypedPayload for Out {
+            const EVENT_TYPE: &'static str = "test.map_items_out";
+        }
+
+        let _transform = ChatTransform::builder()
+            .ollama("llama3.1:8b")
+            .system("x")
+            .build_map_items_lazy::<Item, Out>(
+                |_items| Ok("hi".to_string()),
+                |_response| Ok(Out { ok: true }),
+            )
+            .expect("builder should succeed");
+    }
+
+    #[test]
+    fn chat_builder_build_map_items_with_input_lazy_constructs_transform() {
+        #[derive(Debug, Clone, Serialize, Deserialize)]
+        struct Item {
+            x: i32,
+        }
+
+        #[derive(Debug, Clone, Serialize, Deserialize)]
+        struct Out {
+            count: usize,
+        }
+
+        impl TypedPayload for Out {
+            const EVENT_TYPE: &'static str = "test.map_items_with_input_out";
+        }
+
+        let _transform = ChatTransform::builder()
+            .ollama("llama3.1:8b")
+            .system("x")
+            .build_map_items_with_input_lazy::<Item, Out>(
+                |_items| Ok("hi".to_string()),
+                |items, _response| Ok(Out { count: items.len() }),
+            )
+            .expect("builder should succeed");
+    }
+
+    #[test]
+    fn chat_builder_build_reduce_seeded_lazy_constructs_transform() {
+        #[derive(Debug, Clone, Serialize, Deserialize)]
+        struct Seed {
+            id: u32,
+        }
+
+        #[derive(Debug, Clone, Serialize, Deserialize)]
+        struct Partial {
+            x: i32,
+        }
+
+        #[derive(Debug, Clone, Serialize, Deserialize)]
+        struct Out {
+            seed_id: u32,
+            partials: usize,
+        }
+
+        impl TypedPayload for Out {
+            const EVENT_TYPE: &'static str = "test.reduce_seeded_out";
+        }
+
+        let _transform = ChatTransform::builder()
+            .ollama("llama3.1:8b")
+            .system("x")
+            .build_reduce_seeded_lazy::<Seed, Partial, Out>(
+                |_seed, partials| Ok(format!("partials={}", partials.len())),
+                |seed, partials, _response| {
+                    Ok(Out {
+                        seed_id: seed.id,
+                        partials: partials.len(),
+                    })
+                },
+            )
+            .expect("builder should succeed");
+    }
+
+    #[test]
+    fn chat_builder_context_build_map_items_lazy_constructs_transform() {
+        #[derive(Debug)]
+        struct Ctx {
+            prefix: String,
+        }
+
+        #[derive(Debug, Clone, Serialize, Deserialize)]
+        struct Item {
+            x: i32,
+        }
+
+        #[derive(Debug, Clone, Serialize, Deserialize)]
+        struct Out {
+            ok: bool,
+        }
+
+        impl TypedPayload for Out {
+            const EVENT_TYPE: &'static str = "test.context_map_items_out";
+        }
+
+        let _transform = ChatTransform::builder()
+            .ollama("llama3.1:8b")
+            .system("x")
+            .context(Ctx {
+                prefix: "hello".to_string(),
+            })
+            .build_map_items_lazy::<Item, Out>(
+                |ctx, _items| Ok(format!("{}!", ctx.prefix)),
+                |_ctx, _response| Ok(Out { ok: true }),
+            )
             .expect("builder should succeed");
     }
 
