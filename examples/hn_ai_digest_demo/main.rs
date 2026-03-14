@@ -62,7 +62,7 @@ async fn main() -> anyhow::Result<()> {
         std::env::set_var("OBZENFLOW_METRICS_EXPORTER", "console");
     }
 
-    let config = support::flow::DemoConfig::from_env().await?;
+    let config = support::DemoConfig::from_env().await?;
 
     let presentation = Presentation::new(
         Banner::new("HN AI Digest Demo")
@@ -90,5 +90,5 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    support::flow::run_example(config, presentation).await
+    support::run_example(config, presentation).await
 }

@@ -13,7 +13,7 @@ fn main() -> anyhow::Result<()> {
 fn main() -> anyhow::Result<()> {
     use obzenflow_infra::application::{Banner, Presentation};
 
-    let config = support::flow::DemoConfig::from_env();
+    let config = support::DemoConfig::from_env();
 
     let mut banner = Banner::new("Payment Gateway Resilience Demo")
         .description("Circuit breakers and rate limits protecting an unreliable dependency.")
@@ -77,5 +77,5 @@ fn main() -> anyhow::Result<()> {
             .paragraph("Next step: scrape /metrics for obzenflow_circuit_breaker_* and obzenflow_errors_total.")
     });
 
-    support::flow::run_example(config, presentation)
+    support::run_example(config, presentation)
 }
