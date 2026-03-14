@@ -52,7 +52,12 @@
 //! - `OPENAI_API_KEY=...` (required for `HN_AI_PROVIDER=openai` and `HN_AI_PROVIDER=openai_compatible`)
 //! - `OPENAI_BASE_URL=http://localhost:8080/v1` (required for `HN_AI_PROVIDER=openai_compatible`)
 
-mod support;
+mod config;
+mod decoder;
+mod domain;
+mod flow;
+mod mock_server;
+mod util;
 
 use obzenflow_infra::application::{Banner, Presentation, RunPresentationOutcome};
 
@@ -62,7 +67,7 @@ async fn main() -> anyhow::Result<()> {
         std::env::set_var("OBZENFLOW_METRICS_EXPORTER", "console");
     }
 
-    let config = support::DemoConfig::from_env().await?;
+    let config = config::DemoConfig::from_env().await?;
 
     let presentation = Presentation::new(
         Banner::new("HN AI Digest Demo")
@@ -90,5 +95,5 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    support::run_example(config, presentation).await
+    flow::run_example(config, presentation).await
 }
