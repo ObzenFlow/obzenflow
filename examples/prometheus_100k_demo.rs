@@ -32,7 +32,7 @@ use obzenflow_core::{
     TypedPayload,
 };
 use obzenflow_dsl::{flow, sink, source, stateful, transform};
-use obzenflow_infra::application::FlowApplication;
+use obzenflow_infra::application::{Banner, FlowApplication, LogLevel, Presentation};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::SinkHandler;
@@ -172,23 +172,33 @@ fn main() -> Result<()> {
     // Set environment to use prometheus exporter
     std::env::set_var("OBZENFLOW_METRICS_EXPORTER", "prometheus");
 
-    println!("🚀 Prometheus 100k Demo with FlowApplication Framework");
-    println!("========================================================");
-    println!("📊 Processing 100,000 events demonstrating:");
-    println!("   • Flow-level rate limiting middleware");
-    println!("   • Fan-out topology (processor → counter + sink)");
-    println!("   • StatefulHandler for business-level counting");
-    println!("   • Framework Prometheus metrics");
-    println!();
-    println!("Usage:");
-    println!("  Basic:              cargo run --package obzenflow --example prometheus_100k_demo");
-    println!("  With metrics:       cargo run --package obzenflow --example prometheus_100k_demo --features obzenflow_infra/warp-server -- --server");
-    println!("  Custom port:        cargo run --package obzenflow --example prometheus_100k_demo --features obzenflow_infra/warp-server -- --server --server-port 8080");
-    println!();
+    let presentation = Presentation::new(
+        Banner::new("Prometheus 100k Demo")
+            .description("100,000 events with rate limiting and fan-out.")
+            .bullets(
+                "Demonstrating",
+                [
+                    "Flow-level rate limiting middleware",
+                    "Fan-out topology (processor -> counter + sink)",
+                    "StatefulHandler for business-level counting",
+                    "Framework Prometheus metrics",
+                ],
+            )
+            .section(
+                "Usage",
+                "Basic:        cargo run --package obzenflow --example prometheus_100k_demo\nWith metrics: cargo run --package obzenflow --example prometheus_100k_demo --features obzenflow_infra/warp-server -- --server\nCustom port:  cargo run --package obzenflow --example prometheus_100k_demo --features obzenflow_infra/warp-server -- --server --server-port 8080",
+            ),
+    )
+    .with_footer(|outcome| {
+        outcome
+            .into_footer()
+            .paragraph("Run with --server flag and visit /metrics for Prometheus metrics.")
+    });
 
     // Use FlowApplication builder - handles runtime, observability, and features automatically.
     FlowApplication::builder()
-        .with_log_level(obzenflow_infra::application::LogLevel::Info)
+        .with_log_level(LogLevel::Info)
+        .with_presentation(presentation)
         .run_blocking(flow! {
             name: "prometheus_100k_demo",
             journals: disk_journals(std::path::PathBuf::from("target/prometheus_100k_demo_journal")),

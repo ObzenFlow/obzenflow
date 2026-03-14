@@ -28,7 +28,7 @@ use obzenflow_core::{
     TypedPayload, WriterId,
 };
 use obzenflow_dsl::{flow, sink, source, stateful, transform};
-use obzenflow_infra::application::FlowApplication;
+use obzenflow_infra::application::{Banner, FlowApplication, Presentation};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{SinkHandler, StatefulHandler};
@@ -268,17 +268,6 @@ fn smart_router() -> Map<impl Fn(ChainEvent) -> ChainEvent + Send + Sync + Clone
     })
 }
 
-fn print_sink_summary(name: &str, route: &str, count: usize) {
-    // Fixed width for deterministic alignment
-    println!();
-    println!("┌──────────────────────────────────────────────┐");
-    println!("│ FAN-OUT SINK SUMMARY {:>19} │", format!("({})", name));
-    println!("├──────────────────────────────────────────────┤");
-    println!("│ Route handled : {route:<25}│");
-    println!("│ Events seen   : {count:<25}│");
-    println!("└──────────────────────────────────────────────┘");
-}
-
 /// Sink that processes events for a specific priority
 #[derive(Clone, Debug)]
 struct PrioritySink {
@@ -331,146 +320,155 @@ async fn main() -> Result<()> {
     // Set environment to use console exporter
     std::env::set_var("OBZENFLOW_METRICS_EXPORTER", "console");
 
-    println!("🕸️  Topology Patterns Demo - Fan-In, Fan-Out, and Diamond Pattern");
-    println!("================================================================\n");
-    println!("Demonstrating:");
-    println!("  • Fan-in: Multiple sources → single aggregator");
-    println!("  • Fan-out: Single router → multiple sinks");
-    println!("  • Diamond pattern: Realistic ETL topology");
-    println!("  • StatefulHandler for aggregation (no Arc<Mutex>)");
-    println!("  • Independent journal readers\n");
-
     let journal_path = std::path::PathBuf::from("target/topology_patterns_demo_journal");
     let low_counter = Arc::new(AtomicUsize::new(0));
     let med_counter = Arc::new(AtomicUsize::new(0));
     let high_counter = Arc::new(AtomicUsize::new(0));
 
-    println!("Topology:");
-    println!("  kafka_source (5 events)  ──┐");
-    println!("  api_source (4 events)    ──┼──> aggregator (fan-in)");
-    println!("  file_source (4 events)   ──┘            │");
-    println!("                                           ▼");
-    println!("                                        router");
-    println!("                                           │");
-    println!("                         ┌─────────────────┼─────────────────┐");
-    println!("                         ▼                 ▼                 ▼");
-    println!("                    low_sink          med_sink          high_sink");
-    println!("                   (value<30)       (30≤value<70)      (value≥70)\n");
+    let footer_low = low_counter.clone();
+    let footer_med = med_counter.clone();
+    let footer_high = high_counter.clone();
+
+    let presentation = Presentation::new(
+        Banner::new("Topology Patterns Demo")
+            .description("Fan-in, fan-out, and diamond topology patterns.")
+            .bullets(
+                "Demonstrating",
+                [
+                    "Fan-in: Multiple sources -> single aggregator",
+                    "Fan-out: Single router -> multiple sinks",
+                    "Diamond pattern: Realistic ETL topology",
+                    "StatefulHandler for aggregation (no Arc<Mutex>)",
+                    "Independent journal readers",
+                ],
+            )
+            .section(
+                "Topology",
+                "kafka_source (5 events)  --┐\napi_source (4 events)    --┼--> aggregator (fan-in)\nfile_source (4 events)   --┘            |\n                                        v\n                                     router\n                                        |\n                      ┌─────────────────┼─────────────────┐\n                      v                 v                 v\n                 low_sink          med_sink          high_sink\n                (value<30)       (30<=value<70)      (value>=70)",
+            ),
+    )
+    .with_footer(move |outcome| {
+        let low = footer_low.load(Ordering::Relaxed);
+        let med = footer_med.load(Ordering::Relaxed);
+        let high = footer_high.load(Ordering::Relaxed);
+
+        outcome
+            .into_footer()
+            .bullets(
+                "Fan-out sink summary",
+                [
+                    format!("LOW (value<30): {low}"),
+                    format!("MEDIUM (30<=value<70): {med}"),
+                    format!("HIGH (value>=70): {high}"),
+                ],
+            )
+            .bullets(
+                "Key insights",
+                [
+                    "Fan-in: Aggregator subscribed to 3 upstream journals\n  Each source had an independent journal reader\n  Round-robin reading ensures fairness\n  No special merge primitive is needed",
+                    "Fan-out: Each sink created its own journal reader\n  Readers progress independently\n  Natural backpressure means slow sinks do not block fast ones\n  All sinks see all events (broadcast behaviour)",
+                    "Diamond pattern combines both\n  Multiple inputs are merged and processed\n  Results are distributed to multiple outputs\n  Common in ETL, event routing, and microservices",
+                ],
+            )
+    });
 
     // Use FlowApplication for modern pattern
     let low_counter_flow = low_counter.clone();
     let med_counter_flow = med_counter.clone();
     let high_counter_flow = high_counter.clone();
 
-    FlowApplication::run(flow! {
-        name: "topology_patterns",
-        journals: disk_journals(journal_path.clone()),
-        middleware: [],
+    FlowApplication::run_with_presentation(
+        flow! {
+            name: "topology_patterns",
+            journals: disk_journals(journal_path.clone()),
+            middleware: [],
 
-        stages: {
-            // FAN-IN: Three sources feeding into one aggregator
-            kafka_source = source!(RawDataEvent => sources::finite_from_fn({
-                let source = "kafka".to_string();
-                move |index| {
-                    if index >= 5 {
-                        return None;
+            stages: {
+                // FAN-IN: Three sources feeding into one aggregator
+                kafka_source = source!(RawDataEvent => sources::finite_from_fn({
+                    let source = "kafka".to_string();
+                    move |index| {
+                        if index >= 5 {
+                            return None;
+                        }
+                        let id = index + 1;
+                        Some(RawDataEvent {
+                            source: source.clone(),
+                            id,
+                            value: (id * 20) as i64,
+                        })
                     }
-                    let id = index + 1;
-                    Some(RawDataEvent {
-                        source: source.clone(),
-                        id,
-                        value: (id * 20) as i64,
-                    })
-                }
-            }));
-            api_source = source!(RawDataEvent => sources::finite_from_fn({
-                let source = "api".to_string();
-                move |index| {
-                    if index >= 4 {
-                        return None;
+                }));
+                api_source = source!(RawDataEvent => sources::finite_from_fn({
+                    let source = "api".to_string();
+                    move |index| {
+                        if index >= 4 {
+                            return None;
+                        }
+                        let id = index + 1;
+                        Some(RawDataEvent {
+                            source: source.clone(),
+                            id,
+                            value: (id * 20) as i64,
+                        })
                     }
-                    let id = index + 1;
-                    Some(RawDataEvent {
-                        source: source.clone(),
-                        id,
-                        value: (id * 20) as i64,
-                    })
-                }
-            }));
-            file_source = source!(RawDataEvent => sources::finite_from_fn({
-                let source = "file".to_string();
-                move |index| {
-                    if index >= 4 {
-                        return None;
+                }));
+                file_source = source!(RawDataEvent => sources::finite_from_fn({
+                    let source = "file".to_string();
+                    move |index| {
+                        if index >= 4 {
+                            return None;
+                        }
+                        let id = index + 1;
+                        Some(RawDataEvent {
+                            source: source.clone(),
+                            id,
+                            value: (id * 20) as i64,
+                        })
                     }
-                    let id = index + 1;
-                    Some(RawDataEvent {
-                        source: source.clone(),
-                        id,
-                        value: (id * 20) as i64,
-                    })
-                }
-            }));
+                }));
 
-            // Aggregator demonstrates fan-in with StatefulHandler
-            aggregator = stateful!(MultiSourceAggregator::new().with_expected({
-                let mut m = BTreeMap::new();
-                m.insert("kafka".to_string(), 5);
-                m.insert("api".to_string(), 4);
-                m.insert("file".to_string(), 4);
-                m
-            }));
+                // Aggregator demonstrates fan-in with StatefulHandler
+                aggregator = stateful!(MultiSourceAggregator::new().with_expected({
+                    let mut m = BTreeMap::new();
+                    m.insert("kafka".to_string(), 5);
+                    m.insert("api".to_string(), 4);
+                    m.insert("file".to_string(), 4);
+                    m
+                }));
 
-            // ✨ FLOWIP-080h: Router distributes to multiple sinks using Map helper
-            router = transform!(smart_router());
+                // ✨ FLOWIP-080h: Router distributes to multiple sinks using Map helper
+                router = transform!(smart_router());
 
-            // FAN-OUT: Three sinks receiving from one router
-            low_sink = sink!(PrioritySink::new("LOW", "low", low_counter_flow.clone()));
-            med_sink = sink!(PrioritySink::new(
-                "MEDIUM",
-                "medium",
-                med_counter_flow.clone()
-            ));
-            high_sink = sink!(PrioritySink::new("HIGH", "high", high_counter_flow.clone()));
+                // FAN-OUT: Three sinks receiving from one router
+                low_sink = sink!(PrioritySink::new("LOW", "low", low_counter_flow.clone()));
+                med_sink = sink!(PrioritySink::new(
+                    "MEDIUM",
+                    "medium",
+                    med_counter_flow.clone()
+                ));
+                high_sink = sink!(PrioritySink::new("HIGH", "high", high_counter_flow.clone()));
+            },
+
+            topology: {
+                // FAN-IN: Multiple sources to single aggregator
+                kafka_source |> aggregator;
+                api_source |> aggregator;
+                file_source |> aggregator;
+
+                // Processing chain
+                aggregator |> router;
+
+                // FAN-OUT: Single router to multiple sinks
+                // Each sink creates its own independent journal reader
+                router |> low_sink;
+                router |> med_sink;
+                router |> high_sink;
+            }
         },
-
-        topology: {
-            // FAN-IN: Multiple sources to single aggregator
-            kafka_source |> aggregator;
-            api_source |> aggregator;
-            file_source |> aggregator;
-
-            // Processing chain
-            aggregator |> router;
-
-            // FAN-OUT: Single router to multiple sinks
-            // Each sink creates its own independent journal reader
-            router |> low_sink;
-            router |> med_sink;
-            router |> high_sink;
-        }
-    })
+        presentation,
+    )
     .await?;
-
-    // Deterministic, consolidated fan-out summaries
-    print_sink_summary("LOW", "low", low_counter.load(Ordering::Relaxed));
-    print_sink_summary("MEDIUM", "medium", med_counter.load(Ordering::Relaxed));
-    print_sink_summary("HIGH", "high", high_counter.load(Ordering::Relaxed));
-
-    println!("\n\nFlow completed successfully!");
-    println!("\nKey insights:");
-    println!("  • Fan-in: Aggregator subscribed to 3 upstream journals");
-    println!("    - Each source had independent journal reader");
-    println!("    - Round-robin reading ensures fairness");
-    println!("    - No special merge primitive needed");
-    println!("  • Fan-out: Each sink created its own journal reader");
-    println!("    - Readers progress independently");
-    println!("    - Natural backpressure (slow sinks don't block fast ones)");
-    println!("    - All sinks see all events (broadcast behavior)");
-    println!("  • Diamond pattern combines both:");
-    println!("    - Multiple inputs merged and processed");
-    println!("    - Results distributed to multiple outputs");
-    println!("    - Common in ETL, event routing, microservices");
 
     Ok(())
 }

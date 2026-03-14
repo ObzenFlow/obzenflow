@@ -52,9 +52,48 @@
 //! - `OPENAI_API_KEY=...` (required for `HN_AI_PROVIDER=openai` and `HN_AI_PROVIDER=openai_compatible`)
 //! - `OPENAI_BASE_URL=http://localhost:8080/v1` (required for `HN_AI_PROVIDER=openai_compatible`)
 
-mod support;
+mod config;
+mod decoder;
+mod domain;
+mod flow;
+mod mock_server;
+mod util;
+
+use obzenflow_infra::application::{Banner, Presentation, RunPresentationOutcome};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    support::flow::run_example().await
+    if std::env::var("OBZENFLOW_METRICS_EXPORTER").is_err() {
+        std::env::set_var("OBZENFLOW_METRICS_EXPORTER", "console");
+    }
+
+    let config = config::DemoConfig::from_env().await?;
+
+    let presentation = Presentation::new(
+        Banner::new("HN AI Digest Demo")
+            .description(
+                "Fetch top HN stories, then generate a markdown digest via Rig-backed LLM transforms.",
+            )
+            .config("mode", &config.mode_label)
+            .config("base_url", config.base_url.to_string())
+            .config("max_stories", config.max_stories)
+            .config("poll_timeout", format!("{}s", config.poll_timeout_secs))
+            .section("AI", &config.ai)
+            .config("group_budget_tokens", config.budget_per_group_tokens)
+            .config("group_max_stories", config.group_max_stories_label())
+            .config("source_rate_limit", format!("{} events/sec", config.source_rate_limit)),
+    )
+    .with_footer(|outcome| {
+        let is_success = matches!(&outcome, RunPresentationOutcome::Completed { .. });
+        let footer = outcome.into_footer();
+        if is_success {
+            footer.paragraph(
+                "The generated digest was printed above.\nRe-run with HN_LIVE=1 to fetch from the real Hacker News API.",
+            )
+        } else {
+            footer
+        }
+    });
+
+    flow::run_example(config, presentation).await
 }

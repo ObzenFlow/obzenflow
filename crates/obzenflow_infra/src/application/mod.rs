@@ -10,7 +10,9 @@
 mod config;
 mod error;
 mod flow_application;
+mod presentation;
 
 pub use config::FlowConfig;
 pub use error::ApplicationError;
 pub use flow_application::{FlowApplication, FlowApplicationBuilder, LogLevel};
+pub use presentation::{Banner, Footer, Presentation, RunPresentationOutcome};

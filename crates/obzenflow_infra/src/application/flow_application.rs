@@ -11,7 +11,7 @@
 //! - HTTP server management
 //! - Graceful shutdown handling
 
-use super::{ApplicationError, FlowConfig};
+use super::{ApplicationError, FlowConfig, Presentation, RunPresentationOutcome};
 use crate::application::config::CorsModeArg;
 use crate::application::config::StartupMode;
 use clap::Parser;
@@ -79,6 +79,7 @@ pub struct FlowApplicationBuilder {
     log_level: Option<LogLevel>,
     web_endpoints: Vec<Box<dyn HttpEndpoint>>,
     flow_handle_hooks: Vec<FlowHandleHook>,
+    presentation: Option<Presentation>,
 }
 
 impl FlowApplicationBuilder {
@@ -143,6 +144,11 @@ impl FlowApplicationBuilder {
         self
     }
 
+    pub fn with_presentation(mut self, presentation: Presentation) -> Self {
+        self.presentation = Some(presentation);
+        self
+    }
+
     /// Run the flow in a blocking context (without #[tokio::main])
     ///
     /// This builds the tokio runtime, initializes observability, and runs the flow.
@@ -159,11 +165,14 @@ impl FlowApplicationBuilder {
         self.init_observability(Some(runtime.handle()));
 
         // Run the flow in the runtime
-        runtime.block_on(FlowApplication::run_with_web_endpoints_and_hooks(
-            flow,
-            self.web_endpoints,
-            self.flow_handle_hooks,
-        ))
+        runtime.block_on(
+            FlowApplication::run_with_web_endpoints_and_hooks_and_presentation(
+                flow,
+                self.web_endpoints,
+                self.flow_handle_hooks,
+                self.presentation,
+            ),
+        )
     }
 
     /// Run the flow in an existing async context (with #[tokio::main])
@@ -175,10 +184,11 @@ impl FlowApplicationBuilder {
         self.init_observability(Some(&tokio::runtime::Handle::current()));
 
         // Run the flow
-        FlowApplication::run_with_web_endpoints_and_hooks(
+        FlowApplication::run_with_web_endpoints_and_hooks_and_presentation(
             flow,
             self.web_endpoints,
             self.flow_handle_hooks,
+            self.presentation,
         )
         .await
     }
@@ -357,6 +367,19 @@ impl FlowApplication {
         Self::run_with_web_endpoints(flow, Vec::new()).await
     }
 
+    pub async fn run_with_presentation(
+        flow: FlowDefinition,
+        presentation: Presentation,
+    ) -> Result<(), ApplicationError> {
+        Self::run_with_web_endpoints_and_hooks_and_presentation(
+            flow,
+            Vec::new(),
+            Vec::new(),
+            Some(presentation),
+        )
+        .await
+    }
+
     /// Run a flow and host additional web endpoints when `--server` is enabled.
     pub async fn run_with_web_endpoints(
         flow: FlowDefinition,
@@ -369,6 +392,21 @@ impl FlowApplication {
         flow: FlowDefinition,
         extra_endpoints: Vec<Box<dyn HttpEndpoint>>,
         flow_handle_hooks: Vec<FlowHandleHook>,
+    ) -> Result<(), ApplicationError> {
+        Self::run_with_web_endpoints_and_hooks_and_presentation(
+            flow,
+            extra_endpoints,
+            flow_handle_hooks,
+            None,
+        )
+        .await
+    }
+
+    pub(crate) async fn run_with_web_endpoints_and_hooks_and_presentation(
+        flow: FlowDefinition,
+        extra_endpoints: Vec<Box<dyn HttpEndpoint>>,
+        flow_handle_hooks: Vec<FlowHandleHook>,
+        presentation: Option<Presentation>,
     ) -> Result<(), ApplicationError> {
         // Best-effort tracing initialization when the builder isn't used.
         // This ensures examples like char_transform still emit logs without
@@ -387,322 +425,471 @@ impl FlowApplication {
         // Parse CLI arguments automatically (like Spring Boot)
         let config = FlowConfig::parse();
 
-        if !extra_endpoints.is_empty() && !config.server {
-            return Err(ApplicationError::InvalidConfiguration(
-                "Web endpoints were configured, but FlowApplication is not running with --server"
-                    .to_string(),
-            ));
-        }
-
-        if !config.cors_allow_origin.is_empty() && config.cors_mode != CorsModeArg::AllowList {
-            return Err(ApplicationError::InvalidConfiguration(
-                "--cors-allow-origin requires --cors-mode=allow-list".to_string(),
-            ));
-        }
-        if config.cors_mode == CorsModeArg::AllowList && config.cors_allow_origin.is_empty() {
-            return Err(ApplicationError::InvalidConfiguration(
-                "--cors-mode=allow-list requires at least one --cors-allow-origin".to_string(),
-            ));
-        }
-
-        if config.allow_incomplete_archive && config.replay_from.is_none() {
-            return Err(ApplicationError::InvalidConfiguration(
-                "--allow-incomplete-archive requires --replay-from".to_string(),
-            ));
-        }
-
-        if let Some(path) = &config.replay_from {
-            if !path.is_dir() {
-                return Err(ApplicationError::InvalidConfiguration(format!(
-                    "--replay-from must be a directory: {}",
-                    path.display()
-                )));
-            }
-            let manifest_path = path.join(obzenflow_core::journal::RUN_MANIFEST_FILENAME);
-            if !manifest_path.exists() {
-                return Err(ApplicationError::InvalidConfiguration(format!(
-                    "Replay archive is missing {} at {}",
-                    obzenflow_core::journal::RUN_MANIFEST_FILENAME,
-                    manifest_path.display()
-                )));
-            }
-        }
-
-        // Export replay options to environment so infra can inject a replay archive
-        // implementation into runtime services during flow build (FLOWIP-095a).
-        match &config.replay_from {
-            Some(path) => std::env::set_var("OBZENFLOW_REPLAY_FROM", path),
-            None => std::env::remove_var("OBZENFLOW_REPLAY_FROM"),
-        }
-        if config.allow_incomplete_archive {
-            std::env::set_var("OBZENFLOW_ALLOW_INCOMPLETE_ARCHIVE", "1");
-        } else {
-            std::env::remove_var("OBZENFLOW_ALLOW_INCOMPLETE_ARCHIVE");
-        }
-
-        // Export startup mode to environment so lower layers (runtime_services)
-        // can adjust behaviour (e.g. disable auto-Run in manual mode).
-        // This is primarily used by the pipeline supervisor (FLOWIP-059).
-        if config.server {
-            match config.startup_mode {
-                StartupMode::Auto => {
-                    std::env::set_var("OBZENFLOW_STARTUP_MODE", "auto");
-                }
-                StartupMode::Manual => {
-                    std::env::set_var("OBZENFLOW_STARTUP_MODE", "manual");
-                }
-            }
-        }
-
-        // Note: Logging/console-subscriber should be initialized in main() before
-        // the tokio runtime is created for console_subscriber to work properly
+        let presentation_enabled = presentation.is_some();
 
         // Clear any stale run-dir hint from prior FlowApplication runs (OT-17).
         let _ = crate::journal::factory::take_last_run_dir();
 
-        tracing::info!("🚀 Starting FlowApplication");
-
-        // Build the flow (this executes the flow! macro)
-        let flow_handle = match flow.await {
-            Ok(handle) => handle,
-            Err(e) => {
-                let _ = crate::journal::factory::take_last_run_dir();
-                return Err(ApplicationError::FlowBuildFailed(e.to_string()));
+        if let Some(presentation) = &presentation {
+            let rendered = presentation.banner().render_for_stdout();
+            for warning in rendered.warnings {
+                tracing::warn!("{warning}");
             }
-        };
+            print!("{}", rendered.text);
+        }
 
-        // If disk journals were used, this is the on-disk run directory path (OT-17).
-        let run_dir = crate::journal::factory::take_last_run_dir();
-
-        let print_replay_hint = |run_dir: &std::path::Path| {
-            println!("FlowApplication complete!");
-            println!("To replay, add: --replay-from {}", run_dir.display());
-            println!("(Source config env vars are ignored during replay)");
-        };
-
-        let flow_handle = Arc::new(flow_handle);
-
-        let _hook_tasks: Vec<JoinHandle<()>> = flow_handle_hooks
-            .iter()
-            .map(|hook| hook(&flow_handle))
-            .collect();
-
-        // Start server if --server flag present
-        let server_handle = if config.server {
-            let cors_mode = match config.cors_mode {
-                CorsModeArg::AllowAnyOrigin => CorsMode::AllowAnyOrigin,
-                CorsModeArg::AllowList => CorsMode::AllowList(config.cors_allow_origin.clone()),
-                CorsModeArg::SameOrigin => CorsMode::SameOrigin,
-            };
-            let mut server_config = ServerConfig::localhost(config.server_port);
-            server_config.cors = Some(CorsConfig { mode: cors_mode });
-            Self::start_server(&flow_handle, server_config, extra_endpoints).await?
-        } else {
-            None
-        };
-
-        if config.server {
-            if server_handle.is_none() {
-                match config.startup_mode {
-                    StartupMode::Manual => {
-                        return Err(ApplicationError::FeatureNotEnabled(
-                            "warp-server".to_string(),
-                        ));
-                    }
-                    StartupMode::Auto => {
-                        tracing::warn!("⚠️  Continuing without HTTP server");
-                        tracing::info!("▶️  Starting flow execution (no server)");
-                        let handle = Arc::try_unwrap(flow_handle).map_err(|_| {
-                            ApplicationError::FlowExecutionFailed(
-                                "Failed to unwrap FlowHandle for non-server execution".to_string(),
-                            )
-                        })?;
-                        let result = handle
-                            .run()
-                            .await
-                            .map_err(|e| ApplicationError::FlowExecutionFailed(e.to_string()));
-                        if result.is_ok() {
-                            if let Some(run_dir_path) = run_dir.as_deref() {
-                                print_replay_hint(run_dir_path);
-                            }
-                        }
-                        return result;
-                    }
-                }
+        let (result, flow_name, run_dir, stopped) = 'run: {
+            if !extra_endpoints.is_empty() && !config.server {
+                break 'run (
+                    Err(ApplicationError::InvalidConfiguration(
+                        "Web endpoints were configured, but FlowApplication is not running with --server"
+                            .to_string(),
+                    )),
+                    None,
+                    None,
+                    false,
+                );
             }
 
-            // Server mode: lifecycle is controlled via HTTP (and optionally startup_mode).
-            match config.startup_mode {
-                StartupMode::Auto => {
-                    tracing::info!("▶️  Starting flow execution (startup_mode=auto)");
-                    flow_handle
-                        .start()
-                        .await
-                        .map_err(|e| ApplicationError::FlowExecutionFailed(e.to_string()))?;
+            if !config.cors_allow_origin.is_empty() && config.cors_mode != CorsModeArg::AllowList {
+                break 'run (
+                    Err(ApplicationError::InvalidConfiguration(
+                        "--cors-allow-origin requires --cors-mode=allow-list".to_string(),
+                    )),
+                    None,
+                    None,
+                    false,
+                );
+            }
+            if config.cors_mode == CorsModeArg::AllowList && config.cors_allow_origin.is_empty() {
+                break 'run (
+                    Err(ApplicationError::InvalidConfiguration(
+                        "--cors-mode=allow-list requires at least one --cors-allow-origin"
+                            .to_string(),
+                    )),
+                    None,
+                    None,
+                    false,
+                );
+            }
+
+            if config.allow_incomplete_archive && config.replay_from.is_none() {
+                break 'run (
+                    Err(ApplicationError::InvalidConfiguration(
+                        "--allow-incomplete-archive requires --replay-from".to_string(),
+                    )),
+                    None,
+                    None,
+                    false,
+                );
+            }
+
+            if let Some(path) = &config.replay_from {
+                if !path.is_dir() {
+                    break 'run (
+                        Err(ApplicationError::InvalidConfiguration(format!(
+                            "--replay-from must be a directory: {}",
+                            path.display()
+                        ))),
+                        None,
+                        None,
+                        false,
+                    );
                 }
-                StartupMode::Manual => {
-                    tracing::info!(
-                        "⏸️  startup_mode=manual; waiting for Play via /api/flow/control"
+                let manifest_path = path.join(obzenflow_core::journal::RUN_MANIFEST_FILENAME);
+                if !manifest_path.exists() {
+                    break 'run (
+                        Err(ApplicationError::InvalidConfiguration(format!(
+                            "Replay archive is missing {} at {}",
+                            obzenflow_core::journal::RUN_MANIFEST_FILENAME,
+                            manifest_path.display()
+                        ))),
+                        None,
+                        None,
+                        false,
                     );
                 }
             }
 
-            if let Some(server_task) = server_handle {
-                tracing::info!("📊 Server running on port {}", config.server_port);
-                tracing::info!("⏸️  Press Ctrl+C to cancel; send SIGTERM to graceful-stop...");
+            // Export replay options to environment so infra can inject a replay archive
+            // implementation into runtime services during flow build (FLOWIP-095a).
+            match &config.replay_from {
+                Some(path) => std::env::set_var("OBZENFLOW_REPLAY_FROM", path),
+                None => std::env::remove_var("OBZENFLOW_REPLAY_FROM"),
+            }
+            if config.allow_incomplete_archive {
+                std::env::set_var("OBZENFLOW_ALLOW_INCOMPLETE_ARCHIVE", "1");
+            } else {
+                std::env::remove_var("OBZENFLOW_ALLOW_INCOMPLETE_ARCHIVE");
+            }
 
-                let shutdown_timeout_secs = std::env::var("OBZENFLOW_SHUTDOWN_TIMEOUT_SECS")
-                    .ok()
-                    .and_then(|s| s.parse::<u64>().ok())
-                    .unwrap_or(30);
-                let grace_timeout = Duration::from_secs(shutdown_timeout_secs);
-
-                #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-                enum ShutdownSignal {
-                    Sigint,
-                    Sigterm,
-                }
-
-                #[cfg(unix)]
-                let mut sigterm_stream =
-                    tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
-
-                // Wait for first shutdown signal:
-                // - SIGINT (Ctrl+C) => Cancel
-                // - SIGTERM => GracefulStop(timeout=GRACE)
-                let first_signal = {
-                    #[cfg(unix)]
-                    {
-                        tokio::select! {
-                            _ = tokio::signal::ctrl_c() => ShutdownSignal::Sigint,
-                            _ = sigterm_stream.recv() => ShutdownSignal::Sigterm,
-                        }
+            // Export startup mode to environment so lower layers (runtime_services)
+            // can adjust behaviour (e.g. disable auto-Run in manual mode).
+            // This is primarily used by the pipeline supervisor (FLOWIP-059).
+            if config.server {
+                match config.startup_mode {
+                    StartupMode::Auto => {
+                        std::env::set_var("OBZENFLOW_STARTUP_MODE", "auto");
                     }
-                    #[cfg(not(unix))]
-                    {
-                        tokio::signal::ctrl_c().await?;
-                        ShutdownSignal::Sigint
-                    }
-                };
-
-                tracing::info!(?first_signal, "👋 Shutting down server");
-
-                // The web server currently has no explicit shutdown hook; abort its task so we don't
-                // keep servicing requests while the pipeline is draining.
-                server_task.abort();
-                let _ = server_task.await;
-
-                // Best-effort: stop the flow before tearing down the runtime.
-                //
-                // We avoid force-aborting here because it can cancel in-flight disk journal
-                // writes (spawn_blocking), which then surfaces as "Background writer task was
-                // cancelled/panicked" errors inside stage supervisors.
-                match first_signal {
-                    ShutdownSignal::Sigint => {
-                        if let Err(e) = flow_handle.stop_cancel().await {
-                            tracing::warn!(
-                                error = %e,
-                                "Failed to request flow cancel during SIGINT shutdown; continuing shutdown"
-                            );
-                        }
-                    }
-                    ShutdownSignal::Sigterm => {
-                        if let Err(e) = flow_handle.stop_graceful(grace_timeout).await {
-                            tracing::warn!(
-                                error = %e,
-                                "Failed to request flow graceful stop during SIGTERM shutdown; continuing shutdown"
-                            );
-                        }
+                    StartupMode::Manual => {
+                        std::env::set_var("OBZENFLOW_STARTUP_MODE", "manual");
                     }
                 }
+            }
 
-                let mut phase = first_signal;
-                let mut phase_deadline = match first_signal {
-                    ShutdownSignal::Sigint => Instant::now() + grace_timeout,
-                    ShutdownSignal::Sigterm => Instant::now() + grace_timeout,
+            // Note: Logging/console-subscriber should be initialized in main() before
+            // the tokio runtime is created for console_subscriber to work properly
+
+            tracing::info!("🚀 Starting FlowApplication");
+
+            // Build the flow (this executes the flow! macro)
+            let flow_handle = match flow.await {
+                Ok(handle) => handle,
+                Err(e) => {
+                    let run_dir = crate::journal::factory::take_last_run_dir();
+                    break 'run (
+                        Err(ApplicationError::FlowBuildFailed(e.to_string())),
+                        None,
+                        run_dir,
+                        false,
+                    );
+                }
+            };
+
+            // If disk journals were used, this is the on-disk run directory path (OT-17).
+            let run_dir = crate::journal::factory::take_last_run_dir();
+
+            let print_replay_hint = |run_dir: &std::path::Path| {
+                println!("FlowApplication complete!");
+                println!("To replay, add: --replay-from {}", run_dir.display());
+                println!("(Source config env vars are ignored during replay)");
+            };
+
+            let flow_handle = Arc::new(flow_handle);
+            let flow_name = flow_handle.flow_name().to_string();
+
+            let _hook_tasks: Vec<JoinHandle<()>> = flow_handle_hooks
+                .iter()
+                .map(|hook| hook(&flow_handle))
+                .collect();
+
+            // Start server if --server flag present
+            let server_handle = if config.server {
+                let cors_mode = match config.cors_mode {
+                    CorsModeArg::AllowAnyOrigin => CorsMode::AllowAnyOrigin,
+                    CorsModeArg::AllowList => CorsMode::AllowList(config.cors_allow_origin.clone()),
+                    CorsModeArg::SameOrigin => CorsMode::SameOrigin,
                 };
+                let mut server_config = ServerConfig::localhost(config.server_port);
+                server_config.cors = Some(CorsConfig { mode: cors_mode });
 
-                while flow_handle.is_running() {
-                    if Instant::now() >= phase_deadline {
-                        if phase == ShutdownSignal::Sigterm {
-                            tracing::warn!(
-                                grace_secs = grace_timeout.as_secs(),
-                                "Graceful stop timeout expired; escalating to cancel"
+                match Self::start_server(&flow_handle, server_config, extra_endpoints).await {
+                    Ok(server_handle) => server_handle,
+                    Err(err) => {
+                        break 'run (Err(err), Some(flow_name), run_dir, false);
+                    }
+                }
+            } else {
+                None
+            };
+
+            if config.server {
+                if server_handle.is_none() {
+                    match config.startup_mode {
+                        StartupMode::Manual => {
+                            break 'run (
+                                Err(ApplicationError::FeatureNotEnabled(
+                                    "warp-server".to_string(),
+                                )),
+                                Some(flow_name),
+                                run_dir,
+                                false,
                             );
-                            if let Err(e) = flow_handle.stop_cancel_timeout().await {
-                                tracing::warn!(
-                                    error = %e,
-                                    "Failed to request flow cancel during escalation; continuing shutdown"
-                                );
+                        }
+                        StartupMode::Auto => {
+                            tracing::warn!("⚠️  Continuing without HTTP server");
+                            tracing::info!("▶️  Starting flow execution (no server)");
+                            let handle = match Arc::try_unwrap(flow_handle) {
+                                Ok(handle) => handle,
+                                Err(_) => {
+                                    break 'run (
+                                        Err(ApplicationError::FlowExecutionFailed(
+                                            "Failed to unwrap FlowHandle for non-server execution"
+                                                .to_string(),
+                                        )),
+                                        Some(flow_name),
+                                        run_dir,
+                                        false,
+                                    );
+                                }
+                            };
+                            let result = handle
+                                .run()
+                                .await
+                                .map_err(|e| ApplicationError::FlowExecutionFailed(e.to_string()));
+                            if result.is_ok() && !presentation_enabled {
+                                if let Some(run_dir_path) = run_dir.as_deref() {
+                                    print_replay_hint(run_dir_path);
+                                }
                             }
-                            phase = ShutdownSignal::Sigint;
-                            phase_deadline = Instant::now() + grace_timeout;
-                            continue;
+                            break 'run (result, Some(flow_name), run_dir, false);
                         }
+                    }
+                }
 
-                        tracing::warn!(
-                            shutdown_timeout_secs,
-                            "Flow did not terminate within shutdown timeout; exiting anyway"
+                // Server mode: lifecycle is controlled via HTTP (and optionally startup_mode).
+                match config.startup_mode {
+                    StartupMode::Auto => {
+                        tracing::info!("▶️  Starting flow execution (startup_mode=auto)");
+                        if let Err(err) = flow_handle
+                            .start()
+                            .await
+                            .map_err(|e| ApplicationError::FlowExecutionFailed(e.to_string()))
+                        {
+                            break 'run (Err(err), Some(flow_name), run_dir, false);
+                        }
+                    }
+                    StartupMode::Manual => {
+                        tracing::info!(
+                            "⏸️  startup_mode=manual; waiting for Play via /api/flow/control"
                         );
-                        break;
+                    }
+                }
+
+                if let Some(server_task) = server_handle {
+                    tracing::info!("📊 Server running on port {}", config.server_port);
+                    tracing::info!("⏸️  Press Ctrl+C to cancel; send SIGTERM to graceful-stop...");
+
+                    let shutdown_timeout_secs = std::env::var("OBZENFLOW_SHUTDOWN_TIMEOUT_SECS")
+                        .ok()
+                        .and_then(|s| s.parse::<u64>().ok())
+                        .unwrap_or(30);
+                    let grace_timeout = Duration::from_secs(shutdown_timeout_secs);
+
+                    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+                    enum ShutdownSignal {
+                        Sigint,
+                        Sigterm,
                     }
 
-                    if phase == ShutdownSignal::Sigterm {
+                    #[cfg(unix)]
+                    let mut sigterm_stream = match tokio::signal::unix::signal(
+                        tokio::signal::unix::SignalKind::terminate(),
+                    ) {
+                        Ok(stream) => stream,
+                        Err(err) => {
+                            break 'run (
+                                Err(ApplicationError::from(err)),
+                                Some(flow_name),
+                                run_dir,
+                                false,
+                            );
+                        }
+                    };
+
+                    // Wait for first shutdown signal:
+                    // - SIGINT (Ctrl+C) => Cancel
+                    // - SIGTERM => GracefulStop(timeout=GRACE)
+                    let first_signal = {
                         #[cfg(unix)]
                         {
                             tokio::select! {
-                                _ = tokio::time::sleep(Duration::from_millis(50)) => {},
-                                _ = tokio::signal::ctrl_c() => {
-                                    tracing::warn!("Second SIGINT during graceful stop; escalating to cancel");
-                                    let _ = flow_handle.stop_cancel().await;
-                                    phase = ShutdownSignal::Sigint;
-                                    phase_deadline = Instant::now() + grace_timeout;
-                                }
-                                _ = sigterm_stream.recv() => {
-                                    tracing::warn!("Second SIGTERM during graceful stop; escalating to cancel");
-                                    let _ = flow_handle.stop_cancel().await;
-                                    phase = ShutdownSignal::Sigint;
-                                    phase_deadline = Instant::now() + grace_timeout;
-                                }
+                                _ = tokio::signal::ctrl_c() => ShutdownSignal::Sigint,
+                                _ = sigterm_stream.recv() => ShutdownSignal::Sigterm,
                             }
                         }
                         #[cfg(not(unix))]
                         {
-                            tokio::select! {
-                                _ = tokio::time::sleep(Duration::from_millis(50)) => {},
-                                _ = tokio::signal::ctrl_c() => {
-                                    tracing::warn!("Second SIGINT during graceful stop; escalating to cancel");
-                                    let _ = flow_handle.stop_cancel().await;
-                                    phase = ShutdownSignal::Sigint;
-                                    phase_deadline = Instant::now() + grace_timeout;
-                                }
+                            if let Err(err) = tokio::signal::ctrl_c().await {
+                                break 'run (
+                                    Err(ApplicationError::from(err)),
+                                    Some(flow_name),
+                                    run_dir,
+                                    false,
+                                );
+                            }
+                            ShutdownSignal::Sigint
+                        }
+                    };
+
+                    tracing::info!(?first_signal, "👋 Shutting down server");
+
+                    // The web server currently has no explicit shutdown hook; abort its task so we don't
+                    // keep servicing requests while the pipeline is draining.
+                    server_task.abort();
+                    let _ = server_task.await;
+
+                    // Best-effort: stop the flow before tearing down the runtime.
+                    //
+                    // We avoid force-aborting here because it can cancel in-flight disk journal
+                    // writes (spawn_blocking), which then surfaces as "Background writer task was
+                    // cancelled/panicked" errors inside stage supervisors.
+                    match first_signal {
+                        ShutdownSignal::Sigint => {
+                            if let Err(e) = flow_handle.stop_cancel().await {
+                                tracing::warn!(
+                                    error = %e,
+                                    "Failed to request flow cancel during SIGINT shutdown; continuing shutdown"
+                                );
                             }
                         }
-                    } else {
-                        tokio::time::sleep(Duration::from_millis(50)).await;
+                        ShutdownSignal::Sigterm => {
+                            if let Err(e) = flow_handle.stop_graceful(grace_timeout).await {
+                                tracing::warn!(
+                                    error = %e,
+                                    "Failed to request flow graceful stop during SIGTERM shutdown; continuing shutdown"
+                                );
+                            }
+                        }
+                    }
+
+                    let mut phase = first_signal;
+                    let mut phase_deadline = match first_signal {
+                        ShutdownSignal::Sigint => Instant::now() + grace_timeout,
+                        ShutdownSignal::Sigterm => Instant::now() + grace_timeout,
+                    };
+
+                    while flow_handle.is_running() {
+                        if Instant::now() >= phase_deadline {
+                            if phase == ShutdownSignal::Sigterm {
+                                tracing::warn!(
+                                    grace_secs = grace_timeout.as_secs(),
+                                    "Graceful stop timeout expired; escalating to cancel"
+                                );
+                                if let Err(e) = flow_handle.stop_cancel_timeout().await {
+                                    tracing::warn!(
+                                        error = %e,
+                                        "Failed to request flow cancel during escalation; continuing shutdown"
+                                    );
+                                }
+                                phase = ShutdownSignal::Sigint;
+                                phase_deadline = Instant::now() + grace_timeout;
+                                continue;
+                            }
+
+                            tracing::warn!(
+                                shutdown_timeout_secs,
+                                "Flow did not terminate within shutdown timeout; exiting anyway"
+                            );
+                            break;
+                        }
+
+                        if phase == ShutdownSignal::Sigterm {
+                            #[cfg(unix)]
+                            {
+                                tokio::select! {
+                                    _ = tokio::time::sleep(Duration::from_millis(50)) => {},
+                                    _ = tokio::signal::ctrl_c() => {
+                                        tracing::warn!("Second SIGINT during graceful stop; escalating to cancel");
+                                        let _ = flow_handle.stop_cancel().await;
+                                        phase = ShutdownSignal::Sigint;
+                                        phase_deadline = Instant::now() + grace_timeout;
+                                    }
+                                    _ = sigterm_stream.recv() => {
+                                        tracing::warn!("Second SIGTERM during graceful stop; escalating to cancel");
+                                        let _ = flow_handle.stop_cancel().await;
+                                        phase = ShutdownSignal::Sigint;
+                                        phase_deadline = Instant::now() + grace_timeout;
+                                    }
+                                }
+                            }
+                            #[cfg(not(unix))]
+                            {
+                                tokio::select! {
+                                    _ = tokio::time::sleep(Duration::from_millis(50)) => {},
+                                    _ = tokio::signal::ctrl_c() => {
+                                        tracing::warn!("Second SIGINT during graceful stop; escalating to cancel");
+                                        let _ = flow_handle.stop_cancel().await;
+                                        phase = ShutdownSignal::Sigint;
+                                        phase_deadline = Instant::now() + grace_timeout;
+                                    }
+                                }
+                            }
+                        } else {
+                            tokio::time::sleep(Duration::from_millis(50)).await;
+                        }
                     }
                 }
+
+                break 'run (Ok(()), Some(flow_name), run_dir, true);
             }
 
-            Ok(())
-        } else {
-            // Non-server mode: preserve existing behavior (run to completion, no HTTP server)
+            // Non-server mode: preserve existing behaviour (run to completion, no HTTP server)
             tracing::info!("▶️  Starting flow execution (no server)");
-            let handle = Arc::try_unwrap(flow_handle).map_err(|_| {
-                ApplicationError::FlowExecutionFailed(
-                    "Failed to unwrap FlowHandle for non-server execution".to_string(),
-                )
-            })?;
+            let handle = match Arc::try_unwrap(flow_handle) {
+                Ok(handle) => handle,
+                Err(_) => {
+                    break 'run (
+                        Err(ApplicationError::FlowExecutionFailed(
+                            "Failed to unwrap FlowHandle for non-server execution".to_string(),
+                        )),
+                        Some(flow_name),
+                        run_dir,
+                        false,
+                    );
+                }
+            };
             let result = handle
                 .run()
                 .await
                 .map_err(|e| ApplicationError::FlowExecutionFailed(e.to_string()));
-            if result.is_ok() {
+            if result.is_ok() && !presentation_enabled {
                 if let Some(run_dir_path) = run_dir.as_deref() {
                     print_replay_hint(run_dir_path);
                 }
             }
-            result
+            break 'run (result, Some(flow_name), run_dir, false);
+        };
+
+        match (result, flow_name, run_dir, stopped) {
+            (Ok(()), flow_name, run_dir, stopped) => {
+                if let Some(presentation) = &presentation {
+                    let flow_name = flow_name.unwrap_or_else(|| "Flow".to_string());
+                    let outcome = if stopped {
+                        RunPresentationOutcome::Stopped { flow_name, run_dir }
+                    } else {
+                        RunPresentationOutcome::Completed { flow_name, run_dir }
+                    };
+                    let rendered_footer_banner = presentation.render_footer_banner();
+                    let footer = presentation.render_footer(outcome);
+                    if rendered_footer_banner.is_some() || !footer.trim().is_empty() {
+                        println!();
+                        if let Some(rendered_banner) = rendered_footer_banner {
+                            for warning in rendered_banner.warnings {
+                                tracing::warn!("{warning}");
+                            }
+                            print!("{}", rendered_banner.text);
+                        }
+                        if !footer.trim().is_empty() {
+                            println!("{footer}");
+                        }
+                    }
+                }
+                Ok(())
+            }
+            (Err(err), flow_name, run_dir, _) => {
+                if let Some(presentation) = &presentation {
+                    let rendered_footer_banner = presentation.render_footer_banner();
+                    let footer = presentation.render_footer(RunPresentationOutcome::Failed {
+                        flow_name,
+                        error: err.to_string(),
+                        run_dir,
+                    });
+                    if rendered_footer_banner.is_some() || !footer.trim().is_empty() {
+                        println!();
+                        if let Some(rendered_banner) = rendered_footer_banner {
+                            for warning in rendered_banner.warnings {
+                                tracing::warn!("{warning}");
+                            }
+                            print!("{}", rendered_banner.text);
+                        }
+                        if !footer.trim().is_empty() {
+                            println!("{footer}");
+                        }
+                    }
+                }
+                Err(err)
+            }
         }
     }
 

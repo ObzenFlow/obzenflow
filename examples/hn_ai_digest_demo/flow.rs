@@ -2,31 +2,25 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
+use super::config::DemoConfig;
 use super::decoder::HnStoryDecoder;
 use super::domain::{FormattedStory, HnStory};
-use super::mock_server::spawn_mock_hn_server;
-use super::util::{env_bool, env_usize, truncate_chars};
+use super::util::truncate_chars;
 use anyhow::{anyhow, Result};
-use obzenflow::ai::{AiChatTask, EstimateSource, ModelConfig, TokenCount};
-use obzenflow::sources::{HeaderMap, HttpPullConfig, HttpPullSource, Url};
+use obzenflow::ai::{AiChatTask, EstimateSource, TokenCount};
+use obzenflow::sources::{HeaderMap, HttpPullConfig, HttpPullSource};
 use obzenflow::typed::{sinks, stateful as typed_stateful, transforms as typed_transforms};
 use obzenflow_adapters::middleware::control::ai_circuit_breaker;
 use obzenflow_adapters::middleware::RateLimiterBuilder;
 use obzenflow_core::ai::ChatResponse;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{ai_map_reduce, async_source, flow, sink, stateful, transform};
-use obzenflow_infra::application::FlowApplication;
+use obzenflow_infra::application::{FlowApplication, Presentation};
 use obzenflow_infra::http_client::default_http_client;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
-
-const DEFAULT_HN_SOURCE_RATE_LIMIT: f64 = 10.0;
-
-fn env_f64(key: &str) -> Option<f64> {
-    std::env::var(key).ok().and_then(|v| v.parse().ok())
-}
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct HnTopStories {
@@ -146,78 +140,23 @@ impl AiChatTask for ReduceDigestTask {
     }
 }
 
-pub async fn run_example() -> Result<()> {
-    if std::env::var("OBZENFLOW_METRICS_EXPORTER").is_err() {
-        std::env::set_var("OBZENFLOW_METRICS_EXPORTER", "console");
-    }
-
-    let max_stories = env_usize("HN_MAX_STORIES").unwrap_or(30);
-    let poll_timeout_secs = env_usize("HN_POLL_TIMEOUT_SECS").unwrap_or(120);
-    let live = env_bool("HN_LIVE").unwrap_or(false);
-    let source_rate_limit = env_f64("HN_SOURCE_RATE_LIMIT").unwrap_or(DEFAULT_HN_SOURCE_RATE_LIMIT);
-    if source_rate_limit <= 0.0 {
-        return Err(anyhow!("HN_SOURCE_RATE_LIMIT must be greater than zero"));
-    }
-
-    let mut _mock_server = None;
-    let (base_url, mode_label) = if live {
-        (
-            Url::parse("https://hacker-news.firebaseio.com/")
-                .map_err(|e| anyhow!("invalid HN base URL: {e}"))?,
-            "live",
-        )
-    } else {
-        let server = spawn_mock_hn_server().await?;
-        let base_url = server.base_url();
-        _mock_server = Some(server);
-        (base_url, "mock")
-    };
+pub async fn run_example(config: DemoConfig, presentation: Presentation) -> Result<()> {
+    let DemoConfig {
+        max_stories,
+        poll_timeout_secs,
+        source_rate_limit,
+        ai,
+        budget_per_group,
+        max_stories_per_group,
+        interests,
+        mode_label: mode_label_for_summary,
+        base_url,
+        mock_server: _mock_server,
+        ..
+    } = config;
 
     let base_url_for_summary = base_url.to_string();
-    let mode_label_for_summary = mode_label.to_string();
-
-    let ai = ModelConfig::from_env_with_prefix("HN_AI_")?;
-
-    let budget_per_group_tokens =
-        env_usize("HN_AI_GROUP_BUDGET_TOKENS").unwrap_or(match ai.provider_label() {
-            "ollama" => 2500,
-            _ => 6000,
-        }) as u64;
-    if budget_per_group_tokens == 0 {
-        return Err(anyhow!(
-            "HN_AI_GROUP_BUDGET_TOKENS must be greater than zero"
-        ));
-    }
-    let budget_per_group = TokenCount::new(budget_per_group_tokens);
-
-    let max_stories_per_group_raw = env_usize("HN_AI_GROUP_MAX_STORIES").unwrap_or(10);
-    let max_stories_per_group = match max_stories_per_group_raw {
-        0 => None,
-        n => Some(n),
-    };
-
     let estimator = ai.estimator();
-
-    println!("HN AI Digest Demo (FLOWIP-086z)");
-    println!("===============================");
-    println!(
-        "Fetch top HN stories, then generate a markdown digest via Rig-backed LLM transforms."
-    );
-    println!();
-    println!("  mode: {mode_label}");
-    println!("  base_url: {base_url}");
-    println!("  max_stories: {max_stories}");
-    println!("  poll_timeout: {poll_timeout_secs}s");
-    for line in ai.to_string().lines() {
-        println!("  {line}");
-    }
-    println!("  group_budget_tokens: {budget_per_group_tokens}");
-    match max_stories_per_group {
-        None => println!("  group_max_stories: unlimited"),
-        Some(v) => println!("  group_max_stories: {v}"),
-    }
-    println!("  source_rate_limit: {source_rate_limit} events/sec");
-    println!();
 
     let decoder = HnStoryDecoder::new(base_url, max_stories);
     let client = default_http_client().map_err(|e| anyhow!("HTTP client unavailable: {e}"))?;
@@ -241,8 +180,6 @@ pub async fn run_example() -> Result<()> {
             })
         })
         .emit_on_eof();
-
-    let interests = std::env::var("HN_AI_INTERESTS").ok();
 
     let system_prompt = "You write concise, skimmable Hacker News digests from a list of headlines + URLs. Be neutral, avoid hype, and do not invent facts beyond what the titles imply."
         .to_string();
@@ -273,7 +210,7 @@ pub async fn run_example() -> Result<()> {
             chat_prompt_system: system_prompt_for_summary.clone(),
         })?;
 
-    FlowApplication::run(flow! {
+    FlowApplication::run_with_presentation(flow! {
             name: "hn_ai_digest_demo",
             journals: disk_journals(std::path::PathBuf::from("target/hn-ai-digest-logs")),
             middleware: [],
@@ -315,12 +252,8 @@ pub async fn run_example() -> Result<()> {
                 batch |> digest;
                 digest |> digest_summary;
             }
-        })
+        }, presentation)
         .await?;
-
-    println!();
-    println!("Demo completed!");
-    println!("Journal written to: target/hn-ai-digest-logs/");
 
     Ok(())
 }

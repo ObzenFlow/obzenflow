@@ -17,6 +17,8 @@
 //!   outage pattern eventually causes a SeqDivergence transport violation on
 //!   `gateway → summary`, and the flow is expected to fail in tests.
 
+#[cfg(not(test))]
+use super::config::DemoConfig;
 use super::domain::{AuthorizedPayment, PaymentCommand, TrafficPhase, ValidatedPayment};
 use super::sinks::PaymentSummarySink;
 use super::sources::PaymentCommandSource;
@@ -32,6 +34,8 @@ use obzenflow_core::{
     CircuitBreakerContractMode, TypedPayload,
 };
 use obzenflow_dsl::{async_transform, flow, sink, source, transform};
+#[cfg(not(test))]
+use obzenflow_infra::application::{FlowApplication, LogLevel, Presentation};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{AsyncTransformHandler, TransformHandler};
@@ -39,30 +43,6 @@ use serde_json::json;
 use std::num::NonZeroU32;
 
 const BACKPRESSURE_WINDOW: u64 = 1_000;
-
-#[cfg(not(test))]
-fn env_usize(key: &str) -> Option<usize> {
-    std::env::var(key)
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-}
-
-#[cfg(not(test))]
-fn env_f64(key: &str) -> Option<f64> {
-    std::env::var(key)
-        .ok()
-        .and_then(|value| value.parse::<f64>().ok())
-}
-
-#[cfg(not(test))]
-fn env_bool(key: &str) -> Option<bool> {
-    let raw = std::env::var(key).ok()?;
-    match raw.trim().to_ascii_lowercase().as_str() {
-        "1" | "true" | "yes" | "y" | "on" => Some(true),
-        "0" | "false" | "no" | "n" | "off" => Some(false),
-        _ => None,
-    }
-}
 
 /// Stateless transform that performs cheap local validation.
 ///
@@ -418,138 +398,27 @@ fn build_glitchy_flow(config: GlitchyFlowConfig) -> obzenflow_dsl::FlowDefinitio
 }
 
 #[cfg(not(test))]
-pub fn run_example() -> Result<()> {
-    println!("💳 ObzenFlow - Payment Gateway Resilience Demo");
-    println!("{}", "=".repeat(60));
-    println!("This example shows how circuit breakers and rate limits");
-    println!("work together to protect an unreliable dependency.");
-    println!();
-    println!("Highlights:");
-    println!("  • Local validation errors still show up in obzenflow_errors_total");
-    println!("  • The payments source simulates a semi-reliable upstream feed (MQTT/IOT style)");
-    println!("      - When it glitches, the source circuit breaker opens and you can watch:");
-    println!("        obzenflow_circuit_breaker_*{{stage=\"payments\",...}}");
-    println!("  • Gateway outages open the circuit breaker and increase:");
-    println!("      - obzenflow_circuit_breaker_state");
-    println!("      - obzenflow_circuit_breaker_rejection_rate");
-    println!("      - obzenflow_circuit_breaker_consecutive_failures");
-    println!("  • Once open, the breaker stops hammering the gateway.");
-    println!("{}", "=".repeat(60));
-
-    // Use Prometheus exporter by default so it is trivial to inspect
-    // the circuit_breaker_* gauges for this example.
+pub fn run_example(config: DemoConfig, presentation: Presentation) -> Result<()> {
     std::env::set_var("OBZENFLOW_METRICS_EXPORTER", "prometheus");
 
-    let server_mode_requested = std::env::args().any(|arg| arg == "--server");
-
-    // Optional high-volume mode (similar to prometheus_100k_demo):
-    // - Set PAYMENT_GATEWAY_TOTAL_EVENTS=100000 (or any N) to switch the source
-    //   to a glitchy generator that periodically enters Outage.
-    // - Or set PAYMENT_GATEWAY_DURATION_SECS=300 to run for ~N seconds using a
-    //   derived total event count (based on PAYMENT_GATEWAY_RATE_LIMIT).
-    // - When running with `--server` and no env vars are provided, we default
-    //   to a ~5-minute glitchy run so you have time to scrape /metrics.
-    //
-    // Example (longer, server-friendly run):
-    //   PAYMENT_GATEWAY_DURATION_SECS=300 PAYMENT_GATEWAY_RATE_LIMIT=200 \
-    //     cargo run --example payment_gateway_resilience --features obzenflow_infra/warp-server -- --server
-    //
-    // Example (very high volume):
-    //   PAYMENT_GATEWAY_TOTAL_EVENTS=100000 PAYMENT_GATEWAY_RATE_LIMIT=1000 \
-    //     cargo run --example payment_gateway_resilience --features obzenflow_infra/warp-server -- --server
-    //
-    // Async source demo (FLOWIP-086f):
-    //   PAYMENT_GATEWAY_ASYNC_SOURCE=1 \
-    //   PAYMENT_GATEWAY_TOTAL_EVENTS=60000 PAYMENT_GATEWAY_RATE_LIMIT=200 \
-    //     cargo run --example payment_gateway_resilience --features obzenflow_infra/warp-server -- --server
-    //
-    // Optional async poll timeout override (seconds). Use 0 to disable the timeout:
-    //   PAYMENT_GATEWAY_ASYNC_POLL_TIMEOUT_SECS=20
-    let mut total_events = env_usize("PAYMENT_GATEWAY_TOTAL_EVENTS");
-    let duration_secs = env_usize("PAYMENT_GATEWAY_DURATION_SECS");
-    let mut rate_limit_events_per_sec = env_f64("PAYMENT_GATEWAY_RATE_LIMIT");
-    let mut glitchy_reason: Option<&'static str> = None;
-
-    match (total_events, duration_secs, server_mode_requested) {
-        (Some(_), _, _) => {
-            glitchy_reason = Some("PAYMENT_GATEWAY_TOTAL_EVENTS");
-            rate_limit_events_per_sec.get_or_insert(1000.0);
-        }
-        (None, Some(duration_secs), _) => {
-            glitchy_reason = Some("PAYMENT_GATEWAY_DURATION_SECS");
-            let rate = rate_limit_events_per_sec.unwrap_or(200.0);
-            rate_limit_events_per_sec = Some(rate);
-            total_events = Some(((duration_secs as f64) * rate).round().max(1.0) as usize);
-        }
-        (None, None, true) => {
-            glitchy_reason = Some("--server default");
-            rate_limit_events_per_sec.get_or_insert(200.0);
-            total_events = Some(60_000);
-        }
-        (None, None, false) => {}
-    }
-
-    let rate_limit_events_per_sec = rate_limit_events_per_sec.unwrap_or(1.0).max(0.1);
-
-    let warmup_events = env_usize("PAYMENT_GATEWAY_WARMUP_EVENTS").unwrap_or(8_000);
-    let outage_events = env_usize("PAYMENT_GATEWAY_OUTAGE_EVENTS").unwrap_or(1_000);
-    let recovery_events = env_usize("PAYMENT_GATEWAY_RECOVERY_EVENTS").unwrap_or(1_000);
-    let summary_progress_every = env_usize("PAYMENT_GATEWAY_PROGRESS_EVERY").unwrap_or(5_000);
-    let use_async_source = env_bool("PAYMENT_GATEWAY_ASYNC_SOURCE").unwrap_or(false);
-    let async_poll_timeout =
-        match env_usize("PAYMENT_GATEWAY_ASYNC_POLL_TIMEOUT_SECS").unwrap_or(30) {
-            0 => None,
-            secs => Some(std::time::Duration::from_secs(secs as u64)),
-        };
-
-    if let Some(total_events) = total_events {
-        println!("\n🔁 High-volume glitchy mode enabled");
-        if let Some(reason) = glitchy_reason {
-            println!("   enabled_by:     {reason}");
-        }
-        println!(
-            "   payments_src:   {}",
-            if use_async_source {
-                "async (086f)"
-            } else {
-                "sync"
-            }
-        );
-        if use_async_source {
-            match async_poll_timeout {
-                Some(d) => println!("   poll_timeout:   {}s", d.as_secs()),
-                None => println!("   poll_timeout:   disabled"),
-            }
-        }
-        println!("   total_events:   {total_events}");
-        println!("   rate_limit:     {rate_limit_events_per_sec} events/sec");
-        println!("   cycle:          warmup={warmup_events}, outage={outage_events}, recovery={recovery_events}");
-        println!("   flow_name:      payment_gateway_resilience_glitchy_demo");
-        println!("   journal_dir:    target/payment-gateway-logs-glitchy");
-        println!("   progress_log:   every {summary_progress_every} events");
-    }
-
-    let flow = match total_events {
+    let flow = match config.total_events {
         Some(total) => build_glitchy_flow(GlitchyFlowConfig {
             total_events: total,
-            rate_limit_events_per_sec,
-            warmup_events,
-            outage_events,
-            recovery_events,
-            summary_progress_every,
-            use_async_source,
-            async_poll_timeout,
+            rate_limit_events_per_sec: config.rate_limit_events_per_sec,
+            warmup_events: config.warmup_events,
+            outage_events: config.outage_events,
+            recovery_events: config.recovery_events,
+            summary_progress_every: config.summary_progress_every,
+            use_async_source: config.use_async_source,
+            async_poll_timeout: config.async_poll_timeout,
         }),
         None => build_flow(),
     };
 
-    obzenflow_infra::application::FlowApplication::builder()
-        .with_log_level(obzenflow_infra::application::LogLevel::Info)
+    FlowApplication::builder()
+        .with_log_level(LogLevel::Info)
+        .with_presentation(presentation)
         .run_blocking(flow)?;
-
-    println!("\n✅ Payment gateway resilience demo completed!");
-    println!("💡 Next step: scrape /metrics for obzenflow_circuit_breaker_*");
-    println!("    and obzenflow_errors_total to see the full story.");
 
     Ok(())
 }

@@ -9,6 +9,8 @@ use anyhow::Result;
 use obzenflow::typed::{joins, stateful as typed_stateful};
 use obzenflow_adapters::middleware::RateLimiterBuilder;
 use obzenflow_dsl::{flow, join, sink, source, stateful};
+#[cfg(not(test))]
+use obzenflow_infra::application::{FlowApplication, LogLevel, Presentation};
 use obzenflow_infra::journal::disk_journals;
 
 fn build_flow() -> obzenflow_dsl::FlowDefinition {
@@ -212,31 +214,11 @@ fn build_flow() -> obzenflow_dsl::FlowDefinition {
 }
 
 #[cfg(not(test))]
-pub fn run_example() -> Result<()> {
-    println!("🛒 ObzenFlow - Product Catalog Enrichment");
-    println!("{}", "=".repeat(60));
-    println!("✨ Demonstrating All Three Join Strategies:");
-    println!("   • InnerJoin: Core dimension enrichment (Category→Product→SKU)");
-    println!("   • LeftJoin: Optional promotion enrichment");
-    println!("   • StrictJoin: Critical payment validation (Jonestown Protocol)");
-    println!("\n📚 Based on industrial-scale product catalog patterns");
-    println!("{}", "=".repeat(60));
-
-    if std::env::var("INJECT_BAD_PAYMENT").is_ok() {
-        println!("\n🚨 WARNING: INJECT_BAD_PAYMENT is set!");
-        println!("   Pipeline will trigger Jonestown Protocol on invalid payment.");
-        println!("   StrictJoin will emit poison EOF and cascade shutdown.\n");
-    }
-
-    println!("\n📂 Loading Reference Data (Dimensions)...\n");
-
-    obzenflow_infra::application::FlowApplication::builder()
-        .with_log_level(obzenflow_infra::application::LogLevel::Info)
+pub fn run_example(presentation: Presentation) -> Result<()> {
+    FlowApplication::builder()
+        .with_log_level(LogLevel::Info)
+        .with_presentation(presentation)
         .run_blocking(build_flow())?;
-
-    println!("\n✅ Product catalog enrichment completed!");
-    println!("\n💡 Try setting INJECT_BAD_PAYMENT=1 to see StrictJoin trigger Jonestown Protocol!");
-    println!("📝 Journal written to: target/catalog-logs/");
 
     Ok(())
 }

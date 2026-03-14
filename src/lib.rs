@@ -206,6 +206,7 @@
 //!   optional web server.
 
 pub mod ai;
+pub mod application;
 pub mod sinks;
 pub mod sources;
 pub mod typed;
