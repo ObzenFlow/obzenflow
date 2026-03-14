@@ -2022,6 +2022,32 @@ mod tests {
     }
 
     #[test]
+    fn chat_builder_build_map_items_with_prompt_lazy_constructs_transform() {
+        #[derive(Debug, Clone, Serialize, Deserialize)]
+        struct Item {
+            x: i32,
+        }
+
+        #[derive(Debug, Clone, Serialize, Deserialize)]
+        struct Out {
+            ok: bool,
+        }
+
+        impl TypedPayload for Out {
+            const EVENT_TYPE: &'static str = "test.map_items_with_prompt_out";
+        }
+
+        let _transform = ChatTransform::builder()
+            .ollama("llama3.1:8b")
+            .system("x")
+            .build_map_items_with_prompt_lazy::<Item, Out>(
+                |_items| Ok("hi".into()),
+                |_prompt, _response| Ok(Out { ok: true }),
+            )
+            .expect("builder should succeed");
+    }
+
+    #[test]
     fn chat_builder_build_reduce_seeded_lazy_constructs_transform() {
         #[derive(Debug, Clone, Serialize, Deserialize)]
         struct Seed {
@@ -2049,6 +2075,43 @@ mod tests {
             .build_reduce_seeded_lazy::<Seed, Partial, Out>(
                 |_seed, partials| Ok(format!("partials={}", partials.len()).into()),
                 |seed, partials, _response| {
+                    Ok(Out {
+                        seed_id: seed.id,
+                        partials: partials.len(),
+                    })
+                },
+            )
+            .expect("builder should succeed");
+    }
+
+    #[test]
+    fn chat_builder_build_reduce_seeded_with_prompt_lazy_constructs_transform() {
+        #[derive(Debug, Clone, Serialize, Deserialize)]
+        struct Seed {
+            id: u32,
+        }
+
+        #[derive(Debug, Clone, Serialize, Deserialize)]
+        struct Partial {
+            x: i32,
+        }
+
+        #[derive(Debug, Clone, Serialize, Deserialize)]
+        struct Out {
+            seed_id: u32,
+            partials: usize,
+        }
+
+        impl TypedPayload for Out {
+            const EVENT_TYPE: &'static str = "test.reduce_seeded_with_prompt_out";
+        }
+
+        let _transform = ChatTransform::builder()
+            .ollama("llama3.1:8b")
+            .system("x")
+            .build_reduce_seeded_with_prompt_lazy::<Seed, Partial, Out>(
+                |_seed, partials| Ok(format!("partials={}", partials.len()).into()),
+                |seed, partials, _prompt, _response| {
                     Ok(Out {
                         seed_id: seed.id,
                         partials: partials.len(),
@@ -2133,6 +2196,40 @@ mod tests {
     }
 
     #[test]
+    fn chat_builder_context_build_map_items_with_prompt_lazy_constructs_transform() {
+        #[derive(Debug)]
+        struct Ctx {
+            prefix: String,
+        }
+
+        #[derive(Debug, Clone, Serialize, Deserialize)]
+        struct Item {
+            x: i32,
+        }
+
+        #[derive(Debug, Clone, Serialize, Deserialize)]
+        struct Out {
+            ok: bool,
+        }
+
+        impl TypedPayload for Out {
+            const EVENT_TYPE: &'static str = "test.context_map_items_with_prompt_out";
+        }
+
+        let _transform = ChatTransform::builder()
+            .ollama("llama3.1:8b")
+            .system("x")
+            .context(Ctx {
+                prefix: "hello".to_string(),
+            })
+            .build_map_items_with_prompt_lazy::<Item, Out>(
+                |ctx, _items| Ok(format!("{}!", ctx.prefix).into()),
+                |_ctx, _prompt, _response| Ok(Out { ok: true }),
+            )
+            .expect("builder should succeed");
+    }
+
+    #[test]
     fn chat_builder_context_build_reduce_seeded_lazy_constructs_transform() {
         #[derive(Debug)]
         struct Ctx {
@@ -2171,6 +2268,55 @@ mod tests {
                     Ok(format!("{}:{}:{}", ctx.prefix, seed.id, partials.len()).into())
                 },
                 |ctx, seed, partials, _response| {
+                    Ok(Out {
+                        prefix: ctx.prefix.clone(),
+                        seed_id: seed.id,
+                        partials: partials.len(),
+                    })
+                },
+            )
+            .expect("builder should succeed");
+    }
+
+    #[test]
+    fn chat_builder_context_build_reduce_seeded_with_prompt_lazy_constructs_transform() {
+        #[derive(Debug)]
+        struct Ctx {
+            prefix: String,
+        }
+
+        #[derive(Debug, Clone, Serialize, Deserialize)]
+        struct Seed {
+            id: u32,
+        }
+
+        #[derive(Debug, Clone, Serialize, Deserialize)]
+        struct Partial {
+            x: i32,
+        }
+
+        #[derive(Debug, Clone, Serialize, Deserialize)]
+        struct Out {
+            prefix: String,
+            seed_id: u32,
+            partials: usize,
+        }
+
+        impl TypedPayload for Out {
+            const EVENT_TYPE: &'static str = "test.context_reduce_seeded_with_prompt_out";
+        }
+
+        let _transform = ChatTransform::builder()
+            .ollama("llama3.1:8b")
+            .system("x")
+            .context(Ctx {
+                prefix: "p".to_string(),
+            })
+            .build_reduce_seeded_with_prompt_lazy::<Seed, Partial, Out>(
+                |ctx, seed, partials| {
+                    Ok(format!("{}:{}:{}", ctx.prefix, seed.id, partials.len()).into())
+                },
+                |ctx, seed, partials, _prompt, _response| {
                     Ok(Out {
                         prefix: ctx.prefix.clone(),
                         seed_id: seed.id,
