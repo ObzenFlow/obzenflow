@@ -91,6 +91,96 @@ impl From<&str> for ChatRole {
     }
 }
 
+/// A user-role prompt: the per-request instruction sent to the LLM.
+///
+/// This is distinct from arbitrary strings so prompt functions can be traceable
+/// through type signatures.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct UserPrompt(String);
+
+impl UserPrompt {
+    /// Escape hatch for callers that want to construct a prompt directly from a string.
+    pub fn raw(prompt: impl Into<String>) -> Self {
+        Self(prompt.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl AsRef<str> for UserPrompt {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl fmt::Display for UserPrompt {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl From<String> for UserPrompt {
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
+
+impl From<&str> for UserPrompt {
+    fn from(value: &str) -> Self {
+        Self(value.to_string())
+    }
+}
+
+impl From<UserPrompt> for String {
+    fn from(value: UserPrompt) -> Self {
+        value.0
+    }
+}
+
+/// A system-role prompt: the static behavioural instruction for the LLM.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct SystemPrompt(String);
+
+impl SystemPrompt {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl AsRef<str> for SystemPrompt {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl fmt::Display for SystemPrompt {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl From<String> for SystemPrompt {
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
+
+impl From<&str> for SystemPrompt {
+    fn from(value: &str) -> Self {
+        Self(value.to_string())
+    }
+}
+
+impl From<SystemPrompt> for String {
+    fn from(value: SystemPrompt) -> Self {
+        value.0
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ChatMessage {
     pub role: ChatRole,

@@ -53,6 +53,6 @@ pub use token_estimation::{
 };
 pub use types::{
     AiProvider, ChatMessage, ChatParams, ChatRequest, ChatResponse, ChatResponseFormat, ChatRole,
-    EmbeddingParams, EmbeddingRequest, EmbeddingResponse, ToolCall, ToolDefinition, Usage,
-    UsageSource,
+    EmbeddingParams, EmbeddingRequest, EmbeddingResponse, SystemPrompt, ToolCall, ToolDefinition,
+    Usage, UsageSource, UserPrompt,
 };

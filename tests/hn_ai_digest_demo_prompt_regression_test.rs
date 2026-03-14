@@ -16,7 +16,8 @@ fn hn_ai_digest_demo_prompt_discourages_story_echo_and_supports_group_caps() {
         "hn_ai_digest_demo chunk prompt should explicitly discourage echoing the story list"
     );
     assert!(
-        flow_source.contains("Input stories (numbered; do not repeat):"),
+        flow_source.contains("Input stories (numbered; do not repeat):")
+            || flow_source.contains("Input stories (numbered; do not repeat)"),
         "hn_ai_digest_demo chunk prompt should clearly label input stories"
     );
     assert!(

@@ -7,7 +7,7 @@ use super::decoder::HnStoryDecoder;
 use super::domain::{FormattedStory, HnStory};
 use super::util::truncate_chars;
 use anyhow::{anyhow, Result};
-use obzenflow::ai::{EstimateSource, TokenCount};
+use obzenflow::ai::{EstimateSource, Prompt, SystemPrompt, TokenCount, UserPrompt};
 use obzenflow::sources::{HeaderMap, HttpPullConfig, HttpPullSource};
 use obzenflow::typed::{sinks, stateful as typed_stateful, transforms as typed_transforms};
 use obzenflow_adapters::middleware::control::ai_circuit_breaker;
@@ -57,8 +57,8 @@ struct HnDigestSummary {
     budget_per_group: TokenCount,
     groups: usize,
     interests: Option<String>,
-    chat_prompt_system: String,
-    chat_prompt_user: String,
+    chat_prompt_system: SystemPrompt,
+    chat_prompt_user: UserPrompt,
     input: HnTopStories,
     group_summaries: Vec<HnDigestGroupSummary>,
     output_markdown: String,
@@ -75,8 +75,40 @@ struct DigestMapCtx {
 fn digest_map_prompt(
     ctx: &DigestMapCtx,
     stories: &[NumberedStory],
-) -> Result<String, HandlerError> {
-    Ok(build_group_prompt(stories, ctx.interests.as_deref()))
+) -> Result<UserPrompt, HandlerError> {
+    let min_citations = stories.len().min(6);
+
+    let rules: Vec<String> = vec![
+        "Do not invent facts that are not implied by the titles.".to_string(),
+        "Use a neutral, specific tone.".to_string(),
+        "IMPORTANT: Do not repeat the input story list.".to_string(),
+        "Cite stories only by number, like (12); do not paste URLs.".to_string(),
+        format!(
+            "Reference at least {min_citations} distinct story numbers across Themes + Notable stories."
+        ),
+    ];
+
+    let mut p = Prompt::new();
+    p.text_if(ctx.interests.as_deref(), |i| format!("My interests: {i}"))
+        .text("Summarise these Hacker News stories (titles + URLs are provided as input).")
+        .rules(rules)
+        .labeled(
+            "Output format (follow exactly)",
+            "Themes:\n\
+- <theme> (n, n, n): 1 sentence\n\
+- <theme> (n, n, n): 1 sentence\n\
+- <theme> (n, n, n): 1 sentence\n\
+Notable stories:\n\
+- (n) Title: 1 sentence\n\
+- (n) Title: 1 sentence\n\
+- (n) Title: 1 sentence\n\
+- (n) Title: 1 sentence",
+        )
+        .fenced_items("Input stories (numbered; do not repeat)", stories, |s| {
+            render_story_line(s.n, &s.story)
+        });
+
+    Ok(p.finish())
 }
 
 fn digest_map_parse(
@@ -96,26 +128,44 @@ struct DigestReduceCtx {
     ai_model: String,
     token_estimator: EstimateSource,
     budget_per_group: TokenCount,
-    chat_prompt_system: String,
+    chat_prompt_system: SystemPrompt,
 }
 
 fn digest_reduce_prompt(
     ctx: &DigestReduceCtx,
     _seed: &HnTopStories,
     summaries: &[HnDigestGroupSummary],
-) -> Result<String, HandlerError> {
-    Ok(build_reduce_prompt(summaries, ctx.interests.as_deref()))
+) -> Result<UserPrompt, HandlerError> {
+    let rules: Vec<String> = vec![
+        "Do not invent facts that are not implied by the titles.".to_string(),
+        "Start the response immediately with \"## What's topical today\" (no intro).".to_string(),
+        "Include: Thesis, Themes (cite story numbers), Notable stories, Watch.".to_string(),
+        "Avoid generic wrap-ups.".to_string(),
+    ];
+
+    let mut p = Prompt::new();
+    p.text_if(ctx.interests.as_deref(), |i| format!("My interests: {i}"))
+        .text("Write a concise Markdown digest of the following Hacker News chunk summaries.")
+        .rules(rules)
+        .indexed_sections("Chunk summaries", summaries, |idx, summary| {
+            (
+                format!("Group {idx}"),
+                summary.output_markdown.trim().to_string(),
+            )
+        });
+
+    Ok(p.finish())
 }
 
 fn digest_reduce_parse(
     ctx: &DigestReduceCtx,
     seed: HnTopStories,
     summaries: Vec<HnDigestGroupSummary>,
+    user_prompt: UserPrompt,
     response: ChatResponse,
 ) -> Result<HnDigestSummary, HandlerError> {
     let groups = summaries.len();
     let stories_fetched = seed.stories.len();
-    let user_prompt = build_reduce_prompt(&summaries, ctx.interests.as_deref());
 
     Ok(HnDigestSummary {
         mode: ctx.mode_label.clone(),
@@ -176,8 +226,8 @@ pub async fn run_example(config: DemoConfig, presentation: Presentation) -> Resu
         })
         .emit_on_eof();
 
-    let system_prompt = "You write concise, skimmable Hacker News digests from a list of headlines + URLs. Be neutral, avoid hype, and do not invent facts beyond what the titles imply."
-        .to_string();
+    let system_prompt: SystemPrompt = "You write concise, skimmable Hacker News digests from a list of headlines + URLs. Be neutral, avoid hype, and do not invent facts beyond what the titles imply."
+        .into();
 
     let map_llm_handler = ai
         .chat()
@@ -204,7 +254,7 @@ pub async fn run_example(config: DemoConfig, presentation: Presentation) -> Resu
             interests: interests.clone(),
             chat_prompt_system: system_prompt.clone(),
         })
-        .build_reduce_seeded(digest_reduce_prompt, digest_reduce_parse)?;
+        .build_reduce_seeded_with_prompt(digest_reduce_prompt, digest_reduce_parse)?;
 
     FlowApplication::run_with_presentation(flow! {
             name: "hn_ai_digest_demo",
@@ -220,6 +270,11 @@ pub async fn run_example(config: DemoConfig, presentation: Presentation) -> Resu
                 ]);
                 formatter = transform!(HnStory -> FormattedStory => formatter);
                 batch = stateful!(FormattedStory -> HnTopStories => digest_seed);
+
+                // Type bridge:
+                // - map's `[NumberedStory]` comes from `HnTopStories.stories` via
+                //   `items: |seed: &HnTopStories| seed.stories.clone()`.
+                // - reduce's `[HnDigestGroupSummary]` is collected in chunk-index order.
                 digest = ai_map_reduce!(
                     HnTopStories -> HnDigestSummary => {
                         map: [NumberedStory] -> HnDigestGroupSummary => map_llm_handler,
@@ -280,11 +335,11 @@ fn format_digest_summary_for_console(summary: &HnDigestSummary) -> String {
 
     out.push_str("Chat prompt (system)\n");
     out.push_str("--------------------\n");
-    out.push_str(summary.chat_prompt_system.trim());
+    out.push_str(summary.chat_prompt_system.as_ref().trim());
 
     out.push_str("\n\nChat prompt (user)\n");
     out.push_str("------------------\n");
-    out.push_str(summary.chat_prompt_user.trim());
+    out.push_str(summary.chat_prompt_user.as_ref().trim());
 
     out.push_str("\n\nInput data (stories)\n");
     out.push_str("--------------------\n");
@@ -308,47 +363,6 @@ fn format_digest_summary_for_console(summary: &HnDigestSummary) -> String {
     out
 }
 
-fn build_group_prompt(stories: &[NumberedStory], interests: Option<&str>) -> String {
-    let mut out = String::new();
-
-    if let Some(interests) = interests {
-        out.push_str("My interests: ");
-        out.push_str(interests.trim());
-        out.push_str("\n\n");
-    }
-
-    let min_citations = stories.len().min(6);
-    out.push_str("Summarise these Hacker News stories (titles + URLs are provided as input).\n");
-    out.push_str("- Do not invent facts that are not implied by the titles.\n");
-    out.push_str("- Use a neutral, specific tone.\n");
-    out.push_str("- IMPORTANT: Do not repeat the input story list.\n");
-    out.push_str("- Cite stories only by number, like (12); do not paste URLs.\n");
-    out.push_str(&format!(
-        "- Reference at least {min_citations} distinct story numbers across Themes + Notable stories.\n\n",
-    ));
-
-    out.push_str("Output format (follow exactly):\n");
-    out.push_str("Themes:\n");
-    out.push_str("- <theme> (n, n, n): 1 sentence\n");
-    out.push_str("- <theme> (n, n, n): 1 sentence\n");
-    out.push_str("- <theme> (n, n, n): 1 sentence\n");
-    out.push_str("Notable stories:\n");
-    out.push_str("- (n) Title: 1 sentence\n");
-    out.push_str("- (n) Title: 1 sentence\n");
-    out.push_str("- (n) Title: 1 sentence\n");
-    out.push_str("- (n) Title: 1 sentence\n\n");
-
-    out.push_str("Input stories (numbered; do not repeat):\n");
-    out.push_str("```text\n");
-    for numbered in stories {
-        out.push_str(&render_story_line(numbered.n, &numbered.story));
-        out.push('\n');
-    }
-    out.push_str("```\n");
-
-    out
-}
-
 fn strip_accidental_story_echo(markdown: &str) -> String {
     let mut out = String::new();
     for line in markdown.lines() {
@@ -360,31 +374,6 @@ fn strip_accidental_story_echo(markdown: &str) -> String {
         out.push('\n');
     }
     out.trim_end().to_string()
-}
-
-fn build_reduce_prompt(summaries: &[HnDigestGroupSummary], interests: Option<&str>) -> String {
-    let mut out = String::new();
-
-    if let Some(interests) = interests {
-        out.push_str("My interests: ");
-        out.push_str(interests.trim());
-        out.push_str("\n\n");
-    }
-
-    out.push_str("Write a concise Markdown digest of the following Hacker News chunk summaries.\n");
-    out.push_str("- Do not invent facts that are not implied by the titles.\n");
-    out.push_str("- Start the response immediately with \"## What's topical today\" (no intro).\n");
-    out.push_str("- Include: Thesis, Themes (cite story numbers), Notable stories, Watch.\n");
-    out.push_str("- Avoid generic wrap-ups.\n\n");
-
-    out.push_str("Chunk summaries:\n");
-    for (idx, summary) in summaries.iter().enumerate() {
-        out.push_str(&format!("\n### Group {}\n", idx + 1));
-        out.push_str(summary.output_markdown.trim());
-        out.push('\n');
-    }
-
-    out
 }
 
 fn render_story_line(n: usize, story: &FormattedStory) -> String {
