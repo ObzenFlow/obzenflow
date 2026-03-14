@@ -32,6 +32,8 @@ use obzenflow_core::{
     CircuitBreakerContractMode, TypedPayload,
 };
 use obzenflow_dsl::{async_transform, flow, sink, source, transform};
+#[cfg(not(test))]
+use obzenflow_infra::application::{Banner, FlowApplication, LogLevel, Presentation};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{AsyncTransformHandler, TransformHandler};
@@ -419,23 +421,6 @@ fn build_glitchy_flow(config: GlitchyFlowConfig) -> obzenflow_dsl::FlowDefinitio
 
 #[cfg(not(test))]
 pub fn run_example() -> Result<()> {
-    println!("💳 ObzenFlow - Payment Gateway Resilience Demo");
-    println!("{}", "=".repeat(60));
-    println!("This example shows how circuit breakers and rate limits");
-    println!("work together to protect an unreliable dependency.");
-    println!();
-    println!("Highlights:");
-    println!("  • Local validation errors still show up in obzenflow_errors_total");
-    println!("  • The payments source simulates a semi-reliable upstream feed (MQTT/IOT style)");
-    println!("      - When it glitches, the source circuit breaker opens and you can watch:");
-    println!("        obzenflow_circuit_breaker_*{{stage=\"payments\",...}}");
-    println!("  • Gateway outages open the circuit breaker and increase:");
-    println!("      - obzenflow_circuit_breaker_state");
-    println!("      - obzenflow_circuit_breaker_rejection_rate");
-    println!("      - obzenflow_circuit_breaker_consecutive_failures");
-    println!("  • Once open, the breaker stops hammering the gateway.");
-    println!("{}", "=".repeat(60));
-
     // Use Prometheus exporter by default so it is trivial to inspect
     // the circuit_breaker_* gauges for this example.
     std::env::set_var("OBZENFLOW_METRICS_EXPORTER", "prometheus");
@@ -502,32 +487,58 @@ pub fn run_example() -> Result<()> {
             secs => Some(std::time::Duration::from_secs(secs as u64)),
         };
 
+    let mut banner = Banner::new("Payment Gateway Resilience Demo")
+        .description("Circuit breakers and rate limits protecting an unreliable dependency.")
+        .config_block("Highlights:\n• Local validation errors still show up in obzenflow_errors_total\n• The payments source simulates a semi-reliable upstream feed (MQTT/IOT style)\n  - When it glitches, the source circuit breaker opens and you can watch:\n    obzenflow_circuit_breaker_*{stage=\"payments\",...}\n• Gateway outages open the circuit breaker and increase:\n  - obzenflow_circuit_breaker_state\n  - obzenflow_circuit_breaker_rejection_rate\n  - obzenflow_circuit_breaker_consecutive_failures\n• Once open, the breaker stops hammering the gateway.");
+
     if let Some(total_events) = total_events {
-        println!("\n🔁 High-volume glitchy mode enabled");
-        if let Some(reason) = glitchy_reason {
-            println!("   enabled_by:     {reason}");
-        }
-        println!(
-            "   payments_src:   {}",
-            if use_async_source {
-                "async (086f)"
-            } else {
-                "sync"
-            }
-        );
+        let payments_src = if use_async_source {
+            "async (086f)"
+        } else {
+            "sync"
+        };
+        banner = banner
+            .config("mode", "high-volume glitchy")
+            .config("enabled_by", glitchy_reason.unwrap_or("unknown"))
+            .config("payments_src", payments_src);
+
         if use_async_source {
-            match async_poll_timeout {
-                Some(d) => println!("   poll_timeout:   {}s", d.as_secs()),
-                None => println!("   poll_timeout:   disabled"),
-            }
+            let poll_timeout = match async_poll_timeout {
+                Some(d) => format!("{}s", d.as_secs()),
+                None => "disabled".to_string(),
+            };
+            banner = banner.config("poll_timeout", poll_timeout);
         }
-        println!("   total_events:   {total_events}");
-        println!("   rate_limit:     {rate_limit_events_per_sec} events/sec");
-        println!("   cycle:          warmup={warmup_events}, outage={outage_events}, recovery={recovery_events}");
-        println!("   flow_name:      payment_gateway_resilience_glitchy_demo");
-        println!("   journal_dir:    target/payment-gateway-logs-glitchy");
-        println!("   progress_log:   every {summary_progress_every} events");
+
+        banner = banner
+            .config("total_events", total_events)
+            .config(
+                "rate_limit",
+                format!("{rate_limit_events_per_sec} events/sec"),
+            )
+            .config(
+                "cycle",
+                format!(
+                    "warmup={warmup_events}, outage={outage_events}, recovery={recovery_events}"
+                ),
+            )
+            .config("flow_name", "payment_gateway_resilience_glitchy_demo")
+            .config("journal_dir", "target/payment-gateway-logs-glitchy")
+            .config(
+                "progress_log",
+                format!("every {summary_progress_every} events"),
+            );
+    } else {
+        banner = banner
+            .config("flow_name", "payment_gateway_resilience_demo")
+            .config("journal_dir", "target/payment-gateway-logs");
     }
+
+    let presentation = Presentation::new(banner).with_footer(|outcome| {
+        let mut out = outcome.default_footer();
+        out.push_str("\n\n💡 Next step: scrape /metrics for obzenflow_circuit_breaker_* and obzenflow_errors_total.");
+        out
+    });
 
     let flow = match total_events {
         Some(total) => build_glitchy_flow(GlitchyFlowConfig {
@@ -543,13 +554,10 @@ pub fn run_example() -> Result<()> {
         None => build_flow(),
     };
 
-    obzenflow_infra::application::FlowApplication::builder()
-        .with_log_level(obzenflow_infra::application::LogLevel::Info)
+    FlowApplication::builder()
+        .with_log_level(LogLevel::Info)
+        .with_presentation(presentation)
         .run_blocking(flow)?;
-
-    println!("\n✅ Payment gateway resilience demo completed!");
-    println!("💡 Next step: scrape /metrics for obzenflow_circuit_breaker_*");
-    println!("    and obzenflow_errors_total to see the full story.");
 
     Ok(())
 }

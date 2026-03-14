@@ -15,7 +15,7 @@ use obzenflow_adapters::middleware::RateLimiterBuilder;
 use obzenflow_core::ai::ChatResponse;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{ai_map_reduce, async_source, flow, sink, stateful, transform};
-use obzenflow_infra::application::FlowApplication;
+use obzenflow_infra::application::{Banner, FlowApplication, Presentation};
 use obzenflow_infra::http_client::default_http_client;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
@@ -198,26 +198,25 @@ pub async fn run_example() -> Result<()> {
 
     let estimator = ai.estimator();
 
-    println!("HN AI Digest Demo (FLOWIP-086z)");
-    println!("===============================");
-    println!(
-        "Fetch top HN stories, then generate a markdown digest via Rig-backed LLM transforms."
+    let group_max_stories_label = match max_stories_per_group {
+        None => "unlimited".to_string(),
+        Some(v) => v.to_string(),
+    };
+
+    let presentation = Presentation::new(
+        Banner::new("HN AI Digest Demo")
+            .description(
+                "Fetch top HN stories, then generate a markdown digest via Rig-backed LLM transforms.",
+            )
+            .config("mode", mode_label)
+            .config("base_url", base_url.to_string())
+            .config("max_stories", max_stories)
+            .config("poll_timeout", format!("{poll_timeout_secs}s"))
+            .config_block(&ai)
+            .config("group_budget_tokens", budget_per_group_tokens)
+            .config("group_max_stories", group_max_stories_label)
+            .config("source_rate_limit", format!("{source_rate_limit} events/sec")),
     );
-    println!();
-    println!("  mode: {mode_label}");
-    println!("  base_url: {base_url}");
-    println!("  max_stories: {max_stories}");
-    println!("  poll_timeout: {poll_timeout_secs}s");
-    for line in ai.to_string().lines() {
-        println!("  {line}");
-    }
-    println!("  group_budget_tokens: {budget_per_group_tokens}");
-    match max_stories_per_group {
-        None => println!("  group_max_stories: unlimited"),
-        Some(v) => println!("  group_max_stories: {v}"),
-    }
-    println!("  source_rate_limit: {source_rate_limit} events/sec");
-    println!();
 
     let decoder = HnStoryDecoder::new(base_url, max_stories);
     let client = default_http_client().map_err(|e| anyhow!("HTTP client unavailable: {e}"))?;
@@ -273,7 +272,7 @@ pub async fn run_example() -> Result<()> {
             chat_prompt_system: system_prompt_for_summary.clone(),
         })?;
 
-    FlowApplication::run(flow! {
+    FlowApplication::run_with_presentation(flow! {
             name: "hn_ai_digest_demo",
             journals: disk_journals(std::path::PathBuf::from("target/hn-ai-digest-logs")),
             middleware: [],
@@ -315,12 +314,8 @@ pub async fn run_example() -> Result<()> {
                 batch |> digest;
                 digest |> digest_summary;
             }
-        })
+        }, presentation)
         .await?;
-
-    println!();
-    println!("Demo completed!");
-    println!("Journal written to: target/hn-ai-digest-logs/");
 
     Ok(())
 }

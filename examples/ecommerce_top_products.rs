@@ -14,7 +14,7 @@ use obzenflow::typed::{sources, stateful as typed_stateful};
 use obzenflow_adapters::middleware::RateLimiterBuilder;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, stateful};
-use obzenflow_infra::application::FlowApplication;
+use obzenflow_infra::application::{Banner, FlowApplication, Presentation};
 use obzenflow_infra::journal::disk_journals;
 use serde::{Deserialize, Serialize};
 
@@ -62,15 +62,18 @@ impl TypedPayload for TopProductsUpdate {
 async fn main() -> Result<()> {
     std::env::set_var("OBZENFLOW_METRICS_EXPORTER", "console");
 
-    println!("🛒 ObzenFlow - E-commerce Top Products Analytics");
-    println!("===================================================");
-    println!("✨ Using FLOWIP-080j TopNByTyped & FLOWIP-082a TypedPayload");
-    println!();
-    println!("This demo shows real-time tracking of best-selling");
-    println!("products by total revenue, accumulating multiple");
-    println!("orders for the same product throughout the day.\n");
-
-    println!("Processing order stream...\n");
+    let presentation = Presentation::new(
+        Banner::new("E-commerce Top Products Analytics")
+            .description("Real-time tracking of top products by total revenue.")
+            .config_block(
+                "✨ Using FLOWIP-080j TopNByTyped and FLOWIP-082a TypedPayload.\nProcessing order stream...",
+            ),
+    )
+    .with_footer(|outcome| {
+        let mut out = outcome.default_footer();
+        out.push_str("\n\n💡 Key Insights:\nFLOWIP-082a TypedPayload:\n• OrderEvent::EVENT_TYPE instead of \"order.placed\"\n• SCHEMA_VERSION for evolution tracking\n• Strongly-typed event structs\n\nFLOWIP-080j TopNByTyped:\n• Type-safe key and score extraction\n• No ChainEvent manipulation, work with OrderEvent directly\n• Compile-time safety for field access\n• Memory bounded to N items regardless of stream size");
+        out
+    });
 
     // Simulate a day of orders (some products appear multiple times)
     let orders: Vec<(String, String, f64, u32, String)> = vec![
@@ -216,7 +219,7 @@ async fn main() -> Result<()> {
         ), // Bulk order!
     ];
 
-    FlowApplication::run(flow! {
+    FlowApplication::run_with_presentation(flow! {
         name: "ecommerce_analytics",
         journals: disk_journals(std::path::PathBuf::from("target/ecommerce-logs")),
         middleware: [],
@@ -294,22 +297,8 @@ async fn main() -> Result<()> {
             orders |> top_products;
             top_products |> dashboard;
         }
-    })
+    }, presentation)
     .await?;
-
-    println!("✅ E-commerce analytics completed!");
-    println!("\n💡 Key Insights:");
-    println!("   FLOWIP-082a TypedPayload:");
-    println!("   • OrderEvent::EVENT_TYPE instead of \"order.placed\"");
-    println!("   • SCHEMA_VERSION for evolution tracking");
-    println!("   • Strongly-typed event structs");
-    println!();
-    println!("   FLOWIP-080j TopNByTyped:");
-    println!("   • Type-safe key and score extraction");
-    println!("   • No ChainEvent manipulation - work with OrderEvent directly");
-    println!("   • Compile-time safety for field access");
-    println!("   • Memory bounded to N items regardless of stream size");
-    println!("\n📝 Journal written to: target/ecommerce-logs/");
 
     Ok(())
 }

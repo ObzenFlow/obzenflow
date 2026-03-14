@@ -15,7 +15,7 @@ use obzenflow::typed::joins;
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, join, sink, source, transform};
-use obzenflow_infra::application::{FlowApplication, LogLevel};
+use obzenflow_infra::application::{Banner, FlowApplication, LogLevel, Presentation};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::TransformHandler;
@@ -167,20 +167,17 @@ pub fn run_example() -> Result<()> {
         .auto_flush(true)
         .build()?;
 
-    println!("🎫 CSV Demo: Support SLA");
-    println!("{}", "=".repeat(48));
-    println!("Fixtures:");
-    println!("  - {}", fixture_paths.customers_csv.display());
-    println!("  - {}", fixture_paths.tickets_csv.display());
-    println!("Output:");
-    println!("  - {}", output_path.display());
-    println!();
+    let presentation = Presentation::new(
+        Banner::new("CSV Demo: Support SLA")
+            .config("customers_csv", fixture_paths.customers_csv.display())
+            .config("tickets_csv", fixture_paths.tickets_csv.display())
+            .config("output_csv", output_path.display()),
+    );
 
     FlowApplication::builder()
+        .with_presentation(presentation)
         .with_log_level(LogLevel::Info)
         .run_blocking(build_flow(customers, tickets, output_sink, journals_dir))?;
 
-    println!("\n✅ Demo completed.");
-    println!("📝 Journal written to: {}", out_root.join("logs").display());
     Ok(())
 }
