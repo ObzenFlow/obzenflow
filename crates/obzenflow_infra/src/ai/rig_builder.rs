@@ -684,7 +684,7 @@ impl ChatTransformBuilder {
 
     /// Build a map-role `ChatTransform` over chunk items (eager, with provider/model preflight).
     ///
-    /// The input payload is deserialised as `Vec<Item>`, but the prompt closure receives `&[Item]`.
+    /// The input payload is deserialised as `ChunkEnvelope<Item>`, but the prompt closure receives `&[Item]`.
     ///
     /// Type inference: using named functions for `prompt` and `parse` is usually enough for the
     /// compiler to infer `Item` and `Out` at the call site.
@@ -697,8 +697,8 @@ impl ChatTransformBuilder {
         Item: DeserializeOwned + Send + Sync + 'static,
         Out: Serialize + TypedPayload + Send + Sync + 'static,
     {
-        self.build_typed::<Vec<Item>, Out>(
-            move |items| Ok(prompt(items.as_slice())?.into()),
+        self.build_typed::<ChunkEnvelope<Item>, Out>(
+            move |chunk| Ok(prompt(chunk.items.as_slice())?.into()),
             move |_items, response| parse(response),
         )
         .await
@@ -748,16 +748,16 @@ impl ChatTransformBuilder {
         let prompt = Arc::new(prompt);
         let parse = Arc::new(parse);
 
-        self.build_typed::<Vec<Item>, Out>(
+        self.build_typed::<ChunkEnvelope<Item>, Out>(
             {
                 let prompt = prompt.clone();
-                move |items| Ok((prompt)(items.as_slice())?.into())
+                move |chunk| Ok((prompt)(chunk.items.as_slice())?.into())
             },
             {
                 let prompt = prompt.clone();
                 let parse = parse.clone();
-                move |items, response| {
-                    let user_prompt = (prompt)(items.as_slice())?;
+                move |chunk, response| {
+                    let user_prompt = (prompt)(chunk.items.as_slice())?;
                     (parse)(user_prompt, response)
                 }
             },
@@ -775,8 +775,8 @@ impl ChatTransformBuilder {
         Item: DeserializeOwned + Send + Sync + 'static,
         Out: Serialize + TypedPayload + Send + Sync + 'static,
     {
-        self.build_typed_lazy::<Vec<Item>, Out>(
-            move |items| Ok(prompt(items.as_slice())?.into()),
+        self.build_typed_lazy::<ChunkEnvelope<Item>, Out>(
+            move |chunk| Ok(prompt(chunk.items.as_slice())?.into()),
             move |_items, response| parse(response),
         )
     }
@@ -813,16 +813,16 @@ impl ChatTransformBuilder {
         let prompt = Arc::new(prompt);
         let parse = Arc::new(parse);
 
-        self.build_typed_lazy::<Vec<Item>, Out>(
+        self.build_typed_lazy::<ChunkEnvelope<Item>, Out>(
             {
                 let prompt = prompt.clone();
-                move |items| Ok((prompt)(items.as_slice())?.into())
+                move |chunk| Ok((prompt)(chunk.items.as_slice())?.into())
             },
             {
                 let prompt = prompt.clone();
                 let parse = parse.clone();
-                move |items, response| {
-                    let user_prompt = (prompt)(items.as_slice())?;
+                move |chunk, response| {
+                    let user_prompt = (prompt)(chunk.items.as_slice())?;
                     (parse)(user_prompt, response)
                 }
             },
@@ -840,8 +840,11 @@ impl ChatTransformBuilder {
         Item: DeserializeOwned + Send + Sync + 'static,
         Out: Serialize + TypedPayload + Send + Sync + 'static,
     {
-        self.build_typed::<Vec<Item>, Out>(move |items| Ok(prompt(items.as_slice())?.into()), parse)
-            .await
+        self.build_typed::<ChunkEnvelope<Item>, Out>(
+            move |chunk| Ok(prompt(chunk.items.as_slice())?.into()),
+            move |chunk, response| parse(chunk.items, response),
+        )
+        .await
     }
 
     /// Lazy counterpart of [`Self::build_map_items_with_input`] (no provider/model preflight).
@@ -854,9 +857,9 @@ impl ChatTransformBuilder {
         Item: DeserializeOwned + Send + Sync + 'static,
         Out: Serialize + TypedPayload + Send + Sync + 'static,
     {
-        self.build_typed_lazy::<Vec<Item>, Out>(
-            move |items| Ok(prompt(items.as_slice())?.into()),
-            parse,
+        self.build_typed_lazy::<ChunkEnvelope<Item>, Out>(
+            move |chunk| Ok(prompt(chunk.items.as_slice())?.into()),
+            move |chunk, response| parse(chunk.items, response),
         )
     }
 

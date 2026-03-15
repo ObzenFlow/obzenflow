@@ -109,7 +109,10 @@ Notable stories:\n\
 - (n) Title: 1 sentence\n\
 - (n) Title: 1 sentence",
         )
-        .labeled("Input stories (numbered; do not repeat)", &input_stories_fenced);
+        .labeled(
+            "Input stories (numbered; do not repeat)",
+            &input_stories_fenced,
+        );
 
     Ok(p.finish())
 }
@@ -273,13 +276,13 @@ pub async fn run_example(config: DemoConfig, presentation: Presentation) -> Resu
                 batch = stateful!(FormattedStory -> HnTopStories => digest_seed);
 
                 // Type bridge:
-                // - map's `chunked [FormattedStory]` comes from `HnTopStories.stories` via
+                // - map's `[FormattedStory]` comes from `HnTopStories.stories` via
                 //   `items: |seed: &HnTopStories| seed.stories.clone()`.
                 // - map's render uses `ChunkRenderContext.item_ordinal` to assign stable story numbers.
                 // - reduce's `[HnDigestGroupSummary]` is collected in chunk-index order.
                 digest = ai_map_reduce!(
                     HnTopStories -> HnDigestSummary => {
-                        map: chunked [FormattedStory] -> HnDigestGroupSummary => map_llm_handler,
+                        map: [FormattedStory] -> HnDigestGroupSummary => map_llm_handler,
                         reduce: (HnTopStories, [HnDigestGroupSummary]) -> HnDigestSummary => digest_llm_handler,
                     },
                     chunking: by_budget {

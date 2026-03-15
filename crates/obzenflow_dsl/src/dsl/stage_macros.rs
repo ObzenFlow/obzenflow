@@ -3572,86 +3572,6 @@ macro_rules! __obzenflow_ai_map_reduce_cadillac_typed_default {
         let __chunk_handler = $chunker;
 
         let __map_handler = $map_handler;
-        let __map_handler = $crate::dsl::composites::ai_map_reduce::AiMapReduceChunkItemsAdapter::<
-            $item_ty,
-            _,
-        >::new(__map_handler);
-
-        let __collect_handler: ::obzenflow_runtime::stages::stateful::CollectByInput<
-            $partial_ty,
-            ::obzenflow_core::ai::AiMapReduceReduceInput<
-                $($seed_ty)+,
-                ::obzenflow_core::ai::Many<$partial_ty>,
-            >,
-        > = ::obzenflow_runtime::stages::stateful::CollectByInput::new(
-            ::obzenflow_core::ai::Many::<$partial_ty>::default(),
-            |acc, partial: &$partial_ty| {
-                acc.items.push(partial.clone());
-            },
-        )
-        .with_planning_summary(|acc, planning| {
-            acc.planning = planning.clone();
-        })
-        .with_seed::<$($seed_ty)+>();
-
-        let __reduce_handler = $reduce_handler;
-        let __reduce_handler =
-            $crate::dsl::composites::ai_map_reduce::AiMapReduceReduceInputManyAdapter::<
-                $($seed_ty)+,
-                $partial_ty,
-                _,
-            >::new(__reduce_handler);
-
-        let __builder = $crate::dsl::composites::ai_map_reduce::map_reduce::<
-            $($seed_ty)+,
-            ::obzenflow_core::ai::ChunkEnvelope<$item_ty>,
-            $partial_ty,
-            ::obzenflow_core::ai::AiMapReduceReduceInput<
-                $($seed_ty)+,
-                ::obzenflow_core::ai::Many<$partial_ty>,
-            >,
-            $out_ty,
-        >()
-        .chunker(__chunk_handler)
-        .map(__map_handler)
-        .collect(__collect_handler)
-        .finalize(__reduce_handler);
-
-        let __builder = $crate::__obzenflow_ai_map_reduce_apply_middleware!(
-            __builder,
-            [ $($mw_role : $mw_expr),* ]
-        );
-
-        let mut __descriptor = __builder.build();
-        __descriptor.set_name($name.to_string());
-        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
-    }};
-}
-
-#[doc(hidden)]
-#[macro_export]
-macro_rules! __obzenflow_ai_map_reduce_cadillac_typed_default_chunked_map {
-    (
-        name = $name:literal,
-        seed_type = ($($seed_ty:tt)+),
-        item_type = ($item_ty:ty),
-        partial_type = ($partial_ty:ty),
-        out_type = ($out_ty:ty),
-        chunker = ($chunker:expr),
-        map_handler = ($map_handler:expr),
-        reduce_handler = ($reduce_handler:expr),
-        middleware = [ $($mw_role:ident : $mw_expr:expr),* $(,)? ]
-    ) => {{
-        let __metadata = $crate::dsl::typing::StageTypingMetadata::transform(
-            $crate::dsl::typing::TypeHint::exact(stringify!($($seed_ty)+)),
-            $crate::dsl::typing::TypeHint::exact(stringify!($out_ty)),
-            false,
-            None,
-        );
-
-        let __chunk_handler = $chunker;
-
-        let __map_handler = $map_handler;
 
         let __collect_handler: ::obzenflow_runtime::stages::stateful::CollectByInput<
             $partial_ty,
@@ -3707,71 +3627,6 @@ macro_rules! __obzenflow_ai_map_reduce_cadillac_typed_default_chunked_map {
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __obzenflow_ai_map_reduce_cadillac_typed_collect {
-    (
-        name = $name:literal,
-        seed_type = ($($seed_ty:tt)+),
-        item_type = ($item_ty:ty),
-        partial_type = ($partial_ty:ty),
-        collected_type = ($collected_ty:ty),
-        out_type = ($out_ty:ty),
-        chunker = ($chunker:expr),
-        map_handler = ($map_handler:expr),
-        collect_handler = ($collect_handler:expr),
-        reduce_handler = ($reduce_handler:expr),
-        middleware = [ $($mw_role:ident : $mw_expr:expr),* $(,)? ]
-    ) => {{
-        let __metadata = $crate::dsl::typing::StageTypingMetadata::transform(
-            $crate::dsl::typing::TypeHint::exact(stringify!($($seed_ty)+)),
-            $crate::dsl::typing::TypeHint::exact(stringify!($out_ty)),
-            false,
-            None,
-        );
-
-        let __chunk_handler = $chunker;
-
-        let __map_handler = $map_handler;
-        let __map_handler = $crate::dsl::composites::ai_map_reduce::AiMapReduceChunkItemsAdapter::<
-            $item_ty,
-            _,
-        >::new(__map_handler);
-
-        let __collect_handler = $collect_handler;
-        let __collect_handler = __collect_handler.with_seed::<$($seed_ty)+>();
-
-        let __reduce_handler = $reduce_handler;
-        let __reduce_handler =
-            $crate::dsl::composites::ai_map_reduce::AiMapReduceReduceInputCollectedAdapter::<
-                $($seed_ty)+,
-                $collected_ty,
-                _,
-            >::new(__reduce_handler);
-
-        let __builder = $crate::dsl::composites::ai_map_reduce::map_reduce::<
-            $($seed_ty)+,
-            ::obzenflow_core::ai::ChunkEnvelope<$item_ty>,
-            $partial_ty,
-            ::obzenflow_core::ai::AiMapReduceReduceInput<$($seed_ty)+, $collected_ty>,
-            $out_ty,
-        >()
-        .chunker(__chunk_handler)
-        .map(__map_handler)
-        .collect(__collect_handler)
-        .finalize(__reduce_handler);
-
-        let __builder = $crate::__obzenflow_ai_map_reduce_apply_middleware!(
-            __builder,
-            [ $($mw_role : $mw_expr),* ]
-        );
-
-        let mut __descriptor = __builder.build();
-        __descriptor.set_name($name.to_string());
-        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
-    }};
-}
-
-#[doc(hidden)]
-#[macro_export]
-macro_rules! __obzenflow_ai_map_reduce_cadillac_typed_collect_chunked_map {
     (
         name = $name:literal,
         seed_type = ($($seed_ty:tt)+),
@@ -3878,44 +3733,6 @@ macro_rules! __obzenflow_ai_map_reduce_cadillac_contract {
         )
     }};
 
-    // ── seed type parsed; map/reduce roles (default collector, chunk-aware map) ──
-    (@seed
-        name = $name:literal,
-        seed = ($($seed_ty:tt)+),
-        -> $out_ty:ty => {
-            map: chunked [$item_ty:ty] -> $partial_ty:ty => $map_handler:expr,
-            reduce: ($reduce_seed_ty:ty, [$reduce_partial_ty:ty]) -> $reduce_out_ty:ty => $reduce_handler:expr $(,)?
-        },
-        chunking: by_budget { $($chunking:tt)+ }
-        $(, middleware: { $($mw_role:ident : $mw_expr:expr),* $(,)? } )?
-        $(,)?
-    ) => {{
-        let _: ::core::marker::PhantomData<$($seed_ty)+> =
-            ::core::marker::PhantomData::<$reduce_seed_ty>;
-        let _: ::core::marker::PhantomData<$partial_ty> =
-            ::core::marker::PhantomData::<$reduce_partial_ty>;
-        let _: ::core::marker::PhantomData<$out_ty> =
-            ::core::marker::PhantomData::<$reduce_out_ty>;
-
-        let __chunker = $crate::__obzenflow_ai_map_reduce_chunker_by_budget!(
-            seed_type = ($($seed_ty)+),
-            item_type = ($item_ty),
-            $($chunking)+
-        );
-
-        $crate::__obzenflow_ai_map_reduce_cadillac_typed_default_chunked_map!(
-            name = $name,
-            seed_type = ($($seed_ty)+),
-            item_type = ($item_ty),
-            partial_type = ($partial_ty),
-            out_type = ($out_ty),
-            chunker = (__chunker),
-            map_handler = ($map_handler),
-            reduce_handler = ($reduce_handler),
-            middleware = [ $($($mw_role : $mw_expr),*)? ]
-        )
-    }};
-
     // ── seed type parsed; map/collect/reduce roles (custom collector) ──
     (@seed
         name = $name:literal,
@@ -3945,49 +3762,6 @@ macro_rules! __obzenflow_ai_map_reduce_cadillac_contract {
         );
 
         $crate::__obzenflow_ai_map_reduce_cadillac_typed_collect!(
-            name = $name,
-            seed_type = ($($seed_ty)+),
-            item_type = ($item_ty),
-            partial_type = ($partial_ty),
-            collected_type = ($collected_ty),
-            out_type = ($out_ty),
-            chunker = (__chunker),
-            map_handler = ($map_handler),
-            collect_handler = ($collect_handler),
-            reduce_handler = ($reduce_handler),
-            middleware = [ $($($mw_role : $mw_expr),*)? ]
-        )
-    }};
-
-    // ── seed type parsed; map/collect/reduce roles (custom collector, chunk-aware map) ──
-    (@seed
-        name = $name:literal,
-        seed = ($($seed_ty:tt)+),
-        -> $out_ty:ty => {
-            map: chunked [$item_ty:ty] -> $partial_ty:ty => $map_handler:expr,
-            collect: $($collect_partial_ty:tt)+ -> $collected_ty:ty => $collect_handler:expr,
-            reduce: ($reduce_seed_ty:ty, $reduce_collected_ty:ty) -> $reduce_out_ty:ty => $reduce_handler:expr $(,)?
-        },
-        chunking: by_budget { $($chunking:tt)+ }
-        $(, middleware: { $($mw_role:ident : $mw_expr:expr),* $(,)? } )?
-        $(,)?
-    ) => {{
-        let _: ::core::marker::PhantomData<$($seed_ty)+> =
-            ::core::marker::PhantomData::<$reduce_seed_ty>;
-        let _: ::core::marker::PhantomData<$out_ty> =
-            ::core::marker::PhantomData::<$reduce_out_ty>;
-        let _: ::core::marker::PhantomData<$partial_ty> =
-            ::core::marker::PhantomData::<$($collect_partial_ty)+>;
-        let _: ::core::marker::PhantomData<$collected_ty> =
-            ::core::marker::PhantomData::<$reduce_collected_ty>;
-
-        let __chunker = $crate::__obzenflow_ai_map_reduce_chunker_by_budget!(
-            seed_type = ($($seed_ty)+),
-            item_type = ($item_ty),
-            $($chunking)+
-        );
-
-        $crate::__obzenflow_ai_map_reduce_cadillac_typed_collect_chunked_map!(
             name = $name,
             seed_type = ($($seed_ty)+),
             item_type = ($item_ty),
