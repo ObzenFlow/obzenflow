@@ -123,6 +123,33 @@ impl Prompt {
         self
     }
 
+    /// Add pre-rendered lines inside a titled code fence.
+    /// Renders as: "{title}:\n```text\n{lines}\n```\n"
+    ///
+    /// Fence safety: the fence delimiter is hardcoded as triple backticks. If any
+    /// line contains a triple-backtick sequence, the fence will be broken.
+    pub fn fenced_lines<I, S>(&mut self, title: &str, lines: I) -> &mut Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let title = title.trim();
+        if !title.is_empty() {
+            self.buf.push_str(title);
+            self.buf.push_str(":\n");
+        }
+
+        self.buf.push_str("```text\n");
+        for line in lines {
+            let rendered = line.as_ref();
+            self.buf.push_str(rendered.trim_end());
+            self.buf.push('\n');
+        }
+        self.buf.push_str("```\n");
+
+        self
+    }
+
     /// Add titled subsections. Each item is rendered as a heading and body.
     /// Renders as:
     /// "{title}:\n\n### {heading1}\n{body1}\n\n### {heading2}\n..."
@@ -272,6 +299,13 @@ mod tests {
             p.finish().as_str(),
             "Input:\n```text\nLine 1\nLine 2\n```\n"
         );
+    }
+
+    #[test]
+    fn fenced_lines_renders_each_line_on_its_own_line() {
+        let mut p = Prompt::new();
+        p.fenced_lines("Input", ["A", "B"]);
+        assert_eq!(p.finish().as_str(), "Input:\n```text\nA\nB\n```\n");
     }
 
     #[test]

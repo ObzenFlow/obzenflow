@@ -83,18 +83,8 @@ fn digest_map_prompt(
         ),
     ];
 
-    let input_stories_fenced = format!(
-        "```text\n{}\n```",
-        chunk_info.iter_rendered().collect::<Vec<_>>().join("\n")
-    );
-
     let mut p = Prompt::new();
     p.text_if(ctx.interests.as_deref(), |i| format!("My interests: {i}"))
-        .text(&format!(
-            "This is group {} of {}.",
-            chunk_info.chunk_index + 1,
-            chunk_info.chunk_count
-        ))
         .text("Summarise these Hacker News stories (titles + URLs are provided as input).")
         .rules(rules)
         .labeled(
@@ -109,10 +99,7 @@ Notable stories:\n\
 - (n) Title: 1 sentence\n\
 - (n) Title: 1 sentence",
         )
-        .labeled(
-            "Input stories (numbered; do not repeat)",
-            &input_stories_fenced,
-        );
+        .fenced_lines("Input stories (numbered; do not repeat)", chunk_info.iter_rendered());
 
     Ok(p.finish())
 }
