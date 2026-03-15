@@ -158,6 +158,10 @@ name = "char_transform"
 path = "examples/char_transform.rs"
 
 [[example]]
+name = "char_transform_skeleton"
+path = "examples/char_transform_skeleton.rs"
+
+[[example]]
 name = "flow_middleware_config"
 path = "examples/flow_middleware_config.rs"
 

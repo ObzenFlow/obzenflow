@@ -8,7 +8,7 @@ use crate::dsl::stage_descriptor::StageDescriptor;
 use async_trait::async_trait;
 use obzenflow_adapters::middleware::{control::ControlMiddlewareAggregator, MiddlewareFactory};
 use obzenflow_core::event::context::StageType;
-use obzenflow_core::event::payloads::delivery_payload::DeliveryPayload;
+use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::{ChainEvent, StageId, WriterId};
 use obzenflow_runtime::pipeline::config::StageConfig;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
@@ -27,6 +27,7 @@ use obzenflow_topology::{EdgeKind, Topology};
 use std::collections::HashMap;
 use std::fmt;
 use std::marker::PhantomData;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 /// Three-way model for declared type positions.
@@ -187,6 +188,7 @@ fn placeholder_message(stage_kind: &str, message: Option<&str>) -> String {
 pub struct PlaceholderFiniteSource<T> {
     _phantom: PhantomData<T>,
     message: Option<&'static str>,
+    warned: Arc<AtomicBool>,
 }
 
 impl<T> PlaceholderFiniteSource<T> {
@@ -194,13 +196,18 @@ impl<T> PlaceholderFiniteSource<T> {
         Self {
             _phantom: PhantomData,
             message,
+            warned: Arc::new(AtomicBool::new(false)),
         }
     }
 }
 
 impl<T> Clone for PlaceholderFiniteSource<T> {
     fn clone(&self) -> Self {
-        Self::new(self.message)
+        Self {
+            _phantom: PhantomData,
+            message: self.message,
+            warned: Arc::clone(&self.warned),
+        }
     }
 }
 
@@ -221,13 +228,17 @@ where
     T: Send + Sync + 'static,
 {
     fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
-        panic!("{}", placeholder_message("finite source", self.message));
+        if !self.warned.swap(true, Ordering::Relaxed) {
+            tracing::warn!("{}", placeholder_message("finite source", self.message));
+        }
+        Ok(None)
     }
 }
 
 pub struct PlaceholderAsyncSource<T> {
     _phantom: PhantomData<T>,
     message: Option<&'static str>,
+    warned: Arc<AtomicBool>,
 }
 
 impl<T> PlaceholderAsyncSource<T> {
@@ -235,13 +246,18 @@ impl<T> PlaceholderAsyncSource<T> {
         Self {
             _phantom: PhantomData,
             message,
+            warned: Arc::new(AtomicBool::new(false)),
         }
     }
 }
 
 impl<T> Clone for PlaceholderAsyncSource<T> {
     fn clone(&self) -> Self {
-        Self::new(self.message)
+        Self {
+            _phantom: PhantomData,
+            message: self.message,
+            warned: Arc::clone(&self.warned),
+        }
     }
 }
 
@@ -263,7 +279,10 @@ where
     T: Send + Sync + 'static,
 {
     async fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
-        panic!("{}", placeholder_message("async source", self.message));
+        if !self.warned.swap(true, Ordering::Relaxed) {
+            tracing::warn!("{}", placeholder_message("async source", self.message));
+        }
+        Ok(None)
     }
 }
 
@@ -273,16 +292,20 @@ where
     T: Send + Sync + 'static,
 {
     async fn next(&mut self) -> Result<Vec<ChainEvent>, SourceError> {
-        panic!(
-            "{}",
-            placeholder_message("async infinite source", self.message)
-        );
+        if !self.warned.swap(true, Ordering::Relaxed) {
+            tracing::warn!(
+                "{}",
+                placeholder_message("async infinite source", self.message)
+            );
+        }
+        Ok(Vec::new())
     }
 }
 
 pub struct PlaceholderInfiniteSource<T> {
     _phantom: PhantomData<T>,
     message: Option<&'static str>,
+    warned: Arc<AtomicBool>,
 }
 
 impl<T> PlaceholderInfiniteSource<T> {
@@ -290,13 +313,18 @@ impl<T> PlaceholderInfiniteSource<T> {
         Self {
             _phantom: PhantomData,
             message,
+            warned: Arc::new(AtomicBool::new(false)),
         }
     }
 }
 
 impl<T> Clone for PlaceholderInfiniteSource<T> {
     fn clone(&self) -> Self {
-        Self::new(self.message)
+        Self {
+            _phantom: PhantomData,
+            message: self.message,
+            warned: Arc::clone(&self.warned),
+        }
     }
 }
 
@@ -317,13 +345,17 @@ where
     T: Send + Sync + 'static,
 {
     fn next(&mut self) -> Result<Vec<ChainEvent>, SourceError> {
-        panic!("{}", placeholder_message("infinite source", self.message));
+        if !self.warned.swap(true, Ordering::Relaxed) {
+            tracing::warn!("{}", placeholder_message("infinite source", self.message));
+        }
+        Ok(Vec::new())
     }
 }
 
 pub struct PlaceholderTransform<In, Out> {
     _phantom: PhantomData<(In, Out)>,
     message: Option<&'static str>,
+    warned: Arc<AtomicBool>,
 }
 
 impl<In, Out> PlaceholderTransform<In, Out> {
@@ -331,13 +363,18 @@ impl<In, Out> PlaceholderTransform<In, Out> {
         Self {
             _phantom: PhantomData,
             message,
+            warned: Arc::new(AtomicBool::new(false)),
         }
     }
 }
 
 impl<In, Out> Clone for PlaceholderTransform<In, Out> {
     fn clone(&self) -> Self {
-        Self::new(self.message)
+        Self {
+            _phantom: PhantomData,
+            message: self.message,
+            warned: Arc::clone(&self.warned),
+        }
     }
 }
 
@@ -361,17 +398,24 @@ where
     Out: Send + Sync + 'static,
 {
     fn process(&self, _event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
-        panic!("{}", placeholder_message("transform", self.message));
+        if !self.warned.swap(true, Ordering::Relaxed) {
+            tracing::warn!("{}", placeholder_message("transform", self.message));
+        }
+        Ok(Vec::new())
     }
 
     async fn drain(&mut self) -> Result<(), HandlerError> {
-        panic!("{}", placeholder_message("transform", self.message));
+        if !self.warned.swap(true, Ordering::Relaxed) {
+            tracing::warn!("{}", placeholder_message("transform", self.message));
+        }
+        Ok(())
     }
 }
 
 pub struct PlaceholderAsyncTransform<In, Out> {
     _phantom: PhantomData<(In, Out)>,
     message: Option<&'static str>,
+    warned: Arc<AtomicBool>,
 }
 
 impl<In, Out> PlaceholderAsyncTransform<In, Out> {
@@ -379,13 +423,18 @@ impl<In, Out> PlaceholderAsyncTransform<In, Out> {
         Self {
             _phantom: PhantomData,
             message,
+            warned: Arc::new(AtomicBool::new(false)),
         }
     }
 }
 
 impl<In, Out> Clone for PlaceholderAsyncTransform<In, Out> {
     fn clone(&self) -> Self {
-        Self::new(self.message)
+        Self {
+            _phantom: PhantomData,
+            message: self.message,
+            warned: Arc::clone(&self.warned),
+        }
     }
 }
 
@@ -409,11 +458,17 @@ where
     Out: Send + Sync + 'static,
 {
     async fn process(&self, _event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
-        panic!("{}", placeholder_message("async transform", self.message));
+        if !self.warned.swap(true, Ordering::Relaxed) {
+            tracing::warn!("{}", placeholder_message("async transform", self.message));
+        }
+        Ok(Vec::new())
     }
 
     async fn drain(&mut self) -> Result<(), HandlerError> {
-        panic!("{}", placeholder_message("async transform", self.message));
+        if !self.warned.swap(true, Ordering::Relaxed) {
+            tracing::warn!("{}", placeholder_message("async transform", self.message));
+        }
+        Ok(())
     }
 }
 
@@ -525,6 +580,7 @@ where
 pub struct PlaceholderStateful<In, Out> {
     _phantom: PhantomData<(In, Out)>,
     message: Option<&'static str>,
+    warned: Arc<AtomicBool>,
 }
 
 impl<In, Out> PlaceholderStateful<In, Out> {
@@ -532,13 +588,18 @@ impl<In, Out> PlaceholderStateful<In, Out> {
         Self {
             _phantom: PhantomData,
             message,
+            warned: Arc::new(AtomicBool::new(false)),
         }
     }
 }
 
 impl<In, Out> Clone for PlaceholderStateful<In, Out> {
     fn clone(&self) -> Self {
-        Self::new(self.message)
+        Self {
+            _phantom: PhantomData,
+            message: self.message,
+            warned: Arc::clone(&self.warned),
+        }
     }
 }
 
@@ -564,23 +625,31 @@ where
     type State = ();
 
     fn accumulate(&mut self, _state: &mut Self::State, _event: ChainEvent) {
-        panic!("{}", placeholder_message("stateful", self.message));
+        if !self.warned.swap(true, Ordering::Relaxed) {
+            tracing::warn!("{}", placeholder_message("stateful", self.message));
+        }
     }
 
-    fn initial_state(&self) -> Self::State {}
+    fn initial_state(&self) -> Self::State {
+        ()
+    }
 
     fn create_events(&self, _state: &Self::State) -> Result<Vec<ChainEvent>, HandlerError> {
-        panic!("{}", placeholder_message("stateful", self.message));
+        Ok(Vec::new())
     }
 
     async fn drain(&self, _state: &Self::State) -> Result<Vec<ChainEvent>, HandlerError> {
-        panic!("{}", placeholder_message("stateful", self.message));
+        if !self.warned.swap(true, Ordering::Relaxed) {
+            tracing::warn!("{}", placeholder_message("stateful", self.message));
+        }
+        Ok(Vec::new())
     }
 }
 
 pub struct PlaceholderSink<In> {
     _phantom: PhantomData<In>,
     message: Option<&'static str>,
+    warned: Arc<AtomicBool>,
 }
 
 impl<In> PlaceholderSink<In> {
@@ -588,13 +657,18 @@ impl<In> PlaceholderSink<In> {
         Self {
             _phantom: PhantomData,
             message,
+            warned: Arc::new(AtomicBool::new(false)),
         }
     }
 }
 
 impl<In> Clone for PlaceholderSink<In> {
     fn clone(&self) -> Self {
-        Self::new(self.message)
+        Self {
+            _phantom: PhantomData,
+            message: self.message,
+            warned: Arc::clone(&self.warned),
+        }
     }
 }
 
@@ -616,13 +690,28 @@ where
     In: Send + Sync + 'static,
 {
     async fn consume(&mut self, _event: ChainEvent) -> Result<DeliveryPayload, HandlerError> {
-        panic!("{}", placeholder_message("sink", self.message));
+        if !self.warned.swap(true, Ordering::Relaxed) {
+            tracing::warn!("{}", placeholder_message("sink", self.message));
+        }
+        Ok(DeliveryPayload::success(
+            "placeholder",
+            DeliveryMethod::Noop,
+            None,
+        ))
+    }
+
+    async fn flush(&mut self) -> Result<Option<DeliveryPayload>, HandlerError> {
+        if !self.warned.swap(true, Ordering::Relaxed) {
+            tracing::warn!("{}", placeholder_message("sink", self.message));
+        }
+        Ok(None)
     }
 }
 
 pub struct PlaceholderJoin<Ref, Stream, Out> {
     _phantom: PhantomData<(Ref, Stream, Out)>,
     message: Option<&'static str>,
+    warned: Arc<AtomicBool>,
 }
 
 impl<Ref, Stream, Out> PlaceholderJoin<Ref, Stream, Out> {
@@ -630,13 +719,18 @@ impl<Ref, Stream, Out> PlaceholderJoin<Ref, Stream, Out> {
         Self {
             _phantom: PhantomData,
             message,
+            warned: Arc::new(AtomicBool::new(false)),
         }
     }
 }
 
 impl<Ref, Stream, Out> Clone for PlaceholderJoin<Ref, Stream, Out> {
     fn clone(&self) -> Self {
-        Self::new(self.message)
+        Self {
+            _phantom: PhantomData,
+            message: self.message,
+            warned: Arc::clone(&self.warned),
+        }
     }
 }
 
@@ -645,6 +739,24 @@ impl<Ref, Stream, Out> fmt::Debug for PlaceholderJoin<Ref, Stream, Out> {
         f.debug_struct("PlaceholderJoin")
             .field("message", &self.message)
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod placeholder_warn_once_tests {
+    use super::*;
+
+    #[test]
+    fn placeholder_stateful_clone_shares_warned_flag() {
+        let handler = PlaceholderStateful::<u8, u16>::new(None);
+        let cloned = handler.clone();
+
+        assert!(Arc::ptr_eq(&handler.warned, &cloned.warned));
+        assert!(!handler.warned.load(Ordering::Relaxed));
+
+        assert!(!cloned.warned.swap(true, Ordering::Relaxed));
+        assert!(handler.warned.load(Ordering::Relaxed));
+        assert!(cloned.warned.swap(true, Ordering::Relaxed));
     }
 }
 
@@ -663,7 +775,9 @@ where
 {
     type State = ();
 
-    fn initial_state(&self) -> Self::State {}
+    fn initial_state(&self) -> Self::State {
+        ()
+    }
 
     fn process_event(
         &self,
@@ -672,7 +786,10 @@ where
         _source_id: StageId,
         _writer_id: WriterId,
     ) -> Result<Vec<ChainEvent>, HandlerError> {
-        panic!("{}", placeholder_message("join", self.message));
+        if !self.warned.swap(true, Ordering::Relaxed) {
+            tracing::warn!("{}", placeholder_message("join", self.message));
+        }
+        Ok(Vec::new())
     }
 
     fn on_source_eof(
@@ -681,11 +798,17 @@ where
         _source_id: StageId,
         _writer_id: WriterId,
     ) -> Result<Vec<ChainEvent>, HandlerError> {
-        panic!("{}", placeholder_message("join", self.message));
+        if !self.warned.swap(true, Ordering::Relaxed) {
+            tracing::warn!("{}", placeholder_message("join", self.message));
+        }
+        Ok(Vec::new())
     }
 
     async fn drain(&self, _state: &Self::State) -> Result<Vec<ChainEvent>, HandlerError> {
-        panic!("{}", placeholder_message("join", self.message));
+        if !self.warned.swap(true, Ordering::Relaxed) {
+            tracing::warn!("{}", placeholder_message("join", self.message));
+        }
+        Ok(Vec::new())
     }
 }
 
