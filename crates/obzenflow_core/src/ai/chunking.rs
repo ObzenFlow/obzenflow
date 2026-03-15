@@ -31,6 +31,40 @@ pub struct ChunkEnvelope<T> {
     pub rendered_items: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ChunkInfo {
+    pub decomposition_depth: u32,
+    pub chunk_index: usize,
+    pub chunk_count: usize,
+    pub item_ordinals: Vec<usize>,
+    pub rendered_items: Vec<String>,
+}
+
+impl ChunkInfo {
+    pub fn citation_numbers_1_based(&self) -> impl Iterator<Item = usize> + '_ {
+        self.item_ordinals
+            .iter()
+            .copied()
+            .map(|ordinal| ordinal.saturating_add(1))
+    }
+
+    pub fn iter_rendered(&self) -> impl Iterator<Item = &str> + '_ {
+        self.rendered_items.iter().map(String::as_str)
+    }
+}
+
+impl<T> ChunkEnvelope<T> {
+    pub fn chunk_info(&self) -> ChunkInfo {
+        ChunkInfo {
+            decomposition_depth: self.decomposition_depth,
+            chunk_index: self.chunk_index,
+            chunk_count: self.chunk_count,
+            item_ordinals: self.item_ordinals.clone(),
+            rendered_items: self.rendered_items.clone(),
+        }
+    }
+}
+
 // NOTE: This intentionally uses a single, stable event type. In practice this envelope is
 // expected to be used within one flow for one logical item type at a time.
 impl<T> TypedPayload for ChunkEnvelope<T>
@@ -545,5 +579,56 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn chunk_info_preserves_prompt_relevant_fields() {
+        let envelope = ChunkEnvelope {
+            chunk_index: 2,
+            chunk_count: 5,
+            estimated_tokens: TokenCount::new(42),
+            decomposition_depth: 1,
+            planning: ChunkPlanningSummary {
+                input_items_total: 10,
+                planned_items_total: 9,
+                excluded_items_total: 1,
+            },
+            item_ordinals: vec![4, 6],
+            items: vec!["alpha".to_string(), "beta".to_string()],
+            rendered_items: vec!["5. alpha".to_string(), "7. beta".to_string()],
+        };
+
+        let info = envelope.chunk_info();
+
+        assert_eq!(
+            info,
+            ChunkInfo {
+                decomposition_depth: 1,
+                chunk_index: 2,
+                chunk_count: 5,
+                item_ordinals: vec![4, 6],
+                rendered_items: vec!["5. alpha".to_string(), "7. beta".to_string()],
+            }
+        );
+    }
+
+    #[test]
+    fn chunk_info_helpers_expose_citations_and_rendered_lines() {
+        let info = ChunkInfo {
+            decomposition_depth: 0,
+            chunk_index: 0,
+            chunk_count: 2,
+            item_ordinals: vec![0, 2, 9],
+            rendered_items: vec!["1. first".to_string(), "3. third".to_string()],
+        };
+
+        assert_eq!(
+            info.citation_numbers_1_based().collect::<Vec<_>>(),
+            vec![1, 3, 10]
+        );
+        assert_eq!(
+            info.iter_rendered().collect::<Vec<_>>(),
+            vec!["1. first", "3. third"]
+        );
     }
 }

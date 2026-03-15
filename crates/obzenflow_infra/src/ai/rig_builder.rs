@@ -15,8 +15,8 @@ use obzenflow_adapters::ai::{
 };
 use obzenflow_core::ai::{
     AiClientError, AiProvider, ChatClient, ChatMessage, ChatParams, ChatRequest, ChatResponse,
-    ChatResponseFormat, EmbeddingClient, EmbeddingParams, EmbeddingRequest, EmbeddingResponse,
-    ToolDefinition, UserPrompt,
+    ChatResponseFormat, ChunkEnvelope, ChunkInfo, EmbeddingClient, EmbeddingParams,
+    EmbeddingRequest, EmbeddingResponse, ToolDefinition, UserPrompt,
 };
 use obzenflow_core::event::chain_event::ChainEventFactory;
 use obzenflow_core::http_client::Url;
@@ -704,6 +704,33 @@ impl ChatTransformBuilder {
         .await
     }
 
+    /// Build a map-role `ChatTransform` over chunk items, passing chunk planning metadata
+    /// through to the prompt function (eager, with provider/model preflight).
+    ///
+    /// The input payload is deserialised as `ChunkEnvelope<Item>`, but the prompt closure receives
+    /// `(&[Item], &ChunkInfo)`.
+    ///
+    /// Type inference: using named functions for `prompt` and `parse` is usually enough for the
+    /// compiler to infer `Item` and `Out` at the call site.
+    pub async fn build_map_items_with_chunk_info<Item, Out>(
+        self,
+        prompt: impl Fn(&[Item], &ChunkInfo) -> Result<UserPrompt, HandlerError> + Send + Sync + 'static,
+        parse: impl Fn(ChatResponse) -> Result<Out, HandlerError> + Send + Sync + 'static,
+    ) -> Result<ChatTransform, HandlerError>
+    where
+        Item: DeserializeOwned + Send + Sync + 'static,
+        Out: Serialize + TypedPayload + Send + Sync + 'static,
+    {
+        self.build_typed::<ChunkEnvelope<Item>, Out>(
+            move |chunk| {
+                let info = chunk.chunk_info();
+                Ok(prompt(chunk.items.as_slice(), &info)?.into())
+            },
+            move |_chunk, response| parse(response),
+        )
+        .await
+    }
+
     /// Build a map-role `ChatTransform` over chunk items, passing the prompt to `parse`.
     ///
     /// Determinism: this method calls `prompt` twice (once to build the request, once to
@@ -751,6 +778,25 @@ impl ChatTransformBuilder {
         self.build_typed_lazy::<Vec<Item>, Out>(
             move |items| Ok(prompt(items.as_slice())?.into()),
             move |_items, response| parse(response),
+        )
+    }
+
+    /// Lazy counterpart of [`Self::build_map_items_with_chunk_info`] (no provider/model preflight).
+    pub fn build_map_items_with_chunk_info_lazy<Item, Out>(
+        self,
+        prompt: impl Fn(&[Item], &ChunkInfo) -> Result<UserPrompt, HandlerError> + Send + Sync + 'static,
+        parse: impl Fn(ChatResponse) -> Result<Out, HandlerError> + Send + Sync + 'static,
+    ) -> Result<ChatTransform, HandlerError>
+    where
+        Item: DeserializeOwned + Send + Sync + 'static,
+        Out: Serialize + TypedPayload + Send + Sync + 'static,
+    {
+        self.build_typed_lazy::<ChunkEnvelope<Item>, Out>(
+            move |chunk| {
+                let info = chunk.chunk_info();
+                Ok(prompt(chunk.items.as_slice(), &info)?.into())
+            },
+            move |_chunk, response| parse(response),
         )
     }
 
@@ -1155,6 +1201,31 @@ where
             .await
     }
 
+    /// Build a map-role `ChatTransform` over chunk items, passing chunk planning metadata
+    /// through to the prompt function (eager, with provider/model preflight).
+    pub async fn build_map_items_with_chunk_info<Item, Out>(
+        self,
+        prompt: impl Fn(&Ctx, &[Item], &ChunkInfo) -> Result<UserPrompt, HandlerError>
+            + Send
+            + Sync
+            + 'static,
+        parse: impl Fn(&Ctx, ChatResponse) -> Result<Out, HandlerError> + Send + Sync + 'static,
+    ) -> Result<ChatTransform, HandlerError>
+    where
+        Item: DeserializeOwned + Send + Sync + 'static,
+        Out: Serialize + TypedPayload + Send + Sync + 'static,
+    {
+        let ChatTransformBuilderWithContext { inner, ctx } = self;
+        let ctx_prompt = ctx.clone();
+        let ctx_parse = ctx.clone();
+        inner
+            .build_map_items_with_chunk_info(
+                move |items, info| prompt(ctx_prompt.as_ref(), items, info),
+                move |response| parse(ctx_parse.as_ref(), response),
+            )
+            .await
+    }
+
     /// Build a map-role `ChatTransform` over chunk items, passing the prompt to `parse`.
     ///
     /// Determinism: this method calls `prompt` twice (once to build the request, once to
@@ -1198,6 +1269,28 @@ where
         let ctx_parse = ctx.clone();
         inner.build_map_items_lazy(
             move |items| prompt(ctx_prompt.as_ref(), items),
+            move |response| parse(ctx_parse.as_ref(), response),
+        )
+    }
+
+    /// Lazy counterpart of [`Self::build_map_items_with_chunk_info`] (no provider/model preflight).
+    pub fn build_map_items_with_chunk_info_lazy<Item, Out>(
+        self,
+        prompt: impl Fn(&Ctx, &[Item], &ChunkInfo) -> Result<UserPrompt, HandlerError>
+            + Send
+            + Sync
+            + 'static,
+        parse: impl Fn(&Ctx, ChatResponse) -> Result<Out, HandlerError> + Send + Sync + 'static,
+    ) -> Result<ChatTransform, HandlerError>
+    where
+        Item: DeserializeOwned + Send + Sync + 'static,
+        Out: Serialize + TypedPayload + Send + Sync + 'static,
+    {
+        let ChatTransformBuilderWithContext { inner, ctx } = self;
+        let ctx_prompt = ctx.clone();
+        let ctx_parse = ctx.clone();
+        inner.build_map_items_with_chunk_info_lazy(
+            move |items, info| prompt(ctx_prompt.as_ref(), items, info),
             move |response| parse(ctx_parse.as_ref(), response),
         )
     }
