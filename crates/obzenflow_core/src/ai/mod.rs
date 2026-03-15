@@ -25,9 +25,9 @@ pub use chat_budget::{
     ChatBudgetTemplate,
 };
 pub use chunking::{
-    plan_chunks_by_budget, ChunkEnvelope, ChunkExclusionReason, ChunkPlan, ChunkPlanningConfig,
-    ChunkPlanningError, ChunkPlanningStats, ChunkPlanningSummary, ChunkRenderContext,
-    OversizeExhaustion, OversizePolicy,
+    plan_chunks_by_budget, ChunkEnvelope, ChunkExclusionReason, ChunkInfo, ChunkPlan,
+    ChunkPlanningConfig, ChunkPlanningError, ChunkPlanningStats, ChunkPlanningSummary,
+    ChunkRenderContext, OversizeExhaustion, OversizePolicy,
 };
 pub use error::{AiClientError, StructuredOutputError};
 pub use hashing::{

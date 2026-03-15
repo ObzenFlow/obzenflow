@@ -15,11 +15,11 @@ pub use obzenflow_adapters::ai::{ChatTransform, EmbeddingTransform};
 pub use obzenflow_core::ai::{
     plan_chat_input_budget, plan_chunks_by_budget, remaining_budget, split_to_budget,
     ChatBudgetError, ChatBudgetMessage, ChatBudgetPlan, ChatBudgetSpec, ChatBudgetTemplate,
-    ChatModelProfile, ChunkEnvelope, ChunkExclusionReason, ChunkPlan, ChunkPlanningConfig,
-    ChunkPlanningError, ChunkPlanningStats, ChunkPlanningSummary, ChunkRenderContext,
-    ContextWindowSource, EstimateSource, HeuristicTokenEstimator, OversizeExhaustion,
-    OversizePolicy, ResolvedTokenEstimator, SplitGroup, SystemPrompt, TokenCount, TokenEstimate,
-    TokenEstimationError, TokenEstimator, TokenEstimatorFallbackReason,
+    ChatModelProfile, ChunkEnvelope, ChunkExclusionReason, ChunkInfo, ChunkPlan,
+    ChunkPlanningConfig, ChunkPlanningError, ChunkPlanningStats, ChunkPlanningSummary,
+    ChunkRenderContext, ContextWindowSource, EstimateSource, HeuristicTokenEstimator,
+    OversizeExhaustion, OversizePolicy, ResolvedTokenEstimator, SplitGroup, SystemPrompt,
+    TokenCount, TokenEstimate, TokenEstimationError, TokenEstimator, TokenEstimatorFallbackReason,
     TokenEstimatorResolutionInfo, UserPrompt,
 };
 

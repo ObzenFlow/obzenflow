@@ -3572,10 +3572,6 @@ macro_rules! __obzenflow_ai_map_reduce_cadillac_typed_default {
         let __chunk_handler = $chunker;
 
         let __map_handler = $map_handler;
-        let __map_handler = $crate::dsl::composites::ai_map_reduce::AiMapReduceChunkItemsAdapter::<
-            $item_ty,
-            _,
-        >::new(__map_handler);
 
         let __collect_handler: ::obzenflow_runtime::stages::stateful::CollectByInput<
             $partial_ty,
@@ -3654,10 +3650,6 @@ macro_rules! __obzenflow_ai_map_reduce_cadillac_typed_collect {
         let __chunk_handler = $chunker;
 
         let __map_handler = $map_handler;
-        let __map_handler = $crate::dsl::composites::ai_map_reduce::AiMapReduceChunkItemsAdapter::<
-            $item_ty,
-            _,
-        >::new(__map_handler);
 
         let __collect_handler = $collect_handler;
         let __collect_handler = __collect_handler.with_seed::<$($seed_ty)+>();
