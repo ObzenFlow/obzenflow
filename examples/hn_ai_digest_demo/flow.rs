@@ -99,7 +99,10 @@ Notable stories:\n\
 - (n) Title: 1 sentence\n\
 - (n) Title: 1 sentence",
         )
-        .fenced_lines("Input stories (numbered; do not repeat)", chunk_info.iter_rendered());
+        .fenced_lines(
+            "Input stories (numbered; do not repeat)",
+            chunk_info.iter_rendered(),
+        );
 
     Ok(p.finish())
 }
