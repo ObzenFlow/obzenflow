@@ -18,14 +18,14 @@ pub use obzenflow_core::ai::{
     ChatModelProfile, ChunkEnvelope, ChunkExclusionReason, ChunkPlan, ChunkPlanningConfig,
     ChunkPlanningError, ChunkPlanningStats, ChunkPlanningSummary, ChunkRenderContext,
     ContextWindowSource, EstimateSource, HeuristicTokenEstimator, OversizeExhaustion,
-    OversizePolicy, ResolvedTokenEstimator, SplitGroup, TokenCount, TokenEstimate,
+    OversizePolicy, ResolvedTokenEstimator, SplitGroup, SystemPrompt, TokenCount, TokenEstimate,
     TokenEstimationError, TokenEstimator, TokenEstimatorFallbackReason,
-    TokenEstimatorResolutionInfo,
+    TokenEstimatorResolutionInfo, UserPrompt,
 };
 
 pub use obzenflow_infra::ai::{
     boxed_estimator_for_model, estimator_for_model, resolve_chat_model_profile,
-    resolve_estimator_for_model,
+    resolve_estimator_for_model, Prompt,
 };
 
 #[cfg(feature = "ai")]

@@ -7,6 +7,8 @@
 #[cfg(feature = "ai-rig")]
 pub mod rig;
 
+mod prompt;
+
 #[cfg(feature = "ai-rig")]
 mod rig_builder;
 
@@ -20,6 +22,7 @@ mod token_estimation;
 mod tiktoken;
 
 pub use model_profile::resolve_chat_model_profile;
+pub use prompt::Prompt;
 pub use token_estimation::{
     boxed_estimator_for_model, estimator_for_model, resolve_estimator_for_model,
 };

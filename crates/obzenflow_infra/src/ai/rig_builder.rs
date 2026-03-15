@@ -16,7 +16,7 @@ use obzenflow_adapters::ai::{
 use obzenflow_core::ai::{
     AiClientError, AiProvider, ChatClient, ChatMessage, ChatParams, ChatRequest, ChatResponse,
     ChatResponseFormat, EmbeddingClient, EmbeddingParams, EmbeddingRequest, EmbeddingResponse,
-    ToolDefinition,
+    ToolDefinition, UserPrompt,
 };
 use obzenflow_core::event::chain_event::ChainEventFactory;
 use obzenflow_core::http_client::Url;
@@ -690,7 +690,7 @@ impl ChatTransformBuilder {
     /// compiler to infer `Item` and `Out` at the call site.
     pub async fn build_map_items<Item, Out>(
         self,
-        prompt: impl Fn(&[Item]) -> Result<String, HandlerError> + Send + Sync + 'static,
+        prompt: impl Fn(&[Item]) -> Result<UserPrompt, HandlerError> + Send + Sync + 'static,
         parse: impl Fn(ChatResponse) -> Result<Out, HandlerError> + Send + Sync + 'static,
     ) -> Result<ChatTransform, HandlerError>
     where
@@ -698,8 +698,42 @@ impl ChatTransformBuilder {
         Out: Serialize + TypedPayload + Send + Sync + 'static,
     {
         self.build_typed::<Vec<Item>, Out>(
-            move |items| prompt(items.as_slice()),
+            move |items| Ok(prompt(items.as_slice())?.into()),
             move |_items, response| parse(response),
+        )
+        .await
+    }
+
+    /// Build a map-role `ChatTransform` over chunk items, passing the prompt to `parse`.
+    ///
+    /// Determinism: this method calls `prompt` twice (once to build the request, once to
+    /// provide the prompt to `parse`). Prompt functions must therefore be deterministic and
+    /// side-effect free.
+    pub async fn build_map_items_with_prompt<Item, Out>(
+        self,
+        prompt: impl Fn(&[Item]) -> Result<UserPrompt, HandlerError> + Send + Sync + 'static,
+        parse: impl Fn(UserPrompt, ChatResponse) -> Result<Out, HandlerError> + Send + Sync + 'static,
+    ) -> Result<ChatTransform, HandlerError>
+    where
+        Item: DeserializeOwned + Send + Sync + 'static,
+        Out: Serialize + TypedPayload + Send + Sync + 'static,
+    {
+        let prompt = Arc::new(prompt);
+        let parse = Arc::new(parse);
+
+        self.build_typed::<Vec<Item>, Out>(
+            {
+                let prompt = prompt.clone();
+                move |items| Ok((prompt)(items.as_slice())?.into())
+            },
+            {
+                let prompt = prompt.clone();
+                let parse = parse.clone();
+                move |items, response| {
+                    let user_prompt = (prompt)(items.as_slice())?;
+                    (parse)(user_prompt, response)
+                }
+            },
         )
         .await
     }
@@ -707,7 +741,7 @@ impl ChatTransformBuilder {
     /// Lazy counterpart of [`Self::build_map_items`] (no provider/model preflight).
     pub fn build_map_items_lazy<Item, Out>(
         self,
-        prompt: impl Fn(&[Item]) -> Result<String, HandlerError> + Send + Sync + 'static,
+        prompt: impl Fn(&[Item]) -> Result<UserPrompt, HandlerError> + Send + Sync + 'static,
         parse: impl Fn(ChatResponse) -> Result<Out, HandlerError> + Send + Sync + 'static,
     ) -> Result<ChatTransform, HandlerError>
     where
@@ -715,8 +749,37 @@ impl ChatTransformBuilder {
         Out: Serialize + TypedPayload + Send + Sync + 'static,
     {
         self.build_typed_lazy::<Vec<Item>, Out>(
-            move |items| prompt(items.as_slice()),
+            move |items| Ok(prompt(items.as_slice())?.into()),
             move |_items, response| parse(response),
+        )
+    }
+
+    /// Lazy counterpart of [`Self::build_map_items_with_prompt`] (no provider/model preflight).
+    pub fn build_map_items_with_prompt_lazy<Item, Out>(
+        self,
+        prompt: impl Fn(&[Item]) -> Result<UserPrompt, HandlerError> + Send + Sync + 'static,
+        parse: impl Fn(UserPrompt, ChatResponse) -> Result<Out, HandlerError> + Send + Sync + 'static,
+    ) -> Result<ChatTransform, HandlerError>
+    where
+        Item: DeserializeOwned + Send + Sync + 'static,
+        Out: Serialize + TypedPayload + Send + Sync + 'static,
+    {
+        let prompt = Arc::new(prompt);
+        let parse = Arc::new(parse);
+
+        self.build_typed_lazy::<Vec<Item>, Out>(
+            {
+                let prompt = prompt.clone();
+                move |items| Ok((prompt)(items.as_slice())?.into())
+            },
+            {
+                let prompt = prompt.clone();
+                let parse = parse.clone();
+                move |items, response| {
+                    let user_prompt = (prompt)(items.as_slice())?;
+                    (parse)(user_prompt, response)
+                }
+            },
         )
     }
 
@@ -724,28 +787,31 @@ impl ChatTransformBuilder {
     /// (eager, with provider/model preflight).
     pub async fn build_map_items_with_input<Item, Out>(
         self,
-        prompt: impl Fn(&[Item]) -> Result<String, HandlerError> + Send + Sync + 'static,
+        prompt: impl Fn(&[Item]) -> Result<UserPrompt, HandlerError> + Send + Sync + 'static,
         parse: impl Fn(Vec<Item>, ChatResponse) -> Result<Out, HandlerError> + Send + Sync + 'static,
     ) -> Result<ChatTransform, HandlerError>
     where
         Item: DeserializeOwned + Send + Sync + 'static,
         Out: Serialize + TypedPayload + Send + Sync + 'static,
     {
-        self.build_typed::<Vec<Item>, Out>(move |items| prompt(items.as_slice()), parse)
+        self.build_typed::<Vec<Item>, Out>(move |items| Ok(prompt(items.as_slice())?.into()), parse)
             .await
     }
 
     /// Lazy counterpart of [`Self::build_map_items_with_input`] (no provider/model preflight).
     pub fn build_map_items_with_input_lazy<Item, Out>(
         self,
-        prompt: impl Fn(&[Item]) -> Result<String, HandlerError> + Send + Sync + 'static,
+        prompt: impl Fn(&[Item]) -> Result<UserPrompt, HandlerError> + Send + Sync + 'static,
         parse: impl Fn(Vec<Item>, ChatResponse) -> Result<Out, HandlerError> + Send + Sync + 'static,
     ) -> Result<ChatTransform, HandlerError>
     where
         Item: DeserializeOwned + Send + Sync + 'static,
         Out: Serialize + TypedPayload + Send + Sync + 'static,
     {
-        self.build_typed_lazy::<Vec<Item>, Out>(move |items| prompt(items.as_slice()), parse)
+        self.build_typed_lazy::<Vec<Item>, Out>(
+            move |items| Ok(prompt(items.as_slice())?.into()),
+            parse,
+        )
     }
 
     /// Build a seeded reduce-role `ChatTransform` (eager, with provider/model preflight).
@@ -757,7 +823,7 @@ impl ChatTransformBuilder {
     /// compiler to infer `Seed`, `Partial`, and `Out` at the call site.
     pub async fn build_reduce_seeded<Seed, Partial, Out>(
         self,
-        prompt: impl Fn(&Seed, &[Partial]) -> Result<String, HandlerError> + Send + Sync + 'static,
+        prompt: impl Fn(&Seed, &[Partial]) -> Result<UserPrompt, HandlerError> + Send + Sync + 'static,
         parse: impl Fn(Seed, Vec<Partial>, ChatResponse) -> Result<Out, HandlerError>
             + Send
             + Sync
@@ -769,8 +835,46 @@ impl ChatTransformBuilder {
         Out: Serialize + TypedPayload + Send + Sync + 'static,
     {
         self.build_typed::<(Seed, Vec<Partial>), Out>(
-            move |input| prompt(&input.0, input.1.as_slice()),
+            move |input| Ok(prompt(&input.0, input.1.as_slice())?.into()),
             move |(seed, partials), response| parse(seed, partials, response),
+        )
+        .await
+    }
+
+    /// Build a seeded reduce-role `ChatTransform`, passing the prompt to `parse`.
+    ///
+    /// Determinism: this method calls `prompt` twice (once to build the request, once to
+    /// provide the prompt to `parse`). Prompt functions must therefore be deterministic and
+    /// side-effect free.
+    pub async fn build_reduce_seeded_with_prompt<Seed, Partial, Out>(
+        self,
+        prompt: impl Fn(&Seed, &[Partial]) -> Result<UserPrompt, HandlerError> + Send + Sync + 'static,
+        parse: impl Fn(Seed, Vec<Partial>, UserPrompt, ChatResponse) -> Result<Out, HandlerError>
+            + Send
+            + Sync
+            + 'static,
+    ) -> Result<ChatTransform, HandlerError>
+    where
+        Seed: DeserializeOwned + Send + Sync + 'static,
+        Partial: DeserializeOwned + Send + Sync + 'static,
+        Out: Serialize + TypedPayload + Send + Sync + 'static,
+    {
+        let prompt = Arc::new(prompt);
+        let parse = Arc::new(parse);
+
+        self.build_typed::<(Seed, Vec<Partial>), Out>(
+            {
+                let prompt = prompt.clone();
+                move |input| Ok((prompt)(&input.0, input.1.as_slice())?.into())
+            },
+            {
+                let prompt = prompt.clone();
+                let parse = parse.clone();
+                move |(seed, partials), response| {
+                    let user_prompt = (prompt)(&seed, partials.as_slice())?;
+                    (parse)(seed, partials, user_prompt, response)
+                }
+            },
         )
         .await
     }
@@ -778,7 +882,7 @@ impl ChatTransformBuilder {
     /// Lazy counterpart of [`Self::build_reduce_seeded`] (no provider/model preflight).
     pub fn build_reduce_seeded_lazy<Seed, Partial, Out>(
         self,
-        prompt: impl Fn(&Seed, &[Partial]) -> Result<String, HandlerError> + Send + Sync + 'static,
+        prompt: impl Fn(&Seed, &[Partial]) -> Result<UserPrompt, HandlerError> + Send + Sync + 'static,
         parse: impl Fn(Seed, Vec<Partial>, ChatResponse) -> Result<Out, HandlerError>
             + Send
             + Sync
@@ -790,8 +894,41 @@ impl ChatTransformBuilder {
         Out: Serialize + TypedPayload + Send + Sync + 'static,
     {
         self.build_typed_lazy::<(Seed, Vec<Partial>), Out>(
-            move |input| prompt(&input.0, input.1.as_slice()),
+            move |input| Ok(prompt(&input.0, input.1.as_slice())?.into()),
             move |(seed, partials), response| parse(seed, partials, response),
+        )
+    }
+
+    /// Lazy counterpart of [`Self::build_reduce_seeded_with_prompt`] (no provider/model preflight).
+    pub fn build_reduce_seeded_with_prompt_lazy<Seed, Partial, Out>(
+        self,
+        prompt: impl Fn(&Seed, &[Partial]) -> Result<UserPrompt, HandlerError> + Send + Sync + 'static,
+        parse: impl Fn(Seed, Vec<Partial>, UserPrompt, ChatResponse) -> Result<Out, HandlerError>
+            + Send
+            + Sync
+            + 'static,
+    ) -> Result<ChatTransform, HandlerError>
+    where
+        Seed: DeserializeOwned + Send + Sync + 'static,
+        Partial: DeserializeOwned + Send + Sync + 'static,
+        Out: Serialize + TypedPayload + Send + Sync + 'static,
+    {
+        let prompt = Arc::new(prompt);
+        let parse = Arc::new(parse);
+
+        self.build_typed_lazy::<(Seed, Vec<Partial>), Out>(
+            {
+                let prompt = prompt.clone();
+                move |input| Ok((prompt)(&input.0, input.1.as_slice())?.into())
+            },
+            {
+                let prompt = prompt.clone();
+                let parse = parse.clone();
+                move |(seed, partials), response| {
+                    let user_prompt = (prompt)(&seed, partials.as_slice())?;
+                    (parse)(seed, partials, user_prompt, response)
+                }
+            },
         )
     }
 
@@ -1000,7 +1137,7 @@ where
     /// Build a map-role `ChatTransform` over chunk items (eager, with provider/model preflight).
     pub async fn build_map_items<Item, Out>(
         self,
-        prompt: impl Fn(&Ctx, &[Item]) -> Result<String, HandlerError> + Send + Sync + 'static,
+        prompt: impl Fn(&Ctx, &[Item]) -> Result<UserPrompt, HandlerError> + Send + Sync + 'static,
         parse: impl Fn(&Ctx, ChatResponse) -> Result<Out, HandlerError> + Send + Sync + 'static,
     ) -> Result<ChatTransform, HandlerError>
     where
@@ -1018,10 +1155,38 @@ where
             .await
     }
 
+    /// Build a map-role `ChatTransform` over chunk items, passing the prompt to `parse`.
+    ///
+    /// Determinism: this method calls `prompt` twice (once to build the request, once to
+    /// provide the prompt to `parse`). Prompt functions must therefore be deterministic and
+    /// side-effect free.
+    pub async fn build_map_items_with_prompt<Item, Out>(
+        self,
+        prompt: impl Fn(&Ctx, &[Item]) -> Result<UserPrompt, HandlerError> + Send + Sync + 'static,
+        parse: impl Fn(&Ctx, UserPrompt, ChatResponse) -> Result<Out, HandlerError>
+            + Send
+            + Sync
+            + 'static,
+    ) -> Result<ChatTransform, HandlerError>
+    where
+        Item: DeserializeOwned + Send + Sync + 'static,
+        Out: Serialize + TypedPayload + Send + Sync + 'static,
+    {
+        let ChatTransformBuilderWithContext { inner, ctx } = self;
+        let ctx_prompt = ctx.clone();
+        let ctx_parse = ctx.clone();
+        inner
+            .build_map_items_with_prompt(
+                move |items| prompt(ctx_prompt.as_ref(), items),
+                move |user_prompt, response| parse(ctx_parse.as_ref(), user_prompt, response),
+            )
+            .await
+    }
+
     /// Lazy counterpart of [`Self::build_map_items`] (no provider/model preflight).
     pub fn build_map_items_lazy<Item, Out>(
         self,
-        prompt: impl Fn(&Ctx, &[Item]) -> Result<String, HandlerError> + Send + Sync + 'static,
+        prompt: impl Fn(&Ctx, &[Item]) -> Result<UserPrompt, HandlerError> + Send + Sync + 'static,
         parse: impl Fn(&Ctx, ChatResponse) -> Result<Out, HandlerError> + Send + Sync + 'static,
     ) -> Result<ChatTransform, HandlerError>
     where
@@ -1037,11 +1202,33 @@ where
         )
     }
 
+    /// Lazy counterpart of [`Self::build_map_items_with_prompt`] (no provider/model preflight).
+    pub fn build_map_items_with_prompt_lazy<Item, Out>(
+        self,
+        prompt: impl Fn(&Ctx, &[Item]) -> Result<UserPrompt, HandlerError> + Send + Sync + 'static,
+        parse: impl Fn(&Ctx, UserPrompt, ChatResponse) -> Result<Out, HandlerError>
+            + Send
+            + Sync
+            + 'static,
+    ) -> Result<ChatTransform, HandlerError>
+    where
+        Item: DeserializeOwned + Send + Sync + 'static,
+        Out: Serialize + TypedPayload + Send + Sync + 'static,
+    {
+        let ChatTransformBuilderWithContext { inner, ctx } = self;
+        let ctx_prompt = ctx.clone();
+        let ctx_parse = ctx.clone();
+        inner.build_map_items_with_prompt_lazy(
+            move |items| prompt(ctx_prompt.as_ref(), items),
+            move |user_prompt, response| parse(ctx_parse.as_ref(), user_prompt, response),
+        )
+    }
+
     /// Build a map-role `ChatTransform` where parsing needs access to the input items
     /// (eager, with provider/model preflight).
     pub async fn build_map_items_with_input<Item, Out>(
         self,
-        prompt: impl Fn(&Ctx, &[Item]) -> Result<String, HandlerError> + Send + Sync + 'static,
+        prompt: impl Fn(&Ctx, &[Item]) -> Result<UserPrompt, HandlerError> + Send + Sync + 'static,
         parse: impl Fn(&Ctx, Vec<Item>, ChatResponse) -> Result<Out, HandlerError>
             + Send
             + Sync
@@ -1065,7 +1252,7 @@ where
     /// Lazy counterpart of [`Self::build_map_items_with_input`] (no provider/model preflight).
     pub fn build_map_items_with_input_lazy<Item, Out>(
         self,
-        prompt: impl Fn(&Ctx, &[Item]) -> Result<String, HandlerError> + Send + Sync + 'static,
+        prompt: impl Fn(&Ctx, &[Item]) -> Result<UserPrompt, HandlerError> + Send + Sync + 'static,
         parse: impl Fn(&Ctx, Vec<Item>, ChatResponse) -> Result<Out, HandlerError>
             + Send
             + Sync
@@ -1087,7 +1274,10 @@ where
     /// Build a seeded reduce-role `ChatTransform` (eager, with provider/model preflight).
     pub async fn build_reduce_seeded<Seed, Partial, Out>(
         self,
-        prompt: impl Fn(&Ctx, &Seed, &[Partial]) -> Result<String, HandlerError> + Send + Sync + 'static,
+        prompt: impl Fn(&Ctx, &Seed, &[Partial]) -> Result<UserPrompt, HandlerError>
+            + Send
+            + Sync
+            + 'static,
         parse: impl Fn(&Ctx, Seed, Vec<Partial>, ChatResponse) -> Result<Out, HandlerError>
             + Send
             + Sync
@@ -1109,10 +1299,47 @@ where
             .await
     }
 
+    /// Build a seeded reduce-role `ChatTransform`, passing the prompt to `parse`.
+    ///
+    /// Determinism: this method calls `prompt` twice (once to build the request, once to
+    /// provide the prompt to `parse`). Prompt functions must therefore be deterministic and
+    /// side-effect free.
+    pub async fn build_reduce_seeded_with_prompt<Seed, Partial, Out>(
+        self,
+        prompt: impl Fn(&Ctx, &Seed, &[Partial]) -> Result<UserPrompt, HandlerError>
+            + Send
+            + Sync
+            + 'static,
+        parse: impl Fn(&Ctx, Seed, Vec<Partial>, UserPrompt, ChatResponse) -> Result<Out, HandlerError>
+            + Send
+            + Sync
+            + 'static,
+    ) -> Result<ChatTransform, HandlerError>
+    where
+        Seed: DeserializeOwned + Send + Sync + 'static,
+        Partial: DeserializeOwned + Send + Sync + 'static,
+        Out: Serialize + TypedPayload + Send + Sync + 'static,
+    {
+        let ChatTransformBuilderWithContext { inner, ctx } = self;
+        let ctx_prompt = ctx.clone();
+        let ctx_parse = ctx.clone();
+        inner
+            .build_reduce_seeded_with_prompt(
+                move |seed, partials| prompt(ctx_prompt.as_ref(), seed, partials),
+                move |seed, partials, user_prompt, response| {
+                    parse(ctx_parse.as_ref(), seed, partials, user_prompt, response)
+                },
+            )
+            .await
+    }
+
     /// Lazy counterpart of [`Self::build_reduce_seeded`] (no provider/model preflight).
     pub fn build_reduce_seeded_lazy<Seed, Partial, Out>(
         self,
-        prompt: impl Fn(&Ctx, &Seed, &[Partial]) -> Result<String, HandlerError> + Send + Sync + 'static,
+        prompt: impl Fn(&Ctx, &Seed, &[Partial]) -> Result<UserPrompt, HandlerError>
+            + Send
+            + Sync
+            + 'static,
         parse: impl Fn(&Ctx, Seed, Vec<Partial>, ChatResponse) -> Result<Out, HandlerError>
             + Send
             + Sync
@@ -1129,6 +1356,34 @@ where
         inner.build_reduce_seeded_lazy(
             move |seed, partials| prompt(ctx_prompt.as_ref(), seed, partials),
             move |seed, partials, response| parse(ctx_parse.as_ref(), seed, partials, response),
+        )
+    }
+
+    /// Lazy counterpart of [`Self::build_reduce_seeded_with_prompt`] (no provider/model preflight).
+    pub fn build_reduce_seeded_with_prompt_lazy<Seed, Partial, Out>(
+        self,
+        prompt: impl Fn(&Ctx, &Seed, &[Partial]) -> Result<UserPrompt, HandlerError>
+            + Send
+            + Sync
+            + 'static,
+        parse: impl Fn(&Ctx, Seed, Vec<Partial>, UserPrompt, ChatResponse) -> Result<Out, HandlerError>
+            + Send
+            + Sync
+            + 'static,
+    ) -> Result<ChatTransform, HandlerError>
+    where
+        Seed: DeserializeOwned + Send + Sync + 'static,
+        Partial: DeserializeOwned + Send + Sync + 'static,
+        Out: Serialize + TypedPayload + Send + Sync + 'static,
+    {
+        let ChatTransformBuilderWithContext { inner, ctx } = self;
+        let ctx_prompt = ctx.clone();
+        let ctx_parse = ctx.clone();
+        inner.build_reduce_seeded_with_prompt_lazy(
+            move |seed, partials| prompt(ctx_prompt.as_ref(), seed, partials),
+            move |seed, partials, user_prompt, response| {
+                parse(ctx_parse.as_ref(), seed, partials, user_prompt, response)
+            },
         )
     }
 }
@@ -1740,7 +1995,7 @@ mod tests {
             .ollama("llama3.1:8b")
             .system("x")
             .build_map_items_lazy::<Item, Out>(
-                |_items| Ok("hi".to_string()),
+                |_items| Ok("hi".into()),
                 |_response| Ok(Out { ok: true }),
             )
             .expect("builder should succeed");
@@ -1766,8 +2021,34 @@ mod tests {
             .ollama("llama3.1:8b")
             .system("x")
             .build_map_items_with_input_lazy::<Item, Out>(
-                |_items| Ok("hi".to_string()),
+                |_items| Ok("hi".into()),
                 |items, _response| Ok(Out { count: items.len() }),
+            )
+            .expect("builder should succeed");
+    }
+
+    #[test]
+    fn chat_builder_build_map_items_with_prompt_lazy_constructs_transform() {
+        #[derive(Debug, Clone, Serialize, Deserialize)]
+        struct Item {
+            x: i32,
+        }
+
+        #[derive(Debug, Clone, Serialize, Deserialize)]
+        struct Out {
+            ok: bool,
+        }
+
+        impl TypedPayload for Out {
+            const EVENT_TYPE: &'static str = "test.map_items_with_prompt_out";
+        }
+
+        let _transform = ChatTransform::builder()
+            .ollama("llama3.1:8b")
+            .system("x")
+            .build_map_items_with_prompt_lazy::<Item, Out>(
+                |_items| Ok("hi".into()),
+                |_prompt, _response| Ok(Out { ok: true }),
             )
             .expect("builder should succeed");
     }
@@ -1798,8 +2079,45 @@ mod tests {
             .ollama("llama3.1:8b")
             .system("x")
             .build_reduce_seeded_lazy::<Seed, Partial, Out>(
-                |_seed, partials| Ok(format!("partials={}", partials.len())),
+                |_seed, partials| Ok(format!("partials={}", partials.len()).into()),
                 |seed, partials, _response| {
+                    Ok(Out {
+                        seed_id: seed.id,
+                        partials: partials.len(),
+                    })
+                },
+            )
+            .expect("builder should succeed");
+    }
+
+    #[test]
+    fn chat_builder_build_reduce_seeded_with_prompt_lazy_constructs_transform() {
+        #[derive(Debug, Clone, Serialize, Deserialize)]
+        struct Seed {
+            id: u32,
+        }
+
+        #[derive(Debug, Clone, Serialize, Deserialize)]
+        struct Partial {
+            x: i32,
+        }
+
+        #[derive(Debug, Clone, Serialize, Deserialize)]
+        struct Out {
+            seed_id: u32,
+            partials: usize,
+        }
+
+        impl TypedPayload for Out {
+            const EVENT_TYPE: &'static str = "test.reduce_seeded_with_prompt_out";
+        }
+
+        let _transform = ChatTransform::builder()
+            .ollama("llama3.1:8b")
+            .system("x")
+            .build_reduce_seeded_with_prompt_lazy::<Seed, Partial, Out>(
+                |_seed, partials| Ok(format!("partials={}", partials.len()).into()),
+                |seed, partials, _prompt, _response| {
                     Ok(Out {
                         seed_id: seed.id,
                         partials: partials.len(),
@@ -1837,7 +2155,7 @@ mod tests {
                 prefix: "hello".to_string(),
             })
             .build_map_items_lazy::<Item, Out>(
-                |ctx, _items| Ok(format!("{}!", ctx.prefix)),
+                |ctx, _items| Ok(format!("{}!", ctx.prefix).into()),
                 |_ctx, _response| Ok(Out { ok: true }),
             )
             .expect("builder should succeed");
@@ -1872,13 +2190,47 @@ mod tests {
                 suffix: "!".to_string(),
             })
             .build_map_items_with_input_lazy::<Item, Out>(
-                |ctx, items| Ok(format!("items={}{}", items.len(), ctx.suffix)),
+                |ctx, items| Ok(format!("items={}{}", items.len(), ctx.suffix).into()),
                 |ctx, items, _response| {
                     Ok(Out {
                         marker: ctx.suffix.clone(),
                         count: items.len(),
                     })
                 },
+            )
+            .expect("builder should succeed");
+    }
+
+    #[test]
+    fn chat_builder_context_build_map_items_with_prompt_lazy_constructs_transform() {
+        #[derive(Debug)]
+        struct Ctx {
+            prefix: String,
+        }
+
+        #[derive(Debug, Clone, Serialize, Deserialize)]
+        struct Item {
+            x: i32,
+        }
+
+        #[derive(Debug, Clone, Serialize, Deserialize)]
+        struct Out {
+            ok: bool,
+        }
+
+        impl TypedPayload for Out {
+            const EVENT_TYPE: &'static str = "test.context_map_items_with_prompt_out";
+        }
+
+        let _transform = ChatTransform::builder()
+            .ollama("llama3.1:8b")
+            .system("x")
+            .context(Ctx {
+                prefix: "hello".to_string(),
+            })
+            .build_map_items_with_prompt_lazy::<Item, Out>(
+                |ctx, _items| Ok(format!("{}!", ctx.prefix).into()),
+                |_ctx, _prompt, _response| Ok(Out { ok: true }),
             )
             .expect("builder should succeed");
     }
@@ -1918,8 +2270,59 @@ mod tests {
                 prefix: "p".to_string(),
             })
             .build_reduce_seeded_lazy::<Seed, Partial, Out>(
-                |ctx, seed, partials| Ok(format!("{}:{}:{}", ctx.prefix, seed.id, partials.len())),
+                |ctx, seed, partials| {
+                    Ok(format!("{}:{}:{}", ctx.prefix, seed.id, partials.len()).into())
+                },
                 |ctx, seed, partials, _response| {
+                    Ok(Out {
+                        prefix: ctx.prefix.clone(),
+                        seed_id: seed.id,
+                        partials: partials.len(),
+                    })
+                },
+            )
+            .expect("builder should succeed");
+    }
+
+    #[test]
+    fn chat_builder_context_build_reduce_seeded_with_prompt_lazy_constructs_transform() {
+        #[derive(Debug)]
+        struct Ctx {
+            prefix: String,
+        }
+
+        #[derive(Debug, Clone, Serialize, Deserialize)]
+        struct Seed {
+            id: u32,
+        }
+
+        #[derive(Debug, Clone, Serialize, Deserialize)]
+        struct Partial {
+            x: i32,
+        }
+
+        #[derive(Debug, Clone, Serialize, Deserialize)]
+        struct Out {
+            prefix: String,
+            seed_id: u32,
+            partials: usize,
+        }
+
+        impl TypedPayload for Out {
+            const EVENT_TYPE: &'static str = "test.context_reduce_seeded_with_prompt_out";
+        }
+
+        let _transform = ChatTransform::builder()
+            .ollama("llama3.1:8b")
+            .system("x")
+            .context(Ctx {
+                prefix: "p".to_string(),
+            })
+            .build_reduce_seeded_with_prompt_lazy::<Seed, Partial, Out>(
+                |ctx, seed, partials| {
+                    Ok(format!("{}:{}:{}", ctx.prefix, seed.id, partials.len()).into())
+                },
+                |ctx, seed, partials, _prompt, _response| {
                     Ok(Out {
                         prefix: ctx.prefix.clone(),
                         seed_id: seed.id,
