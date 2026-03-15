@@ -31,67 +31,6 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 
 #[doc(hidden)]
-pub struct AiMapReduceChunkItemsAdapter<Item, H> {
-    inner: H,
-    _phantom: PhantomData<Item>,
-}
-
-impl<Item, H> AiMapReduceChunkItemsAdapter<Item, H> {
-    pub fn new(inner: H) -> Self {
-        Self {
-            inner,
-            _phantom: PhantomData,
-        }
-    }
-}
-
-#[async_trait::async_trait]
-impl<Item, H> AsyncTransformHandler for AiMapReduceChunkItemsAdapter<Item, H>
-where
-    Item: serde::de::DeserializeOwned + serde::Serialize + Send + Sync + 'static,
-    H: AsyncTransformHandler + Send + Sync,
-{
-    async fn process(
-        &self,
-        event: obzenflow_core::ChainEvent,
-    ) -> Result<Vec<obzenflow_core::ChainEvent>, HandlerError> {
-        let obzenflow_core::event::ChainEventContent::Data { payload, .. } = &event.content else {
-            return Ok(Vec::new());
-        };
-
-        #[derive(serde::Deserialize)]
-        struct ItemsOnly<T> {
-            items: Vec<T>,
-        }
-
-        let decoded: ItemsOnly<Item> = serde_json::from_value(payload.clone()).map_err(|err| {
-            HandlerError::Deserialization(format!(
-                "ai_map_reduce: failed to decode ChunkEnvelope.items: {err}"
-            ))
-        })?;
-
-        let items_payload = serde_json::to_value(decoded.items).map_err(|err| {
-            HandlerError::Other(format!(
-                "ai_map_reduce: failed to encode chunk items payload: {err}"
-            ))
-        })?;
-
-        let mut items_event = event;
-        if let obzenflow_core::event::ChainEventContent::Data { payload, .. } =
-            &mut items_event.content
-        {
-            *payload = items_payload;
-        }
-
-        self.inner.process(items_event).await
-    }
-
-    async fn drain(&mut self) -> Result<(), HandlerError> {
-        self.inner.drain().await
-    }
-}
-
-#[doc(hidden)]
 pub struct AiMapReduceReduceInputManyAdapter<Seed, Partial, H> {
     inner: H,
     _phantom: PhantomData<(Seed, Partial)>,

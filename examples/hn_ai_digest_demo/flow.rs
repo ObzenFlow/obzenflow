@@ -7,7 +7,7 @@ use super::decoder::HnStoryDecoder;
 use super::domain::{FormattedStory, HnStory};
 use super::util::truncate_chars;
 use anyhow::{anyhow, Result};
-use obzenflow::ai::{EstimateSource, Prompt, SystemPrompt, TokenCount, UserPrompt};
+use obzenflow::ai::{ChunkInfo, EstimateSource, Prompt, SystemPrompt, TokenCount, UserPrompt};
 use obzenflow::sources::{HeaderMap, HttpPullConfig, HttpPullSource};
 use obzenflow::typed::{sinks, stateful as typed_stateful, transforms as typed_transforms};
 use obzenflow_adapters::middleware::control::ai_circuit_breaker;
@@ -24,17 +24,11 @@ use std::time::Duration;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct HnTopStories {
-    stories: Vec<NumberedStory>,
+    stories: Vec<FormattedStory>,
 }
 
 impl TypedPayload for HnTopStories {
     const EVENT_TYPE: &'static str = "hn.top_stories";
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct NumberedStory {
-    n: usize,
-    story: FormattedStory,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -74,7 +68,8 @@ struct DigestMapCtx {
 
 fn digest_map_prompt(
     ctx: &DigestMapCtx,
-    stories: &[NumberedStory],
+    stories: &[FormattedStory],
+    chunk_info: &ChunkInfo,
 ) -> Result<UserPrompt, HandlerError> {
     let min_citations = stories.len().min(6);
 
@@ -104,9 +99,10 @@ Notable stories:\n\
 - (n) Title: 1 sentence\n\
 - (n) Title: 1 sentence",
         )
-        .fenced_items("Input stories (numbered; do not repeat)", stories, |s| {
-            render_story_line(s.n, &s.story)
-        });
+        .fenced_lines(
+            "Input stories (numbered; do not repeat)",
+            chunk_info.iter_rendered(),
+        );
 
     Ok(p.finish())
 }
@@ -218,11 +214,7 @@ pub async fn run_example(config: DemoConfig, presentation: Presentation) -> Resu
 
     let digest_seed =
         typed_stateful::reduce(HnTopStories::default(), |acc, story: &FormattedStory| {
-            let next_n = acc.stories.len() + 1;
-            acc.stories.push(NumberedStory {
-                n: next_n,
-                story: story.clone(),
-            })
+            acc.stories.push(story.clone());
         })
         .emit_on_eof();
 
@@ -237,7 +229,7 @@ pub async fn run_example(config: DemoConfig, presentation: Presentation) -> Resu
         .context(DigestMapCtx {
             interests: interests.clone(),
         })
-        .build_map_items(digest_map_prompt, digest_map_parse)
+        .build_map_items_with_chunk_info(digest_map_prompt, digest_map_parse)
         .await?;
 
     let digest_llm_handler = ai
@@ -274,18 +266,19 @@ pub async fn run_example(config: DemoConfig, presentation: Presentation) -> Resu
                 batch = stateful!(FormattedStory -> HnTopStories => digest_seed);
 
                 // Type bridge:
-                // - map's `[NumberedStory]` comes from `HnTopStories.stories` via
+                // - map's `[FormattedStory]` comes from `HnTopStories.stories` via
                 //   `items: |seed: &HnTopStories| seed.stories.clone()`.
+                // - map's render uses `ChunkRenderContext.item_ordinal` to assign stable story numbers.
                 // - reduce's `[HnDigestGroupSummary]` is collected in chunk-index order.
                 digest = ai_map_reduce!(
                     HnTopStories -> HnDigestSummary => {
-                        map: [NumberedStory] -> HnDigestGroupSummary => map_llm_handler,
+                        map: [FormattedStory] -> HnDigestGroupSummary => map_llm_handler,
                         reduce: (HnTopStories, [HnDigestGroupSummary]) -> HnDigestSummary => digest_llm_handler,
                     },
                     chunking: by_budget {
                         estimator: estimator.clone(),
                         items: |seed: &HnTopStories| seed.stories.clone(),
-                        render: |story: &NumberedStory, _ctx| render_story_line(story.n, &story.story),
+                        render: |story: &FormattedStory, ctx| render_story_line(ctx.item_ordinal + 1, story),
                         budget: budget_per_group,
                         max_items: max_stories_per_group,
                         oversize: decompose { max_depth: 5, exhaustion: fail },
@@ -345,14 +338,14 @@ fn format_digest_summary_for_console(summary: &HnDigestSummary) -> String {
 
     out.push_str("\n\nInput data (stories)\n");
     out.push_str("--------------------\n");
-    for numbered in &summary.input.stories {
-        let story = &numbered.story;
+    for (n, story) in summary.input.stories.iter().enumerate() {
+        let n = n + 1;
         let title = truncate_chars(story.title.trim(), 140);
         let author = truncate_chars(story.author.trim(), 60);
         let url = truncate_chars(story.url.trim(), 160);
         out.push_str(&format!(
             "{n}. {title} ({points} points, {comments} comments) by {author}\n    {url}\n",
-            n = numbered.n,
+            n = n,
             points = story.points,
             comments = story.comments,
         ));

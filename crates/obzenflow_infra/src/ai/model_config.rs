@@ -11,8 +11,8 @@ use super::{resolve_chat_model_profile, ChatTransformBuilder};
 use anyhow::anyhow;
 use obzenflow_adapters::ai::ChatTransform;
 use obzenflow_core::ai::{
-    ChatModelProfile, ChatResponse, ChatResponseFormat, ResolvedTokenEstimator, TokenCount,
-    TokenEstimator, ToolDefinition, UserPrompt,
+    ChatModelProfile, ChatResponse, ChatResponseFormat, ChunkInfo, ResolvedTokenEstimator,
+    TokenCount, TokenEstimator, ToolDefinition, UserPrompt,
 };
 use obzenflow_core::http_client::Url;
 use obzenflow_core::TypedPayload;
@@ -367,6 +367,27 @@ impl ModelChatBuilder {
         Ok(transform.with_resolved_estimator(resolved_estimator))
     }
 
+    /// Build a map-role `ChatTransform` over chunk items, passing chunk planning metadata
+    /// through to the prompt function.
+    ///
+    /// Runs provider preflight before constructing the transform.
+    pub async fn build_map_items_with_chunk_info<Item, Out>(
+        self,
+        prompt: impl Fn(&[Item], &ChunkInfo) -> Result<UserPrompt, HandlerError> + Send + Sync + 'static,
+        parse: impl Fn(ChatResponse) -> Result<Out, HandlerError> + Send + Sync + 'static,
+    ) -> Result<ChatTransform, HandlerError>
+    where
+        Item: DeserializeOwned + Send + Sync + 'static,
+        Out: Serialize + TypedPayload + Send + Sync + 'static,
+    {
+        let ModelChatBuilder {
+            inner,
+            resolved_estimator,
+        } = self;
+        let transform = inner.build_map_items_with_chunk_info(prompt, parse).await?;
+        Ok(transform.with_resolved_estimator(resolved_estimator))
+    }
+
     /// Build a map-role `ChatTransform` over chunk items, passing the prompt to `parse`.
     ///
     /// Runs provider preflight before constructing the transform.
@@ -489,6 +510,29 @@ where
         inner
             .build_map_items(
                 move |items| prompt(ctx_prompt.as_ref(), items),
+                move |response| parse(ctx_parse.as_ref(), response),
+            )
+            .await
+    }
+
+    pub async fn build_map_items_with_chunk_info<Item, Out>(
+        self,
+        prompt: impl Fn(&Ctx, &[Item], &ChunkInfo) -> Result<UserPrompt, HandlerError>
+            + Send
+            + Sync
+            + 'static,
+        parse: impl Fn(&Ctx, ChatResponse) -> Result<Out, HandlerError> + Send + Sync + 'static,
+    ) -> Result<ChatTransform, HandlerError>
+    where
+        Item: DeserializeOwned + Send + Sync + 'static,
+        Out: Serialize + TypedPayload + Send + Sync + 'static,
+    {
+        let ModelChatBuilderWithContext { inner, ctx } = self;
+        let ctx_prompt = ctx.clone();
+        let ctx_parse = ctx.clone();
+        inner
+            .build_map_items_with_chunk_info(
+                move |items, info| prompt(ctx_prompt.as_ref(), items, info),
                 move |response| parse(ctx_parse.as_ref(), response),
             )
             .await
