@@ -7,4 +7,5 @@
 pub mod ai_map_reduce_lowering_test;
 pub mod cycle_detection_test;
 pub mod join_tuple_syntax_test;
+pub mod placeholder_handlers_test;
 pub mod typed_stage_contracts_test;
