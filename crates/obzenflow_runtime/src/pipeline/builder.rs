@@ -367,6 +367,7 @@ impl SupervisorBuilder for PipelineBuilder {
             backpressure_registry: self.backpressure_registry.clone(),
             completion_subscription: None,
             metrics_exporter: self.metrics_exporter.clone(),
+            metrics_handle: None,
             contract_status: HashMap::new(),
             contract_pairs: HashMap::new(),
             expected_contract_pairs,

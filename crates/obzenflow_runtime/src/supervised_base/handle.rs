@@ -119,6 +119,44 @@ where
             .map(|task| !task.is_finished())
             .unwrap_or(false)
     }
+
+    /// Abort the supervisor task (best-effort).
+    ///
+    /// This does not await completion; callers should follow with
+    /// `wait_for_completion` when they need deterministic teardown.
+    pub(crate) fn abort(&self) {
+        if let Some(task) = self.supervisor_task.as_ref() {
+            task.abort();
+        }
+    }
+
+    /// Best-effort bounded wait for supervisor completion.
+    ///
+    /// Returns:
+    /// - `Ok(true)` if the supervisor finished within the timeout.
+    /// - `Ok(false)` if the wait timed out (task is still running and retained).
+    /// - `Err(_)` if the supervisor finished but failed/panicked, or was not running.
+    pub(crate) async fn try_wait_for_completion(
+        &mut self,
+        timeout: std::time::Duration,
+    ) -> Result<bool, HandleError> {
+        let Some(mut task) = self.supervisor_task.take() else {
+            return Err(HandleError::SupervisorNotRunning);
+        };
+
+        match tokio::time::timeout(timeout, &mut task).await {
+            Ok(join_result) => match join_result {
+                Ok(Ok(())) => Ok(true),
+                Ok(Err(e)) => Err(HandleError::SupervisorFailed(e.to_string())),
+                Err(e) => Err(HandleError::SupervisorPanicked(e.to_string())),
+            },
+            Err(_) => {
+                // Timed out. Put the JoinHandle back so callers can abort/await later.
+                self.supervisor_task = Some(task);
+                Ok(false)
+            }
+        }
+    }
 }
 
 #[async_trait::async_trait]

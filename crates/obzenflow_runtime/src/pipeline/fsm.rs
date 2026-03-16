@@ -8,6 +8,7 @@
 
 use crate::id_conversions::StageIdExt;
 use crate::message_bus::FsmMessageBus;
+use crate::metrics::MetricsHandle;
 use crate::messaging::system_subscription::SystemSubscription;
 use crate::stages::common::stage_handle::{StageError, STOP_REASON_TIMEOUT, STOP_REASON_USER_STOP};
 use crate::supervised_base::SupervisorHandle;
@@ -286,8 +287,9 @@ pub struct PipelineContext {
 
     /// Expected source stages (used to decide when to drain on success)
     pub expected_sources: Vec<StageId>,
-    // TODO: Add metrics handle once MetricsAggregatorBuilder is implemented
-    // pub metrics_handle: Option<MetricsHandle>,
+
+    /// Metrics aggregator handle (for coordinated shutdown/drain).
+    pub metrics_handle: Option<MetricsHandle>,
     /// Last known per-stage lifecycle metrics (for flow rollup)
     pub stage_lifecycle_metrics: HashMap<StageId, StageMetricsSnapshot>,
 
@@ -773,186 +775,246 @@ impl FsmAction for PipelineAction {
                     wait_handle_with_budget(*stage_id, handle, timeout, start).await;
                 }
 
+                // Ensure the metrics aggregator is terminated before the pipeline returns.
+                //
+                // This prevents tokio runtime teardown from cancelling in-flight journal writes
+                // from the metrics task (which otherwise produces error log spam on Ctrl+C).
+                if let Some(mut metrics_handle) = context.metrics_handle.take() {
+                    let metrics_timeout = Duration::from_secs(2);
+
+                    match metrics_handle
+                        .try_wait_for_completion(metrics_timeout)
+                        .await
+                    {
+                        Ok(true) => {
+                            tracing::debug!("Metrics aggregator completed during pipeline cleanup");
+                        }
+                        Ok(false) => {
+                            tracing::debug!(
+                                "Metrics aggregator still running during cleanup; aborting"
+                            );
+                            metrics_handle.abort();
+                            match tokio::time::timeout(
+                                metrics_timeout,
+                                metrics_handle.wait_for_completion(),
+                            )
+                            .await
+                            {
+                                Ok(Ok(())) => {
+                                    tracing::debug!("Metrics aggregator aborted and joined");
+                                }
+                                Ok(Err(e)) => {
+                                    tracing::debug!(
+                                        error = ?e,
+                                        "Metrics aggregator join returned error after abort"
+                                    );
+                                }
+                                Err(_) => {
+                                    tracing::debug!(
+                                        "Timeout waiting for metrics aggregator to abort; continuing"
+                                    );
+                                }
+                            }
+                        }
+                        Err(crate::supervised_base::HandleError::SupervisorNotRunning) => {
+                            tracing::debug!(
+                                "Metrics aggregator handle was not running during cleanup"
+                            );
+                        }
+                        Err(e) => {
+                            tracing::debug!(
+                                error = ?e,
+                                "Metrics aggregator finished with error during cleanup"
+                            );
+                        }
+                    }
+                }
+
                 tracing::info!("Pipeline cleanup complete");
             }
 
             PipelineAction::StartMetricsAggregator => {
                 tracing::info!("StartMetricsAggregator action triggered");
-                // Start metrics aggregator if we have an exporter
-                if let Some(exporter) = context.metrics_exporter.clone() {
-                    tracing::info!("Found metrics exporter, starting metrics aggregator");
+                // Avoid double-starting metrics; pipeline only ever wants one aggregator.
+                if context.metrics_handle.is_some() {
+                    tracing::debug!("Metrics aggregator already started, skipping");
+                    return Ok(());
+                }
 
-                    // Get stage journals from context
-                    let stage_journals = context.stage_data_journals.clone();
+                // Start metrics aggregator if we have an exporter configured.
+                let Some(exporter) = context.metrics_exporter.clone() else {
+                    tracing::info!("No metrics exporter configured, skipping metrics aggregator");
+                    return Ok(());
+                };
 
-                    if stage_journals.is_empty() {
-                        tracing::warn!("No stage journals available for metrics aggregator");
+                tracing::info!("Found metrics exporter, starting metrics aggregator");
+
+                // Get stage journals from context
+                let stage_journals = context.stage_data_journals.clone();
+
+                if stage_journals.is_empty() {
+                    tracing::warn!("No stage journals available for metrics aggregator");
+                    return Ok(());
+                }
+
+                tracing::info!(
+                    stage_journal_ids = ?stage_journals.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+                    "Stage journals passed to metrics aggregator"
+                );
+
+                let system_journal = context.system_journal.clone();
+
+                // Build stage metadata from topology and stage supervisors
+                let mut stage_metadata = std::collections::HashMap::new();
+
+                for (stage_id, stage_handle) in context.stage_supervisors.iter() {
+                    if let Some(stage_info) = context
+                        .topology
+                        .stages()
+                        .find(|s| s.id == stage_id.to_topology_id())
+                    {
+                        let metadata = obzenflow_core::metrics::StageMetadata {
+                            name: stage_info.name.clone(),
+                            stage_type: stage_handle.stage_type(),
+                            reference_mode: None,
+                            flow_name: context.flow_name.clone(),
+                            flow_id: Some(context.flow_id),
+                        };
+                        stage_metadata.insert(*stage_id, metadata);
+                    }
+                }
+                // Include sources in metadata
+                for (stage_id, stage_handle) in context.source_supervisors.iter() {
+                    if let Some(stage_info) = context
+                        .topology
+                        .stages()
+                        .find(|s| s.id == stage_id.to_topology_id())
+                    {
+                        let metadata = obzenflow_core::metrics::StageMetadata {
+                            name: stage_info.name.clone(),
+                            stage_type: stage_handle.stage_type(),
+                            reference_mode: None,
+                            flow_name: context.flow_name.clone(),
+                            flow_id: Some(context.flow_id),
+                        };
+                        stage_metadata.insert(*stage_id, metadata);
+                    }
+                }
+                // Get error journals for metrics (FLOWIP-082g)
+                let error_journals = context.stage_error_journals.clone();
+                let backpressure_registry = context.backpressure_registry.clone();
+                if !error_journals.is_empty() {
+                    tracing::info!(
+                        error_journal_ids = ?error_journals.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+                        "Error journals passed to metrics aggregator"
+                    );
+                } else {
+                    tracing::info!("No error journals passed to metrics aggregator");
+                }
+                tracing::info!(
+                        stage_metadata = ?stage_metadata
+                            .iter()
+                        .map(|(id, meta)| (*id, meta.name.clone(), meta.stage_type))
+                        .collect::<Vec<_>>(),
+                    "Stage metadata collected for metrics aggregator"
+                );
+
+                // Best-effort: create a system journal reader so we can optionally wait
+                // for a Ready coordination event. Metrics must not gate pipeline startup.
+                let mut ready_reader = match context.system_journal.reader().await {
+                    Ok(reader) => Some(reader),
+                    Err(e) => {
+                        tracing::warn!(
+                            journal_error = %e,
+                            "Failed to create system journal reader for metrics readiness; continuing without waiting"
+                        );
+                        None
+                    }
+                };
+
+                // Build metrics aggregator using the builder pattern and store the handle
+                // so cancel/cleanup paths can terminate it deterministically.
+                use crate::metrics::{MetricsAggregatorBuilder, MetricsInputs};
+                use crate::supervised_base::SupervisorBuilder;
+
+                // Create MetricsInputs with both data and error journals (FLOWIP-082g)
+                let inputs = MetricsInputs::new(stage_journals, error_journals)
+                    .with_backpressure_registry_opt(backpressure_registry);
+
+                match MetricsAggregatorBuilder::new(inputs, system_journal, exporter)
+                    .with_stage_metadata(stage_metadata)
+                    .with_export_interval(1) // 10 second interval
+                    .build()
+                    .await
+                {
+                    Ok(handle) => {
+                        context.metrics_handle = Some(handle);
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to build metrics aggregator: {}", e);
                         return Ok(());
                     }
+                }
 
-                    tracing::info!(
-                        stage_journal_ids = ?stage_journals.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
-                        "Stage journals passed to metrics aggregator"
-                    );
-
-                    let system_journal = context.system_journal.clone();
-
-                    // Build stage metadata from topology and stage supervisors
-                    let mut stage_metadata = std::collections::HashMap::new();
-
-                    for (stage_id, stage_handle) in context.stage_supervisors.iter() {
-                        if let Some(stage_info) = context
-                            .topology
-                            .stages()
-                            .find(|s| s.id == stage_id.to_topology_id())
-                        {
-                            let metadata = obzenflow_core::metrics::StageMetadata {
-                                name: stage_info.name.clone(),
-                                stage_type: stage_handle.stage_type(),
-                                reference_mode: None,
-                                flow_name: context.flow_name.clone(),
-                                flow_id: Some(context.flow_id),
-                            };
-                            stage_metadata.insert(*stage_id, metadata);
-                        }
-                    }
-                    // Include sources in metadata
-                    for (stage_id, stage_handle) in context.source_supervisors.iter() {
-                        if let Some(stage_info) = context
-                            .topology
-                            .stages()
-                            .find(|s| s.id == stage_id.to_topology_id())
-                        {
-                            let metadata = obzenflow_core::metrics::StageMetadata {
-                                name: stage_info.name.clone(),
-                                stage_type: stage_handle.stage_type(),
-                                reference_mode: None,
-                                flow_name: context.flow_name.clone(),
-                                flow_id: Some(context.flow_id),
-                            };
-                            stage_metadata.insert(*stage_id, metadata);
-                        }
-                    }
-                    // Get error journals for metrics (FLOWIP-082g)
-                    let error_journals = context.stage_error_journals.clone();
-                    let backpressure_registry = context.backpressure_registry.clone();
-                    if !error_journals.is_empty() {
-                        tracing::info!(
-                            error_journal_ids = ?error_journals.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
-                            "Error journals passed to metrics aggregator"
-                        );
-                    } else {
-                        tracing::info!("No error journals passed to metrics aggregator");
-                    }
-                    tracing::info!(
-                            stage_metadata = ?stage_metadata
-                                .iter()
-                            .map(|(id, meta)| (*id, meta.name.clone(), meta.stage_type))
-                            .collect::<Vec<_>>(),
-                        "Stage metadata collected for metrics aggregator"
-                    );
-
-                    // Best-effort: create a system journal reader so we can optionally wait
-                    // for a Ready coordination event. Metrics must not gate pipeline startup.
-                    let mut ready_reader = match context.system_journal.reader().await {
-                        Ok(reader) => Some(reader),
-                        Err(e) => {
-                            tracing::warn!(
-                                journal_error = %e,
-                                "Failed to create system journal reader for metrics readiness; continuing without waiting"
-                            );
-                            None
-                        }
-                    };
-
-                    // Spawn metrics aggregator using the builder pattern
-                    tokio::spawn(async move {
-                        use crate::metrics::{MetricsAggregatorBuilder, MetricsInputs};
-                        use crate::supervised_base::SupervisorBuilder;
-
-                        // Create MetricsInputs with both data and error journals (FLOWIP-082g)
-                        let inputs = MetricsInputs::new(stage_journals, error_journals)
-                            .with_backpressure_registry_opt(backpressure_registry);
-
-                        match MetricsAggregatorBuilder::new(inputs, system_journal, exporter)
-                            .with_stage_metadata(stage_metadata)
-                            .with_export_interval(1) // 10 second interval
-                            .build()
-                            .await
-                        {
-                            Ok(handle) => {
-                                // Store handle in context for future use
-                                // TODO: Add metrics_handle field to PipelineContext
-
-                                // For now, just wait for completion
-                                if let Err(e) = handle.wait_for_completion().await {
-                                    tracing::error!("Metrics aggregator failed: {}", e);
-                                }
-                            }
-                            Err(e) => {
-                                tracing::error!("Failed to build metrics aggregator: {}", e);
-                            }
-                        }
-                    });
-
-                    // Best-effort: wait briefly for metrics aggregator readiness.
-                    // If it doesn't become ready quickly (or the journal read fails),
-                    // continue startup anyway.
-                    if let Some(mut ready_reader) = ready_reader.take() {
-                        let deadline =
-                            tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
-                        loop {
-                            match tokio::time::timeout_at(deadline, ready_reader.next()).await {
-                                Ok(Ok(Some(envelope))) => {
-                                    // Check if this is the metrics ready event
-                                    if let obzenflow_core::event::SystemEventType::MetricsCoordination(
-                                        obzenflow_core::event::MetricsCoordinationEvent::Ready,
-                                    ) = &envelope.event.event
-                                    {
-                                        tracing::info!("Metrics aggregator is ready");
-                                        break;
-                                    }
-                                }
-                                Ok(Ok(None)) => {
-                                    // No events available right now; avoid a tight spin loop.
-                                    // Sleep for a bounded duration without overshooting the deadline.
-                                    let remaining = deadline
-                                        .saturating_duration_since(tokio::time::Instant::now());
-                                    let sleep_for = std::cmp::min(
-                                        remaining,
-                                        tokio::time::Duration::from_millis(10),
-                                    );
-                                    if sleep_for != tokio::time::Duration::ZERO {
-                                        tokio::time::sleep(sleep_for).await;
-                                    }
-                                }
-                                Ok(Err(e)) => {
-                                    tracing::warn!(
-                                        journal_error = %e,
-                                        "Failed to read metrics ready event; continuing startup"
-                                    );
-                                    break;
-                                }
-                                Err(_) => {
-                                    tracing::warn!(
-                                        "Timeout waiting for metrics aggregator to be ready; continuing startup"
-                                    );
+                // Best-effort: wait briefly for metrics aggregator readiness.
+                // If it doesn't become ready quickly (or the journal read fails),
+                // continue startup anyway.
+                if let Some(mut ready_reader) = ready_reader.take() {
+                    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
+                    loop {
+                        match tokio::time::timeout_at(deadline, ready_reader.next()).await {
+                            Ok(Ok(Some(envelope))) => {
+                                // Check if this is the metrics ready event
+                                if let obzenflow_core::event::SystemEventType::MetricsCoordination(
+                                    obzenflow_core::event::MetricsCoordinationEvent::Ready,
+                                ) = &envelope.event.event
+                                {
+                                    tracing::info!("Metrics aggregator is ready");
                                     break;
                                 }
                             }
+                            Ok(Ok(None)) => {
+                                // No events available right now; avoid a tight spin loop.
+                                // Sleep for a bounded duration without overshooting the deadline.
+                                let remaining = deadline
+                                    .saturating_duration_since(tokio::time::Instant::now());
+                                let sleep_for = std::cmp::min(
+                                    remaining,
+                                    tokio::time::Duration::from_millis(10),
+                                );
+                                if sleep_for != tokio::time::Duration::ZERO {
+                                    tokio::time::sleep(sleep_for).await;
+                                }
+                            }
+                            Ok(Err(e)) => {
+                                tracing::warn!(
+                                    journal_error = %e,
+                                    "Failed to read metrics ready event; continuing startup"
+                                );
+                                break;
+                            }
+                            Err(_) => {
+                                tracing::warn!(
+                                    "Timeout waiting for metrics aggregator to be ready; continuing startup"
+                                );
+                                break;
+                            }
                         }
                     }
-                } else {
-                    tracing::info!("No metrics exporter configured, skipping metrics aggregator");
                 }
             }
 
             PipelineAction::DrainMetrics => {
                 // Metrics draining is only meaningful when the metrics aggregator is running.
-                // When metrics are disabled, skip to avoid unnecessary journal writes and
-                // spurious warnings during shutdown.
-                if context.metrics_exporter.is_none() {
-                    tracing::debug!("Skipping metrics drain (metrics exporter not configured)");
+                // Gate on "metrics actually started" (handle present) to avoid pointless waits
+                // during cancel in early states like Materializing.
+                let metrics_running = context
+                    .metrics_handle
+                    .as_ref()
+                    .map(|h| h.is_running())
+                    .unwrap_or(false);
+                if !metrics_running {
+                    tracing::debug!("Skipping metrics drain (metrics aggregator not running)");
                     return Ok(());
                 }
 
@@ -1270,6 +1332,7 @@ pub fn build_pipeline_fsm_with_initial(initial: PipelineState) -> PipelineFsm {
                         },
                         actions: vec![
                             PipelineAction::WritePipelineStopRequested { mode },
+                            PipelineAction::DrainMetrics,
                             PipelineAction::Cleanup,
                         ],
                     })
@@ -1356,6 +1419,7 @@ pub fn build_pipeline_fsm_with_initial(initial: PipelineState) -> PipelineFsm {
                         },
                         actions: vec![
                             PipelineAction::WritePipelineStopRequested { mode },
+                            PipelineAction::DrainMetrics,
                             PipelineAction::Cleanup,
                         ],
                     })
@@ -1441,6 +1505,7 @@ pub fn build_pipeline_fsm_with_initial(initial: PipelineState) -> PipelineFsm {
                                 if should_emit_stop_requested {
                                     actions.push(PipelineAction::WritePipelineStopRequested { mode });
                                 }
+                                actions.push(PipelineAction::DrainMetrics);
                                 actions.push(PipelineAction::Cleanup);
 
                                 Ok(Transition {
@@ -1545,6 +1610,7 @@ pub fn build_pipeline_fsm_with_initial(initial: PipelineState) -> PipelineFsm {
                                 if should_emit_stop_requested {
                                     actions.push(PipelineAction::WritePipelineStopRequested { mode });
                                 }
+                                actions.push(PipelineAction::DrainMetrics);
                                 actions.push(PipelineAction::Cleanup);
 
                                 Ok(Transition {
@@ -1659,6 +1725,7 @@ pub fn build_pipeline_fsm_with_initial(initial: PipelineState) -> PipelineFsm {
                                 if should_emit_stop_requested {
                                     actions.push(PipelineAction::WritePipelineStopRequested { mode });
                                 }
+                                actions.push(PipelineAction::DrainMetrics);
                                 actions.push(PipelineAction::Cleanup);
 
                                 Ok(Transition {
