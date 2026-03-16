@@ -630,9 +630,7 @@ where
         }
     }
 
-    fn initial_state(&self) -> Self::State {
-        ()
-    }
+    fn initial_state(&self) -> Self::State {}
 
     fn create_events(&self, _state: &Self::State) -> Result<Vec<ChainEvent>, HandlerError> {
         Ok(Vec::new())
@@ -742,24 +740,6 @@ impl<Ref, Stream, Out> fmt::Debug for PlaceholderJoin<Ref, Stream, Out> {
     }
 }
 
-#[cfg(test)]
-mod placeholder_warn_once_tests {
-    use super::*;
-
-    #[test]
-    fn placeholder_stateful_clone_shares_warned_flag() {
-        let handler = PlaceholderStateful::<u8, u16>::new(None);
-        let cloned = handler.clone();
-
-        assert!(Arc::ptr_eq(&handler.warned, &cloned.warned));
-        assert!(!handler.warned.load(Ordering::Relaxed));
-
-        assert!(!cloned.warned.swap(true, Ordering::Relaxed));
-        assert!(handler.warned.load(Ordering::Relaxed));
-        assert!(cloned.warned.swap(true, Ordering::Relaxed));
-    }
-}
-
 impl<Ref, Stream, Out> JoinTyping for PlaceholderJoin<Ref, Stream, Out> {
     type Reference = Ref;
     type Stream = Stream;
@@ -775,9 +755,7 @@ where
 {
     type State = ();
 
-    fn initial_state(&self) -> Self::State {
-        ()
-    }
+    fn initial_state(&self) -> Self::State {}
 
     fn process_event(
         &self,
@@ -964,4 +942,22 @@ pub fn collect_edge_warnings(
     }
 
     warnings
+}
+
+#[cfg(test)]
+mod placeholder_warn_once_tests {
+    use super::*;
+
+    #[test]
+    fn placeholder_stateful_clone_shares_warned_flag() {
+        let handler = PlaceholderStateful::<u8, u16>::new(None);
+        let cloned = handler.clone();
+
+        assert!(Arc::ptr_eq(&handler.warned, &cloned.warned));
+        assert!(!handler.warned.load(Ordering::Relaxed));
+
+        assert!(!cloned.warned.swap(true, Ordering::Relaxed));
+        assert!(handler.warned.load(Ordering::Relaxed));
+        assert!(cloned.warned.swap(true, Ordering::Relaxed));
+    }
 }

@@ -88,18 +88,17 @@ async fn placeholder_async_transform_drops_data_events_and_drains() {
 #[tokio::test]
 async fn placeholder_stateful_emits_nothing_and_drains() {
     let mut handler = PlaceholderStateful::<u8, u16>::new(None);
-    let mut state = StatefulHandler::initial_state(&handler);
     let event = ChainEventFactory::data_event(
         WriterId::from(StageId::new()),
         "test.event",
         json!({"hello": "world"}),
     );
 
-    StatefulHandler::accumulate(&mut handler, &mut state, event);
-    let outputs = StatefulHandler::create_events(&handler, &state).expect("stateful create_events");
+    StatefulHandler::accumulate(&mut handler, &mut (), event);
+    let outputs = StatefulHandler::create_events(&handler, &()).expect("stateful create_events");
     assert!(outputs.is_empty());
 
-    let drained = StatefulHandler::drain(&handler, &state)
+    let drained = StatefulHandler::drain(&handler, &())
         .await
         .expect("stateful drain");
     assert!(drained.is_empty());
@@ -128,7 +127,6 @@ async fn placeholder_sink_acks_and_flushes_safely() {
 #[tokio::test]
 async fn placeholder_join_discards_and_drains_safely() {
     let handler = PlaceholderJoin::<u8, u16, u32>::new(None);
-    let mut state = JoinHandler::initial_state(&handler);
     let event = ChainEventFactory::data_event(
         WriterId::from(StageId::new()),
         "test.event",
@@ -137,7 +135,7 @@ async fn placeholder_join_discards_and_drains_safely() {
 
     let outputs = JoinHandler::process_event(
         &handler,
-        &mut state,
+        &mut (),
         event,
         StageId::new(),
         WriterId::from(StageId::new()),
@@ -147,15 +145,13 @@ async fn placeholder_join_discards_and_drains_safely() {
 
     let eof_outputs = JoinHandler::on_source_eof(
         &handler,
-        &mut state,
+        &mut (),
         StageId::new(),
         WriterId::from(StageId::new()),
     )
     .expect("join on_source_eof");
     assert!(eof_outputs.is_empty());
 
-    let drained = JoinHandler::drain(&handler, &state)
-        .await
-        .expect("join drain");
+    let drained = JoinHandler::drain(&handler, &()).await.expect("join drain");
     assert!(drained.is_empty());
 }

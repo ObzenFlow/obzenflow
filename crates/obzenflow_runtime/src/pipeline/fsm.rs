@@ -1038,6 +1038,17 @@ impl FsmAction for PipelineAction {
                     );
                 }
 
+                // Cancel-mode stop should not block waiting for metrics to drain.
+                //
+                // In Cancel, the stage shutdown happens in `Cleanup`; waiting here risks burning the full drain
+                // timeout while stages are still running (and therefore metrics cannot reach FlowTerminal).
+                if matches!(context.stop_intent.mode, Some(FlowStopMode::Cancel)) {
+                    tracing::debug!(
+                        "Skipping metrics drain wait (stop_mode=Cancel); drain will complete best-effort during Cleanup"
+                    );
+                    return Ok(());
+                }
+
                 // 3. Wait for drain completion event from system journal
                 // The metrics aggregator will publish MetricsCoordination::Drained when done.
                 //
