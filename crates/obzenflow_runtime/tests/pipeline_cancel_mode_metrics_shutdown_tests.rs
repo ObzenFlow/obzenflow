@@ -1,6 +1,12 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
 use async_trait::async_trait;
-use obzenflow_core::event::{ChainEvent, JournalEvent, JournalWriterId, SystemEvent, SystemEventType};
 use obzenflow_core::event::MetricsCoordinationEvent;
+use obzenflow_core::event::{
+    ChainEvent, JournalEvent, JournalWriterId, SystemEvent, SystemEventType,
+};
 use obzenflow_core::id::{FlowId, JournalId, SystemId};
 use obzenflow_core::journal::journal_error::JournalError;
 use obzenflow_core::journal::journal_owner::JournalOwner;
@@ -44,7 +50,10 @@ where
     T: JournalEvent,
 {
     async fn next(&mut self) -> Result<Option<EventEnvelope<T>>, JournalError> {
-        let guard = self.events.lock().expect("MemoryJournalReader: poisoned lock");
+        let guard = self
+            .events
+            .lock()
+            .expect("MemoryJournalReader: poisoned lock");
         if self.pos >= guard.len() {
             return Ok(None);
         }
@@ -55,7 +64,10 @@ where
     }
 
     async fn skip(&mut self, n: u64) -> Result<u64, JournalError> {
-        let guard = self.events.lock().expect("MemoryJournalReader: poisoned lock");
+        let guard = self
+            .events
+            .lock()
+            .expect("MemoryJournalReader: poisoned lock");
         let len = guard.len();
         drop(guard);
         let before = self.pos;
@@ -193,7 +205,10 @@ async fn drain_metrics_skips_when_metrics_not_started() {
         Some(Arc::new(NoOpMetricsExporter)),
     );
 
-    PipelineAction::DrainMetrics.execute(&mut ctx).await.unwrap();
+    PipelineAction::DrainMetrics
+        .execute(&mut ctx)
+        .await
+        .unwrap();
 
     let events = system_journal.read_causally_ordered().await.unwrap();
     assert!(
@@ -238,7 +253,10 @@ async fn cancel_mode_drains_and_shuts_down_metrics_aggregator() {
     .await
     .unwrap();
 
-    PipelineAction::DrainMetrics.execute(&mut ctx).await.unwrap();
+    PipelineAction::DrainMetrics
+        .execute(&mut ctx)
+        .await
+        .unwrap();
     PipelineAction::Cleanup.execute(&mut ctx).await.unwrap();
 
     assert!(
@@ -263,6 +281,12 @@ async fn cancel_mode_drains_and_shuts_down_metrics_aggregator() {
         )
     });
 
-    assert!(drained, "expected MetricsCoordination::Drained system event");
-    assert!(shutdown, "expected MetricsCoordination::Shutdown system event");
+    assert!(
+        drained,
+        "expected MetricsCoordination::Drained system event"
+    );
+    assert!(
+        shutdown,
+        "expected MetricsCoordination::Shutdown system event"
+    );
 }

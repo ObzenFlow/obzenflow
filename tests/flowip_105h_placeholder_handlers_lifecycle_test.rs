@@ -65,4 +65,3 @@ async fn placeholder_handlers_survive_full_lifecycle() -> Result<()> {
     handle.run().await?;
     Ok(())
 }
-

@@ -8,8 +8,8 @@
 
 use crate::id_conversions::StageIdExt;
 use crate::message_bus::FsmMessageBus;
-use crate::metrics::MetricsHandle;
 use crate::messaging::system_subscription::SystemSubscription;
+use crate::metrics::MetricsHandle;
 use crate::stages::common::stage_handle::{StageError, STOP_REASON_TIMEOUT, STOP_REASON_USER_STOP};
 use crate::supervised_base::SupervisorHandle;
 use obzenflow_core::event::{
@@ -960,7 +960,8 @@ impl FsmAction for PipelineAction {
                 // If it doesn't become ready quickly (or the journal read fails),
                 // continue startup anyway.
                 if let Some(mut ready_reader) = ready_reader.take() {
-                    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
+                    let deadline =
+                        tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
                     loop {
                         match tokio::time::timeout_at(deadline, ready_reader.next()).await {
                             Ok(Ok(Some(envelope))) => {
@@ -976,8 +977,8 @@ impl FsmAction for PipelineAction {
                             Ok(Ok(None)) => {
                                 // No events available right now; avoid a tight spin loop.
                                 // Sleep for a bounded duration without overshooting the deadline.
-                                let remaining = deadline
-                                    .saturating_duration_since(tokio::time::Instant::now());
+                                let remaining =
+                                    deadline.saturating_duration_since(tokio::time::Instant::now());
                                 let sleep_for = std::cmp::min(
                                     remaining,
                                     tokio::time::Duration::from_millis(10),

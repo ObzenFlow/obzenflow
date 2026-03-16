@@ -3,15 +3,17 @@
 // https://obzenflow.dev
 
 use crate::dsl::typing::{
-    PlaceholderAsyncSource, PlaceholderAsyncTransform, PlaceholderFiniteSource, PlaceholderInfiniteSource,
-    PlaceholderJoin, PlaceholderSink, PlaceholderStateful, PlaceholderTransform,
+    PlaceholderAsyncSource, PlaceholderAsyncTransform, PlaceholderFiniteSource,
+    PlaceholderInfiniteSource, PlaceholderJoin, PlaceholderSink, PlaceholderStateful,
+    PlaceholderTransform,
 };
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryResult};
 use obzenflow_core::event::ChainEventFactory;
 use obzenflow_core::{StageId, WriterId};
 use obzenflow_runtime::stages::common::handlers::{
-    AsyncFiniteSourceHandler, AsyncInfiniteSourceHandler, AsyncTransformHandler, FiniteSourceHandler,
-    InfiniteSourceHandler, JoinHandler, SinkHandler, StatefulHandler, TransformHandler,
+    AsyncFiniteSourceHandler, AsyncInfiniteSourceHandler, AsyncTransformHandler,
+    FiniteSourceHandler, InfiniteSourceHandler, JoinHandler, SinkHandler, StatefulHandler,
+    TransformHandler,
 };
 use serde_json::json;
 
@@ -58,10 +60,9 @@ async fn placeholder_async_source_is_safe_in_both_modes() {
         .expect("async finite next");
     assert!(finite.is_none());
 
-    let infinite =
-        <PlaceholderAsyncSource<u8> as AsyncInfiniteSourceHandler>::next(&mut handler)
-            .await
-            .expect("async infinite next");
+    let infinite = <PlaceholderAsyncSource<u8> as AsyncInfiniteSourceHandler>::next(&mut handler)
+        .await
+        .expect("async infinite next");
     assert!(infinite.is_empty());
 }
 
@@ -153,7 +154,8 @@ async fn placeholder_join_discards_and_drains_safely() {
     .expect("join on_source_eof");
     assert!(eof_outputs.is_empty());
 
-    let drained = JoinHandler::drain(&handler, &state).await.expect("join drain");
+    let drained = JoinHandler::drain(&handler, &state)
+        .await
+        .expect("join drain");
     assert!(drained.is_empty());
 }
-
