@@ -7,12 +7,13 @@
 //! Provides a simple way to start a web server with topology, metrics, and health endpoints
 
 use obzenflow_core::metrics::MetricsExporter;
-use obzenflow_core::web::{HttpEndpoint, ServerConfig, WebError, WebServer};
+use obzenflow_core::web::{HttpEndpoint, HttpMethod, ServerConfig, WebError, WebServer};
 use obzenflow_core::StageId;
 use obzenflow_runtime::pipeline::fsm::PipelineState;
 use obzenflow_runtime::pipeline::FlowHandle;
 use obzenflow_topology::Topology;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -35,6 +36,59 @@ pub struct WebServerResources {
     pub metrics_exporter: Option<Arc<dyn MetricsExporter>>,
     pub flow_handle: Option<Arc<FlowHandle>>,
     pub extra_endpoints: Vec<Box<dyn HttpEndpoint>>,
+}
+
+fn is_reserved_built_in_path(path: &str) -> bool {
+    matches!(
+        path,
+        "/metrics" | "/health" | "/ready" | "/api/topology" | "/api/flow/events"
+    ) || path == "/api/flow"
+        || path.starts_with("/api/flow/")
+}
+
+fn validate_extra_endpoints(extra_endpoints: &[Box<dyn HttpEndpoint>]) -> Result<(), WebError> {
+    const ALL_METHODS: [HttpMethod; 7] = [
+        HttpMethod::Get,
+        HttpMethod::Post,
+        HttpMethod::Put,
+        HttpMethod::Delete,
+        HttpMethod::Patch,
+        HttpMethod::Head,
+        HttpMethod::Options,
+    ];
+
+    let mut seen_routes: HashSet<(String, HttpMethod)> = HashSet::new();
+    for endpoint in extra_endpoints {
+        let path = endpoint.path().to_string();
+        if is_reserved_built_in_path(&path) {
+            return Err(WebError::EndpointRegistrationFailed {
+                path,
+                message: "Reserved built-in path; choose a different route".to_string(),
+            });
+        }
+
+        let claimed_methods: Vec<HttpMethod> = if endpoint.methods().is_empty() {
+            ALL_METHODS.to_vec()
+        } else {
+            endpoint.methods().to_vec()
+        };
+
+        for method in claimed_methods {
+            let key = (path.clone(), method);
+            if !seen_routes.insert(key) {
+                return Err(WebError::EndpointRegistrationFailed {
+                    path: path.clone(),
+                    message: format!(
+                        "Duplicate route: {} {}",
+                        method.as_str(),
+                        path
+                    ),
+                });
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// Start a web server with all flow endpoints
@@ -90,6 +144,8 @@ pub async fn start_web_server_with_config(
         flow_handle,
         extra_endpoints,
     } = resources;
+
+    validate_extra_endpoints(&extra_endpoints)?;
 
     let mut server = super::warp::WarpServer::new();
     let pipeline_ready = flow_handle.as_ref().map(|handle| {
@@ -190,7 +246,7 @@ pub async fn start_web_server_with_config(
 
 // Reuse simple endpoints from metrics_server module
 use async_trait::async_trait;
-use obzenflow_core::web::{HttpMethod, Request, Response};
+use obzenflow_core::web::{Request, Response};
 
 /// Simple health endpoint
 struct SimpleHealthEndpoint;

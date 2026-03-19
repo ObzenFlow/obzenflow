@@ -37,7 +37,7 @@ use obzenflow_dsl::{async_infinite_source, flow, join, sink, stateful};
 use obzenflow_infra::application::{FlowApplication, LogLevel};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_infra::web::endpoints::event_ingestion::{
-    create_ingestion_endpoints, IngestionConfig, TypedValidator, ValidationConfig,
+    create_ingestion_surface, IngestionConfig, TypedValidator, ValidationConfig,
 };
 use obzenflow_runtime::stages::common::handlers::StatefulHandlerExt;
 use obzenflow_runtime::stages::stateful::strategies::emissions::EmitAlways;
@@ -54,7 +54,7 @@ pub fn run_example_in_tests() -> Result<()> {
 }
 
 async fn run() -> Result<()> {
-    // Required for --server mode (FlowApplication enforces metrics for extra endpoints).
+    // Enable Prometheus /metrics (and ingestion telemetry export).
     std::env::set_var("OBZENFLOW_METRICS_EXPORTER", "prometheus");
 
     let accounts_config = IngestionConfig {
@@ -64,10 +64,9 @@ async fn run() -> Result<()> {
         }),
         ..Default::default()
     };
-    let (accounts_endpoints, accounts_rx, accounts_state) =
-        create_ingestion_endpoints(accounts_config);
-    let accounts_hook_state = accounts_state.clone();
-    let accounts_source = HttpSource::with_telemetry(accounts_rx, accounts_state.telemetry())
+    let (accounts_surface, accounts_rx, accounts_telemetry) =
+        create_ingestion_surface(accounts_config);
+    let accounts_source = HttpSource::with_telemetry(accounts_rx, accounts_telemetry)
         .typed::<AccountOpened>();
 
     let tx_config = IngestionConfig {
@@ -77,23 +76,13 @@ async fn run() -> Result<()> {
         }),
         ..Default::default()
     };
-    let (tx_endpoints, tx_rx, tx_state) = create_ingestion_endpoints(tx_config);
-    let tx_hook_state = tx_state.clone();
-    let tx_source = HttpSource::with_telemetry(tx_rx, tx_state.telemetry()).typed::<LedgerEntry>();
-
-    let mut endpoints = Vec::new();
-    endpoints.extend(accounts_endpoints);
-    endpoints.extend(tx_endpoints);
+    let (tx_surface, tx_rx, tx_telemetry) = create_ingestion_surface(tx_config);
+    let tx_source = HttpSource::with_telemetry(tx_rx, tx_telemetry).typed::<LedgerEntry>();
 
     FlowApplication::builder()
         .with_log_level(LogLevel::Info)
-        .with_web_endpoints(endpoints)
-        .with_flow_handle_hook(move |flow_handle| {
-            accounts_hook_state.watch_pipeline_state(flow_handle.state_receiver())
-        })
-        .with_flow_handle_hook(move |flow_handle| {
-            tx_hook_state.watch_pipeline_state(flow_handle.state_receiver())
-        })
+        .with_web_surface(accounts_surface)
+        .with_web_surface(tx_surface)
         .run_async(flow! {
             name: "http_ingestion_piggy_bank_demo",
             journals: disk_journals(PathBuf::from("target/http-ingestion-piggy-bank-demo-logs")),

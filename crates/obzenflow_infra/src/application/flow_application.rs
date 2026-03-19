@@ -11,7 +11,10 @@
 //! - HTTP server management
 //! - Graceful shutdown handling
 
-use super::{ApplicationError, FlowConfig, Presentation, RunPresentationOutcome};
+use super::{
+    ApplicationError, FlowConfig, Presentation, RunPresentationOutcome, WebSurfaceAttachment,
+    WebSurfaceWiringContext,
+};
 use crate::application::config::CorsModeArg;
 use crate::application::config::StartupMode;
 use clap::Parser;
@@ -77,6 +80,7 @@ pub struct FlowApplicationBuilder {
     console_subscriber: bool,
     console_bind: Option<String>,
     log_level: Option<LogLevel>,
+    web_surfaces: Vec<WebSurfaceAttachment>,
     web_endpoints: Vec<Box<dyn HttpEndpoint>>,
     flow_handle_hooks: Vec<FlowHandleHook>,
     presentation: Option<Presentation>,
@@ -127,6 +131,15 @@ impl FlowApplicationBuilder {
         self
     }
 
+    /// Register a managed web surface to be hosted by FlowApplication when running with `--server`.
+    ///
+    /// This is the preferred extension point for HTTP-facing capabilities that should share
+    /// `FlowApplication` lifecycle, readiness wiring, and shutdown behaviour by default.
+    pub fn with_web_surface(mut self, surface: WebSurfaceAttachment) -> Self {
+        self.web_surfaces.push(surface);
+        self
+    }
+
     /// Add a single HTTP endpoint to be hosted by FlowApplication when running with `--server`.
     pub fn with_web_endpoint(mut self, endpoint: Box<dyn HttpEndpoint>) -> Self {
         self.web_endpoints.push(endpoint);
@@ -168,6 +181,7 @@ impl FlowApplicationBuilder {
         runtime.block_on(
             FlowApplication::run_with_web_endpoints_and_hooks_and_presentation(
                 flow,
+                self.web_surfaces,
                 self.web_endpoints,
                 self.flow_handle_hooks,
                 self.presentation,
@@ -186,6 +200,7 @@ impl FlowApplicationBuilder {
         // Run the flow
         FlowApplication::run_with_web_endpoints_and_hooks_and_presentation(
             flow,
+            self.web_surfaces,
             self.web_endpoints,
             self.flow_handle_hooks,
             self.presentation,
@@ -375,6 +390,7 @@ impl FlowApplication {
             flow,
             Vec::new(),
             Vec::new(),
+            Vec::new(),
             Some(presentation),
         )
         .await
@@ -395,6 +411,7 @@ impl FlowApplication {
     ) -> Result<(), ApplicationError> {
         Self::run_with_web_endpoints_and_hooks_and_presentation(
             flow,
+            Vec::new(),
             extra_endpoints,
             flow_handle_hooks,
             None,
@@ -404,6 +421,7 @@ impl FlowApplication {
 
     pub(crate) async fn run_with_web_endpoints_and_hooks_and_presentation(
         flow: FlowDefinition,
+        web_surfaces: Vec<WebSurfaceAttachment>,
         extra_endpoints: Vec<Box<dyn HttpEndpoint>>,
         flow_handle_hooks: Vec<FlowHandleHook>,
         presentation: Option<Presentation>,
@@ -439,10 +457,10 @@ impl FlowApplication {
         }
 
         let (result, flow_name, run_dir, stopped) = 'run: {
-            if !extra_endpoints.is_empty() && !config.server {
+            if (!extra_endpoints.is_empty() || !web_surfaces.is_empty()) && !config.server {
                 break 'run (
                     Err(ApplicationError::InvalidConfiguration(
-                        "Web endpoints were configured, but FlowApplication is not running with --server"
+                        "Web endpoints or surfaces were configured, but FlowApplication is not running with --server"
                             .to_string(),
                     )),
                     None,
@@ -568,10 +586,25 @@ impl FlowApplication {
             let flow_handle = Arc::new(flow_handle);
             let flow_name = flow_handle.flow_name().to_string();
 
-            let _hook_tasks: Vec<JoinHandle<()>> = flow_handle_hooks
+            let mut managed_tasks: Vec<JoinHandle<()>> = flow_handle_hooks
                 .iter()
                 .map(|hook| hook(&flow_handle))
                 .collect();
+
+            let mut all_extra_endpoints = extra_endpoints;
+            for surface in web_surfaces {
+                let (surface_name, mut endpoints, wiring) = surface.into_parts();
+                all_extra_endpoints.append(&mut endpoints);
+                if let Some(wiring) = wiring {
+                    match wiring(WebSurfaceWiringContext {
+                        pipeline_state: flow_handle.state_receiver(),
+                    }) {
+                        Ok(wired) => managed_tasks.extend(wired.tasks),
+                        Err(err) => break 'run (Err(err), Some(flow_name.clone()), run_dir, false),
+                    }
+                }
+                tracing::debug!(surface = %surface_name, "Web surface attached");
+            }
 
             // Start server if --server flag present
             let server_handle = if config.server {
@@ -580,10 +613,10 @@ impl FlowApplication {
                     CorsModeArg::AllowList => CorsMode::AllowList(config.cors_allow_origin.clone()),
                     CorsModeArg::SameOrigin => CorsMode::SameOrigin,
                 };
-                let mut server_config = ServerConfig::localhost(config.server_port);
+                let mut server_config = ServerConfig::new(config.server_host.clone(), config.server_port);
                 server_config.cors = Some(CorsConfig { mode: cors_mode });
 
-                match Self::start_server(&flow_handle, server_config, extra_endpoints).await {
+                match Self::start_server(&flow_handle, server_config, all_extra_endpoints).await {
                     Ok(server_handle) => server_handle,
                     Err(err) => {
                         break 'run (Err(err), Some(flow_name), run_dir, false);
@@ -657,7 +690,11 @@ impl FlowApplication {
                 }
 
                 if let Some(server_task) = server_handle {
-                    tracing::info!("📊 Server running on port {}", config.server_port);
+                    tracing::info!(
+                        "📊 Server running on http://{}:{}",
+                        config.server_host,
+                        config.server_port
+                    );
                     tracing::info!("⏸️  Press Ctrl+C to cancel; send SIGTERM to graceful-stop...");
 
                     let shutdown_timeout_secs = std::env::var("OBZENFLOW_SHUTDOWN_TIMEOUT_SECS")
@@ -809,6 +846,9 @@ impl FlowApplication {
                             tokio::time::sleep(Duration::from_millis(50)).await;
                         }
                     }
+
+                    // Cancel surface-owned background tasks before final teardown.
+                    Self::cancel_and_join_tasks(managed_tasks, grace_timeout).await;
                 }
 
                 break 'run (Ok(()), Some(flow_name), run_dir, true);
@@ -893,6 +933,23 @@ impl FlowApplication {
         }
     }
 
+    async fn cancel_and_join_tasks(tasks: Vec<JoinHandle<()>>, timeout: Duration) {
+        if tasks.is_empty() {
+            return;
+        }
+
+        for task in &tasks {
+            task.abort();
+        }
+
+        let _ = tokio::time::timeout(timeout, async move {
+            for task in tasks {
+                let _ = task.await;
+            }
+        })
+        .await;
+    }
+
     /// Internal: Start the web server with all endpoints
     async fn start_server(
         _flow_handle: &Arc<FlowHandle>,
@@ -911,13 +968,8 @@ impl FlowApplication {
                 )
             })?;
             let metrics = _flow_handle.metrics_exporter();
-            if !extra_endpoints.is_empty() && metrics.is_none() {
-                return Err(ApplicationError::InvalidConfiguration(
-                    "HTTP ingestion requires a metrics exporter".to_string(),
-                ));
-            }
             let has_metrics = metrics.is_some();
-            let port = _server_config.port;
+            let addr = _server_config.address();
 
             let flow_name = _flow_handle.flow_name().to_string();
             let middleware_stacks = _flow_handle.middleware_stacks();
@@ -944,7 +996,7 @@ impl FlowApplication {
             .await
             .map_err(|e| ApplicationError::ServerStartFailed(e.to_string()))?;
 
-            tracing::info!("📊 Web server started on http://localhost:{}", port);
+            tracing::info!("📊 Web server started on http://{}", addr);
             tracing::info!("   /api/topology  - Flow structure");
             if has_metrics {
                 tracing::info!("   /metrics       - Prometheus metrics");
