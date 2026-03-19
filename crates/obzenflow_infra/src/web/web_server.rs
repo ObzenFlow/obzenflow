@@ -39,6 +39,11 @@ pub struct WebServerResources {
 }
 
 fn is_reserved_built_in_path(path: &str) -> bool {
+    // Paths owned by the framework (built-in endpoints). Attached surfaces must not register
+    // any of these routes because registration order shadowing is not a coherent operator story.
+    //
+    // Note: `/api/flow/*` is reserved as a prefix tree because it includes both control and
+    // streaming endpoints (e.g. SSE).
     matches!(
         path,
         "/metrics" | "/health" | "/ready" | "/api/topology" | "/api/flow/events"
@@ -78,11 +83,7 @@ fn validate_extra_endpoints(extra_endpoints: &[Box<dyn HttpEndpoint>]) -> Result
             if !seen_routes.insert(key) {
                 return Err(WebError::EndpointRegistrationFailed {
                     path: path.clone(),
-                    message: format!(
-                        "Duplicate route: {} {}",
-                        method.as_str(),
-                        path
-                    ),
+                    message: format!("Duplicate route: {} {}", method.as_str(), path),
                 });
             }
         }
@@ -312,6 +313,112 @@ impl HttpEndpoint for PipelineReadyEndpoint {
             Ok(Response::ok().with_text("READY"))
         } else {
             Ok(Response::new(503).with_text("NOT_READY"))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+
+    struct TestEndpoint {
+        path: String,
+        methods: Vec<HttpMethod>,
+    }
+
+    impl TestEndpoint {
+        fn new(path: &str, methods: Vec<HttpMethod>) -> Self {
+            Self {
+                path: path.to_string(),
+                methods,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl HttpEndpoint for TestEndpoint {
+        fn path(&self) -> &str {
+            &self.path
+        }
+
+        fn methods(&self) -> &[HttpMethod] {
+            &self.methods
+        }
+
+        async fn handle(&self, _request: Request) -> Result<Response, WebError> {
+            Ok(Response::ok())
+        }
+    }
+
+    #[test]
+    fn validate_extra_endpoints_rejects_reserved_paths() {
+        let endpoints: Vec<Box<dyn HttpEndpoint>> = vec![
+            Box::new(TestEndpoint::new("/metrics", vec![HttpMethod::Get])),
+            Box::new(TestEndpoint::new(
+                "/api/flow/control",
+                vec![HttpMethod::Post],
+            )),
+        ];
+
+        let err = validate_extra_endpoints(&endpoints).unwrap_err();
+        match err {
+            WebError::EndpointRegistrationFailed { path, .. } => {
+                // Should fail on the first reserved path encountered.
+                assert_eq!(path, "/metrics");
+            }
+            other => panic!("Unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_extra_endpoints_rejects_duplicate_routes_same_method() {
+        let endpoints: Vec<Box<dyn HttpEndpoint>> = vec![
+            Box::new(TestEndpoint::new("/foo", vec![HttpMethod::Post])),
+            Box::new(TestEndpoint::new("/foo", vec![HttpMethod::Post])),
+        ];
+
+        let err = validate_extra_endpoints(&endpoints).unwrap_err();
+        match err {
+            WebError::EndpointRegistrationFailed { path, message } => {
+                assert_eq!(path, "/foo");
+                assert!(
+                    message.contains("Duplicate route"),
+                    "unexpected message: {message}"
+                );
+            }
+            other => panic!("Unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_extra_endpoints_allows_same_path_different_methods() {
+        let endpoints: Vec<Box<dyn HttpEndpoint>> = vec![
+            Box::new(TestEndpoint::new("/foo", vec![HttpMethod::Get])),
+            Box::new(TestEndpoint::new("/foo", vec![HttpMethod::Post])),
+        ];
+
+        validate_extra_endpoints(&endpoints).unwrap();
+    }
+
+    #[test]
+    fn validate_extra_endpoints_treats_empty_methods_as_all_methods() {
+        let endpoints: Vec<Box<dyn HttpEndpoint>> = vec![
+            // Empty = supports all methods.
+            Box::new(TestEndpoint::new("/foo", vec![])),
+            Box::new(TestEndpoint::new("/foo", vec![HttpMethod::Get])),
+        ];
+
+        let err = validate_extra_endpoints(&endpoints).unwrap_err();
+        match err {
+            WebError::EndpointRegistrationFailed { path, message } => {
+                assert_eq!(path, "/foo");
+                assert!(
+                    message.contains("Duplicate route"),
+                    "unexpected message: {message}"
+                );
+            }
+            other => panic!("Unexpected error: {other:?}"),
         }
     }
 }

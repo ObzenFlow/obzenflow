@@ -125,9 +125,11 @@ impl FlowApplicationBuilder {
         self
     }
 
-    /// Register additional HTTP endpoints to be hosted by FlowApplication when running with `--server`.
-    pub fn with_web_endpoints(mut self, endpoints: Vec<Box<dyn HttpEndpoint>>) -> Self {
-        self.web_endpoints = endpoints;
+    /// Add multiple HTTP endpoints to be hosted by FlowApplication when running with `--server`.
+    ///
+    /// This appends to any endpoints already registered via `with_web_endpoint(...)`.
+    pub fn with_web_endpoints(mut self, mut endpoints: Vec<Box<dyn HttpEndpoint>>) -> Self {
+        self.web_endpoints.append(&mut endpoints);
         self
     }
 
@@ -448,6 +450,16 @@ impl FlowApplication {
         // Clear any stale run-dir hint from prior FlowApplication runs (OT-17).
         let _ = crate::journal::factory::take_last_run_dir();
 
+        let shutdown_timeout_secs = std::env::var("OBZENFLOW_SHUTDOWN_TIMEOUT_SECS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(30);
+        let grace_timeout = Duration::from_secs(shutdown_timeout_secs);
+
+        // Background tasks spawned by FlowHandle hooks and/or web surface wiring closures.
+        // These must not be allowed to outlive FlowApplication, even on early-return paths.
+        let mut managed_tasks: Vec<JoinHandle<()>> = Vec::new();
+
         if let Some(presentation) = &presentation {
             let rendered = presentation.banner().render_for_stdout();
             for warning in rendered.warnings {
@@ -586,7 +598,7 @@ impl FlowApplication {
             let flow_handle = Arc::new(flow_handle);
             let flow_name = flow_handle.flow_name().to_string();
 
-            let mut managed_tasks: Vec<JoinHandle<()>> = flow_handle_hooks
+            managed_tasks = flow_handle_hooks
                 .iter()
                 .map(|hook| hook(&flow_handle))
                 .collect();
@@ -613,7 +625,8 @@ impl FlowApplication {
                     CorsModeArg::AllowList => CorsMode::AllowList(config.cors_allow_origin.clone()),
                     CorsModeArg::SameOrigin => CorsMode::SameOrigin,
                 };
-                let mut server_config = ServerConfig::new(config.server_host.clone(), config.server_port);
+                let mut server_config =
+                    ServerConfig::new(config.server_host.clone(), config.server_port);
                 server_config.cors = Some(CorsConfig { mode: cors_mode });
 
                 match Self::start_server(&flow_handle, server_config, all_extra_endpoints).await {
@@ -696,12 +709,6 @@ impl FlowApplication {
                         config.server_port
                     );
                     tracing::info!("⏸️  Press Ctrl+C to cancel; send SIGTERM to graceful-stop...");
-
-                    let shutdown_timeout_secs = std::env::var("OBZENFLOW_SHUTDOWN_TIMEOUT_SECS")
-                        .ok()
-                        .and_then(|s| s.parse::<u64>().ok())
-                        .unwrap_or(30);
-                    let grace_timeout = Duration::from_secs(shutdown_timeout_secs);
 
                     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
                     enum ShutdownSignal {
@@ -846,9 +853,6 @@ impl FlowApplication {
                             tokio::time::sleep(Duration::from_millis(50)).await;
                         }
                     }
-
-                    // Cancel surface-owned background tasks before final teardown.
-                    Self::cancel_and_join_tasks(managed_tasks, grace_timeout).await;
                 }
 
                 break 'run (Ok(()), Some(flow_name), run_dir, true);
@@ -880,6 +884,10 @@ impl FlowApplication {
             }
             break 'run (result, Some(flow_name), run_dir, false);
         };
+
+        // Best-effort: ensure any hook/surface background tasks cannot escape `FlowApplication`
+        // lifetime, even if we exited early due to a startup failure or "no server" fallback.
+        Self::cancel_and_join_tasks(managed_tasks, grace_timeout).await;
 
         match (result, flow_name, run_dir, stopped) {
             (Ok(()), flow_name, run_dir, stopped) => {

@@ -64,6 +64,25 @@ pub fn create_ingestion_endpoints(
 /// - `surface`: register with `FlowApplication::builder().with_web_surface(...)`
 /// - `rx`: pass into `obzenflow_adapters::sources::http::HttpSource`
 /// - `telemetry`: pass into `HttpSource::with_telemetry(...)`
+///
+/// # Example
+/// ```ignore
+/// use obzenflow_infra::application::FlowApplication;
+/// use obzenflow_infra::web::endpoints::event_ingestion::{create_ingestion_surface, IngestionConfig};
+/// use obzenflow_adapters::sources::http::HttpSource;
+///
+/// let config = IngestionConfig {
+///     base_path: "/api/bank/accounts".to_string(),
+///     ..Default::default()
+/// };
+/// let (surface, rx, telemetry) = create_ingestion_surface(config);
+/// let accounts_source = HttpSource::new(rx).with_telemetry(telemetry);
+///
+/// FlowApplication::builder()
+///     .with_web_surface(surface)
+///     .run_blocking(flow! { /* ... */ })?;
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
 pub fn create_ingestion_surface(
     config: IngestionConfig,
 ) -> (
@@ -82,12 +101,11 @@ pub fn create_ingestion_surface(
         Box::new(IngestionHealthEndpoint::new(state)),
     ];
 
-    let surface = WebSurfaceAttachment::new(format!("ingestion:{base_path}"), endpoints).with_wiring(
-        move |ctx: WebSurfaceWiringContext| {
+    let surface = WebSurfaceAttachment::new(format!("ingestion:{base_path}"), endpoints)
+        .with_wiring(move |ctx: WebSurfaceWiringContext| {
             let task = state_for_wiring.watch_pipeline_state(ctx.pipeline_state);
             Ok(WebSurfaceWiring::new(vec![task]))
-        },
-    );
+        });
 
     (surface, rx, telemetry)
 }

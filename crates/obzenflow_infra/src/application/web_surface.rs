@@ -12,6 +12,10 @@ use tokio::task::JoinHandle;
 
 use super::error::ApplicationError;
 
+/// Narrow, framework-owned wiring context for hosted web surfaces.
+///
+/// This is intentionally minimal in the first pass; more capabilities can be added when
+/// a concrete surface requires it (e.g. additional pipeline or runtime signals).
 pub struct WebSurfaceWiringContext {
     pub pipeline_state: watch::Receiver<PipelineState>,
 }
@@ -27,6 +31,35 @@ impl WebSurfaceWiring {
     }
 }
 
+/// A framework-managed attachment describing a hosted HTTP-facing capability.
+///
+/// Surfaces contribute a set of `HttpEndpoint`s plus an optional wiring closure that can
+/// spawn background tasks after the flow has been built (e.g. readiness watchers).
+///
+/// # Example
+/// ```ignore
+/// use obzenflow_infra::application::{FlowApplication, WebSurfaceAttachment, WebSurfaceWiring, WebSurfaceWiringContext};
+/// use obzenflow_core::web::{HttpEndpoint, HttpMethod, Request, Response, WebError};
+/// use async_trait::async_trait;
+///
+/// struct Hello;
+/// #[async_trait]
+/// impl HttpEndpoint for Hello {
+///     fn path(&self) -> &str { "/hello" }
+///     fn methods(&self) -> &[HttpMethod] { &[HttpMethod::Get] }
+///     async fn handle(&self, _req: Request) -> Result<Response, WebError> {
+///         Ok(Response::ok().with_text("hello"))
+///     }
+/// }
+///
+/// let surface = WebSurfaceAttachment::new("hello", vec![Box::new(Hello)])
+///     .with_wiring(|_ctx: WebSurfaceWiringContext| Ok(WebSurfaceWiring::default()));
+///
+/// FlowApplication::builder()
+///     .with_web_surface(surface)
+///     .run_blocking(flow! { /* ... */ })?;
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
 pub struct WebSurfaceAttachment {
     name: String,
     endpoints: Vec<Box<dyn HttpEndpoint>>,
@@ -39,6 +72,7 @@ pub struct WebSurfaceAttachment {
 }
 
 impl WebSurfaceAttachment {
+    /// Create a new surface attachment with a name and a set of endpoints.
     pub fn new(name: impl Into<String>, endpoints: Vec<Box<dyn HttpEndpoint>>) -> Self {
         Self {
             name: name.into(),
@@ -77,3 +111,35 @@ impl WebSurfaceAttachment {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn web_surface_attachment_wiring_receives_pipeline_state_and_returns_tasks() {
+        let (tx, rx) = watch::channel(PipelineState::Created);
+
+        let surface = WebSurfaceAttachment::new("test", vec![]).with_wiring(
+            |ctx: WebSurfaceWiringContext| {
+                assert!(matches!(
+                    *ctx.pipeline_state.borrow(),
+                    PipelineState::Created
+                ));
+                let mut pipeline_state = ctx.pipeline_state;
+                let task = tokio::spawn(async move {
+                    let _ = pipeline_state.changed().await;
+                });
+                Ok(WebSurfaceWiring::new(vec![task]))
+            },
+        );
+
+        let (_name, endpoints, wiring) = surface.into_parts();
+        assert!(endpoints.is_empty());
+        let wiring = wiring.expect("wiring should exist");
+
+        let wired = wiring(WebSurfaceWiringContext { pipeline_state: rx }).unwrap();
+        assert_eq!(wired.tasks.len(), 1);
+
+        let _ = tx.send(PipelineState::Running);
+    }
+}

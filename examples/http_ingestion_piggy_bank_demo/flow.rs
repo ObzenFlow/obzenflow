@@ -66,8 +66,8 @@ async fn run() -> Result<()> {
     };
     let (accounts_surface, accounts_rx, accounts_telemetry) =
         create_ingestion_surface(accounts_config);
-    let accounts_source = HttpSource::with_telemetry(accounts_rx, accounts_telemetry)
-        .typed::<AccountOpened>();
+    let accounts_source =
+        HttpSource::with_telemetry(accounts_rx, accounts_telemetry).typed::<AccountOpened>();
 
     let tx_config = IngestionConfig {
         base_path: "/api/bank/tx".to_string(),
