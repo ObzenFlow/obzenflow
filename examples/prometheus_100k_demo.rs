@@ -271,7 +271,7 @@ fn main() -> Result<()> {
                     println!();
                     println!("📈 To view framework-level Prometheus metrics:");
                     println!("   1. Run with --server flag");
-                    println!("   2. Visit http://localhost:3000/metrics");
+                    println!("   2. Visit http://localhost:9090/metrics");
                     println!("   3. See detailed per-stage metrics, errors, latencies, etc.");
                     println!("=====================================");
                 });
