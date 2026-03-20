@@ -114,9 +114,12 @@ fn validate_extra_endpoints(extra_endpoints: &[Box<dyn HttpEndpoint>]) -> Result
 ///     middleware_stacks: None,
 ///     contract_attachments: None,
 ///     join_metadata: None,
+///     subgraph_membership: None,
+///     subgraphs: None,
 ///     metrics_exporter: Some(metrics_exporter),
 ///     flow_handle: None,
 ///     extra_endpoints: vec![],
+///     surface_metrics: None,
 /// }, 9090).await?;
 /// ```
 #[cfg(feature = "warp-server")]

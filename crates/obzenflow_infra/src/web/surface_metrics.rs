@@ -275,3 +275,131 @@ impl HttpSurfaceMetricsEmitter {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::journal::MemoryJournal;
+    use obzenflow_core::journal::journal_owner::JournalOwner;
+
+    #[test]
+    fn http_status_class_buckets_expected_ranges() {
+        assert_eq!(HttpStatusClass::from_status(200).as_str(), "2xx");
+        assert_eq!(HttpStatusClass::from_status(302).as_str(), "3xx");
+        assert_eq!(HttpStatusClass::from_status(404).as_str(), "4xx");
+        assert_eq!(HttpStatusClass::from_status(503).as_str(), "5xx");
+        assert_eq!(HttpStatusClass::from_status(700).as_str(), "other");
+    }
+
+    #[test]
+    fn collector_accumulates_and_returns_sorted_routes() {
+        let collector = HttpSurfaceMetricsCollector::new();
+
+        collector.observe(
+            Arc::from("b"),
+            HttpMethod::Get,
+            Arc::from("/z"),
+            200,
+            1,
+            0,
+            1,
+        );
+        collector.observe(
+            Arc::from("a"),
+            HttpMethod::Post,
+            Arc::from("/b"),
+            500,
+            2,
+            10,
+            0,
+        );
+        collector.observe(
+            Arc::from("a"),
+            HttpMethod::Get,
+            Arc::from("/a"),
+            204,
+            3,
+            0,
+            0,
+        );
+        collector.observe(
+            Arc::from("a"),
+            HttpMethod::Get,
+            Arc::from("/a"),
+            204,
+            5,
+            0,
+            7,
+        );
+
+        assert_eq!(collector.total_requests(), 4);
+
+        let routes = collector.snapshot_routes();
+        assert_eq!(routes.len(), 3, "expected 3 distinct route keys");
+
+        assert_eq!(routes[0].surface_name, "a");
+        assert_eq!(routes[0].path, "/a");
+        assert_eq!(routes[0].method, HttpMethod::Get);
+        assert_eq!(routes[0].status_class, "2xx");
+        assert_eq!(routes[0].requests_total, 2);
+        assert_eq!(routes[0].request_duration_ms_total, 8);
+        assert_eq!(routes[0].response_bytes_total, 7);
+
+        assert_eq!(routes[1].surface_name, "a");
+        assert_eq!(routes[1].path, "/b");
+        assert_eq!(routes[1].method, HttpMethod::Post);
+        assert_eq!(routes[1].status_class, "5xx");
+        assert_eq!(routes[1].requests_total, 1);
+        assert_eq!(routes[1].request_bytes_total, 10);
+
+        assert_eq!(routes[2].surface_name, "b");
+        assert_eq!(routes[2].path, "/z");
+        assert_eq!(routes[2].method, HttpMethod::Get);
+        assert_eq!(routes[2].status_class, "2xx");
+        assert_eq!(routes[2].requests_total, 1);
+    }
+
+    #[tokio::test]
+    async fn emitter_skips_when_unchanged() {
+        let collector = Arc::new(HttpSurfaceMetricsCollector::new());
+        let journal = Arc::new(MemoryJournal::with_owner(JournalOwner::system(
+            SystemId::new(),
+        )));
+
+        let emitter = HttpSurfaceMetricsEmitter::new(collector.clone(), journal.clone());
+
+        collector.observe(
+            Arc::from("surf"),
+            HttpMethod::Get,
+            Arc::from("/x"),
+            200,
+            1,
+            0,
+            0,
+        );
+
+        emitter.emit_snapshot(false).await;
+        emitter.emit_snapshot(false).await;
+
+        let events = journal.read_causally_ordered().await.unwrap();
+        assert_eq!(
+            events.len(),
+            1,
+            "expected idle suppression to skip second emit"
+        );
+
+        collector.observe(
+            Arc::from("surf"),
+            HttpMethod::Get,
+            Arc::from("/x"),
+            200,
+            1,
+            0,
+            0,
+        );
+        emitter.emit_snapshot(false).await;
+
+        let events = journal.read_causally_ordered().await.unwrap();
+        assert_eq!(events.len(), 2, "expected emit after traffic");
+    }
+}
