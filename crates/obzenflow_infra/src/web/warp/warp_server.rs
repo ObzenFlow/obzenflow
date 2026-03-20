@@ -23,9 +23,8 @@ use obzenflow_core::web::{
 };
 use obzenflow_core::EventId;
 
-use crate::web::surface_metrics::{
-    HttpSurfaceMetricsCollector, HttpSurfaceObservation, SURFACE_NAME_TAG_PREFIX,
-};
+use crate::web::endpoint_tags::SURFACE_NAME_TAG_PREFIX;
+use crate::web::surface_metrics::{HttpSurfaceMetricsCollector, HttpSurfaceObservation};
 
 /// Warp-based web server implementation
 pub struct WarpServer {

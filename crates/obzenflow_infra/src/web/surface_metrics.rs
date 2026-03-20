@@ -22,8 +22,6 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::task::JoinHandle;
 
-pub(crate) const SURFACE_NAME_TAG_PREFIX: &str = "obzenflow.surface_name=";
-
 #[derive(Clone, Debug)]
 pub struct HttpSurfaceObservation {
     pub surface_name: Arc<str>,

@@ -12,7 +12,7 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
 use super::error::ApplicationError;
-use crate::web::surface_metrics::SURFACE_NAME_TAG_PREFIX;
+use crate::web::endpoint_tags::SURFACE_NAME_TAG_PREFIX;
 
 type WebSurfaceWiringFn =
     Box<dyn FnOnce(WebSurfaceWiringContext) -> Result<WebSurfaceWiring, ApplicationError> + Send>;
