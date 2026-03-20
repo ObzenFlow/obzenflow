@@ -6,10 +6,14 @@ mod support;
 
 #[cfg(test)]
 fn main() -> anyhow::Result<()> {
-    support::flow::run_example_in_tests()
+    support::runner::run_example_in_tests()
 }
 
 #[cfg(not(test))]
 fn main() -> anyhow::Result<()> {
-    support::flow::run_example()
+    if std::env::var("OBZENFLOW_METRICS_EXPORTER").is_err() {
+        std::env::set_var("OBZENFLOW_METRICS_EXPORTER", "prometheus");
+    }
+
+    support::runner::run_example()
 }
