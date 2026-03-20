@@ -1881,6 +1881,85 @@ impl PrometheusExporter {
             writeln!(output)?;
         }
 
+        // Hosted web surface metrics (FLOWIP-093a).
+        if !snapshot.http_surface_metrics.is_empty() {
+            writeln!(
+                output,
+                "# HELP http_surface_requests_total Total hosted-surface HTTP requests"
+            )?;
+            writeln!(output, "# TYPE http_surface_requests_total counter")?;
+            for metrics in &snapshot.http_surface_metrics {
+                writeln!(
+                    output,
+                    "http_surface_requests_total{{surface_name=\"{}\",method=\"{}\",path=\"{}\",status_class=\"{}\"}} {}",
+                    escape_label(&metrics.surface_name),
+                    escape_label(metrics.method.as_str()),
+                    escape_label(&metrics.path),
+                    escape_label(&metrics.status_class),
+                    metrics.requests_total
+                )?;
+            }
+            writeln!(output)?;
+
+            writeln!(
+                output,
+                "# HELP http_surface_request_duration_seconds_sum Sum of hosted-surface request durations in seconds"
+            )?;
+            writeln!(
+                output,
+                "# TYPE http_surface_request_duration_seconds_sum counter"
+            )?;
+            for metrics in &snapshot.http_surface_metrics {
+                let seconds = (metrics.request_duration_ms_total as f64) / 1000.0;
+                writeln!(
+                    output,
+                    "http_surface_request_duration_seconds_sum{{surface_name=\"{}\",method=\"{}\",path=\"{}\",status_class=\"{}\"}} {}",
+                    escape_label(&metrics.surface_name),
+                    escape_label(metrics.method.as_str()),
+                    escape_label(&metrics.path),
+                    escape_label(&metrics.status_class),
+                    seconds
+                )?;
+            }
+            writeln!(output)?;
+
+            writeln!(
+                output,
+                "# HELP http_surface_request_bytes_total Total request bytes for hosted surfaces"
+            )?;
+            writeln!(output, "# TYPE http_surface_request_bytes_total counter")?;
+            for metrics in &snapshot.http_surface_metrics {
+                writeln!(
+                    output,
+                    "http_surface_request_bytes_total{{surface_name=\"{}\",method=\"{}\",path=\"{}\",status_class=\"{}\"}} {}",
+                    escape_label(&metrics.surface_name),
+                    escape_label(metrics.method.as_str()),
+                    escape_label(&metrics.path),
+                    escape_label(&metrics.status_class),
+                    metrics.request_bytes_total
+                )?;
+            }
+            writeln!(output)?;
+
+            writeln!(
+                output,
+                "# HELP http_surface_response_bytes_total Total response bytes for hosted surfaces"
+            )?;
+            writeln!(output, "# TYPE http_surface_response_bytes_total counter")?;
+            for metrics in &snapshot.http_surface_metrics {
+                writeln!(
+                    output,
+                    "http_surface_response_bytes_total{{surface_name=\"{}\",method=\"{}\",path=\"{}\",status_class=\"{}\"}} {}",
+                    escape_label(&metrics.surface_name),
+                    escape_label(metrics.method.as_str()),
+                    escape_label(&metrics.path),
+                    escape_label(&metrics.status_class),
+                    metrics.response_bytes_total
+                )?;
+            }
+            writeln!(output)?;
+        }
+
         // HTTP pull telemetry (FLOWIP-084e).
         if !snapshot.http_pull_metrics.is_empty() {
             writeln!(
@@ -2459,7 +2538,9 @@ fn estimate_bucket_count(histogram: &HistogramSnapshot, bucket_value: f64) -> u6
 mod tests {
     use super::*;
     use obzenflow_core::event::ingestion::IngestionTelemetrySnapshot;
-    use obzenflow_core::event::observability::{HttpPullState, HttpPullTelemetry, WaitReason};
+    use obzenflow_core::event::observability::{
+        HttpPullState, HttpPullTelemetry, HttpSurfaceRouteMetricsSnapshot, WaitReason,
+    };
     use obzenflow_core::metrics::AiChunkingMetricsSnapshot;
     use std::collections::HashMap;
 
@@ -2544,6 +2625,44 @@ mod tests {
         )));
         assert!(output.contains(&format!(
             "http_ingestion_channel_depth{{base_path=\"{base_path}\"}} 12"
+        )));
+    }
+
+    #[test]
+    fn test_http_surface_metrics_rendered() {
+        let exporter = PrometheusExporter::new();
+
+        let mut snapshot = AppMetricsSnapshot::default();
+        snapshot
+            .http_surface_metrics
+            .push(HttpSurfaceRouteMetricsSnapshot {
+                surface_name: "ingestion:/api/ingest".to_string(),
+                method: obzenflow_core::web::HttpMethod::Post,
+                path: "/api/ingest".to_string(),
+                status_class: "2xx".to_string(),
+                requests_total: 10,
+                request_duration_ms_total: 1_000,
+                request_bytes_total: 1_024,
+                response_bytes_total: 512,
+            });
+
+        exporter.update_app_metrics(snapshot).unwrap();
+        let output = exporter.render_metrics().unwrap();
+
+        let surface_name = escape_label("ingestion:/api/ingest");
+        let path = escape_label("/api/ingest");
+        assert!(output.contains("# TYPE http_surface_requests_total counter"));
+        assert!(output.contains(&format!(
+            "http_surface_requests_total{{surface_name=\"{surface_name}\",method=\"POST\",path=\"{path}\",status_class=\"2xx\"}} 10"
+        )));
+        assert!(output.contains(&format!(
+            "http_surface_request_duration_seconds_sum{{surface_name=\"{surface_name}\",method=\"POST\",path=\"{path}\",status_class=\"2xx\"}} 1"
+        )));
+        assert!(output.contains(&format!(
+            "http_surface_request_bytes_total{{surface_name=\"{surface_name}\",method=\"POST\",path=\"{path}\",status_class=\"2xx\"}} 1024"
+        )));
+        assert!(output.contains(&format!(
+            "http_surface_response_bytes_total{{surface_name=\"{surface_name}\",method=\"POST\",path=\"{path}\",status_class=\"2xx\"}} 512"
         )));
     }
 

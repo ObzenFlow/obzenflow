@@ -17,6 +17,8 @@ use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use super::surface_metrics::HttpSurfaceMetricsCollector;
+
 pub type MiddlewareStacks =
     Arc<HashMap<StageId, obzenflow_runtime::pipeline::MiddlewareStackConfig>>;
 pub type ContractAttachments = Arc<HashMap<(StageId, StageId), Vec<String>>>;
@@ -36,6 +38,7 @@ pub struct WebServerResources {
     pub metrics_exporter: Option<Arc<dyn MetricsExporter>>,
     pub flow_handle: Option<Arc<FlowHandle>>,
     pub extra_endpoints: Vec<Box<dyn HttpEndpoint>>,
+    pub surface_metrics: Option<Arc<HttpSurfaceMetricsCollector>>,
 }
 
 fn is_reserved_built_in_path(path: &str) -> bool {
@@ -144,11 +147,15 @@ pub async fn start_web_server_with_config(
         metrics_exporter,
         flow_handle,
         extra_endpoints,
+        surface_metrics,
     } = resources;
 
     validate_extra_endpoints(&extra_endpoints)?;
 
     let mut server = super::warp::WarpServer::new();
+    if let Some(collector) = surface_metrics {
+        server.with_surface_metrics(collector);
+    }
     let pipeline_ready = flow_handle.as_ref().map(|handle| {
         let ready = Arc::new(AtomicBool::new(false));
         let ready_for_task = ready.clone();

@@ -12,6 +12,7 @@ pub mod warp;
 
 pub mod endpoints;
 pub mod factory;
+pub mod surface_metrics;
 
 #[cfg(feature = "warp-server")]
 pub mod web_server;

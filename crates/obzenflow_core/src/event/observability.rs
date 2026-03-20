@@ -5,6 +5,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+use crate::web::HttpMethod;
+
 /// HTTP pull telemetry snapshot emitted via `MetricsLifecycle::Custom` wide events (FLOWIP-084e).
 ///
 /// This type is intentionally defined in `obzenflow_core` so both adapters and runtime services
@@ -92,4 +94,33 @@ pub struct AiChunkingSnapshot {
     pub exclusions_by_reason: HashMap<String, u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub excluded_items: Option<Vec<usize>>,
+}
+
+/// Generic hosted HTTP surface route metrics (FLOWIP-093a).
+///
+/// This is intended to be emitted by the hosting layer as low-volume system events so
+/// `/metrics` remains derivable from journaled facts via `MetricsAggregator`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HttpSurfaceMetricsSnapshot {
+    /// Monotonic sequence number for snapshots emitted by a given writer.
+    pub seq: u64,
+
+    /// Per-route totals (monotonic, since process start).
+    pub routes: Vec<HttpSurfaceRouteMetricsSnapshot>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HttpSurfaceRouteMetricsSnapshot {
+    pub surface_name: String,
+    pub method: HttpMethod,
+    /// Registered route path (not a raw URL with parameters).
+    pub path: String,
+    /// Bucketed status class: "2xx", "3xx", "4xx", "5xx", or "other".
+    pub status_class: String,
+
+    /// Monotonic counters (since process start).
+    pub requests_total: u64,
+    pub request_duration_ms_total: u64,
+    pub request_bytes_total: u64,
+    pub response_bytes_total: u64,
 }

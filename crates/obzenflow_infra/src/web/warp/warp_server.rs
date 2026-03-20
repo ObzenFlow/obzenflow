@@ -23,11 +23,14 @@ use obzenflow_core::web::{
 };
 use obzenflow_core::EventId;
 
+use crate::web::surface_metrics::{HttpSurfaceMetricsCollector, SURFACE_NAME_TAG_PREFIX};
+
 /// Warp-based web server implementation
 pub struct WarpServer {
     endpoints: Vec<Arc<dyn HttpEndpoint>>,
     /// Optional system journal for SSE lifecycle events
     system_journal: Option<Arc<dyn Journal<SystemEvent>>>,
+    surface_metrics: Option<Arc<HttpSurfaceMetricsCollector>>,
 }
 
 const DEFAULT_MAX_BODY_SIZE_BYTES: usize = 10 * 1024 * 1024;
@@ -38,12 +41,18 @@ impl WarpServer {
         Self {
             endpoints: Vec::new(),
             system_journal: None,
+            surface_metrics: None,
         }
     }
 
     /// Attach a system journal to enable SSE lifecycle streaming
     pub fn with_system_journal(&mut self, journal: Arc<dyn Journal<SystemEvent>>) {
         self.system_journal = Some(journal);
+    }
+
+    /// Attach an in-memory metrics collector for hosted web surfaces (FLOWIP-093a).
+    pub fn with_surface_metrics(&mut self, collector: Arc<HttpSurfaceMetricsCollector>) {
+        self.surface_metrics = Some(collector);
     }
 
     /// Build path filter from string path
@@ -76,8 +85,18 @@ impl WarpServer {
             let endpoint = endpoint.clone();
             let path_str = endpoint.path().to_string();
 
+            let surface_metrics = match (&self.surface_metrics, surface_name_tag_value(&endpoint)) {
+                (Some(collector), Some(surface_name)) => Some(SurfaceMetricsRouteContext {
+                    collector: collector.clone(),
+                    surface_name,
+                    path: Arc::from(path_str.as_str()),
+                }),
+                _ => None,
+            };
+
             // Create simple route for this endpoint
-            let route = self.build_simple_route(path_str, endpoint, max_body_size_bytes);
+            let route =
+                self.build_simple_route(path_str, endpoint, max_body_size_bytes, surface_metrics);
 
             combined_route = match combined_route {
                 Some(existing) => Some(existing.or(route).unify().boxed()),
@@ -115,6 +134,7 @@ impl WarpServer {
         path_str: String,
         endpoint: Arc<dyn HttpEndpoint>,
         max_body_size_bytes: u64,
+        surface_metrics: Option<SurfaceMetricsRouteContext>,
     ) -> impl Filter<Extract = (Box<dyn Reply>,), Error = Rejection> + Clone {
         let path_filter = self.build_path_filter(&path_str);
 
@@ -130,6 +150,7 @@ impl WarpServer {
             .and_then({
                 let endpoint = endpoint.clone();
                 let path_str = path_str.clone();
+                let surface_metrics = surface_metrics.clone();
                 move |query_params: HashMap<String, String>, headers: warp::http::HeaderMap| {
                     handle_request_no_body(
                         endpoint.clone(),
@@ -137,6 +158,7 @@ impl WarpServer {
                         headers,
                         query_params,
                         path_str.clone(),
+                        surface_metrics.clone(),
                     )
                 }
             });
@@ -152,6 +174,7 @@ impl WarpServer {
             .and_then({
                 let endpoint = endpoint.clone();
                 let path_str = path_str.clone();
+                let surface_metrics = surface_metrics.clone();
                 move |query_params: HashMap<String, String>, headers: warp::http::HeaderMap| {
                     handle_request_no_body(
                         endpoint.clone(),
@@ -159,6 +182,7 @@ impl WarpServer {
                         headers,
                         query_params,
                         path_str.clone(),
+                        surface_metrics.clone(),
                     )
                 }
             });
@@ -174,6 +198,7 @@ impl WarpServer {
             .and_then({
                 let endpoint = endpoint.clone();
                 let path_str = path_str.clone();
+                let surface_metrics = surface_metrics.clone();
                 move |query_params: HashMap<String, String>, headers: warp::http::HeaderMap| {
                     handle_request_no_body(
                         endpoint.clone(),
@@ -181,6 +206,7 @@ impl WarpServer {
                         headers,
                         query_params,
                         path_str.clone(),
+                        surface_metrics.clone(),
                     )
                 }
             });
@@ -199,6 +225,7 @@ impl WarpServer {
             .and_then({
                 let endpoint = endpoint.clone();
                 let path_str = path_str.clone();
+                let surface_metrics = surface_metrics.clone();
                 move |query_params: HashMap<String, String>,
                       headers: warp::http::HeaderMap,
                       body: bytes::Bytes| {
@@ -209,6 +236,7 @@ impl WarpServer {
                         query_params,
                         body,
                         path_str.clone(),
+                        surface_metrics.clone(),
                     )
                 }
             });
@@ -226,6 +254,7 @@ impl WarpServer {
             .and_then({
                 let endpoint = endpoint.clone();
                 let path_str = path_str.clone();
+                let surface_metrics = surface_metrics.clone();
                 move |query_params: HashMap<String, String>,
                       headers: warp::http::HeaderMap,
                       body: bytes::Bytes| {
@@ -236,6 +265,7 @@ impl WarpServer {
                         query_params,
                         body,
                         path_str.clone(),
+                        surface_metrics.clone(),
                     )
                 }
             });
@@ -253,6 +283,7 @@ impl WarpServer {
             .and_then({
                 let endpoint = endpoint.clone();
                 let path_str = path_str.clone();
+                let surface_metrics = surface_metrics.clone();
                 move |query_params: HashMap<String, String>,
                       headers: warp::http::HeaderMap,
                       body: bytes::Bytes| {
@@ -263,6 +294,7 @@ impl WarpServer {
                         query_params,
                         body,
                         path_str.clone(),
+                        surface_metrics.clone(),
                     )
                 }
             });
@@ -377,10 +409,12 @@ impl WarpServer {
                                     }
 
                                     stage_lifecycle_state.observe(&envelope);
-                                    let ev =
-                                        map_system_event_to_sse(&envelope, &mut middleware_state);
-                                    if tx.send(Ok(ev)).is_err() {
-                                        break;
+                                    if let Some(ev) =
+                                        map_system_event_to_sse(&envelope, &mut middleware_state)
+                                    {
+                                        if tx.send(Ok(ev)).is_err() {
+                                            break;
+                                        }
                                     }
 
                                     if is_flow_running_event(&envelope) {
@@ -506,6 +540,42 @@ impl Default for WarpServer {
     }
 }
 
+#[derive(Clone)]
+struct SurfaceMetricsRouteContext {
+    collector: Arc<HttpSurfaceMetricsCollector>,
+    surface_name: Arc<str>,
+    path: Arc<str>,
+}
+
+impl SurfaceMetricsRouteContext {
+    fn observe(
+        &self,
+        method: HttpMethod,
+        status: u16,
+        duration_ms: u64,
+        request_bytes: u64,
+        response_bytes: u64,
+    ) {
+        self.collector.observe(
+            self.surface_name.clone(),
+            method,
+            self.path.clone(),
+            status,
+            duration_ms,
+            request_bytes,
+            response_bytes,
+        );
+    }
+}
+
+fn surface_name_tag_value(endpoint: &Arc<dyn HttpEndpoint>) -> Option<Arc<str>> {
+    let meta = endpoint.metadata()?;
+    meta.tags
+        .iter()
+        .find_map(|tag| tag.strip_prefix(SURFACE_NAME_TAG_PREFIX))
+        .map(Arc::from)
+}
+
 /// Helper function to handle requests without body (GET, HEAD, DELETE, OPTIONS)
 async fn handle_request_no_body(
     endpoint: Arc<dyn HttpEndpoint>,
@@ -513,12 +583,15 @@ async fn handle_request_no_body(
     headers: warp::http::HeaderMap,
     query_params: HashMap<String, String>,
     path: String,
+    surface_metrics: Option<SurfaceMetricsRouteContext>,
 ) -> Result<Box<dyn Reply>, Rejection> {
     // Check if endpoint supports this method
     let supported_methods = endpoint.methods();
     if !supported_methods.is_empty() && !supported_methods.contains(&method) {
         return Err(warp::reject::not_found());
     }
+
+    let start = std::time::Instant::now();
 
     // Convert headers
     let mut req_headers = HashMap::new();
@@ -539,6 +612,17 @@ async fn handle_request_no_body(
     // Handle request
     match endpoint.handle(request).await {
         Ok(response) => {
+            let response_bytes = response.body.len() as u64;
+            if let Some(metrics) = &surface_metrics {
+                metrics.observe(
+                    method,
+                    response.status,
+                    start.elapsed().as_millis() as u64,
+                    0,
+                    response_bytes,
+                );
+            }
+
             let mut builder = warp::http::Response::builder().status(response.status);
 
             for (key, value) in response.headers {
@@ -551,7 +635,12 @@ async fn handle_request_no_body(
 
             Ok(Box::new(reply) as Box<dyn Reply>)
         }
-        Err(_) => Err(warp::reject::reject()),
+        Err(_) => {
+            if let Some(metrics) = &surface_metrics {
+                metrics.observe(method, 500, start.elapsed().as_millis() as u64, 0, 0);
+            }
+            Err(warp::reject::reject())
+        }
     }
 }
 
@@ -563,12 +652,16 @@ async fn handle_request_with_body(
     query_params: HashMap<String, String>,
     body: bytes::Bytes,
     path: String,
+    surface_metrics: Option<SurfaceMetricsRouteContext>,
 ) -> Result<Box<dyn Reply>, Rejection> {
     // Check if endpoint supports this method
     let supported_methods = endpoint.methods();
     if !supported_methods.is_empty() && !supported_methods.contains(&method) {
         return Err(warp::reject::not_found());
     }
+
+    let start = std::time::Instant::now();
+    let request_bytes = body.len() as u64;
 
     // Convert headers
     let mut req_headers = HashMap::new();
@@ -589,6 +682,17 @@ async fn handle_request_with_body(
     // Handle request
     match endpoint.handle(request).await {
         Ok(response) => {
+            let response_bytes = response.body.len() as u64;
+            if let Some(metrics) = &surface_metrics {
+                metrics.observe(
+                    method,
+                    response.status,
+                    start.elapsed().as_millis() as u64,
+                    request_bytes,
+                    response_bytes,
+                );
+            }
+
             let mut builder = warp::http::Response::builder().status(response.status);
 
             for (key, value) in response.headers {
@@ -601,7 +705,18 @@ async fn handle_request_with_body(
 
             Ok(Box::new(reply) as Box<dyn Reply>)
         }
-        Err(_) => Err(warp::reject::reject()),
+        Err(_) => {
+            if let Some(metrics) = &surface_metrics {
+                metrics.observe(
+                    method,
+                    500,
+                    start.elapsed().as_millis() as u64,
+                    request_bytes,
+                    0,
+                );
+            }
+            Err(warp::reject::reject())
+        }
     }
 }
 
@@ -727,7 +842,7 @@ mod tests {
 fn map_system_event_to_sse(
     envelope: &SystemEventEnvelope,
     middleware_state: &mut MiddlewareSseState,
-) -> SseEvent {
+) -> Option<SseEvent> {
     use obzenflow_core::event::system_event::StageLifecycleEvent;
     use obzenflow_core::event::SystemEventType;
     use serde_json::json;
@@ -803,10 +918,12 @@ fn map_system_event_to_sse(
                 data["recoverable"] = serde_json::Value::Bool(rec);
             }
 
-            SseEvent::default()
-                .id(id_str)
-                .event("stage_lifecycle")
-                .data(data.to_string())
+            Some(
+                SseEvent::default()
+                    .id(id_str)
+                    .event("stage_lifecycle")
+                    .data(data.to_string()),
+            )
         }
         SystemEventType::PipelineLifecycle(pipeline_event) => match pipeline_event {
             obzenflow_core::event::system_event::PipelineLifecycleEvent::Starting => {
@@ -818,10 +935,12 @@ fn map_system_event_to_sse(
                 if let Some(vc) = &vector_clock_value {
                     data["vector_clock"] = vc.clone();
                 }
-                SseEvent::default()
-                    .id(id_str)
-                    .event("flow_lifecycle")
-                    .data(data.to_string())
+                Some(
+                    SseEvent::default()
+                        .id(id_str)
+                        .event("flow_lifecycle")
+                        .data(data.to_string()),
+                )
             }
             obzenflow_core::event::system_event::PipelineLifecycleEvent::Running {
                 stage_count,
@@ -837,10 +956,12 @@ fn map_system_event_to_sse(
                 if let Some(vc) = &vector_clock_value {
                     data["vector_clock"] = vc.clone();
                 }
-                SseEvent::default()
-                    .id(id_str)
-                    .event("flow_lifecycle")
-                    .data(data.to_string())
+                Some(
+                    SseEvent::default()
+                        .id(id_str)
+                        .event("flow_lifecycle")
+                        .data(data.to_string()),
+                )
             }
             obzenflow_core::event::system_event::PipelineLifecycleEvent::StopRequested {
                 mode,
@@ -858,10 +979,12 @@ fn map_system_event_to_sse(
                 if let Some(vc) = &vector_clock_value {
                     data["vector_clock"] = vc.clone();
                 }
-                SseEvent::default()
-                    .id(id_str)
-                    .event("flow_lifecycle")
-                    .data(data.to_string())
+                Some(
+                    SseEvent::default()
+                        .id(id_str)
+                        .event("flow_lifecycle")
+                        .data(data.to_string()),
+                )
             }
             obzenflow_core::event::system_event::PipelineLifecycleEvent::Draining { metrics } => {
                 let mut data = json!({
@@ -875,10 +998,12 @@ fn map_system_event_to_sse(
                 if let Some(vc) = &vector_clock_value {
                     data["vector_clock"] = vc.clone();
                 }
-                SseEvent::default()
-                    .id(id_str)
-                    .event("flow_lifecycle")
-                    .data(data.to_string())
+                Some(
+                    SseEvent::default()
+                        .id(id_str)
+                        .event("flow_lifecycle")
+                        .data(data.to_string()),
+                )
             }
             obzenflow_core::event::system_event::PipelineLifecycleEvent::AllStagesCompleted {
                 metrics,
@@ -894,10 +1019,12 @@ fn map_system_event_to_sse(
                 if let Some(vc) = &vector_clock_value {
                     data["vector_clock"] = vc.clone();
                 }
-                SseEvent::default()
-                    .id(id_str)
-                    .event("flow_lifecycle")
-                    .data(data.to_string())
+                Some(
+                    SseEvent::default()
+                        .id(id_str)
+                        .event("flow_lifecycle")
+                        .data(data.to_string()),
+                )
             }
             obzenflow_core::event::system_event::PipelineLifecycleEvent::Drained => {
                 let mut data = json!({
@@ -908,10 +1035,12 @@ fn map_system_event_to_sse(
                 if let Some(vc) = &vector_clock_value {
                     data["vector_clock"] = vc.clone();
                 }
-                SseEvent::default()
-                    .id(id_str)
-                    .event("flow_lifecycle")
-                    .data(data.to_string())
+                Some(
+                    SseEvent::default()
+                        .id(id_str)
+                        .event("flow_lifecycle")
+                        .data(data.to_string()),
+                )
             }
             obzenflow_core::event::system_event::PipelineLifecycleEvent::Completed {
                 duration_ms,
@@ -930,10 +1059,12 @@ fn map_system_event_to_sse(
                 if let Some(vc) = &vector_clock_value {
                     data["vector_clock"] = vc.clone();
                 }
-                SseEvent::default()
-                    .id(id_str)
-                    .event("flow_lifecycle")
-                    .data(data.to_string())
+                Some(
+                    SseEvent::default()
+                        .id(id_str)
+                        .event("flow_lifecycle")
+                        .data(data.to_string()),
+                )
             }
             obzenflow_core::event::system_event::PipelineLifecycleEvent::Failed {
                 reason,
@@ -960,10 +1091,12 @@ fn map_system_event_to_sse(
                 if let Some(vc) = &vector_clock_value {
                     data["vector_clock"] = vc.clone();
                 }
-                SseEvent::default()
-                    .id(id_str)
-                    .event("flow_lifecycle")
-                    .data(data.to_string())
+                Some(
+                    SseEvent::default()
+                        .id(id_str)
+                        .event("flow_lifecycle")
+                        .data(data.to_string()),
+                )
             }
             obzenflow_core::event::system_event::PipelineLifecycleEvent::Cancelled {
                 reason,
@@ -990,10 +1123,12 @@ fn map_system_event_to_sse(
                 if let Some(vc) = &vector_clock_value {
                     data["vector_clock"] = vc.clone();
                 }
-                SseEvent::default()
-                    .id(id_str)
-                    .event("flow_lifecycle")
-                    .data(data.to_string())
+                Some(
+                    SseEvent::default()
+                        .id(id_str)
+                        .event("flow_lifecycle")
+                        .data(data.to_string()),
+                )
             }
         },
         SystemEventType::ReplayLifecycle(replay_event) => match replay_event {
@@ -1022,10 +1157,12 @@ fn map_system_event_to_sse(
                 if let Some(vc) = &vector_clock_value {
                     data["vector_clock"] = vc.clone();
                 }
-                SseEvent::default()
-                    .id(id_str)
-                    .event("replay_lifecycle")
-                    .data(data.to_string())
+                Some(
+                    SseEvent::default()
+                        .id(id_str)
+                        .event("replay_lifecycle")
+                        .data(data.to_string()),
+                )
             }
             obzenflow_core::event::ReplayLifecycleEvent::Completed {
                 replayed_count,
@@ -1046,10 +1183,12 @@ fn map_system_event_to_sse(
                 if let Some(vc) = &vector_clock_value {
                     data["vector_clock"] = vc.clone();
                 }
-                SseEvent::default()
-                    .id(id_str)
-                    .event("replay_lifecycle")
-                    .data(data.to_string())
+                Some(
+                    SseEvent::default()
+                        .id(id_str)
+                        .event("replay_lifecycle")
+                        .data(data.to_string()),
+                )
             }
         },
         SystemEventType::MiddlewareLifecycle {
@@ -1102,13 +1241,15 @@ fn map_system_event_to_sse(
                     }
                 }
             } else {
-                return SseEvent::default().comment("unsupported_middleware_event_skipped");
+                return Some(SseEvent::default().comment("unsupported_middleware_event_skipped"));
             }
 
-            SseEvent::default()
-                .id(id_str)
-                .event("middleware_lifecycle")
-                .data(data.to_string())
+            Some(
+                SseEvent::default()
+                    .id(id_str)
+                    .event("middleware_lifecycle")
+                    .data(data.to_string()),
+            )
         }
         SystemEventType::ContractStatus {
             upstream,
@@ -1145,10 +1286,12 @@ fn map_system_event_to_sse(
                 "contract_violation"
             };
 
-            SseEvent::default()
-                .id(id_str)
-                .event(sse_event_name)
-                .data(data.to_string())
+            Some(
+                SseEvent::default()
+                    .id(id_str)
+                    .event(sse_event_name)
+                    .data(data.to_string()),
+            )
         }
         SystemEventType::ContractResult {
             upstream,
@@ -1181,10 +1324,12 @@ fn map_system_event_to_sse(
                 data["vector_clock"] = vc.clone();
             }
 
-            SseEvent::default()
-                .id(id_str)
-                .event("contract_result")
-                .data(data.to_string())
+            Some(
+                SseEvent::default()
+                    .id(id_str)
+                    .event("contract_result")
+                    .data(data.to_string()),
+            )
         }
         SystemEventType::MetricsCoordination(metrics_event) => match metrics_event {
             obzenflow_core::event::system_event::MetricsCoordinationEvent::Exported {
@@ -1198,10 +1343,12 @@ fn map_system_event_to_sse(
                 if let Some(vc) = &vector_clock_value {
                     data["vector_clock"] = vc.clone();
                 }
-                SseEvent::default()
-                    .id(id_str)
-                    .event("metrics_watermark")
-                    .data(data.to_string())
+                Some(
+                    SseEvent::default()
+                        .id(id_str)
+                        .event("metrics_watermark")
+                        .data(data.to_string()),
+                )
             }
             obzenflow_core::event::system_event::MetricsCoordinationEvent::Ready => {
                 let mut data = json!({
@@ -1212,10 +1359,12 @@ fn map_system_event_to_sse(
                 if let Some(vc) = &vector_clock_value {
                     data["vector_clock"] = vc.clone();
                 }
-                SseEvent::default()
-                    .id(id_str)
-                    .event("metrics_coordination")
-                    .data(data.to_string())
+                Some(
+                    SseEvent::default()
+                        .id(id_str)
+                        .event("metrics_coordination")
+                        .data(data.to_string()),
+                )
             }
             obzenflow_core::event::system_event::MetricsCoordinationEvent::DrainRequested => {
                 let mut data = json!({
@@ -1226,10 +1375,12 @@ fn map_system_event_to_sse(
                 if let Some(vc) = &vector_clock_value {
                     data["vector_clock"] = vc.clone();
                 }
-                SseEvent::default()
-                    .id(id_str)
-                    .event("metrics_coordination")
-                    .data(data.to_string())
+                Some(
+                    SseEvent::default()
+                        .id(id_str)
+                        .event("metrics_coordination")
+                        .data(data.to_string()),
+                )
             }
             obzenflow_core::event::system_event::MetricsCoordinationEvent::Drained => {
                 let mut data = json!({
@@ -1240,10 +1391,12 @@ fn map_system_event_to_sse(
                 if let Some(vc) = &vector_clock_value {
                     data["vector_clock"] = vc.clone();
                 }
-                SseEvent::default()
-                    .id(id_str)
-                    .event("metrics_coordination")
-                    .data(data.to_string())
+                Some(
+                    SseEvent::default()
+                        .id(id_str)
+                        .event("metrics_coordination")
+                        .data(data.to_string()),
+                )
             }
             obzenflow_core::event::system_event::MetricsCoordinationEvent::Shutdown => {
                 let mut data = json!({
@@ -1254,10 +1407,12 @@ fn map_system_event_to_sse(
                 if let Some(vc) = &vector_clock_value {
                     data["vector_clock"] = vc.clone();
                 }
-                SseEvent::default()
-                    .id(id_str)
-                    .event("metrics_coordination")
-                    .data(data.to_string())
+                Some(
+                    SseEvent::default()
+                        .id(id_str)
+                        .event("metrics_coordination")
+                        .data(data.to_string()),
+                )
             }
         },
         SystemEventType::ContractOverrideByPolicy {
@@ -1280,11 +1435,16 @@ fn map_system_event_to_sse(
                 data["vector_clock"] = vc.clone();
             }
 
-            SseEvent::default()
-                .id(id_str)
-                .event("contract_override_by_policy")
-                .data(data.to_string())
+            Some(
+                SseEvent::default()
+                    .id(id_str)
+                    .event("contract_override_by_policy")
+                    .data(data.to_string()),
+            )
         }
+        // FLOWIP-093a: keep system-level hosted-surface snapshot facts out of the SSE stream
+        // by default to avoid turning /api/flow/events into a high-volume metrics pipe.
+        SystemEventType::HttpSurfaceSnapshot { .. } => None,
     }
 }
 

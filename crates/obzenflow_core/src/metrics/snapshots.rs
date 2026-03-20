@@ -8,6 +8,7 @@
 //! implementing the dual collection pattern for application and infrastructure metrics.
 
 use crate::event::context::StageType;
+use crate::event::observability::HttpSurfaceRouteMetricsSnapshot;
 use crate::event::status::processing_status::ErrorKind;
 use crate::id::{FlowId, StageId};
 use crate::metrics::Percentile;
@@ -164,6 +165,11 @@ pub struct AppMetricsSnapshot {
     ///
     /// Keyed by `base_path` (e.g., "/api/ingest").
     pub ingestion_metrics: HashMap<String, crate::event::ingestion::IngestionTelemetrySnapshot>,
+
+    /// Generic hosted-surface HTTP metrics derived from system events (FLOWIP-093a).
+    ///
+    /// Low-cardinality labels: (surface_name, method, path, status_class).
+    pub http_surface_metrics: Vec<HttpSurfaceRouteMetricsSnapshot>,
 
     /// HTTP pull telemetry metrics derived from wide events (FLOWIP-084e).
     ///
@@ -457,6 +463,7 @@ impl Default for AppMetricsSnapshot {
             backpressure_wait_seconds_total: HashMap::new(),
             contract_metrics: ContractMetricsSnapshot::default(),
             ingestion_metrics: HashMap::new(),
+            http_surface_metrics: Vec::new(),
             http_pull_metrics: HashMap::new(),
             ai_chunking_metrics: HashMap::new(),
             flow_metrics: None,

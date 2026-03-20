@@ -11,7 +11,7 @@
 use obzenflow_core::event::chain_event::ChainEventContent;
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::ingestion::IngestionTelemetrySnapshot;
-use obzenflow_core::event::observability::HttpPullTelemetry;
+use obzenflow_core::event::observability::{HttpPullTelemetry, HttpSurfaceRouteMetricsSnapshot};
 use obzenflow_core::event::payloads::observability_payload::{
     CircuitBreakerEvent, MetricsLifecycle, MiddlewareLifecycle, ObservabilityPayload,
 };
@@ -20,6 +20,7 @@ use obzenflow_core::event::{JournalEvent, WriterId};
 use obzenflow_core::id::{FlowId, StageId, SystemId};
 use obzenflow_core::metrics::{ContractMetricsSnapshot, Percentile, StageMetadata};
 use obzenflow_core::time::MetricsDuration;
+use obzenflow_core::web::HttpMethod;
 use obzenflow_core::{ChainEvent, EventId, Journal};
 use obzenflow_fsm::{
     fsm, EventVariant, FsmAction, FsmContext, StateMachine, StateVariant, Transition,
@@ -209,6 +210,10 @@ pub struct MetricsStore {
 
     // HTTP ingestion telemetry (FLOWIP-084d)
     pub ingestion_metrics: HashMap<String, IngestionTelemetrySnapshot>,
+
+    // Hosted web surface metrics (FLOWIP-093a)
+    pub http_surface_metrics:
+        HashMap<(String, HttpMethod, String, String), HttpSurfaceRouteMetricsSnapshot>,
 
     // HTTP pull telemetry (FLOWIP-084e)
     pub http_pull_metrics: HashMap<StageId, HttpPullTelemetry>,
@@ -891,6 +896,25 @@ impl MetricsAggregatorContext {
         // FLOWIP-084d: HTTP ingestion telemetry (wide events)
         snapshot.ingestion_metrics = store.ingestion_metrics.clone();
 
+        // FLOWIP-093a: Generic hosted web surface metrics (system events)
+        let mut http_surface_metrics: Vec<_> =
+            store.http_surface_metrics.values().cloned().collect();
+        http_surface_metrics.sort_by(|a, b| {
+            (
+                a.surface_name.as_str(),
+                a.path.as_str(),
+                a.method.as_str(),
+                a.status_class.as_str(),
+            )
+                .cmp(&(
+                    b.surface_name.as_str(),
+                    b.path.as_str(),
+                    b.method.as_str(),
+                    b.status_class.as_str(),
+                ))
+        });
+        snapshot.http_surface_metrics = http_surface_metrics;
+
         // FLOWIP-084e: HTTP pull telemetry (wide events)
         snapshot.http_pull_metrics = store.http_pull_metrics.clone();
 
@@ -1305,6 +1329,30 @@ impl FsmAction for MetricsAggregatorAction {
                             .entry(key)
                             .or_insert(0);
                         *counter = (*counter).saturating_add(1);
+                    }
+                    obzenflow_core::event::SystemEventType::HttpSurfaceSnapshot { snapshot } => {
+                        for route in &snapshot.routes {
+                            let key = (
+                                route.surface_name.clone(),
+                                route.method,
+                                route.path.clone(),
+                                route.status_class.clone(),
+                            );
+                            let entry = store
+                                .http_surface_metrics
+                                .entry(key)
+                                .or_insert_with(|| route.clone());
+
+                            // Monotonic totals: use max() to tolerate ordering.
+                            entry.requests_total = entry.requests_total.max(route.requests_total);
+                            entry.request_duration_ms_total = entry
+                                .request_duration_ms_total
+                                .max(route.request_duration_ms_total);
+                            entry.request_bytes_total =
+                                entry.request_bytes_total.max(route.request_bytes_total);
+                            entry.response_bytes_total =
+                                entry.response_bytes_total.max(route.response_bytes_total);
+                        }
                     }
                     _ => {} // Skip MetricsCoordination and other event types
                 }

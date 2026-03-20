@@ -11,12 +11,14 @@
 //! - HTTP server management
 //! - Graceful shutdown handling
 
+use super::web_surface::label_endpoint;
 use super::{
     ApplicationError, FlowConfig, Presentation, RunPresentationOutcome, WebSurfaceAttachment,
     WebSurfaceWiringContext,
 };
 use crate::application::config::CorsModeArg;
 use crate::application::config::StartupMode;
+use crate::web::surface_metrics::{HttpSurfaceMetricsCollector, HttpSurfaceMetricsEmitter};
 use clap::Parser;
 use obzenflow_core::web::{CorsConfig, CorsMode, HttpEndpoint, ServerConfig};
 use obzenflow_dsl::FlowDefinition;
@@ -456,9 +458,17 @@ impl FlowApplication {
             .unwrap_or(30);
         let grace_timeout = Duration::from_secs(shutdown_timeout_secs);
 
+        let surface_metrics_interval_secs =
+            std::env::var("OBZENFLOW_SURFACE_METRICS_INTERVAL_SECS")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(15);
+        let surface_metrics_interval = Duration::from_secs(surface_metrics_interval_secs);
+
         // Background tasks spawned by FlowHandle hooks and/or web surface wiring closures.
         // These must not be allowed to outlive FlowApplication, even on early-return paths.
         let mut managed_tasks: Vec<JoinHandle<()>> = Vec::new();
+        let mut surface_metrics_emitter: Option<HttpSurfaceMetricsEmitter> = None;
 
         if let Some(presentation) = &presentation {
             let rendered = presentation.banner().render_for_stdout();
@@ -598,15 +608,33 @@ impl FlowApplication {
             let flow_handle = Arc::new(flow_handle);
             let flow_name = flow_handle.flow_name().to_string();
 
+            let system_journal = flow_handle.system_journal();
+            let surface_metrics_collector =
+                if config.server && !web_surfaces.is_empty() && system_journal.is_some() {
+                    Some(Arc::new(HttpSurfaceMetricsCollector::new()))
+                } else {
+                    None
+                };
+
             managed_tasks = flow_handle_hooks
                 .iter()
                 .map(|hook| hook(&flow_handle))
                 .collect();
 
+            if let (Some(collector), Some(system_journal)) =
+                (surface_metrics_collector.clone(), system_journal)
+            {
+                let emitter = HttpSurfaceMetricsEmitter::new(collector, system_journal);
+                managed_tasks.push(emitter.spawn_periodic(surface_metrics_interval));
+                surface_metrics_emitter = Some(emitter);
+            }
+
             let mut all_extra_endpoints = extra_endpoints;
             for surface in web_surfaces {
-                let (surface_name, mut endpoints, wiring) = surface.into_parts();
-                all_extra_endpoints.append(&mut endpoints);
+                let (surface_name, endpoints, wiring) = surface.into_parts();
+                for endpoint in endpoints {
+                    all_extra_endpoints.push(label_endpoint(&surface_name, endpoint));
+                }
                 if let Some(wiring) = wiring {
                     match wiring(WebSurfaceWiringContext {
                         pipeline_state: flow_handle.state_receiver(),
@@ -629,7 +657,14 @@ impl FlowApplication {
                     ServerConfig::new(config.server_host.clone(), config.server_port);
                 server_config.cors = Some(CorsConfig { mode: cors_mode });
 
-                match Self::start_server(&flow_handle, server_config, all_extra_endpoints).await {
+                match Self::start_server(
+                    &flow_handle,
+                    server_config,
+                    all_extra_endpoints,
+                    surface_metrics_collector,
+                )
+                .await
+                {
                     Ok(server_handle) => server_handle,
                     Err(err) => {
                         break 'run (Err(err), Some(flow_name), run_dir, false);
@@ -885,6 +920,10 @@ impl FlowApplication {
             break 'run (result, Some(flow_name), run_dir, false);
         };
 
+        if let Some(emitter) = &surface_metrics_emitter {
+            let _ = tokio::time::timeout(grace_timeout, emitter.flush()).await;
+        }
+
         // Best-effort: ensure any hook/surface background tasks cannot escape `FlowApplication`
         // lifetime, even if we exited early due to a startup failure or "no server" fallback.
         Self::cancel_and_join_tasks(managed_tasks, grace_timeout).await;
@@ -963,6 +1002,7 @@ impl FlowApplication {
         _flow_handle: &Arc<FlowHandle>,
         _server_config: ServerConfig,
         extra_endpoints: Vec<Box<dyn HttpEndpoint>>,
+        surface_metrics: Option<Arc<HttpSurfaceMetricsCollector>>,
     ) -> Result<Option<JoinHandle<()>>, ApplicationError> {
         #[cfg(feature = "warp-server")]
         {
@@ -998,6 +1038,7 @@ impl FlowApplication {
                     metrics_exporter: metrics,
                     flow_handle: Some(_flow_handle.clone()),
                     extra_endpoints,
+                    surface_metrics,
                 },
                 _server_config,
             )
@@ -1017,6 +1058,7 @@ impl FlowApplication {
 
         #[cfg(not(feature = "warp-server"))]
         {
+            let _ = surface_metrics;
             if !extra_endpoints.is_empty() {
                 return Err(ApplicationError::FeatureNotEnabled(
                     "warp-server".to_string(),

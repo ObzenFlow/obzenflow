@@ -5,12 +5,14 @@
 //! Framework-owned attachment object for HTTP-facing capabilities that are hosted by
 //! `FlowApplication` but do not participate in pipeline topology.
 
-use obzenflow_core::web::HttpEndpoint;
+use async_trait::async_trait;
+use obzenflow_core::web::{EndpointMetadata, HttpEndpoint, Request, Response, WebError};
 use obzenflow_runtime::pipeline::fsm::PipelineState;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
 use super::error::ApplicationError;
+use crate::web::surface_metrics::SURFACE_NAME_TAG_PREFIX;
 
 /// Narrow, framework-owned wiring context for hosted web surfaces.
 ///
@@ -108,6 +110,50 @@ impl WebSurfaceAttachment {
         >,
     ) {
         (self.name, self.endpoints, self.wiring)
+    }
+}
+
+pub(crate) fn label_endpoint(
+    surface_name: &str,
+    endpoint: Box<dyn HttpEndpoint>,
+) -> Box<dyn HttpEndpoint> {
+    Box::new(SurfaceTaggedEndpoint {
+        surface_name: surface_name.to_string(),
+        inner: endpoint,
+    })
+}
+
+struct SurfaceTaggedEndpoint {
+    surface_name: String,
+    inner: Box<dyn HttpEndpoint>,
+}
+
+#[async_trait]
+impl HttpEndpoint for SurfaceTaggedEndpoint {
+    fn path(&self) -> &str {
+        self.inner.path()
+    }
+
+    fn methods(&self) -> &[obzenflow_core::web::HttpMethod] {
+        self.inner.methods()
+    }
+
+    async fn handle(&self, request: Request) -> Result<Response, WebError> {
+        self.inner.handle(request).await
+    }
+
+    fn is_healthy(&self) -> bool {
+        self.inner.is_healthy()
+    }
+
+    fn metadata(&self) -> Option<EndpointMetadata> {
+        let mut meta = self
+            .inner
+            .metadata()
+            .unwrap_or_else(|| EndpointMetadata::new(self.inner.path().to_string()));
+        meta.tags
+            .push(format!("{SURFACE_NAME_TAG_PREFIX}{}", self.surface_name));
+        Some(meta)
     }
 }
 
