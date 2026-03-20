@@ -24,6 +24,17 @@ use tokio::task::JoinHandle;
 
 pub(crate) const SURFACE_NAME_TAG_PREFIX: &str = "obzenflow.surface_name=";
 
+#[derive(Clone, Debug)]
+pub struct HttpSurfaceObservation {
+    pub surface_name: Arc<str>,
+    pub method: HttpMethod,
+    pub path: Arc<str>,
+    pub status: u16,
+    pub duration_ms: u64,
+    pub request_bytes: u64,
+    pub response_bytes: u64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum HttpStatusClass {
     S2xx,
@@ -104,22 +115,13 @@ impl HttpSurfaceMetricsCollector {
         Self::default()
     }
 
-    pub fn observe(
-        &self,
-        surface_name: Arc<str>,
-        method: HttpMethod,
-        path: Arc<str>,
-        status: u16,
-        duration_ms: u64,
-        request_bytes: u64,
-        response_bytes: u64,
-    ) {
-        let status_class = HttpStatusClass::from_status(status);
+    pub fn observe(&self, observation: HttpSurfaceObservation) {
+        let status_class = HttpStatusClass::from_status(observation.status);
 
         let key = RouteKey {
-            surface_name,
-            method,
-            path,
+            surface_name: observation.surface_name,
+            method: observation.method,
+            path: observation.path,
             status_class,
         };
 
@@ -136,13 +138,13 @@ impl HttpSurfaceMetricsCollector {
         counters.requests_total.fetch_add(1, Ordering::Relaxed);
         counters
             .request_duration_ms_total
-            .fetch_add(duration_ms, Ordering::Relaxed);
+            .fetch_add(observation.duration_ms, Ordering::Relaxed);
         counters
             .request_bytes_total
-            .fetch_add(request_bytes, Ordering::Relaxed);
+            .fetch_add(observation.request_bytes, Ordering::Relaxed);
         counters
             .response_bytes_total
-            .fetch_add(response_bytes, Ordering::Relaxed);
+            .fetch_add(observation.response_bytes, Ordering::Relaxed);
 
         self.total_requests.fetch_add(1, Ordering::Relaxed);
     }
@@ -295,42 +297,42 @@ mod tests {
     fn collector_accumulates_and_returns_sorted_routes() {
         let collector = HttpSurfaceMetricsCollector::new();
 
-        collector.observe(
-            Arc::from("b"),
-            HttpMethod::Get,
-            Arc::from("/z"),
-            200,
-            1,
-            0,
-            1,
-        );
-        collector.observe(
-            Arc::from("a"),
-            HttpMethod::Post,
-            Arc::from("/b"),
-            500,
-            2,
-            10,
-            0,
-        );
-        collector.observe(
-            Arc::from("a"),
-            HttpMethod::Get,
-            Arc::from("/a"),
-            204,
-            3,
-            0,
-            0,
-        );
-        collector.observe(
-            Arc::from("a"),
-            HttpMethod::Get,
-            Arc::from("/a"),
-            204,
-            5,
-            0,
-            7,
-        );
+        collector.observe(HttpSurfaceObservation {
+            surface_name: Arc::from("b"),
+            method: HttpMethod::Get,
+            path: Arc::from("/z"),
+            status: 200,
+            duration_ms: 1,
+            request_bytes: 0,
+            response_bytes: 1,
+        });
+        collector.observe(HttpSurfaceObservation {
+            surface_name: Arc::from("a"),
+            method: HttpMethod::Post,
+            path: Arc::from("/b"),
+            status: 500,
+            duration_ms: 2,
+            request_bytes: 10,
+            response_bytes: 0,
+        });
+        collector.observe(HttpSurfaceObservation {
+            surface_name: Arc::from("a"),
+            method: HttpMethod::Get,
+            path: Arc::from("/a"),
+            status: 204,
+            duration_ms: 3,
+            request_bytes: 0,
+            response_bytes: 0,
+        });
+        collector.observe(HttpSurfaceObservation {
+            surface_name: Arc::from("a"),
+            method: HttpMethod::Get,
+            path: Arc::from("/a"),
+            status: 204,
+            duration_ms: 5,
+            request_bytes: 0,
+            response_bytes: 7,
+        });
 
         assert_eq!(collector.total_requests(), 4);
 
@@ -368,15 +370,15 @@ mod tests {
 
         let emitter = HttpSurfaceMetricsEmitter::new(collector.clone(), journal.clone());
 
-        collector.observe(
-            Arc::from("surf"),
-            HttpMethod::Get,
-            Arc::from("/x"),
-            200,
-            1,
-            0,
-            0,
-        );
+        collector.observe(HttpSurfaceObservation {
+            surface_name: Arc::from("surf"),
+            method: HttpMethod::Get,
+            path: Arc::from("/x"),
+            status: 200,
+            duration_ms: 1,
+            request_bytes: 0,
+            response_bytes: 0,
+        });
 
         emitter.emit_snapshot(false).await;
         emitter.emit_snapshot(false).await;
@@ -388,15 +390,15 @@ mod tests {
             "expected idle suppression to skip second emit"
         );
 
-        collector.observe(
-            Arc::from("surf"),
-            HttpMethod::Get,
-            Arc::from("/x"),
-            200,
-            1,
-            0,
-            0,
-        );
+        collector.observe(HttpSurfaceObservation {
+            surface_name: Arc::from("surf"),
+            method: HttpMethod::Get,
+            path: Arc::from("/x"),
+            status: 200,
+            duration_ms: 1,
+            request_bytes: 0,
+            response_bytes: 0,
+        });
         emitter.emit_snapshot(false).await;
 
         let events = journal.read_causally_ordered().await.unwrap();

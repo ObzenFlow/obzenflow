@@ -14,6 +14,13 @@ use tokio::task::JoinHandle;
 use super::error::ApplicationError;
 use crate::web::surface_metrics::SURFACE_NAME_TAG_PREFIX;
 
+type WebSurfaceWiringFn = Box<
+    dyn FnOnce(WebSurfaceWiringContext) -> Result<WebSurfaceWiring, ApplicationError> + Send,
+>;
+
+pub(crate) type WebSurfaceAttachmentParts =
+    (String, Vec<Box<dyn HttpEndpoint>>, Option<WebSurfaceWiringFn>);
+
 /// Narrow, framework-owned wiring context for hosted web surfaces.
 ///
 /// This is intentionally minimal in the first pass; more capabilities can be added when
@@ -65,12 +72,7 @@ impl WebSurfaceWiring {
 pub struct WebSurfaceAttachment {
     name: String,
     endpoints: Vec<Box<dyn HttpEndpoint>>,
-    wiring: Option<
-        Box<
-            dyn FnOnce(WebSurfaceWiringContext) -> Result<WebSurfaceWiring, ApplicationError>
-                + Send,
-        >,
-    >,
+    wiring: Option<WebSurfaceWiringFn>,
 }
 
 impl WebSurfaceAttachment {
@@ -97,18 +99,7 @@ impl WebSurfaceAttachment {
         &self.name
     }
 
-    pub(crate) fn into_parts(
-        self,
-    ) -> (
-        String,
-        Vec<Box<dyn HttpEndpoint>>,
-        Option<
-            Box<
-                dyn FnOnce(WebSurfaceWiringContext) -> Result<WebSurfaceWiring, ApplicationError>
-                    + Send,
-            >,
-        >,
-    ) {
+    pub(crate) fn into_parts(self) -> WebSurfaceAttachmentParts {
         (self.name, self.endpoints, self.wiring)
     }
 }

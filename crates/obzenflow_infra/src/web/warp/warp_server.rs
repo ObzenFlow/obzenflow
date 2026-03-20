@@ -23,7 +23,9 @@ use obzenflow_core::web::{
 };
 use obzenflow_core::EventId;
 
-use crate::web::surface_metrics::{HttpSurfaceMetricsCollector, SURFACE_NAME_TAG_PREFIX};
+use crate::web::surface_metrics::{
+    HttpSurfaceMetricsCollector, HttpSurfaceObservation, SURFACE_NAME_TAG_PREFIX,
+};
 
 /// Warp-based web server implementation
 pub struct WarpServer {
@@ -556,15 +558,15 @@ impl SurfaceMetricsRouteContext {
         request_bytes: u64,
         response_bytes: u64,
     ) {
-        self.collector.observe(
-            self.surface_name.clone(),
+        self.collector.observe(HttpSurfaceObservation {
+            surface_name: self.surface_name.clone(),
             method,
-            self.path.clone(),
+            path: self.path.clone(),
             status,
             duration_ms,
             request_bytes,
             response_bytes,
-        );
+        });
     }
 }
 
