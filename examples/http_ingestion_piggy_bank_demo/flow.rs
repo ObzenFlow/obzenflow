@@ -29,162 +29,107 @@
 
 use super::domain::*;
 use super::handlers::Checkbook;
-use anyhow::Result;
 use obzenflow::typed::{joins, sinks};
 use obzenflow_adapters::sinks::SnapshotTableFormatter;
-use obzenflow_adapters::sources::http::HttpSource;
-use obzenflow_dsl::{async_infinite_source, flow, join, sink, stateful};
-use obzenflow_infra::application::{FlowApplication, LogLevel};
+use obzenflow_adapters::sources::http::HttpSourceTyped;
+use obzenflow_dsl::{async_infinite_source, flow, join, sink, stateful, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_infra::web::endpoints::event_ingestion::{
-    create_ingestion_endpoints, IngestionConfig, TypedValidator, ValidationConfig,
-};
 use obzenflow_runtime::stages::common::handlers::StatefulHandlerExt;
 use obzenflow_runtime::stages::stateful::strategies::emissions::EmitAlways;
 use std::path::PathBuf;
-use std::sync::Arc;
 
-pub fn run_example() -> Result<()> {
-    tokio::runtime::Runtime::new()?.block_on(run())
-}
+pub fn build_flow(
+    accounts_source: HttpSourceTyped<AccountOpened>,
+    tx_source: HttpSourceTyped<LedgerEntry>,
+) -> FlowDefinition {
+    flow! {
+        name: "http_ingestion_piggy_bank_demo",
+        journals: disk_journals(PathBuf::from("target/http-ingestion-piggy-bank-demo-logs")),
+        middleware: [],
 
-#[cfg(test)]
-pub fn run_example_in_tests() -> Result<()> {
-    Ok(())
-}
+        stages: {
+            accounts = async_infinite_source!(AccountOpened => accounts_source);
+            tx = async_infinite_source!(LedgerEntry => tx_source);
 
-async fn run() -> Result<()> {
-    // Required for --server mode (FlowApplication enforces metrics for extra endpoints).
-    std::env::set_var("OBZENFLOW_METRICS_EXPORTER", "prometheus");
+            posted = join!(
+                catalog accounts: AccountOpened,
+                LedgerEntry -> PostedEntry => joins::inner_live(
+                    |account| account.account_id.clone(),
+                    |entry| entry.account_id.clone(),
+                    |account, entry| PostedEntry {
+                        account_id: entry.account_id,
+                        owner: account.owner,
+                        kind: entry.kind,
+                        amount_cents: entry.amount_cents,
+                        initial_balance_cents: account.initial_balance_cents,
+                        note: entry.note,
+                    },
+                )
+            );
 
-    let accounts_config = IngestionConfig {
-        base_path: "/api/bank/accounts".to_string(),
-        validation: Some(ValidationConfig::Single {
-            validator: Arc::new(TypedValidator::<AccountOpened>::new()),
-        }),
-        ..Default::default()
-    };
-    let (accounts_endpoints, accounts_rx, accounts_state) =
-        create_ingestion_endpoints(accounts_config);
-    let accounts_hook_state = accounts_state.clone();
-    let accounts_source = HttpSource::with_telemetry(accounts_rx, accounts_state.telemetry())
-        .typed::<AccountOpened>();
+            checkbook = stateful!(PostedEntry -> CheckbookSnapshot => Checkbook::new().with_emission(EmitAlways));
 
-    let tx_config = IngestionConfig {
-        base_path: "/api/bank/tx".to_string(),
-        validation: Some(ValidationConfig::Single {
-            validator: Arc::new(TypedValidator::<LedgerEntry>::new()),
-        }),
-        ..Default::default()
-    };
-    let (tx_endpoints, tx_rx, tx_state) = create_ingestion_endpoints(tx_config);
-    let tx_hook_state = tx_state.clone();
-    let tx_source = HttpSource::with_telemetry(tx_rx, tx_state.telemetry()).typed::<LedgerEntry>();
+            printer = sink!(CheckbookSnapshot => sinks::console(
+                SnapshotTableFormatter::new(
+                    &["#", "Kind", "Amount", "Credit", "Debit", "Balance", "Note"],
+                    |snapshot: &CheckbookSnapshot| {
+                        snapshot
+                            .transactions
+                            .iter()
+                            .map(|entry| {
+                                let amount = format_unsigned_cents(entry.amount_cents);
+                                let (credit, debit) = match entry.kind {
+                                    EntryKind::Credit => (amount.clone(), String::new()),
+                                    EntryKind::Debit => (String::new(), amount.clone()),
+                                };
 
-    let mut endpoints = Vec::new();
-    endpoints.extend(accounts_endpoints);
-    endpoints.extend(tx_endpoints);
+                                let kind_label = match entry.kind {
+                                    EntryKind::Credit => "Credit",
+                                    EntryKind::Debit => "Debit",
+                                };
 
-    FlowApplication::builder()
-        .with_log_level(LogLevel::Info)
-        .with_web_endpoints(endpoints)
-        .with_flow_handle_hook(move |flow_handle| {
-            accounts_hook_state.watch_pipeline_state(flow_handle.state_receiver())
-        })
-        .with_flow_handle_hook(move |flow_handle| {
-            tx_hook_state.watch_pipeline_state(flow_handle.state_receiver())
-        })
-        .run_async(flow! {
-            name: "http_ingestion_piggy_bank_demo",
-            journals: disk_journals(PathBuf::from("target/http-ingestion-piggy-bank-demo-logs")),
-            middleware: [],
+                                vec![
+                                    entry.index.to_string(),
+                                    kind_label.to_string(),
+                                    amount,
+                                    credit,
+                                    debit,
+                                    format_cents(entry.balance_cents),
+                                    entry.note.as_deref().unwrap_or("").to_string(),
+                                ]
+                            })
+                            .collect()
+                    },
+                )
+                .with_header(|snapshot: &CheckbookSnapshot| {
+                    vec![
+                        format!(
+                            "Account: {} ({})",
+                            snapshot.account_id,
+                            snapshot.owner,
+                        ),
+                        format!(
+                            "Current: {} | Available: {}",
+                            format_cents(snapshot.current_balance_cents),
+                            format_cents(snapshot.available_balance_cents),
+                        ),
+                    ]
+                })
+                .with_footer(|snapshot: &CheckbookSnapshot| {
+                    vec![format!(
+                        "Credits: {} | Debits: {} | Tx: {}",
+                        format_cents(snapshot.total_credits_cents),
+                        format_cents(snapshot.total_debits_cents),
+                        snapshot.transactions.len(),
+                    )]
+                })
+            ));
+        },
 
-            stages: {
-                accounts = async_infinite_source!(AccountOpened => accounts_source);
-                tx = async_infinite_source!(LedgerEntry => tx_source);
-
-                posted = join!(
-                    catalog accounts: AccountOpened,
-                    LedgerEntry -> PostedEntry => joins::inner(
-                        |account| account.account_id.clone(),
-                        |entry| entry.account_id.clone(),
-                        |account, entry| PostedEntry {
-                            account_id: entry.account_id,
-                            owner: account.owner,
-                            kind: entry.kind,
-                            amount_cents: entry.amount_cents,
-                            initial_balance_cents: account.initial_balance_cents,
-                            note: entry.note,
-                        },
-                    )
-                );
-
-                checkbook = stateful!(PostedEntry -> CheckbookSnapshot => Checkbook::new().with_emission(EmitAlways));
-
-                printer = sink!(CheckbookSnapshot => sinks::console(
-                    SnapshotTableFormatter::new(
-                        &["#", "Kind", "Amount", "Credit", "Debit", "Balance", "Note"],
-                        |snapshot: &CheckbookSnapshot| {
-                            snapshot
-                                .transactions
-                                .iter()
-                                .map(|entry| {
-                                    let amount = format_unsigned_cents(entry.amount_cents);
-                                    let (credit, debit) = match entry.kind {
-                                        EntryKind::Credit => (amount.clone(), String::new()),
-                                        EntryKind::Debit => (String::new(), amount.clone()),
-                                    };
-
-                                    let kind_label = match entry.kind {
-                                        EntryKind::Credit => "Credit",
-                                        EntryKind::Debit => "Debit",
-                                    };
-
-                                    vec![
-                                        entry.index.to_string(),
-                                        kind_label.to_string(),
-                                        amount,
-                                        credit,
-                                        debit,
-                                        format_cents(entry.balance_cents),
-                                        entry.note.as_deref().unwrap_or("").to_string(),
-                                    ]
-                                })
-                                .collect()
-                        },
-                    )
-                    .with_header(|snapshot: &CheckbookSnapshot| {
-                        vec![
-                            format!(
-                                "Account: {} ({})",
-                                snapshot.account_id,
-                                snapshot.owner,
-                            ),
-                            format!(
-                                "Current: {} | Available: {}",
-                                format_cents(snapshot.current_balance_cents),
-                                format_cents(snapshot.available_balance_cents),
-                            ),
-                        ]
-                    })
-                    .with_footer(|snapshot: &CheckbookSnapshot| {
-                        vec![format!(
-                            "Credits: {} | Debits: {} | Tx: {}",
-                            format_cents(snapshot.total_credits_cents),
-                            format_cents(snapshot.total_debits_cents),
-                            snapshot.transactions.len(),
-                        )]
-                    })
-                ));
-            },
-
-            topology: {
-                tx |> posted;
-                posted |> checkbook;
-                checkbook |> printer;
-            }
-        })
-        .await?;
-
-    Ok(())
+        topology: {
+            tx |> posted;
+            posted |> checkbook;
+            checkbook |> printer;
+        }
+    }
 }

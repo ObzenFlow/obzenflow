@@ -11,9 +11,15 @@
 //! - HTTP server management
 //! - Graceful shutdown handling
 
-use super::{ApplicationError, FlowConfig, Presentation, RunPresentationOutcome};
+use super::web_surface::label_endpoint;
+use super::{
+    ApplicationError, FlowConfig, Presentation, RunPresentationOutcome, WebSurfaceAttachment,
+    WebSurfaceWiringContext,
+};
 use crate::application::config::CorsModeArg;
 use crate::application::config::StartupMode;
+#[cfg(feature = "warp-server")]
+use crate::web::surface_metrics::{HttpSurfaceMetricsCollector, HttpSurfaceMetricsEmitter};
 use clap::Parser;
 use obzenflow_core::web::{CorsConfig, CorsMode, HttpEndpoint, ServerConfig};
 use obzenflow_dsl::FlowDefinition;
@@ -77,6 +83,7 @@ pub struct FlowApplicationBuilder {
     console_subscriber: bool,
     console_bind: Option<String>,
     log_level: Option<LogLevel>,
+    web_surfaces: Vec<WebSurfaceAttachment>,
     web_endpoints: Vec<Box<dyn HttpEndpoint>>,
     flow_handle_hooks: Vec<FlowHandleHook>,
     presentation: Option<Presentation>,
@@ -121,9 +128,20 @@ impl FlowApplicationBuilder {
         self
     }
 
-    /// Register additional HTTP endpoints to be hosted by FlowApplication when running with `--server`.
-    pub fn with_web_endpoints(mut self, endpoints: Vec<Box<dyn HttpEndpoint>>) -> Self {
-        self.web_endpoints = endpoints;
+    /// Add multiple HTTP endpoints to be hosted by FlowApplication when running with `--server`.
+    ///
+    /// This appends to any endpoints already registered via `with_web_endpoint(...)`.
+    pub fn with_web_endpoints(mut self, mut endpoints: Vec<Box<dyn HttpEndpoint>>) -> Self {
+        self.web_endpoints.append(&mut endpoints);
+        self
+    }
+
+    /// Register a managed web surface to be hosted by FlowApplication when running with `--server`.
+    ///
+    /// This is the preferred extension point for HTTP-facing capabilities that should share
+    /// `FlowApplication` lifecycle, readiness wiring, and shutdown behaviour by default.
+    pub fn with_web_surface(mut self, surface: WebSurfaceAttachment) -> Self {
+        self.web_surfaces.push(surface);
         self
     }
 
@@ -168,6 +186,7 @@ impl FlowApplicationBuilder {
         runtime.block_on(
             FlowApplication::run_with_web_endpoints_and_hooks_and_presentation(
                 flow,
+                self.web_surfaces,
                 self.web_endpoints,
                 self.flow_handle_hooks,
                 self.presentation,
@@ -186,6 +205,7 @@ impl FlowApplicationBuilder {
         // Run the flow
         FlowApplication::run_with_web_endpoints_and_hooks_and_presentation(
             flow,
+            self.web_surfaces,
             self.web_endpoints,
             self.flow_handle_hooks,
             self.presentation,
@@ -375,6 +395,7 @@ impl FlowApplication {
             flow,
             Vec::new(),
             Vec::new(),
+            Vec::new(),
             Some(presentation),
         )
         .await
@@ -395,6 +416,7 @@ impl FlowApplication {
     ) -> Result<(), ApplicationError> {
         Self::run_with_web_endpoints_and_hooks_and_presentation(
             flow,
+            Vec::new(),
             extra_endpoints,
             flow_handle_hooks,
             None,
@@ -404,6 +426,7 @@ impl FlowApplication {
 
     pub(crate) async fn run_with_web_endpoints_and_hooks_and_presentation(
         flow: FlowDefinition,
+        web_surfaces: Vec<WebSurfaceAttachment>,
         extra_endpoints: Vec<Box<dyn HttpEndpoint>>,
         flow_handle_hooks: Vec<FlowHandleHook>,
         presentation: Option<Presentation>,
@@ -430,6 +453,28 @@ impl FlowApplication {
         // Clear any stale run-dir hint from prior FlowApplication runs (OT-17).
         let _ = crate::journal::factory::take_last_run_dir();
 
+        let shutdown_timeout_secs = std::env::var("OBZENFLOW_SHUTDOWN_TIMEOUT_SECS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(30);
+        let grace_timeout = Duration::from_secs(shutdown_timeout_secs);
+
+        #[cfg(feature = "warp-server")]
+        let surface_metrics_interval = {
+            let surface_metrics_interval_secs =
+                std::env::var("OBZENFLOW_SURFACE_METRICS_INTERVAL_SECS")
+                    .ok()
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .unwrap_or(15);
+            Duration::from_secs(surface_metrics_interval_secs)
+        };
+
+        // Background tasks spawned by FlowHandle hooks and/or web surface wiring closures.
+        // These must not be allowed to outlive FlowApplication, even on early-return paths.
+        let mut managed_tasks: Vec<JoinHandle<()>> = Vec::new();
+        #[cfg(feature = "warp-server")]
+        let mut surface_metrics_emitter: Option<HttpSurfaceMetricsEmitter> = None;
+
         if let Some(presentation) = &presentation {
             let rendered = presentation.banner().render_for_stdout();
             for warning in rendered.warnings {
@@ -439,10 +484,10 @@ impl FlowApplication {
         }
 
         let (result, flow_name, run_dir, stopped) = 'run: {
-            if !extra_endpoints.is_empty() && !config.server {
+            if (!extra_endpoints.is_empty() || !web_surfaces.is_empty()) && !config.server {
                 break 'run (
                     Err(ApplicationError::InvalidConfiguration(
-                        "Web endpoints were configured, but FlowApplication is not running with --server"
+                        "Web endpoints or surfaces were configured, but FlowApplication is not running with --server"
                             .to_string(),
                     )),
                     None,
@@ -568,10 +613,48 @@ impl FlowApplication {
             let flow_handle = Arc::new(flow_handle);
             let flow_name = flow_handle.flow_name().to_string();
 
-            let _hook_tasks: Vec<JoinHandle<()>> = flow_handle_hooks
+            managed_tasks = flow_handle_hooks
                 .iter()
                 .map(|hook| hook(&flow_handle))
                 .collect();
+
+            #[cfg(feature = "warp-server")]
+            let surface_metrics_collector = {
+                let system_journal = flow_handle.system_journal();
+                let surface_metrics_collector =
+                    if config.server && !web_surfaces.is_empty() && system_journal.is_some() {
+                        Some(Arc::new(HttpSurfaceMetricsCollector::new()))
+                    } else {
+                        None
+                    };
+
+                if let (Some(collector), Some(system_journal)) =
+                    (surface_metrics_collector.clone(), system_journal)
+                {
+                    let emitter = HttpSurfaceMetricsEmitter::new(collector, system_journal);
+                    managed_tasks.push(emitter.spawn_periodic(surface_metrics_interval));
+                    surface_metrics_emitter = Some(emitter);
+                }
+
+                surface_metrics_collector
+            };
+
+            let mut all_extra_endpoints = extra_endpoints;
+            for surface in web_surfaces {
+                let (surface_name, endpoints, wiring) = surface.into_parts();
+                for endpoint in endpoints {
+                    all_extra_endpoints.push(label_endpoint(&surface_name, endpoint));
+                }
+                if let Some(wiring) = wiring {
+                    match wiring(WebSurfaceWiringContext {
+                        pipeline_state: flow_handle.state_receiver(),
+                    }) {
+                        Ok(wired) => managed_tasks.extend(wired.tasks),
+                        Err(err) => break 'run (Err(err), Some(flow_name.clone()), run_dir, false),
+                    }
+                }
+                tracing::debug!(surface = %surface_name, "Web surface attached");
+            }
 
             // Start server if --server flag present
             let server_handle = if config.server {
@@ -580,10 +663,29 @@ impl FlowApplication {
                     CorsModeArg::AllowList => CorsMode::AllowList(config.cors_allow_origin.clone()),
                     CorsModeArg::SameOrigin => CorsMode::SameOrigin,
                 };
-                let mut server_config = ServerConfig::localhost(config.server_port);
+                let mut server_config =
+                    ServerConfig::new(config.server_host.clone(), config.server_port);
                 server_config.cors = Some(CorsConfig { mode: cors_mode });
 
-                match Self::start_server(&flow_handle, server_config, extra_endpoints).await {
+                let start_result = {
+                    #[cfg(feature = "warp-server")]
+                    {
+                        Self::start_server(
+                            &flow_handle,
+                            server_config,
+                            all_extra_endpoints,
+                            surface_metrics_collector,
+                        )
+                        .await
+                    }
+
+                    #[cfg(not(feature = "warp-server"))]
+                    {
+                        Self::start_server(&flow_handle, server_config, all_extra_endpoints).await
+                    }
+                };
+
+                match start_result {
                     Ok(server_handle) => server_handle,
                     Err(err) => {
                         break 'run (Err(err), Some(flow_name), run_dir, false);
@@ -657,14 +759,12 @@ impl FlowApplication {
                 }
 
                 if let Some(server_task) = server_handle {
-                    tracing::info!("📊 Server running on port {}", config.server_port);
+                    tracing::info!(
+                        "📊 Server running on http://{}:{}",
+                        config.server_host,
+                        config.server_port
+                    );
                     tracing::info!("⏸️  Press Ctrl+C to cancel; send SIGTERM to graceful-stop...");
-
-                    let shutdown_timeout_secs = std::env::var("OBZENFLOW_SHUTDOWN_TIMEOUT_SECS")
-                        .ok()
-                        .and_then(|s| s.parse::<u64>().ok())
-                        .unwrap_or(30);
-                    let grace_timeout = Duration::from_secs(shutdown_timeout_secs);
 
                     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
                     enum ShutdownSignal {
@@ -841,6 +941,15 @@ impl FlowApplication {
             break 'run (result, Some(flow_name), run_dir, false);
         };
 
+        #[cfg(feature = "warp-server")]
+        if let Some(emitter) = &surface_metrics_emitter {
+            let _ = tokio::time::timeout(grace_timeout, emitter.flush()).await;
+        }
+
+        // Best-effort: ensure any hook/surface background tasks cannot escape `FlowApplication`
+        // lifetime, even if we exited early due to a startup failure or "no server" fallback.
+        Self::cancel_and_join_tasks(managed_tasks, grace_timeout).await;
+
         match (result, flow_name, run_dir, stopped) {
             (Ok(()), flow_name, run_dir, stopped) => {
                 if let Some(presentation) = &presentation {
@@ -893,80 +1002,97 @@ impl FlowApplication {
         }
     }
 
+    async fn cancel_and_join_tasks(tasks: Vec<JoinHandle<()>>, timeout: Duration) {
+        if tasks.is_empty() {
+            return;
+        }
+
+        for task in &tasks {
+            task.abort();
+        }
+
+        let _ = tokio::time::timeout(timeout, async move {
+            for task in tasks {
+                let _ = task.await;
+            }
+        })
+        .await;
+    }
+
     /// Internal: Start the web server with all endpoints
+    #[cfg(feature = "warp-server")]
+    async fn start_server(
+        _flow_handle: &Arc<FlowHandle>,
+        _server_config: ServerConfig,
+        extra_endpoints: Vec<Box<dyn HttpEndpoint>>,
+        surface_metrics: Option<Arc<HttpSurfaceMetricsCollector>>,
+    ) -> Result<Option<JoinHandle<()>>, ApplicationError> {
+        use crate::web::start_web_server_with_config;
+        use crate::web::web_server::WebServerResources;
+
+        // Every flow has a topology - it's required to run
+        let topology = _flow_handle.topology().ok_or_else(|| {
+            ApplicationError::ServerStartFailed(
+                "Flow missing topology - this should never happen".to_string(),
+            )
+        })?;
+        let metrics = _flow_handle.metrics_exporter();
+        let has_metrics = metrics.is_some();
+        let addr = _server_config.address();
+
+        let flow_name = _flow_handle.flow_name().to_string();
+        let middleware_stacks = _flow_handle.middleware_stacks();
+        let contract_attachments = _flow_handle.contract_attachments();
+        let join_metadata = _flow_handle.join_metadata();
+        let subgraph_membership = _flow_handle.subgraph_membership();
+        let subgraphs = _flow_handle.subgraphs();
+
+        let handle = start_web_server_with_config(
+            WebServerResources {
+                topology,
+                flow_name,
+                middleware_stacks,
+                contract_attachments,
+                join_metadata,
+                subgraph_membership,
+                subgraphs,
+                metrics_exporter: metrics,
+                flow_handle: Some(_flow_handle.clone()),
+                extra_endpoints,
+                surface_metrics,
+            },
+            _server_config,
+        )
+        .await
+        .map_err(|e| ApplicationError::ServerStartFailed(e.to_string()))?;
+
+        tracing::info!("📊 Web server started on http://{}", addr);
+        tracing::info!("   /api/topology  - Flow structure");
+        if has_metrics {
+            tracing::info!("   /metrics       - Prometheus metrics");
+        }
+        tracing::info!("   /health        - Health status");
+        tracing::info!("   /ready         - Readiness status");
+
+        Ok(Some(handle))
+    }
+
+    /// Internal: Start the web server with all endpoints
+    #[cfg(not(feature = "warp-server"))]
     async fn start_server(
         _flow_handle: &Arc<FlowHandle>,
         _server_config: ServerConfig,
         extra_endpoints: Vec<Box<dyn HttpEndpoint>>,
     ) -> Result<Option<JoinHandle<()>>, ApplicationError> {
-        #[cfg(feature = "warp-server")]
-        {
-            use crate::web::start_web_server_with_config;
-            use crate::web::web_server::WebServerResources;
-
-            // Every flow has a topology - it's required to run
-            let topology = _flow_handle.topology().ok_or_else(|| {
-                ApplicationError::ServerStartFailed(
-                    "Flow missing topology - this should never happen".to_string(),
-                )
-            })?;
-            let metrics = _flow_handle.metrics_exporter();
-            if !extra_endpoints.is_empty() && metrics.is_none() {
-                return Err(ApplicationError::InvalidConfiguration(
-                    "HTTP ingestion requires a metrics exporter".to_string(),
-                ));
-            }
-            let has_metrics = metrics.is_some();
-            let port = _server_config.port;
-
-            let flow_name = _flow_handle.flow_name().to_string();
-            let middleware_stacks = _flow_handle.middleware_stacks();
-            let contract_attachments = _flow_handle.contract_attachments();
-            let join_metadata = _flow_handle.join_metadata();
-            let subgraph_membership = _flow_handle.subgraph_membership();
-            let subgraphs = _flow_handle.subgraphs();
-
-            let handle = start_web_server_with_config(
-                WebServerResources {
-                    topology,
-                    flow_name,
-                    middleware_stacks,
-                    contract_attachments,
-                    join_metadata,
-                    subgraph_membership,
-                    subgraphs,
-                    metrics_exporter: metrics,
-                    flow_handle: Some(_flow_handle.clone()),
-                    extra_endpoints,
-                },
-                _server_config,
-            )
-            .await
-            .map_err(|e| ApplicationError::ServerStartFailed(e.to_string()))?;
-
-            tracing::info!("📊 Web server started on http://localhost:{}", port);
-            tracing::info!("   /api/topology  - Flow structure");
-            if has_metrics {
-                tracing::info!("   /metrics       - Prometheus metrics");
-            }
-            tracing::info!("   /health        - Health status");
-            tracing::info!("   /ready         - Readiness status");
-
-            Ok(Some(handle))
+        if !extra_endpoints.is_empty() {
+            return Err(ApplicationError::FeatureNotEnabled(
+                "warp-server".to_string(),
+            ));
         }
-
-        #[cfg(not(feature = "warp-server"))]
-        {
-            if !extra_endpoints.is_empty() {
-                return Err(ApplicationError::FeatureNotEnabled(
-                    "warp-server".to_string(),
-                ));
-            }
-            tracing::warn!("⚠️  --server flag requires warp-server feature");
-            tracing::warn!("   Recompile with --features obzenflow_infra/warp-server");
-            tracing::warn!("");
-            tracing::warn!("   Continuing without HTTP server...");
-            Ok(None)
-        }
+        tracing::warn!("⚠️  --server flag requires warp-server feature");
+        tracing::warn!("   Recompile with --features obzenflow_infra/warp-server");
+        tracing::warn!("");
+        tracing::warn!("   Continuing without HTTP server...");
+        Ok(None)
     }
 }

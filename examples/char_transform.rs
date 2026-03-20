@@ -130,15 +130,15 @@ async fn main() -> Result<()> {
             collect_text = stateful!(
                 TextChunk -> TransformedText => typed_stateful::reduce(
                     TransformedText::default(),
-                    |text, chunk: &TextChunk| {
-                        text.text.push_str(&chunk.text);
-                        text.character_count += chunk.text.chars().count();
+                    |acc, chunk: &TextChunk| {
+                        acc.text.push_str(&chunk.text);
+                        acc.character_count += chunk.text.chars().count();
 
                         let ends_sentence = matches!(chunk.text.as_str(), "." | "!" | "?");
-                        if ends_sentence && !text.last_was_sentence_end {
-                            text.sentence_count += 1;
+                        if ends_sentence && !acc.last_was_sentence_end {
+                            acc.sentence_count += 1;
                         }
-                        text.last_was_sentence_end = ends_sentence;
+                        acc.last_was_sentence_end = ends_sentence;
                     }
                 ).emit_on_eof()
             );

@@ -7,14 +7,17 @@
 //! Provides a simple way to start a web server with topology, metrics, and health endpoints
 
 use obzenflow_core::metrics::MetricsExporter;
-use obzenflow_core::web::{HttpEndpoint, ServerConfig, WebError, WebServer};
+use obzenflow_core::web::{HttpEndpoint, HttpMethod, ServerConfig, WebError, WebServer};
 use obzenflow_core::StageId;
 use obzenflow_runtime::pipeline::fsm::PipelineState;
 use obzenflow_runtime::pipeline::FlowHandle;
 use obzenflow_topology::Topology;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+
+use super::surface_metrics::HttpSurfaceMetricsCollector;
 
 pub type MiddlewareStacks =
     Arc<HashMap<StageId, obzenflow_runtime::pipeline::MiddlewareStackConfig>>;
@@ -35,6 +38,61 @@ pub struct WebServerResources {
     pub metrics_exporter: Option<Arc<dyn MetricsExporter>>,
     pub flow_handle: Option<Arc<FlowHandle>>,
     pub extra_endpoints: Vec<Box<dyn HttpEndpoint>>,
+    pub surface_metrics: Option<Arc<HttpSurfaceMetricsCollector>>,
+}
+
+fn is_reserved_built_in_path(path: &str) -> bool {
+    // Paths owned by the framework (built-in endpoints). Attached surfaces must not register
+    // any of these routes because registration order shadowing is not a coherent operator story.
+    //
+    // Note: `/api/flow/*` is reserved as a prefix tree because it includes both control and
+    // streaming endpoints (e.g. SSE).
+    matches!(
+        path,
+        "/metrics" | "/health" | "/ready" | "/api/topology" | "/api/flow/events"
+    ) || path == "/api/flow"
+        || path.starts_with("/api/flow/")
+}
+
+fn validate_extra_endpoints(extra_endpoints: &[Box<dyn HttpEndpoint>]) -> Result<(), WebError> {
+    const ALL_METHODS: [HttpMethod; 7] = [
+        HttpMethod::Get,
+        HttpMethod::Post,
+        HttpMethod::Put,
+        HttpMethod::Delete,
+        HttpMethod::Patch,
+        HttpMethod::Head,
+        HttpMethod::Options,
+    ];
+
+    let mut seen_routes: HashSet<(String, HttpMethod)> = HashSet::new();
+    for endpoint in extra_endpoints {
+        let path = endpoint.path().to_string();
+        if is_reserved_built_in_path(&path) {
+            return Err(WebError::EndpointRegistrationFailed {
+                path,
+                message: "Reserved built-in path; choose a different route".to_string(),
+            });
+        }
+
+        let claimed_methods: Vec<HttpMethod> = if endpoint.methods().is_empty() {
+            ALL_METHODS.to_vec()
+        } else {
+            endpoint.methods().to_vec()
+        };
+
+        for method in claimed_methods {
+            let key = (path.clone(), method);
+            if !seen_routes.insert(key) {
+                return Err(WebError::EndpointRegistrationFailed {
+                    path: path.clone(),
+                    message: format!("Duplicate route: {} {}", method.as_str(), path),
+                });
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// Start a web server with all flow endpoints
@@ -56,9 +114,12 @@ pub struct WebServerResources {
 ///     middleware_stacks: None,
 ///     contract_attachments: None,
 ///     join_metadata: None,
+///     subgraph_membership: None,
+///     subgraphs: None,
 ///     metrics_exporter: Some(metrics_exporter),
 ///     flow_handle: None,
 ///     extra_endpoints: vec![],
+///     surface_metrics: None,
 /// }, 9090).await?;
 /// ```
 #[cfg(feature = "warp-server")]
@@ -89,9 +150,15 @@ pub async fn start_web_server_with_config(
         metrics_exporter,
         flow_handle,
         extra_endpoints,
+        surface_metrics,
     } = resources;
 
+    validate_extra_endpoints(&extra_endpoints)?;
+
     let mut server = super::warp::WarpServer::new();
+    if let Some(collector) = surface_metrics {
+        server.with_surface_metrics(collector);
+    }
     let pipeline_ready = flow_handle.as_ref().map(|handle| {
         let ready = Arc::new(AtomicBool::new(false));
         let ready_for_task = ready.clone();
@@ -190,7 +257,7 @@ pub async fn start_web_server_with_config(
 
 // Reuse simple endpoints from metrics_server module
 use async_trait::async_trait;
-use obzenflow_core::web::{HttpMethod, Request, Response};
+use obzenflow_core::web::{Request, Response};
 
 /// Simple health endpoint
 struct SimpleHealthEndpoint;
@@ -256,6 +323,112 @@ impl HttpEndpoint for PipelineReadyEndpoint {
             Ok(Response::ok().with_text("READY"))
         } else {
             Ok(Response::new(503).with_text("NOT_READY"))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+
+    struct TestEndpoint {
+        path: String,
+        methods: Vec<HttpMethod>,
+    }
+
+    impl TestEndpoint {
+        fn new(path: &str, methods: Vec<HttpMethod>) -> Self {
+            Self {
+                path: path.to_string(),
+                methods,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl HttpEndpoint for TestEndpoint {
+        fn path(&self) -> &str {
+            &self.path
+        }
+
+        fn methods(&self) -> &[HttpMethod] {
+            &self.methods
+        }
+
+        async fn handle(&self, _request: Request) -> Result<Response, WebError> {
+            Ok(Response::ok())
+        }
+    }
+
+    #[test]
+    fn validate_extra_endpoints_rejects_reserved_paths() {
+        let endpoints: Vec<Box<dyn HttpEndpoint>> = vec![
+            Box::new(TestEndpoint::new("/metrics", vec![HttpMethod::Get])),
+            Box::new(TestEndpoint::new(
+                "/api/flow/control",
+                vec![HttpMethod::Post],
+            )),
+        ];
+
+        let err = validate_extra_endpoints(&endpoints).unwrap_err();
+        match err {
+            WebError::EndpointRegistrationFailed { path, .. } => {
+                // Should fail on the first reserved path encountered.
+                assert_eq!(path, "/metrics");
+            }
+            other => panic!("Unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_extra_endpoints_rejects_duplicate_routes_same_method() {
+        let endpoints: Vec<Box<dyn HttpEndpoint>> = vec![
+            Box::new(TestEndpoint::new("/foo", vec![HttpMethod::Post])),
+            Box::new(TestEndpoint::new("/foo", vec![HttpMethod::Post])),
+        ];
+
+        let err = validate_extra_endpoints(&endpoints).unwrap_err();
+        match err {
+            WebError::EndpointRegistrationFailed { path, message } => {
+                assert_eq!(path, "/foo");
+                assert!(
+                    message.contains("Duplicate route"),
+                    "unexpected message: {message}"
+                );
+            }
+            other => panic!("Unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_extra_endpoints_allows_same_path_different_methods() {
+        let endpoints: Vec<Box<dyn HttpEndpoint>> = vec![
+            Box::new(TestEndpoint::new("/foo", vec![HttpMethod::Get])),
+            Box::new(TestEndpoint::new("/foo", vec![HttpMethod::Post])),
+        ];
+
+        validate_extra_endpoints(&endpoints).unwrap();
+    }
+
+    #[test]
+    fn validate_extra_endpoints_treats_empty_methods_as_all_methods() {
+        let endpoints: Vec<Box<dyn HttpEndpoint>> = vec![
+            // Empty = supports all methods.
+            Box::new(TestEndpoint::new("/foo", vec![])),
+            Box::new(TestEndpoint::new("/foo", vec![HttpMethod::Get])),
+        ];
+
+        let err = validate_extra_endpoints(&endpoints).unwrap_err();
+        match err {
+            WebError::EndpointRegistrationFailed { path, message } => {
+                assert_eq!(path, "/foo");
+                assert!(
+                    message.contains("Duplicate route"),
+                    "unexpected message: {message}"
+                );
+            }
+            other => panic!("Unexpected error: {other:?}"),
         }
     }
 }

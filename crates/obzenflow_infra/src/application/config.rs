@@ -27,6 +27,10 @@ pub struct FlowConfig {
     #[arg(long)]
     pub server: bool,
 
+    /// Host/interface for HTTP server bind (default: 127.0.0.1)
+    #[arg(long, default_value = "127.0.0.1")]
+    pub server_host: String,
+
     /// Port for HTTP server
     #[arg(long, default_value = "9090")]
     pub server_port: u16,

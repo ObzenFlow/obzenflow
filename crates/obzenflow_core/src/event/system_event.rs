@@ -4,6 +4,7 @@
 
 //! System orchestration events (written to control journal)
 
+use crate::event::observability::HttpSurfaceMetricsSnapshot;
 use crate::event::payloads::observability_payload::MiddlewareLifecycle;
 use crate::event::types::{EventId, WriterId};
 use crate::event::vector_clock::VectorClock;
@@ -122,6 +123,16 @@ pub enum SystemEventType {
         contract_name: String,
         original_cause: crate::contracts::ViolationCause,
         policy: String,
+    },
+
+    /// Generic hosted HTTP surface metrics snapshot emitted by the application host (FLOWIP-093a).
+    ///
+    /// This is intentionally a system journal event because hosted surfaces are not topology
+    /// stages, but their observability must still be reconstructible from journaled facts.
+    #[serde(rename = "http_surface_snapshot")]
+    HttpSurfaceSnapshot {
+        #[serde(flatten)]
+        snapshot: HttpSurfaceMetricsSnapshot,
     },
 }
 
@@ -724,6 +735,7 @@ impl JournalEvent for SystemEvent {
             SystemEventType::ContractOverrideByPolicy { .. } => {
                 "system.contract.override_by_policy"
             }
+            SystemEventType::HttpSurfaceSnapshot { .. } => "system.http_surface.snapshot",
         }
     }
 }
