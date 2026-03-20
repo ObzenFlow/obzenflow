@@ -49,7 +49,7 @@ impl MetricsExporter for PrometheusExporter {
         &self,
         snapshot: AppMetricsSnapshot,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
-        tracing::info!(
+        tracing::debug!(
             "update_app_metrics called with {} event counts",
             snapshot.event_counts.len()
         );

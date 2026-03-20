@@ -2493,6 +2493,22 @@ macro_rules! __obzenflow_join_typed {
     };
     (reference = exact, stream = exact, output = $out:ty,
      ref_type = ($ref_ty:ty), stream_type = ($str_ty:ty),
+     name = $name:literal, ref_var = $ref_var:ident, handler = joins::inner_live($catalog_key:expr, $stream_key:expr, $join_fn:expr $(,)?),
+     middleware = [$($mw:expr),*]) => {
+        $crate::__obzenflow_join_typed!(
+            reference = exact,
+            stream = exact,
+            output = $out,
+            ref_type = ($ref_ty),
+            stream_type = ($str_ty),
+            name = $name,
+            ref_var = $ref_var,
+            handler = joins::inner_live::<$ref_ty, $str_ty, $out, _, _, _, _>($catalog_key, $stream_key, $join_fn),
+            middleware = [$($mw),*]
+        )
+    };
+    (reference = exact, stream = exact, output = $out:ty,
+     ref_type = ($ref_ty:ty), stream_type = ($str_ty:ty),
      name = $name:literal, ref_var = $ref_var:ident, handler = joins::left($catalog_key:expr, $stream_key:expr, $join_fn:expr $(,)?),
      middleware = [$($mw:expr),*]) => {
         $crate::__obzenflow_join_typed!(
@@ -2509,6 +2525,22 @@ macro_rules! __obzenflow_join_typed {
     };
     (reference = exact, stream = exact, output = $out:ty,
      ref_type = ($ref_ty:ty), stream_type = ($str_ty:ty),
+     name = $name:literal, ref_var = $ref_var:ident, handler = joins::left_live($catalog_key:expr, $stream_key:expr, $join_fn:expr $(,)?),
+     middleware = [$($mw:expr),*]) => {
+        $crate::__obzenflow_join_typed!(
+            reference = exact,
+            stream = exact,
+            output = $out,
+            ref_type = ($ref_ty),
+            stream_type = ($str_ty),
+            name = $name,
+            ref_var = $ref_var,
+            handler = joins::left_live::<$ref_ty, $str_ty, $out, _, _, _, _>($catalog_key, $stream_key, $join_fn),
+            middleware = [$($mw),*]
+        )
+    };
+    (reference = exact, stream = exact, output = $out:ty,
+     ref_type = ($ref_ty:ty), stream_type = ($str_ty:ty),
      name = $name:literal, ref_var = $ref_var:ident, handler = joins::strict($catalog_key:expr, $stream_key:expr, $join_fn:expr $(,)?),
      middleware = [$($mw:expr),*]) => {
         $crate::__obzenflow_join_typed!(
@@ -2520,6 +2552,22 @@ macro_rules! __obzenflow_join_typed {
             name = $name,
             ref_var = $ref_var,
             handler = joins::strict::<$ref_ty, $str_ty, $out, _, _, _, _>($catalog_key, $stream_key, $join_fn),
+            middleware = [$($mw),*]
+        )
+    };
+    (reference = exact, stream = exact, output = $out:ty,
+     ref_type = ($ref_ty:ty), stream_type = ($str_ty:ty),
+     name = $name:literal, ref_var = $ref_var:ident, handler = joins::strict_live($catalog_key:expr, $stream_key:expr, $join_fn:expr $(,)?),
+     middleware = [$($mw:expr),*]) => {
+        $crate::__obzenflow_join_typed!(
+            reference = exact,
+            stream = exact,
+            output = $out,
+            ref_type = ($ref_ty),
+            stream_type = ($str_ty),
+            name = $name,
+            ref_var = $ref_var,
+            handler = joins::strict_live::<$ref_ty, $str_ty, $out, _, _, _, _>($catalog_key, $stream_key, $join_fn),
             middleware = [$($mw),*]
         )
     };
@@ -2812,6 +2860,29 @@ macro_rules! __obzenflow_join_exact_stream_contract {
      reference = exact,
      ref_type = ($reference:ty),
      stream = ($($stream:tt)+),
+     -> $out:ty => joins::inner_live($catalog_key:expr, $stream_key:expr, $join_fn:expr $(,)?)) => {
+        $crate::__obzenflow_join_typed!(
+            reference = exact,
+            stream = exact,
+            output = $out,
+            ref_type = ($reference),
+            stream_type = ($($stream)+),
+            name = $name,
+            ref_var = $ref_var,
+            handler = joins::inner_live::<$reference, $($stream)+, $out, _, _, _, _>(
+                $catalog_key,
+                $stream_key,
+                $join_fn
+            ),
+            middleware = []
+        )
+    };
+    (@collect
+     name = $name:literal,
+     ref_var = $ref_var:ident,
+     reference = exact,
+     ref_type = ($reference:ty),
+     stream = ($($stream:tt)+),
      -> $out:ty => joins::left($catalog_key:expr, $stream_key:expr, $join_fn:expr $(,)?)) => {
         $crate::__obzenflow_join_typed!(
             reference = exact,
@@ -2835,6 +2906,29 @@ macro_rules! __obzenflow_join_exact_stream_contract {
      reference = exact,
      ref_type = ($reference:ty),
      stream = ($($stream:tt)+),
+     -> $out:ty => joins::left_live($catalog_key:expr, $stream_key:expr, $join_fn:expr $(,)?)) => {
+        $crate::__obzenflow_join_typed!(
+            reference = exact,
+            stream = exact,
+            output = $out,
+            ref_type = ($reference),
+            stream_type = ($($stream)+),
+            name = $name,
+            ref_var = $ref_var,
+            handler = joins::left_live::<$reference, $($stream)+, $out, _, _, _, _>(
+                $catalog_key,
+                $stream_key,
+                $join_fn
+            ),
+            middleware = []
+        )
+    };
+    (@collect
+     name = $name:literal,
+     ref_var = $ref_var:ident,
+     reference = exact,
+     ref_type = ($reference:ty),
+     stream = ($($stream:tt)+),
      -> $out:ty => joins::strict($catalog_key:expr, $stream_key:expr, $join_fn:expr $(,)?)) => {
         $crate::__obzenflow_join_typed!(
             reference = exact,
@@ -2845,6 +2939,29 @@ macro_rules! __obzenflow_join_exact_stream_contract {
             name = $name,
             ref_var = $ref_var,
             handler = joins::strict::<$reference, $($stream)+, $out, _, _, _, _>(
+                $catalog_key,
+                $stream_key,
+                $join_fn
+            ),
+            middleware = []
+        )
+    };
+    (@collect
+     name = $name:literal,
+     ref_var = $ref_var:ident,
+     reference = exact,
+     ref_type = ($reference:ty),
+     stream = ($($stream:tt)+),
+     -> $out:ty => joins::strict_live($catalog_key:expr, $stream_key:expr, $join_fn:expr $(,)?)) => {
+        $crate::__obzenflow_join_typed!(
+            reference = exact,
+            stream = exact,
+            output = $out,
+            ref_type = ($reference),
+            stream_type = ($($stream)+),
+            name = $name,
+            ref_var = $ref_var,
+            handler = joins::strict_live::<$reference, $($stream)+, $out, _, _, _, _>(
                 $catalog_key,
                 $stream_key,
                 $join_fn
@@ -2882,6 +2999,30 @@ macro_rules! __obzenflow_join_exact_stream_contract {
      reference = exact,
      ref_type = ($reference:ty),
      stream = ($($stream:tt)+),
+     -> $out:ty => joins::inner_live($catalog_key:expr, $stream_key:expr, $join_fn:expr $(,)?),
+     [$($mw:expr),*]) => {
+        $crate::__obzenflow_join_typed!(
+            reference = exact,
+            stream = exact,
+            output = $out,
+            ref_type = ($reference),
+            stream_type = ($($stream)+),
+            name = $name,
+            ref_var = $ref_var,
+            handler = joins::inner_live::<$reference, $($stream)+, $out, _, _, _, _>(
+                $catalog_key,
+                $stream_key,
+                $join_fn
+            ),
+            middleware = [$($mw),*]
+        )
+    };
+    (@collect
+     name = $name:literal,
+     ref_var = $ref_var:ident,
+     reference = exact,
+     ref_type = ($reference:ty),
+     stream = ($($stream:tt)+),
      -> $out:ty => joins::left($catalog_key:expr, $stream_key:expr, $join_fn:expr $(,)?),
      [$($mw:expr),*]) => {
         $crate::__obzenflow_join_typed!(
@@ -2906,6 +3047,30 @@ macro_rules! __obzenflow_join_exact_stream_contract {
      reference = exact,
      ref_type = ($reference:ty),
      stream = ($($stream:tt)+),
+     -> $out:ty => joins::left_live($catalog_key:expr, $stream_key:expr, $join_fn:expr $(,)?),
+     [$($mw:expr),*]) => {
+        $crate::__obzenflow_join_typed!(
+            reference = exact,
+            stream = exact,
+            output = $out,
+            ref_type = ($reference),
+            stream_type = ($($stream)+),
+            name = $name,
+            ref_var = $ref_var,
+            handler = joins::left_live::<$reference, $($stream)+, $out, _, _, _, _>(
+                $catalog_key,
+                $stream_key,
+                $join_fn
+            ),
+            middleware = [$($mw),*]
+        )
+    };
+    (@collect
+     name = $name:literal,
+     ref_var = $ref_var:ident,
+     reference = exact,
+     ref_type = ($reference:ty),
+     stream = ($($stream:tt)+),
      -> $out:ty => joins::strict($catalog_key:expr, $stream_key:expr, $join_fn:expr $(,)?),
      [$($mw:expr),*]) => {
         $crate::__obzenflow_join_typed!(
@@ -2917,6 +3082,30 @@ macro_rules! __obzenflow_join_exact_stream_contract {
             name = $name,
             ref_var = $ref_var,
             handler = joins::strict::<$reference, $($stream)+, $out, _, _, _, _>(
+                $catalog_key,
+                $stream_key,
+                $join_fn
+            ),
+            middleware = [$($mw),*]
+        )
+    };
+    (@collect
+     name = $name:literal,
+     ref_var = $ref_var:ident,
+     reference = exact,
+     ref_type = ($reference:ty),
+     stream = ($($stream:tt)+),
+     -> $out:ty => joins::strict_live($catalog_key:expr, $stream_key:expr, $join_fn:expr $(,)?),
+     [$($mw:expr),*]) => {
+        $crate::__obzenflow_join_typed!(
+            reference = exact,
+            stream = exact,
+            output = $out,
+            ref_type = ($reference),
+            stream_type = ($($stream)+),
+            name = $name,
+            ref_var = $ref_var,
+            handler = joins::strict_live::<$reference, $($stream)+, $out, _, _, _, _>(
                 $catalog_key,
                 $stream_key,
                 $join_fn

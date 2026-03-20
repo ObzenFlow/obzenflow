@@ -94,7 +94,7 @@ async fn run() -> Result<()> {
 
                 posted = join!(
                     catalog accounts: AccountOpened,
-                    LedgerEntry -> PostedEntry => joins::inner(
+                    LedgerEntry -> PostedEntry => joins::inner_live(
                         |account| account.account_id.clone(),
                         |entry| entry.account_id.clone(),
                         |account, entry| PostedEntry {
