@@ -14,12 +14,14 @@ use tokio::task::JoinHandle;
 use super::error::ApplicationError;
 use crate::web::surface_metrics::SURFACE_NAME_TAG_PREFIX;
 
-type WebSurfaceWiringFn = Box<
-    dyn FnOnce(WebSurfaceWiringContext) -> Result<WebSurfaceWiring, ApplicationError> + Send,
->;
+type WebSurfaceWiringFn =
+    Box<dyn FnOnce(WebSurfaceWiringContext) -> Result<WebSurfaceWiring, ApplicationError> + Send>;
 
-pub(crate) type WebSurfaceAttachmentParts =
-    (String, Vec<Box<dyn HttpEndpoint>>, Option<WebSurfaceWiringFn>);
+pub(crate) type WebSurfaceAttachmentParts = (
+    String,
+    Vec<Box<dyn HttpEndpoint>>,
+    Option<WebSurfaceWiringFn>,
+);
 
 /// Narrow, framework-owned wiring context for hosted web surfaces.
 ///
