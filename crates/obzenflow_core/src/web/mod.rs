@@ -18,7 +18,7 @@ pub mod types;
 
 // Re-export core types
 pub use auth::AuthPolicy;
-pub use endpoint::{EndpointMetadata, HttpEndpoint};
+pub use endpoint::{EndpointMetadata, HttpEndpoint, ManagedRouteInfo};
 pub use error::WebError;
 pub use managed::{ManagedResponse, SseBody, SseFrame};
 pub use server::WebServer;

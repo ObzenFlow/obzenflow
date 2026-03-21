@@ -7,7 +7,7 @@
 
 use async_trait::async_trait;
 use obzenflow_core::web::{
-    EndpointMetadata, HttpEndpoint, ManagedResponse, Request, WebError, WebSurface,
+    EndpointMetadata, HttpEndpoint, ManagedResponse, ManagedRouteInfo, Request, WebError, WebSurface,
 };
 use obzenflow_runtime::pipeline::fsm::PipelineState;
 use tokio::sync::watch;
@@ -156,6 +156,10 @@ impl HttpEndpoint for SurfaceTaggedEndpoint {
         meta.tags
             .push(format!("{SURFACE_NAME_TAG_PREFIX}{}", self.surface_name));
         Some(meta)
+    }
+
+    fn managed_route(&self) -> Option<ManagedRouteInfo> {
+        self.inner.managed_route()
     }
 }
 

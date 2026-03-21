@@ -8,7 +8,7 @@
 //! the public contract and route model used by ObzenFlow-owned surfaces.
 
 use crate::web::auth::AuthPolicy;
-use crate::web::endpoint::HttpEndpoint;
+use crate::web::endpoint::{HttpEndpoint, ManagedRouteInfo};
 use crate::web::error::WebError;
 use crate::web::managed::ManagedResponse;
 use crate::web::types::{CorsMode, HttpMethod, Request};
@@ -98,11 +98,13 @@ impl Route {
         &self.policy
     }
 
-    fn into_endpoint(self, full_path: String) -> Box<dyn HttpEndpoint> {
+    fn into_endpoint(self, full_path: String, surface_policy: SurfacePolicy) -> Box<dyn HttpEndpoint> {
         Box::new(ManagedRouteEndpoint {
             methods: self.methods,
             path: full_path,
             kind: self.kind,
+            surface_policy,
+            route_policy: self.policy,
             handler: self.handler,
         })
     }
@@ -205,12 +207,13 @@ impl WebSurface {
 
     pub fn into_endpoints(self) -> (String, Vec<Box<dyn HttpEndpoint>>) {
         let base = self.base_path;
+        let surface_policy = self.policy;
         let endpoints = self
             .routes
             .into_iter()
             .map(|route| {
                 let full_path = join_path(&base, route.path());
-                route.into_endpoint(full_path)
+                route.into_endpoint(full_path, surface_policy.clone())
             })
             .collect();
         (self.name, endpoints)
@@ -254,6 +257,8 @@ struct ManagedRouteEndpoint {
     methods: Vec<HttpMethod>,
     path: String,
     kind: RouteKind,
+    surface_policy: SurfacePolicy,
+    route_policy: RoutePolicy,
     handler: Arc<dyn RouteHandler>,
 }
 
@@ -270,8 +275,14 @@ impl HttpEndpoint for ManagedRouteEndpoint {
     async fn handle(&self, request: Request) -> Result<ManagedResponse, WebError> {
         // The declared kind is a contract signal; the handler is still responsible for returning
         // the appropriate ManagedResponse variant.
-        let _ = self.kind;
         self.handler.handle(request).await
     }
-}
 
+    fn managed_route(&self) -> Option<ManagedRouteInfo> {
+        Some(ManagedRouteInfo {
+            kind: self.kind,
+            surface_policy: Some(self.surface_policy.clone()),
+            route_policy: self.route_policy.clone(),
+        })
+    }
+}

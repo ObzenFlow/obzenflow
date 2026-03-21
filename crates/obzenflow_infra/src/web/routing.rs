@@ -110,3 +110,51 @@ pub(crate) fn matchit_template_to_public(matchit_template: &str) -> String {
     out
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn public_template_to_matchit_keeps_root() {
+        assert_eq!(public_template_to_matchit("/").unwrap(), "/");
+    }
+
+    #[test]
+    fn public_template_to_matchit_translates_named_params() {
+        assert_eq!(
+            public_template_to_matchit("/items/:id").unwrap(),
+            "/items/{id}"
+        );
+        assert_eq!(
+            public_template_to_matchit("/range/:start/:end").unwrap(),
+            "/range/{start}/{end}"
+        );
+    }
+
+    #[test]
+    fn public_template_to_matchit_rejects_empty_param_name() {
+        let err = public_template_to_matchit("/items/:").unwrap_err();
+        assert!(err.contains("cannot be empty"), "unexpected err: {err}");
+    }
+
+    #[test]
+    fn public_template_to_matchit_rejects_mid_segment_colons() {
+        let err = public_template_to_matchit("/items/id:foo").unwrap_err();
+        assert!(err.contains("only supported as a prefix"), "unexpected err: {err}");
+    }
+
+    #[test]
+    fn public_template_to_matchit_rejects_matchit_syntax() {
+        let err = public_template_to_matchit("/items/{id}").unwrap_err();
+        assert!(err.contains("must not contain"), "unexpected err: {err}");
+    }
+
+    #[test]
+    fn matchit_template_to_public_translates_named_params() {
+        assert_eq!(matchit_template_to_public("/items/{id}"), "/items/:id");
+        assert_eq!(
+            matchit_template_to_public("/range/{start}/{end}"),
+            "/range/:start/:end"
+        );
+    }
+}

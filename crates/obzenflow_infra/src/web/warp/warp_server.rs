@@ -58,28 +58,6 @@ impl WarpServer {
         self.surface_metrics = Some(collector);
     }
 
-    /// Build path filter from string path
-    fn build_path_filter(
-        &self,
-        path: &str,
-    ) -> impl Filter<Extract = (), Error = Rejection> + Clone {
-        if path == "/" {
-            warp::path::end().boxed()
-        } else {
-            let segments: Vec<&str> = path
-                .trim_start_matches('/')
-                .split('/')
-                .filter(|s| !s.is_empty())
-                .collect();
-
-            let mut filter = warp::path(segments[0].to_string()).boxed();
-            for segment in &segments[1..] {
-                filter = filter.and(warp::path(segment.to_string())).boxed();
-            }
-            filter.and(warp::path::end()).boxed()
-        }
-    }
-
     /// Build Warp filter from endpoints.
     fn build_filter(
         &self,
@@ -339,203 +317,6 @@ impl WarpServer {
         }
 
         Ok(router)
-    }
-
-    /// Build a simple route for an endpoint
-    fn build_simple_route(
-        &self,
-        path_str: String,
-        endpoint: Arc<dyn HttpEndpoint>,
-        max_body_size_bytes: u64,
-        surface_metrics: Option<SurfaceMetricsRouteContext>,
-    ) -> impl Filter<Extract = (Box<dyn Reply>,), Error = Rejection> + Clone {
-        let path_filter = self.build_path_filter(&path_str);
-
-        // Create GET/HEAD/DELETE routes (no body)
-        let get_route = warp::get()
-            .and(path_filter.clone())
-            .and(
-                warp::filters::query::query::<HashMap<String, String>>()
-                    .or(warp::any().map(HashMap::new))
-                    .unify(),
-            )
-            .and(warp::header::headers_cloned())
-            .and_then({
-                let endpoint = endpoint.clone();
-                let path_str = path_str.clone();
-                let surface_metrics = surface_metrics.clone();
-                move |query_params: HashMap<String, String>, headers: warp::http::HeaderMap| {
-                    handle_request_no_body(
-                        endpoint.clone(),
-                        HttpMethod::Get,
-                        headers,
-                        query_params,
-                        path_str.clone(),
-                        path_str.clone(),
-                        HashMap::new(),
-                        surface_metrics.clone(),
-                    )
-                }
-            });
-
-        let head_route = warp::head()
-            .and(path_filter.clone())
-            .and(
-                warp::filters::query::query::<HashMap<String, String>>()
-                    .or(warp::any().map(HashMap::new))
-                    .unify(),
-            )
-            .and(warp::header::headers_cloned())
-            .and_then({
-                let endpoint = endpoint.clone();
-                let path_str = path_str.clone();
-                let surface_metrics = surface_metrics.clone();
-                move |query_params: HashMap<String, String>, headers: warp::http::HeaderMap| {
-                    handle_request_no_body(
-                        endpoint.clone(),
-                        HttpMethod::Head,
-                        headers,
-                        query_params,
-                        path_str.clone(),
-                        path_str.clone(),
-                        HashMap::new(),
-                        surface_metrics.clone(),
-                    )
-                }
-            });
-
-        let delete_route = warp::delete()
-            .and(path_filter.clone())
-            .and(
-                warp::filters::query::query::<HashMap<String, String>>()
-                    .or(warp::any().map(HashMap::new))
-                    .unify(),
-            )
-            .and(warp::header::headers_cloned())
-            .and_then({
-                let endpoint = endpoint.clone();
-                let path_str = path_str.clone();
-                let surface_metrics = surface_metrics.clone();
-                move |query_params: HashMap<String, String>, headers: warp::http::HeaderMap| {
-                    handle_request_no_body(
-                        endpoint.clone(),
-                        HttpMethod::Delete,
-                        headers,
-                        query_params,
-                        path_str.clone(),
-                        path_str.clone(),
-                        HashMap::new(),
-                        surface_metrics.clone(),
-                    )
-                }
-            });
-
-        // Create POST/PUT/PATCH routes (with body)
-        let post_route = warp::post()
-            .and(path_filter.clone())
-            .and(
-                warp::filters::query::query::<HashMap<String, String>>()
-                    .or(warp::any().map(HashMap::new))
-                    .unify(),
-            )
-            .and(warp::header::headers_cloned())
-            .and(warp::body::content_length_limit(max_body_size_bytes))
-            .and(warp::body::bytes())
-            .and_then({
-                let endpoint = endpoint.clone();
-                let path_str = path_str.clone();
-                let surface_metrics = surface_metrics.clone();
-                move |query_params: HashMap<String, String>,
-                      headers: warp::http::HeaderMap,
-                      body: bytes::Bytes| {
-                    handle_request_with_body(
-                        endpoint.clone(),
-                        HttpMethod::Post,
-                        headers,
-                        query_params,
-                        body,
-                        path_str.clone(),
-                        path_str.clone(),
-                        HashMap::new(),
-                        surface_metrics.clone(),
-                    )
-                }
-            });
-
-        let put_route = warp::put()
-            .and(path_filter.clone())
-            .and(
-                warp::filters::query::query::<HashMap<String, String>>()
-                    .or(warp::any().map(HashMap::new))
-                    .unify(),
-            )
-            .and(warp::header::headers_cloned())
-            .and(warp::body::content_length_limit(max_body_size_bytes))
-            .and(warp::body::bytes())
-            .and_then({
-                let endpoint = endpoint.clone();
-                let path_str = path_str.clone();
-                let surface_metrics = surface_metrics.clone();
-                move |query_params: HashMap<String, String>,
-                      headers: warp::http::HeaderMap,
-                      body: bytes::Bytes| {
-                    handle_request_with_body(
-                        endpoint.clone(),
-                        HttpMethod::Put,
-                        headers,
-                        query_params,
-                        body,
-                        path_str.clone(),
-                        path_str.clone(),
-                        HashMap::new(),
-                        surface_metrics.clone(),
-                    )
-                }
-            });
-
-        let patch_route = warp::patch()
-            .and(path_filter.clone())
-            .and(
-                warp::filters::query::query::<HashMap<String, String>>()
-                    .or(warp::any().map(HashMap::new))
-                    .unify(),
-            )
-            .and(warp::header::headers_cloned())
-            .and(warp::body::content_length_limit(max_body_size_bytes))
-            .and(warp::body::bytes())
-            .and_then({
-                let endpoint = endpoint.clone();
-                let path_str = path_str.clone();
-                let surface_metrics = surface_metrics.clone();
-                move |query_params: HashMap<String, String>,
-                      headers: warp::http::HeaderMap,
-                      body: bytes::Bytes| {
-                    handle_request_with_body(
-                        endpoint.clone(),
-                        HttpMethod::Patch,
-                        headers,
-                        query_params,
-                        body,
-                        path_str.clone(),
-                        path_str.clone(),
-                        HashMap::new(),
-                        surface_metrics.clone(),
-                    )
-                }
-            });
-
-        // Combine all routes
-        get_route
-            .or(post_route)
-            .unify()
-            .or(put_route)
-            .unify()
-            .or(patch_route)
-            .unify()
-            .or(delete_route)
-            .unify()
-            .or(head_route)
-            .unify()
     }
 
     /// Build SSE route for `/api/flow/events`
@@ -975,7 +756,11 @@ async fn handle_request_no_body(
 
             Ok(Box::new(reply) as Box<dyn Reply>)
         }
-        Ok(ManagedResponse::Sse(body)) => Ok(Box::new(sse_body_reply(body)) as Box<dyn Reply>),
+        Ok(ManagedResponse::Sse(body)) => {
+            // FLOWIP-093a: streaming responses do not fit the unary request/response metrics model,
+            // so we intentionally skip surface-metrics observation for SSE replies.
+            Ok(Box::new(sse_body_reply(body)) as Box<dyn Reply>)
+        }
         Err(_) => {
             if let Some(metrics) = &surface_metrics {
                 metrics.observe(method, 500, start.elapsed().as_millis() as u64, 0, 0);
@@ -1050,7 +835,11 @@ async fn handle_request_with_body(
 
             Ok(Box::new(reply) as Box<dyn Reply>)
         }
-        Ok(ManagedResponse::Sse(body)) => Ok(Box::new(sse_body_reply(body)) as Box<dyn Reply>),
+        Ok(ManagedResponse::Sse(body)) => {
+            // FLOWIP-093a: streaming responses do not fit the unary request/response metrics model,
+            // so we intentionally skip surface-metrics observation for SSE replies.
+            Ok(Box::new(sse_body_reply(body)) as Box<dyn Reply>)
+        }
         Err(_) => {
             if let Some(metrics) = &surface_metrics {
                 metrics.observe(
