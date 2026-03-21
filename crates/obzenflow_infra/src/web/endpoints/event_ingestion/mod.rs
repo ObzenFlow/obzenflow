@@ -113,10 +113,17 @@ pub fn create_ingestion_surface(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use obzenflow_core::web::{HttpMethod, Request};
+    use obzenflow_core::web::{HttpMethod, ManagedResponse, Request, Response};
     use serde_json::json;
     use std::collections::{HashMap, HashSet};
     use std::sync::Arc;
+
+    fn unwrap_unary(resp: ManagedResponse) -> Response {
+        match resp {
+            ManagedResponse::Unary(resp) => resp,
+            ManagedResponse::Sse(_) => panic!("expected unary response"),
+        }
+    }
 
     fn json_request(path: &str, body: serde_json::Value) -> Request {
         Request::new(HttpMethod::Post, path.to_string())
@@ -136,10 +143,12 @@ mod tests {
         let telemetry = state.telemetry();
         let endpoint = SingleEventEndpoint::new(state.clone());
 
-        let resp = endpoint
-            .handle(json_request(endpoint.path(), event_body("order.created")))
-            .await
-            .unwrap();
+        let resp = unwrap_unary(
+            endpoint
+                .handle(json_request(endpoint.path(), event_body("order.created")))
+                .await
+                .unwrap(),
+        );
 
         assert_eq!(resp.status, 503);
         assert_eq!(
@@ -163,10 +172,12 @@ mod tests {
             .store(true, std::sync::atomic::Ordering::Release);
         let endpoint = SingleEventEndpoint::new(state.clone());
 
-        let resp = endpoint
-            .handle(json_request(endpoint.path(), event_body("order.created")))
-            .await
-            .unwrap();
+        let resp = unwrap_unary(
+            endpoint
+                .handle(json_request(endpoint.path(), event_body("order.created")))
+                .await
+                .unwrap(),
+        );
 
         assert_eq!(resp.status, 200);
         let queued = rx.recv().await.expect("queued event");
@@ -200,10 +211,12 @@ mod tests {
             })
             .unwrap();
 
-        let resp = endpoint
-            .handle(json_request(endpoint.path(), event_body("order.created")))
-            .await
-            .unwrap();
+        let resp = unwrap_unary(
+            endpoint
+                .handle(json_request(endpoint.path(), event_body("order.created")))
+                .await
+                .unwrap(),
+        );
 
         assert_eq!(resp.status, 503);
         assert_eq!(
@@ -228,10 +241,12 @@ mod tests {
             .store(true, std::sync::atomic::Ordering::Release);
         let endpoint = SingleEventEndpoint::new(state);
 
-        let resp = endpoint
-            .handle(json_request(endpoint.path(), event_body("order.created")))
-            .await
-            .unwrap();
+        let resp = unwrap_unary(
+            endpoint
+                .handle(json_request(endpoint.path(), event_body("order.created")))
+                .await
+                .unwrap(),
+        );
 
         assert_eq!(resp.status, 500);
         let snapshot = telemetry.snapshot();
@@ -258,10 +273,12 @@ mod tests {
             ]
         });
 
-        let resp = endpoint
-            .handle(json_request(endpoint.path(), body))
-            .await
-            .unwrap();
+        let resp = unwrap_unary(
+            endpoint
+                .handle(json_request(endpoint.path(), body))
+                .await
+                .unwrap(),
+        );
         assert_eq!(resp.status, 503);
         assert_eq!(
             resp.headers.get("Retry-After").map(String::as_str),
@@ -289,10 +306,12 @@ mod tests {
             .unwrap();
 
         let endpoint = IngestionHealthEndpoint::new(state);
-        let resp = endpoint
-            .handle(Request::new(HttpMethod::Get, endpoint.path().to_string()))
-            .await
-            .unwrap();
+        let resp = unwrap_unary(
+            endpoint
+                .handle(Request::new(HttpMethod::Get, endpoint.path().to_string()))
+                .await
+                .unwrap(),
+        );
 
         assert_eq!(resp.status, 200);
         let body: serde_json::Value = serde_json::from_slice(&resp.body).unwrap();
@@ -315,10 +334,12 @@ mod tests {
         let (state, _rx) = IngestionState::new(config);
         let endpoint = SingleEventEndpoint::new(state);
 
-        let resp = endpoint
-            .handle(json_request(endpoint.path(), event_body("order.created")))
-            .await
-            .unwrap();
+        let resp = unwrap_unary(
+            endpoint
+                .handle(json_request(endpoint.path(), event_body("order.created")))
+                .await
+                .unwrap(),
+        );
         assert_eq!(resp.status, 401);
     }
 
@@ -355,10 +376,12 @@ mod tests {
             ]
         });
 
-        let resp = endpoint
-            .handle(json_request(endpoint.path(), body))
-            .await
-            .unwrap();
+        let resp = unwrap_unary(
+            endpoint
+                .handle(json_request(endpoint.path(), body))
+                .await
+                .unwrap(),
+        );
         assert_eq!(resp.status, 200);
         let response: obzenflow_core::event::ingestion::SubmissionResponse =
             serde_json::from_slice(&resp.body).unwrap();
@@ -401,10 +424,12 @@ mod tests {
             .store(true, std::sync::atomic::Ordering::Release);
         let endpoint = SingleEventEndpoint::new(state);
 
-        let resp = endpoint
-            .handle(json_request(endpoint.path(), event_body("unknown.event")))
-            .await
-            .unwrap();
+        let resp = unwrap_unary(
+            endpoint
+                .handle(json_request(endpoint.path(), event_body("unknown.event")))
+                .await
+                .unwrap(),
+        );
         assert_eq!(resp.status, 400);
     }
 
@@ -451,7 +476,7 @@ mod tests {
             )
             .with_body(body_bytes);
 
-        let resp = endpoint.handle(request).await.unwrap();
+        let resp = unwrap_unary(endpoint.handle(request).await.unwrap());
         assert_eq!(resp.status, 200);
         let queued = rx.recv().await.expect("queued event");
         assert_eq!(queued.event_type, "order.created");

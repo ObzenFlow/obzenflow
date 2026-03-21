@@ -9,7 +9,7 @@
 //! restarting the process.
 
 use async_trait::async_trait;
-use obzenflow_core::web::{HttpEndpoint, HttpMethod, Request, Response, WebError};
+use obzenflow_core::web::{HttpEndpoint, HttpMethod, ManagedResponse, Request, Response, WebError};
 use obzenflow_runtime::pipeline::FlowHandle;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -79,7 +79,7 @@ impl HttpEndpoint for FlowControlEndpoint {
         &[HttpMethod::Post]
     }
 
-    async fn handle(&self, request: Request) -> Result<Response, WebError> {
+    async fn handle(&self, request: Request) -> Result<ManagedResponse, WebError> {
         // Parse JSON body
         let req: FlowControlRequest = match serde_json::from_slice(&request.body) {
             Ok(r) => r,
@@ -88,12 +88,13 @@ impl HttpEndpoint for FlowControlEndpoint {
                     status: FlowControlStatus::Rejected,
                     message: format!("Invalid request body: {e}"),
                 };
-                return Response::new(400).with_json(&resp).map_err(|err| {
-                    WebError::RequestHandlingFailed {
+                return Response::new(400)
+                    .with_json(&resp)
+                    .map_err(|err| WebError::RequestHandlingFailed {
                         message: err.to_string(),
                         source: None,
-                    }
-                });
+                    })
+                    .map(Into::into);
             }
         };
 
@@ -118,7 +119,7 @@ impl HttpEndpoint for FlowControlEndpoint {
                     status: FlowControlStatus::Rejected,
                     message: "Pause is not yet supported for this flow".to_string(),
                 });
-            }
+            },
             FlowControlAction::Stop => {
                 let mode = req.stop_mode.or_else(|| {
                     request.query_params.get("mode").and_then(|s| {
@@ -171,11 +172,12 @@ impl HttpEndpoint for FlowControlEndpoint {
     }
 }
 
-fn ok_json_response(body: FlowControlResponse) -> Result<Response, WebError> {
+fn ok_json_response(body: FlowControlResponse) -> Result<ManagedResponse, WebError> {
     Response::ok()
         .with_json(&body)
         .map_err(|e| WebError::RequestHandlingFailed {
             message: e.to_string(),
             source: None,
         })
+        .map(Into::into)
 }

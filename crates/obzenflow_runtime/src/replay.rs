@@ -41,7 +41,7 @@ pub enum ReplayError {
     #[error("Replay archive system.log missing at {path}")]
     MissingSystemLog { path: PathBuf },
 
-    #[error("Replay archive status is '{status:?}' and replay requires a completed archive; re-run with --allow-incomplete-archive to override")]
+    #[error("Replay archive status is '{status:?}' and replay requires a completed or cancelled archive; re-run with --allow-incomplete-archive to override")]
     IncompleteArchive { status: ArchiveStatus },
 
     #[error("Stage '{stage_key}' not found in run manifest")]

@@ -10,6 +10,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use matchit::Router as MatchItRouter;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use warp::sse::Event as SseEvent;
 use warp::{filters::BoxedFilter, Filter, Rejection, Reply};
@@ -18,12 +19,13 @@ use obzenflow_core::event::event_envelope::SystemEventEnvelope;
 use obzenflow_core::event::SystemEvent;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::web::{
-    server::ServerShutdownHandle, CorsMode, HttpEndpoint, HttpMethod, Request, ServerConfig,
-    WebError, WebServer,
+    server::ServerShutdownHandle, CorsMode, HttpEndpoint, HttpMethod, ManagedResponse, Request,
+    ServerConfig, SseBody, SseFrame, WebError, WebServer,
 };
 use obzenflow_core::EventId;
 
 use crate::web::endpoint_tags::SURFACE_NAME_TAG_PREFIX;
+use crate::web::routing::{matchit_template_to_public, public_template_to_matchit};
 use crate::web::surface_metrics::{HttpSurfaceMetricsCollector, HttpSurfaceObservation};
 
 /// Warp-based web server implementation
@@ -79,54 +81,264 @@ impl WarpServer {
     }
 
     /// Build Warp filter from endpoints.
-    fn build_filter(&self, max_body_size_bytes: u64) -> BoxedFilter<(Box<dyn Reply>,)> {
-        let mut combined_route: Option<BoxedFilter<(Box<dyn Reply>,)>> = None;
+    fn build_filter(
+        &self,
+        max_body_size_bytes: u64,
+    ) -> Result<BoxedFilter<(Box<dyn Reply>,)>, WebError> {
+        let router = Arc::new(self.build_route_router()?);
+
+        let query = warp::filters::query::query::<HashMap<String, String>>()
+            .or(warp::any().map(HashMap::new))
+            .unify();
+        let headers = warp::header::headers_cloned();
+
+        let get_route = warp::get()
+            .and(warp::path::full())
+            .and(query.clone())
+            .and(headers.clone())
+            .and_then({
+                let router = router.clone();
+                move |path: warp::path::FullPath,
+                      query_params: HashMap<String, String>,
+                      headers: warp::http::HeaderMap| {
+                    dispatch_request(
+                        router.clone(),
+                        HttpMethod::Get,
+                        path,
+                        headers,
+                        query_params,
+                        None,
+                    )
+                }
+            });
+
+        let head_route = warp::head()
+            .and(warp::path::full())
+            .and(query.clone())
+            .and(headers.clone())
+            .and_then({
+                let router = router.clone();
+                move |path: warp::path::FullPath,
+                      query_params: HashMap<String, String>,
+                      headers: warp::http::HeaderMap| {
+                    dispatch_request(
+                        router.clone(),
+                        HttpMethod::Head,
+                        path,
+                        headers,
+                        query_params,
+                        None,
+                    )
+                }
+            });
+
+        let delete_route = warp::delete()
+            .and(warp::path::full())
+            .and(query.clone())
+            .and(headers.clone())
+            .and_then({
+                let router = router.clone();
+                move |path: warp::path::FullPath,
+                      query_params: HashMap<String, String>,
+                      headers: warp::http::HeaderMap| {
+                    dispatch_request(
+                        router.clone(),
+                        HttpMethod::Delete,
+                        path,
+                        headers,
+                        query_params,
+                        None,
+                    )
+                }
+            });
+
+        let options_route = warp::options()
+            .and(warp::path::full())
+            .and(query.clone())
+            .and(headers.clone())
+            .and_then({
+                let router = router.clone();
+                move |path: warp::path::FullPath,
+                      query_params: HashMap<String, String>,
+                      headers: warp::http::HeaderMap| {
+                    dispatch_request(
+                        router.clone(),
+                        HttpMethod::Options,
+                        path,
+                        headers,
+                        query_params,
+                        None,
+                    )
+                }
+            });
+
+        let post_route = warp::post()
+            .and(warp::path::full())
+            .and(query.clone())
+            .and(headers.clone())
+            .and(warp::body::content_length_limit(max_body_size_bytes))
+            .and(warp::body::bytes())
+            .and_then({
+                let router = router.clone();
+                move |path: warp::path::FullPath,
+                      query_params: HashMap<String, String>,
+                      headers: warp::http::HeaderMap,
+                      body: bytes::Bytes| {
+                    dispatch_request(
+                        router.clone(),
+                        HttpMethod::Post,
+                        path,
+                        headers,
+                        query_params,
+                        Some(body),
+                    )
+                }
+            });
+
+        let put_route = warp::put()
+            .and(warp::path::full())
+            .and(query.clone())
+            .and(headers.clone())
+            .and(warp::body::content_length_limit(max_body_size_bytes))
+            .and(warp::body::bytes())
+            .and_then({
+                let router = router.clone();
+                move |path: warp::path::FullPath,
+                      query_params: HashMap<String, String>,
+                      headers: warp::http::HeaderMap,
+                      body: bytes::Bytes| {
+                    dispatch_request(
+                        router.clone(),
+                        HttpMethod::Put,
+                        path,
+                        headers,
+                        query_params,
+                        Some(body),
+                    )
+                }
+            });
+
+        let patch_route = warp::patch()
+            .and(warp::path::full())
+            .and(query)
+            .and(headers)
+            .and(warp::body::content_length_limit(max_body_size_bytes))
+            .and(warp::body::bytes())
+            .and_then({
+                let router = router.clone();
+                move |path: warp::path::FullPath,
+                      query_params: HashMap<String, String>,
+                      headers: warp::http::HeaderMap,
+                      body: bytes::Bytes| {
+                    dispatch_request(
+                        router.clone(),
+                        HttpMethod::Patch,
+                        path,
+                        headers,
+                        query_params,
+                        Some(body),
+                    )
+                }
+            });
+
+        let mut combined_route = get_route
+            .or(post_route)
+            .unify()
+            .or(put_route)
+            .unify()
+            .or(patch_route)
+            .unify()
+            .or(delete_route)
+            .unify()
+            .or(head_route)
+            .unify()
+            .or(options_route)
+            .unify()
+            .boxed();
+
+        // Add SSE /api/flow/events route if a system journal is available
+        if let Some(journal) = &self.system_journal {
+            let sse_route = self.build_flow_events_route(journal.clone());
+            combined_route = combined_route.or(sse_route).unify().boxed();
+        }
+
+        Ok(combined_route)
+    }
+
+    fn build_route_router(&self) -> Result<MatchItRouter<RouteDispatch>, WebError> {
+        const ALL_METHODS: [HttpMethod; 7] = [
+            HttpMethod::Get,
+            HttpMethod::Post,
+            HttpMethod::Put,
+            HttpMethod::Delete,
+            HttpMethod::Patch,
+            HttpMethod::Head,
+            HttpMethod::Options,
+        ];
+
+        let mut by_template: HashMap<String, RouteDispatch> = HashMap::new();
 
         for endpoint in &self.endpoints {
             let endpoint = endpoint.clone();
-            let path_str = endpoint.path().to_string();
+            let template = endpoint.path().to_string();
 
             let surface_metrics = match (&self.surface_metrics, surface_name_tag_value(&endpoint)) {
                 (Some(collector), Some(surface_name)) => Some(SurfaceMetricsRouteContext {
                     collector: collector.clone(),
                     surface_name,
-                    path: Arc::from(path_str.as_str()),
+                    path: Arc::from(template.as_str()),
                 }),
                 _ => None,
             };
 
-            // Create simple route for this endpoint
-            let route =
-                self.build_simple_route(path_str, endpoint, max_body_size_bytes, surface_metrics);
-
-            combined_route = match combined_route {
-                Some(existing) => Some(existing.or(route).unify().boxed()),
-                None => Some(route.boxed()),
+            let claimed_methods: Vec<HttpMethod> = if endpoint.methods().is_empty() {
+                ALL_METHODS.to_vec()
+            } else {
+                endpoint.methods().to_vec()
             };
+
+            let dispatch = by_template
+                .entry(template.clone())
+                .or_insert_with(|| RouteDispatch::new(Arc::from(template.as_str())));
+
+            for method in claimed_methods {
+                dispatch.insert_method(
+                    method,
+                    endpoint.clone(),
+                    surface_metrics.clone(),
+                    &template,
+                )?;
+            }
         }
 
-        // Add SSE /api/flow/events route if a system journal is available
-        if let Some(journal) = &self.system_journal {
-            let sse_route = self.build_flow_events_route(journal.clone());
-            combined_route = match combined_route {
-                Some(existing) => Some(existing.or(sse_route).unify().boxed()),
-                None => Some(sse_route.boxed()),
-            };
+        let mut entries: Vec<(String, RouteDispatch)> = by_template.into_iter().collect();
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+
+        let mut router = MatchItRouter::new();
+        for (template, dispatch) in entries {
+            let matchit_path = public_template_to_matchit(&template).map_err(|message| {
+                WebError::EndpointRegistrationFailed {
+                    path: template.clone(),
+                    message,
+                }
+            })?;
+
+            if let Err(err) = router.insert(matchit_path, dispatch) {
+                let message = match err {
+                    matchit::InsertError::Conflict { with } => format!(
+                        "Route template conflicts with previously registered route: {}",
+                        matchit_template_to_public(&with)
+                    ),
+                    other => other.to_string(),
+                };
+                return Err(WebError::EndpointRegistrationFailed {
+                    path: template,
+                    message,
+                });
+            }
         }
 
-        // Return combined routes or 404 if none
-        combined_route.unwrap_or_else(|| {
-            warp::any()
-                .map(|| -> Box<dyn Reply> {
-                    Box::new(
-                        warp::http::Response::builder()
-                            .status(404)
-                            .body(Vec::new())
-                            .unwrap(),
-                    )
-                })
-                .boxed()
-        })
+        Ok(router)
     }
 
     /// Build a simple route for an endpoint
@@ -159,6 +371,8 @@ impl WarpServer {
                         headers,
                         query_params,
                         path_str.clone(),
+                        path_str.clone(),
+                        HashMap::new(),
                         surface_metrics.clone(),
                     )
                 }
@@ -183,6 +397,8 @@ impl WarpServer {
                         headers,
                         query_params,
                         path_str.clone(),
+                        path_str.clone(),
+                        HashMap::new(),
                         surface_metrics.clone(),
                     )
                 }
@@ -207,6 +423,8 @@ impl WarpServer {
                         headers,
                         query_params,
                         path_str.clone(),
+                        path_str.clone(),
+                        HashMap::new(),
                         surface_metrics.clone(),
                     )
                 }
@@ -237,6 +455,8 @@ impl WarpServer {
                         query_params,
                         body,
                         path_str.clone(),
+                        path_str.clone(),
+                        HashMap::new(),
                         surface_metrics.clone(),
                     )
                 }
@@ -266,6 +486,8 @@ impl WarpServer {
                         query_params,
                         body,
                         path_str.clone(),
+                        path_str.clone(),
+                        HashMap::new(),
                         surface_metrics.clone(),
                     )
                 }
@@ -295,6 +517,8 @@ impl WarpServer {
                         query_params,
                         body,
                         path_str.clone(),
+                        path_str.clone(),
+                        HashMap::new(),
                         surface_metrics.clone(),
                     )
                 }
@@ -577,6 +801,117 @@ fn surface_name_tag_value(endpoint: &Arc<dyn HttpEndpoint>) -> Option<Arc<str>> 
         .map(Arc::from)
 }
 
+#[derive(Clone)]
+struct RoutedEndpoint {
+    endpoint: Arc<dyn HttpEndpoint>,
+    surface_metrics: Option<SurfaceMetricsRouteContext>,
+}
+
+#[derive(Clone)]
+struct RouteDispatch {
+    template: Arc<str>,
+    by_method: HashMap<HttpMethod, RoutedEndpoint>,
+}
+
+impl RouteDispatch {
+    fn new(template: Arc<str>) -> Self {
+        Self {
+            template,
+            by_method: HashMap::new(),
+        }
+    }
+
+    fn insert_method(
+        &mut self,
+        method: HttpMethod,
+        endpoint: Arc<dyn HttpEndpoint>,
+        surface_metrics: Option<SurfaceMetricsRouteContext>,
+        template_for_error: &str,
+    ) -> Result<(), WebError> {
+        if self.by_method.contains_key(&method) {
+            return Err(WebError::EndpointRegistrationFailed {
+                path: template_for_error.to_string(),
+                message: format!(
+                    "Duplicate endpoint registered for {} {}",
+                    method.as_str(),
+                    template_for_error
+                ),
+            });
+        }
+
+        self.by_method.insert(
+            method,
+            RoutedEndpoint {
+                endpoint,
+                surface_metrics,
+            },
+        );
+        Ok(())
+    }
+
+    fn for_method(&self, method: HttpMethod) -> Option<RoutedEndpoint> {
+        self.by_method.get(&method).cloned()
+    }
+}
+
+async fn dispatch_request(
+    router: Arc<MatchItRouter<RouteDispatch>>,
+    method: HttpMethod,
+    path: warp::path::FullPath,
+    headers: warp::http::HeaderMap,
+    query_params: HashMap<String, String>,
+    body: Option<bytes::Bytes>,
+) -> Result<Box<dyn Reply>, Rejection> {
+    let raw_path = path.as_str().to_string();
+
+    let matched = match router.at(raw_path.as_str()) {
+        Ok(matched) => matched,
+        Err(_) => return Err(warp::reject::not_found()),
+    };
+
+    let dispatch = matched.value;
+    let routed = match dispatch.for_method(method) {
+        Some(routed) => routed,
+        None => return Err(warp::reject::not_found()),
+    };
+
+    let mut path_params: HashMap<String, String> = HashMap::new();
+    for (k, v) in matched.params.iter() {
+        path_params.insert(k.to_string(), v.to_string());
+    }
+
+    let matched_route = dispatch.template.to_string();
+    match body {
+        Some(body) => {
+            handle_request_with_body(
+                routed.endpoint,
+                method,
+                headers,
+                query_params,
+                body,
+                raw_path,
+                matched_route,
+                path_params,
+                routed.surface_metrics,
+            )
+            .await
+        }
+        None => {
+            handle_request_no_body(
+                routed.endpoint,
+                method,
+                headers,
+                query_params,
+                raw_path,
+                matched_route,
+                path_params,
+                routed.surface_metrics,
+            )
+            .await
+        }
+    }
+}
+
 /// Helper function to handle requests without body (GET, HEAD, DELETE, OPTIONS)
 async fn handle_request_no_body(
     endpoint: Arc<dyn HttpEndpoint>,
@@ -584,6 +919,8 @@ async fn handle_request_no_body(
     headers: warp::http::HeaderMap,
     query_params: HashMap<String, String>,
     path: String,
+    matched_route: String,
+    path_params: HashMap<String, String>,
     surface_metrics: Option<SurfaceMetricsRouteContext>,
 ) -> Result<Box<dyn Reply>, Rejection> {
     // Check if endpoint supports this method
@@ -605,6 +942,8 @@ async fn handle_request_no_body(
     let request = Request {
         method,
         path,
+        matched_route,
+        path_params,
         headers: req_headers,
         query_params,
         body: Vec::new(),
@@ -612,7 +951,7 @@ async fn handle_request_no_body(
 
     // Handle request
     match endpoint.handle(request).await {
-        Ok(response) => {
+        Ok(ManagedResponse::Unary(response)) => {
             let response_bytes = response.body.len() as u64;
             if let Some(metrics) = &surface_metrics {
                 metrics.observe(
@@ -636,6 +975,7 @@ async fn handle_request_no_body(
 
             Ok(Box::new(reply) as Box<dyn Reply>)
         }
+        Ok(ManagedResponse::Sse(body)) => Ok(Box::new(sse_body_reply(body)) as Box<dyn Reply>),
         Err(_) => {
             if let Some(metrics) = &surface_metrics {
                 metrics.observe(method, 500, start.elapsed().as_millis() as u64, 0, 0);
@@ -653,6 +993,8 @@ async fn handle_request_with_body(
     query_params: HashMap<String, String>,
     body: bytes::Bytes,
     path: String,
+    matched_route: String,
+    path_params: HashMap<String, String>,
     surface_metrics: Option<SurfaceMetricsRouteContext>,
 ) -> Result<Box<dyn Reply>, Rejection> {
     // Check if endpoint supports this method
@@ -675,6 +1017,8 @@ async fn handle_request_with_body(
     let request = Request {
         method,
         path,
+        matched_route,
+        path_params,
         headers: req_headers,
         query_params,
         body: body.to_vec(),
@@ -682,7 +1026,7 @@ async fn handle_request_with_body(
 
     // Handle request
     match endpoint.handle(request).await {
-        Ok(response) => {
+        Ok(ManagedResponse::Unary(response)) => {
             let response_bytes = response.body.len() as u64;
             if let Some(metrics) = &surface_metrics {
                 metrics.observe(
@@ -706,6 +1050,7 @@ async fn handle_request_with_body(
 
             Ok(Box::new(reply) as Box<dyn Reply>)
         }
+        Ok(ManagedResponse::Sse(body)) => Ok(Box::new(sse_body_reply(body)) as Box<dyn Reply>),
         Err(_) => {
             if let Some(metrics) = &surface_metrics {
                 metrics.observe(
@@ -719,6 +1064,30 @@ async fn handle_request_with_body(
             Err(warp::reject::reject())
         }
     }
+}
+
+fn sse_body_reply(body: SseBody) -> impl Reply {
+    use tokio_stream::StreamExt;
+
+    let stream = body.map(|frame: SseFrame| Ok::<SseEvent, Infallible>(sse_frame_to_warp(frame)));
+    warp::sse::reply(warp::sse::keep_alive().stream(stream))
+}
+
+fn sse_frame_to_warp(frame: SseFrame) -> SseEvent {
+    let mut ev = SseEvent::default().data(frame.data);
+    if let Some(event) = frame.event {
+        ev = ev.event(event);
+    }
+    if let Some(id) = frame.id {
+        ev = ev.id(id);
+    }
+    if let Some(retry_ms) = frame.retry_ms {
+        ev = ev.retry(std::time::Duration::from_millis(retry_ms));
+    }
+    if let Some(comment) = frame.comment {
+        ev = ev.comment(comment);
+    }
+    ev
 }
 
 #[async_trait]
@@ -735,7 +1104,7 @@ impl WebServer for WarpServer {
         })?;
 
         let max_body_size_bytes = config.max_body_size.unwrap_or(DEFAULT_MAX_BODY_SIZE_BYTES);
-        let routes = self.build_filter(max_body_size_bytes as u64);
+        let routes = self.build_filter(max_body_size_bytes as u64)?;
 
         let cors_config = config.cors.unwrap_or_default();
         let cors_mode = cors_config.mode;
@@ -791,7 +1160,7 @@ impl WebServer for WarpServer {
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use obzenflow_core::web::{HttpMethod, Request, Response, WebError};
+    use obzenflow_core::web::{HttpMethod, ManagedResponse, Request, Response, WebError};
 
     struct EchoEndpoint;
 
@@ -805,8 +1174,8 @@ mod tests {
             &[HttpMethod::Post]
         }
 
-        async fn handle(&self, _request: Request) -> Result<Response, WebError> {
-            Ok(Response::ok().with_text("OK"))
+        async fn handle(&self, _request: Request) -> Result<ManagedResponse, WebError> {
+            Ok(Response::ok().with_text("OK").into())
         }
     }
 
@@ -814,7 +1183,7 @@ mod tests {
     async fn build_filter_enforces_content_length_limit() {
         let mut server = WarpServer::new();
         server.register_endpoint(Box::new(EchoEndpoint)).unwrap();
-        let filter = server.build_filter(10);
+        let filter = server.build_filter(10).unwrap();
 
         let response = warp::test::request()
             .method("POST")
@@ -836,6 +1205,161 @@ mod tests {
 
         assert_eq!(response.status(), 200);
         assert_eq!(response.body(), "OK");
+    }
+
+    struct PathParamsEndpoint;
+
+    #[async_trait]
+    impl HttpEndpoint for PathParamsEndpoint {
+        fn path(&self) -> &str {
+            "/items/:id"
+        }
+
+        fn methods(&self) -> &[HttpMethod] {
+            &[HttpMethod::Get]
+        }
+
+        async fn handle(&self, request: Request) -> Result<ManagedResponse, WebError> {
+            assert_eq!(request.path, "/items/123");
+            assert_eq!(request.matched_route, "/items/:id");
+            assert_eq!(request.path_params.get("id").map(String::as_str), Some("123"));
+            Ok(Response::ok().with_text("OK").into())
+        }
+    }
+
+    #[tokio::test]
+    async fn build_filter_populates_path_params_and_matched_route() {
+        let mut server = WarpServer::new();
+        server
+            .register_endpoint(Box::new(PathParamsEndpoint))
+            .unwrap();
+        let filter = server.build_filter(10).unwrap();
+
+        let response = warp::test::request()
+            .method("GET")
+            .path("/items/123")
+            .reply(&filter)
+            .await;
+
+        assert_eq!(response.status(), 200);
+        assert_eq!(response.body(), "OK");
+    }
+
+    struct StaticEndpoint;
+
+    #[async_trait]
+    impl HttpEndpoint for StaticEndpoint {
+        fn path(&self) -> &str {
+            "/items/count"
+        }
+
+        fn methods(&self) -> &[HttpMethod] {
+            &[HttpMethod::Get]
+        }
+
+        async fn handle(&self, _request: Request) -> Result<ManagedResponse, WebError> {
+            Ok(Response::ok().with_text("STATIC").into())
+        }
+    }
+
+    struct ParamEndpoint;
+
+    #[async_trait]
+    impl HttpEndpoint for ParamEndpoint {
+        fn path(&self) -> &str {
+            "/items/:id"
+        }
+
+        fn methods(&self) -> &[HttpMethod] {
+            &[HttpMethod::Get]
+        }
+
+        async fn handle(&self, _request: Request) -> Result<ManagedResponse, WebError> {
+            Ok(Response::ok().with_text("PARAM").into())
+        }
+    }
+
+    #[tokio::test]
+    async fn build_filter_prefers_static_routes_over_parameterised_routes() {
+        let mut server = WarpServer::new();
+        server.register_endpoint(Box::new(ParamEndpoint)).unwrap();
+        server.register_endpoint(Box::new(StaticEndpoint)).unwrap();
+        let filter = server.build_filter(10).unwrap();
+
+        let response = warp::test::request()
+            .method("GET")
+            .path("/items/count")
+            .reply(&filter)
+            .await;
+
+        assert_eq!(response.status(), 200);
+        assert_eq!(response.body(), "STATIC");
+
+        let response = warp::test::request()
+            .method("GET")
+            .path("/items/999")
+            .reply(&filter)
+            .await;
+
+        assert_eq!(response.status(), 200);
+        assert_eq!(response.body(), "PARAM");
+    }
+
+    struct ConflictEndpointA;
+
+    #[async_trait]
+    impl HttpEndpoint for ConflictEndpointA {
+        fn path(&self) -> &str {
+            "/conflict/:id"
+        }
+
+        fn methods(&self) -> &[HttpMethod] {
+            &[HttpMethod::Get]
+        }
+
+        async fn handle(&self, _request: Request) -> Result<ManagedResponse, WebError> {
+            Ok(Response::ok().with_text("A").into())
+        }
+    }
+
+    struct ConflictEndpointB;
+
+    #[async_trait]
+    impl HttpEndpoint for ConflictEndpointB {
+        fn path(&self) -> &str {
+            "/conflict/:name"
+        }
+
+        fn methods(&self) -> &[HttpMethod] {
+            &[HttpMethod::Get]
+        }
+
+        async fn handle(&self, _request: Request) -> Result<ManagedResponse, WebError> {
+            Ok(Response::ok().with_text("B").into())
+        }
+    }
+
+    #[tokio::test]
+    async fn build_filter_rejects_conflicting_parameterised_routes() {
+        let mut server = WarpServer::new();
+        server.register_endpoint(Box::new(ConflictEndpointA)).unwrap();
+        server.register_endpoint(Box::new(ConflictEndpointB)).unwrap();
+
+        let err = server.build_filter(10).unwrap_err();
+        match err {
+            WebError::EndpointRegistrationFailed { path, message } => {
+                assert_eq!(path, "/conflict/:name");
+                assert!(
+                    message.contains("conflicts"),
+                    "unexpected message: {message}"
+                );
+                assert!(
+                    message.contains("/conflict/:id"),
+                    "unexpected message: {message}"
+                );
+            }
+            other => panic!("Unexpected error: {other:?}"),
+        }
     }
 }
 

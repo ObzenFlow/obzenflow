@@ -5,7 +5,8 @@
 //! HTTP endpoint abstraction
 
 use super::error::WebError;
-use super::types::{HttpMethod, Request, Response};
+use super::managed::ManagedResponse;
+use super::types::{HttpMethod, Request};
 use async_trait::async_trait;
 
 /// Trait for HTTP endpoints that can be registered with a web server
@@ -31,7 +32,7 @@ pub trait HttpEndpoint: Send + Sync {
     ///
     /// This method is called when a request matches this endpoint's path and method.
     /// The implementation should process the request and return an appropriate response.
-    async fn handle(&self, request: Request) -> Result<Response, WebError>;
+    async fn handle(&self, request: Request) -> Result<ManagedResponse, WebError>;
 
     /// Optional method to check if the endpoint is healthy
     ///

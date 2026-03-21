@@ -356,9 +356,11 @@ impl RunPresentationOutcome {
                 None => Footer::new().paragraph(format!("{flow_name} completed.")),
             },
             Self::Stopped { flow_name, run_dir } => match run_dir {
-                Some(run_dir) => {
-                    Footer::new().paragraph(format!("{flow_name} stopped. Journal: {}", run_dir.display()))
-                }
+                Some(run_dir) => Footer::new().paragraph(format!(
+                    "{flow_name} stopped. Journal: {}\nTo replay, add: --replay-from {}\n(Source config env vars are ignored during replay)",
+                    run_dir.display(),
+                    run_dir.display(),
+                )),
                 None => Footer::new().paragraph(format!("{flow_name} stopped.")),
             },
             Self::Failed {
@@ -391,9 +393,11 @@ impl RunPresentationOutcome {
                 None => Footer::new().paragraph(format!("{flow_name} completed.")),
             },
             Self::Stopped { flow_name, run_dir } => match run_dir {
-                Some(run_dir) => {
-                    Footer::new().paragraph(format!("{flow_name} stopped. Journal: {}", run_dir.display()))
-                }
+                Some(run_dir) => Footer::new().paragraph(format!(
+                    "{flow_name} stopped. Journal: {}\nTo replay, add: --replay-from {}\n(Source config env vars are ignored during replay)",
+                    run_dir.display(),
+                    run_dir.display(),
+                )),
                 None => Footer::new().paragraph(format!("{flow_name} stopped.")),
             },
             Self::Failed {

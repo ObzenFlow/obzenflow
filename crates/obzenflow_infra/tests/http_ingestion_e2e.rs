@@ -4,7 +4,7 @@
 
 use obzenflow_adapters::sources::http::HttpSource;
 use obzenflow_core::event::ChainEventContent;
-use obzenflow_core::web::{HttpMethod, Request};
+use obzenflow_core::web::{HttpMethod, ManagedResponse, Request};
 use obzenflow_core::{StageId, WriterId};
 use obzenflow_infra::web::endpoints::event_ingestion::{
     create_ingestion_endpoints, IngestionConfig,
@@ -32,6 +32,10 @@ async fn http_post_feeds_httpsource_chain_events() {
     );
 
     let resp = events_endpoint.handle(request).await.unwrap();
+    let resp = match resp {
+        ManagedResponse::Unary(resp) => resp,
+        ManagedResponse::Sse(_) => panic!("expected unary response"),
+    };
     assert_eq!(resp.status, 200);
 
     let mut source = HttpSource::new(rx);

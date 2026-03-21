@@ -55,6 +55,9 @@ fn is_reserved_built_in_path(path: &str) -> bool {
 }
 
 fn validate_extra_endpoints(extra_endpoints: &[Box<dyn HttpEndpoint>]) -> Result<(), WebError> {
+    use super::routing::{matchit_template_to_public, public_template_to_matchit};
+    use matchit::Router as MatchItRouter;
+
     const ALL_METHODS: [HttpMethod; 7] = [
         HttpMethod::Get,
         HttpMethod::Post,
@@ -65,7 +68,7 @@ fn validate_extra_endpoints(extra_endpoints: &[Box<dyn HttpEndpoint>]) -> Result
         HttpMethod::Options,
     ];
 
-    let mut seen_routes: HashSet<(String, HttpMethod)> = HashSet::new();
+    let mut methods_by_template: HashMap<String, HashSet<HttpMethod>> = HashMap::new();
     for endpoint in extra_endpoints {
         let path = endpoint.path().to_string();
         if is_reserved_built_in_path(&path) {
@@ -82,13 +85,40 @@ fn validate_extra_endpoints(extra_endpoints: &[Box<dyn HttpEndpoint>]) -> Result
         };
 
         for method in claimed_methods {
-            let key = (path.clone(), method);
-            if !seen_routes.insert(key) {
+            let entry = methods_by_template.entry(path.clone()).or_default();
+            if !entry.insert(method) {
                 return Err(WebError::EndpointRegistrationFailed {
                     path: path.clone(),
                     message: format!("Duplicate route: {} {}", method.as_str(), path),
                 });
             }
+        }
+    }
+
+    let mut templates: Vec<String> = methods_by_template.keys().cloned().collect();
+    templates.sort();
+
+    let mut router = MatchItRouter::new();
+    for template in templates {
+        let matchit_path = public_template_to_matchit(&template).map_err(|message| {
+            WebError::EndpointRegistrationFailed {
+                path: template.clone(),
+                message,
+            }
+        })?;
+
+        if let Err(err) = router.insert(matchit_path, ()) {
+            let message = match err {
+                matchit::InsertError::Conflict { with } => format!(
+                    "Route template conflicts with previously registered route: {}",
+                    matchit_template_to_public(&with)
+                ),
+                other => other.to_string(),
+            };
+            return Err(WebError::EndpointRegistrationFailed {
+                path: template.clone(),
+                message,
+            });
         }
     }
 
@@ -257,7 +287,7 @@ pub async fn start_web_server_with_config(
 
 // Reuse simple endpoints from metrics_server module
 use async_trait::async_trait;
-use obzenflow_core::web::{Request, Response};
+use obzenflow_core::web::{ManagedResponse, Request, Response};
 
 /// Simple health endpoint
 struct SimpleHealthEndpoint;
@@ -272,8 +302,8 @@ impl HttpEndpoint for SimpleHealthEndpoint {
         &[HttpMethod::Get]
     }
 
-    async fn handle(&self, _request: Request) -> Result<Response, WebError> {
-        Ok(Response::ok().with_text("OK"))
+    async fn handle(&self, _request: Request) -> Result<ManagedResponse, WebError> {
+        Ok(Response::ok().with_text("OK").into())
     }
 }
 
@@ -290,8 +320,8 @@ impl HttpEndpoint for SimpleReadyEndpoint {
         &[HttpMethod::Get]
     }
 
-    async fn handle(&self, _request: Request) -> Result<Response, WebError> {
-        Ok(Response::ok().with_text("READY"))
+    async fn handle(&self, _request: Request) -> Result<ManagedResponse, WebError> {
+        Ok(Response::ok().with_text("READY").into())
     }
 }
 
@@ -318,11 +348,11 @@ impl HttpEndpoint for PipelineReadyEndpoint {
         &[HttpMethod::Get]
     }
 
-    async fn handle(&self, _request: Request) -> Result<Response, WebError> {
+    async fn handle(&self, _request: Request) -> Result<ManagedResponse, WebError> {
         if self.ready.load(Ordering::Acquire) {
-            Ok(Response::ok().with_text("READY"))
+            Ok(Response::ok().with_text("READY").into())
         } else {
-            Ok(Response::new(503).with_text("NOT_READY"))
+            Ok(Response::new(503).with_text("NOT_READY").into())
         }
     }
 }
@@ -356,8 +386,8 @@ mod tests {
             &self.methods
         }
 
-        async fn handle(&self, _request: Request) -> Result<Response, WebError> {
-            Ok(Response::ok())
+        async fn handle(&self, _request: Request) -> Result<ManagedResponse, WebError> {
+            Ok(Response::ok().into())
         }
     }
 

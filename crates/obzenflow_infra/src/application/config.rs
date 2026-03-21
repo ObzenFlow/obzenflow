@@ -54,13 +54,13 @@ pub struct FlowConfig {
     #[arg(long = "cors-allow-origin")]
     pub cors_allow_origin: Vec<String>,
 
-    /// Replay sources from a completed archived run directory (FLOWIP-095a).
+    /// Replay sources from a completed or cancelled archived run directory (FLOWIP-095a).
     ///
     /// The path must be the exact run directory containing `run_manifest.json`.
     #[arg(long)]
     pub replay_from: Option<PathBuf>,
 
-    /// Allow replaying from incomplete archives (failed/cancelled/missing system.log).
+    /// Allow replaying from incomplete archives (failed/unknown/missing system.log).
     ///
     /// This is intended for debugging; outputs may be partial and not suitable for regression comparison.
     #[arg(long)]

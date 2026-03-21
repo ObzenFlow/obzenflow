@@ -6,7 +6,9 @@
 //!
 //! Provides a one-line way to start a metrics server
 
-use obzenflow_core::web::{WebServer, ServerConfig, HttpEndpoint, HttpMethod, Request, Response, WebError};
+use obzenflow_core::web::{
+    HttpEndpoint, HttpMethod, ManagedResponse, Request, Response, ServerConfig, WebError, WebServer,
+};
 use obzenflow_core::metrics::MetricsExporter;
 use std::sync::Arc;
 use async_trait::async_trait;
@@ -66,13 +68,18 @@ impl HttpEndpoint for MetricsHttpEndpoint {
         &[HttpMethod::Get]
     }
     
-    async fn handle(&self, _request: Request) -> Result<Response, WebError> {
+    async fn handle(&self, _request: Request) -> Result<ManagedResponse, WebError> {
         match self.exporter.render_metrics() {
             Ok(metrics) => Ok(Response::ok()
-                .with_header("Content-Type".to_string(), "text/plain; version=0.0.4; charset=utf-8".to_string())
-                .with_body(metrics.into_bytes())),
+                .with_header(
+                    "Content-Type".to_string(),
+                    "text/plain; version=0.0.4; charset=utf-8".to_string(),
+                )
+                .with_body(metrics.into_bytes())
+                .into()),
             Err(e) => Ok(Response::internal_error()
-                .with_text(&format!("Failed to render metrics: {}", e))),
+                .with_text(&format!("Failed to render metrics: {e}"))
+                .into()),
         }
     }
 }
@@ -90,8 +97,8 @@ impl HttpEndpoint for SimpleHealthEndpoint {
         &[HttpMethod::Get]
     }
     
-    async fn handle(&self, _request: Request) -> Result<Response, WebError> {
-        Ok(Response::ok().with_text("OK"))
+    async fn handle(&self, _request: Request) -> Result<ManagedResponse, WebError> {
+        Ok(Response::ok().with_text("OK").into())
     }
 }
 
@@ -108,7 +115,7 @@ impl HttpEndpoint for SimpleReadyEndpoint {
         &[HttpMethod::Get]
     }
     
-    async fn handle(&self, _request: Request) -> Result<Response, WebError> {
-        Ok(Response::ok().with_text("READY"))
+    async fn handle(&self, _request: Request) -> Result<ManagedResponse, WebError> {
+        Ok(Response::ok().with_text("READY").into())
     }
 }

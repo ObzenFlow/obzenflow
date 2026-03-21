@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use obzenflow_core::event::ingestion::{
     BatchSubmission, IngestionRejectionReason, SubmissionResponse,
 };
-use obzenflow_core::web::{HttpEndpoint, HttpMethod, Request, Response, WebError};
+use obzenflow_core::web::{HttpEndpoint, HttpMethod, ManagedResponse, Request, Response, WebError};
 use serde_json::json;
 use tokio::sync::mpsc::error::TrySendError;
 
@@ -41,7 +41,7 @@ impl HttpEndpoint for BatchEventEndpoint {
         &[HttpMethod::Post]
     }
 
-    async fn handle(&self, request: Request) -> Result<Response, WebError> {
+    async fn handle(&self, request: Request) -> Result<ManagedResponse, WebError> {
         self.state.telemetry.observe_request();
 
         if request.body.len() > self.state.config.max_body_size {
@@ -54,7 +54,7 @@ impl HttpEndpoint for BatchEventEndpoint {
             self.state
                 .telemetry
                 .observe_rejected(IngestionRejectionReason::PayloadTooLarge, 1);
-            return Ok(response);
+            return Ok(response.into());
         }
 
         if let Some(ref auth) = self.state.config.auth {
@@ -69,7 +69,7 @@ impl HttpEndpoint for BatchEventEndpoint {
                 self.state
                     .telemetry
                     .observe_rejected(IngestionRejectionReason::Auth, rejected);
-                return Ok(response);
+                return Ok(response.into());
             }
         }
 
@@ -85,7 +85,7 @@ impl HttpEndpoint for BatchEventEndpoint {
             self.state
                 .telemetry
                 .observe_rejected(IngestionRejectionReason::NotReady, rejected);
-            return Ok(response);
+            return Ok(response.into());
         }
 
         let submission: BatchSubmission = match serde_json::from_slice(&request.body) {
@@ -100,7 +100,7 @@ impl HttpEndpoint for BatchEventEndpoint {
                 self.state
                     .telemetry
                     .observe_rejected(IngestionRejectionReason::InvalidJson, 1);
-                return Ok(response);
+                return Ok(response.into());
             }
         };
 
@@ -121,7 +121,7 @@ impl HttpEndpoint for BatchEventEndpoint {
                 IngestionRejectionReason::PayloadTooLarge,
                 submission.events.len(),
             );
-            return Ok(response);
+            return Ok(response.into());
         }
 
         let mut accepted_events = Vec::new();
@@ -157,7 +157,7 @@ impl HttpEndpoint for BatchEventEndpoint {
             self.state
                 .telemetry
                 .observe_rejected(IngestionRejectionReason::Validation, rejected);
-            return Ok(response);
+            return Ok(response.into());
         }
 
         let mut permits = Vec::with_capacity(accepted);
@@ -178,7 +178,7 @@ impl HttpEndpoint for BatchEventEndpoint {
                     self.state
                         .telemetry
                         .observe_rejected(IngestionRejectionReason::BufferFull, accepted);
-                    return Ok(response);
+                    return Ok(response.into());
                 }
                 Err(TrySendError::Closed(_)) => {
                     let response = Response::internal_error()
@@ -193,7 +193,7 @@ impl HttpEndpoint for BatchEventEndpoint {
                     self.state
                         .telemetry
                         .observe_rejected(IngestionRejectionReason::ChannelClosed, accepted);
-                    return Ok(response);
+                    return Ok(response.into());
                 }
             }
         }
@@ -216,6 +216,6 @@ impl HttpEndpoint for BatchEventEndpoint {
         self.state
             .telemetry
             .observe_rejected(IngestionRejectionReason::Validation, rejected);
-        Ok(response)
+        Ok(response.into())
     }
 }

@@ -112,7 +112,9 @@ impl DiskReplayArchive {
         };
         let status = status_derivation.chosen;
 
-        if status != ArchiveStatus::Completed && !allow_incomplete_archive {
+        if !matches!(status, ArchiveStatus::Completed | ArchiveStatus::Cancelled)
+            && !allow_incomplete_archive
+        {
             return Err(ReplayError::IncompleteArchive { status });
         }
 
@@ -158,7 +160,11 @@ impl ReplayArchive for DiskReplayArchive {
             });
         }
 
-        if self.status != ArchiveStatus::Completed && !self.allow_incomplete_archive {
+        if !matches!(
+            self.status,
+            ArchiveStatus::Completed | ArchiveStatus::Cancelled
+        ) && !self.allow_incomplete_archive
+        {
             return Err(ReplayError::IncompleteArchive {
                 status: self.status,
             });
