@@ -35,6 +35,18 @@ pub struct FlowConfig {
     #[arg(long, default_value = "9090")]
     pub server_port: u16,
 
+    /// Maximum request body size in bytes for the managed HTTP server.
+    ///
+    /// This is the hard ceiling; managed surfaces may declare a smaller limit.
+    #[arg(long, default_value_t = 10 * 1024 * 1024)]
+    pub max_body_size_bytes: usize,
+
+    /// Request timeout in seconds for the managed HTTP server.
+    ///
+    /// This is the host default and ceiling. Set to `0` to disable timeouts.
+    #[arg(long, default_value_t = 30)]
+    pub request_timeout_secs: u64,
+
     /// Startup mode for the flow when running with --server
     ///
     /// - auto   (default): build and immediately start the flow
