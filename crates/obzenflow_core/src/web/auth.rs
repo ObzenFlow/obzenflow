@@ -34,7 +34,14 @@ pub enum AuthPolicy {
         /// This is descriptive and primarily exists for operator clarity.
         body_hash: String,
         /// Optional header containing an event timestamp for replay protection.
+        ///
+        /// If set, this header must contain a Unix epoch timestamp in seconds.
         timestamp_header: Option<String>,
+        /// Optional replay window in seconds.
+        ///
+        /// When set, `timestamp_header` must be present and parseable as a Unix epoch timestamp
+        /// in seconds, and the request timestamp must be within this tolerance of the server's
+        /// current time (absolute difference).
+        replay_window_secs: Option<u64>,
     },
 }
-

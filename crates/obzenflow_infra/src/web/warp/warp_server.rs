@@ -11,6 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use chrono::Utc;
 use matchit::Router as MatchItRouter;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use warp::sse::Event as SseEvent;
@@ -21,7 +22,7 @@ use obzenflow_core::event::SystemEvent;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::web::{
     server::ServerShutdownHandle, AuthPolicy, CorsMode, HttpEndpoint, HttpMethod, ManagedResponse,
-    ManagedRouteInfo, Request, Response, ServerConfig, SseBody, SseFrame, WebError,
+    ManagedRouteInfo, Request, Response, RouteKind, ServerConfig, SseBody, SseFrame, WebError,
     WebServer,
 };
 use obzenflow_core::EventId;
@@ -830,9 +831,17 @@ fn enforce_auth_policy(
             signature_header,
             body_hash: _,
             timestamp_header,
+            replay_window_secs,
         } => {
             use ring::hmac;
             use subtle::ConstantTimeEq;
+
+            if replay_window_secs.is_some() && timestamp_header.is_none() {
+                tracing::error!(
+                    "AuthPolicy::HmacSha256 is misconfigured: replay_window_secs requires timestamp_header"
+                );
+                return Err(Response::internal_error().with_text("Internal Server Error"));
+            }
 
             let secret = match std::env::var(secret_env) {
                 Ok(v) => v,
@@ -858,6 +867,18 @@ fn enforce_auth_policy(
                 },
                 None => None,
             };
+
+            if let (Some(window_secs), Some(ts_str)) = (replay_window_secs, timestamp) {
+                let ts = match ts_str.trim().parse::<i64>() {
+                    Ok(v) => v,
+                    Err(_) => return Err(Response::new(401).with_text("Unauthorized")),
+                };
+                let now = Utc::now().timestamp();
+                let window = i64::try_from(*window_secs).unwrap_or(i64::MAX);
+                if (now - ts).abs() > window {
+                    return Err(Response::new(401).with_text("Unauthorized"));
+                }
+            }
 
             let key = hmac::Key::new(hmac::HMAC_SHA256, secret.as_bytes());
             let expected = if let Some(ts) = timestamp {
@@ -960,6 +981,11 @@ async fn handle_request_no_body(
 
     let managed = endpoint.managed_route();
     let effective_timeout = resolve_effective_timeout(host_policy.request_timeout, managed.as_ref());
+    let log_ctx = if managed.is_some() {
+        Some((path.clone(), matched_route.clone()))
+    } else {
+        None
+    };
 
     if let Some(managed) = managed.as_ref() {
         if let Some(auth) = resolve_effective_auth(managed) {
@@ -999,7 +1025,30 @@ async fn handle_request_no_body(
     };
 
     match handler_result {
-        Ok(ManagedResponse::Unary(response)) => {
+        Ok(ManagedResponse::Unary(mut response)) => {
+            if let Some(managed) = managed.as_ref() {
+                if matches!(managed.kind, RouteKind::Sse) && response.status < 400 {
+                    if let Some((raw_path, template)) = log_ctx.as_ref() {
+                        tracing::debug!(
+                            method = %method.as_str(),
+                            path = %raw_path,
+                            matched_route = %template,
+                            status = response.status,
+                            declared_kind = ?managed.kind,
+                            "Managed route returned a successful unary response despite being declared as SSE"
+                        );
+                    }
+                }
+
+                if let Some(ct) = managed.route_policy.response_content_type.as_deref() {
+                    if header_value(&response.headers, "content-type").is_none() {
+                        response
+                            .headers
+                            .insert("Content-Type".to_string(), ct.to_string());
+                    }
+                }
+            }
+
             let response_bytes = response.body.len() as u64;
             if let Some(metrics) = &surface_metrics {
                 metrics.observe(
@@ -1024,6 +1073,20 @@ async fn handle_request_no_body(
             Ok(Box::new(reply) as Box<dyn Reply>)
         }
         Ok(ManagedResponse::Sse(body)) => {
+            if let Some(managed) = managed.as_ref() {
+                if matches!(managed.kind, RouteKind::Unary) {
+                    if let Some((raw_path, template)) = log_ctx.as_ref() {
+                        tracing::debug!(
+                            method = %method.as_str(),
+                            path = %raw_path,
+                            matched_route = %template,
+                            declared_kind = ?managed.kind,
+                            "Managed route returned SSE response despite being declared as unary"
+                        );
+                    }
+                }
+            }
+
             // FLOWIP-093a: streaming responses do not fit the unary request/response metrics model,
             // so we intentionally skip surface-metrics observation for SSE replies.
             Ok(Box::new(sse_body_reply(body)) as Box<dyn Reply>)
@@ -1069,6 +1132,11 @@ async fn handle_request_with_body(
 
     let managed = endpoint.managed_route();
     let effective_timeout = resolve_effective_timeout(host_policy.request_timeout, managed.as_ref());
+    let log_ctx = if managed.is_some() {
+        Some((path.clone(), matched_route.clone()))
+    } else {
+        None
+    };
 
     if let Some(managed) = managed.as_ref() {
         let max_body_size_bytes =
@@ -1140,7 +1208,30 @@ async fn handle_request_with_body(
     };
 
     match handler_result {
-        Ok(ManagedResponse::Unary(response)) => {
+        Ok(ManagedResponse::Unary(mut response)) => {
+            if let Some(managed) = managed.as_ref() {
+                if matches!(managed.kind, RouteKind::Sse) && response.status < 400 {
+                    if let Some((raw_path, template)) = log_ctx.as_ref() {
+                        tracing::debug!(
+                            method = %method.as_str(),
+                            path = %raw_path,
+                            matched_route = %template,
+                            status = response.status,
+                            declared_kind = ?managed.kind,
+                            "Managed route returned a successful unary response despite being declared as SSE"
+                        );
+                    }
+                }
+
+                if let Some(ct) = managed.route_policy.response_content_type.as_deref() {
+                    if header_value(&response.headers, "content-type").is_none() {
+                        response
+                            .headers
+                            .insert("Content-Type".to_string(), ct.to_string());
+                    }
+                }
+            }
+
             let response_bytes = response.body.len() as u64;
             if let Some(metrics) = &surface_metrics {
                 metrics.observe(
@@ -1165,6 +1256,20 @@ async fn handle_request_with_body(
             Ok(Box::new(reply) as Box<dyn Reply>)
         }
         Ok(ManagedResponse::Sse(body)) => {
+            if let Some(managed) = managed.as_ref() {
+                if matches!(managed.kind, RouteKind::Unary) {
+                    if let Some((raw_path, template)) = log_ctx.as_ref() {
+                        tracing::debug!(
+                            method = %method.as_str(),
+                            path = %raw_path,
+                            matched_route = %template,
+                            declared_kind = ?managed.kind,
+                            "Managed route returned SSE response despite being declared as unary"
+                        );
+                    }
+                }
+            }
+
             // FLOWIP-093a: streaming responses do not fit the unary request/response metrics model,
             // so we intentionally skip surface-metrics observation for SSE replies.
             Ok(Box::new(sse_body_reply(body)) as Box<dyn Reply>)
@@ -1770,6 +1875,103 @@ mod tests {
             .await;
         assert_eq!(response.status(), 200);
         assert_eq!(response.body(), "OK");
+    }
+
+    fn to_hex(bytes: &[u8]) -> String {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let mut out = String::with_capacity(bytes.len() * 2);
+        for b in bytes {
+            out.push(HEX[(b >> 4) as usize] as char);
+            out.push(HEX[(b & 0x0f) as usize] as char);
+        }
+        out
+    }
+
+    struct ManagedHmacEndpoint;
+
+    #[async_trait]
+    impl HttpEndpoint for ManagedHmacEndpoint {
+        fn path(&self) -> &str {
+            "/managed-hmac"
+        }
+
+        fn methods(&self) -> &[HttpMethod] {
+            &[HttpMethod::Get]
+        }
+
+        async fn handle(&self, _request: Request) -> Result<ManagedResponse, WebError> {
+            Ok(Response::ok().with_text("OK").into())
+        }
+
+        fn managed_route(&self) -> Option<ManagedRouteInfo> {
+            Some(ManagedRouteInfo {
+                kind: RouteKind::Unary,
+                surface_policy: Some(SurfacePolicy {
+                    auth: Some(AuthPolicy::HmacSha256 {
+                        secret_env: "OBZENFLOW_TEST_HMAC_SECRET_V1".to_string(),
+                        signature_header: "X-Signature".to_string(),
+                        body_hash: "raw_body".to_string(),
+                        timestamp_header: Some("X-Timestamp".to_string()),
+                        replay_window_secs: Some(10),
+                    }),
+                    ..SurfacePolicy::default()
+                }),
+                route_policy: RoutePolicy::default(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn managed_surface_enforces_hmac_replay_window_when_configured() {
+        use ring::hmac;
+
+        std::env::set_var("OBZENFLOW_TEST_HMAC_SECRET_V1", "sekret");
+
+        let mut server = WarpServer::new();
+        server.register_endpoint(Box::new(ManagedHmacEndpoint)).unwrap();
+        let filter = server
+            .build_filter(HostPolicy {
+                max_body_size_bytes: 10,
+                request_timeout: None,
+            })
+            .unwrap();
+
+        let now_ts = Utc::now().timestamp().to_string();
+        let key = hmac::Key::new(hmac::HMAC_SHA256, b"sekret");
+        let sig_now = {
+            let mut signed = Vec::with_capacity(now_ts.len() + 1);
+            signed.extend_from_slice(now_ts.as_bytes());
+            signed.push(b'.');
+            let expected = hmac::sign(&key, &signed);
+            to_hex(expected.as_ref())
+        };
+
+        let response = warp::test::request()
+            .method("GET")
+            .path("/managed-hmac")
+            .header("x-timestamp", &now_ts)
+            .header("x-signature", &sig_now)
+            .reply(&filter)
+            .await;
+        assert_eq!(response.status(), 200);
+
+        let old_ts = (Utc::now().timestamp() - 1000).to_string();
+        let sig_old = {
+            let mut signed = Vec::with_capacity(old_ts.len() + 1);
+            signed.extend_from_slice(old_ts.as_bytes());
+            signed.push(b'.');
+            let expected = hmac::sign(&key, &signed);
+            to_hex(expected.as_ref())
+        };
+
+        let response = warp::test::request()
+            .method("GET")
+            .path("/managed-hmac")
+            .header("x-timestamp", &old_ts)
+            .header("x-signature", &sig_old)
+            .reply(&filter)
+            .await;
+        assert_eq!(response.status(), 401);
     }
 
     struct SlowEndpoint;

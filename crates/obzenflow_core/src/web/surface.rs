@@ -11,7 +11,7 @@ use crate::web::auth::AuthPolicy;
 use crate::web::endpoint::{HttpEndpoint, ManagedRouteInfo};
 use crate::web::error::WebError;
 use crate::web::managed::ManagedResponse;
-use crate::web::types::{CorsMode, HttpMethod, Request};
+use crate::web::types::{HttpMethod, Request};
 use async_trait::async_trait;
 use std::future::Future;
 use std::sync::Arc;
@@ -24,7 +24,6 @@ pub enum RouteKind {
 
 #[derive(Debug, Clone, Default)]
 pub struct SurfacePolicy {
-    pub cors: Option<CorsMode>,
     pub auth: Option<AuthPolicy>,
     pub max_body_size: Option<usize>,
     pub request_timeout_secs: Option<u64>,
