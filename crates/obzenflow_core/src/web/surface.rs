@@ -97,7 +97,11 @@ impl Route {
         &self.policy
     }
 
-    fn into_endpoint(self, full_path: String, surface_policy: SurfacePolicy) -> Box<dyn HttpEndpoint> {
+    fn into_endpoint(
+        self,
+        full_path: String,
+        surface_policy: SurfacePolicy,
+    ) -> Box<dyn HttpEndpoint> {
         Box::new(ManagedRouteEndpoint {
             methods: self.methods,
             path: full_path,

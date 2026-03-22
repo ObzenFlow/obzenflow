@@ -7,7 +7,8 @@
 
 use async_trait::async_trait;
 use obzenflow_core::web::{
-    EndpointMetadata, HttpEndpoint, ManagedResponse, ManagedRouteInfo, Request, WebError, WebSurface,
+    EndpointMetadata, HttpEndpoint, ManagedResponse, ManagedRouteInfo, Request, WebError,
+    WebSurface,
 };
 use obzenflow_runtime::pipeline::fsm::PipelineState;
 use tokio::sync::watch;

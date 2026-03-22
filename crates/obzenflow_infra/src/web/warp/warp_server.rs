@@ -82,11 +82,10 @@ impl WarpServer {
 
         let get_route = warp::get()
             .and(warp::path::full())
-            .and(query.clone())
-            .and(headers.clone())
+            .and(query)
+            .and(headers)
             .and_then({
                 let router = router.clone();
-                let host_policy = host_policy;
                 move |path: warp::path::FullPath,
                       query_params: HashMap<String, String>,
                       headers: warp::http::HeaderMap| {
@@ -104,11 +103,10 @@ impl WarpServer {
 
         let head_route = warp::head()
             .and(warp::path::full())
-            .and(query.clone())
-            .and(headers.clone())
+            .and(query)
+            .and(headers)
             .and_then({
                 let router = router.clone();
-                let host_policy = host_policy;
                 move |path: warp::path::FullPath,
                       query_params: HashMap<String, String>,
                       headers: warp::http::HeaderMap| {
@@ -126,11 +124,10 @@ impl WarpServer {
 
         let delete_route = warp::delete()
             .and(warp::path::full())
-            .and(query.clone())
-            .and(headers.clone())
+            .and(query)
+            .and(headers)
             .and_then({
                 let router = router.clone();
-                let host_policy = host_policy;
                 move |path: warp::path::FullPath,
                       query_params: HashMap<String, String>,
                       headers: warp::http::HeaderMap| {
@@ -148,11 +145,10 @@ impl WarpServer {
 
         let options_route = warp::options()
             .and(warp::path::full())
-            .and(query.clone())
-            .and(headers.clone())
+            .and(query)
+            .and(headers)
             .and_then({
                 let router = router.clone();
-                let host_policy = host_policy;
                 move |path: warp::path::FullPath,
                       query_params: HashMap<String, String>,
                       headers: warp::http::HeaderMap| {
@@ -170,13 +166,14 @@ impl WarpServer {
 
         let post_route = warp::post()
             .and(warp::path::full())
-            .and(query.clone())
-            .and(headers.clone())
-            .and(warp::body::content_length_limit(host_policy.max_body_size_bytes))
+            .and(query)
+            .and(headers)
+            .and(warp::body::content_length_limit(
+                host_policy.max_body_size_bytes,
+            ))
             .and(warp::body::bytes())
             .and_then({
                 let router = router.clone();
-                let host_policy = host_policy;
                 move |path: warp::path::FullPath,
                       query_params: HashMap<String, String>,
                       headers: warp::http::HeaderMap,
@@ -195,13 +192,14 @@ impl WarpServer {
 
         let put_route = warp::put()
             .and(warp::path::full())
-            .and(query.clone())
-            .and(headers.clone())
-            .and(warp::body::content_length_limit(host_policy.max_body_size_bytes))
+            .and(query)
+            .and(headers)
+            .and(warp::body::content_length_limit(
+                host_policy.max_body_size_bytes,
+            ))
             .and(warp::body::bytes())
             .and_then({
                 let router = router.clone();
-                let host_policy = host_policy;
                 move |path: warp::path::FullPath,
                       query_params: HashMap<String, String>,
                       headers: warp::http::HeaderMap,
@@ -222,11 +220,12 @@ impl WarpServer {
             .and(warp::path::full())
             .and(query)
             .and(headers)
-            .and(warp::body::content_length_limit(host_policy.max_body_size_bytes))
+            .and(warp::body::content_length_limit(
+                host_policy.max_body_size_bytes,
+            ))
             .and(warp::body::bytes())
             .and_then({
                 let router = router.clone();
-                let host_policy = host_policy;
                 move |path: warp::path::FullPath,
                       query_params: HashMap<String, String>,
                       headers: warp::http::HeaderMap,
@@ -747,11 +746,7 @@ fn header_value<'a>(headers: &'a HashMap<String, String>, header_name: &str) -> 
 }
 
 fn normalize_content_type(value: &str) -> &str {
-    value
-        .split(';')
-        .next()
-        .unwrap_or(value)
-        .trim()
+    value.split(';').next().unwrap_or(value).trim()
 }
 
 fn content_type_matches(provided: Option<&str>, expected: &str) -> bool {
@@ -773,7 +768,10 @@ fn resolve_effective_auth(managed: &ManagedRouteInfo) -> Option<AuthPolicy> {
         .and_then(|policy| policy.auth.clone())
 }
 
-fn resolve_effective_timeout(host: Option<Duration>, managed: Option<&ManagedRouteInfo>) -> Option<Duration> {
+fn resolve_effective_timeout(
+    host: Option<Duration>,
+    managed: Option<&ManagedRouteInfo>,
+) -> Option<Duration> {
     let surface_timeout = managed
         .and_then(|m| m.surface_policy.as_ref())
         .and_then(|policy| policy.request_timeout_secs)
@@ -882,7 +880,8 @@ fn enforce_auth_policy(
 
             let key = hmac::Key::new(hmac::HMAC_SHA256, secret.as_bytes());
             let expected = if let Some(ts) = timestamp {
-                let mut signed = Vec::with_capacity(ts.len().saturating_add(1).saturating_add(body.len()));
+                let mut signed =
+                    Vec::with_capacity(ts.len().saturating_add(1).saturating_add(body.len()));
                 signed.extend_from_slice(ts.as_bytes());
                 signed.push(b'.');
                 signed.extend_from_slice(body);
@@ -952,6 +951,7 @@ fn reply_from_response(response: Response) -> Result<Box<dyn Reply>, Rejection> 
 }
 
 /// Helper function to handle requests without body (GET, HEAD, DELETE, OPTIONS)
+#[allow(clippy::too_many_arguments)]
 async fn handle_request_no_body(
     endpoint: Arc<dyn HttpEndpoint>,
     host_policy: HostPolicy,
@@ -980,7 +980,8 @@ async fn handle_request_no_body(
     }
 
     let managed = endpoint.managed_route();
-    let effective_timeout = resolve_effective_timeout(host_policy.request_timeout, managed.as_ref());
+    let effective_timeout =
+        resolve_effective_timeout(host_policy.request_timeout, managed.as_ref());
     let log_ctx = if managed.is_some() {
         Some((path.clone(), matched_route.clone()))
     } else {
@@ -1101,6 +1102,7 @@ async fn handle_request_no_body(
 }
 
 /// Helper function to handle requests with body (POST, PUT, PATCH)
+#[allow(clippy::too_many_arguments)]
 async fn handle_request_with_body(
     endpoint: Arc<dyn HttpEndpoint>,
     host_policy: HostPolicy,
@@ -1131,7 +1133,8 @@ async fn handle_request_with_body(
     }
 
     let managed = endpoint.managed_route();
-    let effective_timeout = resolve_effective_timeout(host_policy.request_timeout, managed.as_ref());
+    let effective_timeout =
+        resolve_effective_timeout(host_policy.request_timeout, managed.as_ref());
     let log_ctx = if managed.is_some() {
         Some((path.clone(), matched_route.clone()))
     } else {
@@ -1326,9 +1329,8 @@ impl WebServer for WarpServer {
             source: Some(Box::new(e)),
         })?;
 
-        let max_body_size_bytes = config
-            .max_body_size
-            .unwrap_or(DEFAULT_MAX_BODY_SIZE_BYTES) as u64;
+        let max_body_size_bytes =
+            config.max_body_size.unwrap_or(DEFAULT_MAX_BODY_SIZE_BYTES) as u64;
         let request_timeout_secs = config
             .request_timeout_secs
             .unwrap_or(DEFAULT_REQUEST_TIMEOUT_SECS);
@@ -1469,7 +1471,10 @@ mod tests {
         async fn handle(&self, request: Request) -> Result<ManagedResponse, WebError> {
             assert_eq!(request.path, "/items/123");
             assert_eq!(request.matched_route, "/items/:id");
-            assert_eq!(request.path_params.get("id").map(String::as_str), Some("123"));
+            assert_eq!(
+                request.path_params.get("id").map(String::as_str),
+                Some("123")
+            );
             Ok(Response::ok().with_text("OK").into())
         }
     }
@@ -1599,8 +1604,12 @@ mod tests {
     #[tokio::test]
     async fn build_filter_rejects_conflicting_parameterised_routes() {
         let mut server = WarpServer::new();
-        server.register_endpoint(Box::new(ConflictEndpointA)).unwrap();
-        server.register_endpoint(Box::new(ConflictEndpointB)).unwrap();
+        server
+            .register_endpoint(Box::new(ConflictEndpointA))
+            .unwrap();
+        server
+            .register_endpoint(Box::new(ConflictEndpointB))
+            .unwrap();
 
         let err = server
             .build_filter(HostPolicy {
@@ -1844,7 +1853,9 @@ mod tests {
         std::env::set_var("OBZENFLOW_TEST_API_KEY_V1", "sekret");
 
         let mut server = WarpServer::new();
-        server.register_endpoint(Box::new(ManagedApiKeyEndpoint)).unwrap();
+        server
+            .register_endpoint(Box::new(ManagedApiKeyEndpoint))
+            .unwrap();
         let filter = server
             .build_filter(HostPolicy {
                 max_body_size_bytes: 10,
@@ -1928,7 +1939,9 @@ mod tests {
         std::env::set_var("OBZENFLOW_TEST_HMAC_SECRET_V1", "sekret");
 
         let mut server = WarpServer::new();
-        server.register_endpoint(Box::new(ManagedHmacEndpoint)).unwrap();
+        server
+            .register_endpoint(Box::new(ManagedHmacEndpoint))
+            .unwrap();
         let filter = server
             .build_filter(HostPolicy {
                 max_body_size_bytes: 10,

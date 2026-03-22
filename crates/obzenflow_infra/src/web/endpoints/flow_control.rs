@@ -119,7 +119,7 @@ impl HttpEndpoint for FlowControlEndpoint {
                     status: FlowControlStatus::Rejected,
                     message: "Pause is not yet supported for this flow".to_string(),
                 });
-            },
+            }
             FlowControlAction::Stop => {
                 let mode = req.stop_mode.or_else(|| {
                     request.query_params.get("mode").and_then(|s| {

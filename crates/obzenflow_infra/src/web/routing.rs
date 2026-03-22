@@ -18,7 +18,9 @@ pub(crate) fn public_template_to_matchit(template: &str) -> Result<String, Strin
     }
 
     if template.contains('{') || template.contains('}') {
-        return Err("Route template must not contain '{' or '}' (use ':name' parameters)".to_string());
+        return Err(
+            "Route template must not contain '{' or '}' (use ':name' parameters)".to_string(),
+        );
     }
 
     if template == "/" {
@@ -140,7 +142,10 @@ mod tests {
     #[test]
     fn public_template_to_matchit_rejects_mid_segment_colons() {
         let err = public_template_to_matchit("/items/id:foo").unwrap_err();
-        assert!(err.contains("only supported as a prefix"), "unexpected err: {err}");
+        assert!(
+            err.contains("only supported as a prefix"),
+            "unexpected err: {err}"
+        );
     }
 
     #[test]

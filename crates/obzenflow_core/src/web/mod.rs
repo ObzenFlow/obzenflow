@@ -8,8 +8,8 @@
 //! following the same pattern as the journal abstractions.
 //! Concrete implementations are provided in obzenflow_infra.
 
-pub mod endpoint;
 pub mod auth;
+pub mod endpoint;
 pub mod error;
 pub mod managed;
 pub mod server;
