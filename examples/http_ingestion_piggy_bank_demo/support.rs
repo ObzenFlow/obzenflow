@@ -5,9 +5,6 @@
 #[path = "domain.rs"]
 pub mod domain;
 
-#[path = "ingress.rs"]
-pub mod ingress;
-
 #[path = "handlers.rs"]
 pub mod handlers;
 

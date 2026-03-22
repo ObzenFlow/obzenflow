@@ -26,6 +26,9 @@
 //! - Accounts can be submitted at any time; the join catalog updates continuously.
 //! - The stateful stage emits a `bank.checkbook` snapshot for every posted entry.
 //! - The `{accepted,rejected}` response is per-request (single POST => accepted=1). For cumulative counts, check `/metrics`.
+//! - In this example, `runner.rs` owns the HTTP ingress bundles and hosting shell,
+//!   while `build_flow(...)` stays pipeline-only and accepts the extracted typed
+//!   sources. That split is intentional: hosting concerns stay outside `flow!`.
 
 use super::domain::*;
 use super::handlers::Checkbook;
@@ -42,6 +45,8 @@ pub fn build_flow(
     accounts_source: HttpSourceTyped<AccountOpened>,
     tx_source: HttpSourceTyped<LedgerEntry>,
 ) -> FlowDefinition {
+    // This function takes only typed sources, not `HttpIngress<T>` bundles.
+    // The runner owns HTTP hosting; the flow owns pipeline topology.
     flow! {
         name: "http_ingestion_piggy_bank_demo",
         journals: disk_journals(PathBuf::from("target/http-ingestion-piggy-bank-demo-logs")),
