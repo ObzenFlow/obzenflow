@@ -112,3 +112,28 @@ impl ChainEventFactory {
         )
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::event::ingestion::IngressContext;
+    use crate::id::StageId;
+    use crate::WriterId;
+    use serde_json::json;
+
+    #[test]
+    fn derived_event_propagates_ingress_context() {
+        let writer_id = WriterId::from(StageId::new());
+        let parent = ChainEventFactory::data_event(writer_id, "parent.event", json!({"id": 1}))
+            .with_ingress_context(IngressContext {
+                accepted_at_ns: 42,
+                base_path: "/api/orders".to_string(),
+                batch_index: Some(3),
+            });
+
+        let child =
+            ChainEventFactory::derived_data_event(writer_id, &parent, "child.event", json!({}));
+
+        assert_eq!(child.ingress_context, parent.ingress_context);
+    }
+}
