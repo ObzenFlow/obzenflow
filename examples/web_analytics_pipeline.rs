@@ -184,8 +184,7 @@ impl UserEvent {
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     std::env::set_var("OBZENFLOW_METRICS_EXPORTER", "console");
 
     let presentation = Presentation::new(
@@ -224,8 +223,9 @@ async fn main() -> Result<()> {
             )
     });
 
-    FlowApplication::run_with_presentation(
-        flow! {
+    FlowApplication::builder()
+        .with_presentation(presentation)
+        .run_blocking(flow! {
             name: "web_analytics",
             journals: disk_journals(std::path::PathBuf::from("target/web_analytics")),
             middleware: [],
@@ -389,10 +389,7 @@ async fn main() -> Result<()> {
                 funnel_tracker |> funnel;
                 metrics |> metrics_printer;
             }
-        },
-        presentation,
-    )
-    .await?;
+        })?;
 
     Ok(())
 }

@@ -3,6 +3,7 @@
 // https://obzenflow.dev
 
 use super::*;
+use crate::event::ingestion::IngressContext;
 use crate::id::StageId;
 use crate::WriterId;
 use serde_json::json;
@@ -27,7 +28,12 @@ fn test_derived_event() {
             event_type: "parent.event".to_string(),
             payload: json!({"data": "parent"}),
         },
-    );
+    )
+    .with_ingress_context(IngressContext {
+        accepted_at_ns: 42,
+        base_path: "/api/test".to_string(),
+        batch_index: Some(1),
+    });
 
     let child = ChainEventFactory::derived_data_event(
         writer_id,
@@ -38,6 +44,7 @@ fn test_derived_event() {
 
     assert_eq!(child.correlation_id, parent.correlation_id);
     assert_eq!(child.causality.parent_ids, vec![parent.id]);
+    assert_eq!(child.ingress_context, parent.ingress_context);
 }
 
 #[test]

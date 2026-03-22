@@ -104,8 +104,7 @@ fn format_output(output: &TransformedText) -> String {
     )
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     if std::env::var_os("RUST_LOG").is_none() {
         std::env::set_var("RUST_LOG", "warn");
     }
@@ -113,7 +112,7 @@ async fn main() -> Result<()> {
 
     let char_inputs = build_char_inputs(&INPUT_LINES);
 
-    FlowApplication::run(flow! {
+    FlowApplication::builder().run_blocking(flow! {
         name: "char_transform",
         journals: disk_journals(PathBuf::from("target/char-transform-logs")),
         middleware: [],
@@ -151,8 +150,7 @@ async fn main() -> Result<()> {
             transform_text |> collect_text;
             collect_text |> output;
         }
-    })
-    .await?;
+    })?;
 
     Ok(())
 }

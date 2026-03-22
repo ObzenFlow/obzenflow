@@ -131,6 +131,7 @@ mod tests {
             event_type: "test.event".to_string(),
             data: serde_json::json!({}),
             metadata: None,
+            ingress_handoff: None,
         };
         let config = ValidationConfig::Single {
             validator: Arc::new(validator),

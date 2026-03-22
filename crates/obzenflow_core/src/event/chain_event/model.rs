@@ -8,6 +8,7 @@ use crate::event::context::observability_context::ObservabilityContext;
 use crate::event::context::{
     FlowContext, IntentContext, ProcessingContext, ReplayContext, RuntimeContext,
 };
+use crate::event::ingestion::IngressContext;
 use crate::event::payloads::correlation_payload::CorrelationPayload;
 use crate::event::payloads::delivery_payload::DeliveryPayload;
 use crate::event::payloads::flow_control_payload::FlowControlPayload;
@@ -64,6 +65,10 @@ pub struct ChainEvent {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub replay_context: Option<ReplayContext>,
 
+    /// Gateway provenance for accepted ingress events.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ingress_context: Option<IngressContext>,
+
     // === Cycle Iteration Tracking (FLOWIP-051p) ===
     /// Per-event cycle depth counter. Incremented at the SCC entry point
     /// on each round trip. None for events that have never entered a cycle.
@@ -119,6 +124,11 @@ impl ChainEvent {
 
     pub fn with_runtime_context(mut self, ctx: RuntimeContext) -> Self {
         self.runtime_context = Some(ctx);
+        self
+    }
+
+    pub fn with_ingress_context(mut self, ctx: IngressContext) -> Self {
+        self.ingress_context = Some(ctx);
         self
     }
 

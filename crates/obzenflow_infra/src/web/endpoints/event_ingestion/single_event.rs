@@ -2,12 +2,12 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use super::shared::join_path;
+use super::shared::{join_path, unix_now_nanos};
 use super::IngestionState;
 use super::{authorize_request, validate_submission};
 use async_trait::async_trait;
 use obzenflow_core::event::ingestion::{
-    EventSubmission, IngestionRejectionReason, SubmissionResponse,
+    EventSubmission, IngestionRejectionReason, SubmissionIngressContext, SubmissionResponse,
 };
 use obzenflow_core::web::{HttpEndpoint, HttpMethod, ManagedResponse, Request, Response, WebError};
 use serde_json::json;
@@ -80,7 +80,7 @@ impl HttpEndpoint for SingleEventEndpoint {
             return Ok(response.into());
         }
 
-        let submission: EventSubmission = match serde_json::from_slice(&request.body) {
+        let mut submission: EventSubmission = match serde_json::from_slice(&request.body) {
             Ok(s) => s,
             Err(e) => {
                 let response = Response::new(400)
@@ -111,8 +111,14 @@ impl HttpEndpoint for SingleEventEndpoint {
             }
         }
 
-        match self.state.tx.try_send(submission) {
-            Ok(()) => {
+        match self.state.tx.try_reserve() {
+            Ok(permit) => {
+                submission.ingress_handoff = Some(SubmissionIngressContext {
+                    accepted_at_ns: unix_now_nanos(),
+                    base_path: self.state.config.base_path.clone(),
+                    batch_index: None,
+                });
+                permit.send(submission);
                 let response = Response::ok()
                     .with_json(&SubmissionResponse {
                         accepted: 1,

@@ -105,8 +105,7 @@ impl SinkHandler for CountingSink {
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     // Use Prometheus exporter for /metrics endpoint
     // (defaults to "prometheus" if not set, but being explicit here)
     // Change to "console" if you want formatted summary instead
@@ -160,8 +159,9 @@ async fn main() -> Result<()> {
             )
     });
 
-    FlowApplication::run_with_presentation(
-        flow! {
+    FlowApplication::builder()
+        .with_presentation(presentation)
+        .run_blocking(flow! {
             name: "middleware_config_demo",
             journals: disk_journals(journal_path.clone()),
             middleware: [
@@ -200,10 +200,7 @@ async fn main() -> Result<()> {
                 fast_source |> throttled_transform;
                 throttled_transform |> counting_sink;
             }
-        },
-        presentation,
-    )
-    .await?;
+        })?;
 
     Ok(())
 }

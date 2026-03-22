@@ -18,10 +18,14 @@ use super::{
 };
 use crate::application::config::CorsModeArg;
 use crate::application::config::StartupMode;
+use crate::web::endpoints::event_ingestion::HttpIngress;
 #[cfg(feature = "warp-server")]
 use crate::web::surface_metrics::{HttpSurfaceMetricsCollector, HttpSurfaceMetricsEmitter};
 use clap::Parser;
+use obzenflow_core::event::ingestion::IngestionTelemetry;
+use obzenflow_core::metrics::{InfraMetricsSnapshot, MetricsExporter};
 use obzenflow_core::web::{CorsConfig, CorsMode, HttpEndpoint, ServerConfig};
+use obzenflow_core::TypedPayload;
 use obzenflow_dsl::FlowDefinition;
 use obzenflow_runtime::prelude::FlowHandle;
 use std::sync::Arc;
@@ -84,6 +88,7 @@ pub struct FlowApplicationBuilder {
     console_bind: Option<String>,
     log_level: Option<LogLevel>,
     web_surfaces: Vec<WebSurfaceAttachment>,
+    ingress_telemetry: Vec<Arc<IngestionTelemetry>>,
     web_endpoints: Vec<Box<dyn HttpEndpoint>>,
     flow_handle_hooks: Vec<FlowHandleHook>,
     presentation: Option<Presentation>,
@@ -145,6 +150,17 @@ impl FlowApplicationBuilder {
         self
     }
 
+    /// Register a framework-owned HTTP ingress bundle.
+    pub fn with_http_ingress<T>(mut self, ingress: HttpIngress<T>) -> Self
+    where
+        T: TypedPayload + Send + Sync + 'static,
+    {
+        let (surface, telemetry) = ingress.into_surface_and_telemetry();
+        self.web_surfaces.push(surface);
+        self.ingress_telemetry.push(telemetry);
+        self
+    }
+
     /// Add a single HTTP endpoint to be hosted by FlowApplication when running with `--server`.
     pub fn with_web_endpoint(mut self, endpoint: Box<dyn HttpEndpoint>) -> Self {
         self.web_endpoints.push(endpoint);
@@ -187,6 +203,7 @@ impl FlowApplicationBuilder {
             FlowApplication::run_with_web_endpoints_and_hooks_and_presentation(
                 flow,
                 self.web_surfaces,
+                self.ingress_telemetry,
                 self.web_endpoints,
                 self.flow_handle_hooks,
                 self.presentation,
@@ -206,6 +223,7 @@ impl FlowApplicationBuilder {
         FlowApplication::run_with_web_endpoints_and_hooks_and_presentation(
             flow,
             self.web_surfaces,
+            self.ingress_telemetry,
             self.web_endpoints,
             self.flow_handle_hooks,
             self.presentation,
@@ -396,6 +414,7 @@ impl FlowApplication {
             Vec::new(),
             Vec::new(),
             Vec::new(),
+            Vec::new(),
             Some(presentation),
         )
         .await
@@ -417,6 +436,7 @@ impl FlowApplication {
         Self::run_with_web_endpoints_and_hooks_and_presentation(
             flow,
             Vec::new(),
+            Vec::new(),
             extra_endpoints,
             flow_handle_hooks,
             None,
@@ -427,6 +447,7 @@ impl FlowApplication {
     pub(crate) async fn run_with_web_endpoints_and_hooks_and_presentation(
         flow: FlowDefinition,
         web_surfaces: Vec<WebSurfaceAttachment>,
+        ingress_telemetry: Vec<Arc<IngestionTelemetry>>,
         extra_endpoints: Vec<Box<dyn HttpEndpoint>>,
         flow_handle_hooks: Vec<FlowHandleHook>,
         presentation: Option<Presentation>,
@@ -458,6 +479,15 @@ impl FlowApplication {
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or(30);
         let grace_timeout = Duration::from_secs(shutdown_timeout_secs);
+
+        let ingestion_metrics_interval = {
+            let interval_secs = std::env::var("OBZENFLOW_INGESTION_METRICS_INTERVAL_SECS")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(5)
+                .max(1);
+            Duration::from_secs(interval_secs)
+        };
 
         #[cfg(feature = "warp-server")]
         let surface_metrics_interval = {
@@ -617,6 +647,17 @@ impl FlowApplication {
                 .iter()
                 .map(|hook| hook(&flow_handle))
                 .collect();
+
+            if let Some(exporter) = flow_handle.metrics_exporter() {
+                if !ingress_telemetry.is_empty() {
+                    Self::publish_ingestion_infra_snapshot(&exporter, &ingress_telemetry);
+                    managed_tasks.push(Self::spawn_ingestion_metrics_collector(
+                        exporter,
+                        ingress_telemetry.clone(),
+                        ingestion_metrics_interval,
+                    ));
+                }
+            }
 
             #[cfg(feature = "warp-server")]
             let surface_metrics_collector = {
@@ -1019,6 +1060,45 @@ impl FlowApplication {
             }
         })
         .await;
+    }
+
+    fn build_ingestion_infra_snapshot(
+        telemetry_handles: &[Arc<IngestionTelemetry>],
+    ) -> InfraMetricsSnapshot {
+        let mut snapshot = InfraMetricsSnapshot::default();
+        for telemetry in telemetry_handles {
+            snapshot
+                .ingestion_metrics
+                .insert(telemetry.base_path().to_string(), telemetry.snapshot());
+        }
+        snapshot
+    }
+
+    fn publish_ingestion_infra_snapshot(
+        exporter: &Arc<dyn MetricsExporter>,
+        telemetry_handles: &[Arc<IngestionTelemetry>],
+    ) {
+        let snapshot = Self::build_ingestion_infra_snapshot(telemetry_handles);
+        if let Err(err) = exporter.update_infra_metrics(snapshot) {
+            tracing::warn!("Failed to export ingress infrastructure metrics: {}", err);
+        }
+    }
+
+    fn spawn_ingestion_metrics_collector(
+        exporter: Arc<dyn MetricsExporter>,
+        telemetry_handles: Vec<Arc<IngestionTelemetry>>,
+        interval: Duration,
+    ) -> JoinHandle<()> {
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(interval);
+            loop {
+                ticker.tick().await;
+                let snapshot = Self::build_ingestion_infra_snapshot(&telemetry_handles);
+                if let Err(err) = exporter.update_infra_metrics(snapshot) {
+                    tracing::warn!("Failed to export ingress infrastructure metrics: {}", err);
+                }
+            }
+        })
     }
 
     /// Internal: Start the web server with all endpoints

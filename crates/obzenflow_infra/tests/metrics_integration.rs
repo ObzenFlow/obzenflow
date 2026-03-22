@@ -7,15 +7,14 @@ use std::sync::{Arc, Mutex};
 
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::ingestion::IngestionTelemetrySnapshot;
-use obzenflow_core::event::payloads::observability_payload::{
-    MetricsLifecycle, ObservabilityPayload,
-};
 use obzenflow_core::event::JournalWriterId;
 use obzenflow_core::event::{ChainEventFactory, SystemEvent, SystemEventType, WriterId};
 use obzenflow_core::id::{StageId, SystemId};
 use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::journal::Journal;
-use obzenflow_core::metrics::{AppMetricsSnapshot, MetricsExporter, StageMetadata};
+use obzenflow_core::metrics::{
+    AppMetricsSnapshot, InfraMetricsSnapshot, MetricsExporter, StageMetadata,
+};
 use obzenflow_core::EventEnvelope;
 use obzenflow_fsm::FsmAction;
 use obzenflow_infra::journal::MemoryJournal;
@@ -25,10 +24,11 @@ use obzenflow_runtime::metrics::{
     MetricsAggregatorState, MetricsStore, StageMetrics,
 };
 
-/// Simple in-memory exporter that records AppMetricsSnapshot values.
+/// Simple in-memory exporter that records application and infrastructure snapshots.
 #[derive(Default)]
 struct RecordingExporter {
-    snapshots: Mutex<Vec<AppMetricsSnapshot>>,
+    app_snapshots: Mutex<Vec<AppMetricsSnapshot>>,
+    infra_snapshots: Mutex<Vec<InfraMetricsSnapshot>>,
 }
 
 impl MetricsExporter for RecordingExporter {
@@ -36,7 +36,15 @@ impl MetricsExporter for RecordingExporter {
         &self,
         snapshot: AppMetricsSnapshot,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        self.snapshots.lock().unwrap().push(snapshot);
+        self.app_snapshots.lock().unwrap().push(snapshot);
+        Ok(())
+    }
+
+    fn update_infra_metrics(
+        &self,
+        snapshot: InfraMetricsSnapshot,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.infra_snapshots.lock().unwrap().push(snapshot);
         Ok(())
     }
 
@@ -45,7 +53,7 @@ impl MetricsExporter for RecordingExporter {
     }
 
     fn metric_count(&self) -> usize {
-        self.snapshots.lock().unwrap().len()
+        self.app_snapshots.lock().unwrap().len() + self.infra_snapshots.lock().unwrap().len()
     }
 }
 
@@ -117,7 +125,7 @@ async fn export_snapshot_sanity_from_metrics_store() {
         .await
         .unwrap();
 
-    let snapshots = exporter.snapshots.lock().unwrap();
+    let snapshots = exporter.app_snapshots.lock().unwrap();
     assert!(
         !snapshots.is_empty(),
         "expected at least one exported snapshot"
@@ -223,53 +231,32 @@ async fn running_state_process_batch_transitions() {
     );
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn http_ingestion_snapshot_wide_event_populates_app_metrics_snapshot() {
-    let stage_id = StageId::new();
-    let system_id = SystemId::new();
-    let system_journal = make_system_journal(system_id);
-    let exporter = Arc::new(RecordingExporter::default());
-
-    let mut ctx = make_empty_context(system_id, system_journal, exporter.clone(), stage_id);
-
-    let snapshot = IngestionTelemetrySnapshot {
-        base_path: "/api/ingest".to_string(),
-        channel_depth: 12,
-        channel_capacity: 10_000,
-        requests_total: 5,
-        events_accepted_total: 4,
-        events_rejected_auth_total: 1,
-        events_rejected_validation_total: 0,
-        events_rejected_buffer_full_total: 0,
-        events_rejected_not_ready_total: 0,
-        events_rejected_payload_too_large_total: 0,
-        events_rejected_invalid_json_total: 0,
-        events_rejected_channel_closed_total: 0,
-    };
-
-    let event = ChainEventFactory::observability_event(
-        WriterId::from(stage_id),
-        ObservabilityPayload::Metrics(MetricsLifecycle::Custom {
-            name: "http_ingestion.snapshot".to_string(),
-            value: serde_json::to_value(&snapshot).unwrap(),
-            tags: None,
-        }),
+#[test]
+fn infra_exporter_records_ingestion_snapshots_on_infra_path() {
+    let exporter = RecordingExporter::default();
+    let mut snapshot = InfraMetricsSnapshot::default();
+    snapshot.ingestion_metrics.insert(
+        "/api/ingest".to_string(),
+        IngestionTelemetrySnapshot {
+            base_path: "/api/ingest".to_string(),
+            channel_depth: 12,
+            channel_capacity: 10_000,
+            requests_total: 5,
+            events_accepted_total: 4,
+            events_rejected_auth_total: 1,
+            events_rejected_validation_total: 0,
+            events_rejected_buffer_full_total: 0,
+            events_rejected_not_ready_total: 0,
+            events_rejected_payload_too_large_total: 0,
+            events_rejected_invalid_json_total: 0,
+            events_rejected_channel_closed_total: 0,
+        },
     );
-    let envelope = EventEnvelope::new(JournalWriterId::new(), event);
 
-    MetricsAggregatorAction::UpdateMetrics {
-        envelope: Box::new(envelope),
-    }
-    .execute(&mut ctx)
-    .await
-    .unwrap();
-    MetricsAggregatorAction::ExportMetrics
-        .execute(&mut ctx)
-        .await
-        .unwrap();
+    exporter.update_infra_metrics(snapshot).unwrap();
 
-    let snapshots = exporter.snapshots.lock().unwrap();
-    let last = snapshots.last().expect("exported snapshot");
+    let snapshots = exporter.infra_snapshots.lock().unwrap();
+    let last = snapshots.last().expect("exported infra snapshot");
     let ing = last
         .ingestion_metrics
         .get("/api/ingest")

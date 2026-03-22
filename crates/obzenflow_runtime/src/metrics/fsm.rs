@@ -10,7 +10,6 @@
 
 use obzenflow_core::event::chain_event::ChainEventContent;
 use obzenflow_core::event::context::StageType;
-use obzenflow_core::event::ingestion::IngestionTelemetrySnapshot;
 use obzenflow_core::event::observability::{HttpPullTelemetry, HttpSurfaceRouteMetricsSnapshot};
 use obzenflow_core::event::payloads::observability_payload::{
     CircuitBreakerEvent, MetricsLifecycle, MiddlewareLifecycle, ObservabilityPayload,
@@ -207,9 +206,6 @@ pub struct MetricsStore {
 
     // Contract metrics accumulation (FLOWIP-059a)
     pub contract_metrics: ContractMetricsSnapshot,
-
-    // HTTP ingestion telemetry (FLOWIP-084d)
-    pub ingestion_metrics: HashMap<String, IngestionTelemetrySnapshot>,
 
     // Hosted web surface metrics (FLOWIP-093a)
     pub http_surface_metrics:
@@ -893,9 +889,6 @@ impl MetricsAggregatorContext {
         // FLOWIP-059a: Contract metrics
         snapshot.contract_metrics = store.contract_metrics.clone();
 
-        // FLOWIP-084d: HTTP ingestion telemetry (wide events)
-        snapshot.ingestion_metrics = store.ingestion_metrics.clone();
-
         // FLOWIP-093a: Generic hosted web surface metrics (system events)
         let mut http_surface_metrics: Vec<_> =
             store.http_surface_metrics.values().cloned().collect();
@@ -1409,58 +1402,11 @@ impl FsmAction for MetricsAggregatorAction {
                     return Ok(());
                 }
 
-                // Consume HTTP ingestion telemetry wide events (FLOWIP-084d).
                 if let ChainEventContent::Observability(ObservabilityPayload::Metrics(
                     MetricsLifecycle::Custom { name, value, .. },
                 )) = &event.content
                 {
-                    if name == "http_ingestion.snapshot" {
-                        match serde_json::from_value::<IngestionTelemetrySnapshot>(value.clone()) {
-                            Ok(snapshot) => {
-                                let entry = store
-                                    .ingestion_metrics
-                                    .entry(snapshot.base_path.clone())
-                                    .or_insert_with(|| snapshot.clone());
-
-                                // Monotonic counters: use max() to tolerate ordering.
-                                entry.requests_total =
-                                    entry.requests_total.max(snapshot.requests_total);
-                                entry.events_accepted_total = entry
-                                    .events_accepted_total
-                                    .max(snapshot.events_accepted_total);
-                                entry.events_rejected_auth_total = entry
-                                    .events_rejected_auth_total
-                                    .max(snapshot.events_rejected_auth_total);
-                                entry.events_rejected_validation_total = entry
-                                    .events_rejected_validation_total
-                                    .max(snapshot.events_rejected_validation_total);
-                                entry.events_rejected_buffer_full_total = entry
-                                    .events_rejected_buffer_full_total
-                                    .max(snapshot.events_rejected_buffer_full_total);
-                                entry.events_rejected_not_ready_total = entry
-                                    .events_rejected_not_ready_total
-                                    .max(snapshot.events_rejected_not_ready_total);
-                                entry.events_rejected_payload_too_large_total = entry
-                                    .events_rejected_payload_too_large_total
-                                    .max(snapshot.events_rejected_payload_too_large_total);
-                                entry.events_rejected_invalid_json_total = entry
-                                    .events_rejected_invalid_json_total
-                                    .max(snapshot.events_rejected_invalid_json_total);
-                                entry.events_rejected_channel_closed_total = entry
-                                    .events_rejected_channel_closed_total
-                                    .max(snapshot.events_rejected_channel_closed_total);
-
-                                // Gauges: overwrite with latest.
-                                entry.channel_depth = snapshot.channel_depth;
-                                entry.channel_capacity =
-                                    entry.channel_capacity.max(snapshot.channel_capacity);
-                            }
-                            Err(e) => tracing::warn!(
-                                error = %e,
-                                "Failed to decode http_ingestion.snapshot payload; ignoring"
-                            ),
-                        }
-                    } else if name == "http_pull.snapshot" {
+                    if name == "http_pull.snapshot" {
                         match serde_json::from_value::<HttpPullTelemetry>(value.clone()) {
                             Ok(snapshot) => {
                                 let entry = store.http_pull_metrics.entry(stage_id).or_default();

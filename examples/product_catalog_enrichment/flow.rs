@@ -226,17 +226,30 @@ pub fn run_example(presentation: Presentation) -> Result<()> {
 /// Test-friendly runner that bypasses CLI parsing (clap would otherwise read cargo test args)
 #[cfg(test)]
 pub fn run_example_in_tests() -> Result<()> {
+    run_flow_in_tests(build_flow(), "Flow execution failed")
+}
+
+#[cfg(test)]
+fn run_flow_in_tests(
+    flow: obzenflow_dsl::FlowDefinition,
+    error_context: &'static str,
+) -> Result<()> {
     let _ = tracing_subscriber::fmt::try_init();
+
+    // These helpers intentionally bypass FlowApplication:
+    // - `FlowApplication` parses CLI args, which clashes with `cargo test` arguments.
+    // - `FlowApplication` installs global tracing via `.init()`, while tests need a
+    //   best-effort tracer that stays harmless across repeated runs in one process.
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(|e| anyhow::anyhow!("Failed to create runtime: {e:?}"))?;
 
-    runtime.block_on(async {
-        let handle = build_flow().await?;
+    runtime.block_on(async move {
+        let handle = flow.await?;
         handle
             .run()
             .await
-            .map_err(|e| anyhow::anyhow!("Flow execution failed: {e:?}"))
+            .map_err(|e| anyhow::anyhow!("{error_context}: {e:?}"))
     })
 }

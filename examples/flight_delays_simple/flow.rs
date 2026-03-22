@@ -19,21 +19,12 @@ use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 
 pub fn run_example() -> Result<()> {
-    tokio::runtime::Runtime::new()?.block_on(run())
-}
-
-#[cfg(test)]
-pub fn run_example_in_tests() -> Result<()> {
-    Ok(())
-}
-
-async fn run() -> Result<()> {
     std::env::set_var("OBZENFLOW_METRICS_EXPORTER", "console");
 
     let carriers = fixtures::carriers();
     let flights = fixtures::flights();
 
-    FlowApplication::run(flow! {
+    FlowApplication::builder().run_blocking(flow! {
         name: "flight_delays",
         journals: disk_journals(std::path::PathBuf::from("target/flight-delays-logs")),
         middleware: [],
@@ -94,8 +85,12 @@ async fn run() -> Result<()> {
             enricher |> agg;
             agg |> printer;
         }
-    })
-    .await?;
+    })?;
 
+    Ok(())
+}
+
+#[cfg(test)]
+pub fn run_example_in_tests() -> Result<()> {
     Ok(())
 }

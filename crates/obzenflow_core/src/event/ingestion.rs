@@ -18,6 +18,14 @@ pub struct EventSubmission {
     /// Optional metadata (arbitrary JSON)
     #[serde(default)]
     pub metadata: Option<serde_json::Value>,
+
+    /// Framework-owned handoff data used while an accepted HTTP event crosses into `flow!`.
+    ///
+    /// This field is intentionally skipped from user JSON. It is populated by the ingress
+    /// endpoints after semantic checks pass and consumed by `HttpSource` when constructing the
+    /// first `ChainEvent`.
+    #[serde(skip)]
+    pub ingress_handoff: Option<SubmissionIngressContext>,
 }
 
 /// Batch submission payload (FLOWIP-084d).
@@ -62,7 +70,7 @@ impl IngestionRejectionReason {
     }
 }
 
-/// Snapshot of HTTP ingestion telemetry emitted via wide events (FLOWIP-084d).
+/// Snapshot of HTTP ingestion telemetry exported through the infrastructure metrics path.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct IngestionTelemetrySnapshot {
     pub base_path: String,
@@ -78,6 +86,24 @@ pub struct IngestionTelemetrySnapshot {
     pub events_rejected_payload_too_large_total: u64,
     pub events_rejected_invalid_json_total: u64,
     pub events_rejected_channel_closed_total: u64,
+}
+
+/// Framework-owned handoff context carried on accepted HTTP submissions before they become
+/// `ChainEvent`s.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubmissionIngressContext {
+    pub accepted_at_ns: u64,
+    pub base_path: String,
+    pub batch_index: Option<usize>,
+}
+
+/// Provenance attached to accepted events when they enter the pipeline.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IngressContext {
+    pub accepted_at_ns: u64,
+    pub base_path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub batch_index: Option<usize>,
 }
 
 impl IngestionTelemetrySnapshot {
