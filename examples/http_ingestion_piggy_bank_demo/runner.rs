@@ -8,6 +8,7 @@ use super::domain::{AccountOpened, LedgerEntry};
 use super::{flow, ingress};
 use anyhow::Result;
 use obzenflow_infra::application::{FlowApplication, LogLevel};
+use obzenflow_infra::web::endpoints::event_ingestion::http_ingress;
 
 pub fn run_example() -> Result<()> {
     tokio::runtime::Runtime::new()?.block_on(run())
@@ -19,20 +20,17 @@ pub fn run_example_in_tests() -> Result<()> {
 }
 
 async fn run() -> Result<()> {
-    let ingress::TypedIngress {
-        surface: accounts_surface,
-        source: accounts_source,
-    } = ingress::typed_ingress::<AccountOpened>(ingress::ACCOUNTS_BASE_PATH);
+    let accounts_ingress =
+        http_ingress::<AccountOpened>(ingress::config(ingress::ACCOUNTS_BASE_PATH));
+    let accounts_source = accounts_ingress.source();
 
-    let ingress::TypedIngress {
-        surface: tx_surface,
-        source: tx_source,
-    } = ingress::typed_ingress::<LedgerEntry>(ingress::TX_BASE_PATH);
+    let tx_ingress = http_ingress::<LedgerEntry>(ingress::config(ingress::TX_BASE_PATH));
+    let tx_source = tx_ingress.source();
 
     FlowApplication::builder()
         .with_log_level(LogLevel::Info)
-        .with_web_surface(accounts_surface)
-        .with_web_surface(tx_surface)
+        .with_http_ingress(accounts_ingress)
+        .with_http_ingress(tx_ingress)
         .run_async(flow::build_flow(accounts_source, tx_source))
         .await?;
 

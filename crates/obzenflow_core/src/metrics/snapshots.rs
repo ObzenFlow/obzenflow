@@ -161,11 +161,6 @@ pub struct AppMetricsSnapshot {
     /// Contract verification metrics per edge (upstream/downstream)
     pub contract_metrics: ContractMetricsSnapshot,
 
-    /// HTTP ingestion telemetry metrics derived from wide events (FLOWIP-084d).
-    ///
-    /// Keyed by `base_path` (e.g., "/api/ingest").
-    pub ingestion_metrics: HashMap<String, crate::event::ingestion::IngestionTelemetrySnapshot>,
-
     /// Generic hosted-surface HTTP metrics derived from system events (FLOWIP-093a).
     ///
     /// Low-cardinality labels: (surface_name, method, path, status_class).
@@ -245,6 +240,11 @@ pub struct InfraMetricsSnapshot {
 
     /// Stage-level infrastructure metrics
     pub stage_metrics: HashMap<StageId, StageInfraMetrics>,
+
+    /// HTTP ingestion telemetry observed directly from `FlowApplication`-owned ingress handles.
+    ///
+    /// Keyed by `base_path` (e.g., "/api/ingest").
+    pub ingestion_metrics: HashMap<String, crate::event::ingestion::IngestionTelemetrySnapshot>,
 }
 
 /// Aggregated AI chunk planning metrics per stage.
@@ -462,7 +462,6 @@ impl Default for AppMetricsSnapshot {
             backpressure_writer_seq: HashMap::new(),
             backpressure_wait_seconds_total: HashMap::new(),
             contract_metrics: ContractMetricsSnapshot::default(),
-            ingestion_metrics: HashMap::new(),
             http_surface_metrics: Vec::new(),
             http_pull_metrics: HashMap::new(),
             ai_chunking_metrics: HashMap::new(),
@@ -483,6 +482,7 @@ impl Default for InfraMetricsSnapshot {
             timestamp: chrono::Utc::now(),
             journal_metrics: JournalMetricsSnapshot::default(),
             stage_metrics: HashMap::new(),
+            ingestion_metrics: HashMap::new(),
         }
     }
 }

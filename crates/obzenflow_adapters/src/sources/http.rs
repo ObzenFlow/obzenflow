@@ -3,12 +3,7 @@
 // https://obzenflow.dev
 
 use async_trait::async_trait;
-use obzenflow_core::event::ingestion::{
-    EventSubmission, IngestionTelemetry, IngestionTelemetrySnapshot,
-};
-use obzenflow_core::event::payloads::observability_payload::{
-    MetricsLifecycle, ObservabilityPayload,
-};
+use obzenflow_core::event::ingestion::{EventSubmission, IngressContext};
 use obzenflow_core::event::ChainEventFactory;
 use obzenflow_core::{ChainEvent, TypedPayload, WriterId};
 use obzenflow_runtime::stages::common::handlers::AsyncInfiniteSourceHandler;
@@ -16,26 +11,18 @@ use obzenflow_runtime::stages::SourceError;
 use obzenflow_runtime::typing::SourceTyping;
 use std::marker::PhantomData;
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::sync::Mutex;
-use tokio::time::Instant;
 
 #[derive(Debug, Clone)]
 pub struct HttpSourceConfig {
     /// Maximum number of events returned per `next()` call.
     pub max_batch_size: usize,
-
-    /// How often to emit an ingestion telemetry wide event (FLOWIP-084d).
-    ///
-    /// Default: 5 seconds.
-    pub telemetry_flush_interval: Duration,
 }
 
 impl Default for HttpSourceConfig {
     fn default() -> Self {
         Self {
             max_batch_size: 1000,
-            telemetry_flush_interval: Duration::from_secs(5),
         }
     }
 }
@@ -43,9 +30,6 @@ impl Default for HttpSourceConfig {
 #[derive(Clone)]
 pub struct HttpSource {
     rx: Arc<Mutex<tokio::sync::mpsc::Receiver<EventSubmission>>>,
-    telemetry: Option<Arc<IngestionTelemetry>>,
-    last_flush: Instant,
-    last_snapshot: Option<IngestionTelemetrySnapshot>,
     writer_id: Option<WriterId>,
     config: HttpSourceConfig,
 }
@@ -55,7 +39,6 @@ impl std::fmt::Debug for HttpSource {
         f.debug_struct("HttpSource")
             .field("writer_id_bound", &self.writer_id.is_some())
             .field("config", &self.config)
-            .field("telemetry_enabled", &self.telemetry.is_some())
             .finish()
     }
 }
@@ -64,23 +47,6 @@ impl HttpSource {
     pub fn new(rx: tokio::sync::mpsc::Receiver<EventSubmission>) -> Self {
         Self {
             rx: Arc::new(Mutex::new(rx)),
-            telemetry: None,
-            last_flush: Instant::now(),
-            last_snapshot: None,
-            writer_id: None,
-            config: HttpSourceConfig::default(),
-        }
-    }
-
-    pub fn with_telemetry(
-        rx: tokio::sync::mpsc::Receiver<EventSubmission>,
-        telemetry: Arc<IngestionTelemetry>,
-    ) -> Self {
-        Self {
-            rx: Arc::new(Mutex::new(rx)),
-            telemetry: Some(telemetry),
-            last_flush: Instant::now(),
-            last_snapshot: None,
             writer_id: None,
             config: HttpSourceConfig::default(),
         }
@@ -92,24 +58,6 @@ impl HttpSource {
     ) -> Self {
         Self {
             rx: Arc::new(Mutex::new(rx)),
-            telemetry: None,
-            last_flush: Instant::now(),
-            last_snapshot: None,
-            writer_id: None,
-            config,
-        }
-    }
-
-    pub fn with_config_and_telemetry(
-        rx: tokio::sync::mpsc::Receiver<EventSubmission>,
-        config: HttpSourceConfig,
-        telemetry: Arc<IngestionTelemetry>,
-    ) -> Self {
-        Self {
-            rx: Arc::new(Mutex::new(rx)),
-            telemetry: Some(telemetry),
-            last_flush: Instant::now(),
-            last_snapshot: None,
             writer_id: None,
             config,
         }
@@ -134,42 +82,42 @@ impl HttpSource {
             .writer_id
             .expect("WriterId must be bound before next() is called");
         let EventSubmission {
-            event_type, data, ..
+            event_type,
+            data,
+            ingress_handoff,
+            ..
         } = submission;
-        ChainEventFactory::data_event(writer_id, event_type, data)
-    }
-
-    fn telemetry_to_observability_event(
-        &self,
-        snapshot: &IngestionTelemetrySnapshot,
-    ) -> Result<ChainEvent, SourceError> {
-        let writer_id = self
-            .writer_id
-            .expect("WriterId must be bound before next() is called");
-        let value = serde_json::to_value(snapshot).map_err(|e| {
-            SourceError::Other(format!(
-                "Failed to serialize ingestion telemetry snapshot: {e}"
-            ))
-        })?;
-
-        Ok(ChainEventFactory::observability_event(
-            writer_id,
-            ObservabilityPayload::Metrics(MetricsLifecycle::Custom {
-                name: "http_ingestion.snapshot".to_string(),
-                value,
-                tags: None,
-            }),
-        ))
+        let mut event = ChainEventFactory::data_event(writer_id, event_type, data);
+        if let Some(handoff) = ingress_handoff {
+            event.ingress_context = Some(IngressContext {
+                accepted_at_ns: handoff.accepted_at_ns,
+                base_path: handoff.base_path,
+                batch_index: handoff.batch_index,
+            });
+        }
+        event
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct HttpSourceTyped<T>
 where
     T: TypedPayload + Send + Sync + 'static,
 {
     inner: HttpSource,
     _phantom: PhantomData<fn() -> T>,
+}
+
+impl<T> Clone for HttpSourceTyped<T>
+where
+    T: TypedPayload + Send + Sync + 'static,
+{
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+            _phantom: PhantomData,
+        }
+    }
 }
 
 impl<T> SourceTyping for HttpSourceTyped<T>
@@ -206,60 +154,15 @@ impl AsyncInfiniteSourceHandler for HttpSource {
     async fn next(&mut self) -> Result<Vec<ChainEvent>, SourceError> {
         let mut rx = self.rx.lock().await;
 
-        let has_telemetry =
-            self.telemetry.is_some() && self.config.telemetry_flush_interval != Duration::ZERO;
+        let first = rx.recv().await.ok_or_else(|| {
+            SourceError::Transport("HTTP source channel closed (server shutdown)".into())
+        })?;
 
-        let mut out = Vec::new();
-
-        if has_telemetry {
-            let flush_deadline = self.last_flush + self.config.telemetry_flush_interval;
-
-            tokio::select! {
-                biased;
-                maybe_submission = rx.recv() => {
-                    let submission = maybe_submission.ok_or_else(|| {
-                        SourceError::Transport("HTTP source channel closed (server shutdown)".into())
-                    })?;
-                    out.push(self.submission_to_event(submission));
-                }
-                _ = tokio::time::sleep_until(flush_deadline) => {
-                    // Flush tick without an accepted event.
-                }
-            }
-
-            while out.len() < self.config.max_batch_size {
-                match rx.try_recv() {
-                    Ok(submission) => out.push(self.submission_to_event(submission)),
-                    Err(_) => break,
-                }
-            }
-
-            if Instant::now() >= flush_deadline {
-                if let Some(ref telemetry) = self.telemetry {
-                    let snapshot = telemetry.snapshot();
-                    let should_emit = self
-                        .last_snapshot
-                        .as_ref()
-                        .map(|prev| prev != &snapshot)
-                        .unwrap_or(true);
-                    if should_emit {
-                        out.push(self.telemetry_to_observability_event(&snapshot)?);
-                        self.last_snapshot = Some(snapshot);
-                    }
-                }
-                self.last_flush = Instant::now();
-            }
-        } else {
-            let first = rx.recv().await.ok_or_else(|| {
-                SourceError::Transport("HTTP source channel closed (server shutdown)".into())
-            })?;
-
-            out.push(self.submission_to_event(first));
-            while out.len() < self.config.max_batch_size {
-                match rx.try_recv() {
-                    Ok(submission) => out.push(self.submission_to_event(submission)),
-                    Err(_) => break,
-                }
+        let mut out = vec![self.submission_to_event(first)];
+        while out.len() < self.config.max_batch_size {
+            match rx.try_recv() {
+                Ok(submission) => out.push(self.submission_to_event(submission)),
+                Err(_) => break,
             }
         }
 
@@ -285,6 +188,7 @@ mod tests {
             event_type: "order.created".to_string(),
             data: json!({"value": 1}),
             metadata: None,
+            ingress_handoff: None,
         })
         .await
         .unwrap();
@@ -292,6 +196,7 @@ mod tests {
             event_type: "order.updated".to_string(),
             data: json!({"value": 2}),
             metadata: None,
+            ingress_handoff: None,
         })
         .await
         .unwrap();
@@ -316,5 +221,35 @@ mod tests {
 
         let err = source.next().await.unwrap_err();
         assert!(matches!(err, SourceError::Transport(_)));
+    }
+
+    #[tokio::test]
+    async fn http_source_attaches_ingress_context_from_submission_handoff() {
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        tx.send(EventSubmission {
+            event_type: "order.created".to_string(),
+            data: json!({"value": 1}),
+            metadata: None,
+            ingress_handoff: Some(obzenflow_core::event::ingestion::SubmissionIngressContext {
+                accepted_at_ns: 42,
+                base_path: "/api/orders".to_string(),
+                batch_index: Some(0),
+            }),
+        })
+        .await
+        .unwrap();
+
+        let mut source = HttpSource::new(rx);
+        source.bind_writer_id(WriterId::from(StageId::new()));
+
+        let out = source.next().await.unwrap();
+        assert_eq!(
+            out[0].ingress_context,
+            Some(IngressContext {
+                accepted_at_ns: 42,
+                base_path: "/api/orders".to_string(),
+                batch_index: Some(0),
+            })
+        );
     }
 }

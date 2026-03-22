@@ -7,6 +7,7 @@ use obzenflow_core::event::ingestion::IngestionTelemetry;
 use obzenflow_runtime::pipeline::fsm::PipelineState;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::{mpsc, watch};
 
 use super::{AuthConfig, ValidationConfig};
@@ -127,6 +128,13 @@ impl IngestionState {
 pub(crate) fn join_path(base_path: &str, suffix: &str) -> String {
     let base_path = normalize_base_path(base_path);
     format!("{base_path}/{suffix}")
+}
+
+pub(crate) fn unix_now_nanos() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos() as u64
 }
 
 fn normalize_base_path(base_path: &str) -> String {

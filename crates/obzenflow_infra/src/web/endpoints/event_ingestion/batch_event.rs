@@ -2,12 +2,12 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use super::shared::join_path;
+use super::shared::{join_path, unix_now_nanos};
 use super::IngestionState;
 use super::{authorize_request, validate_submission};
 use async_trait::async_trait;
 use obzenflow_core::event::ingestion::{
-    BatchSubmission, IngestionRejectionReason, SubmissionResponse,
+    BatchSubmission, IngestionRejectionReason, SubmissionIngressContext, SubmissionResponse,
 };
 use obzenflow_core::web::{HttpEndpoint, HttpMethod, ManagedResponse, Request, Response, WebError};
 use serde_json::json;
@@ -129,9 +129,9 @@ impl HttpEndpoint for BatchEventEndpoint {
         let mut errors = Vec::new();
 
         if let Some(ref validation) = self.state.config.validation {
-            for event in submission.events {
+            for (batch_index, event) in submission.events.into_iter().enumerate() {
                 match validate_submission(&event, validation) {
-                    Ok(()) => accepted_events.push(event),
+                    Ok(()) => accepted_events.push((batch_index, event)),
                     Err(e) => {
                         rejected += 1;
                         errors.push(format!("{}: {}", event.event_type, e.to_message()));
@@ -139,7 +139,7 @@ impl HttpEndpoint for BatchEventEndpoint {
                 }
             }
         } else {
-            accepted_events = submission.events;
+            accepted_events = submission.events.into_iter().enumerate().collect();
         }
 
         let accepted = accepted_events.len();
@@ -198,7 +198,14 @@ impl HttpEndpoint for BatchEventEndpoint {
             }
         }
 
-        for (permit, event) in permits.into_iter().zip(accepted_events) {
+        let accepted_at_ns = unix_now_nanos();
+        let base_path = self.state.config.base_path.clone();
+        for (permit, (batch_index, mut event)) in permits.into_iter().zip(accepted_events) {
+            event.ingress_handoff = Some(SubmissionIngressContext {
+                accepted_at_ns,
+                base_path: base_path.clone(),
+                batch_index: Some(batch_index),
+            });
             permit.send(event);
         }
 

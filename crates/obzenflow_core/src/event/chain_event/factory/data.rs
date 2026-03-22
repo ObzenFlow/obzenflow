@@ -45,6 +45,7 @@ impl ChainEventFactory {
         event.correlation_id = parent.correlation_id;
         event.correlation_payload = parent.correlation_payload.clone();
         event.replay_context = parent.replay_context.clone();
+        event.ingress_context = parent.ingress_context.clone();
         event.cycle_depth = parent.cycle_depth;
         event.cycle_scc_id = parent.cycle_scc_id;
 

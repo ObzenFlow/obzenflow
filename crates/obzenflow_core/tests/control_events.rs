@@ -162,6 +162,7 @@ fn test_direct_chain_event_construction() {
         correlation_id: None,
         correlation_payload: None,
         replay_context: None,
+        ingress_context: None,
         cycle_depth: None,
         cycle_scc_id: None,
         runtime_context: None,

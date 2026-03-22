@@ -22,9 +22,11 @@ pub use validation::{
     validate_submission, SchemaValidator, TypedValidator, ValidationConfig, ValidationError,
 };
 
+use obzenflow_adapters::sources::http::{HttpSource, HttpSourceTyped};
 use obzenflow_core::event::ingestion::EventSubmission;
 use obzenflow_core::event::ingestion::IngestionTelemetry;
 use obzenflow_core::web::HttpEndpoint;
+use obzenflow_core::TypedPayload;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -34,13 +36,69 @@ use batch_event::BatchEventEndpoint;
 use health::IngestionHealthEndpoint;
 use single_event::SingleEventEndpoint;
 
+/// Framework-owned HTTP ingress bundle for a single typed payload.
+pub struct HttpIngress<T>
+where
+    T: TypedPayload + Send + Sync + 'static,
+{
+    surface: WebSurfaceAttachment,
+    source: HttpSourceTyped<T>,
+    telemetry: Arc<IngestionTelemetry>,
+}
+
+impl<T> HttpIngress<T>
+where
+    T: TypedPayload + Send + Sync + 'static,
+{
+    /// Clone the typed source that feeds accepted events into `flow!`.
+    pub fn source(&self) -> HttpSourceTyped<T> {
+        self.source.clone()
+    }
+
+    /// Consume the bundle and return the hosted surface attachment.
+    pub fn into_surface(self) -> WebSurfaceAttachment {
+        self.surface
+    }
+
+    pub(crate) fn into_surface_and_telemetry(
+        self,
+    ) -> (WebSurfaceAttachment, Arc<IngestionTelemetry>) {
+        (self.surface, self.telemetry)
+    }
+}
+
+/// Create a zero-wiring HTTP ingress bundle for `T`.
+///
+/// If `config.validation` is not set, the bundle defaults to a single-type validator
+/// for `T`.
+pub fn http_ingress<T>(mut config: IngestionConfig) -> HttpIngress<T>
+where
+    T: TypedPayload + Send + Sync + std::fmt::Debug + 'static,
+{
+    if config.validation.is_none() {
+        config.validation = Some(ValidationConfig::Single {
+            validator: Arc::new(TypedValidator::<T>::new()),
+        });
+    }
+
+    let (surface, rx, telemetry) = create_ingestion_surface(config);
+    let source = HttpSource::new(rx).typed::<T>();
+
+    HttpIngress {
+        surface,
+        source,
+        telemetry,
+    }
+}
+
 /// Create ingestion endpoints along with the receiver for wiring into `HttpSource`.
 ///
 /// Returns `(endpoints, rx, state)`:
 /// - `endpoints`: register with `start_web_server(..., extra_endpoints, port)`
 /// - `rx`: pass into `obzenflow_adapters::sources::http::HttpSource`
 /// - `state`: call `state.watch_pipeline_state(flow_handle.state_receiver())` (optional)
-pub fn create_ingestion_endpoints(
+#[allow(dead_code)]
+pub(crate) fn create_ingestion_endpoints(
     config: IngestionConfig,
 ) -> (
     Vec<Box<dyn HttpEndpoint>>,
@@ -58,32 +116,7 @@ pub fn create_ingestion_endpoints(
     (endpoints, rx, state)
 }
 
-/// Create a managed ingestion surface attachment plus the receiver for wiring into `HttpSource`.
-///
-/// This returns `(surface, rx, telemetry)`:
-/// - `surface`: register with `FlowApplication::builder().with_web_surface(...)`
-/// - `rx`: pass into `obzenflow_adapters::sources::http::HttpSource`
-/// - `telemetry`: pass into `HttpSource::with_telemetry(...)`
-///
-/// # Example
-/// ```ignore
-/// use obzenflow_infra::application::FlowApplication;
-/// use obzenflow_infra::web::endpoints::event_ingestion::{create_ingestion_surface, IngestionConfig};
-/// use obzenflow_adapters::sources::http::HttpSource;
-///
-/// let config = IngestionConfig {
-///     base_path: "/api/bank/accounts".to_string(),
-///     ..Default::default()
-/// };
-/// let (surface, rx, telemetry) = create_ingestion_surface(config);
-/// let accounts_source = HttpSource::new(rx).with_telemetry(telemetry);
-///
-/// FlowApplication::builder()
-///     .with_web_surface(surface)
-///     .run_blocking(flow! { /* ... */ })?;
-/// # Ok::<(), Box<dyn std::error::Error>>(())
-/// ```
-pub fn create_ingestion_surface(
+pub(crate) fn create_ingestion_surface(
     config: IngestionConfig,
 ) -> (
     WebSurfaceAttachment,
@@ -208,6 +241,7 @@ mod tests {
                 event_type: "filled".to_string(),
                 data: json!({"value": 1}),
                 metadata: None,
+                ingress_handoff: None,
             })
             .unwrap();
 
@@ -302,6 +336,7 @@ mod tests {
                 event_type: "one".to_string(),
                 data: json!({"value": 1}),
                 metadata: None,
+                ingress_handoff: None,
             })
             .unwrap();
 
@@ -480,5 +515,70 @@ mod tests {
         assert_eq!(resp.status, 200);
         let queued = rx.recv().await.expect("queued event");
         assert_eq!(queued.event_type, "order.created");
+    }
+
+    #[tokio::test]
+    async fn http_ingress_bundle_wires_surface_and_source() {
+        use obzenflow_core::event::ChainEventContent;
+        use obzenflow_core::{StageId, WriterId};
+        use obzenflow_runtime::pipeline::fsm::PipelineState;
+        use obzenflow_runtime::stages::common::handlers::source::AsyncInfiniteSourceHandler;
+        use serde::{Deserialize, Serialize};
+
+        #[derive(Debug, Clone, Serialize, Deserialize)]
+        struct TestPayload {
+            order_id: String,
+        }
+
+        impl TypedPayload for TestPayload {
+            const EVENT_TYPE: &'static str = "order.created";
+        }
+
+        let ingress = http_ingress::<TestPayload>(IngestionConfig::default());
+        let mut source = ingress.source();
+        let (surface, _telemetry) = ingress.into_surface_and_telemetry();
+        let (_name, endpoints, wiring) = surface.into_parts();
+
+        let wiring = wiring.expect("ingress surface wiring");
+        let (_tx, pipeline_state) = tokio::sync::watch::channel(PipelineState::Running);
+        let wired = wiring(WebSurfaceWiringContext { pipeline_state }).unwrap();
+        tokio::task::yield_now().await;
+
+        let events_endpoint = endpoints
+            .into_iter()
+            .find(|endpoint| endpoint.path().ends_with("/events"))
+            .expect("events endpoint");
+
+        let request = Request::new(HttpMethod::Post, events_endpoint.path().to_string()).with_body(
+            serde_json::to_vec(&serde_json::json!({
+                "event_type": "order.created",
+                "data": { "order_id": "1" }
+            }))
+            .unwrap(),
+        );
+
+        let response = unwrap_unary(events_endpoint.handle(request).await.unwrap());
+        assert_eq!(response.status, 200);
+
+        source.bind_writer_id(WriterId::from(StageId::new()));
+        let out = source.next().await.unwrap();
+        assert_eq!(out.len(), 1);
+        match &out[0].content {
+            ChainEventContent::Data {
+                event_type,
+                payload,
+            } => {
+                assert_eq!(event_type, "order.created");
+                assert_eq!(payload, &serde_json::json!({ "order_id": "1" }));
+            }
+            other => panic!("expected data event, got {other:?}"),
+        }
+        let ingress_context = out[0].ingress_context.as_ref().expect("ingress context");
+        assert_eq!(ingress_context.base_path, "/api/ingest");
+        assert_eq!(ingress_context.batch_index, None);
+
+        for task in wired.tasks {
+            task.abort();
+        }
     }
 }
