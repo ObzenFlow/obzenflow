@@ -40,7 +40,7 @@ where
     ) -> Arc<dyn HttpEndpoint> {
         endpoints
             .iter()
-            .find(|ep| ep.path() == path && ep.methods().iter().any(|m| *m == method))
+            .find(|ep| ep.path() == path && ep.methods().contains(&method))
             .cloned()
             .unwrap_or_else(|| panic!("ingestion endpoint not found: {method:?} {path}"))
     }
@@ -64,27 +64,9 @@ where
 
     let surface = WebSurface::resource(format!("ingestion:{base_path}"))
         .base_path(base_path.clone())
-        .route(Route::post("/events").handler({
-            let events = events.clone();
-            move |req| {
-                let events = events.clone();
-                async move { events.handle(req).await }
-            }
-        }))
-        .route(Route::post("/batch").handler({
-            let batch = batch.clone();
-            move |req| {
-                let batch = batch.clone();
-                async move { batch.handle(req).await }
-            }
-        }))
-        .route(Route::get("/health").handler({
-            let health = health.clone();
-            move |req| {
-                let health = health.clone();
-                async move { health.handle(req).await }
-            }
-        }));
+        .route(Route::post("/events").endpoint(events))
+        .route(Route::post("/batch").endpoint(batch))
+        .route(Route::get("/health").endpoint(health));
 
     let state_for_wiring = state.clone();
     let surface =

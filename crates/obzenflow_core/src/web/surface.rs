@@ -162,6 +162,20 @@ impl RouteBuilder {
             policy: self.policy,
         }
     }
+
+    /// Use an existing `HttpEndpoint` as the handler for this route.
+    ///
+    /// This avoids the closure boilerplate needed when bridging legacy
+    /// endpoints into the `WebSurface` DSL.
+    pub fn endpoint(self, ep: Arc<dyn HttpEndpoint>) -> Route {
+        Route {
+            methods: self.methods,
+            path: self.path,
+            kind: self.kind,
+            handler: Arc::new(EndpointAdapter(ep)),
+            policy: self.policy,
+        }
+    }
 }
 
 pub struct WebSurface {
@@ -253,6 +267,16 @@ fn join_path(base_path: &str, suffix: &str) -> String {
         format!("{base}{suffix}")
     } else {
         format!("{base}/{suffix}")
+    }
+}
+
+/// Adapter that lets an existing `Arc<dyn HttpEndpoint>` satisfy `RouteHandler`.
+struct EndpointAdapter(Arc<dyn HttpEndpoint>);
+
+#[async_trait]
+impl RouteHandler for EndpointAdapter {
+    async fn handle(&self, request: Request) -> Result<ManagedResponse, WebError> {
+        self.0.handle(request).await
     }
 }
 
