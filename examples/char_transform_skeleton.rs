@@ -79,14 +79,13 @@ impl TypedPayload for TransformedText {
 // ── Flow ────────────────────────────────────────────────────────────────────
 // Types and topology only. Every handler is placeholder!().
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     if std::env::var_os("RUST_LOG").is_none() {
         std::env::set_var("RUST_LOG", "warn");
     }
     std::env::set_var("OBZENFLOW_METRICS_EXPORTER", "console");
 
-    FlowApplication::run(flow! {
+    FlowApplication::builder().run_blocking(flow! {
         name: "char_transform_skeleton",
         journals: disk_journals(PathBuf::from("target/char-transform-skeleton-logs")),
         middleware: [],
@@ -103,8 +102,7 @@ async fn main() -> Result<()> {
             transform_text |> collect_text;
             collect_text |> output;
         }
-    })
-    .await?;
+    })?;
 
     Ok(())
 }

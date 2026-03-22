@@ -427,19 +427,7 @@ pub fn run_example(config: DemoConfig, presentation: Presentation) -> Result<()>
 /// without invoking the CLI argument parser.
 #[cfg(test)]
 pub fn run_example_in_tests() -> Result<()> {
-    let _ = tracing_subscriber::fmt::try_init();
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| anyhow::anyhow!("Failed to create runtime: {e:?}"))?;
-
-    runtime.block_on(async {
-        let handle = build_flow().await?;
-        handle
-            .run()
-            .await
-            .map_err(|e| anyhow::anyhow!("Flow execution failed: {e:?}"))
-    })
+    run_flow_in_tests(build_flow(), "Flow execution failed")
 }
 
 /// Strict-mode variant of the flow used for tests.
@@ -480,17 +468,30 @@ fn build_strict_flow() -> obzenflow_dsl::FlowDefinition {
 /// Test-only runner for the strict flow; expected to fail with a contract violation.
 #[cfg(test)]
 pub fn run_strict_example_in_tests() -> Result<()> {
+    run_flow_in_tests(build_strict_flow(), "Flow execution failed (strict mode)")
+}
+
+#[cfg(test)]
+fn run_flow_in_tests(
+    flow: obzenflow_dsl::FlowDefinition,
+    error_context: &'static str,
+) -> Result<()> {
     let _ = tracing_subscriber::fmt::try_init();
+
+    // These helpers intentionally bypass FlowApplication:
+    // - `FlowApplication` parses CLI args, which clashes with `cargo test` arguments.
+    // - `FlowApplication` installs global tracing with `.init()`, while ignored end-to-end
+    //   tests need a best-effort tracer that remains harmless across repeated runs.
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(|e| anyhow::anyhow!("Failed to create runtime: {e:?}"))?;
 
-    runtime.block_on(async {
-        let handle = build_strict_flow().await?;
+    runtime.block_on(async move {
+        let handle = flow.await?;
         handle
             .run()
             .await
-            .map_err(|e| anyhow::anyhow!("Flow execution failed (strict mode): {e:?}"))
+            .map_err(|e| anyhow::anyhow!("{error_context}: {e:?}"))
     })
 }

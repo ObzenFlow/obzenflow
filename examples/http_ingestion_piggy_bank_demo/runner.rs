@@ -29,15 +29,6 @@ fn ingress_config(base_path: &str) -> IngestionConfig {
 }
 
 pub fn run_example() -> Result<()> {
-    tokio::runtime::Runtime::new()?.block_on(run())
-}
-
-#[cfg(test)]
-pub fn run_example_in_tests() -> Result<()> {
-    Ok(())
-}
-
-async fn run() -> Result<()> {
     let accounts_ingress = http_ingress::<AccountOpened>(ingress_config(ACCOUNTS_BASE_PATH));
     // Extract the typed source before moving the bundle into FlowApplication.
     let accounts_source = accounts_ingress.source();
@@ -52,8 +43,12 @@ async fn run() -> Result<()> {
         .with_http_ingress(tx_ingress)
         // `build_flow(...)` intentionally takes only sources. It stays unaware of
         // HTTP hosting concerns such as readiness wiring and ingress telemetry.
-        .run_async(flow::build_flow(accounts_source, tx_source))
-        .await?;
+        .run_blocking(flow::build_flow(accounts_source, tx_source))?;
 
+    Ok(())
+}
+
+#[cfg(test)]
+pub fn run_example_in_tests() -> Result<()> {
     Ok(())
 }

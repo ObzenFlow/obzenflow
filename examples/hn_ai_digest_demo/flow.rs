@@ -15,7 +15,7 @@ use obzenflow_adapters::middleware::RateLimiterBuilder;
 use obzenflow_core::ai::ChatResponse;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{ai_map_reduce, async_source, flow, sink, stateful, transform};
-use obzenflow_infra::application::{FlowApplication, Presentation};
+use obzenflow_infra::application::{Banner, FlowApplication, Presentation, RunPresentationOutcome};
 use obzenflow_infra::http_client::default_http_client;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
@@ -302,6 +302,46 @@ pub async fn run_example(config: DemoConfig, presentation: Presentation) -> Resu
         .await?;
 
     Ok(())
+}
+
+pub fn run_demo_blocking() -> Result<()> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+
+    runtime.block_on(async {
+        let config = DemoConfig::from_env().await?;
+        let presentation = build_presentation(&config);
+        run_example(config, presentation).await
+    })
+}
+
+fn build_presentation(config: &DemoConfig) -> Presentation {
+    Presentation::new(
+        Banner::new("HN AI Digest Demo")
+            .description(
+                "Fetch top HN stories, then generate a markdown digest via Rig-backed LLM transforms.",
+            )
+            .config("mode", &config.mode_label)
+            .config("base_url", config.base_url.to_string())
+            .config("max_stories", config.max_stories)
+            .config("poll_timeout", format!("{}s", config.poll_timeout_secs))
+            .section("AI", &config.ai)
+            .config("group_budget_tokens", config.budget_per_group_tokens)
+            .config("group_max_stories", config.group_max_stories_label())
+            .config("source_rate_limit", format!("{} events/sec", config.source_rate_limit)),
+    )
+    .with_footer(|outcome| {
+        let is_success = matches!(&outcome, RunPresentationOutcome::Completed { .. });
+        let footer = outcome.into_footer();
+        if is_success {
+            footer.paragraph(
+                "The generated digest was printed above.\nRe-run with HN_LIVE=1 to fetch from the real Hacker News API.",
+            )
+        } else {
+            footer
+        }
+    })
 }
 
 fn format_digest_summary_for_console(summary: &HnDigestSummary) -> String {

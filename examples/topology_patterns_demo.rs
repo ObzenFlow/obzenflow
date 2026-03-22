@@ -315,8 +315,7 @@ impl SinkHandler for PrioritySink {
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     // Set environment to use console exporter
     std::env::set_var("OBZENFLOW_METRICS_EXPORTER", "console");
 
@@ -377,8 +376,9 @@ async fn main() -> Result<()> {
     let med_counter_flow = med_counter.clone();
     let high_counter_flow = high_counter.clone();
 
-    FlowApplication::run_with_presentation(
-        flow! {
+    FlowApplication::builder()
+        .with_presentation(presentation)
+        .run_blocking(flow! {
             name: "topology_patterns",
             journals: disk_journals(journal_path.clone()),
             middleware: [],
@@ -465,10 +465,7 @@ async fn main() -> Result<()> {
                 router |> med_sink;
                 router |> high_sink;
             }
-        },
-        presentation,
-    )
-    .await?;
+        })?;
 
     Ok(())
 }
