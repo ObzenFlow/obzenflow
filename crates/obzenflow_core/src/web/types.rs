@@ -44,6 +44,16 @@ pub struct Request {
     /// Request path (without query string)
     pub path: String,
 
+    /// Registered route template matched for this request.
+    ///
+    /// For exact routes this is typically equal to `path`, but for parameterised
+    /// routes this preserves the template (e.g. `/items/:id`) while `path` is
+    /// the raw request path (e.g. `/items/123`).
+    pub matched_route: String,
+
+    /// Extracted path parameters from the matched route.
+    pub path_params: HashMap<String, String>,
+
     /// HTTP headers
     pub headers: HashMap<String, String>,
 
@@ -59,7 +69,9 @@ impl Request {
     pub fn new(method: HttpMethod, path: String) -> Self {
         Self {
             method,
+            matched_route: path.clone(),
             path,
+            path_params: HashMap::new(),
             headers: HashMap::new(),
             query_params: HashMap::new(),
             body: Vec::new(),

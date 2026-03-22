@@ -5,8 +5,22 @@
 //! HTTP endpoint abstraction
 
 use super::error::WebError;
-use super::types::{HttpMethod, Request, Response};
+use super::managed::ManagedResponse;
+use super::surface::{RouteKind, RoutePolicy, SurfacePolicy};
+use super::types::{HttpMethod, Request};
 use async_trait::async_trait;
+
+/// Managed-route metadata exposed by `WebSurface`-backed endpoints.
+///
+/// This is an optional, framework-neutral signal that the infrastructure layer can
+/// use for policy enforcement and observability decisions without depending on
+/// any concrete web framework types.
+#[derive(Debug, Clone)]
+pub struct ManagedRouteInfo {
+    pub kind: RouteKind,
+    pub surface_policy: Option<SurfacePolicy>,
+    pub route_policy: RoutePolicy,
+}
 
 /// Trait for HTTP endpoints that can be registered with a web server
 ///
@@ -31,7 +45,7 @@ pub trait HttpEndpoint: Send + Sync {
     ///
     /// This method is called when a request matches this endpoint's path and method.
     /// The implementation should process the request and return an appropriate response.
-    async fn handle(&self, request: Request) -> Result<Response, WebError>;
+    async fn handle(&self, request: Request) -> Result<ManagedResponse, WebError>;
 
     /// Optional method to check if the endpoint is healthy
     ///
@@ -46,6 +60,11 @@ pub trait HttpEndpoint: Send + Sync {
     /// This can be used for documentation, monitoring, etc.
     /// Default implementation returns None.
     fn metadata(&self) -> Option<EndpointMetadata> {
+        None
+    }
+
+    /// Optional managed-route metadata for endpoints that are derived from `WebSurface`.
+    fn managed_route(&self) -> Option<ManagedRouteInfo> {
         None
     }
 }

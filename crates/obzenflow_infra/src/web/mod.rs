@@ -14,6 +14,8 @@ pub(crate) mod endpoint_tags;
 pub mod endpoints;
 pub mod factory;
 #[cfg(feature = "warp-server")]
+pub(crate) mod routing;
+#[cfg(feature = "warp-server")]
 pub(crate) mod surface_metrics;
 
 #[cfg(feature = "warp-server")]

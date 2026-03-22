@@ -5,7 +5,7 @@
 use super::shared::join_path;
 use super::IngestionState;
 use async_trait::async_trait;
-use obzenflow_core::web::{HttpEndpoint, HttpMethod, Request, Response, WebError};
+use obzenflow_core::web::{HttpEndpoint, HttpMethod, ManagedResponse, Request, Response, WebError};
 use serde::Serialize;
 
 pub struct IngestionHealthEndpoint {
@@ -38,7 +38,7 @@ impl HttpEndpoint for IngestionHealthEndpoint {
         &[HttpMethod::Get]
     }
 
-    async fn handle(&self, _request: Request) -> Result<Response, WebError> {
+    async fn handle(&self, _request: Request) -> Result<ManagedResponse, WebError> {
         let pipeline_ready = self.state.is_ready();
         let status = if pipeline_ready { "ready" } else { "not_ready" };
         let body = IngestionHealthResponse {
@@ -60,6 +60,6 @@ impl HttpEndpoint for IngestionHealthEndpoint {
                 message: e.to_string(),
                 source: None,
             })?;
-        Ok(response)
+        Ok(response.into())
     }
 }

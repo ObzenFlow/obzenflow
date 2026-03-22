@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use obzenflow_core::event::ingestion::{
     EventSubmission, IngestionRejectionReason, SubmissionResponse,
 };
-use obzenflow_core::web::{HttpEndpoint, HttpMethod, Request, Response, WebError};
+use obzenflow_core::web::{HttpEndpoint, HttpMethod, ManagedResponse, Request, Response, WebError};
 use serde_json::json;
 use tokio::sync::mpsc::error::TrySendError;
 
@@ -35,7 +35,7 @@ impl HttpEndpoint for SingleEventEndpoint {
         &[HttpMethod::Post]
     }
 
-    async fn handle(&self, request: Request) -> Result<Response, WebError> {
+    async fn handle(&self, request: Request) -> Result<ManagedResponse, WebError> {
         self.state.telemetry.observe_request();
 
         if request.body.len() > self.state.config.max_body_size {
@@ -48,7 +48,7 @@ impl HttpEndpoint for SingleEventEndpoint {
             self.state
                 .telemetry
                 .observe_rejected(IngestionRejectionReason::PayloadTooLarge, 1);
-            return Ok(response);
+            return Ok(response.into());
         }
 
         if let Some(ref auth) = self.state.config.auth {
@@ -62,7 +62,7 @@ impl HttpEndpoint for SingleEventEndpoint {
                 self.state
                     .telemetry
                     .observe_rejected(IngestionRejectionReason::Auth, 1);
-                return Ok(response);
+                return Ok(response.into());
             }
         }
 
@@ -77,7 +77,7 @@ impl HttpEndpoint for SingleEventEndpoint {
             self.state
                 .telemetry
                 .observe_rejected(IngestionRejectionReason::NotReady, 1);
-            return Ok(response);
+            return Ok(response.into());
         }
 
         let submission: EventSubmission = match serde_json::from_slice(&request.body) {
@@ -92,7 +92,7 @@ impl HttpEndpoint for SingleEventEndpoint {
                 self.state
                     .telemetry
                     .observe_rejected(IngestionRejectionReason::InvalidJson, 1);
-                return Ok(response);
+                return Ok(response.into());
             }
         };
 
@@ -107,7 +107,7 @@ impl HttpEndpoint for SingleEventEndpoint {
                 self.state
                     .telemetry
                     .observe_rejected(IngestionRejectionReason::Validation, 1);
-                return Ok(response);
+                return Ok(response.into());
             }
         }
 
@@ -124,7 +124,7 @@ impl HttpEndpoint for SingleEventEndpoint {
                         source: None,
                     })?;
                 self.state.telemetry.observe_accepted(1);
-                Ok(response)
+                Ok(response.into())
             }
             Err(TrySendError::Full(_)) => {
                 let response = Response::new(503)
@@ -137,7 +137,7 @@ impl HttpEndpoint for SingleEventEndpoint {
                 self.state
                     .telemetry
                     .observe_rejected(IngestionRejectionReason::BufferFull, 1);
-                Ok(response)
+                Ok(response.into())
             }
             Err(TrySendError::Closed(_)) => {
                 let response = Response::internal_error()
@@ -149,7 +149,7 @@ impl HttpEndpoint for SingleEventEndpoint {
                 self.state
                     .telemetry
                     .observe_rejected(IngestionRejectionReason::ChannelClosed, 1);
-                Ok(response)
+                Ok(response.into())
             }
         }
     }

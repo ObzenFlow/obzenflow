@@ -6,7 +6,10 @@
 //! `FlowApplication` but do not participate in pipeline topology.
 
 use async_trait::async_trait;
-use obzenflow_core::web::{EndpointMetadata, HttpEndpoint, Request, Response, WebError};
+use obzenflow_core::web::{
+    EndpointMetadata, HttpEndpoint, ManagedResponse, ManagedRouteInfo, Request, WebError,
+    WebSurface,
+};
 use obzenflow_runtime::pipeline::fsm::PipelineState;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
@@ -50,7 +53,7 @@ impl WebSurfaceWiring {
 /// # Example
 /// ```ignore
 /// use obzenflow_infra::application::{FlowApplication, WebSurfaceAttachment, WebSurfaceWiring, WebSurfaceWiringContext};
-/// use obzenflow_core::web::{HttpEndpoint, HttpMethod, Request, Response, WebError};
+/// use obzenflow_core::web::{HttpEndpoint, HttpMethod, ManagedResponse, Request, Response, WebError};
 /// use async_trait::async_trait;
 ///
 /// struct Hello;
@@ -58,8 +61,8 @@ impl WebSurfaceWiring {
 /// impl HttpEndpoint for Hello {
 ///     fn path(&self) -> &str { "/hello" }
 ///     fn methods(&self) -> &[HttpMethod] { &[HttpMethod::Get] }
-///     async fn handle(&self, _req: Request) -> Result<Response, WebError> {
-///         Ok(Response::ok().with_text("hello"))
+///     async fn handle(&self, _req: Request) -> Result<ManagedResponse, WebError> {
+///         Ok(Response::ok().with_text("hello").into())
 ///     }
 /// }
 ///
@@ -106,6 +109,13 @@ impl WebSurfaceAttachment {
     }
 }
 
+impl From<WebSurface> for WebSurfaceAttachment {
+    fn from(surface: WebSurface) -> Self {
+        let (name, endpoints) = surface.into_endpoints();
+        Self::new(name, endpoints)
+    }
+}
+
 pub(crate) fn label_endpoint(
     surface_name: &str,
     endpoint: Box<dyn HttpEndpoint>,
@@ -131,7 +141,7 @@ impl HttpEndpoint for SurfaceTaggedEndpoint {
         self.inner.methods()
     }
 
-    async fn handle(&self, request: Request) -> Result<Response, WebError> {
+    async fn handle(&self, request: Request) -> Result<ManagedResponse, WebError> {
         self.inner.handle(request).await
     }
 
@@ -147,6 +157,10 @@ impl HttpEndpoint for SurfaceTaggedEndpoint {
         meta.tags
             .push(format!("{SURFACE_NAME_TAG_PREFIX}{}", self.surface_name));
         Some(meta)
+    }
+
+    fn managed_route(&self) -> Option<ManagedRouteInfo> {
+        self.inner.managed_route()
     }
 }
 

@@ -64,7 +64,8 @@ feature-depth = 1
 # https://embarkstudios.github.io/cargo-deny/checks/advisories/cfg.html
 [advisories]
 # The path where the advisory databases are cloned/fetched into
-#db-path = "$CARGO_HOME/advisory-dbs"
+# Keep this inside the workspace so CI/sandboxed environments can take the lockfile.
+db-path = "target/advisory-dbs"
 # The url(s) of the advisory databases to use
 #db-urls = ["https://github.com/rustsec/advisory-db"]
 # A list of advisory IDs to ignore. Note that ignored advisories will still

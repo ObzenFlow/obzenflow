@@ -8,8 +8,11 @@ use std::collections::HashMap;
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
+use chrono::Utc;
+use matchit::Router as MatchItRouter;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use warp::sse::Event as SseEvent;
 use warp::{filters::BoxedFilter, Filter, Rejection, Reply};
@@ -18,12 +21,14 @@ use obzenflow_core::event::event_envelope::SystemEventEnvelope;
 use obzenflow_core::event::SystemEvent;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::web::{
-    server::ServerShutdownHandle, CorsMode, HttpEndpoint, HttpMethod, Request, ServerConfig,
-    WebError, WebServer,
+    server::ServerShutdownHandle, AuthPolicy, CorsMode, HttpEndpoint, HttpMethod, ManagedResponse,
+    ManagedRouteInfo, Request, Response, RouteKind, ServerConfig, SseBody, SseFrame, WebError,
+    WebServer,
 };
 use obzenflow_core::EventId;
 
 use crate::web::endpoint_tags::SURFACE_NAME_TAG_PREFIX;
+use crate::web::routing::{matchit_template_to_public, public_template_to_matchit};
 use crate::web::surface_metrics::{HttpSurfaceMetricsCollector, HttpSurfaceObservation};
 
 /// Warp-based web server implementation
@@ -35,6 +40,13 @@ pub struct WarpServer {
 }
 
 const DEFAULT_MAX_BODY_SIZE_BYTES: usize = 10 * 1024 * 1024;
+const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 30;
+
+#[derive(Clone, Copy)]
+struct HostPolicy {
+    max_body_size_bytes: u64,
+    request_timeout: Option<Duration>,
+}
 
 impl WarpServer {
     /// Create a new Warp server
@@ -56,252 +68,181 @@ impl WarpServer {
         self.surface_metrics = Some(collector);
     }
 
-    /// Build path filter from string path
-    fn build_path_filter(
-        &self,
-        path: &str,
-    ) -> impl Filter<Extract = (), Error = Rejection> + Clone {
-        if path == "/" {
-            warp::path::end().boxed()
-        } else {
-            let segments: Vec<&str> = path
-                .trim_start_matches('/')
-                .split('/')
-                .filter(|s| !s.is_empty())
-                .collect();
-
-            let mut filter = warp::path(segments[0].to_string()).boxed();
-            for segment in &segments[1..] {
-                filter = filter.and(warp::path(segment.to_string())).boxed();
-            }
-            filter.and(warp::path::end()).boxed()
-        }
-    }
-
     /// Build Warp filter from endpoints.
-    fn build_filter(&self, max_body_size_bytes: u64) -> BoxedFilter<(Box<dyn Reply>,)> {
-        let mut combined_route: Option<BoxedFilter<(Box<dyn Reply>,)>> = None;
-
-        for endpoint in &self.endpoints {
-            let endpoint = endpoint.clone();
-            let path_str = endpoint.path().to_string();
-
-            let surface_metrics = match (&self.surface_metrics, surface_name_tag_value(&endpoint)) {
-                (Some(collector), Some(surface_name)) => Some(SurfaceMetricsRouteContext {
-                    collector: collector.clone(),
-                    surface_name,
-                    path: Arc::from(path_str.as_str()),
-                }),
-                _ => None,
-            };
-
-            // Create simple route for this endpoint
-            let route =
-                self.build_simple_route(path_str, endpoint, max_body_size_bytes, surface_metrics);
-
-            combined_route = match combined_route {
-                Some(existing) => Some(existing.or(route).unify().boxed()),
-                None => Some(route.boxed()),
-            };
-        }
-
-        // Add SSE /api/flow/events route if a system journal is available
-        if let Some(journal) = &self.system_journal {
-            let sse_route = self.build_flow_events_route(journal.clone());
-            combined_route = match combined_route {
-                Some(existing) => Some(existing.or(sse_route).unify().boxed()),
-                None => Some(sse_route.boxed()),
-            };
-        }
-
-        // Return combined routes or 404 if none
-        combined_route.unwrap_or_else(|| {
-            warp::any()
-                .map(|| -> Box<dyn Reply> {
-                    Box::new(
-                        warp::http::Response::builder()
-                            .status(404)
-                            .body(Vec::new())
-                            .unwrap(),
-                    )
-                })
-                .boxed()
-        })
-    }
-
-    /// Build a simple route for an endpoint
-    fn build_simple_route(
+    fn build_filter(
         &self,
-        path_str: String,
-        endpoint: Arc<dyn HttpEndpoint>,
-        max_body_size_bytes: u64,
-        surface_metrics: Option<SurfaceMetricsRouteContext>,
-    ) -> impl Filter<Extract = (Box<dyn Reply>,), Error = Rejection> + Clone {
-        let path_filter = self.build_path_filter(&path_str);
+        host_policy: HostPolicy,
+    ) -> Result<BoxedFilter<(Box<dyn Reply>,)>, WebError> {
+        let router = Arc::new(self.build_route_router()?);
 
-        // Create GET/HEAD/DELETE routes (no body)
+        let query = warp::filters::query::query::<HashMap<String, String>>()
+            .or(warp::any().map(HashMap::new))
+            .unify();
+        let headers = warp::header::headers_cloned();
+
         let get_route = warp::get()
-            .and(path_filter.clone())
-            .and(
-                warp::filters::query::query::<HashMap<String, String>>()
-                    .or(warp::any().map(HashMap::new))
-                    .unify(),
-            )
-            .and(warp::header::headers_cloned())
+            .and(warp::path::full())
+            .and(query)
+            .and(headers)
             .and_then({
-                let endpoint = endpoint.clone();
-                let path_str = path_str.clone();
-                let surface_metrics = surface_metrics.clone();
-                move |query_params: HashMap<String, String>, headers: warp::http::HeaderMap| {
-                    handle_request_no_body(
-                        endpoint.clone(),
+                let router = router.clone();
+                move |path: warp::path::FullPath,
+                      query_params: HashMap<String, String>,
+                      headers: warp::http::HeaderMap| {
+                    dispatch_request(
+                        router.clone(),
+                        host_policy,
                         HttpMethod::Get,
+                        path,
                         headers,
                         query_params,
-                        path_str.clone(),
-                        surface_metrics.clone(),
+                        None,
                     )
                 }
             });
 
         let head_route = warp::head()
-            .and(path_filter.clone())
-            .and(
-                warp::filters::query::query::<HashMap<String, String>>()
-                    .or(warp::any().map(HashMap::new))
-                    .unify(),
-            )
-            .and(warp::header::headers_cloned())
+            .and(warp::path::full())
+            .and(query)
+            .and(headers)
             .and_then({
-                let endpoint = endpoint.clone();
-                let path_str = path_str.clone();
-                let surface_metrics = surface_metrics.clone();
-                move |query_params: HashMap<String, String>, headers: warp::http::HeaderMap| {
-                    handle_request_no_body(
-                        endpoint.clone(),
+                let router = router.clone();
+                move |path: warp::path::FullPath,
+                      query_params: HashMap<String, String>,
+                      headers: warp::http::HeaderMap| {
+                    dispatch_request(
+                        router.clone(),
+                        host_policy,
                         HttpMethod::Head,
+                        path,
                         headers,
                         query_params,
-                        path_str.clone(),
-                        surface_metrics.clone(),
+                        None,
                     )
                 }
             });
 
         let delete_route = warp::delete()
-            .and(path_filter.clone())
-            .and(
-                warp::filters::query::query::<HashMap<String, String>>()
-                    .or(warp::any().map(HashMap::new))
-                    .unify(),
-            )
-            .and(warp::header::headers_cloned())
+            .and(warp::path::full())
+            .and(query)
+            .and(headers)
             .and_then({
-                let endpoint = endpoint.clone();
-                let path_str = path_str.clone();
-                let surface_metrics = surface_metrics.clone();
-                move |query_params: HashMap<String, String>, headers: warp::http::HeaderMap| {
-                    handle_request_no_body(
-                        endpoint.clone(),
+                let router = router.clone();
+                move |path: warp::path::FullPath,
+                      query_params: HashMap<String, String>,
+                      headers: warp::http::HeaderMap| {
+                    dispatch_request(
+                        router.clone(),
+                        host_policy,
                         HttpMethod::Delete,
+                        path,
                         headers,
                         query_params,
-                        path_str.clone(),
-                        surface_metrics.clone(),
+                        None,
                     )
                 }
             });
 
-        // Create POST/PUT/PATCH routes (with body)
-        let post_route = warp::post()
-            .and(path_filter.clone())
-            .and(
-                warp::filters::query::query::<HashMap<String, String>>()
-                    .or(warp::any().map(HashMap::new))
-                    .unify(),
-            )
-            .and(warp::header::headers_cloned())
-            .and(warp::body::content_length_limit(max_body_size_bytes))
-            .and(warp::body::bytes())
+        let options_route = warp::options()
+            .and(warp::path::full())
+            .and(query)
+            .and(headers)
             .and_then({
-                let endpoint = endpoint.clone();
-                let path_str = path_str.clone();
-                let surface_metrics = surface_metrics.clone();
-                move |query_params: HashMap<String, String>,
-                      headers: warp::http::HeaderMap,
-                      body: bytes::Bytes| {
-                    handle_request_with_body(
-                        endpoint.clone(),
-                        HttpMethod::Post,
+                let router = router.clone();
+                move |path: warp::path::FullPath,
+                      query_params: HashMap<String, String>,
+                      headers: warp::http::HeaderMap| {
+                    dispatch_request(
+                        router.clone(),
+                        host_policy,
+                        HttpMethod::Options,
+                        path,
                         headers,
                         query_params,
-                        body,
-                        path_str.clone(),
-                        surface_metrics.clone(),
+                        None,
+                    )
+                }
+            });
+
+        let post_route = warp::post()
+            .and(warp::path::full())
+            .and(query)
+            .and(headers)
+            .and(warp::body::content_length_limit(
+                host_policy.max_body_size_bytes,
+            ))
+            .and(warp::body::bytes())
+            .and_then({
+                let router = router.clone();
+                move |path: warp::path::FullPath,
+                      query_params: HashMap<String, String>,
+                      headers: warp::http::HeaderMap,
+                      body: bytes::Bytes| {
+                    dispatch_request(
+                        router.clone(),
+                        host_policy,
+                        HttpMethod::Post,
+                        path,
+                        headers,
+                        query_params,
+                        Some(body),
                     )
                 }
             });
 
         let put_route = warp::put()
-            .and(path_filter.clone())
-            .and(
-                warp::filters::query::query::<HashMap<String, String>>()
-                    .or(warp::any().map(HashMap::new))
-                    .unify(),
-            )
-            .and(warp::header::headers_cloned())
-            .and(warp::body::content_length_limit(max_body_size_bytes))
+            .and(warp::path::full())
+            .and(query)
+            .and(headers)
+            .and(warp::body::content_length_limit(
+                host_policy.max_body_size_bytes,
+            ))
             .and(warp::body::bytes())
             .and_then({
-                let endpoint = endpoint.clone();
-                let path_str = path_str.clone();
-                let surface_metrics = surface_metrics.clone();
-                move |query_params: HashMap<String, String>,
+                let router = router.clone();
+                move |path: warp::path::FullPath,
+                      query_params: HashMap<String, String>,
                       headers: warp::http::HeaderMap,
                       body: bytes::Bytes| {
-                    handle_request_with_body(
-                        endpoint.clone(),
+                    dispatch_request(
+                        router.clone(),
+                        host_policy,
                         HttpMethod::Put,
+                        path,
                         headers,
                         query_params,
-                        body,
-                        path_str.clone(),
-                        surface_metrics.clone(),
+                        Some(body),
                     )
                 }
             });
 
         let patch_route = warp::patch()
-            .and(path_filter.clone())
-            .and(
-                warp::filters::query::query::<HashMap<String, String>>()
-                    .or(warp::any().map(HashMap::new))
-                    .unify(),
-            )
-            .and(warp::header::headers_cloned())
-            .and(warp::body::content_length_limit(max_body_size_bytes))
+            .and(warp::path::full())
+            .and(query)
+            .and(headers)
+            .and(warp::body::content_length_limit(
+                host_policy.max_body_size_bytes,
+            ))
             .and(warp::body::bytes())
             .and_then({
-                let endpoint = endpoint.clone();
-                let path_str = path_str.clone();
-                let surface_metrics = surface_metrics.clone();
-                move |query_params: HashMap<String, String>,
+                let router = router.clone();
+                move |path: warp::path::FullPath,
+                      query_params: HashMap<String, String>,
                       headers: warp::http::HeaderMap,
                       body: bytes::Bytes| {
-                    handle_request_with_body(
-                        endpoint.clone(),
+                    dispatch_request(
+                        router.clone(),
+                        host_policy,
                         HttpMethod::Patch,
+                        path,
                         headers,
                         query_params,
-                        body,
-                        path_str.clone(),
-                        surface_metrics.clone(),
+                        Some(body),
                     )
                 }
             });
 
-        // Combine all routes
-        get_route
+        let mut combined_route = get_route
             .or(post_route)
             .unify()
             .or(put_route)
@@ -312,6 +253,109 @@ impl WarpServer {
             .unify()
             .or(head_route)
             .unify()
+            .or(options_route)
+            .unify()
+            .boxed();
+
+        // Add SSE /api/flow/events route if a system journal is available
+        if let Some(journal) = &self.system_journal {
+            let sse_route = self.build_flow_events_route(journal.clone());
+            combined_route = combined_route.or(sse_route).unify().boxed();
+        }
+
+        Ok(combined_route)
+    }
+
+    fn build_route_router(&self) -> Result<MatchItRouter<RouteDispatch>, WebError> {
+        const ALL_METHODS: [HttpMethod; 7] = [
+            HttpMethod::Get,
+            HttpMethod::Post,
+            HttpMethod::Put,
+            HttpMethod::Delete,
+            HttpMethod::Patch,
+            HttpMethod::Head,
+            HttpMethod::Options,
+        ];
+
+        let mut by_template: HashMap<String, RouteDispatch> = HashMap::new();
+
+        for endpoint in &self.endpoints {
+            let endpoint = endpoint.clone();
+            let template = endpoint.path().to_string();
+
+            if let Some(managed) = endpoint.managed_route() {
+                if let Some(surface_policy) = managed.surface_policy.as_ref() {
+                    if let Some(surface_auth) = surface_policy.auth.as_ref() {
+                        if !matches!(surface_auth, AuthPolicy::None)
+                            && matches!(managed.route_policy.auth, Some(AuthPolicy::None))
+                        {
+                            return Err(WebError::EndpointRegistrationFailed {
+                                path: template.clone(),
+                                message: "Route-local AuthPolicy::None must not weaken a surface-level auth requirement; prefer leaving surface auth unset and declaring auth on protected routes explicitly"
+                                    .to_string(),
+                            });
+                        }
+                    }
+                }
+            }
+
+            let surface_metrics = match (&self.surface_metrics, surface_name_tag_value(&endpoint)) {
+                (Some(collector), Some(surface_name)) => Some(SurfaceMetricsRouteContext {
+                    collector: collector.clone(),
+                    surface_name,
+                    path: Arc::from(template.as_str()),
+                }),
+                _ => None,
+            };
+
+            let claimed_methods: Vec<HttpMethod> = if endpoint.methods().is_empty() {
+                ALL_METHODS.to_vec()
+            } else {
+                endpoint.methods().to_vec()
+            };
+
+            let dispatch = by_template
+                .entry(template.clone())
+                .or_insert_with(|| RouteDispatch::new(Arc::from(template.as_str())));
+
+            for method in claimed_methods {
+                dispatch.insert_method(
+                    method,
+                    endpoint.clone(),
+                    surface_metrics.clone(),
+                    &template,
+                )?;
+            }
+        }
+
+        let mut entries: Vec<(String, RouteDispatch)> = by_template.into_iter().collect();
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+
+        let mut router = MatchItRouter::new();
+        for (template, dispatch) in entries {
+            let matchit_path = public_template_to_matchit(&template).map_err(|message| {
+                WebError::EndpointRegistrationFailed {
+                    path: template.clone(),
+                    message,
+                }
+            })?;
+
+            if let Err(err) = router.insert(matchit_path, dispatch) {
+                let message = match err {
+                    matchit::InsertError::Conflict { with } => format!(
+                        "Route template conflicts with previously registered route: {}",
+                        matchit_template_to_public(&with)
+                    ),
+                    other => other.to_string(),
+                };
+                return Err(WebError::EndpointRegistrationFailed {
+                    path: template,
+                    message,
+                });
+            }
+        }
+
+        Ok(router)
     }
 
     /// Build SSE route for `/api/flow/events`
@@ -577,13 +621,346 @@ fn surface_name_tag_value(endpoint: &Arc<dyn HttpEndpoint>) -> Option<Arc<str>> 
         .map(Arc::from)
 }
 
+#[derive(Clone)]
+struct RoutedEndpoint {
+    endpoint: Arc<dyn HttpEndpoint>,
+    surface_metrics: Option<SurfaceMetricsRouteContext>,
+}
+
+#[derive(Clone)]
+struct RouteDispatch {
+    template: Arc<str>,
+    by_method: HashMap<HttpMethod, RoutedEndpoint>,
+}
+
+impl RouteDispatch {
+    fn new(template: Arc<str>) -> Self {
+        Self {
+            template,
+            by_method: HashMap::new(),
+        }
+    }
+
+    fn insert_method(
+        &mut self,
+        method: HttpMethod,
+        endpoint: Arc<dyn HttpEndpoint>,
+        surface_metrics: Option<SurfaceMetricsRouteContext>,
+        template_for_error: &str,
+    ) -> Result<(), WebError> {
+        if self.by_method.contains_key(&method) {
+            return Err(WebError::EndpointRegistrationFailed {
+                path: template_for_error.to_string(),
+                message: format!(
+                    "Duplicate endpoint registered for {} {}",
+                    method.as_str(),
+                    template_for_error
+                ),
+            });
+        }
+
+        self.by_method.insert(
+            method,
+            RoutedEndpoint {
+                endpoint,
+                surface_metrics,
+            },
+        );
+        Ok(())
+    }
+
+    fn for_method(&self, method: HttpMethod) -> Option<RoutedEndpoint> {
+        self.by_method.get(&method).cloned()
+    }
+}
+
+async fn dispatch_request(
+    router: Arc<MatchItRouter<RouteDispatch>>,
+    host_policy: HostPolicy,
+    method: HttpMethod,
+    path: warp::path::FullPath,
+    headers: warp::http::HeaderMap,
+    query_params: HashMap<String, String>,
+    body: Option<bytes::Bytes>,
+) -> Result<Box<dyn Reply>, Rejection> {
+    let raw_path = path.as_str().to_string();
+
+    let matched = match router.at(raw_path.as_str()) {
+        Ok(matched) => matched,
+        Err(_) => return Err(warp::reject::not_found()),
+    };
+
+    let dispatch = matched.value;
+    let routed = match dispatch.for_method(method) {
+        Some(routed) => routed,
+        None => return Err(warp::reject::not_found()),
+    };
+
+    let mut path_params: HashMap<String, String> = HashMap::new();
+    for (k, v) in matched.params.iter() {
+        path_params.insert(k.to_string(), v.to_string());
+    }
+
+    let matched_route = dispatch.template.to_string();
+    match body {
+        Some(body) => {
+            handle_request_with_body(
+                routed.endpoint,
+                host_policy,
+                method,
+                headers,
+                query_params,
+                body,
+                raw_path,
+                matched_route,
+                path_params,
+                routed.surface_metrics,
+            )
+            .await
+        }
+        None => {
+            handle_request_no_body(
+                routed.endpoint,
+                host_policy,
+                method,
+                headers,
+                query_params,
+                raw_path,
+                matched_route,
+                path_params,
+                routed.surface_metrics,
+            )
+            .await
+        }
+    }
+}
+
+fn header_value<'a>(headers: &'a HashMap<String, String>, header_name: &str) -> Option<&'a str> {
+    headers.iter().find_map(|(k, v)| {
+        if k.eq_ignore_ascii_case(header_name) {
+            Some(v.as_str())
+        } else {
+            None
+        }
+    })
+}
+
+fn normalize_content_type(value: &str) -> &str {
+    value.split(';').next().unwrap_or(value).trim()
+}
+
+fn content_type_matches(provided: Option<&str>, expected: &str) -> bool {
+    let Some(provided) = provided else {
+        return false;
+    };
+    let provided = normalize_content_type(provided);
+    let expected = normalize_content_type(expected);
+    provided.eq_ignore_ascii_case(expected)
+}
+
+fn resolve_effective_auth(managed: &ManagedRouteInfo) -> Option<AuthPolicy> {
+    if let Some(route_auth) = &managed.route_policy.auth {
+        return Some(route_auth.clone());
+    }
+    managed
+        .surface_policy
+        .as_ref()
+        .and_then(|policy| policy.auth.clone())
+}
+
+fn resolve_effective_timeout(
+    host: Option<Duration>,
+    managed: Option<&ManagedRouteInfo>,
+) -> Option<Duration> {
+    let surface_timeout = managed
+        .and_then(|m| m.surface_policy.as_ref())
+        .and_then(|policy| policy.request_timeout_secs)
+        .map(Duration::from_secs);
+
+    match (host, surface_timeout) {
+        (Some(host), Some(surface)) => Some(std::cmp::min(host, surface)),
+        (Some(host), None) => Some(host),
+        (None, Some(surface)) => Some(surface),
+        (None, None) => None,
+    }
+}
+
+fn resolve_effective_max_body_size_bytes(host: u64, managed: &ManagedRouteInfo) -> u64 {
+    managed
+        .surface_policy
+        .as_ref()
+        .and_then(|policy| policy.max_body_size)
+        .map(|surface| std::cmp::min(surface as u64, host))
+        .unwrap_or(host)
+}
+
+fn enforce_auth_policy(
+    auth: &AuthPolicy,
+    headers: &HashMap<String, String>,
+    body: &[u8],
+) -> Result<(), Response> {
+    match auth {
+        AuthPolicy::None => Ok(()),
+        AuthPolicy::ApiKey { header, value_env } => {
+            use subtle::ConstantTimeEq;
+
+            let expected = match std::env::var(value_env) {
+                Ok(v) => v,
+                Err(err) => {
+                    tracing::error!(
+                        value_env = %value_env,
+                        error = %err,
+                        "AuthPolicy::ApiKey is misconfigured: expected env var not present"
+                    );
+                    return Err(Response::internal_error().with_text("Internal Server Error"));
+                }
+            };
+
+            let provided = header_value(headers, header).unwrap_or_default();
+            let ok: bool = provided.as_bytes().ct_eq(expected.as_bytes()).into();
+            if ok {
+                Ok(())
+            } else {
+                Err(Response::new(401).with_text("Unauthorized"))
+            }
+        }
+        AuthPolicy::HmacSha256 {
+            secret_env,
+            signature_header,
+            body_hash: _,
+            timestamp_header,
+            replay_window_secs,
+        } => {
+            use ring::hmac;
+            use subtle::ConstantTimeEq;
+
+            if replay_window_secs.is_some() && timestamp_header.is_none() {
+                tracing::error!(
+                    "AuthPolicy::HmacSha256 is misconfigured: replay_window_secs requires timestamp_header"
+                );
+                return Err(Response::internal_error().with_text("Internal Server Error"));
+            }
+
+            let secret = match std::env::var(secret_env) {
+                Ok(v) => v,
+                Err(err) => {
+                    tracing::error!(
+                        secret_env = %secret_env,
+                        error = %err,
+                        "AuthPolicy::HmacSha256 is misconfigured: expected env var not present"
+                    );
+                    return Err(Response::internal_error().with_text("Internal Server Error"));
+                }
+            };
+
+            let provided_sig = match header_value(headers, signature_header) {
+                Some(v) => v,
+                None => return Err(Response::new(401).with_text("Unauthorized")),
+            };
+
+            let timestamp = match timestamp_header {
+                Some(header) => match header_value(headers, header) {
+                    Some(v) => Some(v),
+                    None => return Err(Response::new(401).with_text("Unauthorized")),
+                },
+                None => None,
+            };
+
+            if let (Some(window_secs), Some(ts_str)) = (replay_window_secs, timestamp) {
+                let ts = match ts_str.trim().parse::<i64>() {
+                    Ok(v) => v,
+                    Err(_) => return Err(Response::new(401).with_text("Unauthorized")),
+                };
+                let now = Utc::now().timestamp();
+                let window = i64::try_from(*window_secs).unwrap_or(i64::MAX);
+                if (now - ts).abs() > window {
+                    return Err(Response::new(401).with_text("Unauthorized"));
+                }
+            }
+
+            let key = hmac::Key::new(hmac::HMAC_SHA256, secret.as_bytes());
+            let expected = if let Some(ts) = timestamp {
+                let mut signed =
+                    Vec::with_capacity(ts.len().saturating_add(1).saturating_add(body.len()));
+                signed.extend_from_slice(ts.as_bytes());
+                signed.push(b'.');
+                signed.extend_from_slice(body);
+                hmac::sign(&key, &signed)
+            } else {
+                hmac::sign(&key, body)
+            };
+
+            let provided_bytes = match decode_hex_signature(provided_sig) {
+                Some(bytes) => bytes,
+                None => return Err(Response::new(401).with_text("Unauthorized")),
+            };
+
+            let ok: bool = expected.as_ref().ct_eq(provided_bytes.as_slice()).into();
+            if ok {
+                Ok(())
+            } else {
+                Err(Response::new(401).with_text("Unauthorized"))
+            }
+        }
+    }
+}
+
+fn decode_hex_signature(value: &str) -> Option<Vec<u8>> {
+    let value = value.trim();
+
+    let signature_hex = if let Some(hex) = value.strip_prefix("sha256=") {
+        hex.trim()
+    } else if value.contains("v1=") {
+        value
+            .split(',')
+            .find_map(|part| part.trim().strip_prefix("v1="))
+            .map(|v| v.trim())
+            .unwrap_or(value)
+    } else {
+        value
+    };
+
+    decode_hex(signature_hex)
+}
+
+fn decode_hex(value: &str) -> Option<Vec<u8>> {
+    let value = value.trim();
+    if !value.len().is_multiple_of(2) {
+        return None;
+    }
+
+    let bytes: Option<Vec<u8>> = (0..value.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&value[i..i + 2], 16).ok())
+        .collect();
+    bytes
+}
+
+fn reply_from_response(response: Response) -> Result<Box<dyn Reply>, Rejection> {
+    let mut builder = warp::http::Response::builder().status(response.status);
+
+    for (key, value) in response.headers {
+        builder = builder.header(key, value);
+    }
+
+    let reply = builder
+        .body(response.body)
+        .map_err(|_| warp::reject::reject())?;
+
+    Ok(Box::new(reply) as Box<dyn Reply>)
+}
+
 /// Helper function to handle requests without body (GET, HEAD, DELETE, OPTIONS)
+#[allow(clippy::too_many_arguments)]
 async fn handle_request_no_body(
     endpoint: Arc<dyn HttpEndpoint>,
+    host_policy: HostPolicy,
     method: HttpMethod,
     headers: warp::http::HeaderMap,
     query_params: HashMap<String, String>,
     path: String,
+    matched_route: String,
+    path_params: HashMap<String, String>,
     surface_metrics: Option<SurfaceMetricsRouteContext>,
 ) -> Result<Box<dyn Reply>, Rejection> {
     // Check if endpoint supports this method
@@ -602,17 +979,77 @@ async fn handle_request_no_body(
         }
     }
 
+    let managed = endpoint.managed_route();
+    let effective_timeout =
+        resolve_effective_timeout(host_policy.request_timeout, managed.as_ref());
+    let log_ctx = if managed.is_some() {
+        Some((path.clone(), matched_route.clone()))
+    } else {
+        None
+    };
+
+    if let Some(managed) = managed.as_ref() {
+        if let Some(auth) = resolve_effective_auth(managed) {
+            if let Err(response) = enforce_auth_policy(&auth, &req_headers, &[]) {
+                if let Some(metrics) = &surface_metrics {
+                    metrics.observe(
+                        method,
+                        response.status,
+                        start.elapsed().as_millis() as u64,
+                        0,
+                        response.body.len() as u64,
+                    );
+                }
+                return reply_from_response(response);
+            }
+        }
+    }
+
     let request = Request {
         method,
         path,
+        matched_route,
+        path_params,
         headers: req_headers,
         query_params,
         body: Vec::new(),
     };
 
     // Handle request
-    match endpoint.handle(request).await {
-        Ok(response) => {
+    let handler_result = if let Some(timeout) = effective_timeout {
+        match tokio::time::timeout(timeout, endpoint.handle(request)).await {
+            Ok(res) => res,
+            Err(_) => Ok(Response::new(504).with_text("Gateway Timeout").into()),
+        }
+    } else {
+        endpoint.handle(request).await
+    };
+
+    match handler_result {
+        Ok(ManagedResponse::Unary(mut response)) => {
+            if let Some(managed) = managed.as_ref() {
+                if matches!(managed.kind, RouteKind::Sse) && response.status < 400 {
+                    if let Some((raw_path, template)) = log_ctx.as_ref() {
+                        tracing::debug!(
+                            method = %method.as_str(),
+                            path = %raw_path,
+                            matched_route = %template,
+                            status = response.status,
+                            declared_kind = ?managed.kind,
+                            "Managed route returned a successful unary response despite being declared as SSE"
+                        );
+                    }
+                }
+
+                if let Some(ct) = managed.route_policy.response_content_type.as_deref() {
+                    if header_value(&response.headers, "content-type").is_none() {
+                        response
+                            .headers
+                            .insert("Content-Type".to_string(), ct.to_string());
+                    }
+                }
+            }
+
             let response_bytes = response.body.len() as u64;
             if let Some(metrics) = &surface_metrics {
                 metrics.observe(
@@ -636,6 +1073,25 @@ async fn handle_request_no_body(
 
             Ok(Box::new(reply) as Box<dyn Reply>)
         }
+        Ok(ManagedResponse::Sse(body)) => {
+            if let Some(managed) = managed.as_ref() {
+                if matches!(managed.kind, RouteKind::Unary) {
+                    if let Some((raw_path, template)) = log_ctx.as_ref() {
+                        tracing::debug!(
+                            method = %method.as_str(),
+                            path = %raw_path,
+                            matched_route = %template,
+                            declared_kind = ?managed.kind,
+                            "Managed route returned SSE response despite being declared as unary"
+                        );
+                    }
+                }
+            }
+
+            // FLOWIP-093a: streaming responses do not fit the unary request/response metrics model,
+            // so we intentionally skip surface-metrics observation for SSE replies.
+            Ok(Box::new(sse_body_reply(body)) as Box<dyn Reply>)
+        }
         Err(_) => {
             if let Some(metrics) = &surface_metrics {
                 metrics.observe(method, 500, start.elapsed().as_millis() as u64, 0, 0);
@@ -646,13 +1102,17 @@ async fn handle_request_no_body(
 }
 
 /// Helper function to handle requests with body (POST, PUT, PATCH)
+#[allow(clippy::too_many_arguments)]
 async fn handle_request_with_body(
     endpoint: Arc<dyn HttpEndpoint>,
+    host_policy: HostPolicy,
     method: HttpMethod,
     headers: warp::http::HeaderMap,
     query_params: HashMap<String, String>,
     body: bytes::Bytes,
     path: String,
+    matched_route: String,
+    path_params: HashMap<String, String>,
     surface_metrics: Option<SurfaceMetricsRouteContext>,
 ) -> Result<Box<dyn Reply>, Rejection> {
     // Check if endpoint supports this method
@@ -672,17 +1132,109 @@ async fn handle_request_with_body(
         }
     }
 
+    let managed = endpoint.managed_route();
+    let effective_timeout =
+        resolve_effective_timeout(host_policy.request_timeout, managed.as_ref());
+    let log_ctx = if managed.is_some() {
+        Some((path.clone(), matched_route.clone()))
+    } else {
+        None
+    };
+
+    if let Some(managed) = managed.as_ref() {
+        let max_body_size_bytes =
+            resolve_effective_max_body_size_bytes(host_policy.max_body_size_bytes, managed);
+        if request_bytes > max_body_size_bytes {
+            let response = Response::new(413).with_text("Request Entity Too Large");
+            if let Some(metrics) = &surface_metrics {
+                metrics.observe(
+                    method,
+                    response.status,
+                    start.elapsed().as_millis() as u64,
+                    request_bytes,
+                    response.body.len() as u64,
+                );
+            }
+            return reply_from_response(response);
+        }
+
+        if let Some(expected) = managed.route_policy.request_content_type.as_deref() {
+            if !content_type_matches(header_value(&req_headers, "content-type"), expected) {
+                let response = Response::new(415).with_text("Unsupported Media Type");
+                if let Some(metrics) = &surface_metrics {
+                    metrics.observe(
+                        method,
+                        response.status,
+                        start.elapsed().as_millis() as u64,
+                        request_bytes,
+                        response.body.len() as u64,
+                    );
+                }
+                return reply_from_response(response);
+            }
+        }
+
+        if let Some(auth) = resolve_effective_auth(managed) {
+            if let Err(response) = enforce_auth_policy(&auth, &req_headers, body.as_ref()) {
+                if let Some(metrics) = &surface_metrics {
+                    metrics.observe(
+                        method,
+                        response.status,
+                        start.elapsed().as_millis() as u64,
+                        request_bytes,
+                        response.body.len() as u64,
+                    );
+                }
+                return reply_from_response(response);
+            }
+        }
+    }
+
     let request = Request {
         method,
         path,
+        matched_route,
+        path_params,
         headers: req_headers,
         query_params,
         body: body.to_vec(),
     };
 
     // Handle request
-    match endpoint.handle(request).await {
-        Ok(response) => {
+    let handler_result = if let Some(timeout) = effective_timeout {
+        match tokio::time::timeout(timeout, endpoint.handle(request)).await {
+            Ok(res) => res,
+            Err(_) => Ok(Response::new(504).with_text("Gateway Timeout").into()),
+        }
+    } else {
+        endpoint.handle(request).await
+    };
+
+    match handler_result {
+        Ok(ManagedResponse::Unary(mut response)) => {
+            if let Some(managed) = managed.as_ref() {
+                if matches!(managed.kind, RouteKind::Sse) && response.status < 400 {
+                    if let Some((raw_path, template)) = log_ctx.as_ref() {
+                        tracing::debug!(
+                            method = %method.as_str(),
+                            path = %raw_path,
+                            matched_route = %template,
+                            status = response.status,
+                            declared_kind = ?managed.kind,
+                            "Managed route returned a successful unary response despite being declared as SSE"
+                        );
+                    }
+                }
+
+                if let Some(ct) = managed.route_policy.response_content_type.as_deref() {
+                    if header_value(&response.headers, "content-type").is_none() {
+                        response
+                            .headers
+                            .insert("Content-Type".to_string(), ct.to_string());
+                    }
+                }
+            }
+
             let response_bytes = response.body.len() as u64;
             if let Some(metrics) = &surface_metrics {
                 metrics.observe(
@@ -706,6 +1258,25 @@ async fn handle_request_with_body(
 
             Ok(Box::new(reply) as Box<dyn Reply>)
         }
+        Ok(ManagedResponse::Sse(body)) => {
+            if let Some(managed) = managed.as_ref() {
+                if matches!(managed.kind, RouteKind::Unary) {
+                    if let Some((raw_path, template)) = log_ctx.as_ref() {
+                        tracing::debug!(
+                            method = %method.as_str(),
+                            path = %raw_path,
+                            matched_route = %template,
+                            declared_kind = ?managed.kind,
+                            "Managed route returned SSE response despite being declared as unary"
+                        );
+                    }
+                }
+            }
+
+            // FLOWIP-093a: streaming responses do not fit the unary request/response metrics model,
+            // so we intentionally skip surface-metrics observation for SSE replies.
+            Ok(Box::new(sse_body_reply(body)) as Box<dyn Reply>)
+        }
         Err(_) => {
             if let Some(metrics) = &surface_metrics {
                 metrics.observe(
@@ -721,6 +1292,30 @@ async fn handle_request_with_body(
     }
 }
 
+fn sse_body_reply(body: SseBody) -> impl Reply {
+    use tokio_stream::StreamExt;
+
+    let stream = body.map(|frame: SseFrame| Ok::<SseEvent, Infallible>(sse_frame_to_warp(frame)));
+    warp::sse::reply(warp::sse::keep_alive().stream(stream))
+}
+
+fn sse_frame_to_warp(frame: SseFrame) -> SseEvent {
+    let mut ev = SseEvent::default().data(frame.data);
+    if let Some(event) = frame.event {
+        ev = ev.event(event);
+    }
+    if let Some(id) = frame.id {
+        ev = ev.id(id);
+    }
+    if let Some(retry_ms) = frame.retry_ms {
+        ev = ev.retry(std::time::Duration::from_millis(retry_ms));
+    }
+    if let Some(comment) = frame.comment {
+        ev = ev.comment(comment);
+    }
+    ev
+}
+
 #[async_trait]
 impl WebServer for WarpServer {
     fn register_endpoint(&mut self, endpoint: Box<dyn HttpEndpoint>) -> Result<(), WebError> {
@@ -734,8 +1329,23 @@ impl WebServer for WarpServer {
             source: Some(Box::new(e)),
         })?;
 
-        let max_body_size_bytes = config.max_body_size.unwrap_or(DEFAULT_MAX_BODY_SIZE_BYTES);
-        let routes = self.build_filter(max_body_size_bytes as u64);
+        let max_body_size_bytes =
+            config.max_body_size.unwrap_or(DEFAULT_MAX_BODY_SIZE_BYTES) as u64;
+        let request_timeout_secs = config
+            .request_timeout_secs
+            .unwrap_or(DEFAULT_REQUEST_TIMEOUT_SECS);
+        let request_timeout = if request_timeout_secs == 0 {
+            None
+        } else {
+            Some(Duration::from_secs(request_timeout_secs))
+        };
+
+        let host_policy = HostPolicy {
+            max_body_size_bytes,
+            request_timeout,
+        };
+
+        let routes = self.build_filter(host_policy)?;
 
         let cors_config = config.cors.unwrap_or_default();
         let cors_mode = cors_config.mode;
@@ -791,7 +1401,10 @@ impl WebServer for WarpServer {
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use obzenflow_core::web::{HttpMethod, Request, Response, WebError};
+    use obzenflow_core::web::{
+        AuthPolicy, HttpMethod, ManagedResponse, ManagedRouteInfo, Request, Response, RouteKind,
+        RoutePolicy, SurfacePolicy, WebError,
+    };
 
     struct EchoEndpoint;
 
@@ -805,8 +1418,8 @@ mod tests {
             &[HttpMethod::Post]
         }
 
-        async fn handle(&self, _request: Request) -> Result<Response, WebError> {
-            Ok(Response::ok().with_text("OK"))
+        async fn handle(&self, _request: Request) -> Result<ManagedResponse, WebError> {
+            Ok(Response::ok().with_text("OK").into())
         }
     }
 
@@ -814,7 +1427,12 @@ mod tests {
     async fn build_filter_enforces_content_length_limit() {
         let mut server = WarpServer::new();
         server.register_endpoint(Box::new(EchoEndpoint)).unwrap();
-        let filter = server.build_filter(10);
+        let filter = server
+            .build_filter(HostPolicy {
+                max_body_size_bytes: 10,
+                request_timeout: None,
+            })
+            .unwrap();
 
         let response = warp::test::request()
             .method("POST")
@@ -836,6 +1454,575 @@ mod tests {
 
         assert_eq!(response.status(), 200);
         assert_eq!(response.body(), "OK");
+    }
+
+    struct PathParamsEndpoint;
+
+    #[async_trait]
+    impl HttpEndpoint for PathParamsEndpoint {
+        fn path(&self) -> &str {
+            "/items/:id"
+        }
+
+        fn methods(&self) -> &[HttpMethod] {
+            &[HttpMethod::Get]
+        }
+
+        async fn handle(&self, request: Request) -> Result<ManagedResponse, WebError> {
+            assert_eq!(request.path, "/items/123");
+            assert_eq!(request.matched_route, "/items/:id");
+            assert_eq!(
+                request.path_params.get("id").map(String::as_str),
+                Some("123")
+            );
+            Ok(Response::ok().with_text("OK").into())
+        }
+    }
+
+    #[tokio::test]
+    async fn build_filter_populates_path_params_and_matched_route() {
+        let mut server = WarpServer::new();
+        server
+            .register_endpoint(Box::new(PathParamsEndpoint))
+            .unwrap();
+        let filter = server
+            .build_filter(HostPolicy {
+                max_body_size_bytes: 10,
+                request_timeout: None,
+            })
+            .unwrap();
+
+        let response = warp::test::request()
+            .method("GET")
+            .path("/items/123")
+            .reply(&filter)
+            .await;
+
+        assert_eq!(response.status(), 200);
+        assert_eq!(response.body(), "OK");
+    }
+
+    struct StaticEndpoint;
+
+    #[async_trait]
+    impl HttpEndpoint for StaticEndpoint {
+        fn path(&self) -> &str {
+            "/items/count"
+        }
+
+        fn methods(&self) -> &[HttpMethod] {
+            &[HttpMethod::Get]
+        }
+
+        async fn handle(&self, _request: Request) -> Result<ManagedResponse, WebError> {
+            Ok(Response::ok().with_text("STATIC").into())
+        }
+    }
+
+    struct ParamEndpoint;
+
+    #[async_trait]
+    impl HttpEndpoint for ParamEndpoint {
+        fn path(&self) -> &str {
+            "/items/:id"
+        }
+
+        fn methods(&self) -> &[HttpMethod] {
+            &[HttpMethod::Get]
+        }
+
+        async fn handle(&self, _request: Request) -> Result<ManagedResponse, WebError> {
+            Ok(Response::ok().with_text("PARAM").into())
+        }
+    }
+
+    #[tokio::test]
+    async fn build_filter_prefers_static_routes_over_parameterised_routes() {
+        let mut server = WarpServer::new();
+        server.register_endpoint(Box::new(ParamEndpoint)).unwrap();
+        server.register_endpoint(Box::new(StaticEndpoint)).unwrap();
+        let filter = server
+            .build_filter(HostPolicy {
+                max_body_size_bytes: 10,
+                request_timeout: None,
+            })
+            .unwrap();
+
+        let response = warp::test::request()
+            .method("GET")
+            .path("/items/count")
+            .reply(&filter)
+            .await;
+
+        assert_eq!(response.status(), 200);
+        assert_eq!(response.body(), "STATIC");
+
+        let response = warp::test::request()
+            .method("GET")
+            .path("/items/999")
+            .reply(&filter)
+            .await;
+
+        assert_eq!(response.status(), 200);
+        assert_eq!(response.body(), "PARAM");
+    }
+
+    struct ConflictEndpointA;
+
+    #[async_trait]
+    impl HttpEndpoint for ConflictEndpointA {
+        fn path(&self) -> &str {
+            "/conflict/:id"
+        }
+
+        fn methods(&self) -> &[HttpMethod] {
+            &[HttpMethod::Get]
+        }
+
+        async fn handle(&self, _request: Request) -> Result<ManagedResponse, WebError> {
+            Ok(Response::ok().with_text("A").into())
+        }
+    }
+
+    struct ConflictEndpointB;
+
+    #[async_trait]
+    impl HttpEndpoint for ConflictEndpointB {
+        fn path(&self) -> &str {
+            "/conflict/:name"
+        }
+
+        fn methods(&self) -> &[HttpMethod] {
+            &[HttpMethod::Get]
+        }
+
+        async fn handle(&self, _request: Request) -> Result<ManagedResponse, WebError> {
+            Ok(Response::ok().with_text("B").into())
+        }
+    }
+
+    #[tokio::test]
+    async fn build_filter_rejects_conflicting_parameterised_routes() {
+        let mut server = WarpServer::new();
+        server
+            .register_endpoint(Box::new(ConflictEndpointA))
+            .unwrap();
+        server
+            .register_endpoint(Box::new(ConflictEndpointB))
+            .unwrap();
+
+        let err = server
+            .build_filter(HostPolicy {
+                max_body_size_bytes: 10,
+                request_timeout: None,
+            })
+            .unwrap_err();
+        match err {
+            WebError::EndpointRegistrationFailed { path, message } => {
+                assert_eq!(path, "/conflict/:name");
+                assert!(
+                    message.contains("conflicts"),
+                    "unexpected message: {message}"
+                );
+                assert!(
+                    message.contains("/conflict/:id"),
+                    "unexpected message: {message}"
+                );
+            }
+            other => panic!("Unexpected error: {other:?}"),
+        }
+    }
+
+    struct WeakeningAuthEndpoint;
+
+    #[async_trait]
+    impl HttpEndpoint for WeakeningAuthEndpoint {
+        fn path(&self) -> &str {
+            "/weak"
+        }
+
+        fn methods(&self) -> &[HttpMethod] {
+            &[HttpMethod::Get]
+        }
+
+        async fn handle(&self, _request: Request) -> Result<ManagedResponse, WebError> {
+            Ok(Response::ok().with_text("OK").into())
+        }
+
+        fn managed_route(&self) -> Option<ManagedRouteInfo> {
+            Some(ManagedRouteInfo {
+                kind: RouteKind::Unary,
+                surface_policy: Some(SurfacePolicy {
+                    auth: Some(AuthPolicy::ApiKey {
+                        header: "X-Api-Key".to_string(),
+                        value_env: "OBZENFLOW_TEST_API_KEY_UNUSED".to_string(),
+                    }),
+                    ..SurfacePolicy::default()
+                }),
+                route_policy: RoutePolicy {
+                    auth: Some(AuthPolicy::None),
+                    ..RoutePolicy::default()
+                },
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn build_filter_rejects_route_local_auth_that_weakens_surface_auth() {
+        let mut server = WarpServer::new();
+        server
+            .register_endpoint(Box::new(WeakeningAuthEndpoint))
+            .unwrap();
+
+        let err = server
+            .build_filter(HostPolicy {
+                max_body_size_bytes: 10,
+                request_timeout: None,
+            })
+            .unwrap_err();
+
+        match err {
+            WebError::EndpointRegistrationFailed { path, message } => {
+                assert_eq!(path, "/weak");
+                assert!(
+                    message.contains("must not weaken"),
+                    "unexpected message: {message}"
+                );
+            }
+            other => panic!("Unexpected error: {other:?}"),
+        }
+    }
+
+    struct ManagedBodySizeEndpoint;
+
+    #[async_trait]
+    impl HttpEndpoint for ManagedBodySizeEndpoint {
+        fn path(&self) -> &str {
+            "/managed-body"
+        }
+
+        fn methods(&self) -> &[HttpMethod] {
+            &[HttpMethod::Post]
+        }
+
+        async fn handle(&self, _request: Request) -> Result<ManagedResponse, WebError> {
+            Ok(Response::ok().with_text("OK").into())
+        }
+
+        fn managed_route(&self) -> Option<ManagedRouteInfo> {
+            Some(ManagedRouteInfo {
+                kind: RouteKind::Unary,
+                surface_policy: Some(SurfacePolicy {
+                    max_body_size: Some(5),
+                    ..SurfacePolicy::default()
+                }),
+                route_policy: RoutePolicy::default(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn managed_surface_enforces_surface_max_body_size() {
+        let mut server = WarpServer::new();
+        server
+            .register_endpoint(Box::new(ManagedBodySizeEndpoint))
+            .unwrap();
+        let filter = server
+            .build_filter(HostPolicy {
+                max_body_size_bytes: 10,
+                request_timeout: None,
+            })
+            .unwrap();
+
+        let response = warp::test::request()
+            .method("POST")
+            .path("/managed-body")
+            .header("content-length", "6")
+            .body(vec![0u8; 6])
+            .reply(&filter)
+            .await;
+        assert_eq!(response.status(), 413);
+
+        let response = warp::test::request()
+            .method("POST")
+            .path("/managed-body")
+            .header("content-length", "5")
+            .body(vec![0u8; 5])
+            .reply(&filter)
+            .await;
+        assert_eq!(response.status(), 200);
+        assert_eq!(response.body(), "OK");
+    }
+
+    struct ManagedContentTypeEndpoint;
+
+    #[async_trait]
+    impl HttpEndpoint for ManagedContentTypeEndpoint {
+        fn path(&self) -> &str {
+            "/managed-ct"
+        }
+
+        fn methods(&self) -> &[HttpMethod] {
+            &[HttpMethod::Post]
+        }
+
+        async fn handle(&self, _request: Request) -> Result<ManagedResponse, WebError> {
+            Ok(Response::ok().with_text("OK").into())
+        }
+
+        fn managed_route(&self) -> Option<ManagedRouteInfo> {
+            Some(ManagedRouteInfo {
+                kind: RouteKind::Unary,
+                surface_policy: Some(SurfacePolicy::default()),
+                route_policy: RoutePolicy {
+                    request_content_type: Some("application/json".to_string()),
+                    ..RoutePolicy::default()
+                },
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn managed_surface_enforces_request_content_type_when_declared() {
+        let mut server = WarpServer::new();
+        server
+            .register_endpoint(Box::new(ManagedContentTypeEndpoint))
+            .unwrap();
+        let filter = server
+            .build_filter(HostPolicy {
+                max_body_size_bytes: 10,
+                request_timeout: None,
+            })
+            .unwrap();
+
+        let response = warp::test::request()
+            .method("POST")
+            .path("/managed-ct")
+            .header("content-length", "2")
+            .header("content-type", "text/plain")
+            .body(b"{}")
+            .reply(&filter)
+            .await;
+        assert_eq!(response.status(), 415);
+
+        let response = warp::test::request()
+            .method("POST")
+            .path("/managed-ct")
+            .header("content-length", "2")
+            .header("content-type", "application/json; charset=utf-8")
+            .body(b"{}")
+            .reply(&filter)
+            .await;
+        assert_eq!(response.status(), 200);
+        assert_eq!(response.body(), "OK");
+    }
+
+    struct ManagedApiKeyEndpoint;
+
+    #[async_trait]
+    impl HttpEndpoint for ManagedApiKeyEndpoint {
+        fn path(&self) -> &str {
+            "/managed-auth"
+        }
+
+        fn methods(&self) -> &[HttpMethod] {
+            &[HttpMethod::Get]
+        }
+
+        async fn handle(&self, _request: Request) -> Result<ManagedResponse, WebError> {
+            Ok(Response::ok().with_text("OK").into())
+        }
+
+        fn managed_route(&self) -> Option<ManagedRouteInfo> {
+            Some(ManagedRouteInfo {
+                kind: RouteKind::Unary,
+                surface_policy: Some(SurfacePolicy {
+                    auth: Some(AuthPolicy::ApiKey {
+                        header: "X-Api-Key".to_string(),
+                        value_env: "OBZENFLOW_TEST_API_KEY_V1".to_string(),
+                    }),
+                    ..SurfacePolicy::default()
+                }),
+                route_policy: RoutePolicy::default(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn managed_surface_enforces_api_key_auth() {
+        std::env::set_var("OBZENFLOW_TEST_API_KEY_V1", "sekret");
+
+        let mut server = WarpServer::new();
+        server
+            .register_endpoint(Box::new(ManagedApiKeyEndpoint))
+            .unwrap();
+        let filter = server
+            .build_filter(HostPolicy {
+                max_body_size_bytes: 10,
+                request_timeout: None,
+            })
+            .unwrap();
+
+        let response = warp::test::request()
+            .method("GET")
+            .path("/managed-auth")
+            .reply(&filter)
+            .await;
+        assert_eq!(response.status(), 401);
+
+        let response = warp::test::request()
+            .method("GET")
+            .path("/managed-auth")
+            .header("x-api-key", "wrong")
+            .reply(&filter)
+            .await;
+        assert_eq!(response.status(), 401);
+
+        let response = warp::test::request()
+            .method("GET")
+            .path("/managed-auth")
+            .header("x-api-key", "sekret")
+            .reply(&filter)
+            .await;
+        assert_eq!(response.status(), 200);
+        assert_eq!(response.body(), "OK");
+    }
+
+    fn to_hex(bytes: &[u8]) -> String {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let mut out = String::with_capacity(bytes.len() * 2);
+        for b in bytes {
+            out.push(HEX[(b >> 4) as usize] as char);
+            out.push(HEX[(b & 0x0f) as usize] as char);
+        }
+        out
+    }
+
+    struct ManagedHmacEndpoint;
+
+    #[async_trait]
+    impl HttpEndpoint for ManagedHmacEndpoint {
+        fn path(&self) -> &str {
+            "/managed-hmac"
+        }
+
+        fn methods(&self) -> &[HttpMethod] {
+            &[HttpMethod::Get]
+        }
+
+        async fn handle(&self, _request: Request) -> Result<ManagedResponse, WebError> {
+            Ok(Response::ok().with_text("OK").into())
+        }
+
+        fn managed_route(&self) -> Option<ManagedRouteInfo> {
+            Some(ManagedRouteInfo {
+                kind: RouteKind::Unary,
+                surface_policy: Some(SurfacePolicy {
+                    auth: Some(AuthPolicy::HmacSha256 {
+                        secret_env: "OBZENFLOW_TEST_HMAC_SECRET_V1".to_string(),
+                        signature_header: "X-Signature".to_string(),
+                        body_hash: "raw_body".to_string(),
+                        timestamp_header: Some("X-Timestamp".to_string()),
+                        replay_window_secs: Some(10),
+                    }),
+                    ..SurfacePolicy::default()
+                }),
+                route_policy: RoutePolicy::default(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn managed_surface_enforces_hmac_replay_window_when_configured() {
+        use ring::hmac;
+
+        std::env::set_var("OBZENFLOW_TEST_HMAC_SECRET_V1", "sekret");
+
+        let mut server = WarpServer::new();
+        server
+            .register_endpoint(Box::new(ManagedHmacEndpoint))
+            .unwrap();
+        let filter = server
+            .build_filter(HostPolicy {
+                max_body_size_bytes: 10,
+                request_timeout: None,
+            })
+            .unwrap();
+
+        let now_ts = Utc::now().timestamp().to_string();
+        let key = hmac::Key::new(hmac::HMAC_SHA256, b"sekret");
+        let sig_now = {
+            let mut signed = Vec::with_capacity(now_ts.len() + 1);
+            signed.extend_from_slice(now_ts.as_bytes());
+            signed.push(b'.');
+            let expected = hmac::sign(&key, &signed);
+            to_hex(expected.as_ref())
+        };
+
+        let response = warp::test::request()
+            .method("GET")
+            .path("/managed-hmac")
+            .header("x-timestamp", &now_ts)
+            .header("x-signature", &sig_now)
+            .reply(&filter)
+            .await;
+        assert_eq!(response.status(), 200);
+
+        let old_ts = (Utc::now().timestamp() - 1000).to_string();
+        let sig_old = {
+            let mut signed = Vec::with_capacity(old_ts.len() + 1);
+            signed.extend_from_slice(old_ts.as_bytes());
+            signed.push(b'.');
+            let expected = hmac::sign(&key, &signed);
+            to_hex(expected.as_ref())
+        };
+
+        let response = warp::test::request()
+            .method("GET")
+            .path("/managed-hmac")
+            .header("x-timestamp", &old_ts)
+            .header("x-signature", &sig_old)
+            .reply(&filter)
+            .await;
+        assert_eq!(response.status(), 401);
+    }
+
+    struct SlowEndpoint;
+
+    #[async_trait]
+    impl HttpEndpoint for SlowEndpoint {
+        fn path(&self) -> &str {
+            "/slow"
+        }
+
+        fn methods(&self) -> &[HttpMethod] {
+            &[HttpMethod::Get]
+        }
+
+        async fn handle(&self, _request: Request) -> Result<ManagedResponse, WebError> {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            Ok(Response::ok().with_text("OK").into())
+        }
+    }
+
+    #[tokio::test]
+    async fn host_policy_enforces_request_timeout() {
+        let mut server = WarpServer::new();
+        server.register_endpoint(Box::new(SlowEndpoint)).unwrap();
+        let filter = server
+            .build_filter(HostPolicy {
+                max_body_size_bytes: 10,
+                request_timeout: Some(Duration::from_millis(1)),
+            })
+            .unwrap();
+
+        let response = warp::test::request()
+            .method("GET")
+            .path("/slow")
+            .reply(&filter)
+            .await;
+
+        assert_eq!(response.status(), 504);
     }
 }
 

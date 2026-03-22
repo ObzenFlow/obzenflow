@@ -8,7 +8,7 @@
 //! for visualization in UI tools.
 
 use async_trait::async_trait;
-use obzenflow_core::web::{HttpEndpoint, HttpMethod, Request, Response, WebError};
+use obzenflow_core::web::{HttpEndpoint, HttpMethod, ManagedResponse, Request, Response, WebError};
 use obzenflow_core::StageId;
 use obzenflow_runtime::id_conversions::StageIdExt;
 use obzenflow_topology::EdgeKind;
@@ -521,7 +521,7 @@ impl HttpEndpoint for TopologyHttpEndpoint {
         &[HttpMethod::Get]
     }
 
-    async fn handle(&self, request: Request) -> Result<Response, WebError> {
+    async fn handle(&self, request: Request) -> Result<ManagedResponse, WebError> {
         let include = parse_include_flags(&request);
         let topology_response = self.build_response(include);
 
@@ -541,7 +541,7 @@ impl HttpEndpoint for TopologyHttpEndpoint {
             .insert("Cache-Control".to_string(), "max-age=60".to_string());
         response.body = json_body.into_bytes();
 
-        Ok(response)
+        Ok(response.into())
     }
 }
 
@@ -635,6 +635,10 @@ mod tests {
             .handle(Request::new(HttpMethod::Get, "/api/topology".to_string()))
             .await
             .expect("endpoint should handle request");
+        let response = match response {
+            ManagedResponse::Unary(resp) => resp,
+            ManagedResponse::Sse(_) => panic!("expected unary response"),
+        };
 
         assert_eq!(response.status, 200);
 

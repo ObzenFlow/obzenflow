@@ -666,6 +666,8 @@ impl FlowApplication {
                 let mut server_config =
                     ServerConfig::new(config.server_host.clone(), config.server_port);
                 server_config.cors = Some(CorsConfig { mode: cors_mode });
+                server_config.max_body_size = Some(config.max_body_size_bytes);
+                server_config.request_timeout_secs = Some(config.request_timeout_secs);
 
                 let start_result = {
                     #[cfg(feature = "warp-server")]

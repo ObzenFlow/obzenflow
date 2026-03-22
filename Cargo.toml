@@ -44,12 +44,13 @@ obzenflow_sketches = { version = "0.1.2", path = "crates/obzenflow_sketches" }
 obzenflow-topology = "0.3"
 obzenflow-fsm = "0.3.1"
 
-# Async/runtime + utilities
-tokio = "1"
-tokio-test = "0.4"
-tokio-stream = "0.1"
-async-trait = "0.1"
-futures = "0.3"
+	# Async/runtime + utilities
+	tokio = "1"
+	tokio-test = "0.4"
+	tokio-stream = "0.1"
+	async-trait = "0.1"
+	futures = "0.3"
+	futures-core = "0.3"
 
 # Observability
 tracing = "0.1"
@@ -90,10 +91,11 @@ crc32fast = "1.3"
 ring = "0.17"
 subtle = "2"
 
-# Web / networking (optional in crates that use them)
-warp = "0.3"
-reqwest = { version = "0.12", default-features = false, features = ["charset", "http2", "rustls-tls-native-roots", "system-proxy"] }
-rustls-native-certs = "0.8"
+	# Web / networking (optional in crates that use them)
+	warp = "0.3"
+	reqwest = { version = "0.12", default-features = false, features = ["charset", "http2", "rustls-tls-native-roots", "system-proxy"] }
+	rustls-native-certs = "0.8"
+	matchit = "0.8"
 
 # Benchmarking / testing
 criterion = "0.5"
