@@ -11,14 +11,19 @@
 //!
 //! This taxonomy is ideal for resource-oriented monitoring (CPU, memory, queues).
 //!
-//! ## Metrics Available in ObzenFlow
+//! These helpers provide query and dashboard snippets for the Prometheus metrics
+//! ObzenFlow exposes today. They are a viewing lens, not the runtime instrumentation
+//! source itself.
 //!
-//! USE metrics are automatically derived from control events:
+//! ## Common metric families in ObzenFlow
+//!
+//! USE-style resource proxies are commonly read from the exported Prometheus surface:
 //!
 //! | Metric | Prometheus Name | Description |
 //! |--------|----------------|-------------|
 //! | Utilization | `obzenflow_cpu_usage_ratio` | CPU usage (0.0-1.0) |
-//! | Saturation | `obzenflow_queue_depth` | Queue depth / backlog |
+//! | Memory | `obzenflow_memory_bytes` | Memory usage in bytes |
+//! | Saturation | `obzenflow_in_flight_events` | Current in-flight work / pressure |
 //! | Errors | `obzenflow_errors_total` | Total errors encountered |
 //!
 //! ## Example Prometheus Queries
@@ -28,7 +33,7 @@
 //! obzenflow_cpu_usage_ratio{flow="data_processing"} * 100
 //!
 //! # Queue Saturation
-//! obzenflow_queue_depth{flow="data_processing"}
+//! obzenflow_in_flight_events{flow="data_processing"}
 //!
 //! # Error rate
 //! rate(obzenflow_errors_total{flow="data_processing"}[5m])

@@ -11,15 +11,19 @@
 //!
 //! This taxonomy is ideal for request/response systems and user-facing services.
 //!
-//! ## Metrics Available in ObzenFlow
+//! These helpers provide query and dashboard snippets for the Prometheus metrics
+//! ObzenFlow exposes today. They are a viewing lens, not the runtime instrumentation
+//! source itself.
 //!
-//! RED metrics are automatically derived from the event journal:
+//! ## Common metric families in ObzenFlow
+//!
+//! RED-style stage metrics are typically read from the exported Prometheus surface:
 //!
 //! | Metric | Prometheus Name | Description |
 //! |--------|----------------|-------------|
 //! | Rate | `obzenflow_events_total` | Total events processed (use `rate()` function) |
 //! | Errors | `obzenflow_errors_total` | Total errors encountered |
-//! | Duration | `obzenflow_duration_seconds` | Processing time histogram |
+//! | Duration | `obzenflow_processing_time_seconds` | Processing time histogram |
 //!
 //! ## Example Prometheus Queries
 //!
@@ -31,7 +35,7 @@
 //! rate(obzenflow_errors_total[5m]) / rate(obzenflow_events_total[5m]) * 100
 //!
 //! # 99th percentile latency
-//! histogram_quantile(0.99, rate(obzenflow_duration_seconds_bucket[5m]))
+//! histogram_quantile(0.99, rate(obzenflow_processing_time_seconds_bucket[5m]))
 //! ```
 
 /// RED taxonomy definition
@@ -66,13 +70,13 @@ impl RED {
             (
                 "P50 Latency",
                 format!(
-                    "histogram_quantile(0.5, rate(obzenflow_duration_seconds_bucket{{flow=\"{flow_name}\",stage=\"{stage_name}\"}}[5m]))"
+                    "histogram_quantile(0.5, rate(obzenflow_processing_time_seconds_bucket{{flow=\"{flow_name}\",stage=\"{stage_name}\"}}[5m]))"
                 )
             ),
             (
                 "P99 Latency", 
                 format!(
-                    "histogram_quantile(0.99, rate(obzenflow_duration_seconds_bucket{{flow=\"{flow_name}\",stage=\"{stage_name}\"}}[5m]))"
+                    "histogram_quantile(0.99, rate(obzenflow_processing_time_seconds_bucket{{flow=\"{flow_name}\",stage=\"{stage_name}\"}}[5m]))"
                 )
             ),
         ]
@@ -99,20 +103,33 @@ impl RED {
                     "title": "Latency (P50, P95, P99)",
                     "targets": [
                         {
-                            "expr": format!("histogram_quantile(0.5, rate(obzenflow_duration_seconds_bucket{{flow=\"{}\"}}[5m]))", flow_name),
+                            "expr": format!("histogram_quantile(0.5, rate(obzenflow_processing_time_seconds_bucket{{flow=\"{}\"}}[5m]))", flow_name),
                             "legendFormat": "P50"
                         },
                         {
-                            "expr": format!("histogram_quantile(0.95, rate(obzenflow_duration_seconds_bucket{{flow=\"{}\"}}[5m]))", flow_name),
+                            "expr": format!("histogram_quantile(0.95, rate(obzenflow_processing_time_seconds_bucket{{flow=\"{}\"}}[5m]))", flow_name),
                             "legendFormat": "P95"
                         },
                         {
-                            "expr": format!("histogram_quantile(0.99, rate(obzenflow_duration_seconds_bucket{{flow=\"{}\"}}[5m]))", flow_name),
+                            "expr": format!("histogram_quantile(0.99, rate(obzenflow_processing_time_seconds_bucket{{flow=\"{}\"}}[5m]))", flow_name),
                             "legendFormat": "P99"
                         }
                     ]
                 }
             ]
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RED;
+
+    #[test]
+    fn prometheus_queries_use_current_processing_time_metric_name() {
+        let queries = RED::prometheus_queries("flow", "stage");
+        assert!(queries
+            .iter()
+            .any(|(_, query)| query.contains("obzenflow_processing_time_seconds_bucket")));
     }
 }

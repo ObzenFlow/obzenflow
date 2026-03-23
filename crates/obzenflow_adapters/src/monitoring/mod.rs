@@ -2,24 +2,30 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Monitoring Taxonomies for ObzenFlow
+//! Monitoring support for ObzenFlow.
 //!
-//! Monitoring taxonomies are now documentation and view definitions.
-//! Metrics are automatically collected by the MetricsAggregator from the event journal.
+//! This module contains two different kinds of monitoring material:
 //!
-//! ## Available Taxonomies
+//! - runtime collection and export plumbing
+//! - taxonomy helpers such as RED, USE, Golden Signals, and SAAFE
 //!
-//! - **RED**: Rate, Errors, Duration - ideal for request/response systems
-//! - **USE**: Utilization, Saturation, Errors - ideal for resource monitoring  
-//! - **Golden Signals**: Latency, Traffic, Errors, Saturation - Google SRE's approach
-//! - **SAAFE**: Saturation, Amendments, Anomalies, Failures, Errors - for data pipelines
+//! After `FLOWIP-084h`, ObzenFlow's metrics model is intentionally split:
 //!
-//! ## How Metrics Work
+//! 1. application metrics are derived from wide events and journals into
+//!    `AppMetricsSnapshot`
+//! 2. infrastructure metrics are observed directly into `InfraMetricsSnapshot`
+//! 3. exporters render both into one Prometheus exposition surface
 //!
-//! 1. Events flow through the journal with all context (wide events)
-//! 2. MetricsAggregator subscribes to the journal and derives metrics
-//! 3. MetricsEndpoint exposes metrics in Prometheus format
-//! 4. Taxonomies provide Prometheus queries and Grafana dashboards
+//! The taxonomy modules in this crate are query and dashboard helpers over that
+//! exported metrics surface. They are not middleware, and they are not the source
+//! of runtime metric truth.
+//!
+//! ## Available taxonomy helpers
+//!
+//! - **RED**: Rate, Errors, Duration
+//! - **USE**: Utilization, Saturation, Errors
+//! - **Golden Signals**: Latency, Traffic, Errors, Saturation
+//! - **SAAFE**: Saturation, Amendments, Anomalies, Failures, Errors
 
 pub mod aggregator;
 pub mod exporters;
@@ -31,6 +37,7 @@ pub use taxonomies::{GoldenSignals, RED, SAAFE, USE};
 
 /// Initialize the monitoring subsystem
 pub fn init() -> Result<(), Box<dyn std::error::Error>> {
-    // No longer needed - MetricsAggregator handles everything
+    // Legacy no-op retained for older setup code. Monitoring is configured through
+    // the runtime/exporter wiring rather than an explicit init step.
     Ok(())
 }

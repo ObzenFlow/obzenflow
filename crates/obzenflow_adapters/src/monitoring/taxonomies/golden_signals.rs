@@ -12,16 +12,20 @@
 //!
 //! This taxonomy comes from the Google SRE book and is ideal for service monitoring.
 //!
-//! ## Metrics Available in ObzenFlow
+//! These helpers provide query and dashboard snippets for the Prometheus metrics
+//! ObzenFlow exposes today. They are a viewing lens, not the runtime instrumentation
+//! source itself.
 //!
-//! Golden Signals are automatically derived from events:
+//! ## Common metric families in ObzenFlow
+//!
+//! Golden-signal-style views are commonly built over these exported metric families:
 //!
 //! | Signal | Prometheus Name | Description |
 //! |--------|----------------|-------------|
-//! | Latency | `obzenflow_duration_seconds` | Request duration histogram |
+//! | Latency | `obzenflow_processing_time_seconds` | Request duration histogram |
 //! | Traffic | `obzenflow_events_total` | Total requests (use `rate()`) |
 //! | Errors | `obzenflow_errors_total` | Failed requests |
-//! | Saturation | `obzenflow_in_flight` | In-flight processing as saturation proxy |
+//! | Saturation | `obzenflow_in_flight_events` | In-flight processing as saturation proxy |
 //!
 //! ## Example Prometheus Queries
 //!
@@ -30,13 +34,13 @@
 //! rate(obzenflow_events_total{flow="api_gateway"}[5m])
 //!
 //! # Latency (95th percentile)
-//! histogram_quantile(0.95, rate(obzenflow_duration_seconds_bucket[5m]))
+//! histogram_quantile(0.95, rate(obzenflow_processing_time_seconds_bucket[5m]))
 //!
 //! # Error rate (percentage)
 //! rate(obzenflow_errors_total[5m]) / rate(obzenflow_events_total[5m]) * 100
 //!
 //! # Saturation
-//! obzenflow_in_flight{flow="api_gateway"}  # Current processing pressure
+//! obzenflow_in_flight_events{flow="api_gateway"}  # Current processing pressure
 //! ```
 
 /// Golden Signals taxonomy definition
@@ -64,19 +68,19 @@ impl GoldenSignals {
             (
                 "Latency P50",
                 format!(
-                    "histogram_quantile(0.5, rate(obzenflow_duration_seconds_bucket{{flow=\"{flow_name}\",stage=\"{stage_name}\"}}[5m]))"
+                    "histogram_quantile(0.5, rate(obzenflow_processing_time_seconds_bucket{{flow=\"{flow_name}\",stage=\"{stage_name}\"}}[5m]))"
                 )
             ),
             (
                 "Latency P95",
                 format!(
-                    "histogram_quantile(0.95, rate(obzenflow_duration_seconds_bucket{{flow=\"{flow_name}\",stage=\"{stage_name}\"}}[5m]))"
+                    "histogram_quantile(0.95, rate(obzenflow_processing_time_seconds_bucket{{flow=\"{flow_name}\",stage=\"{stage_name}\"}}[5m]))"
                 )
             ),
             (
                 "Latency P99",
                 format!(
-                    "histogram_quantile(0.99, rate(obzenflow_duration_seconds_bucket{{flow=\"{flow_name}\",stage=\"{stage_name}\"}}[5m]))"
+                    "histogram_quantile(0.99, rate(obzenflow_processing_time_seconds_bucket{{flow=\"{flow_name}\",stage=\"{stage_name}\"}}[5m]))"
                 )
             ),
             (
@@ -88,7 +92,7 @@ impl GoldenSignals {
             (
                 "Saturation (In-Flight)",
                 format!(
-                    "obzenflow_in_flight{{flow=\"{flow_name}\",stage=\"{stage_name}\"}}"
+                    "obzenflow_in_flight_events{{flow=\"{flow_name}\",stage=\"{stage_name}\"}}"
                 )
             ),
         ]
@@ -110,15 +114,15 @@ impl GoldenSignals {
                     "title": "Latency",
                     "targets": [
                         {
-                            "expr": format!("histogram_quantile(0.5, rate(obzenflow_duration_seconds_bucket{{flow=\"{}\"}}[5m]))", flow_name),
+                            "expr": format!("histogram_quantile(0.5, rate(obzenflow_processing_time_seconds_bucket{{flow=\"{}\"}}[5m]))", flow_name),
                             "legendFormat": "P50"
                         },
                         {
-                            "expr": format!("histogram_quantile(0.95, rate(obzenflow_duration_seconds_bucket{{flow=\"{}\"}}[5m]))", flow_name),
+                            "expr": format!("histogram_quantile(0.95, rate(obzenflow_processing_time_seconds_bucket{{flow=\"{}\"}}[5m]))", flow_name),
                             "legendFormat": "P95"
                         },
                         {
-                            "expr": format!("histogram_quantile(0.99, rate(obzenflow_duration_seconds_bucket{{flow=\"{}\"}}[5m]))", flow_name),
+                            "expr": format!("histogram_quantile(0.99, rate(obzenflow_processing_time_seconds_bucket{{flow=\"{}\"}}[5m]))", flow_name),
                             "legendFormat": "P99"
                         }
                     ],
@@ -148,5 +152,21 @@ impl GoldenSignals {
                 }
             ]
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::GoldenSignals;
+
+    #[test]
+    fn prometheus_queries_use_current_exported_metric_names() {
+        let queries = GoldenSignals::prometheus_queries("flow", "stage");
+        assert!(queries
+            .iter()
+            .any(|(_, query)| query.contains("obzenflow_processing_time_seconds_bucket")));
+        assert!(queries
+            .iter()
+            .any(|(_, query)| query.contains("obzenflow_in_flight_events")));
     }
 }

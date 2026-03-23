@@ -23,8 +23,12 @@
 //!
 //! ## Monitoring
 //!
-//! With Wide Events, monitoring is no longer implemented as middleware.
-//! Instead, metrics are automatically derived from the event journal by MetricsAggregator.
+//! Monitoring is no longer implemented as middleware.
+//! Instead, the runtime exports metrics through the snapshot/exporter path:
+//!
+//! - application metrics are derived from wide events and journals
+//! - infrastructure metrics are observed directly
+//! - both are rendered together by the metrics exporter
 //!
 //! The monitoring taxonomies (RED, USE, Golden Signals, SAAFE) are now documentation-only
 //! and provide Prometheus queries and Grafana dashboards for viewing metrics.
@@ -33,8 +37,8 @@
 //! // OLD: Monitoring middleware (no longer available)
 //! // let red_middleware = RED::monitoring();
 //!
-//! // NEW: Metrics are automatically collected from the journal
-//! // See obzenflow_adapters::monitoring::aggregator::MetricsAggregator
+//! // NEW: Use the runtime metrics surface and optional taxonomy helpers
+//! // See obzenflow_adapters::monitoring::taxonomies
 //! ```
 //!
 //! ## Available Monitoring Views
@@ -153,9 +157,9 @@ pub mod state;
 mod system;
 // Dangerous middleware examples moved to examples/dangerous_examples.rs
 // Factory tests moved to tests/factory_tests.rs
-// Note: With FLOWIP-056-666, monitoring is no longer implemented as middleware.
-// Metrics are automatically derived from the event journal by MetricsAggregator.
-// Taxonomies now provide Prometheus queries and Grafana dashboards:
+// Note: Monitoring is no longer implemented as middleware.
+// Application metrics are journal-derived, infrastructure metrics are observed
+// directly, and taxonomy helpers provide Prometheus queries and dashboard views:
 // - RED::prometheus_queries()
 // - USE::prometheus_queries()
 // - GoldenSignals::prometheus_queries()

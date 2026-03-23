@@ -13,10 +13,15 @@
 //!
 //! This taxonomy is ideal for data pipelines where data quality and anomaly detection are critical.
 //!
-//! ## Metrics Available in ObzenFlow
+//! These helpers provide query and dashboard snippets for the Prometheus metrics
+//! ObzenFlow exposes today. They are a viewing lens, not the runtime instrumentation
+//! source itself.
 //!
-//! Core metrics are emitted automatically from journals; consult
-//! obzenflow_adapters metrics documentation for current coverage.
+//! ## Coverage note
+//!
+//! SAAFE is only partially covered by the built-in exported metrics today. Saturation
+//! and error/failure proxies exist out of the box. Amendments and anomalies still
+//! require application-specific metrics or domain-specific observability.
 
 /// SAAFE taxonomy definition
 ///
