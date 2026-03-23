@@ -200,7 +200,7 @@ fn build_flow() -> obzenflow_dsl::FlowDefinition {
         journals: disk_journals(std::path::PathBuf::from("target/payment-gateway-logs")),
 
         // Gentle flow-level rate limit to keep logs and metrics readable.
-        // At 1.0 events/sec you can easily watch RED metrics and
+        // At 1.0 events/sec you can easily watch the core stage metrics and
         // circuit breaker gauges change over time.
         middleware: [
             RateLimiterBuilder::new(1.0).build()

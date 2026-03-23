@@ -228,7 +228,7 @@ fn bench_3_stage_with_different_workers(c: &mut Criterion) {
     let rt_4_workers = Arc::new(
         Builder::new_multi_thread()
             .worker_threads(4)
-            .thread_name("flowstate-4w")
+            .thread_name("obzenflow-4w")
             .enable_all()
             .build()
             .unwrap(),
@@ -257,7 +257,7 @@ fn bench_3_stage_with_different_workers(c: &mut Criterion) {
     let rt_3_workers = Arc::new(
         Builder::new_multi_thread()
             .worker_threads(3)
-            .thread_name("flowstate-3w")
+            .thread_name("obzenflow-3w")
             .enable_all()
             .build()
             .unwrap(),
@@ -286,7 +286,7 @@ fn bench_3_stage_with_different_workers(c: &mut Criterion) {
     let rt_6_workers = Arc::new(
         Builder::new_multi_thread()
             .worker_threads(6)
-            .thread_name("flowstate-6w")
+            .thread_name("obzenflow-6w")
             .enable_all()
             .build()
             .unwrap(),

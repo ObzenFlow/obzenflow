@@ -2,8 +2,8 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! MetricsAggregator has been moved to runtime layer
+//! Application metrics aggregation now lives in the runtime layer.
 //!
-//! The aggregator implementation is now in obzenflow_runtime
-//! as part of the architecture refactoring.
-//! Only exporters remain in the adapters layer.
+//! `MetricsAggregator` is implemented in `obzenflow_runtime`. The adapters layer
+//! keeps exporter implementations, but it is no longer the home of the runtime
+//! aggregation FSM itself.

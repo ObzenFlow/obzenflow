@@ -80,7 +80,7 @@ impl IsolationMode {
             IsolationMode::Shared => base_path.to_path_buf(),
             IsolationMode::Isolated { test_id } => {
                 // Use temp directory for tests
-                std::env::temp_dir().join("flowstate_test").join(test_id)
+                std::env::temp_dir().join("obzenflow_test").join(test_id)
             }
             IsolationMode::Named(name) => base_path.join(format!("named_{name}")),
         }

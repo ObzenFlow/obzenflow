@@ -118,8 +118,9 @@ impl MiddlewareContext {
     /// Write a control event to the journal
     ///
     /// Control events are durable events that flow through the journal and are
-    /// observed by the MetricsAggregator. Use this for significant state changes,
-    /// periodic summaries, or anomaly detection.
+    /// available to downstream consumers and application-metrics aggregation.
+    /// Use this for significant state changes, periodic summaries, or anomaly
+    /// detection.
     ///
     /// Note: The control event will be appended to the handler's results by
     /// MiddlewareTransform after all middleware has run.

@@ -2,10 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Metrics exporter builder for creating different types of exporters
-//!
-//! This module provides a clean builder pattern for creating metrics exporters
-//! based on configuration, avoiding the "block cosplaying as a factory" anti-pattern.
+//! Metrics exporter builder for the supported exporter set.
 
 use super::{ConsoleSummaryExporter, PrometheusExporter};
 use obzenflow_core::metrics::MetricsExporter;
@@ -16,16 +13,10 @@ pub struct MetricsExporterBuilder {
     exporter_type: ExporterType,
 }
 
-/// Types of metrics exporters available
+/// Supported metrics exporters.
 pub enum ExporterType {
     /// Prometheus pull-based metrics
     Prometheus,
-    /// StatsD push-based metrics
-    #[cfg(feature = "metrics-statsd")]
-    StatsD { host: String, port: u16 },
-    /// OpenTelemetry metrics
-    #[cfg(feature = "metrics-otel")]
-    OpenTelemetry { endpoint: String },
     /// Console output for debugging
     Console,
     /// No-op exporter when metrics are disabled
@@ -54,22 +45,6 @@ impl MetricsExporterBuilder {
             Ok("prometheus") | Err(_) => ExporterType::Prometheus, // Default
             Ok("console") => ExporterType::Console,
             Ok("noop") => ExporterType::Noop,
-            #[cfg(feature = "metrics-statsd")]
-            Ok("statsd") => {
-                let host =
-                    env::var("OBZENFLOW_STATSD_HOST").unwrap_or_else(|_| "localhost".to_string());
-                let port = env::var("OBZENFLOW_STATSD_PORT")
-                    .ok()
-                    .and_then(|p| p.parse().ok())
-                    .unwrap_or(8125);
-                ExporterType::StatsD { host, port }
-            }
-            #[cfg(feature = "metrics-otel")]
-            Ok("opentelemetry") => {
-                let endpoint = env::var("OBZENFLOW_OTEL_ENDPOINT")
-                    .unwrap_or_else(|_| "http://localhost:4318".to_string());
-                ExporterType::OpenTelemetry { endpoint }
-            }
             Ok(other) => {
                 tracing::warn!("Unknown metrics exporter type: {}, using prometheus", other);
                 ExporterType::Prometheus
@@ -121,28 +96,6 @@ impl MetricsExporterBuilder {
                 tracing::info!("Creating No-op metrics exporter");
                 Arc::new(NoopExporter)
             }
-            #[cfg(feature = "metrics-statsd")]
-            ExporterType::StatsD { host, port } => {
-                tracing::info!("Creating StatsD metrics exporter: {}:{}", host, port);
-                let target = format!("{host}:{port}");
-                match super::StatsDExporter::new(target)
-                    .map(|exporter| exporter.with_prefix("obzenflow."))
-                {
-                    Ok(exporter) => Arc::new(exporter),
-                    Err(err) => {
-                        tracing::warn!(
-                            error = %err,
-                            "Failed to create StatsD exporter; falling back to Noop"
-                        );
-                        Arc::new(NoopExporter)
-                    }
-                }
-            }
-            #[cfg(feature = "metrics-otel")]
-            ExporterType::OpenTelemetry { endpoint } => {
-                tracing::info!("Creating OpenTelemetry metrics exporter: {}", endpoint);
-                Arc::new(super::OtelExporter::new(endpoint))
-            }
         }
     }
 }
@@ -173,6 +126,33 @@ impl MetricsExporter for NoopExporter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::env;
+    use std::sync::Mutex;
+
+    static ENV_MUTEX: Mutex<()> = Mutex::new(());
+
+    fn with_metrics_exporter_env(value: Option<&str>, test: impl FnOnce()) {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let saved_enabled = env::var("OBZENFLOW_METRICS_ENABLED").ok();
+        let saved_exporter = env::var("OBZENFLOW_METRICS_EXPORTER").ok();
+
+        env::remove_var("OBZENFLOW_METRICS_ENABLED");
+        match value {
+            Some(value) => env::set_var("OBZENFLOW_METRICS_EXPORTER", value),
+            None => env::remove_var("OBZENFLOW_METRICS_EXPORTER"),
+        }
+
+        test();
+
+        match saved_enabled {
+            Some(value) => env::set_var("OBZENFLOW_METRICS_ENABLED", value),
+            None => env::remove_var("OBZENFLOW_METRICS_ENABLED"),
+        }
+        match saved_exporter {
+            Some(value) => env::set_var("OBZENFLOW_METRICS_EXPORTER", value),
+            None => env::remove_var("OBZENFLOW_METRICS_EXPORTER"),
+        }
+    }
 
     #[test]
     fn test_builder_defaults() {
@@ -185,5 +165,30 @@ mod tests {
         let exporter = MetricsExporterBuilder::noop().build();
         let result = exporter.render_metrics().unwrap();
         assert_eq!(result, "");
+    }
+
+    #[test]
+    fn test_from_env_supports_console() {
+        with_metrics_exporter_env(Some("console"), || {
+            let exporter = MetricsExporterBuilder::from_env().build();
+            assert!(exporter.render_metrics().is_ok());
+        });
+    }
+
+    #[test]
+    fn test_from_env_supports_noop() {
+        with_metrics_exporter_env(Some("noop"), || {
+            let exporter = MetricsExporterBuilder::from_env().build();
+            assert_eq!(exporter.render_metrics().unwrap(), "");
+        });
+    }
+
+    #[test]
+    fn test_from_env_unknown_exporter_falls_back_to_prometheus() {
+        with_metrics_exporter_env(Some("legacy_exporter"), || {
+            let exporter = MetricsExporterBuilder::from_env().build();
+            let output = exporter.render_metrics().unwrap();
+            assert!(output.contains("obzenflow_build_info"));
+        });
     }
 }

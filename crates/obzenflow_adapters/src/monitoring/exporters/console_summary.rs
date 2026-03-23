@@ -163,8 +163,8 @@ impl ConsoleSummaryExporter {
                 ));
             }
 
-            // Per-stage RED metrics
-            summary.push_str("RED Metrics by Stage:\n");
+            // Per-stage processing summary
+            summary.push_str("Metrics by Stage:\n");
 
             // Collect and sort stages by type and name
             let mut stages: Vec<(&StageId, &StageMetadata)> =

@@ -4,19 +4,16 @@
 
 use crate::monitoring::metrics::core::Metric;
 
-/// Generic exporter interface for converting metrics to various formats
+/// Low-level exporter interface for adapter-side helpers and tests.
 ///
-/// This trait enables the core principle of separation of concerns:
-/// - Metrics focus on collecting and tracking values
-/// - Exporters focus on format conversion and transmission
-///
-/// The generic type T represents the output format (e.g., Prometheus MetricFamily,
-/// StatsD wire format string, JSON for APIs, test snapshots, etc.)
-pub trait MetricExporter<T> {
+/// This is not the main runtime metrics contract. The public runtime/export path uses
+/// `obzenflow_core::metrics::MetricsExporter`.
+pub(crate) trait MetricExporter<T> {
     /// Export a single metric to the target format
     fn export(&self, metric: &dyn Metric) -> Result<T, ExportError>;
 
     /// Export multiple metrics efficiently (can be overridden for batch optimizations)
+    #[cfg_attr(not(test), allow(dead_code))]
     fn export_batch(&self, metrics: Vec<&dyn Metric>) -> Result<Vec<T>, ExportError> {
         metrics
             .into_iter()
@@ -47,99 +44,10 @@ pub enum ExportError {
     ConfigError { message: String },
 }
 
-/// Helper trait for exporters that need to group metrics by labels or other criteria
-pub trait BatchingExporter<T>: MetricExporter<T> {
-    type BatchKey: Eq + std::hash::Hash;
-
-    /// Extract a grouping key from a metric for batching
-    fn batch_key(&self, metric: &dyn Metric) -> Self::BatchKey;
-
-    /// Export a batch of metrics with the same key
-    fn export_batch_grouped(
-        &self,
-        key: Self::BatchKey,
-        metrics: Vec<&dyn Metric>,
-    ) -> Result<T, ExportError>;
-}
-
-/// Registry for managing multiple exporters
-pub struct ExporterRegistry {
-    exporters: Vec<Box<dyn ExporterAny>>,
-}
-
-impl ExporterRegistry {
-    pub fn new() -> Self {
-        Self {
-            exporters: Vec::new(),
-        }
-    }
-
-    pub fn add_exporter<T, E>(mut self, exporter: E) -> Self
-    where
-        E: MetricExporter<T> + Send + Sync + 'static,
-        T: Send + Sync + 'static,
-    {
-        self.exporters
-            .push(Box::new(TypeErasedExporter::new(exporter)));
-        self
-    }
-
-    pub fn export_all(&self, metrics: Vec<&dyn Metric>) -> Vec<Result<(), ExportError>> {
-        self.exporters
-            .iter()
-            .map(|exporter| exporter.export_metrics(metrics.clone()))
-            .collect()
-    }
-}
-
-// Type erasure helpers for the registry
-trait ExporterAny: Send + Sync {
-    fn export_metrics(&self, metrics: Vec<&dyn Metric>) -> Result<(), ExportError>;
-}
-
-struct TypeErasedExporter<T, E> {
-    exporter: E,
-    _phantom: std::marker::PhantomData<T>,
-}
-
-impl<T, E> TypeErasedExporter<T, E> {
-    fn new(exporter: E) -> Self {
-        Self {
-            exporter,
-            _phantom: std::marker::PhantomData,
-        }
-    }
-}
-
-impl<T, E> ExporterAny for TypeErasedExporter<T, E>
-where
-    E: MetricExporter<T> + Send + Sync,
-    T: Send + Sync + 'static,
-{
-    fn export_metrics(&self, metrics: Vec<&dyn Metric>) -> Result<(), ExportError> {
-        // Export but discard the results (registry just triggers exports)
-        let _results = self.exporter.export_batch(metrics)?;
-        Ok(())
-    }
-}
-
-impl Default for ExporterRegistry {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-// Conditional compilation for different exporters
-#[cfg(feature = "metrics-statsd")]
-pub mod statsd;
-
-#[cfg(feature = "metrics-otel")]
-pub mod otel;
-
 // Always available for testing
 pub mod test;
 
-// Clean exporters for FLOWIP-056-666
+// Supported adapter-side exporters
 pub mod console_summary;
 pub mod prometheus_exporter;
 
@@ -151,12 +59,6 @@ pub use self::builder::{ExporterType, MetricsExporterBuilder};
 pub use self::console_summary::ConsoleSummaryExporter;
 pub use self::prometheus_exporter::PrometheusExporter;
 pub use self::test::TestExporter;
-
-#[cfg(feature = "metrics-statsd")]
-pub use self::statsd::StatsDExporter;
-
-#[cfg(feature = "metrics-otel")]
-pub use self::otel::OtelExporter;
 
 #[cfg(test)]
 mod tests {
@@ -238,16 +140,5 @@ mod tests {
         assert_eq!(results.len(), 2);
         assert_eq!(results[0], "exported:counter1");
         assert_eq!(results[1], "exported:counter2");
-    }
-
-    #[test]
-    fn test_registry() {
-        let registry = ExporterRegistry::new().add_exporter(MockExporter);
-
-        let metric = MockMetric::new("test_metric".to_string(), MetricValue::Counter(100));
-
-        let results = registry.export_all(vec![&metric]);
-        assert_eq!(results.len(), 1);
-        assert!(results[0].is_ok());
     }
 }

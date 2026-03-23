@@ -23,77 +23,21 @@
 //!
 //! ## Monitoring
 //!
-//! With Wide Events, monitoring is no longer implemented as middleware.
-//! Instead, metrics are automatically derived from the event journal by MetricsAggregator.
+//! Monitoring is no longer implemented as middleware.
+//! Instead, the runtime exports metrics through the snapshot/exporter path:
 //!
-//! The monitoring taxonomies (RED, USE, Golden Signals, SAAFE) are now documentation-only
-//! and provide Prometheus queries and Grafana dashboards for viewing metrics.
+//! - application metrics are derived from wide events and journals
+//! - infrastructure metrics are observed directly
+//! - both are rendered together by the metrics exporter
+//!
+//! Monitoring views such as Grafana dashboards belong in static monitoring/docs
+//! assets rather than as Rust helpers in this crate.
 //!
 //! ```text
 //! // OLD: Monitoring middleware (no longer available)
-//! // let red_middleware = RED::monitoring();
+//! // let monitoring_middleware = old_monitoring_factory();
 //!
-//! // NEW: Metrics are automatically collected from the journal
-//! // See obzenflow_adapters::monitoring::aggregator::MetricsAggregator
-//! ```
-//!
-//! ## Available Monitoring Views
-//!
-//! ObzenFlow provides several monitoring taxonomies as view definitions:
-//!
-//! ### RED (Rate, Errors, Duration)
-//! Best for request/response systems and sources. Tracks:
-//! - **Rate**: Events processed per second
-//! - **Errors**: Error count and rate
-//! - **Duration**: Processing time distribution
-//!
-//! ```rust
-//! use obzenflow_adapters::monitoring::taxonomies::red::RED;
-//!
-//! // Get Prometheus queries for RED metrics
-//! let queries = RED::prometheus_queries("my_flow", "my_stage");
-//! ```
-//!
-//! ### USE (Utilization, Saturation, Errors)
-//! Ideal for resource-focused stages like transforms. Tracks:
-//! - **Utilization**: Resource usage percentage
-//! - **Saturation**: Queue depth and backpressure
-//! - **Errors**: Processing errors
-//!
-//! ```rust
-//! use obzenflow_adapters::monitoring::taxonomies::use_taxonomy::USE;
-//!
-//! // Get Prometheus queries for USE metrics
-//! let queries = USE::prometheus_queries("my_flow", "my_stage");
-//! ```
-//!
-//! ### GoldenSignals (Latency, Traffic, Errors, Saturation)
-//! Comprehensive monitoring for critical stages. Tracks:
-//! - **Latency**: End-to-end processing time
-//! - **Traffic**: Request volume
-//! - **Errors**: Error rate and types
-//! - **Saturation**: Resource saturation
-//!
-//! ```rust
-//! use obzenflow_adapters::monitoring::taxonomies::golden_signals::GoldenSignals;
-//!
-//! // Get Prometheus queries for Golden Signals metrics
-//! let queries = GoldenSignals::prometheus_queries("my_flow", "my_stage");
-//! ```
-//!
-//! ### SAAFE (Saturation, Anomalies, Amendments, Failures, Errors)
-//! Advanced monitoring for sinks and data quality. Tracks:
-//! - **Saturation**: Backpressure and queue depth
-//! - **Anomalies**: Unusual patterns in data
-//! - **Amendments**: Data corrections/updates
-//! - **Failures**: Persistent failures
-//! - **Errors**: Transient errors
-//!
-//! ```rust
-//! use obzenflow_adapters::monitoring::taxonomies::saafe::SAAFE;
-//!
-//! // Get Prometheus queries for SAAFE metrics
-//! let queries = SAAFE::prometheus_queries("my_flow", "my_stage");
+//! // NEW: Use the runtime metrics surface and external dashboard/query assets
 //! ```
 //!
 //! ## Applying Middleware to Handlers
@@ -153,13 +97,9 @@ pub mod state;
 mod system;
 // Dangerous middleware examples moved to examples/dangerous_examples.rs
 // Factory tests moved to tests/factory_tests.rs
-// Note: With FLOWIP-056-666, monitoring is no longer implemented as middleware.
-// Metrics are automatically derived from the event journal by MetricsAggregator.
-// Taxonomies now provide Prometheus queries and Grafana dashboards:
-// - RED::prometheus_queries()
-// - USE::prometheus_queries()
-// - GoldenSignals::prometheus_queries()
-// - SAAFE::prometheus_queries()
+// Note: Monitoring is no longer implemented as middleware.
+// Application metrics are journal-derived, infrastructure metrics are observed
+// directly, and dashboards/query assets live outside the middleware API.
 
 // Core trait exports
 pub use middleware_factory::MiddlewareFactory;
@@ -209,4 +149,3 @@ pub use observability::{
 pub use system::{
     outcome_enrichment, validate_middleware_safety, OutcomeEnrichmentMiddleware, ValidationResult,
 };
-// Monitoring is provided via taxonomy-specific methods

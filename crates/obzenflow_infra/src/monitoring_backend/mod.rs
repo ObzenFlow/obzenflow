@@ -5,10 +5,10 @@
 //! Monitoring backend implementations
 //!
 //! This module contains concrete monitoring backend implementations
-//! like Prometheus, StatsD, etc. These are infrastructure concerns
+//! such as Prometheus. These are infrastructure concerns
 //! that implement the monitoring traits from the adapters layer.
 
 #[cfg(feature = "prometheus")]
 pub mod prometheus;
 
-// Future: statsd, datadog, etc.
+// Future backends should be added only when there is a concrete product need.

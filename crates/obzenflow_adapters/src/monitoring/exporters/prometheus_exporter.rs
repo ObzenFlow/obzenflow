@@ -364,7 +364,7 @@ impl PrometheusExporter {
             writeln!(output)?;
         }
 
-        // SAAFE metrics - anomalies
+        // Anomalies
         if !snapshot.anomalies_total.is_empty() {
             writeln!(
                 output,
@@ -385,7 +385,7 @@ impl PrometheusExporter {
             writeln!(output)?;
         }
 
-        // SAAFE metrics - amendments
+        // Amendments
         if !snapshot.amendments_total.is_empty() {
             writeln!(
                 output,
@@ -406,7 +406,7 @@ impl PrometheusExporter {
             writeln!(output)?;
         }
 
-        // SAAFE metrics - saturation
+        // Saturation
         if !snapshot.saturation_ratio.is_empty() {
             writeln!(
                 output,
@@ -427,7 +427,7 @@ impl PrometheusExporter {
             writeln!(output)?;
         }
 
-        // SAAFE metrics - failures
+        // Failures
         if !snapshot.failures_total.is_empty() {
             writeln!(
                 output,
@@ -448,7 +448,7 @@ impl PrometheusExporter {
             writeln!(output)?;
         }
 
-        // USE metrics - event loops total
+        // Event loops total
         if !snapshot.event_loops_total.is_empty() {
             writeln!(
                 output,
@@ -469,7 +469,7 @@ impl PrometheusExporter {
             writeln!(output)?;
         }
 
-        // USE metrics - event loops with work
+        // Event loops with work
         if !snapshot.event_loops_with_work_total.is_empty() {
             writeln!(
                 output,

@@ -11,7 +11,7 @@ use tokio::sync::broadcast;
 /// This trait separates metric collection from export formats, enabling:
 /// - Clean feature flag support (metrics work without exporters)
 /// - Easy testing (no external dependencies required)
-/// - Pluggable export systems (Prometheus, StatsD, custom)
+/// - Pluggable export systems (Prometheus or future custom exporters)
 /// - Type safety (no runtime format dependencies)
 pub trait Metric: Send + Sync {
     /// Unique identifier for this metric

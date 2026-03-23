@@ -96,7 +96,7 @@ This design predates the ChainEvent enhancements but remains valid because it se
 Control events written via `ctx.write_control_event()` are special ChainEvents that:
 - Get appended to handler results by MiddlewareTransform/Sink/Source adapters
 - Flow through the journal for durability
-- Are observed by MetricsAggregator for monitoring
+- Can contribute to application metrics and durable observability derived from the journal
 - Must follow the current ChainEvent structure and requirements
 
 ## Error Handling and Dead Letter Pattern
