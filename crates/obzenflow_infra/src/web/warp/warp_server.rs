@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 use std::convert::Infallible;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -42,10 +42,11 @@ pub struct WarpServer {
 const DEFAULT_MAX_BODY_SIZE_BYTES: usize = 10 * 1024 * 1024;
 const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 30;
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone)]
 struct HostPolicy {
     max_body_size_bytes: u64,
     request_timeout: Option<Duration>,
+    control_plane_auth: Option<AuthPolicy>,
 }
 
 impl WarpServer {
@@ -80,6 +81,7 @@ impl WarpServer {
             .unify();
         let headers = warp::header::headers_cloned();
 
+        let get_host_policy = host_policy.clone();
         let get_route = warp::get()
             .and(warp::path::full())
             .and(query)
@@ -91,7 +93,7 @@ impl WarpServer {
                       headers: warp::http::HeaderMap| {
                     dispatch_request(
                         router.clone(),
-                        host_policy,
+                        get_host_policy.clone(),
                         HttpMethod::Get,
                         path,
                         headers,
@@ -101,6 +103,7 @@ impl WarpServer {
                 }
             });
 
+        let head_host_policy = host_policy.clone();
         let head_route = warp::head()
             .and(warp::path::full())
             .and(query)
@@ -112,7 +115,7 @@ impl WarpServer {
                       headers: warp::http::HeaderMap| {
                     dispatch_request(
                         router.clone(),
-                        host_policy,
+                        head_host_policy.clone(),
                         HttpMethod::Head,
                         path,
                         headers,
@@ -122,6 +125,7 @@ impl WarpServer {
                 }
             });
 
+        let delete_host_policy = host_policy.clone();
         let delete_route = warp::delete()
             .and(warp::path::full())
             .and(query)
@@ -133,7 +137,7 @@ impl WarpServer {
                       headers: warp::http::HeaderMap| {
                     dispatch_request(
                         router.clone(),
-                        host_policy,
+                        delete_host_policy.clone(),
                         HttpMethod::Delete,
                         path,
                         headers,
@@ -143,6 +147,7 @@ impl WarpServer {
                 }
             });
 
+        let options_host_policy = host_policy.clone();
         let options_route = warp::options()
             .and(warp::path::full())
             .and(query)
@@ -154,7 +159,7 @@ impl WarpServer {
                       headers: warp::http::HeaderMap| {
                     dispatch_request(
                         router.clone(),
-                        host_policy,
+                        options_host_policy.clone(),
                         HttpMethod::Options,
                         path,
                         headers,
@@ -164,6 +169,7 @@ impl WarpServer {
                 }
             });
 
+        let post_host_policy = host_policy.clone();
         let post_route = warp::post()
             .and(warp::path::full())
             .and(query)
@@ -180,7 +186,7 @@ impl WarpServer {
                       body: bytes::Bytes| {
                     dispatch_request(
                         router.clone(),
-                        host_policy,
+                        post_host_policy.clone(),
                         HttpMethod::Post,
                         path,
                         headers,
@@ -190,6 +196,7 @@ impl WarpServer {
                 }
             });
 
+        let put_host_policy = host_policy.clone();
         let put_route = warp::put()
             .and(warp::path::full())
             .and(query)
@@ -206,7 +213,7 @@ impl WarpServer {
                       body: bytes::Bytes| {
                     dispatch_request(
                         router.clone(),
-                        host_policy,
+                        put_host_policy.clone(),
                         HttpMethod::Put,
                         path,
                         headers,
@@ -216,6 +223,7 @@ impl WarpServer {
                 }
             });
 
+        let patch_host_policy = host_policy.clone();
         let patch_route = warp::patch()
             .and(warp::path::full())
             .and(query)
@@ -232,7 +240,7 @@ impl WarpServer {
                       body: bytes::Bytes| {
                     dispatch_request(
                         router.clone(),
-                        host_policy,
+                        patch_host_policy.clone(),
                         HttpMethod::Patch,
                         path,
                         headers,
@@ -259,7 +267,7 @@ impl WarpServer {
 
         // Add SSE /api/flow/events route if a system journal is available
         if let Some(journal) = &self.system_journal {
-            let sse_route = self.build_flow_events_route(journal.clone());
+            let sse_route = self.build_flow_events_route(journal.clone(), host_policy.clone());
             combined_route = combined_route.or(sse_route).unify().boxed();
         }
 
@@ -362,16 +370,31 @@ impl WarpServer {
     fn build_flow_events_route(
         &self,
         system_journal: Arc<dyn Journal<SystemEvent>>,
+        host_policy: HostPolicy,
     ) -> impl Filter<Extract = (Box<dyn Reply>,), Error = Rejection> + Clone {
         let journal_filter = warp::any().map(move || system_journal.clone());
 
         warp::path!("api" / "flow" / "events")
             .and(warp::get())
+            .and(warp::header::headers_cloned())
             .and(warp::header::optional::<String>("Last-Event-ID"))
             .and(journal_filter)
             .and_then(
-                |last_event_id: Option<String>,
-                 journal: Arc<dyn Journal<SystemEvent>>| async move {
+                move |headers: warp::http::HeaderMap,
+                      last_event_id: Option<String>,
+                      journal: Arc<dyn Journal<SystemEvent>>| {
+                    let host_policy = host_policy.clone();
+                    async move {
+                    let req_headers = headers_to_owned_map(&headers);
+                    if let Err(response) = maybe_enforce_control_plane_auth(
+                        &host_policy,
+                        "/api/flow/events",
+                        &req_headers,
+                        &[],
+                    ) {
+                        return reply_from_response(response);
+                    }
+
                     let (tx, rx) =
                         tokio::sync::mpsc::unbounded_channel::<Result<SseEvent, Infallible>>();
 
@@ -574,6 +597,7 @@ impl WarpServer {
                     let reply =
                         warp::sse::reply(warp::sse::keep_alive().stream(stream));
                     Ok::<Box<dyn Reply>, Rejection>(Box::new(reply) as Box<dyn Reply>)
+                    }
                 },
             )
     }
@@ -735,6 +759,16 @@ async fn dispatch_request(
     }
 }
 
+fn headers_to_owned_map(headers: &warp::http::HeaderMap) -> HashMap<String, String> {
+    let mut req_headers = HashMap::new();
+    for (name, value) in headers.iter() {
+        if let Ok(value_str) = value.to_str() {
+            req_headers.insert(name.to_string(), value_str.to_string());
+        }
+    }
+    req_headers
+}
+
 fn header_value<'a>(headers: &'a HashMap<String, String>, header_name: &str) -> Option<&'a str> {
     headers.iter().find_map(|(k, v)| {
         if k.eq_ignore_ascii_case(header_name) {
@@ -766,6 +800,144 @@ fn resolve_effective_auth(managed: &ManagedRouteInfo) -> Option<AuthPolicy> {
         .surface_policy
         .as_ref()
         .and_then(|policy| policy.auth.clone())
+}
+
+fn is_control_plane_path(path: &str) -> bool {
+    matches!(path, "/api/topology" | "/metrics")
+        || path == "/api/flow"
+        || path.starts_with("/api/flow/")
+}
+
+fn is_control_plane_exempt_path(path: &str) -> bool {
+    matches!(path, "/health" | "/ready")
+}
+
+fn maybe_enforce_control_plane_auth(
+    host_policy: &HostPolicy,
+    path: &str,
+    headers: &HashMap<String, String>,
+    body: &[u8],
+) -> Result<(), Response> {
+    if is_control_plane_exempt_path(path) || !is_control_plane_path(path) {
+        return Ok(());
+    }
+
+    match host_policy.control_plane_auth.as_ref() {
+        Some(auth) => enforce_auth_policy(auth, headers, body),
+        None => Ok(()),
+    }
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<IpAddr>()
+            .map(|ip| ip.is_loopback())
+            .unwrap_or(false)
+}
+
+fn validate_auth_policy_startup(auth: &AuthPolicy) -> Result<(), WebError> {
+    match auth {
+        AuthPolicy::None => Ok(()),
+        AuthPolicy::ApiKey { value_env, .. } => {
+            std::env::var(value_env)
+                .map(|_| ())
+                .map_err(|err| WebError::StartupFailed {
+                    message: format!(
+                        "Control-plane AuthPolicy::ApiKey expects env var `{value_env}`: {err}"
+                    ),
+                    source: None,
+                })
+        }
+        AuthPolicy::HmacSha256 {
+            secret_env,
+            timestamp_header,
+            replay_window_secs,
+            ..
+        } => {
+            if replay_window_secs.is_some() && timestamp_header.is_none() {
+                return Err(WebError::StartupFailed {
+                    message: "Control-plane AuthPolicy::HmacSha256 requires timestamp_header when replay_window_secs is configured".to_string(),
+                    source: None,
+                });
+            }
+
+            std::env::var(secret_env)
+                .map(|_| ())
+                .map_err(|err| WebError::StartupFailed {
+                    message: format!(
+                        "Control-plane AuthPolicy::HmacSha256 expects env var `{secret_env}`: {err}"
+                    ),
+                    source: None,
+                })
+        }
+    }
+}
+
+fn build_host_policy(
+    config: &ServerConfig,
+    endpoints: &[Arc<dyn HttpEndpoint>],
+    has_flow_events_route: bool,
+) -> Result<HostPolicy, WebError> {
+    let max_body_size_bytes = config.max_body_size.unwrap_or(DEFAULT_MAX_BODY_SIZE_BYTES) as u64;
+    let request_timeout_secs = config
+        .request_timeout_secs
+        .unwrap_or(DEFAULT_REQUEST_TIMEOUT_SECS);
+    let request_timeout = if request_timeout_secs == 0 {
+        None
+    } else {
+        Some(Duration::from_secs(request_timeout_secs))
+    };
+
+    let control_plane_auth = config.control_plane_auth.clone();
+    if let Some(auth) = control_plane_auth.as_ref() {
+        validate_auth_policy_startup(auth)?;
+    }
+
+    let has_control_plane_routes = has_flow_events_route
+        || endpoints.iter().any(|endpoint| {
+            let path = endpoint.path();
+            is_control_plane_path(path) && !is_control_plane_exempt_path(path)
+        });
+
+    if has_control_plane_routes
+        && !is_loopback_host(&config.host)
+        && !matches!(
+            control_plane_auth.as_ref(),
+            Some(AuthPolicy::ApiKey { .. } | AuthPolicy::HmacSha256 { .. })
+        )
+    {
+        return Err(WebError::StartupFailed {
+            message: format!(
+                "Non-loopback host `{}` requires control-plane auth for built-in routes",
+                config.host
+            ),
+            source: None,
+        });
+    }
+
+    if has_control_plane_routes
+        && endpoints
+            .iter()
+            .any(|endpoint| endpoint.path() == "/metrics")
+        && matches!(
+            control_plane_auth.as_ref(),
+            Some(AuthPolicy::HmacSha256 {
+                replay_window_secs: Some(_),
+                ..
+            })
+        )
+    {
+        tracing::warn!(
+            "Control-plane replay-window HMAC is not compatible with standard Prometheus scraping for /metrics; prefer ApiKey on Authorization when metrics scraping is enabled"
+        );
+    }
+
+    Ok(HostPolicy {
+        max_body_size_bytes,
+        request_timeout,
+        control_plane_auth,
+    })
 }
 
 fn resolve_effective_timeout(
@@ -972,12 +1144,7 @@ async fn handle_request_no_body(
     let start = std::time::Instant::now();
 
     // Convert headers
-    let mut req_headers = HashMap::new();
-    for (name, value) in headers.iter() {
-        if let Ok(value_str) = value.to_str() {
-            req_headers.insert(name.to_string(), value_str.to_string());
-        }
-    }
+    let req_headers = headers_to_owned_map(&headers);
 
     let managed = endpoint.managed_route();
     let effective_timeout =
@@ -1003,6 +1170,10 @@ async fn handle_request_no_body(
                 return reply_from_response(response);
             }
         }
+    } else if let Err(response) =
+        maybe_enforce_control_plane_auth(&host_policy, matched_route.as_str(), &req_headers, &[])
+    {
+        return reply_from_response(response);
     }
 
     let request = Request {
@@ -1125,12 +1296,7 @@ async fn handle_request_with_body(
     let request_bytes = body.len() as u64;
 
     // Convert headers
-    let mut req_headers = HashMap::new();
-    for (name, value) in headers.iter() {
-        if let Ok(value_str) = value.to_str() {
-            req_headers.insert(name.to_string(), value_str.to_string());
-        }
-    }
+    let req_headers = headers_to_owned_map(&headers);
 
     let managed = endpoint.managed_route();
     let effective_timeout =
@@ -1188,6 +1354,13 @@ async fn handle_request_with_body(
                 return reply_from_response(response);
             }
         }
+    } else if let Err(response) = maybe_enforce_control_plane_auth(
+        &host_policy,
+        matched_route.as_str(),
+        &req_headers,
+        body.as_ref(),
+    ) {
+        return reply_from_response(response);
     }
 
     let request = Request {
@@ -1329,21 +1502,8 @@ impl WebServer for WarpServer {
             source: Some(Box::new(e)),
         })?;
 
-        let max_body_size_bytes =
-            config.max_body_size.unwrap_or(DEFAULT_MAX_BODY_SIZE_BYTES) as u64;
-        let request_timeout_secs = config
-            .request_timeout_secs
-            .unwrap_or(DEFAULT_REQUEST_TIMEOUT_SECS);
-        let request_timeout = if request_timeout_secs == 0 {
-            None
-        } else {
-            Some(Duration::from_secs(request_timeout_secs))
-        };
-
-        let host_policy = HostPolicy {
-            max_body_size_bytes,
-            request_timeout,
-        };
+        let host_policy =
+            build_host_policy(&config, &self.endpoints, self.system_journal.is_some())?;
 
         let routes = self.build_filter(host_policy)?;
 
@@ -1400,11 +1560,20 @@ impl WebServer for WarpServer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::journal::MemoryJournal;
     use async_trait::async_trait;
     use obzenflow_core::web::{
         AuthPolicy, HttpMethod, ManagedResponse, ManagedRouteInfo, Request, Response, RouteKind,
-        RoutePolicy, SurfacePolicy, WebError,
+        RoutePolicy, ServerConfig, SurfacePolicy, WebError,
     };
+
+    fn test_host_policy() -> HostPolicy {
+        HostPolicy {
+            max_body_size_bytes: 10,
+            request_timeout: None,
+            control_plane_auth: None,
+        }
+    }
 
     struct EchoEndpoint;
 
@@ -1427,12 +1596,7 @@ mod tests {
     async fn build_filter_enforces_content_length_limit() {
         let mut server = WarpServer::new();
         server.register_endpoint(Box::new(EchoEndpoint)).unwrap();
-        let filter = server
-            .build_filter(HostPolicy {
-                max_body_size_bytes: 10,
-                request_timeout: None,
-            })
-            .unwrap();
+        let filter = server.build_filter(test_host_policy()).unwrap();
 
         let response = warp::test::request()
             .method("POST")
@@ -1485,12 +1649,7 @@ mod tests {
         server
             .register_endpoint(Box::new(PathParamsEndpoint))
             .unwrap();
-        let filter = server
-            .build_filter(HostPolicy {
-                max_body_size_bytes: 10,
-                request_timeout: None,
-            })
-            .unwrap();
+        let filter = server.build_filter(test_host_policy()).unwrap();
 
         let response = warp::test::request()
             .method("GET")
@@ -1541,12 +1700,7 @@ mod tests {
         let mut server = WarpServer::new();
         server.register_endpoint(Box::new(ParamEndpoint)).unwrap();
         server.register_endpoint(Box::new(StaticEndpoint)).unwrap();
-        let filter = server
-            .build_filter(HostPolicy {
-                max_body_size_bytes: 10,
-                request_timeout: None,
-            })
-            .unwrap();
+        let filter = server.build_filter(test_host_policy()).unwrap();
 
         let response = warp::test::request()
             .method("GET")
@@ -1611,12 +1765,7 @@ mod tests {
             .register_endpoint(Box::new(ConflictEndpointB))
             .unwrap();
 
-        let err = server
-            .build_filter(HostPolicy {
-                max_body_size_bytes: 10,
-                request_timeout: None,
-            })
-            .unwrap_err();
+        let err = server.build_filter(test_host_policy()).unwrap_err();
         match err {
             WebError::EndpointRegistrationFailed { path, message } => {
                 assert_eq!(path, "/conflict/:name");
@@ -1674,12 +1823,7 @@ mod tests {
             .register_endpoint(Box::new(WeakeningAuthEndpoint))
             .unwrap();
 
-        let err = server
-            .build_filter(HostPolicy {
-                max_body_size_bytes: 10,
-                request_timeout: None,
-            })
-            .unwrap_err();
+        let err = server.build_filter(test_host_policy()).unwrap_err();
 
         match err {
             WebError::EndpointRegistrationFailed { path, message } => {
@@ -1727,12 +1871,7 @@ mod tests {
         server
             .register_endpoint(Box::new(ManagedBodySizeEndpoint))
             .unwrap();
-        let filter = server
-            .build_filter(HostPolicy {
-                max_body_size_bytes: 10,
-                request_timeout: None,
-            })
-            .unwrap();
+        let filter = server.build_filter(test_host_policy()).unwrap();
 
         let response = warp::test::request()
             .method("POST")
@@ -1788,12 +1927,7 @@ mod tests {
         server
             .register_endpoint(Box::new(ManagedContentTypeEndpoint))
             .unwrap();
-        let filter = server
-            .build_filter(HostPolicy {
-                max_body_size_bytes: 10,
-                request_timeout: None,
-            })
-            .unwrap();
+        let filter = server.build_filter(test_host_policy()).unwrap();
 
         let response = warp::test::request()
             .method("POST")
@@ -1856,12 +1990,7 @@ mod tests {
         server
             .register_endpoint(Box::new(ManagedApiKeyEndpoint))
             .unwrap();
-        let filter = server
-            .build_filter(HostPolicy {
-                max_body_size_bytes: 10,
-                request_timeout: None,
-            })
-            .unwrap();
+        let filter = server.build_filter(test_host_policy()).unwrap();
 
         let response = warp::test::request()
             .method("GET")
@@ -1942,12 +2071,7 @@ mod tests {
         server
             .register_endpoint(Box::new(ManagedHmacEndpoint))
             .unwrap();
-        let filter = server
-            .build_filter(HostPolicy {
-                max_body_size_bytes: 10,
-                request_timeout: None,
-            })
-            .unwrap();
+        let filter = server.build_filter(test_host_policy()).unwrap();
 
         let now_ts = Utc::now().timestamp().to_string();
         let key = hmac::Key::new(hmac::HMAC_SHA256, b"sekret");
@@ -2013,6 +2137,7 @@ mod tests {
             .build_filter(HostPolicy {
                 max_body_size_bytes: 10,
                 request_timeout: Some(Duration::from_millis(1)),
+                control_plane_auth: None,
             })
             .unwrap();
 
@@ -2023,6 +2148,176 @@ mod tests {
             .await;
 
         assert_eq!(response.status(), 504);
+    }
+
+    struct RawMetricsEndpoint;
+
+    #[async_trait]
+    impl HttpEndpoint for RawMetricsEndpoint {
+        fn path(&self) -> &str {
+            "/metrics"
+        }
+
+        fn methods(&self) -> &[HttpMethod] {
+            &[HttpMethod::Get]
+        }
+
+        async fn handle(&self, _request: Request) -> Result<ManagedResponse, WebError> {
+            Ok(Response::ok().with_text("metrics").into())
+        }
+    }
+
+    struct RawHealthEndpoint;
+
+    #[async_trait]
+    impl HttpEndpoint for RawHealthEndpoint {
+        fn path(&self) -> &str {
+            "/health"
+        }
+
+        fn methods(&self) -> &[HttpMethod] {
+            &[HttpMethod::Get]
+        }
+
+        async fn handle(&self, _request: Request) -> Result<ManagedResponse, WebError> {
+            Ok(Response::ok().with_text("healthy").into())
+        }
+    }
+
+    #[tokio::test]
+    async fn control_plane_auth_enforces_raw_metrics_endpoint() {
+        std::env::set_var("OBZENFLOW_TEST_CONTROL_PLANE_API_KEY", "Bearer sekret");
+
+        let mut server = WarpServer::new();
+        server
+            .register_endpoint(Box::new(RawMetricsEndpoint))
+            .unwrap();
+        let filter = server
+            .build_filter(HostPolicy {
+                max_body_size_bytes: 10,
+                request_timeout: None,
+                control_plane_auth: Some(AuthPolicy::ApiKey {
+                    header: "Authorization".to_string(),
+                    value_env: "OBZENFLOW_TEST_CONTROL_PLANE_API_KEY".to_string(),
+                }),
+            })
+            .unwrap();
+
+        let response = warp::test::request()
+            .method("GET")
+            .path("/metrics")
+            .reply(&filter)
+            .await;
+        assert_eq!(response.status(), 401);
+
+        let response = warp::test::request()
+            .method("GET")
+            .path("/metrics")
+            .header("authorization", "Bearer sekret")
+            .reply(&filter)
+            .await;
+        assert_eq!(response.status(), 200);
+        assert_eq!(response.body(), "metrics");
+    }
+
+    #[tokio::test]
+    async fn control_plane_auth_does_not_gate_health_endpoint() {
+        std::env::set_var("OBZENFLOW_TEST_CONTROL_PLANE_API_KEY", "Bearer sekret");
+
+        let mut server = WarpServer::new();
+        server
+            .register_endpoint(Box::new(RawHealthEndpoint))
+            .unwrap();
+        let filter = server
+            .build_filter(HostPolicy {
+                max_body_size_bytes: 10,
+                request_timeout: None,
+                control_plane_auth: Some(AuthPolicy::ApiKey {
+                    header: "Authorization".to_string(),
+                    value_env: "OBZENFLOW_TEST_CONTROL_PLANE_API_KEY".to_string(),
+                }),
+            })
+            .unwrap();
+
+        let response = warp::test::request()
+            .method("GET")
+            .path("/health")
+            .reply(&filter)
+            .await;
+        assert_eq!(response.status(), 200);
+        assert_eq!(response.body(), "healthy");
+    }
+
+    #[tokio::test]
+    async fn control_plane_auth_covers_flow_events_special_route() {
+        std::env::set_var("OBZENFLOW_TEST_CONTROL_PLANE_API_KEY", "Bearer sekret");
+
+        let mut server = WarpServer::new();
+        server.with_system_journal(Arc::new(MemoryJournal::<SystemEvent>::new()));
+        let filter = server
+            .build_filter(HostPolicy {
+                max_body_size_bytes: 10,
+                request_timeout: None,
+                control_plane_auth: Some(AuthPolicy::ApiKey {
+                    header: "Authorization".to_string(),
+                    value_env: "OBZENFLOW_TEST_CONTROL_PLANE_API_KEY".to_string(),
+                }),
+            })
+            .unwrap();
+
+        let response = warp::test::request()
+            .method("GET")
+            .path("/api/flow/events")
+            .reply(&filter)
+            .await;
+        assert_eq!(response.status(), 401);
+    }
+
+    #[test]
+    fn build_host_policy_requires_control_plane_auth_for_non_loopback_built_ins() {
+        let config = ServerConfig::new("0.0.0.0".to_string(), 9090);
+        let endpoints: Vec<Arc<dyn HttpEndpoint>> = vec![Arc::new(RawMetricsEndpoint)];
+
+        let err = build_host_policy(&config, &endpoints, false).unwrap_err();
+        match err {
+            WebError::StartupFailed { message, .. } => {
+                assert!(
+                    message.contains("requires control-plane auth"),
+                    "unexpected message: {message}"
+                );
+            }
+            other => panic!("Unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn build_host_policy_allows_non_loopback_when_no_control_plane_routes_exist() {
+        let config = ServerConfig::new("0.0.0.0".to_string(), 9090);
+        let endpoints: Vec<Arc<dyn HttpEndpoint>> = vec![Arc::new(EchoEndpoint)];
+
+        let host_policy = build_host_policy(&config, &endpoints, false).unwrap();
+        assert!(host_policy.control_plane_auth.is_none());
+    }
+
+    #[test]
+    fn build_host_policy_validates_control_plane_auth_env_at_startup() {
+        let mut config = ServerConfig::new("127.0.0.1".to_string(), 9090);
+        config.control_plane_auth = Some(AuthPolicy::ApiKey {
+            header: "Authorization".to_string(),
+            value_env: "OBZENFLOW_TEST_MISSING_CONTROL_PLANE_ENV".to_string(),
+        });
+        let endpoints: Vec<Arc<dyn HttpEndpoint>> = vec![Arc::new(RawMetricsEndpoint)];
+
+        let err = build_host_policy(&config, &endpoints, false).unwrap_err();
+        match err {
+            WebError::StartupFailed { message, .. } => {
+                assert!(
+                    message.contains("OBZENFLOW_TEST_MISSING_CONTROL_PLANE_ENV"),
+                    "unexpected message: {message}"
+                );
+            }
+            other => panic!("Unexpected error: {other:?}"),
+        }
     }
 }
 
