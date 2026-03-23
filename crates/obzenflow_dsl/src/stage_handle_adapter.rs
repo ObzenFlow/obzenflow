@@ -144,13 +144,7 @@ where
     async fn wait_for_completion(&self) -> Result<(), StageError> {
         use std::time::{Duration, Instant};
 
-        // Use the same env var as the pipeline cleanup path so operators
-        // can tune shutdown behavior without code changes.
-        let timeout = std::env::var("OBZENFLOW_SHUTDOWN_TIMEOUT_SECS")
-            .ok()
-            .and_then(|s| s.parse::<u64>().ok())
-            .map(Duration::from_secs)
-            .unwrap_or_else(|| Duration::from_secs(30));
+        let timeout = obzenflow_runtime::bootstrap::shutdown_timeout();
 
         let start = Instant::now();
 

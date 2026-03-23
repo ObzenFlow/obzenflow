@@ -24,7 +24,6 @@ use obzenflow_fsm::{
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::sync::OnceLock;
 use std::time::Duration;
 
 /// Stop intent for externally-initiated shutdown (UI/API/signal).
@@ -309,14 +308,7 @@ impl FsmContext for PipelineContext {}
 /// Controlled via `OBZENFLOW_SHUTDOWN_TIMEOUT_SECS` with a sensible default:
 /// - If the env var is unset or invalid, defaults to 30 seconds.
 pub(crate) fn stop_drain_timeout() -> Duration {
-    static TIMEOUT: OnceLock<Duration> = OnceLock::new();
-    *TIMEOUT.get_or_init(|| {
-        std::env::var("OBZENFLOW_SHUTDOWN_TIMEOUT_SECS")
-            .ok()
-            .and_then(|s| s.parse::<u64>().ok())
-            .map(Duration::from_secs)
-            .unwrap_or_else(|| Duration::from_secs(30))
-    })
+    crate::bootstrap::shutdown_timeout()
 }
 
 /// Compute flow-level lifecycle metrics from per-stage snapshots in the context.

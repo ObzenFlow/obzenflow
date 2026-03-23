@@ -16,22 +16,31 @@ use super::{
     ApplicationError, FlowConfig, Presentation, RunPresentationOutcome, WebSurfaceAttachment,
     WebSurfaceWiringContext,
 };
-use crate::application::config::{CorsModeArg, StartupMode};
+use crate::application::config::{CorsModeArg, ResolvedStartupConfig, StartupMode};
 use crate::web::endpoints::event_ingestion::HttpIngress;
 #[cfg(feature = "warp-server")]
 use crate::web::surface_metrics::{HttpSurfaceMetricsCollector, HttpSurfaceMetricsEmitter};
-use clap::Parser;
 use obzenflow_core::event::ingestion::IngestionTelemetry;
 use obzenflow_core::metrics::{InfraMetricsSnapshot, MetricsExporter};
 use obzenflow_core::web::{CorsConfig, CorsMode, HttpEndpoint, ServerConfig};
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::FlowDefinition;
+use obzenflow_runtime::bootstrap::install_bootstrap_config;
 use obzenflow_runtime::prelude::FlowHandle;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::task::JoinHandle;
 
 type FlowHandleHook = Box<dyn Fn(&Arc<FlowHandle>) -> JoinHandle<()> + Send + Sync>;
+
+fn resolve_startup_config(
+    builder_config_file: Option<PathBuf>,
+    enable_autodiscovery: bool,
+) -> Result<ResolvedStartupConfig, ApplicationError> {
+    FlowConfig::parse_and_resolve(builder_config_file, enable_autodiscovery)
+        .map_err(|err| ApplicationError::InvalidConfiguration(err.to_string()))
+}
 
 /// Configuration for log level filtering
 #[derive(Debug, Clone)]
@@ -86,6 +95,7 @@ pub struct FlowApplicationBuilder {
     console_subscriber: bool,
     console_bind: Option<String>,
     log_level: Option<LogLevel>,
+    config_file: Option<PathBuf>,
     web_surfaces: Vec<WebSurfaceAttachment>,
     ingress_telemetry: Vec<Arc<IngestionTelemetry>>,
     web_endpoints: Vec<Box<dyn HttpEndpoint>>,
@@ -129,6 +139,14 @@ impl FlowApplicationBuilder {
     /// Can be overridden by the `RUST_LOG` environment variable.
     pub fn with_log_level(mut self, level: LogLevel) -> Self {
         self.log_level = Some(level);
+        self
+    }
+
+    /// Use an explicit startup config file for builder-driven runs.
+    ///
+    /// CLI `--config <path>` still wins when both are present.
+    pub fn with_config_file(mut self, path: impl Into<PathBuf>) -> Self {
+        self.config_file = Some(path.into());
         self
     }
 
@@ -201,6 +219,8 @@ impl FlowApplicationBuilder {
         runtime.block_on(
             FlowApplication::run_with_web_endpoints_and_hooks_and_presentation(
                 flow,
+                self.config_file,
+                false,
                 self.web_surfaces,
                 self.ingress_telemetry,
                 self.web_endpoints,
@@ -221,6 +241,8 @@ impl FlowApplicationBuilder {
         // Run the flow
         FlowApplication::run_with_web_endpoints_and_hooks_and_presentation(
             flow,
+            self.config_file,
+            false,
             self.web_surfaces,
             self.ingress_telemetry,
             self.web_endpoints,
@@ -410,6 +432,8 @@ impl FlowApplication {
     ) -> Result<(), ApplicationError> {
         Self::run_with_web_endpoints_and_hooks_and_presentation(
             flow,
+            None,
+            true,
             Vec::new(),
             Vec::new(),
             Vec::new(),
@@ -434,6 +458,8 @@ impl FlowApplication {
     ) -> Result<(), ApplicationError> {
         Self::run_with_web_endpoints_and_hooks_and_presentation(
             flow,
+            None,
+            true,
             Vec::new(),
             Vec::new(),
             extra_endpoints,
@@ -445,6 +471,8 @@ impl FlowApplication {
 
     pub(crate) async fn run_with_web_endpoints_and_hooks_and_presentation(
         flow: FlowDefinition,
+        builder_config_file: Option<PathBuf>,
+        enable_autodiscovery: bool,
         web_surfaces: Vec<WebSurfaceAttachment>,
         ingress_telemetry: Vec<Arc<IngestionTelemetry>>,
         extra_endpoints: Vec<Box<dyn HttpEndpoint>>,
@@ -465,38 +493,18 @@ impl FlowApplication {
                 .try_init();
         }
 
-        // Parse CLI arguments automatically (like Spring Boot)
-        let config = FlowConfig::parse();
+        let config = resolve_startup_config(builder_config_file, enable_autodiscovery)?;
 
         let presentation_enabled = presentation.is_some();
 
         // Clear any stale run-dir hint from prior FlowApplication runs (OT-17).
         let _ = crate::journal::factory::take_last_run_dir();
 
-        let shutdown_timeout_secs = std::env::var("OBZENFLOW_SHUTDOWN_TIMEOUT_SECS")
-            .ok()
-            .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or(30);
-        let grace_timeout = Duration::from_secs(shutdown_timeout_secs);
-
-        let ingestion_metrics_interval = {
-            let interval_secs = std::env::var("OBZENFLOW_INGESTION_METRICS_INTERVAL_SECS")
-                .ok()
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(5)
-                .max(1);
-            Duration::from_secs(interval_secs)
-        };
+        let grace_timeout = config.runtime.shutdown_timeout;
+        let ingestion_metrics_interval = config.runtime.ingestion_metrics_interval;
 
         #[cfg(feature = "warp-server")]
-        let surface_metrics_interval = {
-            let surface_metrics_interval_secs =
-                std::env::var("OBZENFLOW_SURFACE_METRICS_INTERVAL_SECS")
-                    .ok()
-                    .and_then(|s| s.parse::<u64>().ok())
-                    .unwrap_or(15);
-            Duration::from_secs(surface_metrics_interval_secs)
-        };
+        let surface_metrics_interval = config.runtime.surface_metrics_interval;
 
         // Background tasks spawned by FlowHandle hooks and/or web surface wiring closures.
         // These must not be allowed to outlive FlowApplication, even on early-return paths.
@@ -513,7 +521,7 @@ impl FlowApplication {
         }
 
         let (result, flow_name, run_dir, stopped) = 'run: {
-            if (!extra_endpoints.is_empty() || !web_surfaces.is_empty()) && !config.server {
+            if (!extra_endpoints.is_empty() || !web_surfaces.is_empty()) && !config.server.enabled {
                 break 'run (
                     Err(ApplicationError::InvalidConfiguration(
                         "Web endpoints or surfaces were configured, but FlowApplication is not running with --server"
@@ -525,114 +533,8 @@ impl FlowApplication {
                 );
             }
 
-            if !config.cors_allow_origin.is_empty() && config.cors_mode != CorsModeArg::AllowList {
-                break 'run (
-                    Err(ApplicationError::InvalidConfiguration(
-                        "--cors-allow-origin requires --cors-mode=allow-list".to_string(),
-                    )),
-                    None,
-                    None,
-                    false,
-                );
-            }
-
-            if config.has_control_plane_auth_args() && !config.server {
-                break 'run (
-                    Err(ApplicationError::InvalidConfiguration(
-                        "control-plane auth flags require --server".to_string(),
-                    )),
-                    None,
-                    None,
-                    false,
-                );
-            }
-
-            let control_plane_auth = match config.build_control_plane_auth() {
-                Ok(auth) => auth,
-                Err(message) => {
-                    break 'run (
-                        Err(ApplicationError::InvalidConfiguration(message)),
-                        None,
-                        None,
-                        false,
-                    );
-                }
-            };
-            if config.cors_mode == CorsModeArg::AllowList && config.cors_allow_origin.is_empty() {
-                break 'run (
-                    Err(ApplicationError::InvalidConfiguration(
-                        "--cors-mode=allow-list requires at least one --cors-allow-origin"
-                            .to_string(),
-                    )),
-                    None,
-                    None,
-                    false,
-                );
-            }
-
-            if config.allow_incomplete_archive && config.replay_from.is_none() {
-                break 'run (
-                    Err(ApplicationError::InvalidConfiguration(
-                        "--allow-incomplete-archive requires --replay-from".to_string(),
-                    )),
-                    None,
-                    None,
-                    false,
-                );
-            }
-
-            if let Some(path) = &config.replay_from {
-                if !path.is_dir() {
-                    break 'run (
-                        Err(ApplicationError::InvalidConfiguration(format!(
-                            "--replay-from must be a directory: {}",
-                            path.display()
-                        ))),
-                        None,
-                        None,
-                        false,
-                    );
-                }
-                let manifest_path = path.join(obzenflow_core::journal::RUN_MANIFEST_FILENAME);
-                if !manifest_path.exists() {
-                    break 'run (
-                        Err(ApplicationError::InvalidConfiguration(format!(
-                            "Replay archive is missing {} at {}",
-                            obzenflow_core::journal::RUN_MANIFEST_FILENAME,
-                            manifest_path.display()
-                        ))),
-                        None,
-                        None,
-                        false,
-                    );
-                }
-            }
-
-            // Export replay options to environment so infra can inject a replay archive
-            // implementation into runtime services during flow build (FLOWIP-095a).
-            match &config.replay_from {
-                Some(path) => std::env::set_var("OBZENFLOW_REPLAY_FROM", path),
-                None => std::env::remove_var("OBZENFLOW_REPLAY_FROM"),
-            }
-            if config.allow_incomplete_archive {
-                std::env::set_var("OBZENFLOW_ALLOW_INCOMPLETE_ARCHIVE", "1");
-            } else {
-                std::env::remove_var("OBZENFLOW_ALLOW_INCOMPLETE_ARCHIVE");
-            }
-
-            // Export startup mode to environment so lower layers (runtime_services)
-            // can adjust behaviour (e.g. disable auto-Run in manual mode).
-            // This is primarily used by the pipeline supervisor (FLOWIP-059).
-            if config.server {
-                match config.startup_mode {
-                    StartupMode::Auto => {
-                        std::env::set_var("OBZENFLOW_STARTUP_MODE", "auto");
-                    }
-                    StartupMode::Manual => {
-                        std::env::set_var("OBZENFLOW_STARTUP_MODE", "manual");
-                    }
-                }
-            }
+            let control_plane_auth = config.server.control_plane_auth.clone();
+            let _bootstrap_guard = install_bootstrap_config(config.bootstrap_config());
 
             // Note: Logging/console-subscriber should be initialized in main() before
             // the tokio runtime is created for console_subscriber to work properly
@@ -684,12 +586,14 @@ impl FlowApplication {
             #[cfg(feature = "warp-server")]
             let surface_metrics_collector = {
                 let system_journal = flow_handle.system_journal();
-                let surface_metrics_collector =
-                    if config.server && !web_surfaces.is_empty() && system_journal.is_some() {
-                        Some(Arc::new(HttpSurfaceMetricsCollector::new()))
-                    } else {
-                        None
-                    };
+                let surface_metrics_collector = if config.server.enabled
+                    && !web_surfaces.is_empty()
+                    && system_journal.is_some()
+                {
+                    Some(Arc::new(HttpSurfaceMetricsCollector::new()))
+                } else {
+                    None
+                };
 
                 if let (Some(collector), Some(system_journal)) =
                     (surface_metrics_collector.clone(), system_journal)
@@ -720,17 +624,19 @@ impl FlowApplication {
             }
 
             // Start server if --server flag present
-            let server_handle = if config.server {
-                let cors_mode = match config.cors_mode {
+            let server_handle = if config.server.enabled {
+                let cors_mode = match config.server.cors_mode {
                     CorsModeArg::AllowAnyOrigin => CorsMode::AllowAnyOrigin,
-                    CorsModeArg::AllowList => CorsMode::AllowList(config.cors_allow_origin.clone()),
+                    CorsModeArg::AllowList => {
+                        CorsMode::AllowList(config.server.cors_allow_origin.clone())
+                    }
                     CorsModeArg::SameOrigin => CorsMode::SameOrigin,
                 };
                 let mut server_config =
-                    ServerConfig::new(config.server_host.clone(), config.server_port);
+                    ServerConfig::new(config.server.host.clone(), config.server.port);
                 server_config.cors = Some(CorsConfig { mode: cors_mode });
-                server_config.max_body_size = Some(config.max_body_size_bytes);
-                server_config.request_timeout_secs = Some(config.request_timeout_secs);
+                server_config.max_body_size = Some(config.server.max_body_size_bytes);
+                server_config.request_timeout_secs = Some(config.server.request_timeout_secs);
                 server_config.control_plane_auth = control_plane_auth;
 
                 let start_result = {
@@ -761,9 +667,9 @@ impl FlowApplication {
                 None
             };
 
-            if config.server {
+            if config.server.enabled {
                 if server_handle.is_none() {
-                    match config.startup_mode {
+                    match config.server.startup_mode {
                         StartupMode::Manual => {
                             break 'run (
                                 Err(ApplicationError::FeatureNotEnabled(
@@ -806,7 +712,7 @@ impl FlowApplication {
                 }
 
                 // Server mode: lifecycle is controlled via HTTP (and optionally startup_mode).
-                match config.startup_mode {
+                match config.server.startup_mode {
                     StartupMode::Auto => {
                         tracing::info!("▶️  Starting flow execution (startup_mode=auto)");
                         if let Err(err) = flow_handle
@@ -827,8 +733,8 @@ impl FlowApplication {
                 if let Some(server_task) = server_handle {
                     tracing::info!(
                         "📊 Server running on http://{}:{}",
-                        config.server_host,
-                        config.server_port
+                        config.server.host,
+                        config.server.port
                     );
                     tracing::info!("⏸️  Press Ctrl+C to cancel; send SIGTERM to graceful-stop...");
 
@@ -934,7 +840,7 @@ impl FlowApplication {
                             }
 
                             tracing::warn!(
-                                shutdown_timeout_secs,
+                                shutdown_timeout_secs = grace_timeout.as_secs(),
                                 "Flow did not terminate within shutdown timeout; exiting anyway"
                             );
                             break;

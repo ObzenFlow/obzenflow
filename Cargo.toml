@@ -60,6 +60,7 @@ console-subscriber = "0.5"
 # Serialization / IDs / time
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+toml = "0.8"
 ulid = { version = "1", features = ["serde"] }
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }

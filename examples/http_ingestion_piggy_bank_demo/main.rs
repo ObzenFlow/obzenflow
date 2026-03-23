@@ -11,9 +11,5 @@ fn main() -> anyhow::Result<()> {
 
 #[cfg(not(test))]
 fn main() -> anyhow::Result<()> {
-    if std::env::var("OBZENFLOW_METRICS_EXPORTER").is_err() {
-        std::env::set_var("OBZENFLOW_METRICS_EXPORTER", "prometheus");
-    }
-
     support::runner::run_example()
 }

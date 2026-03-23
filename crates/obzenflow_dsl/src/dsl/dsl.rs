@@ -821,14 +821,10 @@ macro_rules! build_typed_flow {
         }
 
         // Write run manifest (disk journals persist; memory journals no-op) - FLOWIP-095a.
-        let replay_manifest = std::env::var_os("OBZENFLOW_REPLAY_FROM").map(|path| {
-            let allow_incomplete_archive = std::env::var("OBZENFLOW_ALLOW_INCOMPLETE_ARCHIVE")
-                .ok()
-                .is_some_and(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"));
-
+        let replay_manifest = obzenflow_runtime::bootstrap::replay_bootstrap().map(|replay| {
             obzenflow_core::journal::run_manifest::RunManifestReplayConfig {
-                replay_from: path.to_string_lossy().to_string(),
-                allow_incomplete_archive,
+                replay_from: replay.archive_path.to_string_lossy().to_string(),
+                allow_incomplete_archive: replay.allow_incomplete_archive,
             }
         });
 
@@ -902,10 +898,8 @@ macro_rules! build_typed_flow {
         )
         .with_backpressure_plan(backpressure_plan)
         .with_replay_archive(
-            obzenflow_runtime::journal::FlowJournalFactory::replay_archive_from_env(
-                &mut journal_factory,
-            )
-            .await
+            obzenflow_runtime::journal::FlowJournalFactory::replay_archive(&mut journal_factory)
+                .await
                 .map_err(|e| FlowBuildError::StageResourcesFailed(format!("Failed to open replay archive: {e}")))?,
         );
 
@@ -926,7 +920,7 @@ macro_rules! build_typed_flow {
 
         // Create metrics exporter using the builder pattern
         let metrics_exporter = if DefaultMetricsConfig::default().is_enabled() {
-            Some(MetricsExporterBuilder::from_env().build())
+            Some(MetricsExporterBuilder::from_bootstrap().build())
         } else {
             None
         };

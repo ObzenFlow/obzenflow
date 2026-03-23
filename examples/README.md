@@ -29,7 +29,8 @@ These are the flagship examples and the best place to start. Each one has a comp
 - **`http_ingestion_piggy_bank_demo`** — The canonical end-to-end service example: HTTP ingress, joins, stateful projection, and `/metrics` in one journal-backed flow.
   - Tutorial: [Model Bank Transactions as a Flow](https://obzenflow.dev/tutorials/model-bank-transactions/)
   - Pillars: [Service-Like Streaming](https://obzenflow.dev/pillars/service-like-streaming/), [Composable Stage Primitives](https://obzenflow.dev/pillars/composable-stages/), [Replayability and Durability](https://obzenflow.dev/pillars/replay-auditability/), [Operational Zen](https://obzenflow.dev/pillars/no-platform-required/)
-  - Run: `export OBZENFLOW_PIGGY_BANK_CONTROL_PLANE_AUTH='Bearer piggy-bank-demo-secret' && cargo run -p obzenflow --example http_ingestion_piggy_bank_demo --features obzenflow_infra/warp-server -- --server --server-port 9090 --control-plane-auth-mode api-key --control-plane-auth-value-env OBZENFLOW_PIGGY_BANK_CONTROL_PLANE_AUTH`
+  - Run: `cargo run -p obzenflow --example http_ingestion_piggy_bank_demo --features obzenflow_infra/warp-server`
+  - Auth override: `export OBZENFLOW_PIGGY_BANK_CONTROL_PLANE_AUTH='Bearer piggy-bank-demo-secret' && cargo run -p obzenflow --example http_ingestion_piggy_bank_demo --features obzenflow_infra/warp-server -- --config examples/http_ingestion_piggy_bank_demo/obzenflow.auth.toml`
   - Code: [`examples/http_ingestion_piggy_bank_demo/flow.rs`](http_ingestion_piggy_bank_demo/flow.rs)
 
 - **`hn_ai_digest_demo`** — The canonical AI example: live HTTP pull, token budgeting, chunking, accumulation, and Rig-backed LLM inference with replayable evidence.

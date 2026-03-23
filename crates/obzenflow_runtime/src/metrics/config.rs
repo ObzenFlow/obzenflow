@@ -4,12 +4,16 @@
 
 //! Default metrics configuration for ObzenFlow
 //!
-//! This module provides the default configuration for metrics collection,
-//! reading from environment variables to allow runtime configuration.
+//! This module provides the default configuration for metrics collection.
+//!
+//! Lower layers read from the runtime bootstrap context populated by the
+//! hosting shell instead of parsing environment variables independently.
 
-use std::env;
+use crate::bootstrap::metrics_bootstrap;
+#[cfg(test)]
+use crate::bootstrap::{install_bootstrap_config, BootstrapConfig, MetricsBootstrap};
 
-/// Default metrics configuration that reads from environment variables
+/// Default metrics configuration sourced from the runtime bootstrap context.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DefaultMetricsConfig {
     /// Whether metrics collection is enabled
@@ -18,13 +22,9 @@ pub struct DefaultMetricsConfig {
 
 impl Default for DefaultMetricsConfig {
     fn default() -> Self {
-        // Read OBZENFLOW_METRICS_ENABLED environment variable
-        let enabled = env::var("OBZENFLOW_METRICS_ENABLED")
-            .ok()
-            .and_then(|v| v.parse::<bool>().ok())
-            .unwrap_or(true);
-
-        Self { enabled }
+        Self {
+            enabled: metrics_bootstrap().enabled,
+        }
     }
 }
 
@@ -48,28 +48,13 @@ impl DefaultMetricsConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    // Use a mutex to ensure tests that modify environment variables don't interfere with each other
-    static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
     #[test]
     fn test_default_config() {
-        let _guard = ENV_MUTEX.lock().unwrap();
-
-        // Save current env var if exists
-        let saved = env::var("OBZENFLOW_METRICS_ENABLED").ok();
-
-        // Remove the env var to test default behavior
-        env::remove_var("OBZENFLOW_METRICS_ENABLED");
+        let _guard = install_bootstrap_config(BootstrapConfig::default());
 
         let config = DefaultMetricsConfig::default();
         assert!(config.enabled);
-
-        // Restore original value if it existed
-        if let Some(val) = saved {
-            env::set_var("OBZENFLOW_METRICS_ENABLED", val);
-        }
     }
 
     #[test]
@@ -79,31 +64,15 @@ mod tests {
     }
 
     #[test]
-    fn test_env_var_override() {
-        let _guard = ENV_MUTEX.lock().unwrap();
-
-        // Save current env var if exists
-        let saved = env::var("OBZENFLOW_METRICS_ENABLED").ok();
-
-        // Test with enabled=false
-        env::set_var("OBZENFLOW_METRICS_ENABLED", "false");
+    fn test_bootstrap_override() {
+        let _guard = install_bootstrap_config(BootstrapConfig {
+            metrics: MetricsBootstrap {
+                enabled: false,
+                ..MetricsBootstrap::default()
+            },
+            ..BootstrapConfig::default()
+        });
         let config = DefaultMetricsConfig::default();
         assert!(!config.enabled);
-
-        // Test with enabled=true
-        env::set_var("OBZENFLOW_METRICS_ENABLED", "true");
-        let config = DefaultMetricsConfig::default();
-        assert!(config.enabled);
-
-        // Test with invalid value (should default to true)
-        env::set_var("OBZENFLOW_METRICS_ENABLED", "invalid");
-        let config = DefaultMetricsConfig::default();
-        assert!(config.enabled);
-
-        // Restore original value or remove
-        match saved {
-            Some(val) => env::set_var("OBZENFLOW_METRICS_ENABLED", val),
-            None => env::remove_var("OBZENFLOW_METRICS_ENABLED"),
-        }
     }
 }

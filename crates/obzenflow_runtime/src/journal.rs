@@ -45,12 +45,10 @@ pub trait FlowJournalFactory: Send {
         Ok(())
     }
 
-    /// Build a replay archive implementation from environment variables, when supported.
+    /// Build a replay archive implementation from the runtime bootstrap context, when supported.
     ///
     /// Default is `Ok(None)` so most backends don't need to implement replay for P0.
-    async fn replay_archive_from_env(
-        &mut self,
-    ) -> Result<Option<Arc<dyn ReplayArchive>>, ReplayError> {
+    async fn replay_archive(&mut self) -> Result<Option<Arc<dyn ReplayArchive>>, ReplayError> {
         Ok(None)
     }
 }

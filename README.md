@@ -41,14 +41,14 @@ Prerequisites:
 Run with localhost-only defaults:
 
 ```bash
-cargo run -p obzenflow --example http_ingestion_piggy_bank_demo --features obzenflow_infra/warp-server -- --server --server-port 9090
+cargo run -p obzenflow --example http_ingestion_piggy_bank_demo --features obzenflow_infra/warp-server
 ```
 
 Recommended control-plane auth variant:
 
 ```bash
 export OBZENFLOW_PIGGY_BANK_CONTROL_PLANE_AUTH='Bearer piggy-bank-demo-secret'
-cargo run -p obzenflow --example http_ingestion_piggy_bank_demo --features obzenflow_infra/warp-server -- --server --server-port 9090 --control-plane-auth-mode api-key --control-plane-auth-value-env OBZENFLOW_PIGGY_BANK_CONTROL_PLANE_AUTH
+cargo run -p obzenflow --example http_ingestion_piggy_bank_demo --features obzenflow_infra/warp-server -- --config examples/http_ingestion_piggy_bank_demo/obzenflow.auth.toml
 ```
 
 In another terminal, post a couple of events:
@@ -82,7 +82,7 @@ cargo run -p obzenflow --example product_catalog_enrichment
 cargo run -p obzenflow --example payment_gateway_resilience
 
 # Middleware inheritance/override (observe /metrics while it runs)
-cargo run -p obzenflow --example flow_middleware_config --features obzenflow_infra/warp-server -- --server
+cargo run -p obzenflow --example flow_middleware_config
 ```
 
 No features are enabled by default. `--features obzenflow_infra/warp-server` enables the HTTP server and web endpoints, and `--features http-pull` enables HTTP pull sources. See `crates/obzenflow_infra/README.md` for the full feature matrix.

@@ -19,30 +19,23 @@ pub struct DemoConfig {
 
 impl DemoConfig {
     pub fn from_env() -> Result<Self> {
-        let server_mode_requested = std::env::args().any(|arg| arg == "--server");
-
         let mut total_events = env_var::<usize>("PAYMENT_GATEWAY_TOTAL_EVENTS")?;
         let duration_secs = env_var::<usize>("PAYMENT_GATEWAY_DURATION_SECS")?;
         let mut rate_limit_events_per_sec = env_var::<f64>("PAYMENT_GATEWAY_RATE_LIMIT")?;
         let mut glitchy_reason: Option<&'static str> = None;
 
-        match (total_events, duration_secs, server_mode_requested) {
-            (Some(_), _, _) => {
+        match (total_events, duration_secs) {
+            (Some(_), _) => {
                 glitchy_reason = Some("PAYMENT_GATEWAY_TOTAL_EVENTS");
                 rate_limit_events_per_sec.get_or_insert(1000.0);
             }
-            (None, Some(duration_secs), _) => {
+            (None, Some(duration_secs)) => {
                 glitchy_reason = Some("PAYMENT_GATEWAY_DURATION_SECS");
                 let rate = rate_limit_events_per_sec.unwrap_or(200.0);
                 rate_limit_events_per_sec = Some(rate);
                 total_events = Some(((duration_secs as f64) * rate).round().max(1.0) as usize);
             }
-            (None, None, true) => {
-                glitchy_reason = Some("--server default");
-                rate_limit_events_per_sec.get_or_insert(200.0);
-                total_events = Some(60_000);
-            }
-            (None, None, false) => {}
+            (None, None) => {}
         }
 
         let rate_limit_events_per_sec = rate_limit_events_per_sec.unwrap_or(1.0).max(0.1);

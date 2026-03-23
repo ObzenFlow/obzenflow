@@ -6,6 +6,9 @@
 
 use super::{ConsoleSummaryExporter, PrometheusExporter};
 use obzenflow_core::metrics::MetricsExporter;
+#[cfg(test)]
+use obzenflow_runtime::bootstrap::{install_bootstrap_config, BootstrapConfig, MetricsBootstrap};
+use obzenflow_runtime::bootstrap::{metrics_bootstrap, MetricsExporterKind};
 use std::sync::Arc;
 
 /// Builder for creating metrics exporters
@@ -24,31 +27,17 @@ pub enum ExporterType {
 }
 
 impl MetricsExporterBuilder {
-    /// Create a builder configured from environment variables
-    pub fn from_env() -> Self {
-        use std::env;
-
-        // Check if metrics are enabled first
-        let enabled = env::var("OBZENFLOW_METRICS_ENABLED")
-            .ok()
-            .and_then(|v| v.parse::<bool>().ok())
-            .unwrap_or(true);
-
-        if !enabled {
-            return Self {
-                exporter_type: ExporterType::Noop,
-            };
+    /// Create a builder configured from the runtime bootstrap context.
+    pub fn from_bootstrap() -> Self {
+        let metrics = metrics_bootstrap();
+        if !metrics.enabled {
+            return Self::noop();
         }
 
-        // Determine exporter type from env var
-        let exporter_type = match env::var("OBZENFLOW_METRICS_EXPORTER").as_deref() {
-            Ok("prometheus") | Err(_) => ExporterType::Prometheus, // Default
-            Ok("console") => ExporterType::Console,
-            Ok("noop") => ExporterType::Noop,
-            Ok(other) => {
-                tracing::warn!("Unknown metrics exporter type: {}, using prometheus", other);
-                ExporterType::Prometheus
-            }
+        let exporter_type = match metrics.exporter {
+            MetricsExporterKind::Prometheus => ExporterType::Prometheus,
+            MetricsExporterKind::Console => ExporterType::Console,
+            MetricsExporterKind::Noop => ExporterType::Noop,
         };
 
         Self { exporter_type }
@@ -126,32 +115,13 @@ impl MetricsExporter for NoopExporter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::env;
-    use std::sync::Mutex;
 
-    static ENV_MUTEX: Mutex<()> = Mutex::new(());
-
-    fn with_metrics_exporter_env(value: Option<&str>, test: impl FnOnce()) {
-        let _guard = ENV_MUTEX.lock().unwrap();
-        let saved_enabled = env::var("OBZENFLOW_METRICS_ENABLED").ok();
-        let saved_exporter = env::var("OBZENFLOW_METRICS_EXPORTER").ok();
-
-        env::remove_var("OBZENFLOW_METRICS_ENABLED");
-        match value {
-            Some(value) => env::set_var("OBZENFLOW_METRICS_EXPORTER", value),
-            None => env::remove_var("OBZENFLOW_METRICS_EXPORTER"),
-        }
-
+    fn with_metrics_bootstrap(metrics: MetricsBootstrap, test: impl FnOnce()) {
+        let _guard = install_bootstrap_config(BootstrapConfig {
+            metrics,
+            ..BootstrapConfig::default()
+        });
         test();
-
-        match saved_enabled {
-            Some(value) => env::set_var("OBZENFLOW_METRICS_ENABLED", value),
-            None => env::remove_var("OBZENFLOW_METRICS_ENABLED"),
-        }
-        match saved_exporter {
-            Some(value) => env::set_var("OBZENFLOW_METRICS_EXPORTER", value),
-            None => env::remove_var("OBZENFLOW_METRICS_EXPORTER"),
-        }
     }
 
     #[test]
@@ -168,25 +138,37 @@ mod tests {
     }
 
     #[test]
-    fn test_from_env_supports_console() {
-        with_metrics_exporter_env(Some("console"), || {
-            let exporter = MetricsExporterBuilder::from_env().build();
-            assert!(exporter.render_metrics().is_ok());
-        });
+    fn test_from_bootstrap_supports_console() {
+        with_metrics_bootstrap(
+            MetricsBootstrap {
+                enabled: true,
+                exporter: MetricsExporterKind::Console,
+            },
+            || {
+                let exporter = MetricsExporterBuilder::from_bootstrap().build();
+                assert!(exporter.render_metrics().is_ok());
+            },
+        );
     }
 
     #[test]
-    fn test_from_env_supports_noop() {
-        with_metrics_exporter_env(Some("noop"), || {
-            let exporter = MetricsExporterBuilder::from_env().build();
-            assert_eq!(exporter.render_metrics().unwrap(), "");
-        });
+    fn test_from_bootstrap_supports_noop() {
+        with_metrics_bootstrap(
+            MetricsBootstrap {
+                enabled: false,
+                exporter: MetricsExporterKind::Prometheus,
+            },
+            || {
+                let exporter = MetricsExporterBuilder::from_bootstrap().build();
+                assert_eq!(exporter.render_metrics().unwrap(), "");
+            },
+        );
     }
 
     #[test]
-    fn test_from_env_unknown_exporter_falls_back_to_prometheus() {
-        with_metrics_exporter_env(Some("legacy_exporter"), || {
-            let exporter = MetricsExporterBuilder::from_env().build();
+    fn test_from_bootstrap_defaults_to_prometheus() {
+        with_metrics_bootstrap(MetricsBootstrap::default(), || {
+            let exporter = MetricsExporterBuilder::from_bootstrap().build();
             let output = exporter.render_metrics().unwrap();
             assert!(output.contains("obzenflow_build_info"));
         });
