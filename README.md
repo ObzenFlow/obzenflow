@@ -38,10 +38,17 @@ For runnable versions with real domain types and handlers, see the examples cata
 Prerequisites:
 - Rust `1.93.0` (pinned in `rust-toolchain.toml`)
 
-Run (starts the web server and `/metrics`):
+Run with localhost-only defaults:
 
 ```bash
 cargo run -p obzenflow --example http_ingestion_piggy_bank_demo --features obzenflow_infra/warp-server -- --server --server-port 9090
+```
+
+Recommended control-plane auth variant:
+
+```bash
+export OBZENFLOW_PIGGY_BANK_CONTROL_PLANE_AUTH='Bearer piggy-bank-demo-secret'
+cargo run -p obzenflow --example http_ingestion_piggy_bank_demo --features obzenflow_infra/warp-server -- --server --server-port 9090 --control-plane-auth-mode api-key --control-plane-auth-value-env OBZENFLOW_PIGGY_BANK_CONTROL_PLANE_AUTH
 ```
 
 In another terminal, post a couple of events:
@@ -49,15 +56,17 @@ In another terminal, post a couple of events:
 ```bash
 curl -XPOST http://127.0.0.1:9090/api/bank/accounts/events \
   -H 'content-type: application/json' \
-  -d '{"event_type":"bank.account","data":{"account_id":"acct-1","owner":"Alice","initial_balance_cents":1000}}'
+  -d '{"event_type":"bank.account_opened","data":{"account_id":"acct-1","owner":"Alice","initial_balance_cents":1000}}'
 curl -XPOST http://127.0.0.1:9090/api/bank/tx/events \
   -H 'content-type: application/json' \
-  -d '{"event_type":"bank.tx","data":{"account_id":"acct-1","delta_cents":-99,"note":"coffee"}}'
+  -d '{"event_type":"bank.ledger_entry","data":{"account_id":"acct-1","kind":"Debit","amount_cents":99,"note":"coffee"}}'
 ```
 
 Observe:
-- Metrics: `curl http://127.0.0.1:9090/metrics`
-- Topology: `curl http://127.0.0.1:9090/api/topology`
+- Metrics (localhost default): `curl http://127.0.0.1:9090/metrics`
+- Topology (localhost default): `curl http://127.0.0.1:9090/api/topology`
+- Metrics (auth variant): `curl http://127.0.0.1:9090/metrics -H 'Authorization: Bearer piggy-bank-demo-secret'`
+- Topology (auth variant): `curl http://127.0.0.1:9090/api/topology -H 'Authorization: Bearer piggy-bank-demo-secret'`
 
 Code: `examples/http_ingestion_piggy_bank_demo/flow.rs`
 
