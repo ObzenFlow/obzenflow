@@ -13,7 +13,7 @@ fn main() -> anyhow::Result<()> {
 fn main() -> anyhow::Result<()> {
     use obzenflow_infra::application::{Banner, Presentation};
 
-    let config = support::DemoConfig::from_env();
+    let config = support::DemoConfig::from_env()?;
 
     let mut banner = Banner::new("Payment Gateway Resilience Demo")
         .description("Circuit breakers and rate limits protecting an unreliable dependency.")

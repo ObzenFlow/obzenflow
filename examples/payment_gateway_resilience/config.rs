@@ -2,26 +2,8 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-fn env_usize(key: &str) -> Option<usize> {
-    std::env::var(key)
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-}
-
-fn env_f64(key: &str) -> Option<f64> {
-    std::env::var(key)
-        .ok()
-        .and_then(|value| value.parse::<f64>().ok())
-}
-
-fn env_bool(key: &str) -> Option<bool> {
-    let raw = std::env::var(key).ok()?;
-    match raw.trim().to_ascii_lowercase().as_str() {
-        "1" | "true" | "yes" | "y" | "on" => Some(true),
-        "0" | "false" | "no" | "n" | "off" => Some(false),
-        _ => None,
-    }
-}
+use anyhow::Result;
+use obzenflow::env::{env_bool_or, env_var, env_var_or};
 
 pub struct DemoConfig {
     pub total_events: Option<usize>,
@@ -36,12 +18,12 @@ pub struct DemoConfig {
 }
 
 impl DemoConfig {
-    pub fn from_env() -> Self {
+    pub fn from_env() -> Result<Self> {
         let server_mode_requested = std::env::args().any(|arg| arg == "--server");
 
-        let mut total_events = env_usize("PAYMENT_GATEWAY_TOTAL_EVENTS");
-        let duration_secs = env_usize("PAYMENT_GATEWAY_DURATION_SECS");
-        let mut rate_limit_events_per_sec = env_f64("PAYMENT_GATEWAY_RATE_LIMIT");
+        let mut total_events = env_var::<usize>("PAYMENT_GATEWAY_TOTAL_EVENTS")?;
+        let duration_secs = env_var::<usize>("PAYMENT_GATEWAY_DURATION_SECS")?;
+        let mut rate_limit_events_per_sec = env_var::<f64>("PAYMENT_GATEWAY_RATE_LIMIT")?;
         let mut glitchy_reason: Option<&'static str> = None;
 
         match (total_events, duration_secs, server_mode_requested) {
@@ -64,18 +46,18 @@ impl DemoConfig {
         }
 
         let rate_limit_events_per_sec = rate_limit_events_per_sec.unwrap_or(1.0).max(0.1);
-        let warmup_events = env_usize("PAYMENT_GATEWAY_WARMUP_EVENTS").unwrap_or(8_000);
-        let outage_events = env_usize("PAYMENT_GATEWAY_OUTAGE_EVENTS").unwrap_or(1_000);
-        let recovery_events = env_usize("PAYMENT_GATEWAY_RECOVERY_EVENTS").unwrap_or(1_000);
-        let summary_progress_every = env_usize("PAYMENT_GATEWAY_PROGRESS_EVERY").unwrap_or(5_000);
-        let use_async_source = env_bool("PAYMENT_GATEWAY_ASYNC_SOURCE").unwrap_or(false);
+        let warmup_events = env_var_or::<usize>("PAYMENT_GATEWAY_WARMUP_EVENTS", 8_000)?;
+        let outage_events = env_var_or::<usize>("PAYMENT_GATEWAY_OUTAGE_EVENTS", 1_000)?;
+        let recovery_events = env_var_or::<usize>("PAYMENT_GATEWAY_RECOVERY_EVENTS", 1_000)?;
+        let summary_progress_every = env_var_or::<usize>("PAYMENT_GATEWAY_PROGRESS_EVERY", 5_000)?;
+        let use_async_source = env_bool_or("PAYMENT_GATEWAY_ASYNC_SOURCE", false)?;
         let async_poll_timeout =
-            match env_usize("PAYMENT_GATEWAY_ASYNC_POLL_TIMEOUT_SECS").unwrap_or(30) {
+            match env_var_or::<usize>("PAYMENT_GATEWAY_ASYNC_POLL_TIMEOUT_SECS", 30)? {
                 0 => None,
                 secs => Some(std::time::Duration::from_secs(secs as u64)),
             };
 
-        Self {
+        Ok(Self {
             total_events,
             rate_limit_events_per_sec,
             warmup_events,
@@ -85,6 +67,6 @@ impl DemoConfig {
             use_async_source,
             async_poll_timeout,
             glitchy_reason,
-        }
+        })
     }
 }
