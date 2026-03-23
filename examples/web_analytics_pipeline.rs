@@ -27,6 +27,10 @@ use obzenflow_infra::journal::disk_journals;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::Duration;
+const CONFIG_FILE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/examples/web_analytics_pipeline.obzenflow.toml"
+);
 
 // FLOWIP-082a: Strongly-typed domain events
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -185,8 +189,6 @@ impl UserEvent {
 }
 
 fn main() -> Result<()> {
-    std::env::set_var("OBZENFLOW_METRICS_EXPORTER", "console");
-
     let presentation = Presentation::new(
         Banner::new("Web Analytics Pipeline")
             .description("Processing user behaviour events with typed accumulators.")
@@ -224,6 +226,7 @@ fn main() -> Result<()> {
     });
 
     FlowApplication::builder()
+        .with_config_file(CONFIG_FILE)
         .with_presentation(presentation)
         .run_blocking(flow! {
             name: "web_analytics",

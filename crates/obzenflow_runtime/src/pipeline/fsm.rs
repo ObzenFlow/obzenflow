@@ -305,8 +305,8 @@ impl FsmContext for PipelineContext {}
 
 /// Stop-triggered drain timeout.
 ///
-/// Controlled via `OBZENFLOW_SHUTDOWN_TIMEOUT_SECS` with a sensible default:
-/// - If the env var is unset or invalid, defaults to 30 seconds.
+/// Controlled by the resolved runtime bootstrap config with a sensible default:
+/// - If no host override is supplied, defaults to 30 seconds.
 pub(crate) fn stop_drain_timeout() -> Duration {
     crate::bootstrap::shutdown_timeout()
 }
@@ -710,7 +710,7 @@ impl FsmAction for PipelineAction {
 
                 // Wait for all stages to complete (with timeout)
                 //
-                // Timeout is configurable via OBZENFLOW_SHUTDOWN_TIMEOUT_SECS
+                // Timeout comes from the resolved runtime bootstrap config.
                 // (default: 30 seconds) so operators can tune shutdown behavior
                 // without code changes.
                 use std::time::{Duration, Instant};

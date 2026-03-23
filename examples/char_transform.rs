@@ -22,6 +22,10 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 const INPUT_LINES: [&str; 3] = ["hello 2024 world!", "42 is the answer.", "rust 1 python 0."];
+const CONFIG_FILE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/examples/char_transform.obzenflow.toml"
+);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct CharInput {
@@ -108,49 +112,51 @@ fn main() -> Result<()> {
     if std::env::var_os("RUST_LOG").is_none() {
         std::env::set_var("RUST_LOG", "warn");
     }
-    std::env::set_var("OBZENFLOW_METRICS_EXPORTER", "console");
 
     let char_inputs = build_char_inputs(&INPUT_LINES);
 
-    FlowApplication::builder().run_blocking(flow! {
-        name: "char_transform",
-        journals: disk_journals(PathBuf::from("target/char-transform-logs")),
-        middleware: [],
+    FlowApplication::builder()
+        .with_config_file(CONFIG_FILE)
+        .run_blocking(flow! {
+            name: "char_transform",
+            journals: disk_journals(PathBuf::from("target/char-transform-logs")),
+            middleware: [],
 
-        stages: {
-            characters = source!(CharInput => sources::finite(char_inputs));
+            stages: {
+                characters = source!(CharInput => sources::finite(char_inputs));
 
-            transform_text = transform!(
-                CharInput -> TextChunk => transforms::map(|input: CharInput| TextChunk {
-                    text: transform_char(input.character),
-                })
-            );
+                transform_text = transform!(
+                    CharInput -> TextChunk => transforms::map(|input: CharInput| TextChunk {
+                        text: transform_char(input.character),
+                    })
+                );
 
-            collect_text = stateful!(
-                TextChunk -> TransformedText => typed_stateful::reduce(
-                    TransformedText::default(),
-                    |acc, chunk: &TextChunk| {
-                        acc.text.push_str(&chunk.text);
-                        acc.character_count += chunk.text.chars().count();
+                collect_text = stateful!(
+                    TextChunk -> TransformedText => typed_stateful::reduce(
+                        TransformedText::default(),
+                        |acc, chunk: &TextChunk| {
+                            acc.text.push_str(&chunk.text);
+                            acc.character_count += chunk.text.chars().count();
 
-                        let ends_sentence = matches!(chunk.text.as_str(), "." | "!" | "?");
-                        if ends_sentence && !acc.last_was_sentence_end {
-                            acc.sentence_count += 1;
+                            let ends_sentence = matches!(chunk.text.as_str(), "." | "!" | "?");
+                            if ends_sentence && !acc.last_was_sentence_end {
+                                acc.sentence_count += 1;
+                            }
+                            acc.last_was_sentence_end = ends_sentence;
                         }
-                        acc.last_was_sentence_end = ends_sentence;
-                    }
-                ).emit_on_eof()
-            );
+                    )
+                    .emit_on_eof()
+                );
 
-            output = sink!(TransformedText => sinks::console(format_output));
-        },
+                output = sink!(TransformedText => sinks::console(format_output));
+            },
 
-        topology: {
-            characters |> transform_text;
-            transform_text |> collect_text;
-            collect_text |> output;
-        }
-    })?;
+            topology: {
+                characters |> transform_text;
+                transform_text |> collect_text;
+                collect_text |> output;
+            }
+        })?;
 
     Ok(())
 }

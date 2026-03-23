@@ -316,9 +316,6 @@ impl SinkHandler for PrioritySink {
 }
 
 fn main() -> Result<()> {
-    // Set environment to use console exporter
-    std::env::set_var("OBZENFLOW_METRICS_EXPORTER", "console");
-
     let journal_path = std::path::PathBuf::from("target/topology_patterns_demo_journal");
     let low_counter = Arc::new(AtomicUsize::new(0));
     let med_counter = Arc::new(AtomicUsize::new(0));
@@ -377,6 +374,10 @@ fn main() -> Result<()> {
     let high_counter_flow = high_counter.clone();
 
     FlowApplication::builder()
+        .with_config_file(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/examples/topology_patterns_demo.obzenflow.toml"
+        ))
         .with_presentation(presentation)
         .run_blocking(flow! {
             name: "topology_patterns",

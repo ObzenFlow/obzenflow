@@ -48,9 +48,11 @@ impl DefaultMetricsConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bootstrap::bootstrap_test_lock;
 
     #[test]
     fn test_default_config() {
+        let _lock = bootstrap_test_lock();
         let _guard = install_bootstrap_config(BootstrapConfig::default());
 
         let config = DefaultMetricsConfig::default();
@@ -65,6 +67,7 @@ mod tests {
 
     #[test]
     fn test_bootstrap_override() {
+        let _lock = bootstrap_test_lock();
         let _guard = install_bootstrap_config(BootstrapConfig {
             metrics: MetricsBootstrap {
                 enabled: false,

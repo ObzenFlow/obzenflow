@@ -60,9 +60,5 @@ mod mock_server;
 mod util;
 
 fn main() -> anyhow::Result<()> {
-    if std::env::var("OBZENFLOW_METRICS_EXPORTER").is_err() {
-        std::env::set_var("OBZENFLOW_METRICS_EXPORTER", "console");
-    }
-
     flow::run_demo_blocking()
 }

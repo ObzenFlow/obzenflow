@@ -17,6 +17,10 @@ use obzenflow_dsl::{flow, sink, source, stateful};
 use obzenflow_infra::application::{Banner, FlowApplication, Presentation};
 use obzenflow_infra::journal::disk_journals;
 use serde::{Deserialize, Serialize};
+const CONFIG_FILE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/examples/ecommerce_top_products.obzenflow.toml"
+);
 
 // FLOWIP-082a: Strongly-typed event with schema version
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -59,8 +63,6 @@ impl TypedPayload for TopProductsUpdate {
 }
 
 fn main() -> Result<()> {
-    std::env::set_var("OBZENFLOW_METRICS_EXPORTER", "console");
-
     let presentation = Presentation::new(
         Banner::new("E-commerce Top Products Analytics")
             .description("Real-time tracking of top products by total revenue.")
@@ -236,6 +238,7 @@ fn main() -> Result<()> {
     ];
 
     FlowApplication::builder()
+        .with_config_file(CONFIG_FILE)
         .with_presentation(presentation)
         .run_blocking(flow! {
             name: "ecommerce_analytics",

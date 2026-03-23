@@ -115,8 +115,14 @@ impl MetricsExporter for NoopExporter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
 
     fn with_metrics_bootstrap(metrics: MetricsBootstrap, test: impl FnOnce()) {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        let _lock = LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("bootstrap test lock poisoned");
         let _guard = install_bootstrap_config(BootstrapConfig {
             metrics,
             ..BootstrapConfig::default()

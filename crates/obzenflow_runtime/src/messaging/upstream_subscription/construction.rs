@@ -131,7 +131,7 @@ where
                     if crate::runtime_resource_limits::journal_error_is_too_many_open_files(&e) =>
                 {
                     return Err(format!(
-                        "Too many open files while creating reader for upstream journal (owner={owner_label}, stage_id={stage_id:?}, stage_name={stage_name}, journal_id={journal_id:?}). Increase RLIMIT_NOFILE / `ulimit -n` or reduce pipeline size (consider `OBZENFLOW_METRICS_ENABLED=false` for development). Underlying error: {e}"
+                        "Too many open files while creating reader for upstream journal (owner={owner_label}, stage_id={stage_id:?}, stage_name={stage_name}, journal_id={journal_id:?}). Increase RLIMIT_NOFILE / `ulimit -n` or reduce pipeline size (for development, disable metrics in obzenflow.toml). Underlying error: {e}"
                     )
                     .into());
                 }

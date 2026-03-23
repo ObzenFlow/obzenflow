@@ -15,9 +15,9 @@
 //! **FLOWIP-080j Update**: Replaced 59-line EventCounter StatefulHandler with ReduceTyped
 //! **FLOWIP-082a Update**: Added TypedPayload with EVENT_TYPE and SCHEMA_VERSION constants
 //!
-//! Run with: cargo run -p obzenflow --example prometheus_100k_demo --features obzenflow_infra/warp-server -- --server
+//! Run with: cargo run -p obzenflow --example prometheus_100k_demo --features obzenflow_infra/warp-server
 //!
-//! The --server flag will start the web server with:
+//! The default startup config starts the web server with:
 //! - /metrics endpoint for Prometheus metrics (framework-level metrics)
 //! - /api/topology endpoint for flow structure
 //! - /health and /ready endpoints for monitoring
@@ -42,6 +42,10 @@ use obzenflow_runtime::stages::transform::Map;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+const CONFIG_FILE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/examples/prometheus_100k_demo.obzenflow.toml"
+);
 
 // ============================================================================
 // FLOWIP-082a: Strongly-Typed Domain Events
@@ -169,9 +173,6 @@ impl SinkHandler for CompletionSink {
 }
 
 fn main() -> Result<()> {
-    // Set environment to use prometheus exporter
-    std::env::set_var("OBZENFLOW_METRICS_EXPORTER", "prometheus");
-
     let presentation = Presentation::new(
         Banner::new("Prometheus 100k Demo")
             .description("100,000 events with rate limiting and fan-out.")
@@ -186,17 +187,18 @@ fn main() -> Result<()> {
             )
             .section(
                 "Usage",
-                "Basic:        cargo run --package obzenflow --example prometheus_100k_demo\nWith metrics: cargo run --package obzenflow --example prometheus_100k_demo --features obzenflow_infra/warp-server -- --server\nCustom port:  cargo run --package obzenflow --example prometheus_100k_demo --features obzenflow_infra/warp-server -- --server --server-port 8080",
+                "Default:     cargo run --package obzenflow --example prometheus_100k_demo --features obzenflow_infra/warp-server\nCustom port: cargo run --package obzenflow --example prometheus_100k_demo --features obzenflow_infra/warp-server -- --server-port 8080",
             ),
     )
     .with_footer(|outcome| {
         outcome
             .into_footer()
-            .paragraph("Run with --server flag and visit /metrics for Prometheus metrics.")
+            .paragraph("Run with the default config and visit /metrics for Prometheus metrics.")
     });
 
     // Use FlowApplication builder - handles runtime, observability, and features automatically.
     FlowApplication::builder()
+        .with_config_file(CONFIG_FILE)
         .with_log_level(LogLevel::Info)
         .with_presentation(presentation)
         .run_blocking(flow! {
@@ -270,7 +272,7 @@ fn main() -> Result<()> {
                     println!("   Type-safe accumulation with zero ChainEvent manipulation!");
                     println!();
                     println!("📈 To view framework-level Prometheus metrics:");
-                    println!("   1. Run with --server flag");
+                    println!("   1. Run the example with the default config");
                     println!("   2. Visit http://localhost:9090/metrics");
                     println!("   3. See detailed per-stage metrics, errors, latencies, etc.");
                     println!("=====================================");

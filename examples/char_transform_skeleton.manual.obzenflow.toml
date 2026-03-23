@@ -1,0 +1,20 @@
+[server]
+enabled = true
+host = "127.0.0.1"
+port = 9090
+startup_mode = "manual"
+max_body_size_bytes = 10485760
+request_timeout_secs = 30
+
+[server.cors]
+mode = "same-origin"
+allow_origins = []
+
+[runtime]
+shutdown_timeout_secs = 30
+ingestion_metrics_interval_secs = 5
+surface_metrics_interval_secs = 15
+
+[metrics]
+enabled = true
+exporter = "console"

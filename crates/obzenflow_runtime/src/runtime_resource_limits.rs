@@ -185,7 +185,7 @@ pub(crate) fn preflight_nofile_for_disk_journals(
             Ok(raised) if raised.soft >= estimate.estimated_fds => return Ok(Some(raised)),
             Ok(raised) => {
                 return Err(format!(
-                    "Disk-journal pipeline requires ~{} file descriptors (stages={}, edges={}, metrics_enabled={}). RLIMIT_NOFILE soft={} hard={} (raised attempt reached soft={}). Increase your process file-descriptor limit (e.g. `ulimit -n {}`) or reduce pipeline size / disable metrics (`OBZENFLOW_METRICS_ENABLED=false`).",
+                    "Disk-journal pipeline requires ~{} file descriptors (stages={}, edges={}, metrics_enabled={}). RLIMIT_NOFILE soft={} hard={} (raised attempt reached soft={}). Increase your process file-descriptor limit (e.g. `ulimit -n {}`) or reduce pipeline size / disable metrics in obzenflow.toml.",
                     estimate.estimated_fds,
                     estimate.stages,
                     estimate.edges,
@@ -198,7 +198,7 @@ pub(crate) fn preflight_nofile_for_disk_journals(
             }
             Err(e) => {
                 return Err(format!(
-                    "Disk-journal pipeline requires ~{} file descriptors (stages={}, edges={}, metrics_enabled={}). RLIMIT_NOFILE soft={} hard={}. Attempt to raise soft limit failed: {}. Increase your process file-descriptor limit (e.g. `ulimit -n {}`) or reduce pipeline size / disable metrics (`OBZENFLOW_METRICS_ENABLED=false`).",
+                    "Disk-journal pipeline requires ~{} file descriptors (stages={}, edges={}, metrics_enabled={}). RLIMIT_NOFILE soft={} hard={}. Attempt to raise soft limit failed: {}. Increase your process file-descriptor limit (e.g. `ulimit -n {}`) or reduce pipeline size / disable metrics in obzenflow.toml.",
                     estimate.estimated_fds,
                     estimate.stages,
                     estimate.edges,
@@ -213,7 +213,7 @@ pub(crate) fn preflight_nofile_for_disk_journals(
     }
 
     Err(format!(
-        "Disk-journal pipeline requires ~{} file descriptors (stages={}, edges={}, metrics_enabled={}). RLIMIT_NOFILE soft={} hard={}. Increase your process file-descriptor limit (e.g. `ulimit -n {}`) or reduce pipeline size / disable metrics (`OBZENFLOW_METRICS_ENABLED=false`).",
+        "Disk-journal pipeline requires ~{} file descriptors (stages={}, edges={}, metrics_enabled={}). RLIMIT_NOFILE soft={} hard={}. Increase your process file-descriptor limit (e.g. `ulimit -n {}`) or reduce pipeline size / disable metrics in obzenflow.toml.",
         estimate.estimated_fds,
         estimate.stages,
         estimate.edges,

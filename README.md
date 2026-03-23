@@ -44,6 +44,8 @@ Run with localhost-only defaults:
 cargo run -p obzenflow --example http_ingestion_piggy_bank_demo --features obzenflow_infra/warp-server
 ```
 
+The demo uses its checked-in startup config by default. To override the startup file explicitly, pass `-- --config <path>` after the Cargo arguments.
+
 Recommended control-plane auth variant:
 
 ```bash

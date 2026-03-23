@@ -7,9 +7,9 @@
 //! This demonstrates middleware inheritance - a critical concept for production flows.
 //!
 //! **How to observe rate limiting in real-time:**
-//!   1. Run with --server flag (requires warp-server feature):
+//!   1. Run the example (requires `warp-server` feature):
 //!      ```
-//!      cargo run -p obzenflow --example flow_middleware_config --features obzenflow_infra/warp-server -- --server
+//!      cargo run -p obzenflow --example flow_middleware_config --features obzenflow_infra/warp-server
 //!      ```
 //!   2. Query metrics while flow runs:
 //!      ```
@@ -39,6 +39,10 @@ use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{SinkHandler, TransformHandler};
 use serde::{Deserialize, Serialize};
+const CONFIG_FILE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/examples/flow_middleware_config.obzenflow.toml"
+);
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 struct CounterEvent {
@@ -106,11 +110,6 @@ impl SinkHandler for CountingSink {
 }
 
 fn main() -> Result<()> {
-    // Use Prometheus exporter for /metrics endpoint
-    // (defaults to "prometheus" if not set, but being explicit here)
-    // Change to "console" if you want formatted summary instead
-    std::env::set_var("OBZENFLOW_METRICS_EXPORTER", "prometheus");
-
     let journal_path = std::path::PathBuf::from("target/flow_middleware_config_journal");
 
     let presentation = Presentation::new(
@@ -127,7 +126,7 @@ fn main() -> Result<()> {
             )
             .section(
                 "How to observe in real-time",
-                "1. Run with --server flag (requires warp-server feature):\n   cargo run -p obzenflow --example flow_middleware_config \\\n     --features obzenflow_infra/warp-server -- --server\n2. Query metrics while flow runs:\n   curl http://localhost:9090/metrics | grep events_processed_total\n3. Watch the rate differences between stages!",
+                "1. Run the example (requires warp-server feature):\n   cargo run -p obzenflow --example flow_middleware_config \\\n     --features obzenflow_infra/warp-server\n2. Query metrics while flow runs:\n   curl http://localhost:9090/metrics | grep events_processed_total\n3. Watch the rate differences between stages!",
             )
             .section(
                 "Run duration",
@@ -155,11 +154,12 @@ fn main() -> Result<()> {
                 ],
             )
             .paragraph(
-                "Production tip: Use --server flag + /metrics endpoint to observe rate limiting in real time.",
+                "Production tip: use the default config-backed /metrics endpoint to observe rate limiting in real time.",
             )
     });
 
     FlowApplication::builder()
+        .with_config_file(CONFIG_FILE)
         .with_presentation(presentation)
         .run_blocking(flow! {
             name: "middleware_config_demo",

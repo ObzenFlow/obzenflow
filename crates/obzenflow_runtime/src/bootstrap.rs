@@ -12,6 +12,9 @@ use std::path::PathBuf;
 use std::sync::{OnceLock, RwLock};
 use std::time::Duration;
 
+#[cfg(test)]
+use std::sync::{Mutex, MutexGuard};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StartupMode {
     Auto,
@@ -71,48 +74,9 @@ impl Default for BootstrapConfig {
     }
 }
 
-impl BootstrapConfig {
-    fn from_legacy_env() -> Self {
-        let startup_mode = match std::env::var("OBZENFLOW_STARTUP_MODE") {
-            Ok(value) if value.eq_ignore_ascii_case("manual") => StartupMode::Manual,
-            _ => StartupMode::Auto,
-        };
-
-        let replay = std::env::var_os("OBZENFLOW_REPLAY_FROM").map(|path| ReplayBootstrap {
-            archive_path: PathBuf::from(path),
-            allow_incomplete_archive: std::env::var("OBZENFLOW_ALLOW_INCOMPLETE_ARCHIVE")
-                .ok()
-                .is_some_and(|value| {
-                    matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES")
-                }),
-        });
-
-        let enabled = std::env::var("OBZENFLOW_METRICS_ENABLED")
-            .ok()
-            .and_then(|value| value.parse::<bool>().ok())
-            .unwrap_or(true);
-        let exporter = match std::env::var("OBZENFLOW_METRICS_EXPORTER").ok().as_deref() {
-            Some("console") => MetricsExporterKind::Console,
-            Some("noop") => MetricsExporterKind::Noop,
-            _ => MetricsExporterKind::Prometheus,
-        };
-
-        Self {
-            shutdown_timeout: std::env::var("OBZENFLOW_SHUTDOWN_TIMEOUT_SECS")
-                .ok()
-                .and_then(|value| value.parse::<u64>().ok())
-                .map(Duration::from_secs)
-                .unwrap_or_else(|| Duration::from_secs(30)),
-            startup_mode,
-            replay,
-            metrics: MetricsBootstrap { enabled, exporter },
-        }
-    }
-}
-
 fn storage() -> &'static RwLock<BootstrapConfig> {
     static BOOTSTRAP: OnceLock<RwLock<BootstrapConfig>> = OnceLock::new();
-    BOOTSTRAP.get_or_init(|| RwLock::new(BootstrapConfig::from_legacy_env()))
+    BOOTSTRAP.get_or_init(|| RwLock::new(BootstrapConfig::default()))
 }
 
 pub fn bootstrap_config() -> BootstrapConfig {
@@ -170,11 +134,20 @@ pub fn metrics_bootstrap() -> MetricsBootstrap {
 }
 
 #[cfg(test)]
+pub(crate) fn bootstrap_test_lock() -> MutexGuard<'static, ()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("bootstrap test lock poisoned")
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn bootstrap_defaults_are_sensible() {
+        let _lock = bootstrap_test_lock();
         let _guard = install_bootstrap_config(BootstrapConfig::default());
 
         let bootstrap = bootstrap_config();
@@ -186,6 +159,7 @@ mod tests {
 
     #[test]
     fn bootstrap_guard_restores_previous_config() {
+        let _lock = bootstrap_test_lock();
         let baseline = BootstrapConfig {
             shutdown_timeout: Duration::from_secs(45),
             startup_mode: StartupMode::Auto,

@@ -12,9 +12,11 @@ cargo run -p obzenflow --example <name>
 
 Some examples require feature flags:
 
-- `--features obzenflow_infra/warp-server` for `--server` mode and HTTP endpoints
+- `--features obzenflow_infra/warp-server` for examples whose `obzenflow.toml` enables HTTP endpoints
 - `--features http-pull` for HTTP pull sources
 - `--features "http-pull ai"` for the AI digest example
+
+Examples default to their bundled startup config. Power users can override it with `-- --config <path/to/obzenflow.toml>` after the Cargo arguments.
 
 ## Canonical examples
 
@@ -56,7 +58,7 @@ These examples don't have tutorials, but they demonstrate concrete framework con
 - **`payment_gateway_resilience`** — Circuit breakers, fallback behavior, and operator-facing resilience against unreliable dependencies. Use this when you care about runtime protections and failure semantics.
   - Pillars: [Production-Grade Primitives](https://obzenflow.dev/pillars/batteries-included/), [Correctness Guarantees](https://obzenflow.dev/pillars/correctness-guarantees/)
   - Run: `cargo run -p obzenflow --example payment_gateway_resilience`
-  - Run with metrics: `cargo run -p obzenflow --example payment_gateway_resilience --features obzenflow_infra/warp-server -- --server`
+  - Run with metrics: `cargo run -p obzenflow --example payment_gateway_resilience --features obzenflow_infra/warp-server -- --config examples/payment_gateway_resilience/obzenflow.server.toml`
   - Code: [`examples/payment_gateway_resilience/flow.rs`](payment_gateway_resilience/flow.rs)
 
 - **`ecommerce_top_products`** — Bounded-memory ranked aggregation over event streams with stage-level rate limiting. Use this for a realistic Top-N-by-score pattern.
