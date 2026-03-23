@@ -14,10 +14,6 @@ use std::env;
 pub struct DefaultMetricsConfig {
     /// Whether metrics collection is enabled
     pub enabled: bool,
-    /// Taxonomy for stage metrics (e.g., "RED" for Rate, Errors, Duration)
-    pub stage_taxonomy: String,
-    /// Taxonomy for flow metrics (e.g., "GoldenSignals")
-    pub flow_taxonomy: String,
 }
 
 impl Default for DefaultMetricsConfig {
@@ -28,11 +24,7 @@ impl Default for DefaultMetricsConfig {
             .and_then(|v| v.parse::<bool>().ok())
             .unwrap_or(true);
 
-        Self {
-            enabled,
-            stage_taxonomy: "RED".to_string(),
-            flow_taxonomy: "GoldenSignals".to_string(),
-        }
+        Self { enabled }
     }
 }
 
@@ -44,11 +36,7 @@ impl DefaultMetricsConfig {
 
     /// Create a disabled metrics configuration
     pub fn disabled() -> Self {
-        Self {
-            enabled: false,
-            stage_taxonomy: "RED".to_string(),
-            flow_taxonomy: "GoldenSignals".to_string(),
-        }
+        Self { enabled: false }
     }
 
     /// Check if metrics are enabled
@@ -77,8 +65,6 @@ mod tests {
 
         let config = DefaultMetricsConfig::default();
         assert!(config.enabled);
-        assert_eq!(config.stage_taxonomy, "RED");
-        assert_eq!(config.flow_taxonomy, "GoldenSignals");
 
         // Restore original value if it existed
         if let Some(val) = saved {
@@ -90,8 +76,6 @@ mod tests {
     fn test_disabled_config() {
         let config = DefaultMetricsConfig::disabled();
         assert!(!config.enabled);
-        assert_eq!(config.stage_taxonomy, "RED");
-        assert_eq!(config.flow_taxonomy, "GoldenSignals");
     }
 
     #[test]

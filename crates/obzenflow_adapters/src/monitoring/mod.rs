@@ -4,11 +4,6 @@
 
 //! Monitoring support for ObzenFlow.
 //!
-//! This module contains two different kinds of monitoring material:
-//!
-//! - runtime collection and export plumbing
-//! - taxonomy helpers such as RED, USE, Golden Signals, and SAAFE
-//!
 //! After `FLOWIP-084h`, ObzenFlow's metrics model is intentionally split:
 //!
 //! 1. application metrics are derived from wide events and journals into
@@ -16,23 +11,13 @@
 //! 2. infrastructure metrics are observed directly into `InfraMetricsSnapshot`
 //! 3. exporters render both into one Prometheus exposition surface
 //!
-//! The taxonomy modules in this crate are query and dashboard helpers over that
-//! exported metrics surface. They are not middleware, and they are not the source
-//! of runtime metric truth.
-//!
-//! Taxonomy helpers remain available under `obzenflow_adapters::monitoring::taxonomies::*`.
-//!
-//! ## Available taxonomy helpers
-//!
-//! - **RED**: Rate, Errors, Duration
-//! - **USE**: Utilization, Saturation, Errors
-//! - **Golden Signals**: Latency, Traffic, Errors, Saturation
-//! - **SAAFE**: Saturation, Amendments, Anomalies, Failures, Errors
+//! This crate contains the runtime-facing collection and export plumbing for that
+//! model. Dashboard organization and monitoring lenses live in static dashboard/docs
+//! assets, not in the Rust API surface.
 
 pub mod aggregator;
 pub mod exporters;
 pub mod metrics;
-pub mod taxonomies;
 
 pub use exporters::PrometheusExporter;
 

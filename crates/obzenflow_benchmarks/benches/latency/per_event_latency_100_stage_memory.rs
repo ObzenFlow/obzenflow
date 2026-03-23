@@ -21,8 +21,7 @@ use obzenflow_runtime::stages::common::handlers::{
     FiniteSourceHandler, SinkHandler, TransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
-// Monitoring taxonomies are no longer needed with FLOWIP-056-666
-// Metrics are automatically collected by MetricsAggregator from the event journal
+// Metrics are automatically collected by MetricsAggregator from the event journal.
 use async_trait::async_trait;
 use serde_json::json;
 use std::sync::atomic::{AtomicU64, Ordering};

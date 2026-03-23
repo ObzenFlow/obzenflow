@@ -3,7 +3,7 @@
 // https://obzenflow.dev
 
 // src/monitoring/metrics/utilities.rs
-//! Core metric collection utilities for taxonomies
+//! Core metric collection utilities for monitoring primitives
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};

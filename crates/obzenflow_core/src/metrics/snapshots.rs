@@ -52,22 +52,22 @@ pub struct AppMetricsSnapshot {
     /// Memory usage in bytes by stage
     pub memory_bytes: HashMap<StageId, f64>,
 
-    /// SAAFE metrics - anomalies total by stage
+    /// Anomalies total by stage
     pub anomalies_total: HashMap<StageId, u64>,
 
-    /// SAAFE metrics - amendments total by stage
+    /// Amendments total by stage
     pub amendments_total: HashMap<StageId, u64>,
 
-    /// SAAFE metrics - saturation ratio by stage (0.0-1.0)
+    /// Saturation ratio by stage (0.0-1.0)
     pub saturation_ratio: HashMap<StageId, f64>,
 
-    /// SAAFE metrics - failures total by stage (critical failures)
+    /// Failures total by stage (critical failures)
     pub failures_total: HashMap<StageId, u64>,
 
-    /// USE metrics - event loops total by stage
+    /// Event loops total by stage
     pub event_loops_total: HashMap<StageId, u64>,
 
-    /// USE metrics - event loops with work by stage
+    /// Event loops with work by stage
     pub event_loops_with_work_total: HashMap<StageId, u64>,
 
     /// Flow-level latency histograms by flow name (in seconds)

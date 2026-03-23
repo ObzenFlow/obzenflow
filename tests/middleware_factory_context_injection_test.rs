@@ -13,8 +13,6 @@
 #![cfg(any())] // Disabled until monitoring middleware is redesigned
 
 use obzenflow_adapters::middleware::MiddlewareFactory;
-// FLOWIP-056-666: Monitoring middleware temporarily disabled pending redesign
-// use obzenflow_adapters::monitoring::taxonomies::red::RED;
 use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::journal::writer_id::WriterId;
 use obzenflow_dsl::dsl::stage_descriptor::{StageDescriptor, TransformDescriptor};
@@ -60,11 +58,8 @@ fn test_flowip_054_middleware_factory_integration() {
     // 3. Create supervisor (this is where factory.create(&config) is called)
     let _supervisor = descriptor.create_supervisor(config);
 
-    // At this point:
-    // - The RED::monitoring() factory was invoked with full StageConfig
-    // - MonitoringMiddleware was created with stage_name="payment_processor"
-    // - MonitoringMiddleware was created with the correct stage_id
-    // - No empty stage names!
+    // At this point middleware factories receive full stage context and can build
+    // stage-specific middleware without losing names or IDs.
 
     println!("✅ FLOWIP-054 Verified:");
     println!("   - Middleware factory pattern works");
@@ -110,24 +105,11 @@ fn test_multiple_stages_get_unique_context() {
 }
 
 #[test]
-fn test_all_taxonomies_support_factory_pattern() {
-    // FLOWIP-056-666: Monitoring middleware temporarily disabled
-    // use obzenflow_adapters::monitoring::taxonomies::{
-    //     use_taxonomy::USE,
-    //     golden_signals::GoldenSignals,
-    //     saafe::SAAFE,
-    // };
+fn test_monitoring_factories_support_factory_pattern() {
+    let monitoring_factories: Vec<(&str, Box<dyn MiddlewareFactory>)> = vec![];
 
-    // FLOWIP-056-666: Monitoring middleware temporarily disabled
-    let taxonomies: Vec<(&str, Box<dyn MiddlewareFactory>)> = vec![
-        // ("RED", RED::monitoring()),
-        // ("USE", USE::monitoring()),
-        // ("GoldenSignals", GoldenSignals::monitoring()),
-        // ("SAAFE", SAAFE::monitoring()),
-    ];
-
-    for (taxonomy_name, factory) in taxonomies {
-        let stage_name = format!("{}_monitored_stage", taxonomy_name.to_lowercase());
+    for (factory_name, factory) in monitoring_factories {
+        let stage_name = format!("{}_monitored_stage", factory_name.to_lowercase());
 
         let descriptor = Box::new(TransformDescriptor {
             name: stage_name.clone(),
@@ -147,10 +129,10 @@ fn test_all_taxonomies_support_factory_pattern() {
         let _supervisor = descriptor.create_supervisor(config);
 
         println!(
-            "   ✓ {} taxonomy factory works with context '{}'",
-            taxonomy_name, stage_name
+            "   ✓ {} monitoring factory works with context '{}'",
+            factory_name, stage_name
         );
     }
 
-    println!("✅ All monitoring taxonomies support factory pattern!");
+    println!("✅ All monitoring factories support factory pattern!");
 }

@@ -5,7 +5,7 @@
 //! Test that verifies stage-level metrics work automatically
 //!
 //! This test confirms that FLOWIP-056-666's core requirement is met:
-//! Every stage automatically emits RED metrics without configuration.
+//! Every stage automatically emits core stage metrics without configuration.
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -178,8 +178,8 @@ async fn test_stage_level_metrics_automatic() -> Result<()> {
         }
     }
 
-    // Verify automatic RED metrics for ALL stages
-    println!("\n=== Verifying Automatic RED Metrics ===");
+    // Verify automatic stage metrics for ALL stages
+    println!("\n=== Verifying Automatic Stage Metrics ===");
 
     // Check events_total for each stage
     let has_source_events = metrics_text
@@ -250,7 +250,7 @@ async fn test_stage_level_metrics_automatic() -> Result<()> {
     }
 
     println!("\n✅ Stage-Level Metrics Test PASSED!");
-    println!("   - All stages automatically emit RED metrics");
+    println!("   - All stages automatically emit core stage metrics");
     println!("   - No configuration required");
     println!("   - Flow context properly populated");
 

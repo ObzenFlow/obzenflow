@@ -30,74 +30,14 @@
 //! - infrastructure metrics are observed directly
 //! - both are rendered together by the metrics exporter
 //!
-//! The monitoring taxonomies (RED, USE, Golden Signals, SAAFE) are now documentation-only
-//! and provide Prometheus queries and Grafana dashboards for viewing metrics.
+//! Monitoring views such as Grafana dashboards belong in static monitoring/docs
+//! assets rather than as Rust helpers in this crate.
 //!
 //! ```text
 //! // OLD: Monitoring middleware (no longer available)
-//! // let red_middleware = RED::monitoring();
+//! // let monitoring_middleware = old_monitoring_factory();
 //!
-//! // NEW: Use the runtime metrics surface and optional taxonomy helpers
-//! // See obzenflow_adapters::monitoring::taxonomies
-//! ```
-//!
-//! ## Available Monitoring Views
-//!
-//! ObzenFlow provides several monitoring taxonomies as view definitions:
-//!
-//! ### RED (Rate, Errors, Duration)
-//! Best for request/response systems and sources. Tracks:
-//! - **Rate**: Events processed per second
-//! - **Errors**: Error count and rate
-//! - **Duration**: Processing time distribution
-//!
-//! ```rust
-//! use obzenflow_adapters::monitoring::taxonomies::red::RED;
-//!
-//! // Get Prometheus queries for RED metrics
-//! let queries = RED::prometheus_queries("my_flow", "my_stage");
-//! ```
-//!
-//! ### USE (Utilization, Saturation, Errors)
-//! Ideal for resource-focused stages like transforms. Tracks:
-//! - **Utilization**: Resource usage percentage
-//! - **Saturation**: Queue depth and backpressure
-//! - **Errors**: Processing errors
-//!
-//! ```rust
-//! use obzenflow_adapters::monitoring::taxonomies::use_taxonomy::USE;
-//!
-//! // Get Prometheus queries for USE metrics
-//! let queries = USE::prometheus_queries("my_flow", "my_stage");
-//! ```
-//!
-//! ### GoldenSignals (Latency, Traffic, Errors, Saturation)
-//! Comprehensive monitoring for critical stages. Tracks:
-//! - **Latency**: End-to-end processing time
-//! - **Traffic**: Request volume
-//! - **Errors**: Error rate and types
-//! - **Saturation**: Resource saturation
-//!
-//! ```rust
-//! use obzenflow_adapters::monitoring::taxonomies::golden_signals::GoldenSignals;
-//!
-//! // Get Prometheus queries for Golden Signals metrics
-//! let queries = GoldenSignals::prometheus_queries("my_flow", "my_stage");
-//! ```
-//!
-//! ### SAAFE (Saturation, Anomalies, Amendments, Failures, Errors)
-//! Advanced monitoring for sinks and data quality. Tracks:
-//! - **Saturation**: Backpressure and queue depth
-//! - **Anomalies**: Unusual patterns in data
-//! - **Amendments**: Data corrections/updates
-//! - **Failures**: Persistent failures
-//! - **Errors**: Transient errors
-//!
-//! ```rust
-//! use obzenflow_adapters::monitoring::taxonomies::saafe::SAAFE;
-//!
-//! // Get Prometheus queries for SAAFE metrics
-//! let queries = SAAFE::prometheus_queries("my_flow", "my_stage");
+//! // NEW: Use the runtime metrics surface and external dashboard/query assets
 //! ```
 //!
 //! ## Applying Middleware to Handlers
@@ -159,11 +99,7 @@ mod system;
 // Factory tests moved to tests/factory_tests.rs
 // Note: Monitoring is no longer implemented as middleware.
 // Application metrics are journal-derived, infrastructure metrics are observed
-// directly, and taxonomy helpers provide Prometheus queries and dashboard views:
-// - RED::prometheus_queries()
-// - USE::prometheus_queries()
-// - GoldenSignals::prometheus_queries()
-// - SAAFE::prometheus_queries()
+// directly, and dashboards/query assets live outside the middleware API.
 
 // Core trait exports
 pub use middleware_factory::MiddlewareFactory;
@@ -213,4 +149,3 @@ pub use observability::{
 pub use system::{
     outcome_enrichment, validate_middleware_safety, OutcomeEnrichmentMiddleware, ValidationResult,
 };
-// Monitoring is provided via taxonomy-specific methods

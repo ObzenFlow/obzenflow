@@ -5,5 +5,5 @@
 //! Application metrics aggregation now lives in the runtime layer.
 //!
 //! `MetricsAggregator` is implemented in `obzenflow_runtime`. The adapters layer
-//! keeps exporter implementations and taxonomy helpers, but it is no longer the
-//! home of the runtime aggregation FSM itself.
+//! keeps exporter implementations, but it is no longer the home of the runtime
+//! aggregation FSM itself.
