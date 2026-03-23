@@ -98,7 +98,7 @@ Inner layers are intentionally generic (domain types + traits) and avoid I/O and
 - `crates/obzenflow_core/README.md`: core domain types + stable interfaces (events, journals, contracts, middleware ports)
 - `crates/obzenflow_runtime/README.md`: stage execution + supervisors + runtime orchestration (the engine)
 - `crates/obzenflow_dsl/README.md`: the `flow!` DSL and how it builds a runnable flow graph (including middleware resolution)
-- `crates/obzenflow_infra/README.md`: `FlowApplication` + journaling/web/HTTP implementations, mostly behind feature flags
+- `crates/obzenflow_infra/README.md`: `FlowApplication` + journaling/web/HTTP implementations + typed env parsing, mostly behind feature flags
 - `crates/obzenflow_adapters/README.md`: middleware + concrete sources/sinks (connectors) intended to be composed into flows
 
 The root `obzenflow` crate is a convenience re-export layer for common sources/sinks (`src/sources.rs`, `src/sinks.rs`).

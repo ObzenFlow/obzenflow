@@ -10,6 +10,7 @@ Wires the workspace together into a runnable application, providing journal back
 - **Journal backends.** Disk-backed (`disk_journals`) and in-memory (`memory_journals`) implementations of the journaling traits, plus replay archive support.
 - **Web server and endpoints** (feature `warp-server`). Topology, metrics, health/readiness, flow control, SSE event streaming, and HTTP ingestion endpoints.
 - **Outbound HTTP client** (feature `reqwest-client`). Reqwest-based implementation of the core `HttpClient` trait.
+- **Typed env parsing** (`env`). `env_var`, `env_var_or`, `env_var_required`, and `env_bool` helpers that distinguish missing from malformed environment variables with actionable error messages.
 
 ## Features
 
