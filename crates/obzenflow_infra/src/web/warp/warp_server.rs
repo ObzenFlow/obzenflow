@@ -922,14 +922,11 @@ fn build_host_policy(
             .any(|endpoint| endpoint.path() == "/metrics")
         && matches!(
             control_plane_auth.as_ref(),
-            Some(AuthPolicy::HmacSha256 {
-                replay_window_secs: Some(_),
-                ..
-            })
+            Some(AuthPolicy::HmacSha256 { .. })
         )
     {
         tracing::warn!(
-            "Control-plane replay-window HMAC is not compatible with standard Prometheus scraping for /metrics; prefer ApiKey on Authorization when metrics scraping is enabled"
+            "Control-plane HMAC is not the natural fit for pull-based /metrics scraping; prefer ApiKey on Authorization when metrics scraping is enabled"
         );
     }
 
@@ -2184,6 +2181,57 @@ mod tests {
         }
     }
 
+    struct RawReadyEndpoint;
+
+    #[async_trait]
+    impl HttpEndpoint for RawReadyEndpoint {
+        fn path(&self) -> &str {
+            "/ready"
+        }
+
+        fn methods(&self) -> &[HttpMethod] {
+            &[HttpMethod::Get]
+        }
+
+        async fn handle(&self, _request: Request) -> Result<ManagedResponse, WebError> {
+            Ok(Response::ok().with_text("ready").into())
+        }
+    }
+
+    struct RawTopologyEndpoint;
+
+    #[async_trait]
+    impl HttpEndpoint for RawTopologyEndpoint {
+        fn path(&self) -> &str {
+            "/api/topology"
+        }
+
+        fn methods(&self) -> &[HttpMethod] {
+            &[HttpMethod::Get]
+        }
+
+        async fn handle(&self, _request: Request) -> Result<ManagedResponse, WebError> {
+            Ok(Response::ok().with_text("topology").into())
+        }
+    }
+
+    struct RawFlowControlEndpoint;
+
+    #[async_trait]
+    impl HttpEndpoint for RawFlowControlEndpoint {
+        fn path(&self) -> &str {
+            "/api/flow/control"
+        }
+
+        fn methods(&self) -> &[HttpMethod] {
+            &[HttpMethod::Post]
+        }
+
+        async fn handle(&self, _request: Request) -> Result<ManagedResponse, WebError> {
+            Ok(Response::ok().with_text("control").into())
+        }
+    }
+
     #[tokio::test]
     async fn control_plane_auth_enforces_raw_metrics_endpoint() {
         std::env::set_var("OBZENFLOW_TEST_CONTROL_PLANE_API_KEY", "Bearer sekret");
@@ -2246,6 +2294,108 @@ mod tests {
             .await;
         assert_eq!(response.status(), 200);
         assert_eq!(response.body(), "healthy");
+    }
+
+    #[tokio::test]
+    async fn control_plane_auth_does_not_gate_ready_endpoint() {
+        std::env::set_var("OBZENFLOW_TEST_CONTROL_PLANE_API_KEY", "Bearer sekret");
+
+        let mut server = WarpServer::new();
+        server
+            .register_endpoint(Box::new(RawReadyEndpoint))
+            .unwrap();
+        let filter = server
+            .build_filter(HostPolicy {
+                max_body_size_bytes: 10,
+                request_timeout: None,
+                control_plane_auth: Some(AuthPolicy::ApiKey {
+                    header: "Authorization".to_string(),
+                    value_env: "OBZENFLOW_TEST_CONTROL_PLANE_API_KEY".to_string(),
+                }),
+            })
+            .unwrap();
+
+        let response = warp::test::request()
+            .method("GET")
+            .path("/ready")
+            .reply(&filter)
+            .await;
+        assert_eq!(response.status(), 200);
+        assert_eq!(response.body(), "ready");
+    }
+
+    #[tokio::test]
+    async fn control_plane_auth_enforces_topology_endpoint() {
+        std::env::set_var("OBZENFLOW_TEST_CONTROL_PLANE_API_KEY", "Bearer sekret");
+
+        let mut server = WarpServer::new();
+        server
+            .register_endpoint(Box::new(RawTopologyEndpoint))
+            .unwrap();
+        let filter = server
+            .build_filter(HostPolicy {
+                max_body_size_bytes: 10,
+                request_timeout: None,
+                control_plane_auth: Some(AuthPolicy::ApiKey {
+                    header: "Authorization".to_string(),
+                    value_env: "OBZENFLOW_TEST_CONTROL_PLANE_API_KEY".to_string(),
+                }),
+            })
+            .unwrap();
+
+        let response = warp::test::request()
+            .method("GET")
+            .path("/api/topology")
+            .reply(&filter)
+            .await;
+        assert_eq!(response.status(), 401);
+
+        let response = warp::test::request()
+            .method("GET")
+            .path("/api/topology")
+            .header("authorization", "Bearer sekret")
+            .reply(&filter)
+            .await;
+        assert_eq!(response.status(), 200);
+        assert_eq!(response.body(), "topology");
+    }
+
+    #[tokio::test]
+    async fn control_plane_auth_enforces_api_flow_prefix_endpoint() {
+        std::env::set_var("OBZENFLOW_TEST_CONTROL_PLANE_API_KEY", "Bearer sekret");
+
+        let mut server = WarpServer::new();
+        server
+            .register_endpoint(Box::new(RawFlowControlEndpoint))
+            .unwrap();
+        let filter = server
+            .build_filter(HostPolicy {
+                max_body_size_bytes: 10,
+                request_timeout: None,
+                control_plane_auth: Some(AuthPolicy::ApiKey {
+                    header: "Authorization".to_string(),
+                    value_env: "OBZENFLOW_TEST_CONTROL_PLANE_API_KEY".to_string(),
+                }),
+            })
+            .unwrap();
+
+        let response = warp::test::request()
+            .method("POST")
+            .path("/api/flow/control")
+            .body(Vec::<u8>::new())
+            .reply(&filter)
+            .await;
+        assert_eq!(response.status(), 401);
+
+        let response = warp::test::request()
+            .method("POST")
+            .path("/api/flow/control")
+            .header("authorization", "Bearer sekret")
+            .body(Vec::<u8>::new())
+            .reply(&filter)
+            .await;
+        assert_eq!(response.status(), 200);
+        assert_eq!(response.body(), "control");
     }
 
     #[tokio::test]
