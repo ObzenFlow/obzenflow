@@ -16,8 +16,7 @@ use super::{
     ApplicationError, FlowConfig, Presentation, RunPresentationOutcome, WebSurfaceAttachment,
     WebSurfaceWiringContext,
 };
-use crate::application::config::CorsModeArg;
-use crate::application::config::StartupMode;
+use crate::application::config::{CorsModeArg, StartupMode};
 use crate::web::endpoints::event_ingestion::HttpIngress;
 #[cfg(feature = "warp-server")]
 use crate::web::surface_metrics::{HttpSurfaceMetricsCollector, HttpSurfaceMetricsEmitter};
@@ -536,6 +535,29 @@ impl FlowApplication {
                     false,
                 );
             }
+
+            if config.has_control_plane_auth_args() && !config.server {
+                break 'run (
+                    Err(ApplicationError::InvalidConfiguration(
+                        "control-plane auth flags require --server".to_string(),
+                    )),
+                    None,
+                    None,
+                    false,
+                );
+            }
+
+            let control_plane_auth = match config.build_control_plane_auth() {
+                Ok(auth) => auth,
+                Err(message) => {
+                    break 'run (
+                        Err(ApplicationError::InvalidConfiguration(message)),
+                        None,
+                        None,
+                        false,
+                    );
+                }
+            };
             if config.cors_mode == CorsModeArg::AllowList && config.cors_allow_origin.is_empty() {
                 break 'run (
                     Err(ApplicationError::InvalidConfiguration(
@@ -709,6 +731,7 @@ impl FlowApplication {
                 server_config.cors = Some(CorsConfig { mode: cors_mode });
                 server_config.max_body_size = Some(config.max_body_size_bytes);
                 server_config.request_timeout_secs = Some(config.request_timeout_secs);
+                server_config.control_plane_auth = control_plane_auth;
 
                 let start_result = {
                     #[cfg(feature = "warp-server")]

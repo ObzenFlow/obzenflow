@@ -4,6 +4,7 @@
 
 //! Core HTTP types used by web abstractions
 
+use super::auth::AuthPolicy;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -191,6 +192,10 @@ pub struct ServerConfig {
     ///
     /// If unset, the web server implementation decides a default.
     pub cors: Option<CorsConfig>,
+
+    /// Optional auth policy for framework-owned control-plane routes such as
+    /// `/api/flow/*`, `/api/topology`, and `/metrics`.
+    pub control_plane_auth: Option<AuthPolicy>,
 }
 
 /// CORS configuration.
@@ -231,6 +236,7 @@ impl ServerConfig {
             request_timeout_secs: None,
             worker_threads: None,
             cors: None,
+            control_plane_auth: None,
         }
     }
 

@@ -3,6 +3,7 @@
 // https://obzenflow.dev
 
 use clap::{Parser, ValueEnum};
+use obzenflow_core::web::AuthPolicy;
 use std::path::PathBuf;
 
 /// CORS mode for FlowApplication's HTTP server.
@@ -14,6 +15,15 @@ pub enum CorsModeArg {
     AllowList,
     /// Do not add CORS headers (browser same-origin policy applies).
     SameOrigin,
+}
+
+/// Control-plane auth mode for FlowApplication's HTTP server.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+pub enum ControlPlaneAuthModeArg {
+    /// Static shared secret compared against a request header.
+    ApiKey,
+    /// HMAC-SHA256 signature over the request body.
+    HmacSha256,
 }
 
 /// Configuration for FlowApplication
@@ -66,6 +76,44 @@ pub struct FlowConfig {
     #[arg(long = "cors-allow-origin")]
     pub cors_allow_origin: Vec<String>,
 
+    /// Optional auth mode for built-in control-plane routes such as `/api/flow/*`,
+    /// `/api/topology`, and `/metrics`.
+    #[arg(long, value_enum)]
+    pub control_plane_auth_mode: Option<ControlPlaneAuthModeArg>,
+
+    /// Header to inspect when `--control-plane-auth-mode=api-key`.
+    ///
+    /// Defaults to `Authorization`.
+    #[arg(long)]
+    pub control_plane_auth_header: Option<String>,
+
+    /// Environment variable containing the expected header value when
+    /// `--control-plane-auth-mode=api-key`.
+    #[arg(long)]
+    pub control_plane_auth_value_env: Option<String>,
+
+    /// Environment variable containing the shared secret when
+    /// `--control-plane-auth-mode=hmac-sha256`.
+    #[arg(long)]
+    pub control_plane_hmac_secret_env: Option<String>,
+
+    /// Header containing the HMAC signature when
+    /// `--control-plane-auth-mode=hmac-sha256`.
+    ///
+    /// Defaults to `X-Signature`.
+    #[arg(long)]
+    pub control_plane_hmac_signature_header: Option<String>,
+
+    /// Optional header containing the timestamp used for replay protection when
+    /// `--control-plane-auth-mode=hmac-sha256`.
+    #[arg(long)]
+    pub control_plane_hmac_timestamp_header: Option<String>,
+
+    /// Optional replay window in seconds when
+    /// `--control-plane-auth-mode=hmac-sha256`.
+    #[arg(long)]
+    pub control_plane_hmac_replay_window_secs: Option<u64>,
+
     /// Replay sources from a completed or cancelled archived run directory (FLOWIP-095a).
     ///
     /// The path must be the exact run directory containing `run_manifest.json`.
@@ -91,4 +139,96 @@ pub enum StartupMode {
     Auto,
     /// Build pipeline, expose HTTP endpoints, but do not start until Play
     Manual,
+}
+
+impl FlowConfig {
+    pub fn has_control_plane_auth_args(&self) -> bool {
+        self.control_plane_auth_mode.is_some()
+            || self.control_plane_auth_header.is_some()
+            || self.control_plane_auth_value_env.is_some()
+            || self.control_plane_hmac_secret_env.is_some()
+            || self.control_plane_hmac_signature_header.is_some()
+            || self.control_plane_hmac_timestamp_header.is_some()
+            || self.control_plane_hmac_replay_window_secs.is_some()
+    }
+
+    pub fn build_control_plane_auth(&self) -> Result<Option<AuthPolicy>, String> {
+        let Some(mode) = self.control_plane_auth_mode else {
+            if self.has_control_plane_auth_args() {
+                return Err(
+                    "control-plane auth fields require --control-plane-auth-mode".to_string(),
+                );
+            }
+            return Ok(None);
+        };
+
+        match mode {
+            ControlPlaneAuthModeArg::ApiKey => {
+                if self.control_plane_hmac_secret_env.is_some()
+                    || self.control_plane_hmac_signature_header.is_some()
+                    || self.control_plane_hmac_timestamp_header.is_some()
+                    || self.control_plane_hmac_replay_window_secs.is_some()
+                {
+                    return Err(
+                        "HMAC-specific control-plane auth flags require --control-plane-auth-mode=hmac-sha256"
+                            .to_string(),
+                    );
+                }
+
+                let value_env = self
+                    .control_plane_auth_value_env
+                    .clone()
+                    .ok_or_else(|| {
+                        "--control-plane-auth-value-env is required for --control-plane-auth-mode=api-key"
+                            .to_string()
+                    })?;
+
+                Ok(Some(AuthPolicy::ApiKey {
+                    header: self
+                        .control_plane_auth_header
+                        .clone()
+                        .unwrap_or_else(|| "Authorization".to_string()),
+                    value_env,
+                }))
+            }
+            ControlPlaneAuthModeArg::HmacSha256 => {
+                if self.control_plane_auth_header.is_some()
+                    || self.control_plane_auth_value_env.is_some()
+                {
+                    return Err(
+                        "API-key-specific control-plane auth flags require --control-plane-auth-mode=api-key"
+                            .to_string(),
+                    );
+                }
+
+                let secret_env = self
+                    .control_plane_hmac_secret_env
+                    .clone()
+                    .ok_or_else(|| {
+                        "--control-plane-hmac-secret-env is required for --control-plane-auth-mode=hmac-sha256"
+                            .to_string()
+                    })?;
+
+                if self.control_plane_hmac_replay_window_secs.is_some()
+                    && self.control_plane_hmac_timestamp_header.is_none()
+                {
+                    return Err(
+                        "--control-plane-hmac-replay-window-secs requires --control-plane-hmac-timestamp-header"
+                            .to_string(),
+                    );
+                }
+
+                Ok(Some(AuthPolicy::HmacSha256 {
+                    secret_env,
+                    signature_header: self
+                        .control_plane_hmac_signature_header
+                        .clone()
+                        .unwrap_or_else(|| "X-Signature".to_string()),
+                    body_hash: "raw_body".to_string(),
+                    timestamp_header: self.control_plane_hmac_timestamp_header.clone(),
+                    replay_window_secs: self.control_plane_hmac_replay_window_secs,
+                }))
+            }
+        }
+    }
 }

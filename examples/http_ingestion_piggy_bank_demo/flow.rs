@@ -10,8 +10,12 @@
 //! - Stateful stage (materializes a checkbook snapshot per posted entry)
 //! - Console sink (prints balances + a transaction table)
 //!
-//! Run with:
+//! Run with localhost-only defaults:
 //! `cargo run -p obzenflow --example http_ingestion_piggy_bank_demo --features obzenflow_infra/warp-server -- --server --server-port 9090`
+//!
+//! Recommended control-plane auth example:
+//! `export OBZENFLOW_PIGGY_BANK_CONTROL_PLANE_AUTH='Bearer piggy-bank-demo-secret'`
+//! `cargo run -p obzenflow --example http_ingestion_piggy_bank_demo --features obzenflow_infra/warp-server -- --server --server-port 9090 --control-plane-auth-mode api-key --control-plane-auth-value-env OBZENFLOW_PIGGY_BANK_CONTROL_PLANE_AUTH`
 //!
 //! 1) Open accounts (reference side; required before ledger entries):
 //!    `curl -XPOST http://127.0.0.1:9090/api/bank/accounts/events -H 'content-type: application/json' -d '{"event_type":"bank.account_opened","data":{"account_id":"acct-1","owner":"Alice","initial_balance_cents":1000}}'`
@@ -26,6 +30,10 @@
 //! - Accounts can be submitted at any time; the join catalog updates continuously.
 //! - The stateful stage emits a `bank.checkbook` snapshot for every posted entry.
 //! - The `{accepted,rejected}` response is per-request (single POST => accepted=1). For cumulative counts, check `/metrics`.
+//! - Ingress POSTs above stay unauthenticated in this example. Control-plane auth protects built-ins such as `/metrics`, `/api/topology`, and `/api/flow/*`.
+//! - With the recommended auth example above, query built-ins with:
+//!   - `curl http://127.0.0.1:9090/metrics -H 'Authorization: Bearer piggy-bank-demo-secret'`
+//!   - `curl http://127.0.0.1:9090/api/topology -H 'Authorization: Bearer piggy-bank-demo-secret'`
 //! - In this example, `runner.rs` owns the HTTP ingress bundles and hosting shell,
 //!   while `build_flow(...)` stays pipeline-only and accepts the extracted typed
 //!   sources. That split is intentional: hosting concerns stay outside `flow!`.
