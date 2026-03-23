@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 /// This exporter is always available (no feature flags) and enables:
 /// - Unit testing of metrics without external dependencies
 /// - Integration testing of pipelines with metric assertions
-/// - Debugging and development without Prometheus/StatsD setup
+/// - Debugging and development without an external metrics backend
 /// - Performance testing with captured metrics
 pub struct TestExporter {
     captured_metrics: Arc<Mutex<Vec<MetricSnapshot>>>,

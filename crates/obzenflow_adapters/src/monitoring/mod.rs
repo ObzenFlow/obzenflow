@@ -20,6 +20,8 @@
 //! exported metrics surface. They are not middleware, and they are not the source
 //! of runtime metric truth.
 //!
+//! Taxonomy helpers remain available under `obzenflow_adapters::monitoring::taxonomies::*`.
+//!
 //! ## Available taxonomy helpers
 //!
 //! - **RED**: Rate, Errors, Duration
@@ -33,7 +35,6 @@ pub mod metrics;
 pub mod taxonomies;
 
 pub use exporters::PrometheusExporter;
-pub use taxonomies::{GoldenSignals, RED, SAAFE, USE};
 
 /// Initialize the monitoring subsystem
 pub fn init() -> Result<(), Box<dyn std::error::Error>> {
