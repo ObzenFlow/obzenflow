@@ -729,49 +729,7 @@ fn resolve_provider_value(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, OnceLock};
-
-    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-
-    struct EnvGuard {
-        saved: Vec<(String, Option<String>)>,
-    }
-
-    impl EnvGuard {
-        fn new(names: &[&str]) -> Self {
-            let mut saved = Vec::with_capacity(names.len());
-            for name in names {
-                saved.push(((*name).to_string(), std::env::var(name).ok()));
-            }
-            Self { saved }
-        }
-
-        fn set(&self, name: &str, value: &str) {
-            std::env::set_var(name, value);
-        }
-
-        fn remove(&self, name: &str) {
-            std::env::remove_var(name);
-        }
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            for (name, value) in self.saved.drain(..) {
-                match value {
-                    Some(value) => std::env::set_var(name, value),
-                    None => std::env::remove_var(name),
-                }
-            }
-        }
-    }
-
-    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-        ENV_LOCK
-            .get_or_init(|| Mutex::new(()))
-            .lock()
-            .expect("poisoned")
-    }
+    use crate::test_support::{env_lock, EnvGuard};
 
     #[test]
     fn from_env_defaults_to_ollama() {

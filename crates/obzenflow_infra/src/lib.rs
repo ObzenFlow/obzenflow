@@ -13,7 +13,11 @@
 
 pub mod ai;
 pub mod application;
+pub mod env;
 pub mod http_client;
 pub mod journal;
 pub mod monitoring_backend;
 pub mod web;
+
+#[cfg(test)]
+pub(crate) mod test_support;

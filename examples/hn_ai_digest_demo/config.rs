@@ -3,16 +3,12 @@
 // https://obzenflow.dev
 
 use super::mock_server::{spawn_mock_hn_server, MockHnServer};
-use super::util::{env_bool, env_usize};
 use anyhow::{anyhow, Result};
 use obzenflow::ai::{ModelConfig, TokenCount};
+use obzenflow::env::{env_bool_or, env_var, env_var_or};
 use obzenflow::sources::Url;
 
 const DEFAULT_HN_SOURCE_RATE_LIMIT: f64 = 10.0;
-
-fn env_f64(key: &str) -> Option<f64> {
-    std::env::var(key).ok().and_then(|value| value.parse().ok())
-}
 
 pub struct DemoConfig {
     pub max_stories: usize,
@@ -30,11 +26,11 @@ pub struct DemoConfig {
 
 impl DemoConfig {
     pub async fn from_env() -> Result<Self> {
-        let max_stories = env_usize("HN_MAX_STORIES").unwrap_or(30);
-        let poll_timeout_secs = env_usize("HN_POLL_TIMEOUT_SECS").unwrap_or(120);
-        let live = env_bool("HN_LIVE").unwrap_or(false);
+        let max_stories = env_var_or::<usize>("HN_MAX_STORIES", 30)?;
+        let poll_timeout_secs = env_var_or::<usize>("HN_POLL_TIMEOUT_SECS", 120)?;
+        let live = env_bool_or("HN_LIVE", false)?;
         let source_rate_limit =
-            env_f64("HN_SOURCE_RATE_LIMIT").unwrap_or(DEFAULT_HN_SOURCE_RATE_LIMIT);
+            env_var_or::<f64>("HN_SOURCE_RATE_LIMIT", DEFAULT_HN_SOURCE_RATE_LIMIT)?;
         if source_rate_limit <= 0.0 {
             return Err(anyhow!("HN_SOURCE_RATE_LIMIT must be greater than zero"));
         }
@@ -55,11 +51,13 @@ impl DemoConfig {
 
         let ai = ModelConfig::from_env_with_prefix("HN_AI_")?;
 
-        let budget_per_group_tokens =
-            env_usize("HN_AI_GROUP_BUDGET_TOKENS").unwrap_or(match ai.provider_label() {
+        let budget_per_group_tokens = env_var_or::<usize>(
+            "HN_AI_GROUP_BUDGET_TOKENS",
+            match ai.provider_label() {
                 "ollama" => 2500,
                 _ => 6000,
-            }) as u64;
+            },
+        )? as u64;
         if budget_per_group_tokens == 0 {
             return Err(anyhow!(
                 "HN_AI_GROUP_BUDGET_TOKENS must be greater than zero"
@@ -67,12 +65,12 @@ impl DemoConfig {
         }
         let budget_per_group = TokenCount::new(budget_per_group_tokens);
 
-        let max_stories_per_group = match env_usize("HN_AI_GROUP_MAX_STORIES").unwrap_or(10) {
+        let max_stories_per_group = match env_var_or::<usize>("HN_AI_GROUP_MAX_STORIES", 10)? {
             0 => None,
             value => Some(value),
         };
 
-        let interests = std::env::var("HN_AI_INTERESTS").ok();
+        let interests = env_var::<String>("HN_AI_INTERESTS")?;
 
         Ok(Self {
             max_stories,
