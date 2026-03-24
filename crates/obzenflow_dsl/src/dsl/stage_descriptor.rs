@@ -381,10 +381,9 @@ impl<H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
 {
     /// Create a new async finite source descriptor with a default 30s poll timeout.
     pub fn new(name: impl Into<String>, handler: H) -> Self {
-        let poll_timeout =
-            handler
-                .suggested_poll_timeout()
-                .or(Some(DEFAULT_ASYNC_SOURCE_POLL_TIMEOUT));
+        let poll_timeout = handler
+            .suggested_poll_timeout()
+            .or(Some(DEFAULT_ASYNC_SOURCE_POLL_TIMEOUT));
         Self {
             name: name.into(),
             handler,
@@ -1900,8 +1899,7 @@ mod tests {
 
     #[test]
     fn async_finite_source_descriptor_seeds_poll_timeout_from_handler_hint() {
-        let descriptor =
-            AsyncFiniteSourceDescriptor::new("hinted", DummyAsyncFiniteSourceWithHint);
+        let descriptor = AsyncFiniteSourceDescriptor::new("hinted", DummyAsyncFiniteSourceWithHint);
         assert_eq!(descriptor.poll_timeout, Some(Duration::from_secs(123)));
     }
 

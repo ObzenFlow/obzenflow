@@ -275,20 +275,15 @@ where
 }
 
 type ListRequestFn = Arc<dyn Fn() -> RequestSpec + Send + Sync>;
-type ListParseFn<K> =
-    Arc<dyn Fn(&HttpResponse) -> Result<Vec<K>, DecodeError> + Send + Sync>;
+type ListParseFn<K> = Arc<dyn Fn(&HttpResponse) -> Result<Vec<K>, DecodeError> + Send + Sync>;
 type DetailRequestFn<K> = Arc<dyn Fn(&K) -> RequestSpec + Send + Sync>;
-type ItemParseFn<T> =
-    Arc<dyn Fn(&HttpResponse) -> Result<Option<T>, DecodeError> + Send + Sync>;
+type ItemParseFn<T> = Arc<dyn Fn(&HttpResponse) -> Result<Option<T>, DecodeError> + Send + Sync>;
 type OnSkipFn<K> = Arc<dyn Fn(&K) + Send + Sync>;
 
 #[doc(hidden)]
-#[non_exhaustive]
 #[derive(Debug, Clone)]
-pub enum ListDetailState<K> {
-    #[allow(dead_code)]
-    FetchList,
-    FetchItems { pending: VecDeque<K> },
+pub struct ListDetailState<K> {
+    pending: VecDeque<K>,
 }
 
 /// Convenience decoder for the "fetch one list, then fetch each item sequentially" pattern.
@@ -409,11 +404,11 @@ where
 
     fn request_spec(&self, cursor: Option<&Self::Cursor>) -> RequestSpec {
         match cursor {
-            None | Some(ListDetailState::FetchList) => (self.list_request)(),
-            Some(ListDetailState::FetchItems { pending }) => {
+            None => (self.list_request)(),
+            Some(ListDetailState { pending }) => {
                 let key = pending
                     .front()
-                    .expect("ListDetailDecoder pending queue should not be empty");
+                    .expect("ListDetailDecoder pending queue should not be empty (cursor values must come from the decoder)");
                 (self.detail_request)(key)
             }
         }
@@ -425,7 +420,7 @@ where
         response: &HttpResponse,
     ) -> Result<DecodeResult<Self::Cursor, Self::Item>, DecodeError> {
         match cursor {
-            None | Some(ListDetailState::FetchList) => {
+            None => {
                 let mut keys = (self.parse_list)(response)?;
                 if let Some(max_list_items) = self.max_list_items {
                     keys.truncate(max_list_items);
@@ -441,13 +436,13 @@ where
                 let pending = keys.into_iter().collect::<VecDeque<_>>();
                 Ok(DecodeResult {
                     items: Vec::new(),
-                    next_cursor: Some(ListDetailState::FetchItems { pending }),
+                    next_cursor: Some(ListDetailState { pending }),
                 })
             }
-            Some(ListDetailState::FetchItems { pending }) => {
+            Some(ListDetailState { pending }) => {
                 let key = pending
                     .front()
-                    .expect("ListDetailDecoder pending queue should not be empty");
+                    .expect("ListDetailDecoder pending queue should not be empty (cursor values must come from the decoder)");
                 let item = (self.parse_item)(response)?;
                 if item.is_none() {
                     if let Some(on_skip) = self.on_skip.as_ref() {
@@ -461,7 +456,7 @@ where
                 let next_cursor = if pending.is_empty() {
                     None
                 } else {
-                    Some(ListDetailState::FetchItems { pending })
+                    Some(ListDetailState { pending })
                 };
 
                 Ok(DecodeResult {
@@ -598,6 +593,10 @@ impl std::fmt::Debug for HttpPollConfig {
 }
 
 /// Builder for [`HttpPullConfig`] with sensible defaults.
+///
+/// NOTE: This builder defaults `poll_timeout` to 120s for finite sources because `HttpPullSource`
+/// may legitimately wait inside `next()` (e.g., honoring `Retry-After` and backoff). Override with
+/// [`Self::poll_timeout_opt(None)`] to inherit the descriptor default instead.
 #[derive(Clone)]
 pub struct HttpPullConfigBuilder {
     client: Option<Arc<dyn HttpClient>>,
@@ -639,6 +638,16 @@ impl HttpPullConfigBuilder {
 
     pub fn default_headers(mut self, default_headers: HeaderMap) -> Self {
         self.default_headers = default_headers;
+        self
+    }
+
+    /// Insert a single header into [`Self::default_headers`].
+    ///
+    /// Panics if `name` or `value` are invalid HTTP header syntax.
+    pub fn header(mut self, name: &str, value: &str) -> Self {
+        let name: http::header::HeaderName = name.parse().expect("valid HTTP header name");
+        let value: http::header::HeaderValue = value.parse().expect("valid HTTP header value");
+        self.default_headers.insert(name, value);
         self
     }
 
@@ -725,6 +734,16 @@ impl HttpPollConfigBuilder {
 
     pub fn default_headers(mut self, default_headers: HeaderMap) -> Self {
         self.default_headers = default_headers;
+        self
+    }
+
+    /// Insert a single header into [`Self::default_headers`].
+    ///
+    /// Panics if `name` or `value` are invalid HTTP header syntax.
+    pub fn header(mut self, name: &str, value: &str) -> Self {
+        let name: http::header::HeaderName = name.parse().expect("valid HTTP header name");
+        let value: http::header::HeaderValue = value.parse().expect("valid HTTP header value");
+        self.default_headers.insert(name, value);
         self
     }
 
@@ -1578,6 +1597,7 @@ mod tests {
     use super::*;
     use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
     use obzenflow_core::http_client::MockHttpClient;
+    use obzenflow_core::web::HttpMethod;
     use obzenflow_core::StageId;
     use std::sync::Arc;
 
@@ -1880,7 +1900,10 @@ mod tests {
     #[test]
     fn http_pull_config_builder_has_sensible_defaults() {
         let (_mock, client) = mock_client();
-        let config = HttpPullConfig::builder().client(client).build().expect("build ok");
+        let config = HttpPullConfig::builder()
+            .client(client)
+            .build()
+            .expect("build ok");
         assert_eq!(config.default_headers.len(), 0);
         assert_eq!(config.max_batch_size, 10);
         assert_eq!(config.poll_timeout, Some(Duration::from_secs(120)));
@@ -1888,9 +1911,94 @@ mod tests {
     }
 
     #[test]
+    fn http_pull_config_builder_rejects_zero_max_batch_size() {
+        let (_mock, client) = mock_client();
+        assert!(HttpPullConfig::builder()
+            .client(client)
+            .max_batch_size(0)
+            .build()
+            .is_err());
+    }
+
+    #[test]
+    fn http_pull_config_builder_header_inserts_default_header() {
+        let (_mock, client) = mock_client();
+        let config = HttpPullConfig::builder()
+            .client(client)
+            .header("authorization", "Bearer test")
+            .build()
+            .expect("build ok");
+        assert_eq!(
+            config
+                .default_headers
+                .get("authorization")
+                .expect("header present")
+                .to_str()
+                .expect("utf-8 header value"),
+            "Bearer test"
+        );
+    }
+
+    #[test]
+    fn http_pull_config_builder_poll_timeout_opt_allows_disabling_default() {
+        let (_mock, client) = mock_client();
+        let config = HttpPullConfig::builder()
+            .client(client)
+            .poll_timeout_opt(None)
+            .build()
+            .expect("build ok");
+        assert_eq!(config.poll_timeout, None);
+    }
+
+    #[test]
+    fn http_pull_config_builder_applies_overrides() {
+        let (_mock, client) = mock_client();
+        let retry = HttpRetryConfig {
+            transient_max_retries: 0,
+            transient_backoff: vec![],
+            rate_limit_max_wait: Duration::from_secs(3),
+        };
+
+        let config = HttpPullConfig::builder()
+            .client(client)
+            .max_batch_size(7)
+            .retry(retry.clone())
+            .poll_timeout(Duration::from_secs(5))
+            .build()
+            .expect("build ok");
+        assert_eq!(config.max_batch_size, 7);
+        assert_eq!(
+            config.retry.transient_max_retries,
+            retry.transient_max_retries
+        );
+        assert_eq!(config.poll_timeout, Some(Duration::from_secs(5)));
+    }
+
+    #[test]
     fn http_poll_config_builder_requires_poll_interval() {
         let (_mock, client) = mock_client();
         assert!(HttpPollConfig::builder().client(client).build().is_err());
+    }
+
+    #[test]
+    fn http_poll_config_builder_rejects_zero_max_batch_size() {
+        let (_mock, client) = mock_client();
+        assert!(HttpPollConfig::builder()
+            .client(client)
+            .poll_interval(Duration::from_secs(1))
+            .max_batch_size(0)
+            .build()
+            .is_err());
+    }
+
+    #[test]
+    fn http_poll_config_builder_rejects_zero_poll_interval() {
+        let (_mock, client) = mock_client();
+        assert!(HttpPollConfig::builder()
+            .client(client)
+            .poll_interval(Duration::ZERO)
+            .build()
+            .is_err());
     }
 
     #[test]
@@ -1906,6 +2014,116 @@ mod tests {
     }
 
     #[test]
+    fn http_poll_config_builder_applies_overrides() {
+        let (_mock, client) = mock_client();
+        let retry = HttpRetryConfig {
+            transient_max_retries: 0,
+            transient_backoff: vec![],
+            rate_limit_max_wait: Duration::from_secs(3),
+        };
+
+        let config = HttpPollConfig::builder()
+            .client(client)
+            .poll_interval(Duration::from_secs(2))
+            .max_batch_size(7)
+            .retry(retry.clone())
+            .poll_timeout(Duration::from_secs(11))
+            .build()
+            .expect("build ok");
+        assert_eq!(config.max_batch_size, 7);
+        assert_eq!(
+            config.retry.transient_max_retries,
+            retry.transient_max_retries
+        );
+        assert_eq!(config.poll_timeout, Some(Duration::from_secs(11)));
+        assert_eq!(config.poll_interval, Duration::from_secs(2));
+    }
+
+    #[test]
+    fn list_detail_decoder_new_with_list_request_uses_request_spec_from_fn() {
+        let decoder = ListDetailDecoder::new_with_list_request(
+            "test.item.v1",
+            || RequestSpec::post("http://example.invalid/list".parse().unwrap()),
+            |response| {
+                let ids: Vec<u32> = response
+                    .json()
+                    .map_err(|e| DecodeError::Parse(e.to_string()))?;
+                Ok(ids)
+            },
+            |id: &u32| {
+                RequestSpec::get(format!("http://example.invalid/item/{id}").parse().unwrap())
+            },
+            |response| {
+                let item: Option<serde_json::Value> = response
+                    .json()
+                    .map_err(|e| DecodeError::Parse(e.to_string()))?;
+                Ok(item)
+            },
+        );
+
+        let req = decoder.request_spec(None);
+        assert_eq!(req.method, HttpMethod::Post);
+        assert_eq!(req.url.as_str(), "http://example.invalid/list");
+    }
+
+    #[tokio::test]
+    async fn http_pull_source_with_list_detail_decoder_fetches_list_then_items() {
+        let (mock, client) = mock_client();
+
+        mock.enqueue(HttpResponse::new(200, HeaderMap::new(), "[1,2]"));
+        mock.enqueue(HttpResponse::new(200, HeaderMap::new(), r#"{"n": 1}"#));
+        mock.enqueue(HttpResponse::new(200, HeaderMap::new(), r#"{"n": 2}"#));
+
+        let decoder = ListDetailDecoder::new(
+            "test.item.v1",
+            "http://example.invalid/list".parse().unwrap(),
+            |response| {
+                let ids: Vec<u32> = response
+                    .json()
+                    .map_err(|e| DecodeError::Parse(e.to_string()))?;
+                Ok(ids)
+            },
+            |id: &u32| {
+                RequestSpec::get(format!("http://example.invalid/item/{id}").parse().unwrap())
+            },
+            |response| {
+                let item: Option<serde_json::Value> = response
+                    .json()
+                    .map_err(|e| DecodeError::Parse(e.to_string()))?;
+                Ok(item)
+            },
+        );
+
+        let config = HttpPullConfig::builder()
+            .client(client)
+            .max_batch_size(10)
+            .build()
+            .expect("build ok");
+
+        let mut source = HttpPullSource::new(decoder, config);
+        source.bind_writer_id(WriterId::from(StageId::new()));
+
+        let batch1 = source.next().await.unwrap().unwrap();
+        let items1: Vec<_> = batch1
+            .iter()
+            .filter(|e| e.event_type() == "test.item.v1")
+            .map(|e| e.payload())
+            .collect();
+        assert_eq!(items1, vec![serde_json::json!({"n": 1})]);
+
+        let batch2 = source.next().await.unwrap().unwrap();
+        let items2: Vec<_> = batch2
+            .iter()
+            .filter(|e| e.event_type() == "test.item.v1")
+            .map(|e| e.payload())
+            .collect();
+        assert_eq!(items2, vec![serde_json::json!({"n": 2})]);
+
+        let done = source.next().await.unwrap();
+        assert!(done.is_none());
+    }
+
+    #[test]
     fn list_detail_decoder_fetches_list_then_items_until_exhausted() {
         let decoder = ListDetailDecoder::new(
             "test.item.v1",
@@ -1917,11 +2135,7 @@ mod tests {
                 Ok(ids)
             },
             |id: &u32| {
-                RequestSpec::get(
-                    format!("http://example.invalid/item/{id}")
-                        .parse()
-                        .unwrap(),
-                )
+                RequestSpec::get(format!("http://example.invalid/item/{id}").parse().unwrap())
             },
             |response| {
                 let item: Option<serde_json::Value> = response
@@ -1972,11 +2186,7 @@ mod tests {
                 Ok(ids)
             },
             |id: &u32| {
-                RequestSpec::get(
-                    format!("http://example.invalid/item/{id}")
-                        .parse()
-                        .unwrap(),
-                )
+                RequestSpec::get(format!("http://example.invalid/item/{id}").parse().unwrap())
             },
             |response| {
                 let item: Option<serde_json::Value> = response
@@ -2018,11 +2228,7 @@ mod tests {
                 Ok(ids)
             },
             |id: &u32| {
-                RequestSpec::get(
-                    format!("http://example.invalid/item/{id}")
-                        .parse()
-                        .unwrap(),
-                )
+                RequestSpec::get(format!("http://example.invalid/item/{id}").parse().unwrap())
             },
             |response| {
                 let item: Option<serde_json::Value> = response

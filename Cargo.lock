@@ -1576,6 +1576,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "csv",
+ "http 1.4.0",
  "obzenflow_core",
  "obzenflow_runtime",
  "serde",

@@ -47,8 +47,8 @@ impl TypedPayload for HnStory {
 }
 
 fn hn_story_decoder(max_stories: usize) -> ListDetailDecoder<u64, HnStory> {
-    let base_url = Url::parse("https://hacker-news.firebaseio.com/")
-        .expect("HN base URL should parse");
+    let base_url =
+        Url::parse("https://hacker-news.firebaseio.com/").expect("HN base URL should parse");
     let topstories_url = base_url
         .join("v0/topstories.json")
         .expect("topstories url should join");
