@@ -275,15 +275,211 @@ where
 }
 
 type ListRequestFn = Arc<dyn Fn() -> RequestSpec + Send + Sync>;
-type ListParseFn<K> = Arc<dyn Fn(&HttpResponse) -> Result<Vec<K>, DecodeError> + Send + Sync>;
-type DetailRequestFn<K> = Arc<dyn Fn(&K) -> RequestSpec + Send + Sync>;
-type ItemParseFn<T> = Arc<dyn Fn(&HttpResponse) -> Result<Option<T>, DecodeError> + Send + Sync>;
-type OnSkipFn<K> = Arc<dyn Fn(&K) + Send + Sync>;
+type ListParseFn<K> =
+    Arc<dyn for<'a> Fn(&'a HttpResponse) -> Result<Vec<K>, DecodeError> + Send + Sync>;
+type DetailRequestFn<K> = Arc<dyn for<'a> Fn(&'a K) -> RequestSpec + Send + Sync>;
+type DetailPathFn<K> = Arc<dyn for<'a> Fn(&'a K) -> String + Send + Sync>;
+type ItemParseFn<T> =
+    Arc<dyn for<'a> Fn(&'a HttpResponse) -> Result<Option<T>, DecodeError> + Send + Sync>;
+type OnSkipFn<K> = Arc<dyn for<'a> Fn(&'a K) + Send + Sync>;
 
 #[doc(hidden)]
 #[derive(Debug, Clone)]
 pub struct ListDetailState<K> {
     pending: VecDeque<K>,
+}
+
+/// Builder for [`ListDetailDecoder`].
+///
+/// Use this as the primary construction surface so each decoder step is named rather than passed
+/// positionally as a closure argument.
+#[derive(Clone)]
+pub struct ListDetailDecoderBuilder<K, T> {
+    event_type: String,
+    base_url: Option<obzenflow_core::http_client::Url>,
+    list_request: Option<ListRequestFn>,
+    list_path: Option<String>,
+    parse_list: Option<ListParseFn<K>>,
+    detail_request: Option<DetailRequestFn<K>>,
+    detail_path: Option<DetailPathFn<K>>,
+    parse_item: Option<ItemParseFn<T>>,
+    max_list_items: Option<usize>,
+    on_skip: Option<OnSkipFn<K>>,
+}
+
+impl<K, T> Debug for ListDetailDecoderBuilder<K, T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ListDetailDecoderBuilder")
+            .field("event_type", &self.event_type)
+            .field("key_type", &std::any::type_name::<K>())
+            .field("item_type", &std::any::type_name::<T>())
+            .field("has_base_url", &self.base_url.is_some())
+            .field("has_list_request", &self.list_request.is_some())
+            .field("has_list_path", &self.list_path.is_some())
+            .field("has_parse_list", &self.parse_list.is_some())
+            .field("has_detail_request", &self.detail_request.is_some())
+            .field("has_detail_path", &self.detail_path.is_some())
+            .field("has_parse_item", &self.parse_item.is_some())
+            .field("max_list_items", &self.max_list_items)
+            .field("has_on_skip", &self.on_skip.is_some())
+            .finish()
+    }
+}
+
+impl<K: 'static, T> ListDetailDecoderBuilder<K, T> {
+    fn new(event_type: impl Into<String>) -> Self {
+        Self {
+            event_type: event_type.into(),
+            base_url: None,
+            list_request: None,
+            list_path: None,
+            parse_list: None,
+            detail_request: None,
+            detail_path: None,
+            parse_item: None,
+            max_list_items: None,
+            on_skip: None,
+        }
+    }
+
+    /// Set a shared base URL for `.list_path(...)` and `.detail_path(...)`.
+    pub fn base_url(mut self, base_url: obzenflow_core::http_client::Url) -> Self {
+        self.base_url = Some(base_url);
+        self
+    }
+
+    /// Set the list request directly.
+    pub fn list_request<F>(mut self, list_request: F) -> Self
+    where
+        F: Fn() -> RequestSpec + Send + Sync + 'static,
+    {
+        self.list_request = Some(Arc::new(list_request));
+        self.list_path = None;
+        self
+    }
+
+    /// Set the list request as a `GET` to `list_url`.
+    pub fn list_url(self, list_url: obzenflow_core::http_client::Url) -> Self {
+        self.list_request(move || RequestSpec::get(list_url.clone()))
+    }
+
+    /// Set the list request as a `GET` to `base_url.join(list_path)`.
+    pub fn list_path(mut self, list_path: impl Into<String>) -> Self {
+        self.list_path = Some(list_path.into());
+        self.list_request = None;
+        self
+    }
+
+    /// Set the list parser.
+    pub fn parse_list<F>(mut self, parse_list: F) -> Self
+    where
+        F: Fn(&HttpResponse) -> Result<Vec<K>, DecodeError> + Send + Sync + 'static,
+    {
+        self.parse_list = Some(Arc::new(parse_list));
+        self
+    }
+
+    /// Set the detail request directly.
+    pub fn detail_request<F>(mut self, detail_request: F) -> Self
+    where
+        F: Fn(&K) -> RequestSpec + Send + Sync + 'static,
+    {
+        self.detail_request = Some(Arc::new(detail_request));
+        self.detail_path = None;
+        self
+    }
+
+    /// Set the detail request as a `GET` to a URL produced from each key.
+    pub fn detail_url<F>(self, detail_url: F) -> Self
+    where
+        F: Fn(&K) -> obzenflow_core::http_client::Url + Send + Sync + 'static,
+    {
+        self.detail_request(move |key| RequestSpec::get(detail_url(key)))
+    }
+
+    /// Set the detail request as a `GET` to `base_url.join(detail_path(key))`.
+    pub fn detail_path<F>(mut self, detail_path: F) -> Self
+    where
+        F: Fn(&K) -> String + Send + Sync + 'static,
+    {
+        self.detail_path = Some(Arc::new(detail_path));
+        self.detail_request = None;
+        self
+    }
+
+    /// Set the item parser.
+    pub fn parse_item<F>(mut self, parse_item: F) -> Self
+    where
+        F: Fn(&HttpResponse) -> Result<Option<T>, DecodeError> + Send + Sync + 'static,
+    {
+        self.parse_item = Some(Arc::new(parse_item));
+        self
+    }
+
+    /// Cap the initial list length before detail requests begin.
+    pub fn max_list_items(mut self, max_list_items: usize) -> Self {
+        self.max_list_items = Some(max_list_items);
+        self
+    }
+
+    /// Run a callback when `parse_item` returns `None`.
+    pub fn on_skip<F>(mut self, on_skip: F) -> Self
+    where
+        F: Fn(&K) + Send + Sync + 'static,
+    {
+        self.on_skip = Some(Arc::new(on_skip));
+        self
+    }
+
+    /// Build the decoder.
+    pub fn build(self) -> anyhow::Result<ListDetailDecoder<K, T>> {
+        let list_request = match (self.list_request, self.list_path) {
+            (Some(list_request), _) => list_request,
+            (None, Some(list_path)) => {
+                let base_url = self
+                    .base_url
+                    .clone()
+                    .ok_or_else(|| anyhow::anyhow!("base_url required when list_path is used"))?;
+                let list_url = base_url
+                    .join(&list_path)
+                    .map_err(|e| anyhow::anyhow!("invalid list_path: {e}"))?;
+                Arc::new(move || RequestSpec::get(list_url.clone()))
+            }
+            (None, None) => anyhow::bail!("list_request or list_path required"),
+        };
+
+        let detail_request = match (self.detail_request, self.detail_path) {
+            (Some(detail_request), _) => detail_request,
+            (None, Some(detail_path)) => {
+                let base_url = self
+                    .base_url
+                    .ok_or_else(|| anyhow::anyhow!("base_url required when detail_path is used"))?;
+                let detail_request: DetailRequestFn<K> = Arc::new(move |key: &K| {
+                    let detail_path = detail_path(key);
+                    let detail_url = base_url
+                        .join(&detail_path)
+                        .expect("detail_path should produce a valid URL path");
+                    RequestSpec::get(detail_url)
+                });
+                detail_request
+            }
+            (None, None) => anyhow::bail!("detail_request or detail_path required"),
+        };
+
+        Ok(ListDetailDecoder {
+            event_type: self.event_type,
+            list_request,
+            parse_list: self
+                .parse_list
+                .ok_or_else(|| anyhow::anyhow!("parse_list required"))?,
+            detail_request,
+            parse_item: self
+                .parse_item
+                .ok_or_else(|| anyhow::anyhow!("parse_item required"))?,
+            max_list_items: self.max_list_items,
+            on_skip: self.on_skip,
+        })
+    }
 }
 
 /// Convenience decoder for the "fetch one list, then fetch each item sequentially" pattern.
@@ -315,7 +511,16 @@ impl<K, T> Clone for ListDetailDecoder<K, T> {
     }
 }
 
-impl<K, T> ListDetailDecoder<K, T> {
+impl<K: 'static, T> ListDetailDecoder<K, T> {
+    /// Start a named-step builder for the list/detail decoder.
+    pub fn builder<E>(event_type: E) -> ListDetailDecoderBuilder<K, T>
+    where
+        E: Into<String>,
+    {
+        ListDetailDecoderBuilder::new(event_type)
+    }
+
+    #[doc(hidden)]
     pub fn new<E, PL, DR, PI>(
         event_type: E,
         list_url: obzenflow_core::http_client::Url,
@@ -329,16 +534,16 @@ impl<K, T> ListDetailDecoder<K, T> {
         DR: Fn(&K) -> RequestSpec + Send + Sync + 'static,
         PI: Fn(&HttpResponse) -> Result<Option<T>, DecodeError> + Send + Sync + 'static,
     {
-        let list_url_copy = list_url.clone();
-        Self::new_with_list_request(
-            event_type,
-            move || RequestSpec::get(list_url_copy.clone()),
-            parse_list,
-            detail_request,
-            parse_item,
-        )
+        Self::builder(event_type)
+            .list_url(list_url)
+            .parse_list(parse_list)
+            .detail_request(detail_request)
+            .parse_item(parse_item)
+            .build()
+            .expect("ListDetailDecoder::new should provide all required builder fields")
     }
 
+    #[doc(hidden)]
     pub fn new_with_list_request<E, LR, PL, DR, PI>(
         event_type: E,
         list_request: LR,
@@ -353,15 +558,15 @@ impl<K, T> ListDetailDecoder<K, T> {
         DR: Fn(&K) -> RequestSpec + Send + Sync + 'static,
         PI: Fn(&HttpResponse) -> Result<Option<T>, DecodeError> + Send + Sync + 'static,
     {
-        Self {
-            event_type: event_type.into(),
-            list_request: Arc::new(list_request),
-            parse_list: Arc::new(parse_list),
-            detail_request: Arc::new(detail_request),
-            parse_item: Arc::new(parse_item),
-            max_list_items: None,
-            on_skip: None,
-        }
+        Self::builder(event_type)
+            .list_request(list_request)
+            .parse_list(parse_list)
+            .detail_request(detail_request)
+            .parse_item(parse_item)
+            .build()
+            .expect(
+                "ListDetailDecoder::new_with_list_request should provide all required builder fields",
+            )
     }
 
     pub fn max_list_items(mut self, max_list_items: usize) -> Self {
@@ -1607,6 +1812,47 @@ mod tests {
         (client, trait_object)
     }
 
+    fn test_list_detail_decoder() -> ListDetailDecoder<u32, serde_json::Value> {
+        ListDetailDecoder::builder("test.item.v1")
+            .list_url("http://example.invalid/list".parse().unwrap())
+            .parse_list(|response| {
+                let ids: Vec<u32> = response
+                    .json()
+                    .map_err(|e| DecodeError::Parse(e.to_string()))?;
+                Ok(ids)
+            })
+            .detail_url(|id: &u32| format!("http://example.invalid/item/{id}").parse().unwrap())
+            .parse_item(|response| {
+                let item: Option<serde_json::Value> = response
+                    .json()
+                    .map_err(|e| DecodeError::Parse(e.to_string()))?;
+                Ok(item)
+            })
+            .build()
+            .expect("decoder build ok")
+    }
+
+    fn test_list_detail_path_decoder() -> ListDetailDecoder<u32, serde_json::Value> {
+        ListDetailDecoder::builder("test.item.v1")
+            .base_url("http://example.invalid/api/".parse().unwrap())
+            .list_path("list")
+            .parse_list(|response| {
+                let ids: Vec<u32> = response
+                    .json()
+                    .map_err(|e| DecodeError::Parse(e.to_string()))?;
+                Ok(ids)
+            })
+            .detail_path(|id: &u32| format!("item/{id}"))
+            .parse_item(|response| {
+                let item: Option<serde_json::Value> = response
+                    .json()
+                    .map_err(|e| DecodeError::Parse(e.to_string()))?;
+                Ok(item)
+            })
+            .build()
+            .expect("decoder build ok")
+    }
+
     #[derive(Debug, Clone)]
     struct TestDecoder {
         base_url: obzenflow_core::http_client::Url,
@@ -2066,6 +2312,38 @@ mod tests {
         assert_eq!(req.url.as_str(), "http://example.invalid/list");
     }
 
+    #[test]
+    fn list_detail_decoder_builder_requires_parse_item() {
+        let result = ListDetailDecoder::<u32, serde_json::Value>::builder("test.item.v1")
+            .base_url("http://example.invalid/".parse().unwrap())
+            .list_path("list")
+            .parse_list(|response| {
+                let ids: Vec<u32> = response
+                    .json()
+                    .map_err(|e| DecodeError::Parse(e.to_string()))?;
+                Ok(ids)
+            })
+            .detail_path(|id: &u32| format!("item/{id}"))
+            .build();
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn list_detail_decoder_builder_supports_base_url_path_sugar() {
+        let decoder = test_list_detail_path_decoder();
+
+        let req = decoder.request_spec(None);
+        assert_eq!(req.url.as_str(), "http://example.invalid/api/list");
+
+        let list = HttpResponse::new(200, HeaderMap::new(), "[7]");
+        let out = decoder.decode_success(None, &list).expect("decode ok");
+        let cursor = out.next_cursor.expect("cursor expected");
+
+        let req = decoder.request_spec(Some(&cursor));
+        assert_eq!(req.url.as_str(), "http://example.invalid/api/item/7");
+    }
+
     #[tokio::test]
     async fn http_pull_source_with_list_detail_decoder_fetches_list_then_items() {
         let (mock, client) = mock_client();
@@ -2074,25 +2352,7 @@ mod tests {
         mock.enqueue(HttpResponse::new(200, HeaderMap::new(), r#"{"n": 1}"#));
         mock.enqueue(HttpResponse::new(200, HeaderMap::new(), r#"{"n": 2}"#));
 
-        let decoder = ListDetailDecoder::new(
-            "test.item.v1",
-            "http://example.invalid/list".parse().unwrap(),
-            |response| {
-                let ids: Vec<u32> = response
-                    .json()
-                    .map_err(|e| DecodeError::Parse(e.to_string()))?;
-                Ok(ids)
-            },
-            |id: &u32| {
-                RequestSpec::get(format!("http://example.invalid/item/{id}").parse().unwrap())
-            },
-            |response| {
-                let item: Option<serde_json::Value> = response
-                    .json()
-                    .map_err(|e| DecodeError::Parse(e.to_string()))?;
-                Ok(item)
-            },
-        );
+        let decoder = test_list_detail_path_decoder();
 
         let config = HttpPullConfig::builder()
             .client(client)
@@ -2125,25 +2385,7 @@ mod tests {
 
     #[test]
     fn list_detail_decoder_fetches_list_then_items_until_exhausted() {
-        let decoder = ListDetailDecoder::new(
-            "test.item.v1",
-            "http://example.invalid/list".parse().unwrap(),
-            |response| {
-                let ids: Vec<u32> = response
-                    .json()
-                    .map_err(|e| DecodeError::Parse(e.to_string()))?;
-                Ok(ids)
-            },
-            |id: &u32| {
-                RequestSpec::get(format!("http://example.invalid/item/{id}").parse().unwrap())
-            },
-            |response| {
-                let item: Option<serde_json::Value> = response
-                    .json()
-                    .map_err(|e| DecodeError::Parse(e.to_string()))?;
-                Ok(item)
-            },
-        );
+        let decoder = test_list_detail_decoder();
 
         let list = HttpResponse::new(200, HeaderMap::new(), "[1,2]");
         let out = decoder.decode_success(None, &list).expect("decode ok");
@@ -2176,29 +2418,27 @@ mod tests {
         let skips = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let skips_for_cb = skips.clone();
 
-        let decoder = ListDetailDecoder::new(
-            "test.item.v1",
-            "http://example.invalid/list".parse().unwrap(),
-            |response| {
+        let decoder = ListDetailDecoder::builder("test.item.v1")
+            .list_url("http://example.invalid/list".parse().unwrap())
+            .parse_list(|response| {
                 let ids: Vec<u32> = response
                     .json()
                     .map_err(|e| DecodeError::Parse(e.to_string()))?;
                 Ok(ids)
-            },
-            |id: &u32| {
-                RequestSpec::get(format!("http://example.invalid/item/{id}").parse().unwrap())
-            },
-            |response| {
+            })
+            .detail_url(|id: &u32| format!("http://example.invalid/item/{id}").parse().unwrap())
+            .parse_item(|response| {
                 let item: Option<serde_json::Value> = response
                     .json()
                     .map_err(|e| DecodeError::Parse(e.to_string()))?;
                 Ok(item)
-            },
-        )
-        .on_skip(move |id| {
-            assert_eq!(*id, 1);
-            skips_for_cb.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        });
+            })
+            .on_skip(move |id| {
+                assert_eq!(*id, 1);
+                skips_for_cb.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            })
+            .build()
+            .expect("decoder build ok");
 
         let list = HttpResponse::new(200, HeaderMap::new(), "[1,2]");
         let out = decoder.decode_success(None, &list).expect("decode ok");
@@ -2218,26 +2458,24 @@ mod tests {
 
     #[test]
     fn list_detail_decoder_caps_list_size_with_max_list_items() {
-        let decoder = ListDetailDecoder::new(
-            "test.item.v1",
-            "http://example.invalid/list".parse().unwrap(),
-            |response| {
+        let decoder = ListDetailDecoder::builder("test.item.v1")
+            .list_url("http://example.invalid/list".parse().unwrap())
+            .parse_list(|response| {
                 let ids: Vec<u32> = response
                     .json()
                     .map_err(|e| DecodeError::Parse(e.to_string()))?;
                 Ok(ids)
-            },
-            |id: &u32| {
-                RequestSpec::get(format!("http://example.invalid/item/{id}").parse().unwrap())
-            },
-            |response| {
+            })
+            .detail_url(|id: &u32| format!("http://example.invalid/item/{id}").parse().unwrap())
+            .parse_item(|response| {
                 let item: Option<serde_json::Value> = response
                     .json()
                     .map_err(|e| DecodeError::Parse(e.to_string()))?;
                 Ok(item)
-            },
-        )
-        .max_list_items(2);
+            })
+            .max_list_items(2)
+            .build()
+            .expect("decoder build ok");
 
         let list = HttpResponse::new(200, HeaderMap::new(), "[1,2,3]");
         let out = decoder.decode_success(None, &list).expect("decode ok");

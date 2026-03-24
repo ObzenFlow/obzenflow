@@ -14,5 +14,5 @@ pub use http::{HttpSource, HttpSourceConfig};
 pub use http_pull::{
     simple_poll, CursorlessPullDecoder, DecodeError, DecodeResult, FnPullDecoder, HttpPollConfig,
     HttpPollConfigBuilder, HttpPollSource, HttpPullConfig, HttpPullConfigBuilder, HttpPullSource,
-    HttpResponse, ListDetailDecoder, PullDecoder,
+    HttpResponse, ListDetailDecoder, ListDetailDecoderBuilder, PullDecoder,
 };

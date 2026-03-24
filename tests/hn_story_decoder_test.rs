@@ -7,7 +7,7 @@
 //! These tests validate the decoder logic with fixtures — no network required.
 
 use obzenflow::sources::{
-    DecodeError, HeaderMap, HttpResponse, ListDetailDecoder, PullDecoder, RequestSpec, Url,
+    DecodeError, HeaderMap, HttpResponse, ListDetailDecoder, PullDecoder, Url,
 };
 use obzenflow_core::TypedPayload;
 use serde::{Deserialize, Serialize};
@@ -49,36 +49,25 @@ impl TypedPayload for HnStory {
 fn hn_story_decoder(max_stories: usize) -> ListDetailDecoder<u64, HnStory> {
     let base_url =
         Url::parse("https://hacker-news.firebaseio.com/").expect("HN base URL should parse");
-    let topstories_url = base_url
-        .join("v0/topstories.json")
-        .expect("topstories url should join");
-
-    ListDetailDecoder::new(
-        HnStory::versioned_event_type(),
-        topstories_url,
-        |response| {
+    ListDetailDecoder::builder(HnStory::versioned_event_type())
+        .base_url(base_url)
+        .list_path("v0/topstories.json")
+        .parse_list(|response| {
             let ids: Vec<u64> = response
                 .json()
                 .map_err(|e| DecodeError::Parse(e.to_string()))?;
             Ok(ids)
-        },
-        {
-            let base_url = base_url.clone();
-            move |id: &u64| {
-                let url = base_url
-                    .join(&format!("v0/item/{id}.json"))
-                    .expect("item url should join");
-                RequestSpec::get(url)
-            }
-        },
-        |response| {
+        })
+        .detail_path(|id: &u64| format!("v0/item/{id}.json"))
+        .parse_item(|response| {
             let story: Option<HnStory> = response
                 .json()
                 .map_err(|e| DecodeError::Parse(e.to_string()))?;
             Ok(story)
-        },
-    )
-    .max_list_items(max_stories)
+        })
+        .max_list_items(max_stories)
+        .build()
+        .expect("HN test decoder builder should be fully configured")
 }
 
 // ============================================================================

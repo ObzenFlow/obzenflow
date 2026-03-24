@@ -29,7 +29,7 @@ pub use obzenflow_adapters::sources::{CsvRow, CsvSource, CsvSourceBuilder};
 pub use obzenflow_adapters::sources::{
     simple_poll, CursorlessPullDecoder, DecodeError, DecodeResult, FnPullDecoder, HttpPollConfig,
     HttpPollConfigBuilder, HttpPollSource, HttpPullConfig, HttpPullConfigBuilder, HttpPullSource,
-    HttpResponse, ListDetailDecoder, PullDecoder,
+    HttpResponse, ListDetailDecoder, ListDetailDecoderBuilder, PullDecoder,
 };
 
 /// HTTP primitives re-exported from `obzenflow_core` for building request specs.
