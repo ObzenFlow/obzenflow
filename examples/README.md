@@ -71,6 +71,15 @@ These examples don't have tutorials, but they demonstrate concrete framework con
   - Run: `cargo run -p obzenflow --example flight_delays_simple`
   - Code: [`examples/flight_delays_simple/flow.rs`](flight_delays_simple/flow.rs)
 
+## Scaffolding
+
+These examples are intentionally skeletal. Use them when you want to sketch topology first, inspect the shape of a flow, or start from a compilable placeholder before filling in handler logic.
+
+- **`char_transform_skeleton`** — Placeholder-only flow skeleton for event-storming and topology-first inspection. Use this when you want a compilable flow shape before writing any handler logic.
+  - Run: `cargo run -p obzenflow --example char_transform_skeleton`
+  - Manual server mode: `cargo run -p obzenflow --features obzenflow_infra/warp-server --example char_transform_skeleton -- --config examples/char_transform_skeleton.manual.obzenflow.toml`
+  - Code: [`examples/char_transform_skeleton.rs`](char_transform_skeleton.rs)
+
 ## Reference shelf
 
 More niche examples that target specific API surfaces or topology patterns. We use these to validate the developer experience as we add features, and they're useful if you want to explore a particular capability in isolation.
