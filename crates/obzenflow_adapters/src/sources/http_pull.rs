@@ -1832,19 +1832,9 @@ mod tests {
     fn test_list_detail_decoder() -> ListDetailDecoder<u32, serde_json::Value> {
         ListDetailDecoder::builder("test.item.v1")
             .list_url("http://example.invalid/list".parse().unwrap())
-            .parse_list(|response| {
-                let ids: Vec<u32> = response
-                    .json()
-                    .map_err(|e| DecodeError::Parse(e.to_string()))?;
-                Ok(ids)
-            })
+            .parse_list(|response| Ok(response.json()?))
             .detail_url(|id: &u32| format!("http://example.invalid/item/{id}").parse().unwrap())
-            .parse_item(|response| {
-                let item: Option<serde_json::Value> = response
-                    .json()
-                    .map_err(|e| DecodeError::Parse(e.to_string()))?;
-                Ok(item)
-            })
+            .parse_item(|response| Ok(response.json()?))
             .build()
             .expect("decoder build ok")
     }
@@ -1853,19 +1843,9 @@ mod tests {
         ListDetailDecoder::builder("test.item.v1")
             .base_url("http://example.invalid/api/".parse().unwrap())
             .list_path("list")
-            .parse_list(|response| {
-                let ids: Vec<u32> = response
-                    .json()
-                    .map_err(|e| DecodeError::Parse(e.to_string()))?;
-                Ok(ids)
-            })
+            .parse_list(|response| Ok(response.json()?))
             .detail_path(|id: &u32| format!("item/{id}"))
-            .parse_item(|response| {
-                let item: Option<serde_json::Value> = response
-                    .json()
-                    .map_err(|e| DecodeError::Parse(e.to_string()))?;
-                Ok(item)
-            })
+            .parse_item(|response| Ok(response.json()?))
             .build()
             .expect("decoder build ok")
     }
@@ -1905,9 +1885,7 @@ mod tests {
             _cursor: Option<&Self::Cursor>,
             response: &HttpResponse,
         ) -> Result<DecodeResult<Self::Cursor, Self::Item>, DecodeError> {
-            let value: serde_json::Value = response
-                .json()
-                .map_err(|e| DecodeError::Parse(e.to_string()))?;
+            let value: serde_json::Value = response.json()?;
             let items = value
                 .get("items")
                 .and_then(|v| v.as_array())
@@ -2304,24 +2282,14 @@ mod tests {
 
     #[test]
     fn list_detail_decoder_new_with_list_request_uses_request_spec_from_fn() {
-        let decoder = ListDetailDecoder::new_with_list_request(
+        let decoder = ListDetailDecoder::<u32, serde_json::Value>::new_with_list_request(
             "test.item.v1",
             || RequestSpec::post("http://example.invalid/list".parse().unwrap()),
-            |response| {
-                let ids: Vec<u32> = response
-                    .json()
-                    .map_err(|e| DecodeError::Parse(e.to_string()))?;
-                Ok(ids)
-            },
+            |response| Ok(response.json()?),
             |id: &u32| {
                 RequestSpec::get(format!("http://example.invalid/item/{id}").parse().unwrap())
             },
-            |response| {
-                let item: Option<serde_json::Value> = response
-                    .json()
-                    .map_err(|e| DecodeError::Parse(e.to_string()))?;
-                Ok(item)
-            },
+            |response| Ok(response.json()?),
         );
 
         let req = decoder.request_spec(None);
@@ -2334,12 +2302,7 @@ mod tests {
         let result = ListDetailDecoder::<u32, serde_json::Value>::builder("test.item.v1")
             .base_url("http://example.invalid/".parse().unwrap())
             .list_path("list")
-            .parse_list(|response| {
-                let ids: Vec<u32> = response
-                    .json()
-                    .map_err(|e| DecodeError::Parse(e.to_string()))?;
-                Ok(ids)
-            })
+            .parse_list(|response| Ok(response.json()?))
             .detail_path(|id: &u32| format!("item/{id}"))
             .build();
 
@@ -2435,21 +2398,11 @@ mod tests {
         let skips = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let skips_for_cb = skips.clone();
 
-        let decoder = ListDetailDecoder::builder("test.item.v1")
+        let decoder = ListDetailDecoder::<u32, serde_json::Value>::builder("test.item.v1")
             .list_url("http://example.invalid/list".parse().unwrap())
-            .parse_list(|response| {
-                let ids: Vec<u32> = response
-                    .json()
-                    .map_err(|e| DecodeError::Parse(e.to_string()))?;
-                Ok(ids)
-            })
+            .parse_list(|response| Ok(response.json()?))
             .detail_url(|id: &u32| format!("http://example.invalid/item/{id}").parse().unwrap())
-            .parse_item(|response| {
-                let item: Option<serde_json::Value> = response
-                    .json()
-                    .map_err(|e| DecodeError::Parse(e.to_string()))?;
-                Ok(item)
-            })
+            .parse_item(|response| Ok(response.json()?))
             .on_skip(move |id| {
                 assert_eq!(*id, 1);
                 skips_for_cb.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -2475,21 +2428,11 @@ mod tests {
 
     #[test]
     fn list_detail_decoder_caps_list_size_with_max_list_items() {
-        let decoder = ListDetailDecoder::builder("test.item.v1")
+        let decoder = ListDetailDecoder::<u32, serde_json::Value>::builder("test.item.v1")
             .list_url("http://example.invalid/list".parse().unwrap())
-            .parse_list(|response| {
-                let ids: Vec<u32> = response
-                    .json()
-                    .map_err(|e| DecodeError::Parse(e.to_string()))?;
-                Ok(ids)
-            })
+            .parse_list(|response| Ok(response.json()?))
             .detail_url(|id: &u32| format!("http://example.invalid/item/{id}").parse().unwrap())
-            .parse_item(|response| {
-                let item: Option<serde_json::Value> = response
-                    .json()
-                    .map_err(|e| DecodeError::Parse(e.to_string()))?;
-                Ok(item)
-            })
+            .parse_item(|response| Ok(response.json()?))
             .max_list_items(2)
             .build()
             .expect("decoder build ok");
