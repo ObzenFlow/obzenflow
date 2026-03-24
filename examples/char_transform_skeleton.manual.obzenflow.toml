@@ -1,0 +1,6 @@
+[server]
+enabled = true
+startup_mode = "manual"
+
+[metrics]
+exporter = "console"

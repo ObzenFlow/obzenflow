@@ -60,6 +60,7 @@ console-subscriber = "0.5"
 # Serialization / IDs / time
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+toml = "0.8"
 ulid = { version = "1", features = ["serde"] }
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
@@ -165,7 +166,11 @@ path = "examples/char_transform_skeleton.rs"
 
 [[example]]
 name = "flow_middleware_config"
-path = "examples/flow_middleware_config.rs"
+path = "examples/flow_middleware_config/main.rs"
+
+[[example]]
+name = "prometheus_100k_demo"
+path = "examples/prometheus_100k_demo/main.rs"
 
 [[example]]
 name = "product_catalog_enrichment"

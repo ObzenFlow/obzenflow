@@ -2,7 +2,8 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use super::{startup_mode_manual, BoxError, PipelineContext, PipelineEvent, PipelineSupervisor};
+use super::{BoxError, PipelineContext, PipelineEvent, PipelineSupervisor};
+use crate::bootstrap::startup_mode_manual;
 use crate::id_conversions::StageIdExt;
 use crate::messaging::SubscriptionPoller;
 use crate::supervised_base::EventLoopDirective;

@@ -41,7 +41,7 @@ Results are written under Cargo’s target directory, typically `target/criterio
 
 This crate also calls `obzenflow_benchmarks::init_tracing()` inside most benchmarks to keep runs predictable:
 
-- Sets `OBZENFLOW_METRICS_ENABLED=false` by default (you can opt back in by explicitly setting it to `true`).
+- Installs a benchmark bootstrap config with metrics disabled by default.
 - Best-effort bumps the process `nofile` limit on Unix to help deep disk-journal pipelines on platforms with low defaults.
 - Configures `tracing_subscriber` using `RUST_LOG` (defaulting to `warn` to minimize overhead).
 
@@ -80,7 +80,7 @@ These benchmarks measure overall “batch completion” time—how long it takes
 These benchmarks are less about event throughput/latency and more about runtime behavior under specific conditions.
 
 - `idle_cpu_usage`: Measures CPU usage while a pipeline is running but idle (no events flowing). Includes a “by depth” variant.
-- `waiting_for_gun_cpu_usage`: Measures CPU usage while a pipeline is materialized but not started (targets “pure wait” busy-spin scenarios such as `WaitingForGun`). The benchmark sets `OBZENFLOW_STARTUP_MODE=manual` for the process.
+- `waiting_for_gun_cpu_usage`: Measures CPU usage while a pipeline is materialized but not started (targets “pure wait” busy-spin scenarios such as `WaitingForGun`). The benchmark installs a manual-start bootstrap config for that run.
 - `tokio_worker_3_stage_experiment`: Experiments with Tokio worker-thread counts for a 3-stage pipeline to understand scheduler effects (plus a 5-stage control).
 
 ## Policies

@@ -99,11 +99,7 @@ impl HttpEndpoint for FlowControlEndpoint {
         };
 
         fn default_grace_timeout() -> Duration {
-            let shutdown_timeout_secs = std::env::var("OBZENFLOW_SHUTDOWN_TIMEOUT_SECS")
-                .ok()
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(30);
-            Duration::from_secs(shutdown_timeout_secs)
+            obzenflow_runtime::bootstrap::shutdown_timeout()
         }
 
         let result = match req.action {

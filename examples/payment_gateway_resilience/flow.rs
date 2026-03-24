@@ -399,8 +399,6 @@ fn build_glitchy_flow(config: GlitchyFlowConfig) -> obzenflow_dsl::FlowDefinitio
 
 #[cfg(not(test))]
 pub fn run_example(config: DemoConfig, presentation: Presentation) -> Result<()> {
-    std::env::set_var("OBZENFLOW_METRICS_EXPORTER", "prometheus");
-
     let flow = match config.total_events {
         Some(total) => build_glitchy_flow(GlitchyFlowConfig {
             total_events: total,

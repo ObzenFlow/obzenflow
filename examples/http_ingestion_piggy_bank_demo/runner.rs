@@ -20,6 +20,10 @@ use obzenflow_infra::web::endpoints::event_ingestion::{http_ingress, IngestionCo
 
 const ACCOUNTS_BASE_PATH: &str = "/api/bank/accounts";
 const TX_BASE_PATH: &str = "/api/bank/tx";
+const CONFIG_FILE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/examples/http_ingestion_piggy_bank_demo/obzenflow.toml"
+);
 
 fn ingress_config(base_path: &str) -> IngestionConfig {
     IngestionConfig {
@@ -38,6 +42,7 @@ pub fn run_example() -> Result<()> {
     let tx_source = tx_ingress.source();
 
     FlowApplication::builder()
+        .with_config_file(CONFIG_FILE)
         .with_log_level(LogLevel::Info)
         .with_http_ingress(accounts_ingress)
         .with_http_ingress(tx_ingress)

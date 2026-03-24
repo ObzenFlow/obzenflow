@@ -1,0 +1,6 @@
+[server]
+enabled = true
+
+[server.control_plane_auth]
+mode = "api_key"
+value_env = "OBZENFLOW_PIGGY_BANK_CONTROL_PLANE_AUTH"

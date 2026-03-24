@@ -6,6 +6,7 @@
 
 // Core modules
 pub mod backpressure;
+pub mod bootstrap;
 pub mod contracts;
 pub mod errors;
 pub mod id_conversions;

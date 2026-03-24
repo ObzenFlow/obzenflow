@@ -59,8 +59,6 @@ impl TypedPayload for TopProductsUpdate {
 }
 
 fn main() -> Result<()> {
-    std::env::set_var("OBZENFLOW_METRICS_EXPORTER", "console");
-
     let presentation = Presentation::new(
         Banner::new("E-commerce Top Products Analytics")
             .description("Real-time tracking of top products by total revenue.")

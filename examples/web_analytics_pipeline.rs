@@ -185,8 +185,6 @@ impl UserEvent {
 }
 
 fn main() -> Result<()> {
-    std::env::set_var("OBZENFLOW_METRICS_EXPORTER", "console");
-
     let presentation = Presentation::new(
         Banner::new("Web Analytics Pipeline")
             .description("Processing user behaviour events with typed accumulators.")

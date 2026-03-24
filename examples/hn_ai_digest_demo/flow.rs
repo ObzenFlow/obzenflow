@@ -250,7 +250,9 @@ pub async fn run_example(config: DemoConfig, presentation: Presentation) -> Resu
         .build_reduce_seeded_with_prompt(digest_reduce_prompt, digest_reduce_parse)
         .await?;
 
-    FlowApplication::run_with_presentation(flow! {
+    FlowApplication::builder()
+        .with_presentation(presentation)
+        .run_async(flow! {
             name: "hn_ai_digest_demo",
             journals: disk_journals(std::path::PathBuf::from("target/hn-ai-digest-logs")),
             middleware: [],
@@ -298,7 +300,7 @@ pub async fn run_example(config: DemoConfig, presentation: Presentation) -> Resu
                 batch |> digest;
                 digest |> digest_summary;
             }
-        }, presentation)
+        })
         .await?;
 
     Ok(())

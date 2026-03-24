@@ -19,8 +19,6 @@ use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 
 pub fn run_example() -> Result<()> {
-    std::env::set_var("OBZENFLOW_METRICS_EXPORTER", "console");
-
     let carriers = fixtures::carriers();
     let flights = fixtures::flights();
 

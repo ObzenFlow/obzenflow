@@ -108,7 +108,6 @@ fn main() -> Result<()> {
     if std::env::var_os("RUST_LOG").is_none() {
         std::env::set_var("RUST_LOG", "warn");
     }
-    std::env::set_var("OBZENFLOW_METRICS_EXPORTER", "console");
 
     let char_inputs = build_char_inputs(&INPUT_LINES);
 
@@ -139,7 +138,8 @@ fn main() -> Result<()> {
                         }
                         acc.last_was_sentence_end = ends_sentence;
                     }
-                ).emit_on_eof()
+                )
+                .emit_on_eof()
             );
 
             output = sink!(TransformedText => sinks::console(format_output));

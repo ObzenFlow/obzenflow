@@ -12,9 +12,11 @@ cargo run -p obzenflow --example <name>
 
 Some examples require feature flags:
 
-- `--features obzenflow_infra/warp-server` for `--server` mode and HTTP endpoints
+- `--features obzenflow_infra/warp-server` for examples whose `obzenflow.toml` enables HTTP endpoints
 - `--features http-pull` for HTTP pull sources
 - `--features "http-pull ai"` for the AI digest example
+
+Most examples run on framework defaults and do not need a config file. Examples that enable the HTTP server bundle a minimal `obzenflow.toml` in their directory. To override startup config, pass `-- --config <path/to/obzenflow.toml>` after the Cargo arguments.
 
 ## Canonical examples
 
@@ -29,7 +31,8 @@ These are the flagship examples and the best place to start. Each one has a comp
 - **`http_ingestion_piggy_bank_demo`** — The canonical end-to-end service example: HTTP ingress, joins, stateful projection, and `/metrics` in one journal-backed flow.
   - Tutorial: [Model Bank Transactions as a Flow](https://obzenflow.dev/tutorials/model-bank-transactions/)
   - Pillars: [Service-Like Streaming](https://obzenflow.dev/pillars/service-like-streaming/), [Composable Stage Primitives](https://obzenflow.dev/pillars/composable-stages/), [Replayability and Durability](https://obzenflow.dev/pillars/replay-auditability/), [Operational Zen](https://obzenflow.dev/pillars/no-platform-required/)
-  - Run: `export OBZENFLOW_PIGGY_BANK_CONTROL_PLANE_AUTH='Bearer piggy-bank-demo-secret' && cargo run -p obzenflow --example http_ingestion_piggy_bank_demo --features obzenflow_infra/warp-server -- --server --server-port 9090 --control-plane-auth-mode api-key --control-plane-auth-value-env OBZENFLOW_PIGGY_BANK_CONTROL_PLANE_AUTH`
+  - Run: `cargo run -p obzenflow --example http_ingestion_piggy_bank_demo --features obzenflow_infra/warp-server`
+  - Auth override: `export OBZENFLOW_PIGGY_BANK_CONTROL_PLANE_AUTH='Bearer piggy-bank-demo-secret' && cargo run -p obzenflow --example http_ingestion_piggy_bank_demo --features obzenflow_infra/warp-server -- --config examples/http_ingestion_piggy_bank_demo/obzenflow.auth.toml`
   - Code: [`examples/http_ingestion_piggy_bank_demo/flow.rs`](http_ingestion_piggy_bank_demo/flow.rs)
 
 - **`hn_ai_digest_demo`** — The canonical AI example: live HTTP pull, token budgeting, chunking, accumulation, and Rig-backed LLM inference with replayable evidence.
@@ -55,7 +58,7 @@ These examples don't have tutorials, but they demonstrate concrete framework con
 - **`payment_gateway_resilience`** — Circuit breakers, fallback behavior, and operator-facing resilience against unreliable dependencies. Use this when you care about runtime protections and failure semantics.
   - Pillars: [Production-Grade Primitives](https://obzenflow.dev/pillars/batteries-included/), [Correctness Guarantees](https://obzenflow.dev/pillars/correctness-guarantees/)
   - Run: `cargo run -p obzenflow --example payment_gateway_resilience`
-  - Run with metrics: `cargo run -p obzenflow --example payment_gateway_resilience --features obzenflow_infra/warp-server -- --server`
+  - Run with metrics: `cargo run -p obzenflow --example payment_gateway_resilience --features obzenflow_infra/warp-server -- --config examples/payment_gateway_resilience/obzenflow.server.toml`
   - Code: [`examples/payment_gateway_resilience/flow.rs`](payment_gateway_resilience/flow.rs)
 
 - **`ecommerce_top_products`** — Bounded-memory ranked aggregation over event streams with stage-level rate limiting. Use this for a realistic Top-N-by-score pattern.

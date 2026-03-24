@@ -143,11 +143,9 @@ impl DiskJournalFactory {
         Ok(())
     }
 
-    /// Build a replay archive implementation from env vars (FLOWIP-095a).
-    pub async fn replay_archive_from_env(
-        &self,
-    ) -> Result<Option<Arc<dyn ReplayArchive>>, ReplayError> {
-        replay_archive_from_env().await
+    /// Build a replay archive implementation from the runtime bootstrap context (FLOWIP-095a).
+    pub async fn replay_archive(&self) -> Result<Option<Arc<dyn ReplayArchive>>, ReplayError> {
+        replay_archive().await
     }
 }
 
@@ -200,25 +198,19 @@ impl MemoryJournalFactory {
         Ok(())
     }
 
-    /// Build a replay archive implementation from env vars (FLOWIP-095a).
-    pub async fn replay_archive_from_env(
-        &self,
-    ) -> Result<Option<Arc<dyn ReplayArchive>>, ReplayError> {
-        replay_archive_from_env().await
+    /// Build a replay archive implementation from the runtime bootstrap context (FLOWIP-095a).
+    pub async fn replay_archive(&self) -> Result<Option<Arc<dyn ReplayArchive>>, ReplayError> {
+        replay_archive().await
     }
 }
 
-async fn replay_archive_from_env() -> Result<Option<Arc<dyn ReplayArchive>>, ReplayError> {
-    let Some(path) = std::env::var_os("OBZENFLOW_REPLAY_FROM") else {
+async fn replay_archive() -> Result<Option<Arc<dyn ReplayArchive>>, ReplayError> {
+    let Some(replay) = obzenflow_runtime::bootstrap::replay_bootstrap() else {
         return Ok(None);
     };
 
-    let allow_incomplete_archive = std::env::var("OBZENFLOW_ALLOW_INCOMPLETE_ARCHIVE")
-        .ok()
-        .is_some_and(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"));
-
-    let archive_path = PathBuf::from(path);
-    let archive = DiskReplayArchive::open(archive_path, allow_incomplete_archive).await?;
+    let archive =
+        DiskReplayArchive::open(replay.archive_path, replay.allow_incomplete_archive).await?;
     Ok(Some(Arc::new(archive)))
 }
 
@@ -255,10 +247,8 @@ impl FlowJournalFactory for DiskJournalFactory {
         DiskJournalFactory::write_run_manifest(self, manifest)
     }
 
-    async fn replay_archive_from_env(
-        &mut self,
-    ) -> Result<Option<Arc<dyn ReplayArchive>>, ReplayError> {
-        DiskJournalFactory::replay_archive_from_env(self).await
+    async fn replay_archive(&mut self) -> Result<Option<Arc<dyn ReplayArchive>>, ReplayError> {
+        DiskJournalFactory::replay_archive(self).await
     }
 }
 
@@ -284,9 +274,7 @@ impl FlowJournalFactory for MemoryJournalFactory {
         MemoryJournalFactory::write_run_manifest(self, manifest)
     }
 
-    async fn replay_archive_from_env(
-        &mut self,
-    ) -> Result<Option<Arc<dyn ReplayArchive>>, ReplayError> {
-        MemoryJournalFactory::replay_archive_from_env(self).await
+    async fn replay_archive(&mut self) -> Result<Option<Arc<dyn ReplayArchive>>, ReplayError> {
+        MemoryJournalFactory::replay_archive(self).await
     }
 }

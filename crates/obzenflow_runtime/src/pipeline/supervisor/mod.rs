@@ -92,26 +92,6 @@ fn source_contract_mode() -> SourceContractStrictMode {
     })
 }
 
-/// Startup mode for the pipeline supervisor.
-///
-/// By default the supervisor will automatically transition from
-/// Materialized → Running once all non-source stages report `Running`.
-/// When OBZENFLOW_STARTUP_MODE=manual is set (by FlowApplication in
-/// server/UI mode), the supervisor will *not* auto-run; it will remain
-/// Materialized until an explicit `Run` event is received from the
-/// external FlowHandle (e.g. via /api/flow/control Play).
-#[inline]
-fn startup_mode_manual() -> bool {
-    use std::sync::OnceLock;
-
-    static MANUAL: OnceLock<bool> = OnceLock::new();
-
-    *MANUAL.get_or_init(|| match std::env::var("OBZENFLOW_STARTUP_MODE") {
-        Ok(val) => val.eq_ignore_ascii_case("manual"),
-        Err(_) => false,
-    })
-}
-
 /// Helper used to decide whether a given edge should be treated as
 /// gating for the purposes of contract-driven pipeline aborts.
 #[inline]

@@ -24,7 +24,8 @@
 //!
 //! ```sh
 //! cargo run -p obzenflow --features obzenflow_infra/warp-server \
-//!     --example char_transform_skeleton -- --server --startup-mode manual
+//!     --example char_transform_skeleton -- \
+//!     --config examples/char_transform_skeleton.manual.obzenflow.toml
 //! ```
 //!
 //! When you press Play, the placeholder finite source returns EOF
@@ -83,7 +84,6 @@ fn main() -> Result<()> {
     if std::env::var_os("RUST_LOG").is_none() {
         std::env::set_var("RUST_LOG", "warn");
     }
-    std::env::set_var("OBZENFLOW_METRICS_EXPORTER", "console");
 
     FlowApplication::builder().run_blocking(flow! {
         name: "char_transform_skeleton",
