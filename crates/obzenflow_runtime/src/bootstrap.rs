@@ -9,6 +9,8 @@
 
 use std::mem;
 use std::path::PathBuf;
+#[cfg(debug_assertions)]
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{OnceLock, RwLock};
 use std::time::Duration;
 
@@ -94,7 +96,14 @@ pub fn set_bootstrap_config(config: BootstrapConfig) {
 ///
 /// This keeps bootstrap settings scoped to a single host run instead of
 /// permanently caching the first configuration seen in the process.
+///
+/// FlowApplication bootstrap is currently a single-run-per-process contract.
+/// In debug builds, overlapping installs panic so accidental concurrent host
+/// runs fail loudly instead of racing through shared mutable bootstrap state.
 pub fn install_bootstrap_config(config: BootstrapConfig) -> BootstrapConfigGuard {
+    #[cfg(debug_assertions)]
+    let active_install = ActiveInstallLease::acquire();
+
     let previous = {
         let mut bootstrap = storage().write().expect("bootstrap config lock poisoned");
         mem::replace(&mut *bootstrap, config)
@@ -102,11 +111,15 @@ pub fn install_bootstrap_config(config: BootstrapConfig) -> BootstrapConfigGuard
 
     BootstrapConfigGuard {
         previous: Some(previous),
+        #[cfg(debug_assertions)]
+        active_install: Some(active_install),
     }
 }
 
 pub struct BootstrapConfigGuard {
     previous: Option<BootstrapConfig>,
+    #[cfg(debug_assertions)]
+    active_install: Option<ActiveInstallLease>,
 }
 
 impl Drop for BootstrapConfigGuard {
@@ -114,6 +127,8 @@ impl Drop for BootstrapConfigGuard {
         if let Some(previous) = self.previous.take() {
             *storage().write().expect("bootstrap config lock poisoned") = previous;
         }
+        #[cfg(debug_assertions)]
+        let _ = self.active_install.take();
     }
 }
 
@@ -131,6 +146,36 @@ pub fn replay_bootstrap() -> Option<ReplayBootstrap> {
 
 pub fn metrics_bootstrap() -> MetricsBootstrap {
     bootstrap_config().metrics
+}
+
+#[cfg(debug_assertions)]
+fn active_install_flag() -> &'static AtomicBool {
+    static ACTIVE_INSTALL: OnceLock<AtomicBool> = OnceLock::new();
+    ACTIVE_INSTALL.get_or_init(|| AtomicBool::new(false))
+}
+
+#[cfg(debug_assertions)]
+struct ActiveInstallLease;
+
+#[cfg(debug_assertions)]
+impl ActiveInstallLease {
+    fn acquire() -> Self {
+        let was_active = active_install_flag()
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err();
+        debug_assert!(
+            !was_active,
+            "install_bootstrap_config() does not support overlapping FlowApplication runs in the same process"
+        );
+        Self
+    }
+}
+
+#[cfg(debug_assertions)]
+impl Drop for ActiveInstallLease {
+    fn drop(&mut self) {
+        active_install_flag().store(false, Ordering::Release);
+    }
 }
 
 #[cfg(test)]
@@ -187,9 +232,22 @@ mod tests {
 
             assert_eq!(shutdown_timeout(), Duration::from_secs(5));
             assert!(startup_mode_manual());
-            assert_eq!(metrics_bootstrap().enabled, false);
+            assert!(!metrics_bootstrap().enabled);
         }
 
         assert_eq!(bootstrap_config(), baseline);
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn overlapping_install_panics_in_debug_builds() {
+        let _lock = bootstrap_test_lock();
+        let _guard = install_bootstrap_config(BootstrapConfig::default());
+
+        let result = std::panic::catch_unwind(|| {
+            let _nested = install_bootstrap_config(BootstrapConfig::default());
+        });
+
+        assert!(result.is_err());
     }
 }

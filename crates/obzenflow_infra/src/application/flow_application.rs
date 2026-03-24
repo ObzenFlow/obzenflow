@@ -34,6 +34,26 @@ use tokio::task::JoinHandle;
 
 type FlowHandleHook = Box<dyn Fn(&Arc<FlowHandle>) -> JoinHandle<()> + Send + Sync>;
 
+#[derive(Default)]
+struct LaunchParams {
+    builder_config_file: Option<PathBuf>,
+    enable_autodiscovery: bool,
+    web_surfaces: Vec<WebSurfaceAttachment>,
+    ingress_telemetry: Vec<Arc<IngestionTelemetry>>,
+    extra_endpoints: Vec<Box<dyn HttpEndpoint>>,
+    flow_handle_hooks: Vec<FlowHandleHook>,
+    presentation: Option<Presentation>,
+}
+
+impl LaunchParams {
+    fn autodiscovery_enabled() -> Self {
+        Self {
+            enable_autodiscovery: true,
+            ..Self::default()
+        }
+    }
+}
+
 fn resolve_startup_config(
     builder_config_file: Option<PathBuf>,
     enable_autodiscovery: bool,
@@ -144,7 +164,9 @@ impl FlowApplicationBuilder {
 
     /// Use an explicit startup config file for builder-driven runs.
     ///
-    /// CLI `--config <path>` still wins when both are present.
+    /// When not set, builder-driven runs also participate in `obzenflow.toml`
+    /// autodiscovery from the current working directory. CLI `--config <path>`
+    /// still wins when both are present.
     pub fn with_config_file(mut self, path: impl Into<PathBuf>) -> Self {
         self.config_file = Some(path.into());
         self
@@ -215,19 +237,29 @@ impl FlowApplicationBuilder {
         // Initialize tracing/console-subscriber using the runtime handle
         self.init_observability(Some(runtime.handle()));
 
+        let FlowApplicationBuilder {
+            config_file,
+            web_surfaces,
+            ingress_telemetry,
+            web_endpoints,
+            flow_handle_hooks,
+            presentation,
+            ..
+        } = self;
+
         // Run the flow in the runtime
-        runtime.block_on(
-            FlowApplication::run_with_web_endpoints_and_hooks_and_presentation(
-                flow,
-                self.config_file,
-                false,
-                self.web_surfaces,
-                self.ingress_telemetry,
-                self.web_endpoints,
-                self.flow_handle_hooks,
-                self.presentation,
-            ),
-        )
+        runtime.block_on(FlowApplication::launch(
+            flow,
+            LaunchParams {
+                builder_config_file: config_file,
+                enable_autodiscovery: true,
+                web_surfaces,
+                ingress_telemetry,
+                extra_endpoints: web_endpoints,
+                flow_handle_hooks,
+                presentation,
+            },
+        ))
     }
 
     /// Run the flow in an existing async context (with #[tokio::main])
@@ -238,16 +270,28 @@ impl FlowApplicationBuilder {
         // Initialize tracing/console-subscriber with the current runtime handle
         self.init_observability(Some(&tokio::runtime::Handle::current()));
 
+        let FlowApplicationBuilder {
+            config_file,
+            web_surfaces,
+            ingress_telemetry,
+            web_endpoints,
+            flow_handle_hooks,
+            presentation,
+            ..
+        } = self;
+
         // Run the flow
-        FlowApplication::run_with_web_endpoints_and_hooks_and_presentation(
+        FlowApplication::launch(
             flow,
-            self.config_file,
-            false,
-            self.web_surfaces,
-            self.ingress_telemetry,
-            self.web_endpoints,
-            self.flow_handle_hooks,
-            self.presentation,
+            LaunchParams {
+                builder_config_file: config_file,
+                enable_autodiscovery: true,
+                web_surfaces,
+                ingress_telemetry,
+                extra_endpoints: web_endpoints,
+                flow_handle_hooks,
+                presentation,
+            },
         )
         .await
     }
@@ -430,15 +474,12 @@ impl FlowApplication {
         flow: FlowDefinition,
         presentation: Presentation,
     ) -> Result<(), ApplicationError> {
-        Self::run_with_web_endpoints_and_hooks_and_presentation(
+        Self::launch(
             flow,
-            None,
-            true,
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Some(presentation),
+            LaunchParams {
+                presentation: Some(presentation),
+                ..LaunchParams::autodiscovery_enabled()
+            },
         )
         .await
     }
@@ -456,29 +497,28 @@ impl FlowApplication {
         extra_endpoints: Vec<Box<dyn HttpEndpoint>>,
         flow_handle_hooks: Vec<FlowHandleHook>,
     ) -> Result<(), ApplicationError> {
-        Self::run_with_web_endpoints_and_hooks_and_presentation(
+        Self::launch(
             flow,
-            None,
-            true,
-            Vec::new(),
-            Vec::new(),
-            extra_endpoints,
-            flow_handle_hooks,
-            None,
+            LaunchParams {
+                extra_endpoints,
+                flow_handle_hooks,
+                ..LaunchParams::autodiscovery_enabled()
+            },
         )
         .await
     }
 
-    pub(crate) async fn run_with_web_endpoints_and_hooks_and_presentation(
-        flow: FlowDefinition,
-        builder_config_file: Option<PathBuf>,
-        enable_autodiscovery: bool,
-        web_surfaces: Vec<WebSurfaceAttachment>,
-        ingress_telemetry: Vec<Arc<IngestionTelemetry>>,
-        extra_endpoints: Vec<Box<dyn HttpEndpoint>>,
-        flow_handle_hooks: Vec<FlowHandleHook>,
-        presentation: Option<Presentation>,
-    ) -> Result<(), ApplicationError> {
+    async fn launch(flow: FlowDefinition, params: LaunchParams) -> Result<(), ApplicationError> {
+        let LaunchParams {
+            builder_config_file,
+            enable_autodiscovery,
+            web_surfaces,
+            ingress_telemetry,
+            extra_endpoints,
+            flow_handle_hooks,
+            presentation,
+        } = params;
+
         // Best-effort tracing initialization when the builder isn't used.
         // This ensures examples like char_transform still emit logs without
         // requiring callers to wire tracing explicitly.

@@ -849,7 +849,7 @@ exporter = "console"
     }
 
     #[test]
-    fn autodiscovery_is_cli_only() {
+    fn autodiscovery_obeys_enable_flag() {
         let tempdir = tempfile::tempdir().unwrap();
         let config_path = tempdir.path().join("obzenflow.toml");
         fs::write(
