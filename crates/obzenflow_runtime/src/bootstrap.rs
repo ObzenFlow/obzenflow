@@ -138,6 +138,29 @@ pub fn install_bootstrap_config(config: BootstrapConfig) -> BootstrapConfigGuard
     }
 }
 
+/// Attempt to install a bootstrap snapshot without waiting.
+///
+/// When another install is already active, this returns `Err(config)` and leaves
+/// the currently-installed bootstrap unchanged.
+pub fn try_install_bootstrap_config(
+    config: BootstrapConfig,
+) -> Result<BootstrapConfigGuard, BootstrapConfig> {
+    let active_install = match ActiveInstallLease::try_acquire() {
+        Some(lease) => lease,
+        None => return Err(config),
+    };
+
+    let previous = {
+        let mut bootstrap = storage().write().expect("bootstrap config lock poisoned");
+        mem::replace(&mut *bootstrap, config)
+    };
+
+    Ok(BootstrapConfigGuard {
+        previous: Some(previous),
+        active_install,
+    })
+}
+
 /// Restores the prior bootstrap snapshot on drop.
 pub struct BootstrapConfigGuard {
     previous: Option<BootstrapConfig>,
@@ -185,6 +208,22 @@ fn current_owner_id() -> usize {
 struct ActiveInstallLease;
 
 impl ActiveInstallLease {
+    fn try_acquire() -> Option<Self> {
+        let owner = active_install_owner();
+        let me = current_owner_id();
+
+        // Catch the most likely deadlock case: re-entrant install on the same thread.
+        // This cannot be made perfectly robust without passing an explicit run context.
+        if owner.load(Ordering::Acquire) == me {
+            panic!("install_bootstrap_config() does not support nested installs");
+        }
+
+        owner
+            .compare_exchange(0, me, Ordering::AcqRel, Ordering::Acquire)
+            .ok()
+            .map(|_| Self)
+    }
+
     fn acquire() -> Self {
         let owner = active_install_owner();
         let me = current_owner_id();
@@ -197,11 +236,8 @@ impl ActiveInstallLease {
 
         let mut attempts: u32 = 0;
         loop {
-            if owner
-                .compare_exchange(0, me, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
-            {
-                return Self;
+            if let Some(lease) = Self::try_acquire() {
+                return lease;
             }
 
             attempts = attempts.saturating_add(1);
@@ -316,6 +352,24 @@ mod tests {
 
         drop(guard);
         acquired_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn try_install_fails_fast_when_an_install_is_active() {
+        use std::sync::mpsc;
+
+        let _lock = bootstrap_test_lock();
+        let guard = install_bootstrap_config(BootstrapConfig::default());
+
+        let (tx, rx) = mpsc::channel::<bool>();
+        let handle = std::thread::spawn(move || {
+            let result = try_install_bootstrap_config(BootstrapConfig::default());
+            tx.send(result.is_err()).unwrap();
+        });
+
+        assert!(rx.recv_timeout(Duration::from_secs(1)).unwrap());
+        drop(guard);
         handle.join().unwrap();
     }
 }

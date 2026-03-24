@@ -25,7 +25,7 @@ use obzenflow_core::metrics::{InfraMetricsSnapshot, MetricsExporter};
 use obzenflow_core::web::{CorsConfig, CorsMode, HttpEndpoint, ServerConfig};
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::FlowDefinition;
-use obzenflow_runtime::bootstrap::install_bootstrap_config;
+use obzenflow_runtime::bootstrap::{install_bootstrap_config, try_install_bootstrap_config};
 use obzenflow_runtime::prelude::FlowHandle;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -574,7 +574,18 @@ impl FlowApplication {
             }
 
             let control_plane_auth = config.server.control_plane_auth.clone();
-            let _bootstrap_guard = install_bootstrap_config(config.bootstrap_config());
+            let _bootstrap_guard = if cfg!(debug_assertions) {
+                // In debug/test builds, allow Rust's parallel test runner to serialize installs
+                // rather than failing unrelated tests with an overlapping-run error.
+                install_bootstrap_config(config.bootstrap_config())
+            } else {
+                try_install_bootstrap_config(config.bootstrap_config()).map_err(|_| {
+                    ApplicationError::InvalidConfiguration(
+                        "Overlapping FlowApplication runs in the same process are not supported"
+                            .to_string(),
+                    )
+                })?
+            };
 
             // Note: Logging/console-subscriber should be initialized in main() before
             // the tokio runtime is created for console_subscriber to work properly
