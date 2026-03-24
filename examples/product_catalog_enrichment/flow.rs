@@ -12,11 +12,6 @@ use obzenflow_dsl::{flow, join, sink, source, stateful};
 #[cfg(not(test))]
 use obzenflow_infra::application::{FlowApplication, LogLevel, Presentation};
 use obzenflow_infra::journal::disk_journals;
-#[cfg(not(test))]
-const CONFIG_FILE: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/examples/product_catalog_enrichment/obzenflow.toml"
-);
 
 fn build_flow() -> obzenflow_dsl::FlowDefinition {
     let sku_products_handler = joins::inner(
@@ -221,7 +216,6 @@ fn build_flow() -> obzenflow_dsl::FlowDefinition {
 #[cfg(not(test))]
 pub fn run_example(presentation: Presentation) -> Result<()> {
     FlowApplication::builder()
-        .with_config_file(CONFIG_FILE)
         .with_log_level(LogLevel::Info)
         .with_presentation(presentation)
         .run_blocking(build_flow())?;

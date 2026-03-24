@@ -38,10 +38,6 @@ use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-const CONFIG_FILE: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/examples/char_transform_skeleton.obzenflow.toml"
-);
 
 // ── Event types ─────────────────────────────────────────────────────────────
 // These are the only things you need to decide up front. Each type represents
@@ -89,26 +85,24 @@ fn main() -> Result<()> {
         std::env::set_var("RUST_LOG", "warn");
     }
 
-    FlowApplication::builder()
-        .with_config_file(CONFIG_FILE)
-        .run_blocking(flow! {
-            name: "char_transform_skeleton",
-            journals: disk_journals(PathBuf::from("target/char-transform-skeleton-logs")),
-            middleware: [],
+    FlowApplication::builder().run_blocking(flow! {
+        name: "char_transform_skeleton",
+        journals: disk_journals(PathBuf::from("target/char-transform-skeleton-logs")),
+        middleware: [],
 
-            stages: {
-                characters = source!(CharInput => placeholder!());
-                transform_text = transform!(CharInput -> TextChunk => placeholder!());
-                collect_text = stateful!(TextChunk -> TransformedText => placeholder!());
-                output = sink!(TransformedText => placeholder!());
-            },
+        stages: {
+            characters = source!(CharInput => placeholder!());
+            transform_text = transform!(CharInput -> TextChunk => placeholder!());
+            collect_text = stateful!(TextChunk -> TransformedText => placeholder!());
+            output = sink!(TransformedText => placeholder!());
+        },
 
-            topology: {
-                characters |> transform_text;
-                transform_text |> collect_text;
-                collect_text |> output;
-            }
-        })?;
+        topology: {
+            characters |> transform_text;
+            transform_text |> collect_text;
+            collect_text |> output;
+        }
+    })?;
 
     Ok(())
 }

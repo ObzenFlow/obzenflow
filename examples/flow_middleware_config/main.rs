@@ -41,7 +41,7 @@ use obzenflow_runtime::stages::common::handlers::{SinkHandler, TransformHandler}
 use serde::{Deserialize, Serialize};
 const CONFIG_FILE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/examples/flow_middleware_config.obzenflow.toml"
+    "/examples/flow_middleware_config/obzenflow.toml"
 );
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

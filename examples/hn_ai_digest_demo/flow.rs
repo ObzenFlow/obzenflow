@@ -22,11 +22,6 @@ use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
-const CONFIG_FILE: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/examples/hn_ai_digest_demo.obzenflow.toml"
-);
-
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct HnTopStories {
     stories: Vec<FormattedStory>,
@@ -256,7 +251,6 @@ pub async fn run_example(config: DemoConfig, presentation: Presentation) -> Resu
         .await?;
 
     FlowApplication::builder()
-        .with_config_file(CONFIG_FILE)
         .with_presentation(presentation)
         .run_async(flow! {
             name: "hn_ai_digest_demo",

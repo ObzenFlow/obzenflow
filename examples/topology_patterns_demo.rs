@@ -374,10 +374,6 @@ fn main() -> Result<()> {
     let high_counter_flow = high_counter.clone();
 
     FlowApplication::builder()
-        .with_config_file(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/examples/topology_patterns_demo.obzenflow.toml"
-        ))
         .with_presentation(presentation)
         .run_blocking(flow! {
             name: "topology_patterns",

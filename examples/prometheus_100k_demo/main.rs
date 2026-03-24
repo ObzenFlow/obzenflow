@@ -44,7 +44,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 const CONFIG_FILE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/examples/prometheus_100k_demo.obzenflow.toml"
+    "/examples/prometheus_100k_demo/obzenflow.toml"
 );
 
 // ============================================================================

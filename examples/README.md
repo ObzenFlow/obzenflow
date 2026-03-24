@@ -16,7 +16,7 @@ Some examples require feature flags:
 - `--features http-pull` for HTTP pull sources
 - `--features "http-pull ai"` for the AI digest example
 
-Examples default to their bundled startup config. Power users can override it with `-- --config <path/to/obzenflow.toml>` after the Cargo arguments.
+Most examples run on framework defaults and do not need a config file. Examples that enable the HTTP server bundle a minimal `obzenflow.toml` in their directory. To override startup config, pass `-- --config <path/to/obzenflow.toml>` after the Cargo arguments.
 
 ## Canonical examples
 

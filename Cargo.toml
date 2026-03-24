@@ -166,7 +166,11 @@ path = "examples/char_transform_skeleton.rs"
 
 [[example]]
 name = "flow_middleware_config"
-path = "examples/flow_middleware_config.rs"
+path = "examples/flow_middleware_config/main.rs"
+
+[[example]]
+name = "prometheus_100k_demo"
+path = "examples/prometheus_100k_demo/main.rs"
 
 [[example]]
 name = "product_catalog_enrichment"

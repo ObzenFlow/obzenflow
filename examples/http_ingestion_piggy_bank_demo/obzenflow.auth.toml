@@ -1,25 +1,6 @@
 [server]
 enabled = true
-host = "127.0.0.1"
-port = 9090
-startup_mode = "auto"
-max_body_size_bytes = 10485760
-request_timeout_secs = 30
-
-[server.cors]
-mode = "same-origin"
-allow_origins = []
 
 [server.control_plane_auth]
 mode = "api_key"
-header = "Authorization"
 value_env = "OBZENFLOW_PIGGY_BANK_CONTROL_PLANE_AUTH"
-
-[runtime]
-shutdown_timeout_secs = 30
-ingestion_metrics_interval_secs = 5
-surface_metrics_interval_secs = 15
-
-[metrics]
-enabled = true
-exporter = "prometheus"

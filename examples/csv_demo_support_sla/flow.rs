@@ -20,10 +20,6 @@ use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::TransformHandler;
 use std::path::PathBuf;
-const CONFIG_FILE: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/examples/csv_demo_support_sla/obzenflow.toml"
-);
 
 pub struct DemoPaths {
     pub customers_csv: PathBuf,
@@ -189,7 +185,6 @@ pub fn run_example(paths: DemoPaths, presentation: Presentation) -> Result<()> {
         .build()?;
 
     FlowApplication::builder()
-        .with_config_file(CONFIG_FILE)
         .with_presentation(presentation)
         .with_log_level(LogLevel::Info)
         .run_blocking(build_flow(

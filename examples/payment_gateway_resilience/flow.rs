@@ -43,11 +43,6 @@ use serde_json::json;
 use std::num::NonZeroU32;
 
 const BACKPRESSURE_WINDOW: u64 = 1_000;
-#[cfg(not(test))]
-const CONFIG_FILE: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/examples/payment_gateway_resilience/obzenflow.toml"
-);
 
 /// Stateless transform that performs cheap local validation.
 ///
@@ -419,7 +414,6 @@ pub fn run_example(config: DemoConfig, presentation: Presentation) -> Result<()>
     };
 
     FlowApplication::builder()
-        .with_config_file(CONFIG_FILE)
         .with_log_level(LogLevel::Info)
         .with_presentation(presentation)
         .run_blocking(flow)?;
