@@ -381,10 +381,14 @@ impl<H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
 {
     /// Create a new async finite source descriptor with a default 30s poll timeout.
     pub fn new(name: impl Into<String>, handler: H) -> Self {
+        let poll_timeout =
+            handler
+                .suggested_poll_timeout()
+                .or(Some(DEFAULT_ASYNC_SOURCE_POLL_TIMEOUT));
         Self {
             name: name.into(),
             handler,
-            poll_timeout: Some(DEFAULT_ASYNC_SOURCE_POLL_TIMEOUT),
+            poll_timeout,
             middleware: Vec::new(),
         }
     }
@@ -702,10 +706,11 @@ impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
     ///
     /// Defaults to no poll timeout so push sources can block efficiently (e.g. `recv().await`).
     pub fn new(name: impl Into<String>, handler: H) -> Self {
+        let poll_timeout = handler.suggested_poll_timeout();
         Self {
             name: name.into(),
             handler,
-            poll_timeout: None,
+            poll_timeout,
             middleware: Vec::new(),
         }
     }
@@ -1835,6 +1840,101 @@ mod tests {
             // circuit breaker middleware wires up a CircuitBreakerSourceStrategy.
             Ok(None)
         }
+    }
+
+    #[derive(Clone, Debug)]
+    struct DummyAsyncFiniteSourceNoHint;
+
+    #[async_trait]
+    impl AsyncFiniteSourceHandler for DummyAsyncFiniteSourceNoHint {
+        async fn next(
+            &mut self,
+        ) -> Result<Option<Vec<ChainEvent>>, obzenflow_runtime::stages::SourceError> {
+            Ok(None)
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct DummyAsyncFiniteSourceWithHint;
+
+    #[async_trait]
+    impl AsyncFiniteSourceHandler for DummyAsyncFiniteSourceWithHint {
+        fn suggested_poll_timeout(&self) -> Option<Duration> {
+            Some(Duration::from_secs(123))
+        }
+
+        async fn next(
+            &mut self,
+        ) -> Result<Option<Vec<ChainEvent>>, obzenflow_runtime::stages::SourceError> {
+            Ok(None)
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct DummyAsyncInfiniteSourceNoHint;
+
+    #[async_trait]
+    impl AsyncInfiniteSourceHandler for DummyAsyncInfiniteSourceNoHint {
+        async fn next(
+            &mut self,
+        ) -> Result<Vec<ChainEvent>, obzenflow_runtime::stages::SourceError> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct DummyAsyncInfiniteSourceWithHint;
+
+    #[async_trait]
+    impl AsyncInfiniteSourceHandler for DummyAsyncInfiniteSourceWithHint {
+        fn suggested_poll_timeout(&self) -> Option<Duration> {
+            Some(Duration::from_secs(7))
+        }
+
+        async fn next(
+            &mut self,
+        ) -> Result<Vec<ChainEvent>, obzenflow_runtime::stages::SourceError> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[test]
+    fn async_finite_source_descriptor_seeds_poll_timeout_from_handler_hint() {
+        let descriptor =
+            AsyncFiniteSourceDescriptor::new("hinted", DummyAsyncFiniteSourceWithHint);
+        assert_eq!(descriptor.poll_timeout, Some(Duration::from_secs(123)));
+    }
+
+    #[test]
+    fn async_finite_source_descriptor_uses_default_poll_timeout_without_hint() {
+        let descriptor =
+            AsyncFiniteSourceDescriptor::new("defaulted", DummyAsyncFiniteSourceNoHint);
+        assert_eq!(
+            descriptor.poll_timeout,
+            Some(DEFAULT_ASYNC_SOURCE_POLL_TIMEOUT)
+        );
+    }
+
+    #[test]
+    fn async_finite_source_descriptor_explicit_poll_timeout_override_wins() {
+        let descriptor =
+            AsyncFiniteSourceDescriptor::new("override", DummyAsyncFiniteSourceWithHint)
+                .with_poll_timeout(Some(Duration::from_secs(1)));
+        assert_eq!(descriptor.poll_timeout, Some(Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn async_infinite_source_descriptor_seeds_poll_timeout_from_handler_hint() {
+        let descriptor =
+            AsyncInfiniteSourceDescriptor::new("hinted", DummyAsyncInfiniteSourceWithHint);
+        assert_eq!(descriptor.poll_timeout, Some(Duration::from_secs(7)));
+    }
+
+    #[test]
+    fn async_infinite_source_descriptor_keeps_default_poll_timeout_without_hint() {
+        let descriptor =
+            AsyncInfiniteSourceDescriptor::new("defaulted", DummyAsyncInfiniteSourceNoHint);
+        assert_eq!(descriptor.poll_timeout, None);
     }
 
     #[tokio::test]

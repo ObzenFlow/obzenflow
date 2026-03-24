@@ -274,6 +274,205 @@ where
     }
 }
 
+type ListRequestFn = Arc<dyn Fn() -> RequestSpec + Send + Sync>;
+type ListParseFn<K> =
+    Arc<dyn Fn(&HttpResponse) -> Result<Vec<K>, DecodeError> + Send + Sync>;
+type DetailRequestFn<K> = Arc<dyn Fn(&K) -> RequestSpec + Send + Sync>;
+type ItemParseFn<T> =
+    Arc<dyn Fn(&HttpResponse) -> Result<Option<T>, DecodeError> + Send + Sync>;
+type OnSkipFn<K> = Arc<dyn Fn(&K) + Send + Sync>;
+
+#[doc(hidden)]
+#[non_exhaustive]
+#[derive(Debug, Clone)]
+pub enum ListDetailState<K> {
+    #[allow(dead_code)]
+    FetchList,
+    FetchItems { pending: VecDeque<K> },
+}
+
+/// Convenience decoder for the "fetch one list, then fetch each item sequentially" pattern.
+///
+/// - First request fetches a list of keys (`K`), does not emit items.
+/// - Subsequent requests fetch each item (`T`) one at a time.
+/// - `None` from `parse_item` is treated as "skip".
+pub struct ListDetailDecoder<K, T> {
+    event_type: String,
+    list_request: ListRequestFn,
+    parse_list: ListParseFn<K>,
+    detail_request: DetailRequestFn<K>,
+    parse_item: ItemParseFn<T>,
+    max_list_items: Option<usize>,
+    on_skip: Option<OnSkipFn<K>>,
+}
+
+impl<K, T> Clone for ListDetailDecoder<K, T> {
+    fn clone(&self) -> Self {
+        Self {
+            event_type: self.event_type.clone(),
+            list_request: self.list_request.clone(),
+            parse_list: self.parse_list.clone(),
+            detail_request: self.detail_request.clone(),
+            parse_item: self.parse_item.clone(),
+            max_list_items: self.max_list_items,
+            on_skip: self.on_skip.clone(),
+        }
+    }
+}
+
+impl<K, T> ListDetailDecoder<K, T> {
+    pub fn new<E, PL, DR, PI>(
+        event_type: E,
+        list_url: obzenflow_core::http_client::Url,
+        parse_list: PL,
+        detail_request: DR,
+        parse_item: PI,
+    ) -> Self
+    where
+        E: Into<String>,
+        PL: Fn(&HttpResponse) -> Result<Vec<K>, DecodeError> + Send + Sync + 'static,
+        DR: Fn(&K) -> RequestSpec + Send + Sync + 'static,
+        PI: Fn(&HttpResponse) -> Result<Option<T>, DecodeError> + Send + Sync + 'static,
+    {
+        let list_url_copy = list_url.clone();
+        Self::new_with_list_request(
+            event_type,
+            move || RequestSpec::get(list_url_copy.clone()),
+            parse_list,
+            detail_request,
+            parse_item,
+        )
+    }
+
+    pub fn new_with_list_request<E, LR, PL, DR, PI>(
+        event_type: E,
+        list_request: LR,
+        parse_list: PL,
+        detail_request: DR,
+        parse_item: PI,
+    ) -> Self
+    where
+        E: Into<String>,
+        LR: Fn() -> RequestSpec + Send + Sync + 'static,
+        PL: Fn(&HttpResponse) -> Result<Vec<K>, DecodeError> + Send + Sync + 'static,
+        DR: Fn(&K) -> RequestSpec + Send + Sync + 'static,
+        PI: Fn(&HttpResponse) -> Result<Option<T>, DecodeError> + Send + Sync + 'static,
+    {
+        Self {
+            event_type: event_type.into(),
+            list_request: Arc::new(list_request),
+            parse_list: Arc::new(parse_list),
+            detail_request: Arc::new(detail_request),
+            parse_item: Arc::new(parse_item),
+            max_list_items: None,
+            on_skip: None,
+        }
+    }
+
+    pub fn max_list_items(mut self, max_list_items: usize) -> Self {
+        self.max_list_items = Some(max_list_items);
+        self
+    }
+
+    pub fn on_skip<F>(mut self, on_skip: F) -> Self
+    where
+        F: Fn(&K) + Send + Sync + 'static,
+    {
+        self.on_skip = Some(Arc::new(on_skip));
+        self
+    }
+}
+
+impl<K, T> Debug for ListDetailDecoder<K, T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ListDetailDecoder")
+            .field("event_type", &self.event_type)
+            .field("key_type", &std::any::type_name::<K>())
+            .field("item_type", &std::any::type_name::<T>())
+            .field("max_list_items", &self.max_list_items)
+            .field("has_on_skip", &self.on_skip.is_some())
+            .finish()
+    }
+}
+
+impl<K, T> PullDecoder for ListDetailDecoder<K, T>
+where
+    K: Clone + Debug + Send + Sync + 'static,
+    T: Serialize + Send + 'static,
+{
+    type Cursor = ListDetailState<K>;
+    type Item = T;
+
+    fn event_type(&self) -> String {
+        self.event_type.clone()
+    }
+
+    fn request_spec(&self, cursor: Option<&Self::Cursor>) -> RequestSpec {
+        match cursor {
+            None | Some(ListDetailState::FetchList) => (self.list_request)(),
+            Some(ListDetailState::FetchItems { pending }) => {
+                let key = pending
+                    .front()
+                    .expect("ListDetailDecoder pending queue should not be empty");
+                (self.detail_request)(key)
+            }
+        }
+    }
+
+    fn decode_success(
+        &self,
+        cursor: Option<&Self::Cursor>,
+        response: &HttpResponse,
+    ) -> Result<DecodeResult<Self::Cursor, Self::Item>, DecodeError> {
+        match cursor {
+            None | Some(ListDetailState::FetchList) => {
+                let mut keys = (self.parse_list)(response)?;
+                if let Some(max_list_items) = self.max_list_items {
+                    keys.truncate(max_list_items);
+                }
+
+                if keys.is_empty() {
+                    return Ok(DecodeResult {
+                        items: Vec::new(),
+                        next_cursor: None,
+                    });
+                }
+
+                let pending = keys.into_iter().collect::<VecDeque<_>>();
+                Ok(DecodeResult {
+                    items: Vec::new(),
+                    next_cursor: Some(ListDetailState::FetchItems { pending }),
+                })
+            }
+            Some(ListDetailState::FetchItems { pending }) => {
+                let key = pending
+                    .front()
+                    .expect("ListDetailDecoder pending queue should not be empty");
+                let item = (self.parse_item)(response)?;
+                if item.is_none() {
+                    if let Some(on_skip) = self.on_skip.as_ref() {
+                        on_skip(key);
+                    }
+                }
+
+                let mut pending = pending.clone();
+                let _ = pending.pop_front();
+
+                let next_cursor = if pending.is_empty() {
+                    None
+                } else {
+                    Some(ListDetailState::FetchItems { pending })
+                };
+
+                Ok(DecodeResult {
+                    items: item.into_iter().collect(),
+                    next_cursor,
+                })
+            }
+        }
+    }
+}
+
 /// Create a cursorless decoder for "poll latest" endpoints.
 ///
 /// The returned decoder:
@@ -333,6 +532,7 @@ impl Default for HttpRetryConfig {
 }
 
 /// Configuration for HTTP pull source (finite mode) (FLOWIP-084e OT-1/2/8/9).
+#[non_exhaustive]
 #[derive(Clone)]
 pub struct HttpPullConfig {
     /// Pre-configured HTTP client (timeouts, TLS, connection pooling).
@@ -346,15 +546,27 @@ pub struct HttpPullConfig {
 
     /// Retry/backoff configuration.
     pub retry: HttpRetryConfig,
+
+    /// Suggested stage poll timeout for `async_source!` when no explicit timeout is provided.
+    ///
+    /// NOTE: This is a suggestion/hint. If `None`, async finite sources fall back to the
+    /// descriptor default poll timeout (currently 30s).
+    pub poll_timeout: Option<Duration>,
 }
 
 /// Configuration for HTTP poll source (infinite mode) (FLOWIP-084e OT-1/2/8/9).
+#[non_exhaustive]
 #[derive(Clone)]
 pub struct HttpPollConfig {
     pub client: Arc<dyn HttpClient>,
     pub default_headers: HeaderMap,
     pub max_batch_size: usize,
     pub retry: HttpRetryConfig,
+
+    /// Suggested stage poll timeout for `async_source!` when no explicit timeout is provided.
+    ///
+    /// If `None`, async infinite sources keep the descriptor default of no poll timeout.
+    pub poll_timeout: Option<Duration>,
 
     /// Interval between polling cycles (enforced by source via tokio::sleep).
     pub poll_interval: Duration,
@@ -367,6 +579,7 @@ impl std::fmt::Debug for HttpPullConfig {
             .field("default_headers_len", &self.default_headers.len())
             .field("max_batch_size", &self.max_batch_size)
             .field("retry", &self.retry)
+            .field("poll_timeout", &self.poll_timeout)
             .finish()
     }
 }
@@ -378,16 +591,211 @@ impl std::fmt::Debug for HttpPollConfig {
             .field("default_headers_len", &self.default_headers.len())
             .field("max_batch_size", &self.max_batch_size)
             .field("retry", &self.retry)
+            .field("poll_timeout", &self.poll_timeout)
             .field("poll_interval", &self.poll_interval)
             .finish()
+    }
+}
+
+/// Builder for [`HttpPullConfig`] with sensible defaults.
+#[derive(Clone)]
+pub struct HttpPullConfigBuilder {
+    client: Option<Arc<dyn HttpClient>>,
+    default_headers: HeaderMap,
+    max_batch_size: usize,
+    retry: HttpRetryConfig,
+    poll_timeout: Option<Duration>,
+}
+
+impl Default for HttpPullConfigBuilder {
+    fn default() -> Self {
+        Self {
+            client: None,
+            default_headers: HeaderMap::new(),
+            max_batch_size: 10,
+            retry: HttpRetryConfig::default(),
+            poll_timeout: Some(Duration::from_secs(120)),
+        }
+    }
+}
+
+impl std::fmt::Debug for HttpPullConfigBuilder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HttpPullConfigBuilder")
+            .field("client", &self.client.as_ref().map(|_| "<dyn HttpClient>"))
+            .field("default_headers_len", &self.default_headers.len())
+            .field("max_batch_size", &self.max_batch_size)
+            .field("retry", &self.retry)
+            .field("poll_timeout", &self.poll_timeout)
+            .finish()
+    }
+}
+
+impl HttpPullConfigBuilder {
+    pub fn client(mut self, client: Arc<dyn HttpClient>) -> Self {
+        self.client = Some(client);
+        self
+    }
+
+    pub fn default_headers(mut self, default_headers: HeaderMap) -> Self {
+        self.default_headers = default_headers;
+        self
+    }
+
+    pub fn max_batch_size(mut self, max_batch_size: usize) -> Self {
+        self.max_batch_size = max_batch_size;
+        self
+    }
+
+    pub fn retry(mut self, retry: HttpRetryConfig) -> Self {
+        self.retry = retry;
+        self
+    }
+
+    pub fn poll_timeout(mut self, poll_timeout: Duration) -> Self {
+        self.poll_timeout = Some(poll_timeout);
+        self
+    }
+
+    pub fn poll_timeout_opt(mut self, poll_timeout: Option<Duration>) -> Self {
+        self.poll_timeout = poll_timeout;
+        self
+    }
+
+    pub fn build(self) -> anyhow::Result<HttpPullConfig> {
+        let client = self
+            .client
+            .ok_or_else(|| anyhow::anyhow!("client required"))?;
+        if self.max_batch_size == 0 {
+            anyhow::bail!("max_batch_size must be > 0");
+        }
+
+        Ok(HttpPullConfig {
+            client,
+            default_headers: self.default_headers,
+            max_batch_size: self.max_batch_size,
+            retry: self.retry,
+            poll_timeout: self.poll_timeout,
+        })
+    }
+}
+
+/// Builder for [`HttpPollConfig`] with sensible defaults.
+#[derive(Clone)]
+pub struct HttpPollConfigBuilder {
+    client: Option<Arc<dyn HttpClient>>,
+    default_headers: HeaderMap,
+    max_batch_size: usize,
+    retry: HttpRetryConfig,
+    poll_timeout: Option<Duration>,
+    poll_interval: Option<Duration>,
+}
+
+impl Default for HttpPollConfigBuilder {
+    fn default() -> Self {
+        Self {
+            client: None,
+            default_headers: HeaderMap::new(),
+            max_batch_size: 10,
+            retry: HttpRetryConfig::default(),
+            poll_timeout: None,
+            poll_interval: None,
+        }
+    }
+}
+
+impl std::fmt::Debug for HttpPollConfigBuilder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HttpPollConfigBuilder")
+            .field("client", &self.client.as_ref().map(|_| "<dyn HttpClient>"))
+            .field("default_headers_len", &self.default_headers.len())
+            .field("max_batch_size", &self.max_batch_size)
+            .field("retry", &self.retry)
+            .field("poll_timeout", &self.poll_timeout)
+            .field("poll_interval", &self.poll_interval)
+            .finish()
+    }
+}
+
+impl HttpPollConfigBuilder {
+    pub fn client(mut self, client: Arc<dyn HttpClient>) -> Self {
+        self.client = Some(client);
+        self
+    }
+
+    pub fn default_headers(mut self, default_headers: HeaderMap) -> Self {
+        self.default_headers = default_headers;
+        self
+    }
+
+    pub fn max_batch_size(mut self, max_batch_size: usize) -> Self {
+        self.max_batch_size = max_batch_size;
+        self
+    }
+
+    pub fn retry(mut self, retry: HttpRetryConfig) -> Self {
+        self.retry = retry;
+        self
+    }
+
+    pub fn poll_timeout(mut self, poll_timeout: Duration) -> Self {
+        self.poll_timeout = Some(poll_timeout);
+        self
+    }
+
+    pub fn poll_timeout_opt(mut self, poll_timeout: Option<Duration>) -> Self {
+        self.poll_timeout = poll_timeout;
+        self
+    }
+
+    pub fn poll_interval(mut self, poll_interval: Duration) -> Self {
+        self.poll_interval = Some(poll_interval);
+        self
+    }
+
+    pub fn build(self) -> anyhow::Result<HttpPollConfig> {
+        let client = self
+            .client
+            .ok_or_else(|| anyhow::anyhow!("client required"))?;
+        if self.max_batch_size == 0 {
+            anyhow::bail!("max_batch_size must be > 0");
+        }
+
+        let poll_interval = self
+            .poll_interval
+            .ok_or_else(|| anyhow::anyhow!("poll_interval required"))?;
+        if poll_interval.is_zero() {
+            anyhow::bail!("poll_interval must be > 0");
+        }
+
+        Ok(HttpPollConfig {
+            client,
+            default_headers: self.default_headers,
+            max_batch_size: self.max_batch_size,
+            retry: self.retry,
+            poll_timeout: self.poll_timeout,
+            poll_interval,
+        })
+    }
+}
+
+impl HttpPullConfig {
+    pub fn builder() -> HttpPullConfigBuilder {
+        HttpPullConfigBuilder::default()
+    }
+}
+
+impl HttpPollConfig {
+    pub fn builder() -> HttpPollConfigBuilder {
+        HttpPollConfigBuilder::default()
     }
 }
 
 /// Finite (EOF-terminating) HTTP pull source (FLOWIP-084e).
 ///
 /// NOTE: This source may perform in-handler waits (e.g., honoring `Retry-After` and backoff).
-/// When mounted via `async_source!`, configure the stage poll timeout accordingly (IC-1):
-/// `async_source!(name: "http_pull", (source, Some(Duration::from_secs(120))))` or disable it with `None`.
+/// Configure a suitable poll timeout via [`HttpPullConfig::builder()`] so `async_source!` can omit
+/// the timeout tuple, or override explicitly using `async_source!((source, Some(timeout)))`.
 #[derive(Debug, Clone)]
 pub struct HttpPullSource<D: PullDecoder> {
     inner: Arc<Mutex<HttpPullSourceInner<D>>>,
@@ -667,6 +1075,10 @@ impl<D: PullDecoder> AsyncFiniteSourceHandler for HttpPullSource<D> {
         self.writer_id = Some(id);
     }
 
+    fn suggested_poll_timeout(&self) -> Option<Duration> {
+        self.config.poll_timeout
+    }
+
     async fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
         let mut inner = self.inner.lock().await;
 
@@ -841,6 +1253,10 @@ impl<D: PullDecoder> AsyncFiniteSourceHandler for HttpPullSource<D> {
 impl<D: PullDecoder> AsyncInfiniteSourceHandler for HttpPollSource<D> {
     fn bind_writer_id(&mut self, id: WriterId) {
         self.writer_id = Some(id);
+    }
+
+    fn suggested_poll_timeout(&self) -> Option<Duration> {
+        self.config.poll_timeout
     }
 
     async fn next(&mut self) -> Result<Vec<ChainEvent>, SourceError> {
@@ -1255,6 +1671,7 @@ mod tests {
                 transient_backoff: vec![],
                 rate_limit_max_wait: Duration::from_secs(1),
             },
+            poll_timeout: Some(Duration::from_secs(120)),
         };
 
         let mut source = HttpPullSource::new(decoder, config);
@@ -1325,6 +1742,7 @@ mod tests {
             default_headers: HeaderMap::new(),
             max_batch_size: 1000,
             retry: HttpRetryConfig::default(),
+            poll_timeout: Some(Duration::from_secs(120)),
         };
         let mut source = HttpPullSource::new(decoder, config);
         source.bind_writer_id(WriterId::from(StageId::new()));
@@ -1359,6 +1777,7 @@ mod tests {
             default_headers: HeaderMap::new(),
             max_batch_size: 2,
             retry: HttpRetryConfig::default(),
+            poll_timeout: None,
             poll_interval: Duration::from_secs(1),
         };
         let mut source = HttpPollSource::new(decoder, config);
@@ -1405,6 +1824,7 @@ mod tests {
                 transient_backoff: vec![],
                 rate_limit_max_wait: Duration::from_secs(1),
             },
+            poll_timeout: None,
             poll_interval: Duration::from_secs(10),
         };
 
@@ -1450,5 +1870,183 @@ mod tests {
             assert!(inner.cursor.is_none());
             assert!(!inner.cycle_exhausted);
         }
+    }
+
+    #[test]
+    fn http_pull_config_builder_requires_client() {
+        assert!(HttpPullConfig::builder().build().is_err());
+    }
+
+    #[test]
+    fn http_pull_config_builder_has_sensible_defaults() {
+        let (_mock, client) = mock_client();
+        let config = HttpPullConfig::builder().client(client).build().expect("build ok");
+        assert_eq!(config.default_headers.len(), 0);
+        assert_eq!(config.max_batch_size, 10);
+        assert_eq!(config.poll_timeout, Some(Duration::from_secs(120)));
+        assert_eq!(config.retry.transient_max_retries, 2);
+    }
+
+    #[test]
+    fn http_poll_config_builder_requires_poll_interval() {
+        let (_mock, client) = mock_client();
+        assert!(HttpPollConfig::builder().client(client).build().is_err());
+    }
+
+    #[test]
+    fn http_poll_config_builder_defaults_poll_timeout_to_none() {
+        let (_mock, client) = mock_client();
+        let config = HttpPollConfig::builder()
+            .client(client)
+            .poll_interval(Duration::from_secs(1))
+            .build()
+            .expect("build ok");
+        assert_eq!(config.poll_timeout, None);
+        assert_eq!(config.max_batch_size, 10);
+    }
+
+    #[test]
+    fn list_detail_decoder_fetches_list_then_items_until_exhausted() {
+        let decoder = ListDetailDecoder::new(
+            "test.item.v1",
+            "http://example.invalid/list".parse().unwrap(),
+            |response| {
+                let ids: Vec<u32> = response
+                    .json()
+                    .map_err(|e| DecodeError::Parse(e.to_string()))?;
+                Ok(ids)
+            },
+            |id: &u32| {
+                RequestSpec::get(
+                    format!("http://example.invalid/item/{id}")
+                        .parse()
+                        .unwrap(),
+                )
+            },
+            |response| {
+                let item: Option<serde_json::Value> = response
+                    .json()
+                    .map_err(|e| DecodeError::Parse(e.to_string()))?;
+                Ok(item)
+            },
+        );
+
+        let list = HttpResponse::new(200, HeaderMap::new(), "[1,2]");
+        let out = decoder.decode_success(None, &list).expect("decode ok");
+        assert!(out.items.is_empty());
+        let cursor = out.next_cursor.expect("cursor expected");
+
+        let req = decoder.request_spec(Some(&cursor));
+        assert_eq!(req.url.as_str(), "http://example.invalid/item/1");
+
+        let item = HttpResponse::new(200, HeaderMap::new(), r#"{"n": 1}"#);
+        let out = decoder
+            .decode_success(Some(&cursor), &item)
+            .expect("decode ok");
+        assert_eq!(out.items, vec![serde_json::json!({"n": 1})]);
+        let cursor = out.next_cursor.expect("cursor expected");
+
+        let req = decoder.request_spec(Some(&cursor));
+        assert_eq!(req.url.as_str(), "http://example.invalid/item/2");
+
+        let item = HttpResponse::new(200, HeaderMap::new(), r#"{"n": 2}"#);
+        let out = decoder
+            .decode_success(Some(&cursor), &item)
+            .expect("decode ok");
+        assert_eq!(out.items, vec![serde_json::json!({"n": 2})]);
+        assert!(out.next_cursor.is_none());
+    }
+
+    #[test]
+    fn list_detail_decoder_skips_null_items_and_calls_on_skip() {
+        let skips = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let skips_for_cb = skips.clone();
+
+        let decoder = ListDetailDecoder::new(
+            "test.item.v1",
+            "http://example.invalid/list".parse().unwrap(),
+            |response| {
+                let ids: Vec<u32> = response
+                    .json()
+                    .map_err(|e| DecodeError::Parse(e.to_string()))?;
+                Ok(ids)
+            },
+            |id: &u32| {
+                RequestSpec::get(
+                    format!("http://example.invalid/item/{id}")
+                        .parse()
+                        .unwrap(),
+                )
+            },
+            |response| {
+                let item: Option<serde_json::Value> = response
+                    .json()
+                    .map_err(|e| DecodeError::Parse(e.to_string()))?;
+                Ok(item)
+            },
+        )
+        .on_skip(move |id| {
+            assert_eq!(*id, 1);
+            skips_for_cb.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        });
+
+        let list = HttpResponse::new(200, HeaderMap::new(), "[1,2]");
+        let out = decoder.decode_success(None, &list).expect("decode ok");
+        let cursor = out.next_cursor.expect("cursor expected");
+
+        let item = HttpResponse::new(200, HeaderMap::new(), "null");
+        let out = decoder
+            .decode_success(Some(&cursor), &item)
+            .expect("decode ok");
+        assert!(out.items.is_empty());
+        assert_eq!(skips.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        let cursor = out.next_cursor.expect("cursor expected");
+        let req = decoder.request_spec(Some(&cursor));
+        assert_eq!(req.url.as_str(), "http://example.invalid/item/2");
+    }
+
+    #[test]
+    fn list_detail_decoder_caps_list_size_with_max_list_items() {
+        let decoder = ListDetailDecoder::new(
+            "test.item.v1",
+            "http://example.invalid/list".parse().unwrap(),
+            |response| {
+                let ids: Vec<u32> = response
+                    .json()
+                    .map_err(|e| DecodeError::Parse(e.to_string()))?;
+                Ok(ids)
+            },
+            |id: &u32| {
+                RequestSpec::get(
+                    format!("http://example.invalid/item/{id}")
+                        .parse()
+                        .unwrap(),
+                )
+            },
+            |response| {
+                let item: Option<serde_json::Value> = response
+                    .json()
+                    .map_err(|e| DecodeError::Parse(e.to_string()))?;
+                Ok(item)
+            },
+        )
+        .max_list_items(2);
+
+        let list = HttpResponse::new(200, HeaderMap::new(), "[1,2,3]");
+        let out = decoder.decode_success(None, &list).expect("decode ok");
+        let cursor = out.next_cursor.expect("cursor expected");
+
+        let item = HttpResponse::new(200, HeaderMap::new(), r#"{"n": 1}"#);
+        let out = decoder
+            .decode_success(Some(&cursor), &item)
+            .expect("decode ok");
+        let cursor = out.next_cursor.expect("cursor expected");
+
+        let item = HttpResponse::new(200, HeaderMap::new(), r#"{"n": 2}"#);
+        let out = decoder
+            .decode_success(Some(&cursor), &item)
+            .expect("decode ok");
+        assert!(out.next_cursor.is_none());
     }
 }
