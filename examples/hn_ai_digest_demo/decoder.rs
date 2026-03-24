@@ -17,12 +17,9 @@ pub fn hn_story_decoder(
         .list_path("v0/topstories.json")
         .parse_list(|response| Ok(response.json()?))
         .detail_path(|id| format!("v0/item/{id}.json"))
-        .parse_item(|response| {
-            // Deleted items return `null` — treat as skip.
-            Ok(response.json()?)
-        })
+        .parse_item(|response| Ok(response.json()?))
         .max_list_items(max_stories)
-        .on_skip(|id| tracing::info!(id = %id, "HN item was deleted (null), skipping"))
+        .on_skip(|id| tracing::info!(id = %id, "HN item deleted, skipping"))
         .build()
         .expect("HN decoder builder should be fully configured")
 }
