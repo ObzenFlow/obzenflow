@@ -6,9 +6,7 @@
 //!
 //! These tests validate the decoder logic with fixtures — no network required.
 
-use obzenflow::sources::{
-    DecodeError, HeaderMap, HttpResponse, ListDetailDecoder, PullDecoder, Url,
-};
+use obzenflow::sources::{HeaderMap, HttpResponse, ListDetailDecoder, PullDecoder, Url};
 use obzenflow_core::TypedPayload;
 use serde::{Deserialize, Serialize};
 
@@ -16,9 +14,18 @@ use serde::{Deserialize, Serialize};
 // Duplicated types from the example (tests should be self-contained)
 // ============================================================================
 
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash, Serialize, Deserialize)]
+struct HnStoryId(u64);
+
+impl std::fmt::Display for HnStoryId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct HnStory {
-    id: u64,
+    id: HnStoryId,
 
     #[serde(default, rename = "type")]
     item_type: Option<String>,
@@ -46,25 +53,15 @@ impl TypedPayload for HnStory {
     const EVENT_TYPE: &'static str = "hn.story";
 }
 
-fn hn_story_decoder(max_stories: usize) -> ListDetailDecoder<u64, HnStory> {
+fn hn_story_decoder(max_stories: usize) -> ListDetailDecoder<HnStoryId, HnStory> {
     let base_url =
         Url::parse("https://hacker-news.firebaseio.com/").expect("HN base URL should parse");
     ListDetailDecoder::builder(HnStory::versioned_event_type())
         .base_url(base_url)
         .list_path("v0/topstories.json")
-        .parse_list(|response| {
-            let ids: Vec<u64> = response
-                .json()
-                .map_err(|e| DecodeError::Parse(e.to_string()))?;
-            Ok(ids)
-        })
-        .detail_path(|id: &u64| format!("v0/item/{id}.json"))
-        .parse_item(|response| {
-            let story: Option<HnStory> = response
-                .json()
-                .map_err(|e| DecodeError::Parse(e.to_string()))?;
-            Ok(story)
-        })
+        .parse_list(|response| Ok(response.json()?))
+        .detail_path(|id| format!("v0/item/{id}.json"))
+        .parse_item(|response| Ok(response.json()?))
         .max_list_items(max_stories)
         .build()
         .expect("HN test decoder builder should be fully configured")
@@ -104,7 +101,7 @@ fn hn_decoder_parses_topstories_and_seeds_cursor() {
         .expect("decode ok");
     let cursor = out.next_cursor.expect("cursor expected");
     assert_eq!(out.items.len(), 1);
-    assert_eq!(out.items[0].id, 101);
+    assert_eq!(out.items[0].id, HnStoryId(101));
 
     let req = decoder.request_spec(Some(&cursor));
     assert_eq!(
@@ -118,7 +115,7 @@ fn hn_decoder_parses_topstories_and_seeds_cursor() {
         .expect("decode ok");
     let cursor = out.next_cursor.expect("cursor expected");
     assert_eq!(out.items.len(), 1);
-    assert_eq!(out.items[0].id, 102);
+    assert_eq!(out.items[0].id, HnStoryId(102));
 
     let req = decoder.request_spec(Some(&cursor));
     assert_eq!(
@@ -131,7 +128,7 @@ fn hn_decoder_parses_topstories_and_seeds_cursor() {
         .decode_success(Some(&cursor), &item)
         .expect("decode ok");
     assert_eq!(out.items.len(), 1);
-    assert_eq!(out.items[0].id, 103);
+    assert_eq!(out.items[0].id, HnStoryId(103));
     assert!(out.next_cursor.is_none());
 }
 
@@ -168,7 +165,7 @@ fn hn_decoder_parses_item_and_advances_cursor() {
         .decode_success(Some(&cursor), &resp)
         .expect("decode ok");
     assert_eq!(out.items.len(), 1);
-    assert_eq!(out.items[0].id, 42);
+    assert_eq!(out.items[0].id, HnStoryId(42));
 
     let next = out.next_cursor.expect("cursor expected");
     let req = decoder.request_spec(Some(&next));

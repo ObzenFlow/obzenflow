@@ -52,6 +52,12 @@ pub enum DecodeError {
     Parse(String),
 }
 
+impl From<serde_json::Error> for DecodeError {
+    fn from(value: serde_json::Error) -> Self {
+        DecodeError::Parse(value.to_string())
+    }
+}
+
 /// Decoder trait — owns event typing, request building, and response parsing (FLOWIP-084e OT-6/7).
 pub trait PullDecoder: Clone + Debug + Send + Sync + 'static {
     type Cursor: Clone + Debug + Send + Sync;
@@ -614,6 +620,7 @@ where
                 let key = pending
                     .front()
                     .expect("ListDetailDecoder pending queue should not be empty (cursor values must come from the decoder)");
+                tracing::debug!(event_type = %self.event_type, key = ?key, "detail fetch");
                 (self.detail_request)(key)
             }
         }
@@ -628,7 +635,17 @@ where
             None => {
                 let mut keys = (self.parse_list)(response)?;
                 if let Some(max_list_items) = self.max_list_items {
-                    keys.truncate(max_list_items);
+                    let total = keys.len();
+                    if total > max_list_items {
+                        keys.truncate(max_list_items);
+                        tracing::info!(
+                            event_type = %self.event_type,
+                            total,
+                            kept = keys.len(),
+                            max_list_items,
+                            "list truncated"
+                        );
+                    }
                 }
 
                 if keys.is_empty() {

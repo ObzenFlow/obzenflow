@@ -5,10 +5,19 @@
 use obzenflow_core::TypedPayload;
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash, Serialize, Deserialize)]
+pub struct HnStoryId(pub u64);
+
+impl std::fmt::Display for HnStoryId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
 /// Raw HN item from the Firebase API (we only care about `type=story` in the sink).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HnStory {
-    pub id: u64,
+    pub id: HnStoryId,
 
     #[serde(default, rename = "type")]
     pub item_type: Option<String>,
@@ -39,7 +48,7 @@ impl TypedPayload for HnStory {
 /// Formatted story for display.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FormattedStory {
-    pub id: u64,
+    pub id: HnStoryId,
     pub title: String,
     pub url: String,
     pub author: String,
