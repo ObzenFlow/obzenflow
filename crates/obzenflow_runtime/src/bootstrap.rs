@@ -9,14 +9,18 @@
 
 use std::mem;
 use std::path::PathBuf;
-#[cfg(debug_assertions)]
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{OnceLock, RwLock};
 use std::time::Duration;
 
 #[cfg(test)]
 use std::sync::{Mutex, MutexGuard};
 
+thread_local! {
+    static INSTALL_OWNER: u8 = const { 0 };
+}
+
+/// Controls whether a pipeline starts automatically after materialisation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StartupMode {
     Auto,
@@ -24,11 +28,13 @@ pub enum StartupMode {
 }
 
 impl StartupMode {
+    /// Returns `true` when the host must manually start the pipeline.
     pub fn is_manual(self) -> bool {
         matches!(self, Self::Manual)
     }
 }
 
+/// The configured metrics exporter backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MetricsExporterKind {
     Prometheus,
@@ -36,15 +42,21 @@ pub enum MetricsExporterKind {
     Noop,
 }
 
+/// Replay settings needed to bootstrap a flow from an existing run archive.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReplayBootstrap {
+    /// Path to a run archive directory containing `run_manifest.json`.
     pub archive_path: PathBuf,
+    /// When true, allow replay from an incomplete archive.
     pub allow_incomplete_archive: bool,
 }
 
+/// Host-level metrics settings used during flow build and execution.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetricsBootstrap {
+    /// When false, metrics are disabled and no exporter is started.
     pub enabled: bool,
+    /// Which exporter implementation to use when `enabled` is true.
     pub exporter: MetricsExporterKind,
 }
 
@@ -57,11 +69,19 @@ impl Default for MetricsBootstrap {
     }
 }
 
+/// A resolved bootstrap snapshot shared across infra, DSL, adapters, and runtime.
+///
+/// These settings are resolved by the hosting shell (typically `FlowApplication`)
+/// and installed for the lifetime of a single run via [`install_bootstrap_config`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BootstrapConfig {
+    /// Graceful shutdown timeout for pipeline drain and stage teardown.
     pub shutdown_timeout: Duration,
+    /// Host startup behaviour for pipeline execution.
     pub startup_mode: StartupMode,
+    /// Optional replay bootstrap configuration.
     pub replay: Option<ReplayBootstrap>,
+    /// Metrics bootstrap configuration.
     pub metrics: MetricsBootstrap,
 }
 
@@ -81,6 +101,7 @@ fn storage() -> &'static RwLock<BootstrapConfig> {
     BOOTSTRAP.get_or_init(|| RwLock::new(BootstrapConfig::default()))
 }
 
+/// Read the currently-installed bootstrap snapshot.
 pub fn bootstrap_config() -> BootstrapConfig {
     storage()
         .read()
@@ -88,6 +109,10 @@ pub fn bootstrap_config() -> BootstrapConfig {
         .clone()
 }
 
+/// Overwrite the process bootstrap snapshot.
+///
+/// Prefer [`install_bootstrap_config`] for host runs so the previous value is restored
+/// on drop. This setter is primarily intended for benchmarks and tests.
 pub fn set_bootstrap_config(config: BootstrapConfig) {
     *storage().write().expect("bootstrap config lock poisoned") = config;
 }
@@ -97,11 +122,9 @@ pub fn set_bootstrap_config(config: BootstrapConfig) {
 /// This keeps bootstrap settings scoped to a single host run instead of
 /// permanently caching the first configuration seen in the process.
 ///
-/// FlowApplication bootstrap is currently a single-run-per-process contract.
-/// In debug builds, overlapping installs panic so accidental concurrent host
-/// runs fail loudly instead of racing through shared mutable bootstrap state.
+/// Bootstrap settings are process-global, so only one active install is supported
+/// at a time. Overlapping installs will wait until the prior guard is dropped.
 pub fn install_bootstrap_config(config: BootstrapConfig) -> BootstrapConfigGuard {
-    #[cfg(debug_assertions)]
     let active_install = ActiveInstallLease::acquire();
 
     let previous = {
@@ -111,15 +134,14 @@ pub fn install_bootstrap_config(config: BootstrapConfig) -> BootstrapConfigGuard
 
     BootstrapConfigGuard {
         previous: Some(previous),
-        #[cfg(debug_assertions)]
-        active_install: Some(active_install),
+        active_install,
     }
 }
 
+/// Restores the prior bootstrap snapshot on drop.
 pub struct BootstrapConfigGuard {
     previous: Option<BootstrapConfig>,
-    #[cfg(debug_assertions)]
-    active_install: Option<ActiveInstallLease>,
+    active_install: ActiveInstallLease,
 }
 
 impl Drop for BootstrapConfigGuard {
@@ -127,54 +149,76 @@ impl Drop for BootstrapConfigGuard {
         if let Some(previous) = self.previous.take() {
             *storage().write().expect("bootstrap config lock poisoned") = previous;
         }
-        #[cfg(debug_assertions)]
-        let _ = self.active_install.take();
+        let _ = &self.active_install;
     }
 }
 
+/// Graceful shutdown timeout for pipeline drain and teardown.
 pub fn shutdown_timeout() -> Duration {
     bootstrap_config().shutdown_timeout
 }
 
+/// Returns `true` when the pipeline should not auto-run on materialisation.
 pub fn startup_mode_manual() -> bool {
     bootstrap_config().startup_mode.is_manual()
 }
 
+/// Optional replay bootstrap parameters.
 pub fn replay_bootstrap() -> Option<ReplayBootstrap> {
     bootstrap_config().replay
 }
 
+/// Metrics bootstrap settings.
 pub fn metrics_bootstrap() -> MetricsBootstrap {
     bootstrap_config().metrics
 }
 
-#[cfg(debug_assertions)]
-fn active_install_flag() -> &'static AtomicBool {
-    static ACTIVE_INSTALL: OnceLock<AtomicBool> = OnceLock::new();
-    ACTIVE_INSTALL.get_or_init(|| AtomicBool::new(false))
+fn active_install_owner() -> &'static AtomicUsize {
+    static ACTIVE_INSTALL: OnceLock<AtomicUsize> = OnceLock::new();
+    ACTIVE_INSTALL.get_or_init(|| AtomicUsize::new(0))
 }
 
-#[cfg(debug_assertions)]
+fn current_owner_id() -> usize {
+    INSTALL_OWNER.with(|marker| marker as *const u8 as usize)
+}
+
 struct ActiveInstallLease;
 
-#[cfg(debug_assertions)]
 impl ActiveInstallLease {
     fn acquire() -> Self {
-        let was_active = active_install_flag()
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_err();
-        debug_assert!(
-            !was_active,
-            "install_bootstrap_config() does not support overlapping FlowApplication runs in the same process"
-        );
-        Self
+        let owner = active_install_owner();
+        let me = current_owner_id();
+
+        // Catch the most likely deadlock case: re-entrant install on the same thread.
+        // This cannot be made perfectly robust without passing an explicit run context.
+        if owner.load(Ordering::Acquire) == me {
+            panic!("install_bootstrap_config() does not support nested installs");
+        }
+
+        let mut attempts: u32 = 0;
+        loop {
+            if owner
+                .compare_exchange(0, me, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                return Self;
+            }
+
+            attempts = attempts.saturating_add(1);
+            if attempts <= 10 {
+                std::hint::spin_loop();
+            } else if attempts <= 100 {
+                std::thread::yield_now();
+            } else {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
     }
 }
 
-#[cfg(debug_assertions)]
 impl Drop for ActiveInstallLease {
     fn drop(&mut self) {
-        active_install_flag().store(false, Ordering::Release);
+        active_install_owner().store(0, Ordering::Release);
     }
 }
 
@@ -238,9 +282,8 @@ mod tests {
         assert_eq!(bootstrap_config(), baseline);
     }
 
-    #[cfg(debug_assertions)]
     #[test]
-    fn overlapping_install_panics_in_debug_builds() {
+    fn nested_install_panics() {
         let _lock = bootstrap_test_lock();
         let _guard = install_bootstrap_config(BootstrapConfig::default());
 
@@ -249,5 +292,30 @@ mod tests {
         });
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn overlapping_installs_are_serialised() {
+        use std::sync::mpsc;
+
+        let _lock = bootstrap_test_lock();
+        let guard = install_bootstrap_config(BootstrapConfig::default());
+
+        let (started_tx, started_rx) = mpsc::channel::<()>();
+        let (acquired_tx, acquired_rx) = mpsc::channel::<()>();
+
+        let handle = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            let _guard = install_bootstrap_config(BootstrapConfig::default());
+            acquired_tx.send(()).unwrap();
+        });
+
+        started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        std::thread::sleep(Duration::from_millis(25));
+        assert!(acquired_rx.try_recv().is_err());
+
+        drop(guard);
+        acquired_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        handle.join().unwrap();
     }
 }

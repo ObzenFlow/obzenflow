@@ -904,4 +904,116 @@ exporter = "statsd"
             "config error at metrics.exporter: unknown value \"statsd\"; expected one of prometheus, console, noop"
         );
     }
+
+    #[test]
+    fn builder_config_file_is_used_when_cli_has_no_config() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let config_path = tempdir.path().join("obzenflow.toml");
+        fs::write(
+            &config_path,
+            r#"
+[server]
+enabled = true
+port = 9876
+"#,
+        )
+        .unwrap();
+
+        let cli = FlowConfig::try_parse_from(["obzenflow"]).unwrap();
+        let resolved = cli.resolve(Some(config_path.clone()), false).unwrap();
+        assert!(resolved.server.enabled);
+        assert_eq!(resolved.server.port, 9876);
+    }
+
+    #[test]
+    fn cli_config_overrides_builder_config_file() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let builder_path = tempdir.path().join("builder.toml");
+        let cli_path = tempdir.path().join("cli.toml");
+
+        fs::write(
+            &builder_path,
+            r#"
+[server]
+enabled = true
+port = 1111
+"#,
+        )
+        .unwrap();
+
+        fs::write(
+            &cli_path,
+            r#"
+[server]
+enabled = true
+port = 2222
+"#,
+        )
+        .unwrap();
+
+        let cli = FlowConfig::try_parse_from(["obzenflow", "--config", cli_path.to_str().unwrap()])
+            .unwrap();
+
+        let resolved = cli.resolve(Some(builder_path.clone()), true).unwrap();
+        assert!(resolved.server.enabled);
+        assert_eq!(resolved.server.port, 2222);
+    }
+
+    #[test]
+    fn env_layer_applies_when_no_cli_or_file() {
+        let _lock = env_lock();
+        let guard = EnvGuard::new(&["OBZENFLOW_METRICS_ENABLED", "OBZENFLOW_METRICS_EXPORTER"]);
+        guard.set("OBZENFLOW_METRICS_ENABLED", "false");
+        guard.set("OBZENFLOW_METRICS_EXPORTER", "console");
+
+        let cli = FlowConfig::try_parse_from(["obzenflow"]).unwrap();
+        let resolved = cli.resolve(None, false).unwrap();
+        assert!(!resolved.metrics.enabled);
+        assert_eq!(resolved.metrics.exporter, MetricsExporterKind::Console);
+    }
+
+    #[test]
+    fn deny_unknown_fields_rejects_unknown_keys_in_file() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let config_path = tempdir.path().join("obzenflow.toml");
+        fs::write(
+            &config_path,
+            r#"
+[server]
+enabled = true
+frobnicate = true
+"#,
+        )
+        .unwrap();
+
+        let cli =
+            FlowConfig::try_parse_from(["obzenflow", "--config", config_path.to_str().unwrap()])
+                .unwrap();
+        let err = cli.resolve(None, false).unwrap_err();
+        let rendered = err.to_string();
+        assert!(rendered.contains("failed to parse"));
+        assert!(rendered.contains("unknown field"));
+    }
+
+    #[test]
+    fn wrong_type_in_toml_reports_parse_error() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let config_path = tempdir.path().join("obzenflow.toml");
+        fs::write(
+            &config_path,
+            r#"
+[server]
+enabled = true
+port = "abc"
+"#,
+        )
+        .unwrap();
+
+        let cli =
+            FlowConfig::try_parse_from(["obzenflow", "--config", config_path.to_str().unwrap()])
+                .unwrap();
+        let err = cli.resolve(None, false).unwrap_err();
+        let rendered = err.to_string();
+        assert!(rendered.contains("failed to parse"));
+    }
 }
