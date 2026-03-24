@@ -5,9 +5,9 @@
 //! Character Transform Skeleton
 //!
 //! The same pipeline shape as `char_transform`, but with every handler
-//! replaced by `placeholder!()`. This compiles and can be inspected via
-//! the topology/control HTTP surface. Placeholder handlers are lifecycle-aware
-//! and will not panic, but the flow produces no output.
+//! replaced by `placeholder!()`. This compiles and can be opened in
+//! the UI. Placeholder handlers are lifecycle-aware and will not panic,
+//! but the flow produces no output.
 //!
 //! The point: you can go from an event-storming diagram to a
 //! compilable flow skeleton without writing any business logic.
@@ -19,8 +19,8 @@
 //! cargo run -p obzenflow --example char_transform_skeleton
 //! ```
 //!
-//! To inspect the topology in manual server mode, start the server so
-//! the pipeline does not run until you send Play:
+//! To view the topology in the UI, start the server in manual mode so
+//! the pipeline does not run until you press Play:
 //!
 //! ```sh
 //! cargo run -p obzenflow --features obzenflow_infra/warp-server \
@@ -28,7 +28,7 @@
 //!     --config examples/char_transform_skeleton.manual.obzenflow.toml
 //! ```
 //!
-//! When you send Play, the placeholder finite source returns EOF
+//! When you press Play, the placeholder finite source returns EOF
 //! immediately, and the pipeline drains and exits quickly.
 
 use anyhow::Result;
