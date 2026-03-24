@@ -79,7 +79,12 @@ pub struct ReqwestHttpClient {
 impl ReqwestHttpClient {
     pub fn new() -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: std::panic::catch_unwind(reqwest::Client::new).unwrap_or_else(|_| {
+                reqwest::Client::builder()
+                    .no_proxy()
+                    .build()
+                    .expect("reqwest client build (no_proxy fallback)")
+            }),
         }
     }
 

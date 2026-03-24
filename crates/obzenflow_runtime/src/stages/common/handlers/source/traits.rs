@@ -13,6 +13,7 @@ use async_trait::async_trait;
 use obzenflow_core::ChainEvent;
 use obzenflow_core::WriterId;
 use std::fmt;
+use std::time::Duration;
 
 /// Errors that can occur while polling a source.
 ///
@@ -113,6 +114,13 @@ pub trait AsyncFiniteSourceHandler: Send + Sync {
     /// Default is a no-op for existing handlers that manage their own `WriterId`.
     fn bind_writer_id(&mut self, _id: WriterId) {}
 
+    /// Suggest a stage-level poll timeout for bounding `next().await`.
+    ///
+    /// If `None`, descriptors keep their existing defaults.
+    fn suggested_poll_timeout(&self) -> Option<Duration> {
+        None
+    }
+
     /// Pull zero or more events from the source asynchronously.
     async fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError>;
 
@@ -141,6 +149,13 @@ pub trait AsyncInfiniteSourceHandler: Send + Sync {
     ///
     /// Default is a no-op for existing handlers that manage their own `WriterId`.
     fn bind_writer_id(&mut self, _id: WriterId) {}
+
+    /// Suggest a stage-level poll timeout for bounding `next().await`.
+    ///
+    /// If `None`, descriptors keep their existing defaults.
+    fn suggested_poll_timeout(&self) -> Option<Duration> {
+        None
+    }
 
     /// Pull zero or more events from the source asynchronously.
     async fn next(&mut self) -> Result<Vec<ChainEvent>, SourceError>;

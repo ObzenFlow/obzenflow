@@ -47,9 +47,7 @@ mod example {
             _cursor: Option<&Self::Cursor>,
             response: &HttpResponse,
         ) -> Result<DecodeResult<Self::Cursor, Self::Item>, DecodeError> {
-            let value: serde_json::Value = response
-                .json()
-                .map_err(|e| DecodeError::Parse(e.to_string()))?;
+            let value: serde_json::Value = response.json()?;
 
             let items = value
                 .get("items")
@@ -88,9 +86,7 @@ mod example {
         }
 
         fn decode_success(&self, response: &HttpResponse) -> Result<Vec<Self::Item>, DecodeError> {
-            response
-                .json()
-                .map_err(|e| DecodeError::Parse(e.to_string()))
+            Ok(response.json()?)
         }
     }
 
@@ -115,9 +111,7 @@ mod example {
             _cursor: Option<&Self::Cursor>,
             response: &HttpResponse,
         ) -> Result<DecodeResult<Self::Cursor, Self::Item>, DecodeError> {
-            let value: serde_json::Value = response
-                .json()
-                .map_err(|e| DecodeError::Parse(e.to_string()))?;
+            let value: serde_json::Value = response.json()?;
 
             let items = value
                 .get("items")
@@ -227,11 +221,7 @@ mod example {
             "http://example.invalid/items"
                 .parse()
                 .expect("simple_poll url"),
-            |response: &HttpResponse| {
-                response
-                    .json::<Vec<serde_json::Value>>()
-                    .map_err(|e| DecodeError::Parse(e.to_string()))
-            },
+            |response: &HttpResponse| Ok(response.json::<Vec<serde_json::Value>>()?),
         );
 
         let request = poll.request_spec(None);

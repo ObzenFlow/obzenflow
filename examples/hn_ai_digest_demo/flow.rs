@@ -3,12 +3,12 @@
 // https://obzenflow.dev
 
 use super::config::DemoConfig;
-use super::decoder::HnStoryDecoder;
+use super::decoder::hn_story_decoder;
 use super::domain::{FormattedStory, HnStory};
 use super::util::truncate_chars;
 use anyhow::{anyhow, Result};
 use obzenflow::ai::{ChunkInfo, EstimateSource, Prompt, SystemPrompt, TokenCount, UserPrompt};
-use obzenflow::sources::{HeaderMap, HttpPullConfig, HttpPullSource};
+use obzenflow::sources::{http_pull_config, HttpPullSource};
 use obzenflow::typed::{sinks, stateful as typed_stateful, transforms as typed_transforms};
 use obzenflow_adapters::middleware::control::ai_circuit_breaker;
 use obzenflow_adapters::middleware::RateLimiterBuilder;
@@ -16,7 +16,6 @@ use obzenflow_core::ai::ChatResponse;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{ai_map_reduce, async_source, flow, sink, stateful, transform};
 use obzenflow_infra::application::{Banner, FlowApplication, Presentation, RunPresentationOutcome};
-use obzenflow_infra::http_client::default_http_client;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use serde::{Deserialize, Serialize};
@@ -199,15 +198,12 @@ pub async fn run_example(config: DemoConfig, presentation: Presentation) -> Resu
     let base_url_for_summary = base_url.to_string();
     let estimator = ai.estimator();
 
-    let decoder = HnStoryDecoder::new(base_url, max_stories);
-    let client = default_http_client().map_err(|e| anyhow!("HTTP client unavailable: {e}"))?;
-
-    let config = HttpPullConfig {
-        client,
-        default_headers: HeaderMap::new(),
-        max_batch_size: 10,
-        retry: Default::default(),
-    };
+    let decoder = hn_story_decoder(base_url, max_stories);
+    let config = http_pull_config()
+        .map_err(|e| anyhow!("HTTP client unavailable: {e}"))?
+        .max_batch_size(10)
+        .poll_timeout(Duration::from_secs(poll_timeout_secs as u64))
+        .build()?;
 
     let formatter =
         typed_transforms::try_map_with(|story: HnStory| Ok(format_story(story))).on_error_drop();
@@ -258,10 +254,7 @@ pub async fn run_example(config: DemoConfig, presentation: Presentation) -> Resu
             middleware: [],
 
             stages: {
-                hn_stories = async_source!(HnStory => (
-                    HttpPullSource::new(decoder, config),
-                    Some(Duration::from_secs(poll_timeout_secs as u64))
-                ), [
+                hn_stories = async_source!(HnStory => HttpPullSource::new(decoder, config), [
                     RateLimiterBuilder::new(source_rate_limit).build()
                 ]);
                 formatter = transform!(HnStory -> FormattedStory => formatter);

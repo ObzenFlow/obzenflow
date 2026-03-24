@@ -22,6 +22,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
 csv = { workspace = true }
+http = { workspace = true }
 
 [features]
 default = []
