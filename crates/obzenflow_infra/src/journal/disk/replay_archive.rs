@@ -82,7 +82,7 @@ impl DiskReplayArchive {
             });
         }
 
-        if is_newer_semver(&manifest.obzenflow_version, OBZENFLOW_VERSION) {
+        if !is_compatible_semver(&manifest.obzenflow_version, OBZENFLOW_VERSION) {
             return Err(ReplayError::VersionMismatch {
                 archive_version: manifest.obzenflow_version.clone(),
                 current_version: OBZENFLOW_VERSION.to_string(),
@@ -337,14 +337,18 @@ fn derive_status_derivation_from_system_log(path: &Path) -> Result<StatusDerivat
     })
 }
 
-fn is_newer_semver(archive_version: &str, current_version: &str) -> bool {
+/// Check whether an archive's ObzenFlow version is compatible with the running
+/// framework.  Compatibility requires an exact major.minor match; patch-level
+/// differences are tolerated.  If either version string cannot be parsed the
+/// check fails closed (incompatible).
+fn is_compatible_semver(archive_version: &str, current_version: &str) -> bool {
     let Some(archive) = parse_semver_triplet(archive_version) else {
         return false;
     };
     let Some(current) = parse_semver_triplet(current_version) else {
         return false;
     };
-    archive > current
+    archive.0 == current.0 && archive.1 == current.1
 }
 
 fn parse_semver_triplet(version: &str) -> Option<(u64, u64, u64)> {

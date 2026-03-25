@@ -21,7 +21,11 @@ pub trait JournalReader<T>: Send + Sync
 where
     T: JournalEvent,
 {
-    /// Read the next event from the current position
+    /// Read the next event from the current position (append order).
+    ///
+    /// This is an append-order cursor, not a causal-order iterator. Callers that need
+    /// deterministic causal ordering should use `Journal::read_causally_ordered()` /
+    /// `Journal::read_causally_after(...)` instead of `JournalReader::next()`.
     ///
     /// Returns None if no more events are available (EOF).
     /// This method should be efficient - O(1) regardless of journal size.

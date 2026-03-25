@@ -10,6 +10,10 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+use crate::journal::JournalError;
+
+use crate::event::types::EventId;
+
 /// Vector clock data structure for causal ordering
 ///
 /// This is a pure data structure representing the causal history of an event.
@@ -114,6 +118,34 @@ impl CausalOrderingService {
         }
     }
 
+    /// A deterministic scalar derived from a vector clock.
+    ///
+    /// This scalar is strictly monotonic under happened-before: if `a` happened-before `b`, then
+    /// `causal_rank(a) < causal_rank(b)`.
+    pub fn causal_rank(clock: &VectorClock) -> u128 {
+        clock
+            .clocks
+            .values()
+            .fold(0u128, |acc, &seq| acc.saturating_add(seq as u128))
+    }
+
+    /// Deterministically compare two vector clocks using a monotonic scalar plus `EventId`.
+    ///
+    /// Note: a comparator defined as "happened-before first, otherwise `EventId`" is not a strict
+    /// total order and must not be used with `slice::sort_by`, as it can violate transitivity and
+    /// trigger Rust's sort-time total-order checks.
+    pub fn total_compare_by_event_id(
+        a_clock: &VectorClock,
+        a_event_id: &EventId,
+        b_clock: &VectorClock,
+        b_event_id: &EventId,
+    ) -> std::cmp::Ordering {
+        let a_rank = Self::causal_rank(a_clock);
+        let b_rank = Self::causal_rank(b_clock);
+
+        a_rank.cmp(&b_rank).then_with(|| a_event_id.cmp(b_event_id))
+    }
+
     /// Calculate L1 (Manhattan) distance between two vector clocks.
     ///
     /// This represents the total number of events that happened
@@ -145,5 +177,164 @@ impl CausalOrderingService {
         }
 
         distance
+    }
+
+    /// Produce a deterministic causal readback order using a monotonic scalar plus `EventId`.
+    ///
+    /// This is intended for *iteration* APIs like `Journal::read_causally_ordered()` that must be
+    /// deterministic and must not use wall-clock timestamps. It guarantees that if `a`
+    /// happened-before `b`, then `a` appears before `b` in the output.
+    pub fn order_envelopes_by_event_id<T>(
+        mut events: Vec<super::EventEnvelope<T>>,
+    ) -> Result<Vec<super::EventEnvelope<T>>, JournalError>
+    where
+        T: super::JournalEvent,
+    {
+        // Fast path.
+        if events.len() <= 1 {
+            return Ok(events);
+        }
+
+        events.sort_by_cached_key(|e| (Self::causal_rank(&e.vector_clock), *e.event.id()));
+
+        Ok(events)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::event::chain_event::ChainEventFactory;
+    use crate::event::{ChainEvent, EventEnvelope};
+    use crate::{StageId, WriterId};
+    use chrono::Utc;
+    use serde_json::json;
+
+    fn envelope_with_event_id_and_clock(
+        event_id: EventId,
+        vector_clock: VectorClock,
+    ) -> EventEnvelope<ChainEvent> {
+        let writer_id = WriterId::from(StageId::new());
+        let mut event =
+            ChainEventFactory::data_event(writer_id, "test.vector_clock", json!({ "ok": true }));
+        event.id = event_id;
+
+        EventEnvelope {
+            journal_writer_id: crate::event::JournalWriterId::new(),
+            vector_clock,
+            timestamp: Utc::now(),
+            event,
+        }
+    }
+
+    #[test]
+    fn transitivity_violation_regression_orders_deterministically() {
+        let w1 = WriterId::from(StageId::new()).to_string();
+        let w2 = WriterId::from(StageId::new()).to_string();
+        let w3 = WriterId::from(StageId::new()).to_string();
+
+        let mut clock_a = VectorClock::new();
+        clock_a.clocks.insert(w1.clone(), 1);
+
+        let mut clock_b = VectorClock::new();
+        clock_b.clocks.insert(w1.clone(), 1);
+        clock_b.clocks.insert(w2.clone(), 1);
+
+        let mut clock_c = VectorClock::new();
+        clock_c.clocks.insert(w2.clone(), 1);
+        clock_c.clocks.insert(w3.clone(), 1);
+
+        assert!(CausalOrderingService::happened_before(&clock_a, &clock_b));
+        assert!(CausalOrderingService::are_concurrent(&clock_b, &clock_c));
+        assert!(CausalOrderingService::are_concurrent(&clock_a, &clock_c));
+
+        let a_id = EventId::from_string("ZZZZZZZZZZZZZZZZZZZZZZZZZZ").unwrap();
+        let b_id = EventId::from_string("00000000000000000000000000").unwrap();
+        let c_id = EventId::from_string("MMMMMMMMMMMMMMMMMMMMMMMMMM").unwrap();
+
+        let a = envelope_with_event_id_and_clock(a_id, clock_a);
+        let b = envelope_with_event_id_and_clock(b_id, clock_b);
+        let c = envelope_with_event_id_and_clock(c_id, clock_c);
+
+        let input = vec![c.clone(), a.clone(), b.clone()];
+        let output1 = CausalOrderingService::order_envelopes_by_event_id(input.clone()).unwrap();
+        let output2 = CausalOrderingService::order_envelopes_by_event_id(input).unwrap();
+
+        let ids1: Vec<_> = output1.iter().map(|e| e.event.id).collect();
+        let ids2: Vec<_> = output2.iter().map(|e| e.event.id).collect();
+
+        assert_eq!(ids1, vec![a_id, b_id, c_id]);
+        assert_eq!(ids1, ids2);
+
+        let idx_a = ids1.iter().position(|id| *id == a_id).unwrap();
+        let idx_b = ids1.iter().position(|id| *id == b_id).unwrap();
+        assert!(idx_a < idx_b);
+    }
+
+    #[test]
+    fn order_is_stable_under_permutation() {
+        let w1 = WriterId::from(StageId::new()).to_string();
+        let w2 = WriterId::from(StageId::new()).to_string();
+        let w3 = WriterId::from(StageId::new()).to_string();
+
+        let mut clock_a = VectorClock::new();
+        clock_a.clocks.insert(w1.clone(), 1);
+
+        let mut clock_b = VectorClock::new();
+        clock_b.clocks.insert(w1.clone(), 1);
+        clock_b.clocks.insert(w2.clone(), 1);
+
+        let mut clock_c = VectorClock::new();
+        clock_c.clocks.insert(w2.clone(), 1);
+        clock_c.clocks.insert(w3.clone(), 1);
+
+        let a_id = EventId::from_string("ZZZZZZZZZZZZZZZZZZZZZZZZZZ").unwrap();
+        let b_id = EventId::from_string("00000000000000000000000000").unwrap();
+        let c_id = EventId::from_string("MMMMMMMMMMMMMMMMMMMMMMMMMM").unwrap();
+
+        let a = envelope_with_event_id_and_clock(a_id, clock_a);
+        let b = envelope_with_event_id_and_clock(b_id, clock_b);
+        let c = envelope_with_event_id_and_clock(c_id, clock_c);
+
+        let expected = vec![a_id, b_id, c_id];
+        let permutations = [
+            vec![a.clone(), b.clone(), c.clone()],
+            vec![a.clone(), c.clone(), b.clone()],
+            vec![b.clone(), a.clone(), c.clone()],
+            vec![b.clone(), c.clone(), a.clone()],
+            vec![c.clone(), a.clone(), b.clone()],
+            vec![c.clone(), b.clone(), a.clone()],
+        ];
+
+        for permutation in permutations {
+            let ordered = CausalOrderingService::order_envelopes_by_event_id(permutation).unwrap();
+            let ordered_ids: Vec<_> = ordered.iter().map(|e| e.event.id).collect();
+            assert_eq!(ordered_ids, expected);
+        }
+    }
+
+    #[test]
+    fn causal_rank_sums_components_and_respects_happened_before() {
+        let empty = VectorClock::new();
+        assert_eq!(CausalOrderingService::causal_rank(&empty), 0);
+
+        let mut single = VectorClock::new();
+        single.clocks.insert("writer_1".to_string(), 3);
+        assert_eq!(CausalOrderingService::causal_rank(&single), 3);
+
+        let mut multi = VectorClock::new();
+        multi.clocks.insert("writer_1".to_string(), 2);
+        multi.clocks.insert("writer_2".to_string(), 3);
+        assert_eq!(CausalOrderingService::causal_rank(&multi), 5);
+
+        let mut a = VectorClock::new();
+        a.clocks.insert("writer_1".to_string(), 1);
+
+        let mut b = VectorClock::new();
+        b.clocks.insert("writer_1".to_string(), 1);
+        b.clocks.insert("writer_2".to_string(), 1);
+
+        assert!(CausalOrderingService::happened_before(&a, &b));
+        assert!(CausalOrderingService::causal_rank(&a) < CausalOrderingService::causal_rank(&b));
     }
 }

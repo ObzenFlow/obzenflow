@@ -32,7 +32,7 @@ pub enum ReplayError {
         supported: &'static str,
     },
 
-    #[error("Replay archive was created with newer ObzenFlow version {archive_version} (current: {current_version})")]
+    #[error("Replay archive version {archive_version} is incompatible with running framework version {current_version} (major.minor must match)")]
     VersionMismatch {
         archive_version: String,
         current_version: String,

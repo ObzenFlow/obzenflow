@@ -378,6 +378,12 @@ impl<T: JournalEvent + 'static> Journal<T> for DiskJournal<T> {
         // Get writer_id from the event
         let writer_id = *event.writer_id();
 
+        // Acquire the journal write lock before advancing writer clocks.
+        //
+        // This serialises append operations and ensures concurrent appends
+        // cannot compute the same `writer_seq` from a stale snapshot.
+        let _lock = self.read_write_lock.write().await;
+
         // Get or create vector clock for this writer
         let mut vector_clock = {
             let writer_clocks = self.writer_clocks.read().await;
@@ -431,9 +437,6 @@ impl<T: JournalEvent + 'static> Journal<T> for DiskJournal<T> {
         let mut bytes = framed_line.into_bytes();
         bytes.extend_from_slice(&json_body);
         bytes.push(b'\n');
-
-        // Acquire write lock for atomic write (blocks readers)
-        let _lock = self.read_write_lock.write().await;
 
         // Get current offset and reserve space
         let offset = self.write_offset.load(Ordering::SeqCst);
@@ -520,19 +523,8 @@ impl<T: JournalEvent + 'static> Journal<T> for DiskJournal<T> {
     }
 
     async fn read_causally_ordered(&self) -> Result<Vec<EventEnvelope<T>>, JournalError> {
-        let mut events = self.read_all_raw().await?;
-
-        // Sort by vector clock for causal ordering
-        events.sort_by(|a, b| {
-            CausalOrderingService::causal_compare(&a.vector_clock, &b.vector_clock).unwrap_or_else(
-                || {
-                    // For concurrent events, use timestamp as tiebreaker
-                    a.timestamp.cmp(&b.timestamp)
-                },
-            )
-        });
-
-        Ok(events)
+        let events = self.read_all_raw().await?;
+        CausalOrderingService::order_envelopes_by_event_id(events)
     }
 
     async fn read_causally_after(
@@ -750,6 +742,7 @@ mod tests {
     use super::*;
     use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
     use obzenflow_core::id::StageId;
+    use tokio::sync::Barrier;
 
     use uuid::Uuid;
 
@@ -881,6 +874,59 @@ mod tests {
         assert_eq!(writer_ids.len(), 5);
 
         // Cleanup
+        std::fs::remove_dir_all(&test_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn test_same_writer_concurrent_appends_have_unique_writer_seq() {
+        let test_id = Uuid::new_v4();
+        let test_dir = std::path::PathBuf::from(format!(
+            "target/test-logs/test_same_writer_concurrent_appends_have_unique_writer_seq_{test_id}"
+        ));
+        std::fs::create_dir_all(&test_dir).unwrap();
+
+        let test_stage_id = obzenflow_core::StageId::new();
+        let owner = obzenflow_core::JournalOwner::stage(test_stage_id);
+        let log_path = test_dir.join("same_writer_concurrent.log");
+        let log = Arc::new(DiskJournal::<ChainEvent>::with_owner(log_path, owner).unwrap());
+
+        let writer_id = WriterId::from(StageId::new());
+        let writer_key = writer_id.to_string();
+
+        let task_count: usize = 20;
+        let barrier = Arc::new(Barrier::new(task_count));
+
+        let mut handles = Vec::with_capacity(task_count);
+        for i in 0..task_count {
+            let log_clone = log.clone();
+            let barrier_clone = barrier.clone();
+            let handle = tokio::spawn(async move {
+                barrier_clone.wait().await;
+                let event = ChainEventFactory::data_event(
+                    writer_id,
+                    "concurrent.same_writer",
+                    serde_json::json!({ "i": i }),
+                );
+                log_clone.append(event, None).await
+            });
+            handles.push(handle);
+        }
+
+        for handle in handles {
+            handle.await.unwrap().unwrap();
+        }
+
+        let events = log.read_causally_ordered().await.unwrap();
+        assert_eq!(events.len(), task_count);
+
+        let writer_seqs: Vec<u64> = events
+            .iter()
+            .map(|e| e.vector_clock.get(&writer_key))
+            .collect();
+
+        let expected: Vec<u64> = (1..=task_count as u64).collect();
+        assert_eq!(writer_seqs, expected);
+
         std::fs::remove_dir_all(&test_dir).ok();
     }
 }

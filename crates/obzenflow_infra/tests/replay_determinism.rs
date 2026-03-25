@@ -128,6 +128,26 @@ async fn run_stateful_fold_once(
         .collect()
 }
 
+async fn run_order_sensitive_fold_once(
+    upstream_journal: Arc<MemoryJournal<ChainEvent>>,
+) -> Vec<u64> {
+    let events = upstream_journal
+        .read_causally_ordered()
+        .await
+        .expect("read upstream journal");
+
+    let mut seen = Vec::new();
+    for envelope in events {
+        if let ChainEventContent::Data { payload, .. } = &envelope.event.content {
+            if let Some(seq) = payload.get("seq").and_then(|v| v.as_u64()) {
+                seen.push(seq);
+            }
+        }
+    }
+
+    seen
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn stateful_replay_produces_identical_aggregates() {
     let upstream_stage = StageId::new();
@@ -160,6 +180,45 @@ async fn stateful_replay_produces_identical_aggregates() {
     );
     assert_eq!(aggregates_run1.len(), 1);
     assert_eq!(aggregates_run1[0]["count"], json!(3));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn replay_determinism_covers_concurrent_writer_ordering() {
+    let upstream_stage = StageId::new();
+    let upstream_journal: Arc<MemoryJournal<ChainEvent>> = Arc::new(MemoryJournal::with_owner(
+        JournalOwner::stage(upstream_stage),
+    ));
+
+    let writer_a = WriterId::from(StageId::new());
+    let writer_b = WriterId::from(StageId::new());
+
+    // Force EventId ordering to be independent of append timing:
+    // ensure `low` has the smaller EventId, but append `high` first (earlier timestamp).
+    let mut low = ChainEventFactory::data_event(writer_a, "test.concurrent", json!({ "seq": 0 }));
+    low.id = obzenflow_core::event::types::EventId::new();
+
+    let mut high = ChainEventFactory::data_event(writer_b, "test.concurrent", json!({ "seq": 1 }));
+    high.id = obzenflow_core::event::types::EventId::new();
+
+    if low.id > high.id {
+        std::mem::swap(&mut low.id, &mut high.id);
+    }
+
+    upstream_journal
+        .append(high, None)
+        .await
+        .expect("append high-id event");
+    tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+    upstream_journal
+        .append(low, None)
+        .await
+        .expect("append low-id event");
+
+    let seen_run1 = run_order_sensitive_fold_once(upstream_journal.clone()).await;
+    let seen_run2 = run_order_sensitive_fold_once(upstream_journal.clone()).await;
+
+    assert_eq!(seen_run1, vec![0, 1]);
+    assert_eq!(seen_run1, seen_run2);
 }
 
 // =========================
