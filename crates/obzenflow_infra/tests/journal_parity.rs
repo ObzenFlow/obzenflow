@@ -5,12 +5,14 @@
 //! Simple parity test to ensure DiskJournal and MemoryJournal behave identically
 
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
+use obzenflow_core::event::types::EventId;
 use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::Journal;
 use obzenflow_core::{StageId, WriterId};
 use obzenflow_infra::journal::{DiskJournal, MemoryJournal};
 use serde_json::json;
 use std::sync::Arc;
+use std::time::Duration;
 use tempfile::TempDir;
 
 #[tokio::test]
@@ -29,24 +31,27 @@ async fn test_journal_parity() {
     let writer1 = WriterId::from(StageId::new());
     let writer2 = WriterId::from(StageId::new());
 
+    let event1 = ChainEventFactory::data_event(writer1, "test.first", json!({ "value": 42 }));
+    let event2 = ChainEventFactory::data_event(writer1, "test.second", json!({ "value": 84 }));
+    let event3 = ChainEventFactory::data_event(writer2, "test.parallel", json!({ "value": 100 }));
+    let event4 = ChainEventFactory::data_event(writer1, "test.third", json!({ "value": 168 }));
+
     // Test both journals with identical operations
     for journal in [&disk_journal, &memory_journal] {
         // Event 1: No parent
-        let event1 = ChainEventFactory::data_event(writer1, "test.first", json!({ "value": 42 }));
-        let envelope1 = journal.append(event1, None).await.unwrap();
+        let envelope1 = journal.append(event1.clone(), None).await.unwrap();
 
         // Event 2: Child of event 1
-        let event2 = ChainEventFactory::data_event(writer1, "test.second", json!({ "value": 84 }));
-        let envelope2 = journal.append(event2, Some(&envelope1)).await.unwrap();
+        let envelope2 = journal
+            .append(event2.clone(), Some(&envelope1))
+            .await
+            .unwrap();
 
         // Event 3: From different writer, no parent
-        let event3 =
-            ChainEventFactory::data_event(writer2, "test.parallel", json!({ "value": 100 }));
-        let _envelope3 = journal.append(event3, None).await.unwrap();
+        let _envelope3 = journal.append(event3.clone(), None).await.unwrap();
 
         // Event 4: Child of event 2
-        let event4 = ChainEventFactory::data_event(writer1, "test.third", json!({ "value": 168 }));
-        journal.append(event4, Some(&envelope2)).await.unwrap();
+        journal.append(event4.clone(), Some(&envelope2)).await.unwrap();
     }
 
     // Compare results
@@ -60,6 +65,10 @@ async fn test_journal_parity() {
     // Compare each event
     for (i, (disk_event, memory_event)) in disk_events.iter().zip(memory_events.iter()).enumerate()
     {
+        assert_eq!(
+            disk_event.event.id, memory_event.event.id,
+            "EventId mismatch at index {i}"
+        );
         assert_eq!(
             disk_event.event.event_type(),
             memory_event.event.event_type(),
@@ -111,4 +120,61 @@ async fn test_journal_parity() {
         3,
         "MemoryJournal should have 3 events after first"
     );
+}
+
+#[tokio::test]
+async fn test_journal_concurrent_tiebreak_is_event_id() {
+    let temp_dir = TempDir::new().unwrap();
+    let owner = JournalOwner::stage(StageId::new());
+    let log_path = temp_dir.path().join("tiebreak_test.log");
+
+    let disk_journal = Arc::new(DiskJournal::with_owner(log_path, owner.clone()).unwrap())
+        as Arc<dyn Journal<ChainEvent> + Send + Sync>;
+    let memory_journal =
+        Arc::new(MemoryJournal::with_owner(owner)) as Arc<dyn Journal<ChainEvent> + Send + Sync>;
+
+    let writer_a = WriterId::from(StageId::new());
+    let writer_b = WriterId::from(StageId::new());
+
+    let mut a = ChainEventFactory::data_event(writer_a, "test.concurrent", json!({ "i": 1 }));
+    a.id = EventId::new();
+
+    let mut b = ChainEventFactory::data_event(writer_b, "test.concurrent", json!({ "i": 0 }));
+    b.id = EventId::new();
+
+    let (low, high) = if a.id < b.id { (a, b) } else { (b, a) };
+
+    for journal in [&disk_journal, &memory_journal] {
+        // Append in the opposite order of the desired causal-tie-break order.
+        // If timestamps were used as the concurrent tie-break, this would tend to sort as:
+        //   high (earlier append) then low (later append).
+        journal.append(high.clone(), None).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(2)).await;
+        journal.append(low.clone(), None).await.unwrap();
+
+        let ordered = journal.read_causally_ordered().await.unwrap();
+        let ordered_ids: Vec<_> = ordered.iter().map(|e| e.event.id).collect();
+        assert_eq!(
+            ordered_ids,
+            vec![low.id, high.id],
+            "concurrent tie-break should use EventId ordering"
+        );
+    }
+
+    // Parity: disk and memory should agree on the deterministic order.
+    let disk_ids: Vec<_> = disk_journal
+        .read_causally_ordered()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|e| e.event.id)
+        .collect();
+    let memory_ids: Vec<_> = memory_journal
+        .read_causally_ordered()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|e| e.event.id)
+        .collect();
+    assert_eq!(disk_ids, memory_ids);
 }

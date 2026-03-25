@@ -167,11 +167,11 @@ impl<T: JournalEvent + 'static> Journal<T> for MemoryJournal<T> {
 
         // Sort by vector clock for causal ordering
         events_copy.sort_by(|a, b| {
-            CausalOrderingService::causal_compare(&a.vector_clock, &b.vector_clock).unwrap_or_else(
-                || {
-                    // For concurrent events, use timestamp as tiebreaker
-                    a.timestamp.cmp(&b.timestamp)
-                },
+            CausalOrderingService::total_compare_by_event_id(
+                &a.vector_clock,
+                a.event.id(),
+                &b.vector_clock,
+                b.event.id(),
             )
         });
 

@@ -10,6 +10,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+use crate::event::types::EventId;
+
 /// Vector clock data structure for causal ordering
 ///
 /// This is a pure data structure representing the causal history of an event.
@@ -112,6 +114,19 @@ impl CausalOrderingService {
         } else {
             None // Concurrent
         }
+    }
+
+    /// Deterministically compare two concurrent vector clocks using `EventId` as the tie-break.
+    ///
+    /// This is a total comparator intended for *iteration* surfaces such as
+    /// `Journal::read_causally_ordered()`. It must not use wall-clock timestamps.
+    pub fn total_compare_by_event_id(
+        a_clock: &VectorClock,
+        a_event_id: &EventId,
+        b_clock: &VectorClock,
+        b_event_id: &EventId,
+    ) -> std::cmp::Ordering {
+        Self::causal_compare(a_clock, b_clock).unwrap_or_else(|| a_event_id.cmp(b_event_id))
     }
 
     /// Calculate L1 (Manhattan) distance between two vector clocks.

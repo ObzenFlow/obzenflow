@@ -65,6 +65,10 @@ where
     ///
     /// Events MUST be ordered such that if A happened-before B,
     /// then A appears before B in the result
+    ///
+    /// For concurrent events (no happened-before relation), implementations MUST
+    /// return a deterministic total order. The current framework contract is to
+    /// break concurrent ties by `EventId` ordering, not by wall-clock time.
     async fn read_causally_ordered(&self) -> Result<Vec<EventEnvelope<T>>, JournalError>;
 
     /// Read events causally after the given event
