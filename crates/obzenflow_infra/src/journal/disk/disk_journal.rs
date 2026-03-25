@@ -523,19 +523,8 @@ impl<T: JournalEvent + 'static> Journal<T> for DiskJournal<T> {
     }
 
     async fn read_causally_ordered(&self) -> Result<Vec<EventEnvelope<T>>, JournalError> {
-        let mut events = self.read_all_raw().await?;
-
-        // Sort by vector clock for causal ordering
-        events.sort_by(|a, b| {
-            CausalOrderingService::total_compare_by_event_id(
-                &a.vector_clock,
-                a.event.id(),
-                &b.vector_clock,
-                b.event.id(),
-            )
-        });
-
-        Ok(events)
+        let events = self.read_all_raw().await?;
+        CausalOrderingService::order_envelopes_by_event_id(events)
     }
 
     async fn read_causally_after(

@@ -10,6 +10,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+use crate::journal::JournalError;
+
 use crate::event::types::EventId;
 
 /// Vector clock data structure for causal ordering
@@ -116,17 +118,32 @@ impl CausalOrderingService {
         }
     }
 
-    /// Deterministically compare two concurrent vector clocks using `EventId` as the tie-break.
+    /// A deterministic scalar derived from a vector clock.
     ///
-    /// This is a total comparator intended for *iteration* surfaces such as
-    /// `Journal::read_causally_ordered()`. It must not use wall-clock timestamps.
+    /// This scalar is strictly monotonic under happened-before: if `a` happened-before `b`, then
+    /// `causal_rank(a) < causal_rank(b)`.
+    pub fn causal_rank(clock: &VectorClock) -> u128 {
+        clock
+            .clocks
+            .values()
+            .fold(0u128, |acc, &seq| acc.saturating_add(seq as u128))
+    }
+
+    /// Deterministically compare two vector clocks using a monotonic scalar plus `EventId`.
+    ///
+    /// Note: a comparator defined as "happened-before first, otherwise `EventId`" is not a strict
+    /// total order and must not be used with `slice::sort_by`, as it can violate transitivity and
+    /// trigger Rust's sort-time total-order checks.
     pub fn total_compare_by_event_id(
         a_clock: &VectorClock,
         a_event_id: &EventId,
         b_clock: &VectorClock,
         b_event_id: &EventId,
     ) -> std::cmp::Ordering {
-        Self::causal_compare(a_clock, b_clock).unwrap_or_else(|| a_event_id.cmp(b_event_id))
+        let a_rank = Self::causal_rank(a_clock);
+        let b_rank = Self::causal_rank(b_clock);
+
+        a_rank.cmp(&b_rank).then_with(|| a_event_id.cmp(b_event_id))
     }
 
     /// Calculate L1 (Manhattan) distance between two vector clocks.
@@ -160,5 +177,26 @@ impl CausalOrderingService {
         }
 
         distance
+    }
+
+    /// Produce a deterministic causal readback order using a monotonic scalar plus `EventId`.
+    ///
+    /// This is intended for *iteration* APIs like `Journal::read_causally_ordered()` that must be
+    /// deterministic and must not use wall-clock timestamps. It guarantees that if `a`
+    /// happened-before `b`, then `a` appears before `b` in the output.
+    pub fn order_envelopes_by_event_id<T>(
+        mut events: Vec<super::EventEnvelope<T>>,
+    ) -> Result<Vec<super::EventEnvelope<T>>, JournalError>
+    where
+        T: super::JournalEvent,
+    {
+        // Fast path.
+        if events.len() <= 1 {
+            return Ok(events);
+        }
+
+        events.sort_by_cached_key(|e| (Self::causal_rank(&e.vector_clock), *e.event.id()));
+
+        Ok(events)
     }
 }

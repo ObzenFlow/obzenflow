@@ -162,20 +162,10 @@ impl<T: JournalEvent + 'static> Journal<T> for MemoryJournal<T> {
 
     async fn read_causally_ordered(&self) -> Result<Vec<EventEnvelope<T>>, JournalError> {
         let events = self.events.lock().unwrap();
-        let mut events_copy = events.clone();
+        let events_copy = events.clone();
         drop(events);
 
-        // Sort by vector clock for causal ordering
-        events_copy.sort_by(|a, b| {
-            CausalOrderingService::total_compare_by_event_id(
-                &a.vector_clock,
-                a.event.id(),
-                &b.vector_clock,
-                b.event.id(),
-            )
-        });
-
-        Ok(events_copy)
+        CausalOrderingService::order_envelopes_by_event_id(events_copy)
     }
 
     async fn read_causally_after(

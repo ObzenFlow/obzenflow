@@ -51,7 +51,10 @@ async fn test_journal_parity() {
         let _envelope3 = journal.append(event3.clone(), None).await.unwrap();
 
         // Event 4: Child of event 2
-        journal.append(event4.clone(), Some(&envelope2)).await.unwrap();
+        journal
+            .append(event4.clone(), Some(&envelope2))
+            .await
+            .unwrap();
     }
 
     // Compare results
