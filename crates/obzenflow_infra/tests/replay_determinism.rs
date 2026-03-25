@@ -742,6 +742,26 @@ async fn run_join_supervisor_once() -> Vec<JoinedRow> {
         .await
         .expect("read join journal");
 
+    let joined_env = events
+        .iter()
+        .find(|env| JoinedRow::from_event(&env.event).is_some())
+        .expect("expected at least one joined output event");
+
+    // FLOWIP-071h: join outputs must carry ancestry from both the matched reference state
+    // and the triggering stream input (no fan-in ancestry loss at merge boundaries).
+    let reference_key = WriterId::from(reference_stage).to_string();
+    let stream_key = WriterId::from(stream_stage).to_string();
+    assert_ne!(
+        joined_env.vector_clock.get(&reference_key),
+        0,
+        "joined output vector clock must include reference writer ancestry"
+    );
+    assert_ne!(
+        joined_env.vector_clock.get(&stream_key),
+        0,
+        "joined output vector clock must include stream writer ancestry"
+    );
+
     events
         .iter()
         .filter_map(|env| JoinedRow::from_event(&env.event))

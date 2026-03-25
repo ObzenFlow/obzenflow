@@ -11,7 +11,8 @@
 use obzenflow_core::event::context::{FlowContext, StageType};
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::types::SeqNo;
-use obzenflow_core::event::{ChainEventFactory, SystemEvent};
+use obzenflow_core::event::vector_clock::VectorClock;
+use obzenflow_core::event::{ChainEventFactory, EventEnvelope, SystemEvent};
 use obzenflow_core::journal::Journal;
 use obzenflow_core::StageId;
 use obzenflow_core::{ChainEvent, FlowId, WriterId};
@@ -332,6 +333,19 @@ pub struct JoinContext<H: JoinHandler> {
     /// Buffered EOF event to forward when draining completes
     pub buffered_eof: Option<ChainEvent>,
 
+    /// Stream-side envelope template used to parent drain-time emissions.
+    ///
+    /// This should be the *stream EOF envelope* so that drain-time outputs can be
+    /// parented with a frontier that includes stream-side ancestry even when the
+    /// join emitted zero outputs prior to draining (FLOWIP-071h).
+    pub(crate) drain_parent: Option<EventEnvelope<ChainEvent>>,
+
+    /// Conservative high-water clock for the reference side (FLOWIP-071h interim).
+    ///
+    /// This accumulates ancestry from reference envelopes as they are consumed
+    /// and is merged into stream-triggered output parents.
+    pub(crate) reference_high_water_clock: VectorClock,
+
     /// Stage instrumentation for metrics tracking
     pub instrumentation: Arc<StageInstrumentation>,
 
@@ -363,6 +377,9 @@ pub struct JoinContext<H: JoinHandler> {
 
     /// Pending data outputs blocked on downstream credits (Phase 1: bounded to one input).
     pub(crate) pending_outputs: VecDeque<ChainEvent>,
+
+    /// Parent envelope for pending outputs (input that produced them).
+    pub(crate) pending_parent: Option<EventEnvelope<ChainEvent>>,
 
     /// Pending state transition once blocked outputs are fully written.
     pub(crate) pending_transition: Option<PendingTransition>,

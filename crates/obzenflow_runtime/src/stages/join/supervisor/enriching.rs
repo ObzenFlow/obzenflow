@@ -13,6 +13,8 @@ use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::supervised_base::EventLoopDirective;
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::status::processing_status::ProcessingStatus;
+use obzenflow_core::event::vector_clock::CausalOrderingService;
+use obzenflow_core::event::EventEnvelope;
 use obzenflow_core::ChainEvent;
 use obzenflow_fsm::StateVariant;
 use std::collections::VecDeque;
@@ -69,6 +71,7 @@ pub(super) async fn dispatch_enriching<
                 obzenflow_core::event::ChainEventContent::FlowControl(signal) => {
                     if envelope.event.is_eof() {
                         ctx.buffered_eof = Some(envelope.event.clone());
+                        ctx.drain_parent = Some(envelope.clone());
                     }
 
                     let contract_reader_count = ctx.stream_contract_state.len();
@@ -189,6 +192,7 @@ pub(super) async fn dispatch_enriching<
                             ctx,
                             source_id,
                             VecDeque::from([event]),
+                            Some(&envelope),
                         )
                         .await?;
                         drop(
@@ -201,6 +205,12 @@ pub(super) async fn dispatch_enriching<
                         );
                         return Ok(EventLoopDirective::Continue);
                     }
+
+                    let mut merged_parent = envelope.clone();
+                    CausalOrderingService::update_with_parent(
+                        &mut merged_parent.vector_clock,
+                        &ctx.reference_high_water_clock,
+                    );
 
                     ctx.instrumentation
                         .in_flight_count
@@ -237,6 +247,7 @@ pub(super) async fn dispatch_enriching<
                                 ctx,
                                 source_id,
                                 events.into(),
+                                Some(&merged_parent),
                             )
                             .await?;
                         }
@@ -248,7 +259,7 @@ pub(super) async fn dispatch_enriching<
 
                             if route_to_error_journal(&error_event) {
                                 ctx.error_journal
-                                    .append(error_event, None)
+                                    .append(error_event, Some(&merged_parent))
                                     .await
                                     .map_err(|e| {
                                         format!("Failed to write join error event: {e}")
@@ -262,6 +273,7 @@ pub(super) async fn dispatch_enriching<
                                     ctx,
                                     source_id,
                                     VecDeque::from([error_event]),
+                                    Some(&merged_parent),
                                 )
                                 .await?;
                             }
@@ -336,6 +348,7 @@ async fn write_stage_outputs_and_ack<H: JoinHandler>(
     ctx: &mut JoinContext<H>,
     source_id: obzenflow_core::StageId,
     mut outputs: VecDeque<ChainEvent>,
+    pending_parent: Option<&EventEnvelope<ChainEvent>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if outputs.is_empty() {
         if let Some(reader) = ctx.backpressure_readers.get(&source_id) {
@@ -360,7 +373,7 @@ async fn write_stage_outputs_and_ack<H: JoinHandler>(
             ctx.stage_id,
             &ctx.data_journal,
             &ctx.system_journal,
-            /* pending_parent */ None,
+            pending_parent,
             &ctx.instrumentation,
             &ctx.backpressure_writer,
             &mut ctx.backpressure_pulse,
@@ -377,6 +390,7 @@ async fn write_stage_outputs_and_ack<H: JoinHandler>(
             DrainOutcome::BackedOff => {
                 ctx.pending_ack_upstream = Some(source_id);
                 ctx.pending_outputs = outputs;
+                ctx.pending_parent = pending_parent.cloned();
                 return Ok(());
             }
         }
