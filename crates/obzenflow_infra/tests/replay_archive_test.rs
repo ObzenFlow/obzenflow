@@ -153,6 +153,132 @@ async fn open_requires_completed_status_by_default() {
     assert!(matches!(err, ReplayError::IncompleteArchive { .. }));
 }
 
+/// Write a manifest with a custom `obzenflow_version` for version-compat tests.
+fn write_manifest_with_version(dir: &Path, version: &str) {
+    let mut stages = HashMap::new();
+    stages.insert(
+        "returns".to_string(),
+        RunManifestStage {
+            dsl_var: "source".to_string(),
+            stage_type: StageType::FiniteSource,
+            stage_id: "stage_01H000000000000000000000000".to_string(),
+            data_journal_file: "FiniteSource_returns_stage_01H000000000000000000000000.log"
+                .to_string(),
+            error_journal_file: "FiniteSource_returns_error_stage_01H000000000000000000000000.log"
+                .to_string(),
+        },
+    );
+
+    let manifest = RunManifest {
+        manifest_version: RUN_MANIFEST_VERSION.to_string(),
+        obzenflow_version: version.to_string(),
+        flow_id: "flow_01H000000000000000000000000".to_string(),
+        flow_name: "test_flow".to_string(),
+        created_at: Utc::now(),
+        replay: None,
+        stages,
+        system_journal_file: "system.log".to_string(),
+    };
+
+    let body = serde_json::to_string_pretty(&manifest).unwrap();
+    std::fs::write(dir.join(RUN_MANIFEST_FILENAME), body).unwrap();
+}
+
+#[tokio::test]
+async fn open_rejects_archive_from_newer_minor_version() {
+    let dir = tempdir().unwrap();
+    // Bump the minor version beyond what the framework reports.
+    let (major, minor, _patch) = {
+        let parts: Vec<u64> = OBZENFLOW_VERSION
+            .split('.')
+            .map(|p| p.parse().unwrap())
+            .collect();
+        (parts[0], parts[1], parts[2])
+    };
+    let future_version = format!("{}.{}.0", major, minor + 1);
+    write_manifest_with_version(dir.path(), &future_version);
+    write_system_log_completed(dir.path());
+
+    let err = DiskReplayArchive::open(dir.path().to_path_buf(), false)
+        .await
+        .err()
+        .unwrap();
+    assert!(
+        matches!(err, ReplayError::VersionMismatch { .. }),
+        "expected VersionMismatch for newer minor, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn open_rejects_archive_from_older_minor_version() {
+    let dir = tempdir().unwrap();
+    let (major, minor, _patch) = {
+        let parts: Vec<u64> = OBZENFLOW_VERSION
+            .split('.')
+            .map(|p| p.parse().unwrap())
+            .collect();
+        (parts[0], parts[1], parts[2])
+    };
+
+    // Only meaningful if minor > 0; otherwise skip gracefully.
+    if minor == 0 {
+        // Bump major instead to guarantee a mismatch.
+        let old_version = format!("{}.999.0", major.saturating_sub(1));
+        write_manifest_with_version(dir.path(), &old_version);
+    } else {
+        let old_version = format!("{}.{}.0", major, minor - 1);
+        write_manifest_with_version(dir.path(), &old_version);
+    }
+    write_system_log_completed(dir.path());
+
+    let err = DiskReplayArchive::open(dir.path().to_path_buf(), false)
+        .await
+        .err()
+        .unwrap();
+    assert!(
+        matches!(err, ReplayError::VersionMismatch { .. }),
+        "expected VersionMismatch for older minor, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn open_accepts_archive_with_different_patch_version() {
+    let dir = tempdir().unwrap();
+    let (major, minor, patch) = {
+        let parts: Vec<u64> = OBZENFLOW_VERSION
+            .split('.')
+            .map(|p| p.parse().unwrap())
+            .collect();
+        (parts[0], parts[1], parts[2])
+    };
+    // Use a different patch version (if current is 0, use 99; otherwise use 0).
+    let alt_patch = if patch == 0 { 99 } else { 0 };
+    let compat_version = format!("{}.{}.{}", major, minor, alt_patch);
+    write_manifest_with_version(dir.path(), &compat_version);
+    write_system_log_completed(dir.path());
+
+    let archive = DiskReplayArchive::open(dir.path().to_path_buf(), false)
+        .await
+        .expect("same major.minor with different patch should be accepted");
+    assert_eq!(archive.status(), ArchiveStatus::Completed);
+}
+
+#[tokio::test]
+async fn open_rejects_archive_with_unparseable_version() {
+    let dir = tempdir().unwrap();
+    write_manifest_with_version(dir.path(), "not-a-version");
+    write_system_log_completed(dir.path());
+
+    let err = DiskReplayArchive::open(dir.path().to_path_buf(), false)
+        .await
+        .err()
+        .unwrap();
+    assert!(
+        matches!(err, ReplayError::VersionMismatch { .. }),
+        "unparseable version should fail closed as VersionMismatch, got: {err}"
+    );
+}
+
 #[tokio::test]
 async fn open_source_reader_errors_when_journal_missing() {
     let dir = tempdir().unwrap();
