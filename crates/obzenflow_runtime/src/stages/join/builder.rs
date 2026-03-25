@@ -13,6 +13,7 @@ use crate::supervised_base::{
     BuilderError, ChannelBuilder, HandleBuilder, HandlerSupervisedExt,
     HandlerSupervisedWithExternalEvents, SupervisorBuilder, SupervisorTaskBuilder,
 };
+use obzenflow_core::event::vector_clock::VectorClock;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{ChainEvent, StageId};
 
@@ -124,6 +125,8 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
             stream_contract_state: Vec::new(),
             stream_last_contract_check: None,
             buffered_eof: None,
+            drain_parent: None,
+            reference_high_water_clock: VectorClock::new(),
             instrumentation: instrumentation.clone(),
             control_strategy: self.control_strategy.clone(),
             reference_subscription_factory,
@@ -135,6 +138,7 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
             backpressure_writer: self.resources.backpressure_writer.clone(),
             backpressure_readers: self.resources.backpressure_readers.clone(),
             pending_outputs: std::collections::VecDeque::new(),
+            pending_parent: None,
             pending_transition: None,
             pending_ack_upstream: None,
             backpressure_pulse:

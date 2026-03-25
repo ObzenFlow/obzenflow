@@ -11,6 +11,7 @@ use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::payloads::observability_payload::{
     MetricsLifecycle, ObservabilityPayload,
 };
+use obzenflow_core::event::vector_clock::CausalOrderingService;
 use obzenflow_core::event::{ChainEventFactory, EventEnvelope};
 use obzenflow_core::{ChainEvent, StageId};
 use serde_json::json;
@@ -73,7 +74,7 @@ pub(super) async fn flush_pending_outputs<
             ctx.stage_id,
             &ctx.data_journal,
             &ctx.system_journal,
-            /* pending_parent */ None,
+            ctx.pending_parent.as_ref(),
             &ctx.instrumentation,
             &ctx.backpressure_writer,
             &mut ctx.backpressure_pulse,
@@ -96,6 +97,7 @@ pub(super) async fn flush_pending_outputs<
             reader.ack_consumed(1);
         }
     }
+    ctx.pending_parent = None;
 
     if ctx.pending_outputs.is_empty()
         && matches!(
@@ -107,6 +109,18 @@ pub(super) async fn flush_pending_outputs<
     }
 
     Ok(FlushOutcome::Drained)
+}
+
+pub(super) fn observe_reference_envelope<H: JoinHandler>(
+    ctx: &mut JoinContext<H>,
+    envelope: &EventEnvelope<ChainEvent>,
+) {
+    // Conservative interim for FLOWIP-071h: merge all reference-side ancestry into one
+    // high-water clock (component-wise max).
+    CausalOrderingService::update_with_parent(
+        &mut ctx.reference_high_water_clock,
+        &envelope.vector_clock,
+    );
 }
 
 fn track_output_event_for_pending_source<

@@ -247,6 +247,24 @@ async fn live_join_processes_stream_without_reference_eof() {
         .read_causally_ordered()
         .await
         .expect("read join journal");
+    let joined_env = events
+        .iter()
+        .find(|env| JoinedRow::from_event(&env.event).is_some())
+        .expect("joined output envelope present");
+
+    // FLOWIP-071h: fan-in outputs must preserve ancestry from both contributors.
+    let reference_key = WriterId::from(reference_stage).to_string();
+    let stream_key = WriterId::from(stream_stage).to_string();
+    assert_ne!(
+        joined_env.vector_clock.get(&reference_key),
+        0,
+        "joined output vector clock must include reference writer ancestry"
+    );
+    assert_ne!(
+        joined_env.vector_clock.get(&stream_key),
+        0,
+        "joined output vector clock must include stream writer ancestry"
+    );
     let joined: Vec<JoinedRow> = events
         .iter()
         .filter_map(|env| JoinedRow::from_event(&env.event))

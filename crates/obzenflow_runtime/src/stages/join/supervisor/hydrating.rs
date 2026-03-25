@@ -56,6 +56,9 @@ pub(super) async fn dispatch_hydrating<
                 .event_loops_with_work_total
                 .fetch_add(1, Ordering::Relaxed);
 
+            // Capture reference-side ancestry for FLOWIP-071h (conservative high-water interim).
+            common::observe_reference_envelope(ctx, &envelope);
+
             let directive = match &envelope.event.content {
                 obzenflow_core::event::ChainEventContent::FlowControl(signal) => {
                     let contract_reader_count = ctx.reference_contract_state.len();

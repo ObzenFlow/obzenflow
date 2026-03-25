@@ -6,6 +6,7 @@ use crate::messaging::PollResult;
 use crate::stages::common::handlers::JoinHandler;
 use crate::stages::common::supervision::error_routing::route_to_error_journal;
 use crate::supervised_base::EventLoopDirective;
+use obzenflow_core::event::vector_clock::CausalOrderingService;
 use obzenflow_fsm::StateVariant;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
@@ -55,6 +56,9 @@ pub(super) async fn dispatch_draining<
                     .event_loops_with_work_total
                     .fetch_add(1, Ordering::Relaxed);
 
+                // Capture reference-side ancestry for FLOWIP-071h (conservative high-water interim).
+                common::observe_reference_envelope(ctx, &envelope);
+
                 if !envelope.event.is_control() {
                     let event = envelope.event.clone();
                     let reference_stage_id = ctx.reference_stage_id;
@@ -101,6 +105,7 @@ pub(super) async fn dispatch_draining<
                             } else {
                                 ctx.pending_outputs.extend(results);
                                 ctx.pending_ack_upstream = upstream_stage;
+                                ctx.pending_parent = Some(envelope.clone());
                             }
                         }
                         Err(err) => {
@@ -171,6 +176,12 @@ pub(super) async fn dispatch_draining<
                         })
                         .unwrap_or(ctx.reference_stage_id);
 
+                    let mut merged_parent = envelope.clone();
+                    CausalOrderingService::update_with_parent(
+                        &mut merged_parent.vector_clock,
+                        &ctx.reference_high_water_clock,
+                    );
+
                     ctx.instrumentation
                         .in_flight_count
                         .fetch_add(1, Ordering::Relaxed);
@@ -212,6 +223,7 @@ pub(super) async fn dispatch_draining<
                             } else {
                                 ctx.pending_outputs.extend(events);
                                 ctx.pending_ack_upstream = upstream_stage;
+                                ctx.pending_parent = Some(merged_parent);
                             }
                         }
                         Err(err) => {
@@ -223,7 +235,7 @@ pub(super) async fn dispatch_draining<
                             let upstream_stage = subscription.last_delivered_upstream_stage();
                             if route_to_error_journal(&error_event) {
                                 ctx.error_journal
-                                    .append(error_event, None)
+                                    .append(error_event, Some(&merged_parent))
                                     .await
                                     .map_err(|e| {
                                         format!("Failed to write join drain error event: {e}")
@@ -236,6 +248,7 @@ pub(super) async fn dispatch_draining<
                             } else {
                                 ctx.pending_outputs.push_back(error_event);
                                 ctx.pending_ack_upstream = upstream_stage;
+                                ctx.pending_parent = Some(merged_parent);
                             }
                         }
                     }
@@ -276,6 +289,15 @@ pub(super) async fn dispatch_draining<
     ctx.handler_state = final_state;
 
     ctx.pending_outputs.extend(events);
+    if !ctx.pending_outputs.is_empty() {
+        if let Some(mut frontier) = ctx.drain_parent.clone() {
+            CausalOrderingService::update_with_parent(
+                &mut frontier.vector_clock,
+                &ctx.reference_high_water_clock,
+            );
+            ctx.pending_parent = Some(frontier);
+        }
+    }
     ctx.pending_transition = Some(PendingTransition::DrainComplete);
     Ok(EventLoopDirective::Continue)
 }
@@ -329,6 +351,15 @@ async fn dispatch_draining_live<
         ctx.handler_state = final_state;
 
         ctx.pending_outputs.extend(events);
+        if !ctx.pending_outputs.is_empty() {
+            if let Some(mut frontier) = ctx.drain_parent.clone() {
+                CausalOrderingService::update_with_parent(
+                    &mut frontier.vector_clock,
+                    &ctx.reference_high_water_clock,
+                );
+                ctx.pending_parent = Some(frontier);
+            }
+        }
         ctx.pending_transition = Some(PendingTransition::DrainComplete);
     }
 

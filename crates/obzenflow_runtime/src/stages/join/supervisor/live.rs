@@ -13,6 +13,8 @@ use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::supervised_base::EventLoopDirective;
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::status::processing_status::ProcessingStatus;
+use obzenflow_core::event::vector_clock::CausalOrderingService;
+use obzenflow_core::event::EventEnvelope;
 use obzenflow_core::ChainEvent;
 use std::collections::VecDeque;
 use std::sync::atomic::Ordering;
@@ -107,6 +109,9 @@ async fn poll_live_reference<H: JoinHandler + Clone + std::fmt::Debug + Send + S
                 .event_loops_with_work_total
                 .fetch_add(1, Ordering::Relaxed);
 
+            // Capture reference-side ancestry for FLOWIP-071h (conservative high-water interim).
+            common::observe_reference_envelope(ctx, &envelope);
+
             ctx.reference_since_last_stream = ctx.reference_since_last_stream.saturating_add(1);
             ctx.instrumentation
                 .join_reference_since_last_stream
@@ -191,6 +196,7 @@ async fn poll_live_reference<H: JoinHandler + Clone + std::fmt::Debug + Send + S
                             ctx,
                             source_id,
                             VecDeque::from([event]),
+                            Some(&envelope),
                         )
                         .await?;
                         drop(
@@ -239,6 +245,7 @@ async fn poll_live_reference<H: JoinHandler + Clone + std::fmt::Debug + Send + S
                                 ctx,
                                 source_id,
                                 events.into(),
+                                Some(&envelope),
                             )
                             .await?;
                         }
@@ -251,7 +258,7 @@ async fn poll_live_reference<H: JoinHandler + Clone + std::fmt::Debug + Send + S
 
                             if route_to_error_journal(&error_event) {
                                 ctx.error_journal
-                                    .append(error_event, None)
+                                    .append(error_event, Some(&envelope))
                                     .await
                                     .map_err(|e| {
                                         format!("Failed to write join error event: {e}")
@@ -265,6 +272,7 @@ async fn poll_live_reference<H: JoinHandler + Clone + std::fmt::Debug + Send + S
                                     ctx,
                                     source_id,
                                     VecDeque::from([error_event]),
+                                    Some(&envelope),
                                 )
                                 .await?;
                             }
@@ -321,6 +329,7 @@ async fn poll_live_stream<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync
                 obzenflow_core::event::ChainEventContent::FlowControl(signal) => {
                     if envelope.event.is_eof() {
                         ctx.buffered_eof = Some(envelope.event.clone());
+                        ctx.drain_parent = Some(envelope.clone());
                     }
 
                     let contract_reader_count = ctx.stream_contract_state.len();
@@ -414,6 +423,7 @@ async fn poll_live_stream<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync
                             ctx,
                             source_id,
                             VecDeque::from([event]),
+                            Some(&envelope),
                         )
                         .await?;
                         drop(
@@ -426,6 +436,12 @@ async fn poll_live_stream<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync
                         );
                         return Ok(Some(EventLoopDirective::Continue));
                     }
+
+                    let mut merged_parent = envelope.clone();
+                    CausalOrderingService::update_with_parent(
+                        &mut merged_parent.vector_clock,
+                        &ctx.reference_high_water_clock,
+                    );
 
                     ctx.instrumentation
                         .in_flight_count
@@ -462,6 +478,7 @@ async fn poll_live_stream<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync
                                 ctx,
                                 source_id,
                                 events.into(),
+                                Some(&merged_parent),
                             )
                             .await?;
                         }
@@ -474,7 +491,7 @@ async fn poll_live_stream<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync
 
                             if route_to_error_journal(&error_event) {
                                 ctx.error_journal
-                                    .append(error_event, None)
+                                    .append(error_event, Some(&merged_parent))
                                     .await
                                     .map_err(|e| {
                                         format!("Failed to write join error event: {e}")
@@ -488,6 +505,7 @@ async fn poll_live_stream<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync
                                     ctx,
                                     source_id,
                                     VecDeque::from([error_event]),
+                                    Some(&merged_parent),
                                 )
                                 .await?;
                             }
@@ -522,6 +540,7 @@ async fn write_stage_outputs_and_ack<H: JoinHandler>(
     ctx: &mut JoinContext<H>,
     source_id: obzenflow_core::StageId,
     mut outputs: VecDeque<ChainEvent>,
+    pending_parent: Option<&EventEnvelope<ChainEvent>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if outputs.is_empty() {
         if let Some(reader) = ctx.backpressure_readers.get(&source_id) {
@@ -546,7 +565,7 @@ async fn write_stage_outputs_and_ack<H: JoinHandler>(
             ctx.stage_id,
             &ctx.data_journal,
             &ctx.system_journal,
-            /* pending_parent */ None,
+            pending_parent,
             &ctx.instrumentation,
             &ctx.backpressure_writer,
             &mut ctx.backpressure_pulse,
@@ -563,6 +582,7 @@ async fn write_stage_outputs_and_ack<H: JoinHandler>(
             DrainOutcome::BackedOff => {
                 ctx.pending_ack_upstream = Some(source_id);
                 ctx.pending_outputs = outputs;
+                ctx.pending_parent = pending_parent.cloned();
                 return Ok(());
             }
         }
