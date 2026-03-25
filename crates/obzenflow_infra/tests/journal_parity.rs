@@ -178,3 +178,39 @@ async fn test_journal_concurrent_tiebreak_is_event_id() {
         .collect();
     assert_eq!(disk_ids, memory_ids);
 }
+
+#[tokio::test]
+async fn test_read_causally_after_matches_slice_with_concurrent_events() {
+    let temp_dir = TempDir::new().unwrap();
+    let owner = JournalOwner::stage(StageId::new());
+    let log_path = temp_dir.path().join("after_slice_test.log");
+
+    let disk_journal = Arc::new(DiskJournal::with_owner(log_path, owner.clone()).unwrap())
+        as Arc<dyn Journal<ChainEvent> + Send + Sync>;
+    let memory_journal =
+        Arc::new(MemoryJournal::with_owner(owner)) as Arc<dyn Journal<ChainEvent> + Send + Sync>;
+
+    let writer_a = WriterId::from(StageId::new());
+    let writer_b = WriterId::from(StageId::new());
+
+    let event_a = ChainEventFactory::data_event(writer_a, "test.a", json!({ "seq": "a" }));
+    let event_b = ChainEventFactory::data_event(writer_b, "test.b", json!({ "seq": "b" }));
+    let event_c = ChainEventFactory::data_event(writer_a, "test.c", json!({ "seq": "c" }));
+
+    for journal in [&disk_journal, &memory_journal] {
+        let env_a = journal.append(event_a.clone(), None).await.unwrap();
+        let _env_b = journal.append(event_b.clone(), None).await.unwrap();
+        let _env_c = journal.append(event_c.clone(), Some(&env_a)).await.unwrap();
+
+        let ordered = journal.read_causally_ordered().await.unwrap();
+        assert_eq!(ordered.len(), 3);
+
+        let reference_id = ordered[0].event.id;
+        let expected_ids: Vec<_> = ordered.iter().skip(1).map(|e| e.event.id).collect();
+
+        let after = journal.read_causally_after(&reference_id).await.unwrap();
+        let after_ids: Vec<_> = after.into_iter().map(|e| e.event.id).collect();
+
+        assert_eq!(after_ids, expected_ids);
+    }
+}
