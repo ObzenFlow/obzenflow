@@ -114,4 +114,3 @@ async fn stall_detection_does_not_emit_system_contract_failure() {
         "stall detection must not emit ContractStatus(pass=false) into system journal"
     );
 }
-
