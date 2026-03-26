@@ -16,7 +16,7 @@ pub mod transform;
 pub use join::JoinHandler;
 pub use observer::ObserverHandler;
 pub use resource_managed::ResourceManaged;
-pub use sink::SinkHandler;
+pub use sink::{CommitReceipt, SinkConsumeReport, SinkHandler, SinkLifecycleReport};
 pub use source::{
     AsyncFiniteSourceHandler, AsyncInfiniteSourceHandler, FiniteSourceHandler,
     InfiniteSourceHandler,

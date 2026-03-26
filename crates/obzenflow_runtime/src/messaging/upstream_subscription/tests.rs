@@ -9,9 +9,11 @@ use super::{
 use crate::messaging::upstream_subscription_policy::build_policy_stack_for_upstream;
 use async_trait::async_trait;
 use obzenflow_core::control_middleware::{CircuitBreakerSnapshotter, RateLimiterSnapshotter};
+use obzenflow_core::event::context::causality_context::CausalityContext;
 use obzenflow_core::event::event_envelope::EventEnvelope;
 use obzenflow_core::event::identity::JournalWriterId;
 use obzenflow_core::event::journal_event::JournalEvent;
+use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::system_event::{
     ContractResultStatusLabel, SystemEvent, SystemEventType,
@@ -19,6 +21,7 @@ use obzenflow_core::event::system_event::{
 use obzenflow_core::event::types::{
     Count, DurationMs, SeqNo, ViolationCause as EventViolationCause,
 };
+use obzenflow_core::event::vector_clock::VectorClock;
 use obzenflow_core::event::{ChainEvent, ChainEventContent, ChainEventFactory};
 use obzenflow_core::id::JournalId;
 use obzenflow_core::journal::journal_error::JournalError;
@@ -527,6 +530,55 @@ async fn final_append_failure_keeps_final_emitted_false() {
 }
 
 #[tokio::test]
+async fn diagnostics_only_eof_check_does_not_emit_final_or_latch_state() {
+    let upstream_stage = StageId::new();
+    let upstream_owner = JournalOwner::stage(upstream_stage);
+    let upstream_journal: Arc<dyn Journal<ChainEvent>> = Arc::new(TestJournal::new(upstream_owner));
+    let upstreams = [(upstream_stage, "upstream".to_string(), upstream_journal)];
+
+    let mut subscription = UpstreamSubscription::new_with_names("test_owner", &upstreams)
+        .await
+        .unwrap();
+
+    let contract_stage = StageId::new();
+    let contract_owner = JournalOwner::stage(contract_stage);
+    let contract_journal: Arc<dyn Journal<ChainEvent>> = Arc::new(TestJournal::new(contract_owner));
+
+    subscription = subscription.with_contracts(ContractsWiring {
+        writer_id: WriterId::from(contract_stage),
+        contract_journal: contract_journal.clone(),
+        config: ContractConfig::default(),
+        system_journal: None,
+        reader_stage: None,
+        control_middleware: Arc::new(NoControlMiddleware),
+        include_delivery_contract: true,
+        cycle_guard_config: None,
+    });
+
+    subscription.state.mark_reader_eof(0);
+
+    let mut reader_progress = [ReaderProgress::new(upstream_stage)];
+    reader_progress[0].reader_seq = SeqNo(1);
+    reader_progress[0].receipted_seq = SeqNo(1);
+
+    let _status = subscription
+        .check_contracts_diagnostics_only(&mut reader_progress)
+        .await;
+
+    assert!(!reader_progress[0].final_emitted);
+    assert!(!reader_progress[0].contract_violated);
+
+    let events = contract_journal.read_causally_ordered().await.unwrap();
+    assert!(
+        !events.iter().any(|env| matches!(
+            &env.event.content,
+            ChainEventContent::FlowControl(FlowControlPayload::ConsumptionFinal { .. })
+        )),
+        "diagnostics-only checks must not emit final contract evidence"
+    );
+}
+
+#[tokio::test]
 async fn contract_status_append_failure_keeps_final_emitted_false() {
     let upstream_stage = StageId::new();
     let upstream_owner = JournalOwner::stage(upstream_stage);
@@ -654,6 +706,140 @@ async fn progress_contract_heartbeats_are_suppressed_until_data_observed() {
 }
 
 #[tokio::test]
+async fn progress_emission_uses_receipt_watermark_when_delivery_contract_enabled() {
+    let upstream_stage = StageId::new();
+    let upstream_owner = JournalOwner::stage(upstream_stage);
+    let upstream_journal: Arc<dyn Journal<ChainEvent>> = Arc::new(TestJournal::new(upstream_owner));
+    let upstreams = [(upstream_stage, "upstream".to_string(), upstream_journal)];
+
+    let mut subscription = UpstreamSubscription::new_with_names("test_owner", &upstreams)
+        .await
+        .unwrap();
+
+    let contract_stage = StageId::new();
+    let contract_owner = JournalOwner::stage(contract_stage);
+    let contract_journal: Arc<dyn Journal<ChainEvent>> = Arc::new(TestJournal::new(contract_owner));
+
+    subscription = subscription.with_contracts(ContractsWiring {
+        writer_id: WriterId::from(contract_stage),
+        contract_journal: contract_journal.clone(),
+        config: ContractConfig::default(),
+        system_journal: None,
+        reader_stage: None,
+        control_middleware: Arc::new(NoControlMiddleware),
+        include_delivery_contract: true,
+        cycle_guard_config: None,
+    });
+
+    let read_event_id = EventId::new();
+    let receipted_event_id = EventId::new();
+    let mut read_clock = VectorClock::new();
+    read_clock.clocks.insert("upstream".to_string(), 3);
+    let mut receipted_clock = VectorClock::new();
+    receipted_clock.clocks.insert("upstream".to_string(), 1);
+
+    let mut reader_progress = [ReaderProgress::new(upstream_stage)];
+    reader_progress[0].reader_seq = SeqNo(3);
+    reader_progress[0].receipted_seq = SeqNo(1);
+    reader_progress[0].last_event_id = Some(read_event_id);
+    reader_progress[0].last_vector_clock = Some(read_clock);
+    reader_progress[0].last_receipted_event_id = Some(receipted_event_id);
+    reader_progress[0].last_receipted_vector_clock = Some(receipted_clock.clone());
+
+    let status = subscription.check_contracts(&mut reader_progress).await;
+    assert!(matches!(status, ContractStatus::ProgressEmitted));
+    assert_eq!(reader_progress[0].last_progress_seq, SeqNo(1));
+
+    let events = contract_journal.read_causally_ordered().await.unwrap();
+    let progress = events
+        .iter()
+        .find_map(|env| match &env.event.content {
+            ChainEventContent::FlowControl(FlowControlPayload::ConsumptionProgress {
+                reader_seq,
+                last_event_id,
+                vector_clock,
+                ..
+            }) => Some((*reader_seq, *last_event_id, vector_clock.clone())),
+            _ => None,
+        })
+        .expect("expected ConsumptionProgress event");
+
+    assert_eq!(progress.0, SeqNo(1));
+    assert_eq!(progress.1, Some(receipted_event_id));
+    assert_eq!(progress.2, Some(receipted_clock));
+}
+
+#[tokio::test]
+async fn record_delivery_receipt_advances_only_when_receipts_become_contiguous() {
+    let upstream_stage = StageId::new();
+    let upstream_owner = JournalOwner::stage(upstream_stage);
+    let upstream_journal: Arc<dyn Journal<ChainEvent>> = Arc::new(TestJournal::new(upstream_owner));
+    let upstreams = [(upstream_stage, "upstream".to_string(), upstream_journal)];
+
+    let mut subscription = UpstreamSubscription::new_with_names("test_owner", &upstreams)
+        .await
+        .unwrap();
+
+    let contract_stage = StageId::new();
+    let contract_owner = JournalOwner::stage(contract_stage);
+    let contract_journal: Arc<dyn Journal<ChainEvent>> = Arc::new(TestJournal::new(contract_owner));
+
+    subscription = subscription.with_contracts(ContractsWiring {
+        writer_id: WriterId::from(contract_stage),
+        contract_journal,
+        config: ContractConfig::default(),
+        system_journal: None,
+        reader_stage: None,
+        control_middleware: Arc::new(NoControlMiddleware),
+        include_delivery_contract: true,
+        cycle_guard_config: None,
+    });
+
+    let writer_id = WriterId::from(upstream_stage);
+    let first = ChainEventFactory::data_event(writer_id, "test.event", json!({"seq": 1}));
+    let second = ChainEventFactory::data_event(writer_id, "test.event", json!({"seq": 2}));
+
+    let mut clock_1 = VectorClock::new();
+    clock_1.clocks.insert("upstream".to_string(), 1);
+    let mut clock_2 = VectorClock::new();
+    clock_2.clocks.insert("upstream".to_string(), 2);
+
+    let mut reader_progress = [ReaderProgress::new(upstream_stage)];
+    reader_progress[0].reader_seq = SeqNo(1);
+    reader_progress[0].track_pending_receipt(first.id, first.clone(), clock_1);
+    reader_progress[0].reader_seq = SeqNo(2);
+    reader_progress[0].track_pending_receipt(second.id, second.clone(), clock_2.clone());
+
+    let second_receipt = ChainEventFactory::delivery_event(
+        WriterId::from(contract_stage),
+        DeliveryPayload::success("dest", DeliveryMethod::Noop, None),
+    )
+    .with_causality(CausalityContext::with_parent(second.id));
+
+    assert!(subscription
+        .record_delivery_receipt(&second_receipt, &mut reader_progress)
+        .is_none());
+    assert_eq!(reader_progress[0].receipted_seq, SeqNo(0));
+
+    let first_receipt = ChainEventFactory::delivery_event(
+        WriterId::from(contract_stage),
+        DeliveryPayload::success("dest", DeliveryMethod::Noop, None),
+    )
+    .with_causality(CausalityContext::with_parent(first.id));
+
+    let watermark = subscription
+        .record_delivery_receipt(&first_receipt, &mut reader_progress)
+        .expect("expected contiguous receipts to advance watermark");
+
+    assert_eq!(watermark.0, SeqNo(2));
+    assert_eq!(watermark.1, second.id);
+    assert_eq!(watermark.2, clock_2);
+    assert_eq!(reader_progress[0].receipted_seq, SeqNo(2));
+    assert!(reader_progress[0].pending_receipts.is_empty());
+    assert!(reader_progress[0].committed_out_of_order.is_empty());
+}
+
+#[tokio::test]
 async fn stall_append_failure_does_not_set_stalled_since() {
     let upstream_stage = StageId::new();
     let upstream_owner = JournalOwner::stage(upstream_stage);
@@ -696,7 +882,7 @@ async fn stall_append_failure_does_not_set_stalled_since() {
     });
 
     let mut reader_progress = [ReaderProgress::new(upstream_stage)];
-    reader_progress[0].last_progress_instant =
+    reader_progress[0].last_read_instant =
         Some(Instant::now() - std::time::Duration::from_millis(250));
     reader_progress[0].last_progress_seq = reader_progress[0].reader_seq;
 

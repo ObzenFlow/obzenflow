@@ -30,11 +30,14 @@ pub use types::{
 use crate::contracts::ContractChain;
 use crate::messaging::upstream_subscription_policy::ContractPolicyStack;
 use obzenflow_core::control_middleware::ControlMiddlewareProvider;
+use obzenflow_core::event::payloads::delivery_payload::DeliveryResult;
 use obzenflow_core::event::types::SeqNo;
-use obzenflow_core::event::{ChainEvent, JournalEvent};
+use obzenflow_core::event::vector_clock::VectorClock;
+use obzenflow_core::event::{ChainEvent, EventEnvelope, JournalEvent, JournalWriterId};
 use obzenflow_core::journal::journal_reader::JournalReader;
-use obzenflow_core::StageId;
+use obzenflow_core::{EventId, StageId};
 use std::sync::Arc;
+use tokio::time::Instant;
 
 /// Subscription coordinator that manages reading from multiple upstream journals
 ///
@@ -112,6 +115,37 @@ where
         self.last_delivered_upstream_stage
     }
 
+    fn uses_receipt_watermark(&self) -> bool {
+        self.contract_tracker
+            .as_ref()
+            .map(|tracker| tracker.receipt_aware_progress)
+            .unwrap_or(false)
+    }
+
+    fn progress_seq(&self, progress: &ReaderProgress) -> SeqNo {
+        if self.uses_receipt_watermark() {
+            progress.receipted_seq
+        } else {
+            progress.reader_seq
+        }
+    }
+
+    fn progress_last_event_id(&self, progress: &ReaderProgress) -> Option<EventId> {
+        if self.uses_receipt_watermark() {
+            progress.last_receipted_event_id
+        } else {
+            progress.last_event_id
+        }
+    }
+
+    fn progress_vector_clock(&self, progress: &ReaderProgress) -> Option<VectorClock> {
+        if self.uses_receipt_watermark() {
+            progress.last_receipted_vector_clock.clone()
+        } else {
+            progress.last_vector_clock.clone()
+        }
+    }
+
     /// Bridge a sink delivery receipt write into the edge-scoped `ContractChain`
     /// for the upstream that delivered the consumed parent event.
     ///
@@ -147,6 +181,108 @@ where
         // The receipt is written by the sink (the reader stage for this subscription).
         // SeqNo(0) because receipt accounting does not use sequence numbers.
         chain.on_write(receipt, reader_stage, SeqNo(0));
+    }
+
+    /// Record a just-journalled delivery receipt and advance the receipt watermark if possible.
+    ///
+    /// This is called by sink supervisors after appending a `ChainEventContent::Delivery` event.
+    /// It updates per-upstream `ReaderProgress` bookkeeping and returns the new receipt watermark
+    /// triple when (and only when) receipts become contiguous.
+    ///
+    /// `DeliveryResult::Buffered` receipts are recorded for auditing but do **not** advance the
+    /// receipt watermark or clear pending receipt metadata.
+    pub fn record_delivery_receipt(
+        &mut self,
+        receipt: &ChainEvent,
+        reader_progress: &mut [ReaderProgress],
+    ) -> Option<(SeqNo, EventId, VectorClock)> {
+        if !self.uses_receipt_watermark() {
+            return None;
+        }
+
+        let Some(parent_id) = receipt.causality.parent_ids.first().copied() else {
+            tracing::warn!(
+                owner = %self.owner_label,
+                receipt_id = %receipt.id,
+                "record_delivery_receipt: receipt missing parent causality"
+            );
+            return None;
+        };
+
+        let Some(index) = reader_progress
+            .iter()
+            .enumerate()
+            .find_map(|(index, progress)| progress.pending_receipts.get(&parent_id).map(|_| index))
+        else {
+            tracing::warn!(
+                owner = %self.owner_label,
+                receipt_id = %receipt.id,
+                ?parent_id,
+                "record_delivery_receipt: no pending receipt metadata for parent"
+            );
+            return None;
+        };
+
+        let upstream_stage = reader_progress[index].stage_id;
+        self.notify_delivery_receipt(receipt, upstream_stage);
+
+        let obzenflow_core::event::ChainEventContent::Delivery(payload) = &receipt.content else {
+            tracing::warn!(
+                owner = %self.owner_label,
+                receipt_id = %receipt.id,
+                ?upstream_stage,
+                ?parent_id,
+                "record_delivery_receipt: non-delivery event passed to receipt recorder"
+            );
+            return None;
+        };
+
+        if matches!(&payload.result, DeliveryResult::Buffered { .. }) {
+            return None;
+        }
+
+        let previous_seq = reader_progress[index].receipted_seq;
+        if reader_progress[index].mark_receipted(parent_id) {
+            reader_progress[index].last_read_instant = Some(Instant::now());
+            if reader_progress[index].receipted_seq != previous_seq {
+                if let (Some(event_id), Some(vector_clock)) = (
+                    reader_progress[index].last_receipted_event_id,
+                    reader_progress[index].last_receipted_vector_clock.clone(),
+                ) {
+                    return Some((reader_progress[index].receipted_seq, event_id, vector_clock));
+                }
+            }
+        } else {
+            tracing::debug!(
+                owner = %self.owner_label,
+                ?upstream_stage,
+                ?parent_id,
+                "record_delivery_receipt: parent was not pending when receipt arrived"
+            );
+        }
+
+        None
+    }
+
+    pub fn pending_receipt_envelope(
+        &self,
+        parent_event_id: EventId,
+        reader_progress: &[ReaderProgress],
+    ) -> Option<(StageId, EventEnvelope<ChainEvent>)> {
+        reader_progress.iter().find_map(|progress| {
+            progress
+                .pending_receipts
+                .get(&parent_event_id)
+                .map(|pending| {
+                    let envelope = EventEnvelope {
+                        journal_writer_id: JournalWriterId::default(),
+                        vector_clock: pending.vector_clock.clone(),
+                        timestamp: chrono::Utc::now(),
+                        event: pending.event.clone(),
+                    };
+                    (progress.stage_id, envelope)
+                })
+        })
     }
 
     /// Retrieve and clear the most recent EOF accounting outcome, if any.

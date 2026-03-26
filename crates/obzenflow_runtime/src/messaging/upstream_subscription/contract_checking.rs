@@ -18,6 +18,12 @@ use obzenflow_core::event::{
 use obzenflow_core::{ContractResult, ViolationCause};
 use tokio::time::Instant;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ContractCheckMode {
+    Authoritative,
+    DiagnosticsOnly,
+}
+
 fn contract_result_labels_for_emission(
     result: &ContractResult,
     pending_label: ContractResultStatusLabel,
@@ -47,6 +53,23 @@ where
         &mut self,
         reader_progress: &mut [ReaderProgress],
     ) -> ContractStatus {
+        self.check_contracts_with_mode(reader_progress, ContractCheckMode::Authoritative)
+            .await
+    }
+
+    pub async fn check_contracts_diagnostics_only(
+        &mut self,
+        reader_progress: &mut [ReaderProgress],
+    ) -> ContractStatus {
+        self.check_contracts_with_mode(reader_progress, ContractCheckMode::DiagnosticsOnly)
+            .await
+    }
+
+    async fn check_contracts_with_mode(
+        &mut self,
+        reader_progress: &mut [ReaderProgress],
+        mode: ContractCheckMode,
+    ) -> ContractStatus {
         if self.contract_tracker.is_none() {
             return ContractStatus::Healthy;
         };
@@ -68,12 +91,22 @@ where
             self.check_progress_contracts_for_reader(progress, index, &mut status)
                 .await;
 
-            if self.should_emit_progress(progress, index, now) {
+            let should_emit_progress =
+                if mode == ContractCheckMode::DiagnosticsOnly && self.state.is_reader_eof(index) {
+                    false
+                } else {
+                    self.should_emit_progress(progress, index, now)
+                };
+
+            if should_emit_progress {
                 self.emit_progress_for_reader(progress, index, now, &mut status)
                     .await;
 
                 // Check for EOF contract validation
-                if self.state.is_reader_eof(index) && !progress.final_emitted {
+                if mode == ContractCheckMode::Authoritative
+                    && self.state.is_reader_eof(index)
+                    && !progress.final_emitted
+                {
                     self.verify_eof_contracts_for_reader(progress, index, &mut status)
                         .await;
                 }
@@ -122,11 +155,13 @@ where
         // Only emitting heartbeats once `reader_seq` has advanced avoids noisy and
         // misleading UI output ("all contracts healthy") when a flow is idle or
         // awaiting manual start.
-        if progress.reader_seq.0 == 0 {
+        let progress_seq = self.progress_seq(progress);
+
+        if progress_seq.0 == 0 {
             return;
         }
 
-        let should_emit_healthy = progress.reader_seq != progress.last_contract_result_seq;
+        let should_emit_healthy = progress_seq != progress.last_contract_result_seq;
 
         let results = chain_slot.check_progress_all(progress.stage_id, reader_stage);
         let results_only: Vec<ContractResult> = results.iter().map(|(_, r)| r.clone()).collect();
@@ -158,7 +193,7 @@ where
                         contract_name: contract_name.clone(),
                         status: status_label,
                         cause: cause_label,
-                        reader_seq: Some(progress.reader_seq),
+                        reader_seq: Some(progress_seq),
                         advertised_writer_seq: progress.advertised_writer_seq,
                     },
                 );
@@ -179,7 +214,7 @@ where
             }
 
             if emitted_any && should_emit_healthy {
-                progress.last_contract_result_seq = progress.reader_seq;
+                progress.last_contract_result_seq = progress_seq;
             }
         }
 
@@ -293,6 +328,9 @@ where
         let Some(tracker) = &self.contract_tracker else {
             return;
         };
+        let progress_seq = self.progress_seq(progress);
+        let progress_last_event_id = self.progress_last_event_id(progress);
+        let progress_vector_clock = self.progress_vector_clock(progress);
 
         // Emit progress event
         let stalled_duration = progress
@@ -302,21 +340,21 @@ where
         let progress_event = ChainEventFactory::consumption_progress_event(
             tracker.writer_id,
             ConsumptionProgressEventParams {
-                reader_seq: progress.reader_seq,
-                last_event_id: progress.last_event_id,
-                vector_clock: progress.last_vector_clock.clone(),
+                reader_seq: progress_seq,
+                last_event_id: progress_last_event_id,
+                vector_clock: progress_vector_clock.clone(),
                 eof_seen: self.state.is_reader_eof(index),
                 reader_path: JournalPath(progress.stage_id.to_string()),
                 reader_index: JournalIndex(index as u64),
                 advertised_writer_seq: progress.advertised_writer_seq,
-                advertised_vector_clock: progress.last_vector_clock.clone(),
+                advertised_vector_clock: progress_vector_clock,
                 stalled_since: stalled_duration,
             },
         );
 
         match tracker.journal.append(progress_event, None).await {
             Ok(_) => {
-                progress.last_progress_seq = progress.reader_seq;
+                progress.last_progress_seq = progress_seq;
                 progress.last_progress_instant = Some(now);
                 progress.stalled_since = None;
                 progress.consecutive_stall_checks = 0;
@@ -347,6 +385,9 @@ where
         let Some(tracker) = &self.contract_tracker else {
             return;
         };
+        let progress_seq = self.progress_seq(progress);
+        let progress_last_event_id = self.progress_last_event_id(progress);
+        let progress_vector_clock = self.progress_vector_clock(progress);
 
         let mut pass = true;
         let mut failure_reason = None;
@@ -381,7 +422,7 @@ where
                             contract_name: contract_name.clone(),
                             status: status_label,
                             cause: cause_label,
-                            reader_seq: Some(progress.reader_seq),
+                            reader_seq: Some(progress_seq),
                             advertised_writer_seq: progress.advertised_writer_seq,
                         },
                     );
@@ -580,13 +621,13 @@ where
             tracker.writer_id,
             ConsumptionFinalEventParams {
                 pass,
-                consumed_count: Count(progress.reader_seq.0),
+                consumed_count: Count(progress_seq.0),
                 expected_count: None,
                 eof_seen: true,
-                last_event_id: progress.last_event_id,
-                reader_seq: progress.reader_seq,
+                last_event_id: progress_last_event_id,
+                reader_seq: progress_seq,
                 advertised_writer_seq: progress.advertised_writer_seq,
-                advertised_vector_clock: progress.last_vector_clock.clone(),
+                advertised_vector_clock: progress_vector_clock,
                 failure_reason,
             },
         );
@@ -617,7 +658,7 @@ where
                     upstream: progress.stage_id,
                     reader: reader_stage,
                     pass,
-                    reader_seq: Some(progress.reader_seq),
+                    reader_seq: Some(progress_seq),
                     advertised_writer_seq: progress.advertised_writer_seq,
                     reason: status_reason,
                 },
@@ -654,8 +695,8 @@ where
         };
 
         // Check for stalls
-        let Some(last) = progress.last_progress_instant else {
-            progress.last_progress_instant = Some(now);
+        let Some(last) = progress.last_read_instant else {
+            progress.last_read_instant = Some(now);
             return;
         };
 
@@ -740,8 +781,8 @@ where
             return false;
         };
 
-        let delta_events = progress
-            .reader_seq
+        let delta_events = self
+            .progress_seq(progress)
             .0
             .saturating_sub(progress.last_progress_seq.0);
         let time_elapsed = progress
@@ -835,5 +876,30 @@ where
 
         *last_contract_check = Some(now);
         Some(self.check_contracts(reader_progress).await)
+    }
+
+    pub async fn maybe_check_contracts_tick_diagnostics_only(
+        &mut self,
+        reader_progress: &mut [ReaderProgress],
+        last_contract_check: &mut Option<Instant>,
+    ) -> Option<ContractStatus> {
+        let Some(tracker) = &self.contract_tracker else {
+            return None;
+        };
+
+        let now = Instant::now();
+        let tick_ms = (tracker.config.progress_max_interval.0 / 2).max(1);
+
+        let due = match last_contract_check {
+            Some(last) => now.duration_since(*last).as_millis() as u64 >= tick_ms,
+            None => true,
+        };
+
+        if !due {
+            return None;
+        }
+
+        *last_contract_check = Some(now);
+        Some(self.check_contracts_diagnostics_only(reader_progress).await)
     }
 }

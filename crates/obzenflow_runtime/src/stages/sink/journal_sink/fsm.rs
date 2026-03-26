@@ -16,8 +16,10 @@ use crate::stages::common::control_strategies::ControlEventStrategy;
 use crate::stages::common::handlers::SinkHandler;
 use crate::stages::common::supervision::lifecycle_actions;
 use crate::stages::resources_builder::BoundSubscriptionFactory;
+use obzenflow_core::event::context::causality_context::CausalityContext;
 use obzenflow_core::event::context::{FlowContext, StageType};
-use obzenflow_core::event::{ChainEventFactory, SystemEvent};
+use obzenflow_core::event::payloads::delivery_payload::DeliveryPayload;
+use obzenflow_core::event::{ChainEventFactory, EventEnvelope, SystemEvent};
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{ChainEvent, FlowId, StageId, WriterId};
 use obzenflow_fsm::{EventVariant, FsmAction, FsmContext, StateVariant};
@@ -221,6 +223,12 @@ pub enum JournalSinkAction<H> {
     /// Flush any buffered data to ensure durability
     FlushBuffers,
 
+    /// Run the authoritative post-flush contract evaluation.
+    ///
+    /// This must run only after `FlushBuffers` has journalled any per-event commit receipts so that
+    /// EOF completion and progress signals are gated on durable receipt evidence.
+    VerifyContractsAfterFlush,
+
     /// Clean up all resources
     Cleanup,
 
@@ -239,6 +247,7 @@ impl<H> Clone for JournalSinkAction<H> {
                 message: message.clone(),
             },
             Self::FlushBuffers => Self::FlushBuffers,
+            Self::VerifyContractsAfterFlush => Self::VerifyContractsAfterFlush,
             Self::Cleanup => Self::Cleanup,
             Self::_Phantom(_) => Self::_Phantom(PhantomData),
         }
@@ -253,6 +262,7 @@ impl<H> std::fmt::Debug for JournalSinkAction<H> {
             Self::SendCompletion => write!(f, "SendCompletion"),
             Self::SendFailure { message } => write!(f, "SendFailure({message:?})"),
             Self::FlushBuffers => write!(f, "FlushBuffers"),
+            Self::VerifyContractsAfterFlush => write!(f, "VerifyContractsAfterFlush"),
             Self::Cleanup => write!(f, "Cleanup"),
             Self::_Phantom(_) => write!(f, "_Phantom"),
         }
@@ -430,41 +440,59 @@ impl<H: SinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAction<H> 
                     stage_name = %ctx.stage_name,
                     "sink: FlushBuffers action - calling handler.flush()"
                 );
-                match handler.flush().await {
-                    Ok(Some(mut payload)) => {
-                        payload.destination = ctx.stage_name.clone();
-                        tracing::trace!(
-                            target: "flowip-080o",
-                            stage_name = %ctx.stage_name,
-                            "sink: FlushBuffers action - flush returned payload, writing delivery"
-                        );
-                        // grab a copy of the WriterId or crash; this should never be None after init
-                        let writer_id = ctx.writer_id.expect("writer_id not initialised");
+                match handler.flush_report().await {
+                    Ok(report) => {
+                        if let Some(mut payload) = report.audit_payload {
+                            payload.destination = ctx.stage_name.clone();
+                            tracing::trace!(
+                                target: "flowip-080o",
+                                stage_name = %ctx.stage_name,
+                                "sink: FlushBuffers action - flush returned audit payload, writing delivery"
+                            );
+                            let writer_id = ctx.writer_id.ok_or_else(|| {
+                                obzenflow_fsm::FsmError::HandlerError(
+                                    "writer_id not initialised".to_string(),
+                                )
+                            })?;
 
-                        let flow_ctx = FlowContext {
-                            flow_name: ctx.flow_name.clone(),
-                            flow_id: ctx.flow_id.to_string(),
-                            stage_name: ctx.stage_name.clone(),
-                            stage_id: ctx.stage_id,
-                            stage_type: StageType::Sink, // or whatever enum case
-                        };
+                            let flow_ctx = FlowContext {
+                                flow_name: ctx.flow_name.clone(),
+                                flow_id: ctx.flow_id.to_string(),
+                                stage_name: ctx.stage_name.clone(),
+                                stage_id: ctx.stage_id,
+                                stage_type: StageType::Sink,
+                            };
 
-                        let evt = ChainEventFactory::delivery_event(writer_id, payload)
-                            .with_flow_context(flow_ctx)
-                            .with_runtime_context(ctx.instrumentation.snapshot_with_control());
+                            let evt = ChainEventFactory::delivery_event(writer_id, payload)
+                                .with_flow_context(flow_ctx)
+                                .with_runtime_context(ctx.instrumentation.snapshot_with_control());
 
-                        ctx.data_journal.append(evt, None).await.map_err(|e| {
-                            obzenflow_fsm::FsmError::HandlerError(format!(
-                                "Failed to write delivery receipt: {e}"
-                            ))
-                        })?;
-                    }
-                    Ok(None) => {
-                        tracing::trace!(
-                            target: "flowip-080o",
-                            stage_name = %ctx.stage_name,
-                            "sink: FlushBuffers action - flush returned None (no payload)"
-                        );
+                            ctx.data_journal.append(evt, None).await.map_err(|e| {
+                                obzenflow_fsm::FsmError::HandlerError(format!(
+                                    "Failed to write delivery receipt: {e}"
+                                ))
+                            })?;
+                        }
+
+                        for commit in report.commit_receipts {
+                            let Some((_upstream_stage, parent_envelope)) =
+                                ctx.subscription.as_ref().and_then(|subscription| {
+                                    subscription.pending_receipt_envelope(
+                                        commit.parent_event_id,
+                                        &ctx.contract_state[..],
+                                    )
+                                })
+                            else {
+                                tracing::warn!(
+                                    stage_name = %ctx.stage_name,
+                                    parent_event_id = %commit.parent_event_id,
+                                    "FlushBuffers: skipping commit receipt with no pending parent metadata"
+                                );
+                                continue;
+                            };
+
+                            journal_commit_receipt(ctx, &parent_envelope, commit.payload).await?;
+                        }
                     }
                     Err(e) => {
                         return Err(obzenflow_fsm::FsmError::HandlerError(format!(
@@ -475,35 +503,35 @@ impl<H: SinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAction<H> 
                 tracing::trace!(
                     target: "flowip-080o",
                     stage_name = %ctx.stage_name,
-                    "sink: FlushBuffers action - acquiring subscription lock for contract check"
+                    "sink: FlushBuffers action - COMPLETE (flush only)"
                 );
-                // After flush, emit any pending contract events (final/progress/stall)
+                Ok(())
+            }
+
+            JournalSinkAction::VerifyContractsAfterFlush => {
+                tracing::trace!(
+                    target: "flowip-080o",
+                    stage_name = %ctx.stage_name,
+                    "sink: VerifyContractsAfterFlush action - acquiring subscription lock"
+                );
                 let maybe_subscription = ctx.subscription.take();
 
                 if let Some(mut subscription) = maybe_subscription {
-                    // Take contract_state out so we don't borrow ctx across await
                     let mut contract_state = std::mem::take(&mut ctx.contract_state);
                     tracing::trace!(
                         target: "flowip-080o",
                         stage_name = %ctx.stage_name,
-                        "sink: FlushBuffers action - calling check_contracts"
+                        "sink: VerifyContractsAfterFlush action - calling authoritative check_contracts"
                     );
                     drop(subscription.check_contracts(&mut contract_state[..]).await);
-                    tracing::trace!(
-                        target: "flowip-080o",
-                        stage_name = %ctx.stage_name,
-                        "sink: FlushBuffers action - putting subscription back"
-                    );
                     ctx.subscription = Some(subscription);
-
-                    // Restore contract_state after contract evaluation
                     ctx.contract_state = contract_state;
                 }
 
                 tracing::trace!(
                     target: "flowip-080o",
                     stage_name = %ctx.stage_name,
-                    "sink: FlushBuffers action - COMPLETE (flush + contract check)"
+                    "sink: VerifyContractsAfterFlush action - COMPLETE"
                 );
                 Ok(())
             }
@@ -523,18 +551,24 @@ impl<H: SinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAction<H> 
                         stage_name = %stage_name,
                         "sink: Cleanup action - calling handler.drain()"
                     );
-                    let drain_result = handler.drain().await.map_err(|e| {
+                    let drain_result = handler.drain_report().await.map_err(|e| {
                         obzenflow_fsm::FsmError::HandlerError(format!(
                             "Failed to drain handler: {e:?}"
                         ))
                     })?;
 
-                    // If the handler reports a drain delivery payload, journal it for audit
-                    // completeness. This is a stage-level delivery receipt and therefore has
-                    // no per-event causality parents.
-                    if let Some(mut payload) = drain_result {
+                    if let Some(mut payload) = drain_result.audit_payload {
                         payload.destination = stage_name.clone();
-                        let writer_id = ctx.writer_id.expect("writer_id not initialised");
+                        tracing::trace!(
+                            target: "flowip-080o",
+                            stage_name = %ctx.stage_name,
+                            "sink: Cleanup action - drain returned audit payload, writing delivery"
+                        );
+                        let writer_id = ctx.writer_id.ok_or_else(|| {
+                            obzenflow_fsm::FsmError::HandlerError(
+                                "writer_id not initialised".to_string(),
+                            )
+                        })?;
 
                         let flow_ctx = FlowContext {
                             flow_name: ctx.flow_name.clone(),
@@ -550,9 +584,28 @@ impl<H: SinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAction<H> 
 
                         ctx.data_journal.append(evt, None).await.map_err(|e| {
                             obzenflow_fsm::FsmError::HandlerError(format!(
-                                "Failed to write drain delivery receipt: {e}"
+                                "Failed to write delivery receipt: {e}"
                             ))
                         })?;
+                    }
+                    for commit in drain_result.commit_receipts {
+                        let Some((_upstream_stage, parent_envelope)) =
+                            ctx.subscription.as_ref().and_then(|subscription| {
+                                subscription.pending_receipt_envelope(
+                                    commit.parent_event_id,
+                                    &ctx.contract_state[..],
+                                )
+                            })
+                        else {
+                            tracing::warn!(
+                                stage_name = %ctx.stage_name,
+                                parent_event_id = %commit.parent_event_id,
+                                "Cleanup: skipping commit receipt with no pending parent metadata"
+                            );
+                            continue;
+                        };
+
+                        journal_commit_receipt(ctx, &parent_envelope, commit.payload).await?;
                     }
                     tracing::trace!(
                         target: "flowip-080o",
@@ -573,4 +626,59 @@ impl<H: SinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAction<H> 
             JournalSinkAction::_Phantom(_) => unreachable!("PhantomData variant"),
         }
     }
+}
+
+async fn journal_commit_receipt<H: SinkHandler + Send + Sync + 'static>(
+    ctx: &mut JournalSinkContext<H>,
+    parent_envelope: &EventEnvelope<ChainEvent>,
+    payload: DeliveryPayload,
+) -> Result<(), obzenflow_fsm::FsmError> {
+    let writer_id = ctx.writer_id.ok_or_else(|| {
+        obzenflow_fsm::FsmError::HandlerError("writer_id not initialised".to_string())
+    })?;
+    let flow_ctx = FlowContext {
+        flow_name: ctx.flow_name.clone(),
+        flow_id: ctx.flow_id.to_string(),
+        stage_name: ctx.stage_name.clone(),
+        stage_id: ctx.stage_id,
+        stage_type: StageType::Sink,
+    };
+
+    let evt = ChainEventFactory::delivery_event(writer_id, payload)
+        .with_flow_context(flow_ctx)
+        .with_causality(CausalityContext::with_parent(parent_envelope.event.id))
+        .with_correlation_from(&parent_envelope.event);
+
+    if evt.is_data() || evt.is_delivery() {
+        ctx.instrumentation.record_output_event(&evt);
+    }
+
+    let evt = evt.with_runtime_context(ctx.instrumentation.snapshot_with_control());
+
+    let written = ctx
+        .data_journal
+        .append(evt, Some(parent_envelope))
+        .await
+        .map_err(|e| {
+            obzenflow_fsm::FsmError::HandlerError(format!(
+                "Failed to write commit delivery receipt: {e}"
+            ))
+        })?;
+
+    crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
+        &written,
+        &ctx.system_journal,
+    )
+    .await;
+
+    if let Some(subscription) = ctx.subscription.as_mut() {
+        if let Some((seq, event_id, vector_clock)) =
+            subscription.record_delivery_receipt(&written.event, &mut ctx.contract_state[..])
+        {
+            ctx.instrumentation
+                .record_receipted_position(seq.0, event_id, vector_clock);
+        }
+    }
+
+    Ok(())
 }

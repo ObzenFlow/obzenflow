@@ -108,3 +108,46 @@ async fn csv_untyped_source_to_sink_roundtrip_preserves_strings() -> anyhow::Res
 
     Ok(())
 }
+
+#[tokio::test]
+async fn csv_source_to_buffered_sink_roundtrip_flushes_on_eof() -> anyhow::Result<()> {
+    let temp_dir = TempDir::new()?;
+    let input_path = temp_dir.path().join("input.csv");
+    let output_path = temp_dir.path().join("output.csv");
+    let journals_path = temp_dir.path().join("journals");
+
+    std::fs::write(&input_path, "carrier,delay_minutes\nAA,5\nCC,10\n")?;
+
+    let source = CsvSource::typed_from_file::<FlightData>(&input_path)?;
+    let sink = CsvSink::builder()
+        .path(&output_path)
+        .buffer_size(100)
+        .auto_flush(false)
+        .build()?;
+
+    let handle = flow! {
+        name: "csv_buffered_connectors_roundtrip_test",
+        journals: disk_journals(journals_path),
+        middleware: [],
+
+        stages: {
+            src = source!(source);
+            csv = sink!(sink);
+        },
+
+        topology: {
+            src |> csv;
+        }
+    }
+    .await?;
+
+    handle.run().await?;
+
+    let out = std::fs::read_to_string(&output_path)?;
+    assert!(out.contains("carrier,delay_minutes"));
+    assert!(out.contains("AA,5"));
+    assert!(out.contains("CC,10"));
+    assert_eq!(out.lines().count(), 3);
+
+    Ok(())
+}

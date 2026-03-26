@@ -10,8 +10,8 @@ use obzenflow_core::event::types::{
 use obzenflow_core::event::vector_clock::VectorClock;
 use obzenflow_core::event::ChainEvent;
 use obzenflow_core::journal::Journal;
-use obzenflow_core::{EventEnvelope, StageId, WriterId};
-use std::collections::VecDeque;
+use obzenflow_core::{EventEnvelope, EventId, StageId, WriterId};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
 use tokio::time::Instant;
 
@@ -142,19 +142,33 @@ pub struct EofOutcome {
 /// This struct is intentionally pure contract state (no I/O handles) so that it
 /// can be owned by FSM contexts and inspected/snapshotted independently of the
 /// subscription mechanics.
+#[derive(Debug, Clone)]
+pub(crate) struct PendingReceiptMeta {
+    pub seq: SeqNo,
+    pub event_id: EventId,
+    pub vector_clock: VectorClock,
+    pub event: ChainEvent,
+}
+
 #[derive(Debug)]
 pub struct ReaderProgress {
     pub stage_id: StageId,
 
     /// Sequences and positions
     pub reader_seq: SeqNo,
+    pub receipted_seq: SeqNo,
     pub advertised_writer_seq: Option<SeqNo>,
     pub last_event_id: Option<obzenflow_core::EventId>,
     pub last_vector_clock: Option<VectorClock>,
+    pub last_receipted_event_id: Option<EventId>,
+    pub last_receipted_vector_clock: Option<VectorClock>,
+    pub(crate) pending_receipts: HashMap<EventId, PendingReceiptMeta>,
+    pub(crate) committed_out_of_order: BTreeMap<SeqNo, PendingReceiptMeta>,
 
     /// Progress timing
     pub last_progress_seq: SeqNo,
     pub last_progress_instant: Option<Instant>,
+    pub last_read_instant: Option<Instant>,
 
     /// Last reader_seq for which we emitted a mid-flight ContractResult heartbeat.
     ///
@@ -173,24 +187,80 @@ pub struct ReaderProgress {
 
 impl ReaderProgress {
     /// Create a new reader progress record for the given upstream stage.
-    ///
-    /// Kept `pub(crate)` so FSM contexts within this crate can construct
-    /// contract state without exposing construction details outside the crate.
-    pub(crate) fn new(stage_id: StageId) -> Self {
+    pub fn new(stage_id: StageId) -> Self {
         Self {
             stage_id,
             reader_seq: SeqNo(0),
+            receipted_seq: SeqNo(0),
             advertised_writer_seq: None,
             last_event_id: None,
             last_vector_clock: None,
+            last_receipted_event_id: None,
+            last_receipted_vector_clock: None,
+            pending_receipts: HashMap::new(),
+            committed_out_of_order: BTreeMap::new(),
             last_progress_seq: SeqNo(0),
             last_progress_instant: None,
+            last_read_instant: None,
             last_contract_result_seq: SeqNo(0),
             stalled_since: None,
             consecutive_stall_checks: 0,
             final_emitted: false,
             contract_violated: false,
         }
+    }
+
+    /// Stores receipt metadata for a just-read event that requires durable delivery evidence.
+    ///
+    /// `reader_seq` at the time of tracking is used as the receipt-ordering key for advancing
+    /// the contiguous receipt watermark (`receipted_seq`).
+    pub(crate) fn track_pending_receipt(
+        &mut self,
+        event_id: EventId,
+        event: ChainEvent,
+        vector_clock: VectorClock,
+    ) {
+        let meta = PendingReceiptMeta {
+            seq: self.reader_seq,
+            event_id,
+            vector_clock,
+            event,
+        };
+        self.pending_receipts.insert(event_id, meta);
+    }
+
+    /// Mark a pending event as durably receipted.
+    ///
+    /// Returns `false` if the event is not pending (duplicate receipt or missing read-side
+    /// bookkeeping). When receipts arrive out-of-order, this buffers them until the receipt
+    /// watermark can advance contiguously.
+    pub(crate) fn mark_receipted(&mut self, event_id: EventId) -> bool {
+        let Some(meta) = self.pending_receipts.remove(&event_id) else {
+            return false;
+        };
+
+        let next_seq = SeqNo(self.receipted_seq.0.saturating_add(1));
+        if meta.seq == next_seq {
+            self.advance_receipted(meta);
+            loop {
+                let next_seq = SeqNo(self.receipted_seq.0.saturating_add(1));
+                let Some(next_meta) = self.committed_out_of_order.remove(&next_seq) else {
+                    break;
+                };
+                self.advance_receipted(next_meta);
+            }
+        } else if meta.seq.0 > self.receipted_seq.0 {
+            let seq = meta.seq;
+            self.committed_out_of_order.insert(seq, meta);
+        }
+
+        true
+    }
+
+    fn advance_receipted(&mut self, meta: PendingReceiptMeta) {
+        self.receipted_seq = meta.seq;
+        self.last_receipted_event_id = Some(meta.event_id);
+        self.last_receipted_vector_clock = Some(meta.vector_clock);
     }
 }
 
@@ -208,6 +278,7 @@ pub struct ContractTracker {
     pub(super) journal: Arc<dyn Journal<ChainEvent>>,
     pub(super) system_journal: Option<Arc<dyn Journal<SystemEvent>>>,
     pub(super) reader_stage: Option<StageId>,
+    pub(super) receipt_aware_progress: bool,
 
     /// Tracks output events written by this stage
     pub(super) output_events_written: SeqNo,

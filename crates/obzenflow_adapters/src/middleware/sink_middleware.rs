@@ -13,7 +13,9 @@ use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, Delivery
 use obzenflow_core::time::MetricsDuration;
 use obzenflow_core::ChainEvent;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
-use obzenflow_runtime::stages::common::handlers::SinkHandler;
+use obzenflow_runtime::stages::common::handlers::{
+    SinkConsumeReport, SinkHandler, SinkLifecycleReport,
+};
 use std::sync::Arc;
 
 /// A SinkHandler wrapper that applies middleware
@@ -51,7 +53,7 @@ impl<H: SinkHandler> MiddlewareSink<H> {
     async fn apply_middleware_with_error_handling(
         &mut self,
         event: ChainEvent,
-    ) -> Result<DeliveryPayload, HandlerError> {
+    ) -> Result<SinkConsumeReport, HandlerError> {
         // Create ephemeral context for this processing
         let mut ctx = MiddlewareContext::new();
 
@@ -61,26 +63,26 @@ impl<H: SinkHandler> MiddlewareSink<H> {
                 MiddlewareAction::Continue => continue,
                 MiddlewareAction::Skip(_) => {
                     // Skip means don't consume - return success with no delivery
-                    return Ok(DeliveryPayload::success(
+                    return Ok(SinkConsumeReport::new(DeliveryPayload::success(
                         "middleware_sink",
                         DeliveryMethod::Noop,
                         None, // bytes_processed
-                    ));
+                    )));
                 }
                 MiddlewareAction::Abort => {
                     // Abort is also treated as success but with a different message
-                    return Ok(DeliveryPayload::success(
+                    return Ok(SinkConsumeReport::new(DeliveryPayload::success(
                         "middleware_sink",
                         DeliveryMethod::Noop,
                         None, // bytes_processed
-                    ));
+                    )));
                 }
             }
         }
 
         // Consume with inner handler
-        match self.inner.consume(event.clone()).await {
-            Ok(payload) => {
+        match self.inner.consume_report(event.clone()).await {
+            Ok(mut report) => {
                 // Post-processing phase - sinks don't produce output events
                 let empty = vec![];
                 for middleware in self.middleware_chain.iter() {
@@ -88,7 +90,7 @@ impl<H: SinkHandler> MiddlewareSink<H> {
                 }
 
                 // Extract timing from context if available (set by TimingMiddleware)
-                let enhanced_payload = if let Some(start_value) =
+                report.primary = if let Some(start_value) =
                     ctx.get_baggage("processing_start_nanos")
                 {
                     if let Some(start_nanos) = start_value.as_u64() {
@@ -104,15 +106,15 @@ impl<H: SinkHandler> MiddlewareSink<H> {
                             duration
                         );
 
-                        payload.with_processing_duration(duration)
+                        report.primary.with_processing_duration(duration)
                     } else {
-                        payload
+                        report.primary
                     }
                 } else {
-                    payload
+                    report.primary
                 };
 
-                Ok(enhanced_payload)
+                Ok(report)
             }
             Err(e) => {
                 // Give each middleware a chance to handle the error
@@ -121,15 +123,15 @@ impl<H: SinkHandler> MiddlewareSink<H> {
                         ErrorAction::Propagate => continue,
                         ErrorAction::Recover(_) => {
                             // Recovery means success
-                            return Ok(DeliveryPayload::success(
+                            return Ok(SinkConsumeReport::new(DeliveryPayload::success(
                                 "middleware_sink",
                                 DeliveryMethod::Noop,
                                 None, // bytes_processed
-                            ));
+                            )));
                         }
                         ErrorAction::Retry => {
                             // Simple retry once - in production, might want exponential backoff
-                            return self.inner.consume(event).await;
+                            return self.inner.consume_report(event).await;
                         }
                     }
                 }
@@ -144,6 +146,16 @@ impl<H: SinkHandler> MiddlewareSink<H> {
 #[async_trait]
 impl<H: SinkHandler> SinkHandler for MiddlewareSink<H> {
     async fn consume(&mut self, event: ChainEvent) -> Result<DeliveryPayload, HandlerError> {
+        Ok(self
+            .apply_middleware_with_error_handling(event)
+            .await?
+            .primary)
+    }
+
+    async fn consume_report(
+        &mut self,
+        event: ChainEvent,
+    ) -> Result<SinkConsumeReport, HandlerError> {
         self.apply_middleware_with_error_handling(event).await
     }
 
@@ -152,9 +164,17 @@ impl<H: SinkHandler> SinkHandler for MiddlewareSink<H> {
         self.inner.flush().await
     }
 
+    async fn flush_report(&mut self) -> Result<SinkLifecycleReport, HandlerError> {
+        self.inner.flush_report().await
+    }
+
     async fn drain(&mut self) -> Result<Option<DeliveryPayload>, HandlerError> {
         // Drain is not intercepted by middleware - it's an infrastructure concern
         self.inner.drain().await
+    }
+
+    async fn drain_report(&mut self) -> Result<SinkLifecycleReport, HandlerError> {
+        self.inner.drain_report().await
     }
 }
 

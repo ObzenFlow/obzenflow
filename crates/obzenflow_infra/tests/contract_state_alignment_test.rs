@@ -108,20 +108,7 @@ async fn contract_state_tracks_seq_and_emits_final() {
         build_subscription_with_contracts(consumer_writer).await;
 
     // FSM-owned contract state for a single reader (upstream side)
-    let mut progress = [ReaderProgress {
-        stage_id: upstream_stage,
-        reader_seq: SeqNo(0),
-        advertised_writer_seq: None,
-        last_event_id: None,
-        last_vector_clock: None,
-        last_progress_seq: SeqNo(0),
-        last_progress_instant: None,
-        last_contract_result_seq: SeqNo(0),
-        stalled_since: None,
-        consecutive_stall_checks: 0,
-        final_emitted: false,
-        contract_violated: false,
-    }];
+    let mut progress = [ReaderProgress::new(upstream_stage)];
 
     let upstream_writer = WriterId::from(upstream_stage);
 
@@ -219,20 +206,7 @@ async fn contract_seq_divergence_missing_events_emits_gap_and_violation() {
     let (mut subscription, contract_journal, upstream_journal, upstream_stage) =
         build_subscription_with_contracts(consumer_writer).await;
 
-    let mut progress = [ReaderProgress {
-        stage_id: upstream_stage,
-        reader_seq: SeqNo(0),
-        advertised_writer_seq: None,
-        last_event_id: None,
-        last_vector_clock: None,
-        last_progress_seq: SeqNo(0),
-        last_progress_instant: None,
-        last_contract_result_seq: SeqNo(0),
-        stalled_since: None,
-        consecutive_stall_checks: 0,
-        final_emitted: false,
-        contract_violated: false,
-    }];
+    let mut progress = [ReaderProgress::new(upstream_stage)];
 
     let upstream_writer = WriterId::from(upstream_stage);
 
@@ -392,20 +366,7 @@ async fn contract_seq_divergence_overconsumption_sets_violation_without_gap() {
     let (mut subscription, contract_journal, upstream_journal, upstream_stage) =
         build_subscription_with_contracts(consumer_writer).await;
 
-    let mut progress = [ReaderProgress {
-        stage_id: upstream_stage,
-        reader_seq: SeqNo(0),
-        advertised_writer_seq: None,
-        last_event_id: None,
-        last_vector_clock: None,
-        last_progress_seq: SeqNo(0),
-        last_progress_instant: None,
-        last_contract_result_seq: SeqNo(0),
-        stalled_since: None,
-        consecutive_stall_checks: 0,
-        final_emitted: false,
-        contract_violated: false,
-    }];
+    let mut progress = [ReaderProgress::new(upstream_stage)];
 
     let upstream_writer = WriterId::from(upstream_stage);
 

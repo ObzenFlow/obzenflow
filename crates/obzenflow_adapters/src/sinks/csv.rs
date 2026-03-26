@@ -8,9 +8,11 @@ use async_trait::async_trait;
 use csv::{Writer, WriterBuilder};
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::event::ChainEventContent;
-use obzenflow_core::ChainEvent;
+use obzenflow_core::{ChainEvent, EventId};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
-use obzenflow_runtime::stages::common::handlers::SinkHandler;
+use obzenflow_runtime::stages::common::handlers::{
+    CommitReceipt, SinkConsumeReport, SinkHandler, SinkLifecycleReport,
+};
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
@@ -197,7 +199,18 @@ impl SinkHandler for CsvSink {
             .inner
             .lock()
             .map_err(|_| HandlerError::Other("CsvSink mutex poisoned".to_string()))?;
-        inner.consume(event)
+        Ok(inner.consume_report(event)?.primary)
+    }
+
+    async fn consume_report(
+        &mut self,
+        event: ChainEvent,
+    ) -> Result<SinkConsumeReport, HandlerError> {
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| HandlerError::Other("CsvSink mutex poisoned".to_string()))?;
+        inner.consume_report(event)
     }
 
     async fn flush(&mut self) -> Result<Option<DeliveryPayload>, HandlerError> {
@@ -205,8 +218,22 @@ impl SinkHandler for CsvSink {
             .inner
             .lock()
             .map_err(|_| HandlerError::Other("CsvSink mutex poisoned".to_string()))?;
-        inner.flush().map(Some)
+        Ok(inner.flush_report()?.audit_payload)
     }
+
+    async fn flush_report(&mut self) -> Result<SinkLifecycleReport, HandlerError> {
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| HandlerError::Other("CsvSink mutex poisoned".to_string()))?;
+        inner.flush_report()
+    }
+}
+
+#[derive(Clone, Debug)]
+struct BufferedCsvRow {
+    parent_event_id: EventId,
+    row: Vec<String>,
 }
 
 struct CsvSinkInner {
@@ -214,7 +241,7 @@ struct CsvSinkInner {
     path: PathBuf,
     columns: Option<Vec<String>>,
     headers: Option<Vec<String>>,
-    buffer: Vec<Vec<String>>,
+    buffer: Vec<BufferedCsvRow>,
     buffer_size: usize,
     flush_every: Option<usize>,
     auto_flush: bool,
@@ -301,36 +328,62 @@ impl CsvSinkInner {
         Ok(row)
     }
 
-    fn flush_buffer(&mut self) -> Result<(), HandlerError> {
+    fn commit_payload(&self) -> DeliveryPayload {
+        DeliveryPayload::success(
+            self.path.display().to_string(),
+            DeliveryMethod::FileWrite {
+                path: self.path.clone(),
+            },
+            None,
+        )
+    }
+
+    fn buffered_payload(&self) -> DeliveryPayload {
+        DeliveryPayload::buffered(
+            self.path.display().to_string(),
+            DeliveryMethod::FileWrite {
+                path: self.path.clone(),
+            },
+            None,
+        )
+    }
+
+    fn flush_buffer(&mut self) -> Result<Vec<CommitReceipt>, HandlerError> {
         if self.buffer.is_empty() {
-            return Ok(());
+            return Ok(Vec::new());
         }
 
         for row in &self.buffer {
             self.writer
-                .write_record(row)
+                .write_record(&row.row)
                 .map_err(|e| HandlerError::Other(format!("Failed to write CSV row: {e}")))?;
         }
 
-        self.buffer.clear();
         self.writer
             .flush()
             .map_err(|e| HandlerError::Other(format!("Failed to flush CSV: {e}")))?;
-        Ok(())
+
+        let path = self.path.clone();
+        let committed = self
+            .buffer
+            .drain(..)
+            .map(|row| CommitReceipt {
+                parent_event_id: row.parent_event_id,
+                payload: DeliveryPayload::success(
+                    path.display().to_string(),
+                    DeliveryMethod::FileWrite { path: path.clone() },
+                    None,
+                ),
+            })
+            .collect();
+
+        Ok(committed)
     }
 
-    fn consume(&mut self, event: ChainEvent) -> Result<DeliveryPayload, HandlerError> {
+    fn consume_report(&mut self, event: ChainEvent) -> Result<SinkConsumeReport, HandlerError> {
         let payload = match &event.content {
             ChainEventContent::Data { payload, .. } => payload,
-            _ => {
-                return Ok(DeliveryPayload::success(
-                    self.path.display().to_string(),
-                    DeliveryMethod::FileWrite {
-                        path: self.path.clone(),
-                    },
-                    None,
-                ))
-            }
+            _ => return Ok(SinkConsumeReport::new(self.commit_payload())),
         };
 
         let Value::Object(obj) = payload else {
@@ -344,6 +397,7 @@ impl CsvSinkInner {
         // Ensure headers exist before writing any rows (unless append+non-empty).
         self.write_headers_if_needed()?;
 
+        let mut commit_receipts = Vec::new();
         if self.auto_flush {
             self.writer
                 .write_record(&row)
@@ -352,9 +406,12 @@ impl CsvSinkInner {
                 .flush()
                 .map_err(|e| HandlerError::Other(format!("Failed to flush CSV: {e}")))?;
         } else {
-            self.buffer.push(row);
+            self.buffer.push(BufferedCsvRow {
+                parent_event_id: event.id,
+                row,
+            });
             if self.buffer.len() >= self.buffer_size {
-                self.flush_buffer()?;
+                commit_receipts.extend(self.flush_buffer()?);
             }
         }
 
@@ -362,47 +419,52 @@ impl CsvSinkInner {
 
         if let Some(flush_every) = self.flush_every {
             if flush_every > 0 && self.row_count.is_multiple_of(flush_every) {
-                self.flush_buffer()?;
+                commit_receipts.extend(self.flush_buffer()?);
             }
         }
 
-        let middleware_context = if self.auto_flush {
+        let primary = if self.auto_flush {
+            self.commit_payload()
+        } else {
+            let middleware_context = Some(json!({
+                "csv_sink": {
+                    "buffered_rows": self.buffer.len(),
+                }
+            }));
+
+            DeliveryPayload {
+                middleware_context,
+                ..self.buffered_payload()
+            }
+        };
+
+        Ok(SinkConsumeReport {
+            primary,
+            commit_receipts,
+        })
+    }
+
+    fn flush_report(&mut self) -> Result<SinkLifecycleReport, HandlerError> {
+        self.write_headers_if_needed()?;
+        let commit_receipts = self.flush_buffer()?;
+
+        let middleware_context = if commit_receipts.is_empty() {
             None
         } else {
             Some(json!({
                 "csv_sink": {
-                    "buffered_rows": self.buffer.len(),
+                    "flush": true,
+                    "committed_rows": commit_receipts.len(),
                 }
             }))
         };
 
-        Ok(DeliveryPayload {
-            middleware_context,
-            ..DeliveryPayload::success(
-                self.path.display().to_string(),
-                DeliveryMethod::FileWrite {
-                    path: self.path.clone(),
-                },
-                None,
-            )
-        })
-    }
-
-    fn flush(&mut self) -> Result<DeliveryPayload, HandlerError> {
-        self.write_headers_if_needed()?;
-        self.flush_buffer()?;
-
-        Ok(DeliveryPayload {
-            middleware_context: Some(json!({
-                "csv_sink": { "flush": true }
-            })),
-            ..DeliveryPayload::success(
-                self.path.display().to_string(),
-                DeliveryMethod::FileWrite {
-                    path: self.path.clone(),
-                },
-                None,
-            )
+        Ok(SinkLifecycleReport {
+            audit_payload: Some(DeliveryPayload {
+                middleware_context,
+                ..self.commit_payload()
+            }),
+            commit_receipts,
         })
     }
 }
@@ -410,6 +472,7 @@ impl CsvSinkInner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use obzenflow_core::event::payloads::delivery_payload::DeliveryResult;
     use obzenflow_core::event::ChainEventFactory;
     use obzenflow_core::StageId;
     use obzenflow_core::WriterId;
@@ -441,6 +504,105 @@ mod tests {
         File::open(&path).unwrap().read_to_string(&mut out).unwrap();
         assert!(out.contains("a,b"));
         assert!(out.contains("1,2"));
+    }
+
+    #[tokio::test]
+    async fn csv_sink_buffered_mode_emits_commit_receipts_on_flush() {
+        let tmp = NamedTempFile::new().expect("temp file");
+        let path = tmp.path().to_path_buf();
+
+        let mut sink = CsvSink::builder()
+            .path(&path)
+            .buffer_size(10)
+            .auto_flush(false)
+            .build()
+            .unwrap();
+
+        let first = ChainEventFactory::data_event(
+            WriterId::from(StageId::new()),
+            "test.event",
+            json!({"a": 1, "b": 2}),
+        );
+        let second = ChainEventFactory::data_event(
+            WriterId::from(StageId::new()),
+            "test.event",
+            json!({"a": 3, "b": 4}),
+        );
+
+        let report = sink.consume_report(first.clone()).await.unwrap();
+        assert!(matches!(
+            report.primary.result,
+            DeliveryResult::Buffered { .. }
+        ));
+        assert!(report.commit_receipts.is_empty());
+
+        let report = sink.consume_report(second.clone()).await.unwrap();
+        assert!(matches!(
+            report.primary.result,
+            DeliveryResult::Buffered { .. }
+        ));
+        assert!(report.commit_receipts.is_empty());
+
+        let lifecycle = sink.flush_report().await.unwrap();
+        assert_eq!(lifecycle.commit_receipts.len(), 2);
+        assert_eq!(lifecycle.commit_receipts[0].parent_event_id, first.id);
+        assert_eq!(lifecycle.commit_receipts[1].parent_event_id, second.id);
+        assert!(matches!(
+            lifecycle.audit_payload.expect("audit payload").result,
+            DeliveryResult::Success { .. }
+        ));
+
+        let mut out = String::new();
+        File::open(&path).unwrap().read_to_string(&mut out).unwrap();
+        assert!(out.contains("a,b"));
+        assert!(out.contains("1,2"));
+        assert!(out.contains("3,4"));
+    }
+
+    #[tokio::test]
+    async fn csv_sink_buffer_threshold_emits_per_event_commit_receipts() {
+        let tmp = NamedTempFile::new().expect("temp file");
+        let path = tmp.path().to_path_buf();
+
+        let mut sink = CsvSink::builder()
+            .path(&path)
+            .buffer_size(2)
+            .auto_flush(false)
+            .build()
+            .unwrap();
+
+        let first = ChainEventFactory::data_event(
+            WriterId::from(StageId::new()),
+            "test.event",
+            json!({"a": 1, "b": 2}),
+        );
+        let second = ChainEventFactory::data_event(
+            WriterId::from(StageId::new()),
+            "test.event",
+            json!({"a": 3, "b": 4}),
+        );
+
+        let first_report = sink.consume_report(first.clone()).await.unwrap();
+        assert!(matches!(
+            first_report.primary.result,
+            DeliveryResult::Buffered { .. }
+        ));
+        assert!(first_report.commit_receipts.is_empty());
+
+        let second_report = sink.consume_report(second.clone()).await.unwrap();
+        assert!(matches!(
+            second_report.primary.result,
+            DeliveryResult::Buffered { .. }
+        ));
+        assert_eq!(second_report.commit_receipts.len(), 2);
+        assert_eq!(second_report.commit_receipts[0].parent_event_id, first.id);
+        assert_eq!(second_report.commit_receipts[1].parent_event_id, second.id);
+
+        let mut out = String::new();
+        File::open(&path).unwrap().read_to_string(&mut out).unwrap();
+        assert!(out.contains("a,b"));
+        assert!(out.contains("1,2"));
+        assert!(out.contains("3,4"));
     }
 
     #[tokio::test]
