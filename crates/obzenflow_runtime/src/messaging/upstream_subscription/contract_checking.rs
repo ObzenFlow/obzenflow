@@ -83,6 +83,15 @@ where
                 continue;
             }
 
+            // Diagnostics-only checks are used by stages that intentionally defer
+            // authoritative EOF verification (e.g. sinks that flush receipts before
+            // running final contract checks). Once a reader has reached terminal EOF,
+            // stall detection is meaningless and can produce a spurious
+            // `reader_stalled` failure during shutdown.
+            if mode == ContractCheckMode::DiagnosticsOnly && self.state.is_reader_eof(index) {
+                continue;
+            }
+
             // Continuous contract evaluation (FLOWIP-080r).
             //
             // We run `check_progress` independently of progress emission so that
@@ -91,12 +100,7 @@ where
             self.check_progress_contracts_for_reader(progress, index, &mut status)
                 .await;
 
-            let should_emit_progress =
-                if mode == ContractCheckMode::DiagnosticsOnly && self.state.is_reader_eof(index) {
-                    false
-                } else {
-                    self.should_emit_progress(progress, index, now)
-                };
+            let should_emit_progress = self.should_emit_progress(progress, index, now);
 
             if should_emit_progress {
                 self.emit_progress_for_reader(progress, index, now, &mut status)
