@@ -58,6 +58,7 @@ pub enum DeliveryMethod {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "result", rename_all = "snake_case")]
 pub enum DeliveryResult {
+    Buffered {},
     Success {
         #[serde(skip_serializing_if = "Option::is_none")]
         confirmation: Option<String>,
@@ -99,6 +100,24 @@ impl DeliveryPayload {
             destination: destination.into(),
             delivery_method: method,
             processing_duration: MetricsDuration::ZERO, // Will be set by middleware
+            bytes_processed,
+            processed_at: Utc::now(),
+            middleware_context: None,
+        }
+    }
+
+    /// Generic buffered-accept builder for sinks that have accepted work into
+    /// an in-memory or connector-local buffer but have not durably committed it yet.
+    pub fn buffered(
+        destination: impl Into<String>,
+        method: DeliveryMethod,
+        bytes_processed: Option<u64>,
+    ) -> Self {
+        Self {
+            result: DeliveryResult::Buffered {},
+            destination: destination.into(),
+            delivery_method: method,
+            processing_duration: MetricsDuration::ZERO,
             bytes_processed,
             processed_at: Utc::now(),
             middleware_context: None,

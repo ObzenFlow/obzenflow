@@ -59,10 +59,16 @@ pub struct RuntimeContext {
 
     // Wide-event observability: capture positions at the time of instrumentation snapshot
     pub reader_seq: u64,
+    #[serde(default)]
+    pub receipted_seq: u64,
     pub writer_seq: u64,
     pub last_consumed_event_id: Option<EventId>,
     pub last_consumed_writer: Option<JournalWriterId>,
     pub last_consumed_vector_clock: Option<VectorClock>,
+    #[serde(default)]
+    pub last_receipted_event_id: Option<EventId>,
+    #[serde(default)]
+    pub last_receipted_vector_clock: Option<VectorClock>,
     pub last_emitted_event_id: Option<EventId>,
     pub last_emitted_writer: Option<WriterId>,
 

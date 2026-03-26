@@ -254,6 +254,7 @@ where
             journal: contract_journal,
             system_journal,
             reader_stage,
+            receipt_aware_progress: include_delivery_contract,
             output_events_written: SeqNo(0),
         });
 

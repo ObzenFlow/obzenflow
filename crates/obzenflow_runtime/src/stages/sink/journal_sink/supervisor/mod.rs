@@ -135,6 +135,7 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
                             next_state: JournalSinkState::Drained,
                             actions: vec![
                                 JournalSinkAction::FlushBuffers,
+                                JournalSinkAction::VerifyContractsAfterFlush,
                                 JournalSinkAction::SendCompletion,
                                 JournalSinkAction::Cleanup,
                             ],

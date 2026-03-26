@@ -6,4 +6,4 @@
 
 pub mod traits;
 
-pub use traits::SinkHandler;
+pub use traits::{CommitReceipt, SinkConsumeReport, SinkHandler, SinkLifecycleReport};

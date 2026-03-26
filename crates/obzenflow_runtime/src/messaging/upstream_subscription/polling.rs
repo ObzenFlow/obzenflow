@@ -9,6 +9,7 @@ use obzenflow_core::event::{ChainEvent, ChainEventContent, JournalEvent};
 use obzenflow_core::WriterId;
 use std::any::Any;
 use std::io;
+use tokio::time::Instant;
 
 impl<T> UpstreamSubscription<T>
 where
@@ -181,6 +182,20 @@ where
                                 {
                                     if chain_event.is_data() {
                                         progress.reader_seq.0 += 1;
+                                        progress.last_read_instant = Some(Instant::now());
+                                        if self.uses_receipt_watermark() {
+                                            progress.track_pending_receipt(
+                                                *envelope.event.id(),
+                                                chain_event.clone(),
+                                                envelope.vector_clock.clone(),
+                                            );
+                                        } else {
+                                            progress.receipted_seq = progress.reader_seq;
+                                            progress.last_receipted_event_id =
+                                                Some(*envelope.event.id());
+                                            progress.last_receipted_vector_clock =
+                                                Some(envelope.vector_clock.clone());
+                                        }
                                     }
 
                                     // Capture advertised positions from EOF authored by this upstream

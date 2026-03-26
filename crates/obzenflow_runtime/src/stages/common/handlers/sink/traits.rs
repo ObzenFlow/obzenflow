@@ -50,7 +50,34 @@
 use crate::stages::common::handler_error::HandlerError;
 use async_trait::async_trait;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryPayload;
-use obzenflow_core::ChainEvent;
+use obzenflow_core::{ChainEvent, EventId};
+
+#[derive(Debug, Clone)]
+pub struct CommitReceipt {
+    pub parent_event_id: EventId,
+    pub payload: DeliveryPayload,
+}
+
+#[derive(Debug, Clone)]
+pub struct SinkConsumeReport {
+    pub primary: DeliveryPayload,
+    pub commit_receipts: Vec<CommitReceipt>,
+}
+
+impl SinkConsumeReport {
+    pub fn new(primary: DeliveryPayload) -> Self {
+        Self {
+            primary,
+            commit_receipts: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SinkLifecycleReport {
+    pub audit_payload: Option<DeliveryPayload>,
+    pub commit_receipts: Vec<CommitReceipt>,
+}
 
 /// Trait every **sink stage** must implement.
 #[async_trait]
@@ -64,6 +91,18 @@ pub trait SinkHandler: Send + Sync {
     /// ErrorKind, route it appropriately, and keep the sink running.
     async fn consume(&mut self, event: ChainEvent) -> Result<DeliveryPayload, HandlerError>;
 
+    /// Extended consume hook for buffered sinks that may need to emit
+    /// additional commit receipts after accepting the current event.
+    ///
+    /// Default behaviour preserves the legacy `consume()` contract so existing
+    /// sinks do not need to change.
+    async fn consume_report(
+        &mut self,
+        event: ChainEvent,
+    ) -> Result<SinkConsumeReport, HandlerError> {
+        Ok(SinkConsumeReport::new(self.consume(event).await?))
+    }
+
     /// Flush in‑memory buffers **and optionally** emit a `DeliveryPayload`
     /// capturing the flush action (e.g., `DeliveryResult::Success` for a batch
     /// commit).  Default impl returns `Ok(None)` so simple sinks can ignore it.
@@ -71,10 +110,34 @@ pub trait SinkHandler: Send + Sync {
         Ok(None)
     }
 
+    /// Extended flush hook for buffered sinks that need to emit per-event
+    /// commit receipts after a successful flush.
+    ///
+    /// Default behaviour preserves the legacy `flush()` contract so existing
+    /// sinks do not need to change.
+    async fn flush_report(&mut self) -> Result<SinkLifecycleReport, HandlerError> {
+        Ok(SinkLifecycleReport {
+            audit_payload: self.flush().await?,
+            commit_receipts: Vec::new(),
+        })
+    }
+
     /// Draining hook called during graceful shutdown.
     /// Default behaviour delegates to `flush()` so most sinks only override
     /// one method.
     async fn drain(&mut self) -> Result<Option<DeliveryPayload>, HandlerError> {
         self.flush().await
+    }
+
+    /// Extended drain hook for buffered sinks that need to emit per-event
+    /// commit receipts after a successful drain.
+    ///
+    /// Default behaviour preserves the legacy `drain()` contract so existing
+    /// sinks do not need to change.
+    async fn drain_report(&mut self) -> Result<SinkLifecycleReport, HandlerError> {
+        Ok(SinkLifecycleReport {
+            audit_payload: self.drain().await?,
+            commit_receipts: Vec::new(),
+        })
     }
 }

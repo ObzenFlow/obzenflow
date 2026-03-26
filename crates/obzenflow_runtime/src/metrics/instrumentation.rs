@@ -88,10 +88,13 @@ pub struct StageInstrumentation {
 
     // Observability positions
     pub reader_seq: AtomicU64,
+    pub receipted_seq: AtomicU64,
     pub writer_seq: AtomicU64,
     pub last_consumed_event_id: RwLock<Option<EventId>>,
     pub last_consumed_writer: RwLock<Option<JournalWriterId>>,
     pub last_consumed_vector_clock: RwLock<Option<VectorClock>>,
+    pub last_receipted_event_id: RwLock<Option<EventId>>,
+    pub last_receipted_vector_clock: RwLock<Option<VectorClock>>,
     pub last_emitted_event_id: RwLock<Option<EventId>>,
     pub last_emitted_writer: RwLock<Option<WriterId>>,
 
@@ -165,10 +168,13 @@ impl StageInstrumentation {
 
             // Observability positions
             reader_seq: AtomicU64::new(0),
+            receipted_seq: AtomicU64::new(0),
             writer_seq: AtomicU64::new(0),
             last_consumed_event_id: RwLock::new(None),
             last_consumed_writer: RwLock::new(None),
             last_consumed_vector_clock: RwLock::new(None),
+            last_receipted_event_id: RwLock::new(None),
+            last_receipted_vector_clock: RwLock::new(None),
             last_emitted_event_id: RwLock::new(None),
             last_emitted_writer: RwLock::new(None),
 
@@ -278,10 +284,13 @@ impl StageInstrumentation {
 
             // Observability positions
             reader_seq: self.reader_seq.load(Ordering::Relaxed),
+            receipted_seq: self.receipted_seq.load(Ordering::Relaxed),
             writer_seq: self.writer_seq.load(Ordering::Relaxed),
             last_consumed_event_id: *self.last_consumed_event_id.read().unwrap(),
             last_consumed_writer: *self.last_consumed_writer.read().unwrap(),
             last_consumed_vector_clock: self.last_consumed_vector_clock.read().unwrap().clone(),
+            last_receipted_event_id: *self.last_receipted_event_id.read().unwrap(),
+            last_receipted_vector_clock: self.last_receipted_vector_clock.read().unwrap().clone(),
             last_emitted_event_id: *self.last_emitted_event_id.read().unwrap(),
             last_emitted_writer: *self.last_emitted_writer.read().unwrap(),
             errors_by_kind: self
@@ -367,6 +376,18 @@ impl StageInstrumentation {
         *self.last_consumed_event_id.write().unwrap() = Some(*envelope.event.id());
         *self.last_consumed_writer.write().unwrap() = Some(envelope.journal_writer_id);
         *self.last_consumed_vector_clock.write().unwrap() = Some(envelope.vector_clock.clone());
+    }
+
+    /// Note the latest durable delivery watermark for sink stages.
+    pub fn record_receipted_position(
+        &self,
+        seq: u64,
+        event_id: EventId,
+        vector_clock: VectorClock,
+    ) {
+        self.receipted_seq.store(seq, Ordering::Relaxed);
+        *self.last_receipted_event_id.write().unwrap() = Some(event_id);
+        *self.last_receipted_vector_clock.write().unwrap() = Some(vector_clock);
     }
 
     /// Note an emitted event for wide-event observability.
@@ -587,6 +608,8 @@ pub fn heartbeat_interval() -> u64 {
 mod tests {
     use super::StageInstrumentation;
     use obzenflow_core::event::status::processing_status::ErrorKind;
+    use obzenflow_core::event::vector_clock::VectorClock;
+    use obzenflow_core::EventId;
 
     #[test]
     fn record_error_updates_totals_and_by_kind() {
@@ -606,5 +629,20 @@ mod tests {
         assert_eq!(snapshot.errors_total, 3);
         assert_eq!(snapshot.errors_by_kind.get(&ErrorKind::Domain), Some(&1));
         assert_eq!(snapshot.errors_by_kind.get(&ErrorKind::Timeout), Some(&2));
+    }
+
+    #[test]
+    fn record_receipted_position_updates_snapshot() {
+        let instrumentation = StageInstrumentation::new();
+        let event_id = EventId::new();
+        let mut vector_clock = VectorClock::new();
+        vector_clock.clocks.insert("sink".to_string(), 7);
+
+        instrumentation.record_receipted_position(7, event_id, vector_clock.clone());
+
+        let snapshot = instrumentation.snapshot();
+        assert_eq!(snapshot.receipted_seq, 7);
+        assert_eq!(snapshot.last_receipted_event_id, Some(event_id));
+        assert_eq!(snapshot.last_receipted_vector_clock, Some(vector_clock));
     }
 }

@@ -94,9 +94,13 @@ pub(super) async fn dispatch_running<
 
             let is_data = envelope.event.is_data();
             let directive = dispatch_event(ctx, subscription, &envelope).await?;
+            let received_eof = matches!(
+                directive,
+                EventLoopDirective::Transition(JournalSinkEvent::ReceivedEOF)
+            );
 
             // Backpressure ack: upstream input was consumed by sink handler.
-            if is_data {
+            if is_data && !received_eof {
                 if let Some(upstream) = subscription.last_delivered_upstream_stage() {
                     if let Some(reader) = ctx.backpressure_readers.get(&upstream) {
                         reader.ack_consumed(1);
@@ -104,41 +108,49 @@ pub(super) async fn dispatch_running<
                 }
             }
 
-            if let Some(status) = subscription
-                .maybe_check_contracts_tick(
-                    &mut ctx.contract_state[..],
-                    &mut ctx.last_contract_check,
-                )
-                .await
-            {
-                match status {
-                    crate::messaging::upstream_subscription::ContractStatus::Stalled(upstream) => {
-                        tracing::warn!(
-                            stage_name = %ctx.stage_name,
-                            upstream = ?upstream,
-                            "Upstream stalled detected during sink processing"
-                        );
+            if !received_eof {
+                if let Some(status) = subscription
+                    .maybe_check_contracts_tick_diagnostics_only(
+                        &mut ctx.contract_state[..],
+                        &mut ctx.last_contract_check,
+                    )
+                    .await
+                {
+                    match status {
+                        crate::messaging::upstream_subscription::ContractStatus::Stalled(
+                            upstream,
+                        ) => {
+                            tracing::warn!(
+                                stage_name = %ctx.stage_name,
+                                upstream = ?upstream,
+                                "Upstream stalled detected during sink processing"
+                            );
+                        }
+                        crate::messaging::upstream_subscription::ContractStatus::Violated {
+                            upstream,
+                            cause,
+                        } => {
+                            tracing::error!(
+                                stage_name = %ctx.stage_name,
+                                upstream = ?upstream,
+                                cause = ?cause,
+                                "Contract violation detected during sink processing"
+                            );
+                        }
+                        _ => {}
                     }
-                    crate::messaging::upstream_subscription::ContractStatus::Violated {
-                        upstream,
-                        cause,
-                    } => {
-                        tracing::error!(
-                            stage_name = %ctx.stage_name,
-                            upstream = ?upstream,
-                            cause = ?cause,
-                            "Contract violation detected during sink processing"
-                        );
-                    }
-                    _ => {}
                 }
+            }
+
+            if received_eof {
+                ctx.subscription = sup.subscription.take();
             }
 
             Ok(directive)
         }
         PollResult::NoEvents => {
             if let Some(status) = subscription
-                .maybe_check_contracts_tick(
+                .maybe_check_contracts_tick_diagnostics_only(
                     &mut ctx.contract_state[..],
                     &mut ctx.last_contract_check,
                 )
@@ -270,7 +282,7 @@ async fn dispatch_control_event<
             if envelope.event.is_eof() {
                 drop(
                     subscription
-                        .check_contracts(&mut ctx.contract_state[..])
+                        .check_contracts_diagnostics_only(&mut ctx.contract_state[..])
                         .await,
                 );
                 let _ = subscription.take_last_eof_outcome();
@@ -336,7 +348,7 @@ async fn dispatch_control_event<
             // Final EOF (all authoritative upstream EOFs observed).
             drop(
                 subscription
-                    .check_contracts(&mut ctx.contract_state[..])
+                    .check_contracts_diagnostics_only(&mut ctx.contract_state[..])
                     .await,
             );
             let _ = subscription.take_last_eof_outcome();
@@ -407,14 +419,17 @@ async fn dispatch_data_event<H: SinkHandler + Clone + std::fmt::Debug + Send + S
     // Use instrumentation wrapper but keep handler-level failures as per-record
     // outcomes instead of stage-fatal errors.
     let ack_result = process_with_instrumentation(&ctx.instrumentation, || async {
-        let result = AssertUnwindSafe(ctx.handler.consume(envelope_event))
+        let result = AssertUnwindSafe(ctx.handler.consume_report(envelope_event))
             .catch_unwind()
             .await;
 
         match result {
-            Ok(Ok(mut payload)) => {
-                payload.destination = stage_name.clone();
-                Ok((payload, None, false))
+            Ok(Ok(mut report)) => {
+                report.primary.destination = stage_name.clone();
+                for commit in &mut report.commit_receipts {
+                    commit.payload.destination = stage_name.clone();
+                }
+                Ok((report, None, false))
             }
             Ok(Err(err)) => {
                 let fail_payload = DeliveryPayload::failed(
@@ -424,7 +439,11 @@ async fn dispatch_data_event<H: SinkHandler + Clone + std::fmt::Debug + Send + S
                     err.to_string(),
                     /* final_attempt */ false,
                 );
-                Ok((fail_payload, Some(err), false))
+                Ok((
+                    crate::stages::common::handlers::SinkConsumeReport::new(fail_payload),
+                    Some(err),
+                    false,
+                ))
             }
             Err(panic_payload) => {
                 let msg = panic_payload
@@ -446,48 +465,33 @@ async fn dispatch_data_event<H: SinkHandler + Clone + std::fmt::Debug + Send + S
                     msg,
                     /* final_attempt */ true,
                 );
-                Ok((fail_payload, None, true))
+                Ok((
+                    crate::stages::common::handlers::SinkConsumeReport::new(fail_payload),
+                    None,
+                    true,
+                ))
             }
         }
     })
     .await;
 
     match ack_result {
-        Ok((payload, maybe_err, panicked)) => {
-            let flow_id = ctx.flow_id.to_string();
-            let flow_context = make_flow_context(
-                &ctx.flow_name,
-                &flow_id,
-                &ctx.stage_name,
-                ctx.stage_id,
-                StageType::Sink,
-            );
+        Ok((report, maybe_err, panicked)) => {
+            journal_delivery_receipt(ctx, subscription, envelope, report.primary).await?;
 
-            let writer_id = WriterId::from(ctx.stage_id);
-            let delivery_event = ChainEventFactory::delivery_event(writer_id, payload)
-                .with_flow_context(flow_context)
-                .with_causality(CausalityContext::with_parent(envelope.event.id))
-                .with_correlation_from(&envelope.event);
-
-            // Only count data/delivery events for writer_seq.
-            if delivery_event.is_data() || delivery_event.is_delivery() {
-                ctx.instrumentation.record_output_event(&delivery_event);
-            }
-
-            let delivery_event =
-                delivery_event.with_runtime_context(ctx.instrumentation.snapshot_with_control());
-            let written = ctx
-                .data_journal
-                .append(delivery_event, Some(envelope))
-                .await?;
-            crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
-                &written,
-                &ctx.system_journal,
-            )
-            .await;
-
-            if let Some(upstream_stage) = subscription.last_delivered_upstream_stage() {
-                subscription.notify_delivery_receipt(&written.event, upstream_stage);
+            for commit in report.commit_receipts {
+                if let Some((_upstream_stage, parent_envelope)) = subscription
+                    .pending_receipt_envelope(commit.parent_event_id, &ctx.contract_state[..])
+                {
+                    journal_delivery_receipt(ctx, subscription, &parent_envelope, commit.payload)
+                        .await?;
+                } else {
+                    tracing::warn!(
+                        stage_name = %ctx.stage_name,
+                        parent_event_id = %commit.parent_event_id,
+                        "Skipping commit receipt with no pending parent metadata"
+                    );
+                }
             }
 
             // Per-record handler errors are not stage-fatal. Surface them as
@@ -556,39 +560,60 @@ async fn dispatch_data_event<H: SinkHandler + Clone + std::fmt::Debug + Send + S
                 e.to_string(),
                 /* final_attempt */ false,
             );
-
-            let flow_id = ctx.flow_id.to_string();
-            let flow_ctx = make_flow_context(
-                &ctx.flow_name,
-                &flow_id,
-                &ctx.stage_name,
-                ctx.stage_id,
-                StageType::Sink,
-            );
-
-            let writer_id = WriterId::from(ctx.stage_id);
-            let fail_event = ChainEventFactory::delivery_event(writer_id, fail_payload)
-                .with_flow_context(flow_ctx)
-                .with_causality(CausalityContext::with_parent(envelope.event.id))
-                .with_correlation_from(&envelope.event);
-
-            if fail_event.is_data() || fail_event.is_delivery() {
-                ctx.instrumentation.record_output_event(&fail_event);
-            }
-            let fail_event =
-                fail_event.with_runtime_context(ctx.instrumentation.snapshot_with_control());
-            let written = ctx
-                .data_journal
-                .append(fail_event, Some(envelope))
+            journal_delivery_receipt(ctx, subscription, envelope, fail_payload)
                 .await
                 .map_err(|je| format!("Failed to journal sink failure: {je}"))?;
-            crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
-                &written,
-                &ctx.system_journal,
-            )
-            .await;
 
             Err(format!("Sink consume failed: {e}").into())
         }
     }
+}
+
+async fn journal_delivery_receipt<
+    H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
+>(
+    ctx: &mut JournalSinkContext<H>,
+    subscription: &mut crate::messaging::UpstreamSubscription<ChainEvent>,
+    parent_envelope: &EventEnvelope<ChainEvent>,
+    payload: DeliveryPayload,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let flow_id = ctx.flow_id.to_string();
+    let flow_context = make_flow_context(
+        &ctx.flow_name,
+        &flow_id,
+        &ctx.stage_name,
+        ctx.stage_id,
+        StageType::Sink,
+    );
+
+    let writer_id = WriterId::from(ctx.stage_id);
+    let delivery_event = ChainEventFactory::delivery_event(writer_id, payload)
+        .with_flow_context(flow_context)
+        .with_causality(CausalityContext::with_parent(parent_envelope.event.id))
+        .with_correlation_from(&parent_envelope.event);
+
+    if delivery_event.is_data() || delivery_event.is_delivery() {
+        ctx.instrumentation.record_output_event(&delivery_event);
+    }
+
+    let delivery_event =
+        delivery_event.with_runtime_context(ctx.instrumentation.snapshot_with_control());
+    let written = ctx
+        .data_journal
+        .append(delivery_event, Some(parent_envelope))
+        .await?;
+    crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
+        &written,
+        &ctx.system_journal,
+    )
+    .await;
+
+    if let Some((seq, event_id, vector_clock)) =
+        subscription.record_delivery_receipt(&written.event, &mut ctx.contract_state[..])
+    {
+        ctx.instrumentation
+            .record_receipted_position(seq.0, event_id, vector_clock);
+    }
+
+    Ok(())
 }
