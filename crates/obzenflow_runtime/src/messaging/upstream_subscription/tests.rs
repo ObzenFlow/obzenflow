@@ -946,13 +946,11 @@ async fn idle_reader_without_any_reads_does_not_emit_stall() {
     assert!(reader_progress[0].last_read_instant.is_none());
     assert!(reader_progress[0].stalled_since.is_none());
     assert!(!reader_progress[0].contract_violated);
-    assert!(
-        contract_journal
-            .read_causally_ordered()
-            .await
-            .expect("read contract journal")
-            .is_empty()
-    );
+    assert!(contract_journal
+        .read_causally_ordered()
+        .await
+        .expect("read contract journal")
+        .is_empty());
 }
 
 #[tokio::test]
