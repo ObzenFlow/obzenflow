@@ -735,43 +735,24 @@ where
                     }
                 };
 
-                // Emit stalled contract status fail to system journal (if available)
-                let mut status_append_ok = true;
-                if let (Some(system_journal), Some(reader_stage)) =
-                    (&tracker.system_journal, tracker.reader_stage)
-                {
-                    let status_event = SystemEvent::new(
-                        tracker.writer_id,
-                        SystemEventType::ContractStatus {
-                            upstream: progress.stage_id,
-                            reader: reader_stage,
-                            pass: false,
-                            reader_seq: Some(progress.reader_seq),
-                            advertised_writer_seq: progress.advertised_writer_seq,
-                            reason: Some(EventViolationCause::Other("reader_stalled".into())),
-                        },
-                    );
-                    if let Err(e) = system_journal.append(status_event, None).await {
-                        status_append_ok = false;
-                        tracing::error!(
-                            target: "flowip-105",
-                            owner = %self.owner_label,
-                            upstream = ?progress.stage_id,
-                            reader = ?reader_stage,
-                            reader_index = index,
-                            error = %e,
-                            "Failed to append stalled contract status; skipping state update"
-                        );
-                    }
-                }
+                // IMPORTANT: A stall is a liveness signal, not a transport contract violation.
+                //
+                // Historically we emitted `SystemEventType::ContractStatus { pass: false, reason:
+                // reader_stalled }` here. PipelineSupervisor treats *any* ContractStatus failure
+                // as a gating contract violation and aborts the flow (including during drain),
+                // which has proven wildly non-actionable for long/variable-latency stages
+                // (AI calls, network jitter) and creates nondeterministic demo failures.
+                //
+                // We still emit `FlowControlPayload::ReaderStalled` into the stage journal for
+                // observability, and we still return `ContractStatus::Stalled` to allow stage
+                // supervisors to log warnings, but we must not poison the global contract barrier.
 
                 if !matches!(status, ContractStatus::Violated { .. }) {
                     *status = ContractStatus::Stalled(progress.stage_id);
                 }
 
-                if stalled_append_ok && status_append_ok {
+                if stalled_append_ok {
                     progress.stalled_since = stall_since_candidate;
-                    progress.contract_violated = true;
                 }
             }
         } else {
