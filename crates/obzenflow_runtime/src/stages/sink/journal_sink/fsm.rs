@@ -224,6 +224,9 @@ pub enum JournalSinkAction<H> {
     FlushBuffers,
 
     /// Run the authoritative post-flush contract evaluation.
+    ///
+    /// This must run only after `FlushBuffers` has journalled any per-event commit receipts so that
+    /// EOF completion and progress signals are gated on durable receipt evidence.
     VerifyContractsAfterFlush,
 
     /// Clean up all resources
@@ -446,7 +449,11 @@ impl<H: SinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAction<H> 
                                 stage_name = %ctx.stage_name,
                                 "sink: FlushBuffers action - flush returned audit payload, writing delivery"
                             );
-                            let writer_id = ctx.writer_id.expect("writer_id not initialised");
+                            let writer_id = ctx.writer_id.ok_or_else(|| {
+                                obzenflow_fsm::FsmError::HandlerError(
+                                    "writer_id not initialised".to_string(),
+                                )
+                            })?;
 
                             let flow_ctx = FlowContext {
                                 flow_name: ctx.flow_name.clone(),
@@ -557,7 +564,11 @@ impl<H: SinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAction<H> 
                             stage_name = %ctx.stage_name,
                             "sink: Cleanup action - drain returned audit payload, writing delivery"
                         );
-                        let writer_id = ctx.writer_id.expect("writer_id not initialised");
+                        let writer_id = ctx.writer_id.ok_or_else(|| {
+                            obzenflow_fsm::FsmError::HandlerError(
+                                "writer_id not initialised".to_string(),
+                            )
+                        })?;
 
                         let flow_ctx = FlowContext {
                             flow_name: ctx.flow_name.clone(),
@@ -622,7 +633,9 @@ async fn journal_commit_receipt<H: SinkHandler + Send + Sync + 'static>(
     parent_envelope: &EventEnvelope<ChainEvent>,
     payload: DeliveryPayload,
 ) -> Result<(), obzenflow_fsm::FsmError> {
-    let writer_id = ctx.writer_id.expect("writer_id not initialised");
+    let writer_id = ctx.writer_id.ok_or_else(|| {
+        obzenflow_fsm::FsmError::HandlerError("writer_id not initialised".to_string())
+    })?;
     let flow_ctx = FlowContext {
         flow_name: ctx.flow_name.clone(),
         flow_id: ctx.flow_id.to_string(),

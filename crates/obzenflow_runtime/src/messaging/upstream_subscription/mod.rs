@@ -183,6 +183,14 @@ where
         chain.on_write(receipt, reader_stage, SeqNo(0));
     }
 
+    /// Record a just-journalled delivery receipt and advance the receipt watermark if possible.
+    ///
+    /// This is called by sink supervisors after appending a `ChainEventContent::Delivery` event.
+    /// It updates per-upstream `ReaderProgress` bookkeeping and returns the new receipt watermark
+    /// triple when (and only when) receipts become contiguous.
+    ///
+    /// `DeliveryResult::Buffered` receipts are recorded for auditing but do **not** advance the
+    /// receipt watermark or clear pending receipt metadata.
     pub fn record_delivery_receipt(
         &mut self,
         receipt: &ChainEvent,
@@ -193,6 +201,11 @@ where
         }
 
         let Some(parent_id) = receipt.causality.parent_ids.first().copied() else {
+            tracing::warn!(
+                owner = %self.owner_label,
+                receipt_id = %receipt.id,
+                "record_delivery_receipt: receipt missing parent causality"
+            );
             return None;
         };
 
@@ -201,6 +214,12 @@ where
             .enumerate()
             .find_map(|(index, progress)| progress.pending_receipts.get(&parent_id).map(|_| index))
         else {
+            tracing::warn!(
+                owner = %self.owner_label,
+                receipt_id = %receipt.id,
+                ?parent_id,
+                "record_delivery_receipt: no pending receipt metadata for parent"
+            );
             return None;
         };
 
@@ -208,6 +227,13 @@ where
         self.notify_delivery_receipt(receipt, upstream_stage);
 
         let obzenflow_core::event::ChainEventContent::Delivery(payload) = &receipt.content else {
+            tracing::warn!(
+                owner = %self.owner_label,
+                receipt_id = %receipt.id,
+                ?upstream_stage,
+                ?parent_id,
+                "record_delivery_receipt: non-delivery event passed to receipt recorder"
+            );
             return None;
         };
 

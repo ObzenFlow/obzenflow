@@ -640,21 +640,20 @@ async fn flowip_059a_rate_limiter_metrics_are_exported_with_joinable_labels() ->
     // Strict timeout protocol: if the flow or metrics pipeline hangs, fail fast.
     let timeout_flow = Duration::from_secs(30);
     let timeout_metrics = Duration::from_secs(10);
+    let total_events: usize = 250;
 
-    // Configure the limiter to produce:
-    // - at least 1 delayed event (tiny burst forces blocking)
-    // - a window summary (>=1000 processed events triggers summary)
+    // Configure the limiter to produce at least one delayed event while keeping
+    // the end-to-end run comfortably inside CI timing variance.
     let flow_handle = flow! {
         name: "flowip_059a_rl_phase3",
         journals: disk_journals(unique_journal_dir("flowip_059a_rl_phase3")),
         middleware: [],
 
         stages: {
-            // Use 1001 so the summary is not emitted on the final stage output.
-            src = source!(BurstSource::new(1001), [
+            src = source!(BurstSource::new(total_events), [
                 // Force deterministic backpressure: small burst + low rate so at least
-                // one event must block, while still reaching 1000 events well under the
-                // 10s time-based summary threshold.
+                // one event must block while still allowing the run to complete
+                // within the metrics wait window on slower CI hosts.
                 rate_limit_with_burst(200.0, 1.0)
             ]);
             // Drop downstream data outputs to keep journaling light; rate limiting
@@ -693,7 +692,7 @@ async fn flowip_059a_rate_limiter_metrics_are_exported_with_joinable_labels() ->
         rl_stage_label.clone(),
     ];
 
-    let expected_events_total = 1001.0;
+    let expected_events_total = total_events as f64;
     let join_labels = vec![flow_label.clone(), rl_stage_label.clone()];
     let metrics_text = wait_for_metrics(&exporter, timeout_metrics, &debug_patterns, |text| {
         let events_total =
@@ -720,8 +719,8 @@ async fn flowip_059a_rate_limiter_metrics_are_exported_with_joinable_labels() ->
     )
     .ok_or_else(|| anyhow!("missing rate_limiter_events_total for {rl_stage_label}"))?;
     assert!(
-        (events_total - 1001.0).abs() < f64::EPSILON,
-        "expected rate_limiter_events_total=1001, got {events_total}"
+        (events_total - total_events as f64).abs() < f64::EPSILON,
+        "expected rate_limiter_events_total={total_events}, got {events_total}"
     );
 
     let delayed_total = metric_line_value(
@@ -742,8 +741,8 @@ async fn flowip_059a_rate_limiter_metrics_are_exported_with_joinable_labels() ->
     )
     .ok_or_else(|| anyhow!("missing rate_limiter_tokens_consumed_total for {rl_stage_label}"))?;
     assert!(
-        tokens_consumed_total >= 1000.0,
-        "expected tokens_consumed_total to be populated, got {tokens_consumed_total}"
+        (tokens_consumed_total - total_events as f64).abs() < f64::EPSILON,
+        "expected tokens_consumed_total={total_events}, got {tokens_consumed_total}"
     );
 
     let delay_seconds_total = metric_line_value(

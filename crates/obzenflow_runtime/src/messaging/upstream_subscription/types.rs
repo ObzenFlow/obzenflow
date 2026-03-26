@@ -163,7 +163,7 @@ pub struct ReaderProgress {
     pub last_receipted_event_id: Option<EventId>,
     pub last_receipted_vector_clock: Option<VectorClock>,
     pub(crate) pending_receipts: HashMap<EventId, PendingReceiptMeta>,
-    pub(crate) committed_out_of_order: BTreeMap<u64, PendingReceiptMeta>,
+    pub(crate) committed_out_of_order: BTreeMap<SeqNo, PendingReceiptMeta>,
 
     /// Progress timing
     pub last_progress_seq: SeqNo,
@@ -187,10 +187,7 @@ pub struct ReaderProgress {
 
 impl ReaderProgress {
     /// Create a new reader progress record for the given upstream stage.
-    ///
-    /// Kept `pub(crate)` so FSM contexts within this crate can construct
-    /// contract state without exposing construction details outside the crate.
-    pub(crate) fn new(stage_id: StageId) -> Self {
+    pub fn new(stage_id: StageId) -> Self {
         Self {
             stage_id,
             reader_seq: SeqNo(0),
@@ -213,6 +210,10 @@ impl ReaderProgress {
         }
     }
 
+    /// Stores receipt metadata for a just-read event that requires durable delivery evidence.
+    ///
+    /// `reader_seq` at the time of tracking is used as the receipt-ordering key for advancing
+    /// the contiguous receipt watermark (`receipted_seq`).
     pub(crate) fn track_pending_receipt(
         &mut self,
         event_id: EventId,
@@ -228,22 +229,29 @@ impl ReaderProgress {
         self.pending_receipts.insert(event_id, meta);
     }
 
+    /// Mark a pending event as durably receipted.
+    ///
+    /// Returns `false` if the event is not pending (duplicate receipt or missing read-side
+    /// bookkeeping). When receipts arrive out-of-order, this buffers them until the receipt
+    /// watermark can advance contiguously.
     pub(crate) fn mark_receipted(&mut self, event_id: EventId) -> bool {
         let Some(meta) = self.pending_receipts.remove(&event_id) else {
             return false;
         };
 
-        if meta.seq.0 == self.receipted_seq.0.saturating_add(1) {
+        let next_seq = SeqNo(self.receipted_seq.0.saturating_add(1));
+        if meta.seq == next_seq {
             self.advance_receipted(meta);
             loop {
-                let next_seq = self.receipted_seq.0.saturating_add(1);
+                let next_seq = SeqNo(self.receipted_seq.0.saturating_add(1));
                 let Some(next_meta) = self.committed_out_of_order.remove(&next_seq) else {
                     break;
                 };
                 self.advance_receipted(next_meta);
             }
         } else if meta.seq.0 > self.receipted_seq.0 {
-            self.committed_out_of_order.insert(meta.seq.0, meta);
+            let seq = meta.seq;
+            self.committed_out_of_order.insert(seq, meta);
         }
 
         true
