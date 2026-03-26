@@ -696,7 +696,6 @@ where
 
         // Check for stalls
         let Some(last) = progress.last_read_instant else {
-            progress.last_read_instant = Some(now);
             return;
         };
 
