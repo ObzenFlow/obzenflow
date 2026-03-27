@@ -412,7 +412,11 @@ async fn dispatch_running_inner<
                             }
 
                             let _processing = heartbeat_state.as_ref().map(|state| {
-                                HeartbeatProcessingGuard::new(state.clone(), event_id)
+                                HeartbeatProcessingGuard::new(
+                                    state.clone(),
+                                    upstream_stage,
+                                    event_id,
+                                )
                             });
 
                             match handler.process(event).await {

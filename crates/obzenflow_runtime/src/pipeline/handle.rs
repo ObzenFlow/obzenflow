@@ -5,6 +5,7 @@
 use super::fsm::{FlowStopMode, PipelineEvent, PipelineState};
 use crate::errors::FlowError;
 use crate::stages::common::stage_handle::STOP_REASON_TIMEOUT;
+use crate::stages::common::LivenessRegistry;
 use crate::supervised_base::{HandleError, StandardHandle, SupervisorHandle};
 use obzenflow_core::event::SystemEvent;
 use obzenflow_core::journal::Journal;
@@ -32,6 +33,7 @@ pub(crate) struct FlowHandleExtras {
     pub subgraph_membership: Option<StageSubgraphMembershipMap>,
     pub subgraphs: Option<SubgraphRegistry>,
     pub system_journal: Option<Arc<dyn Journal<SystemEvent>>>,
+    pub liveness_registry: Option<LivenessRegistry>,
 }
 
 /// Structural middleware configuration for a stage (FLOWIP-059).
@@ -107,6 +109,9 @@ pub struct FlowHandle {
 
     /// System journal for lifecycle events (for SSE / observability)
     system_journal: Option<Arc<dyn Journal<SystemEvent>>>,
+
+    /// Flow-scoped liveness registry (FLOWIP-063e).
+    liveness_registry: Option<LivenessRegistry>,
 }
 
 impl FlowHandle {
@@ -125,6 +130,7 @@ impl FlowHandle {
             subgraph_membership,
             subgraphs,
             system_journal,
+            liveness_registry,
         } = extras;
 
         Self {
@@ -138,6 +144,7 @@ impl FlowHandle {
             join_metadata,
             subgraph_membership,
             subgraphs,
+            liveness_registry,
         }
     }
 
@@ -383,6 +390,10 @@ impl FlowHandle {
     /// Get the system journal for lifecycle events (if available)
     pub fn system_journal(&self) -> Option<Arc<dyn Journal<SystemEvent>>> {
         self.system_journal.clone()
+    }
+
+    pub fn liveness_registry(&self) -> Option<LivenessRegistry> {
+        self.liveness_registry.clone()
     }
 
     /// Get the user-specified flow name from the flow! macro

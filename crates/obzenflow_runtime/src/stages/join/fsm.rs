@@ -621,6 +621,10 @@ impl<H: JoinHandler + Send + Sync + 'static> FsmAction for JoinAction<H> {
             }
 
             JoinAction::SendCompletion => {
+                if let Some(heartbeat) = &ctx.heartbeat {
+                    heartbeat.state.mark_completed();
+                }
+
                 lifecycle_actions::send_completion_best_effort(
                     "Join",
                     ctx.stage_id,

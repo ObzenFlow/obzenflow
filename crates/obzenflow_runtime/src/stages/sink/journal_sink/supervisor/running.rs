@@ -432,13 +432,14 @@ async fn dispatch_data_event<H: SinkHandler + Clone + std::fmt::Debug + Send + S
     let event_id = envelope_event.id;
     let stage_name = ctx.stage_name.clone();
     let heartbeat_state = ctx.heartbeat.as_ref().map(|h| h.state.clone());
+    let upstream_stage = subscription.last_delivered_upstream_stage();
 
     // Use instrumentation wrapper but keep handler-level failures as per-record
     // outcomes instead of stage-fatal errors.
     let ack_result = process_with_instrumentation(&ctx.instrumentation, || async {
         let _processing = heartbeat_state
             .as_ref()
-            .map(|state| HeartbeatProcessingGuard::new(state.clone(), event_id));
+            .map(|state| HeartbeatProcessingGuard::new(state.clone(), upstream_stage, event_id));
 
         let result = AssertUnwindSafe(ctx.handler.consume_report(envelope_event))
             .catch_unwind()

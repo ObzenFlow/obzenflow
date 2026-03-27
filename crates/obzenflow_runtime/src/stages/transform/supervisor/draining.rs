@@ -28,6 +28,10 @@ pub(super) async fn dispatch_draining<
     state: &TransformState<H>,
     ctx: &mut TransformContext<H>,
 ) -> Result<EventLoopDirective<TransformEvent<H>>, Box<dyn std::error::Error + Send + Sync>> {
+    if let Some(heartbeat) = &ctx.heartbeat {
+        heartbeat.state.mark_draining();
+    }
+
     let flow_id = ctx.flow_id.to_string();
     let flow_context = make_flow_context(
         &ctx.flow_name,
@@ -174,9 +178,9 @@ async fn dispatch_draining_inner<
                         return Ok(vec![event]);
                     }
 
-                    let _processing = heartbeat_state
-                        .as_ref()
-                        .map(|state| HeartbeatProcessingGuard::new(state.clone(), event_id));
+                    let _processing = heartbeat_state.as_ref().map(|state| {
+                        HeartbeatProcessingGuard::new(state.clone(), upstream_stage, event_id)
+                    });
 
                     match handler.process(event).await {
                         Ok(outputs) => {

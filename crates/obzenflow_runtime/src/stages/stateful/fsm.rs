@@ -583,6 +583,10 @@ impl<H: StatefulHandler + Send + Sync + 'static> FsmAction for StatefulAction<H>
             }
 
             StatefulAction::SendCompletion => {
+                if let Some(heartbeat) = &ctx.heartbeat {
+                    heartbeat.state.mark_completed();
+                }
+
                 lifecycle_actions::send_completion_best_effort(
                     "Stateful",
                     ctx.stage_id,

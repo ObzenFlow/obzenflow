@@ -223,9 +223,9 @@ async fn poll_live_reference<H: JoinHandler + Clone + std::fmt::Debug + Send + S
                         .in_flight_count
                         .fetch_add(1, Ordering::Relaxed);
                     let start = Instant::now();
-                    let _processing = heartbeat_state
-                        .as_ref()
-                        .map(|state| HeartbeatProcessingGuard::new(state.clone(), event_id));
+                    let _processing = heartbeat_state.as_ref().map(|state| {
+                        HeartbeatProcessingGuard::new(state.clone(), Some(source_id), event_id)
+                    });
                     let result = ctx.handler.process_event(
                         &mut ctx.handler_state,
                         event.clone(),
@@ -471,9 +471,9 @@ async fn poll_live_stream<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync
                         .in_flight_count
                         .fetch_add(1, Ordering::Relaxed);
                     let start = Instant::now();
-                    let _processing = heartbeat_state
-                        .as_ref()
-                        .map(|state| HeartbeatProcessingGuard::new(state.clone(), event_id));
+                    let _processing = heartbeat_state.as_ref().map(|state| {
+                        HeartbeatProcessingGuard::new(state.clone(), Some(source_id), event_id)
+                    });
                     let result = ctx.handler.process_event(
                         &mut ctx.handler_state,
                         event.clone(),

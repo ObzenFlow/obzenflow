@@ -263,9 +263,9 @@ pub(super) async fn dispatch_accumulating<
                         ctx.last_data_event_time = Some(start);
                     }
 
-                    let _processing = heartbeat_state
-                        .as_ref()
-                        .map(|state| HeartbeatProcessingGuard::new(state.clone(), event_id));
+                    let _processing = heartbeat_state.as_ref().map(|state| {
+                        HeartbeatProcessingGuard::new(state.clone(), upstream_stage, event_id)
+                    });
 
                     handler.accumulate(&mut ctx.current_state, event);
 

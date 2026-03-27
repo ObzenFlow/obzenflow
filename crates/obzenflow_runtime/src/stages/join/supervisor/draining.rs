@@ -24,6 +24,10 @@ pub(super) async fn dispatch_draining<
     state: &JoinState<H>,
     ctx: &mut JoinContext<H>,
 ) -> Result<EventLoopDirective<JoinEvent<H>>, Box<dyn std::error::Error + Send + Sync>> {
+    if let Some(heartbeat) = &ctx.heartbeat {
+        heartbeat.state.mark_draining();
+    }
+
     if ctx.reference_mode == JoinReferenceMode::Live {
         return dispatch_draining_live(sup, ctx).await;
     }
@@ -78,9 +82,13 @@ pub(super) async fn dispatch_draining<
                         .in_flight_count
                         .fetch_add(1, Ordering::Relaxed);
                     let start = Instant::now();
-                    let _processing = heartbeat_state
-                        .as_ref()
-                        .map(|state| HeartbeatProcessingGuard::new(state.clone(), event_id));
+                    let _processing = heartbeat_state.as_ref().map(|state| {
+                        HeartbeatProcessingGuard::new(
+                            state.clone(),
+                            Some(reference_stage_id),
+                            event_id,
+                        )
+                    });
                     let result = ctx.handler.process_event(
                         &mut ctx.handler_state,
                         event,
@@ -214,9 +222,9 @@ pub(super) async fn dispatch_draining<
                         .in_flight_count
                         .fetch_add(1, Ordering::Relaxed);
                     let start = Instant::now();
-                    let _processing = heartbeat_state
-                        .as_ref()
-                        .map(|state| HeartbeatProcessingGuard::new(state.clone(), event_id));
+                    let _processing = heartbeat_state.as_ref().map(|state| {
+                        HeartbeatProcessingGuard::new(state.clone(), Some(upstream_stage), event_id)
+                    });
                     let result = ctx.handler.process_event(
                         &mut ctx.handler_state,
                         event,

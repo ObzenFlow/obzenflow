@@ -247,10 +247,28 @@ pub struct InfraMetricsSnapshot {
     /// Stage-level infrastructure metrics
     pub stage_metrics: HashMap<StageId, StageInfraMetrics>,
 
+    /// Continuous liveness metrics derived from the in-memory heartbeat registry (FLOWIP-063e).
+    pub liveness_metrics: LivenessMetricsSnapshot,
+
     /// HTTP ingestion telemetry observed directly from `FlowApplication`-owned ingress handles.
     ///
     /// Keyed by `base_path` (e.g., "/api/ingest").
     pub ingestion_metrics: HashMap<String, crate::event::ingestion::IngestionTelemetrySnapshot>,
+}
+
+/// Snapshot of continuous heartbeat-derived liveness metrics (FLOWIP-063e).
+///
+/// These values are wall-clock based and are not derived from journal events.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct LivenessMetricsSnapshot {
+    /// Stage handler blocked time (seconds). 0 when not processing.
+    pub stage_handler_blocked_seconds: HashMap<StageId, f64>,
+
+    /// Stage activity state code: 0=polling, 1=processing, 2=draining, 3=completed.
+    pub stage_activity_state: HashMap<StageId, f64>,
+
+    /// Edge idle time (seconds) per edge (upstream, downstream).
+    pub edge_idle_seconds: HashMap<(StageId, StageId), f64>,
 }
 
 /// Aggregated AI chunk planning metrics per stage.
@@ -489,6 +507,7 @@ impl Default for InfraMetricsSnapshot {
             timestamp: chrono::Utc::now(),
             journal_metrics: JournalMetricsSnapshot::default(),
             stage_metrics: HashMap::new(),
+            liveness_metrics: LivenessMetricsSnapshot::default(),
             ingestion_metrics: HashMap::new(),
         }
     }

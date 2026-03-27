@@ -29,6 +29,10 @@ pub(super) async fn dispatch_draining<
     state: &StatefulState<H>,
     ctx: &mut StatefulContext<H>,
 ) -> Result<EventLoopDirective<StatefulEvent<H>>, Box<dyn std::error::Error + Send + Sync>> {
+    if let Some(heartbeat) = &ctx.heartbeat {
+        heartbeat.state.mark_draining();
+    }
+
     let flow_id = ctx.flow_id.to_string();
     let flow_context = make_flow_context(
         &ctx.flow_name,
@@ -128,9 +132,9 @@ pub(super) async fn dispatch_draining<
                         .fetch_add(1, Ordering::Relaxed);
                     let start = Instant::now();
 
-                    let _processing = heartbeat_state
-                        .as_ref()
-                        .map(|state| HeartbeatProcessingGuard::new(state.clone(), event_id));
+                    let _processing = heartbeat_state.as_ref().map(|state| {
+                        HeartbeatProcessingGuard::new(state.clone(), upstream_stage, event_id)
+                    });
 
                     handler.accumulate(&mut ctx.current_state, event);
 

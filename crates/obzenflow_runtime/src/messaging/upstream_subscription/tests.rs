@@ -968,6 +968,86 @@ async fn stall_append_failure_does_not_set_stalled_since() {
 }
 
 #[tokio::test]
+async fn stall_cooloff_suppresses_repeat_stalled_emission() {
+    tokio::time::pause();
+
+    let upstream_stage = StageId::new();
+    let upstream_owner = JournalOwner::stage(upstream_stage);
+    let upstream_journal: Arc<dyn Journal<ChainEvent>> = Arc::new(TestJournal::new(upstream_owner));
+    let upstreams = [(upstream_stage, "upstream".to_string(), upstream_journal)];
+
+    let mut subscription = UpstreamSubscription::new_with_names("test_owner", &upstreams)
+        .await
+        .unwrap();
+
+    let contract_stage = StageId::new();
+    let contract_owner = JournalOwner::stage(contract_stage);
+    let contract_journal: Arc<dyn Journal<ChainEvent>> = Arc::new(TestJournal::new(contract_owner));
+
+    let config = ContractConfig {
+        progress_min_events: Count(100),
+        progress_max_interval: DurationMs(500),
+        stall_threshold: DurationMs(100),
+        stall_cooloff: DurationMs(1_000),
+        stall_checks_before_emit: 1,
+    };
+
+    subscription = subscription.with_contracts(ContractsWiring {
+        writer_id: WriterId::from(contract_stage),
+        contract_journal: contract_journal.clone(),
+        config,
+        system_journal: None,
+        reader_stage: None,
+        control_middleware: Arc::new(NoControlMiddleware),
+        include_delivery_contract: false,
+        cycle_guard_config: None,
+    });
+
+    let mut reader_progress = [ReaderProgress::new(upstream_stage)];
+    reader_progress[0].last_read_instant = Some(Instant::now());
+    reader_progress[0].last_progress_instant = Some(Instant::now());
+    reader_progress[0].last_progress_seq = reader_progress[0].reader_seq;
+
+    // Stall emitted on first check (should_emit_progress is false, stall_threshold exceeded).
+    tokio::time::advance(std::time::Duration::from_millis(200)).await;
+    let status = subscription.check_contracts(&mut reader_progress).await;
+    assert!(
+        matches!(status, ContractStatus::Stalled(s) if s == upstream_stage),
+        "expected initial stalled status"
+    );
+
+    // Progress emission clears stalled_since (time_elapsed >= progress_max_interval).
+    tokio::time::advance(std::time::Duration::from_millis(400)).await;
+    let _ = subscription.check_contracts(&mut reader_progress).await;
+
+    // Still stalled, but within cooloff window, so do not emit ReaderStalled again.
+    tokio::time::advance(std::time::Duration::from_millis(50)).await;
+    let status = subscription.check_contracts(&mut reader_progress).await;
+    assert!(
+        matches!(status, ContractStatus::Stalled(s) if s == upstream_stage),
+        "expected stalled status during cooloff"
+    );
+
+    let envelopes = contract_journal
+        .read_causally_ordered()
+        .await
+        .expect("read contract journal");
+    let stalled_count = envelopes
+        .iter()
+        .filter(|e| {
+            matches!(
+                &e.event.content,
+                ChainEventContent::FlowControl(FlowControlPayload::ReaderStalled { .. })
+            )
+        })
+        .count();
+    assert_eq!(
+        stalled_count, 1,
+        "expected ReaderStalled to be emitted once within cooloff"
+    );
+}
+
+#[tokio::test]
 async fn idle_reader_without_any_reads_does_not_emit_stall() {
     tokio::time::pause();
 

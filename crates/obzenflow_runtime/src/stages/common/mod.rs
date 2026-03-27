@@ -16,6 +16,7 @@ pub mod stage_handle;
 pub(crate) mod supervision;
 
 pub use heartbeat::HeartbeatConfig;
+pub use heartbeat::LivenessRegistry;
 
 // Re-export handler traits for convenience
 pub use handlers::{

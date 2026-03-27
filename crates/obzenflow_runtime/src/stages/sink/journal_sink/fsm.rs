@@ -397,6 +397,10 @@ impl<H: SinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAction<H> 
             }
 
             JournalSinkAction::SendCompletion => {
+                if let Some(heartbeat) = &ctx.heartbeat {
+                    heartbeat.state.mark_completed();
+                }
+
                 lifecycle_actions::send_completion_best_effort(
                     "Sink",
                     ctx.stage_id,

@@ -501,6 +501,10 @@ impl<H: UnifiedTransformHandler + Send + Sync + 'static> FsmAction for Transform
             }
 
             TransformAction::SendCompletion => {
+                if let Some(heartbeat) = &ctx.heartbeat {
+                    heartbeat.state.mark_completed();
+                }
+
                 lifecycle_actions::send_completion_best_effort(
                     "Transform",
                     ctx.stage_id,

@@ -441,6 +441,7 @@ impl StageResourcesBuilder {
             pipeline_system_id: self.pipeline_system_id,
             system_journal: self.system_journal,
             backpressure_registry,
+            liveness_registry,
             stage_journals: all_stage_journals,
             error_journals: all_error_journals,
             stage_resources,
@@ -462,6 +463,9 @@ pub struct StageResourcesSet {
 
     /// Flow-scoped backpressure registry for observability (FLOWIP-086k).
     pub backpressure_registry: Arc<BackpressureRegistry>,
+
+    /// Flow-scoped liveness registry for observability (FLOWIP-063e).
+    pub liveness_registry: LivenessRegistry,
 
     /// All stage journals (for metrics aggregator to read)
     pub stage_journals: Vec<(StageId, Arc<dyn Journal<ChainEvent>>)>,

@@ -1161,6 +1161,7 @@ macro_rules! build_typed_flow {
             .with_stage_journals(stage_resources_set.stage_journals.clone())
             .with_error_journals(stage_resources_set.error_journals.clone())
             .with_backpressure_registry(stage_resources_set.backpressure_registry.clone())
+            .with_liveness_registry(stage_resources_set.liveness_registry.clone())
             .with_middleware_stacks(middleware_stacks);
 
         if !join_metadata_map.is_empty() {
