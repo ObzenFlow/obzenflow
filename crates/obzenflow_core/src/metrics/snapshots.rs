@@ -247,7 +247,7 @@ pub struct InfraMetricsSnapshot {
     /// Stage-level infrastructure metrics
     pub stage_metrics: HashMap<StageId, StageInfraMetrics>,
 
-    /// Continuous liveness metrics derived from the in-memory heartbeat registry (FLOWIP-063e).
+    /// Continuous liveness metrics derived from the in-memory heartbeat snapshots store (FLOWIP-063e).
     pub liveness_metrics: LivenessMetricsSnapshot,
 
     /// HTTP ingestion telemetry observed directly from `FlowApplication`-owned ingress handles.
