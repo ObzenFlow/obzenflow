@@ -8,8 +8,8 @@ use std::sync::Arc;
 
 use crate::metrics::instrumentation::StageInstrumentation;
 use crate::stages::common::control_strategies::{ControlEventStrategy, JonestownStrategy};
-use crate::stages::common::heartbeat::{spawn_heartbeat, HeartbeatConfig, HeartbeatState};
 use crate::stages::common::handlers::StatefulHandler;
+use crate::stages::common::heartbeat::{spawn_heartbeat, HeartbeatConfig, HeartbeatState};
 use crate::stages::resources_builder::StageResources;
 use crate::supervised_base::{
     BuilderError, ChannelBuilder, HandleBuilder, HandlerSupervisedExt,

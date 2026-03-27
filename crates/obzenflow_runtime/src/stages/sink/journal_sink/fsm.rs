@@ -13,8 +13,8 @@ use crate::messaging::upstream_subscription::{ContractConfig, ContractsWiring, R
 use crate::messaging::UpstreamSubscription;
 use crate::metrics::instrumentation::StageInstrumentation;
 use crate::stages::common::control_strategies::ControlEventStrategy;
-use crate::stages::common::heartbeat::HeartbeatHandle;
 use crate::stages::common::handlers::SinkHandler;
+use crate::stages::common::heartbeat::HeartbeatHandle;
 use crate::stages::common::supervision::lifecycle_actions;
 use crate::stages::resources_builder::BoundSubscriptionFactory;
 use obzenflow_core::event::context::causality_context::CausalityContext;

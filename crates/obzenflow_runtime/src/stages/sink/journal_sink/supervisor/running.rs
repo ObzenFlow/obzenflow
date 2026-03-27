@@ -214,7 +214,9 @@ async fn dispatch_event<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync +
     let upstream_stage = subscription.last_delivered_upstream_stage();
     if let (Some(heartbeat), Some(upstream)) = (&ctx.heartbeat, upstream_stage) {
         if envelope.event.is_data() {
-            heartbeat.state.record_data_read(upstream, envelope.event.id);
+            heartbeat
+                .state
+                .record_data_read(upstream, envelope.event.id);
         }
     }
 

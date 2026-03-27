@@ -7,9 +7,9 @@
 pub(crate) mod backpressure_activity_pulse;
 pub mod control_strategies;
 pub(crate) mod cycle_guard;
-pub(crate) mod heartbeat;
 pub mod handler_error;
 pub mod handlers;
+pub(crate) mod heartbeat;
 pub mod middleware_mirror;
 pub mod source_handle;
 pub mod stage_handle;

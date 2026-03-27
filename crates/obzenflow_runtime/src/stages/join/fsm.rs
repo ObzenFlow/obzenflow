@@ -28,8 +28,8 @@ use crate::messaging::upstream_subscription::{ContractConfig, ContractsWiring, R
 use crate::messaging::UpstreamSubscription;
 use crate::metrics::instrumentation::StageInstrumentation;
 use crate::stages::common::backpressure_activity_pulse::BackpressureActivityPulse;
-use crate::stages::common::heartbeat::HeartbeatHandle;
 use crate::stages::common::handlers::JoinHandler;
+use crate::stages::common::heartbeat::HeartbeatHandle;
 use crate::stages::common::supervision::lifecycle_actions;
 use crate::stages::resources_builder::BoundSubscriptionFactory;
 use crate::supervised_base::idle_backoff::IdleBackoff;

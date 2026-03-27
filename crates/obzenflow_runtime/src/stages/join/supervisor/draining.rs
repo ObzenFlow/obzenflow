@@ -67,7 +67,9 @@ pub(super) async fn dispatch_draining<
                     let writer_id = ctx.writer_id.ok_or("No writer ID available")?;
                     if let Some(heartbeat) = &ctx.heartbeat {
                         if event.is_data() {
-                            heartbeat.state.record_data_read(reference_stage_id, event_id);
+                            heartbeat
+                                .state
+                                .record_data_read(reference_stage_id, event_id);
                         }
                     }
                     let heartbeat_state = ctx.heartbeat.as_ref().map(|h| h.state.clone());

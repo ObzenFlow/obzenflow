@@ -713,8 +713,7 @@ where
             {
                 if tracker.config.stall_cooloff.0 > 0 {
                     if let Some(last_emitted) = progress.last_stall_emitted_instant {
-                        let cooloff_elapsed =
-                            now.duration_since(last_emitted).as_millis() as u64;
+                        let cooloff_elapsed = now.duration_since(last_emitted).as_millis() as u64;
                         if cooloff_elapsed < tracker.config.stall_cooloff.0 {
                             if !matches!(status, ContractStatus::Violated { .. }) {
                                 *status = ContractStatus::Stalled(progress.stage_id);

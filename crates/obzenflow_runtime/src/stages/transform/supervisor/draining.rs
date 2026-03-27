@@ -123,7 +123,9 @@ async fn dispatch_draining_inner<
 
             if let (Some(heartbeat), Some(upstream)) = (&ctx.heartbeat, upstream_stage) {
                 if envelope.event.is_data() {
-                    heartbeat.state.record_data_read(upstream, envelope.event.id);
+                    heartbeat
+                        .state
+                        .record_data_read(upstream, envelope.event.id);
                 }
             }
 

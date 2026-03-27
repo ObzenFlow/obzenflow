@@ -1347,10 +1347,9 @@ impl FsmAction for MetricsAggregatorAction {
                         state,
                         ..
                     } => {
-                        store.edge_liveness_state.insert(
-                            (*upstream, *reader),
-                            edge_liveness_state_gauge_value(state),
-                        );
+                        store
+                            .edge_liveness_state
+                            .insert((*upstream, *reader), edge_liveness_state_gauge_value(state));
                     }
                     obzenflow_core::event::SystemEventType::HttpSurfaceSnapshot { snapshot } => {
                         for route in &snapshot.routes {

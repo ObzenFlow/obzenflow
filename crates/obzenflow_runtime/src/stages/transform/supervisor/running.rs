@@ -170,7 +170,9 @@ async fn dispatch_running_inner<
 
             if let (Some(heartbeat), Some(upstream)) = (&ctx.heartbeat, upstream_stage) {
                 if envelope.event.is_data() {
-                    heartbeat.state.record_data_read(upstream, envelope.event.id);
+                    heartbeat
+                        .state
+                        .record_data_read(upstream, envelope.event.id);
                 }
             }
 
@@ -409,9 +411,9 @@ async fn dispatch_running_inner<
                                 return Ok(vec![event]);
                             }
 
-                            let _processing = heartbeat_state
-                                .as_ref()
-                                .map(|state| HeartbeatProcessingGuard::new(state.clone(), event_id));
+                            let _processing = heartbeat_state.as_ref().map(|state| {
+                                HeartbeatProcessingGuard::new(state.clone(), event_id)
+                            });
 
                             match handler.process(event).await {
                                 Ok(outputs) => {

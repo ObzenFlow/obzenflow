@@ -103,14 +103,26 @@ impl HeartbeatState {
 
     pub fn mark_polling(&self) {
         self.activity.store(ACTIVITY_POLLING, Ordering::Release);
-        *self.handler_entered_at.lock().expect("handler_entered_at lock") = None;
-        *self.processing_event_id.lock().expect("processing_event_id lock") = None;
+        *self
+            .handler_entered_at
+            .lock()
+            .expect("handler_entered_at lock") = None;
+        *self
+            .processing_event_id
+            .lock()
+            .expect("processing_event_id lock") = None;
     }
 
     pub fn mark_processing(&self, event_id: EventId) {
         self.activity.store(ACTIVITY_PROCESSING, Ordering::Release);
-        *self.handler_entered_at.lock().expect("handler_entered_at lock") = Some(Instant::now());
-        *self.processing_event_id.lock().expect("processing_event_id lock") = Some(event_id);
+        *self
+            .handler_entered_at
+            .lock()
+            .expect("handler_entered_at lock") = Some(Instant::now());
+        *self
+            .processing_event_id
+            .lock()
+            .expect("processing_event_id lock") = Some(event_id);
     }
 
     pub fn record_data_read(&self, upstream: StageId, event_id: EventId) {
@@ -145,7 +157,10 @@ impl HeartbeatState {
             return None;
         }
 
-        let entered_at = self.handler_entered_at.lock().expect("handler_entered_at lock");
+        let entered_at = self
+            .handler_entered_at
+            .lock()
+            .expect("handler_entered_at lock");
         let entered_at = (*entered_at)?;
         Some(
             Instant::now()
@@ -164,9 +179,12 @@ impl HeartbeatState {
                     .processing_event_id
                     .lock()
                     .expect("processing_event_id lock")
-                    .unwrap_or_else(EventId::new);
+                    .unwrap_or_default();
                 let elapsed_ms = self.handler_blocked_ms().unwrap_or(0);
-                StageActivity::Processing { event_id, elapsed_ms }
+                StageActivity::Processing {
+                    event_id,
+                    elapsed_ms,
+                }
             }
             ACTIVITY_DRAINING => StageActivity::Draining,
             ACTIVITY_COMPLETED => StageActivity::Completed,
@@ -175,7 +193,9 @@ impl HeartbeatState {
     }
 
     fn edge_idle_ms(&self, index: usize) -> u64 {
-        let last = self.edges[index].last_read_offset_ms.load(Ordering::Relaxed);
+        let last = self.edges[index]
+            .last_read_offset_ms
+            .load(Ordering::Relaxed);
         self.now_offset_ms().saturating_sub(last)
     }
 
@@ -184,7 +204,10 @@ impl HeartbeatState {
     }
 
     fn edge_last_event_id(&self, index: usize) -> Option<EventId> {
-        *self.edges[index].last_event_id.lock().expect("last_event_id lock")
+        *self.edges[index]
+            .last_event_id
+            .lock()
+            .expect("last_event_id lock")
     }
 }
 
@@ -303,13 +326,16 @@ pub fn spawn_heartbeat(
                             let last_reader_seq = state_for_task.edge_reader_seq(index);
                             let last_event_id = state_for_task.edge_last_event_id(index);
 
-                            let state_for_registry = stable_state_for_tick.clone().unwrap_or_else(|| {
-                                if idle_ms >= config.idle_threshold.as_millis() as u64 {
-                                    EdgeLivenessState::Idle
-                                } else {
-                                    EdgeLivenessState::Healthy
+                            let state_for_registry = match stable_state_for_tick.clone() {
+                                Some(state) => state,
+                                None => {
+                                    if idle_ms >= config.idle_threshold.as_millis() as u64 {
+                                        EdgeLivenessState::Idle
+                                    } else {
+                                        EdgeLivenessState::Healthy
+                                    }
                                 }
-                            });
+                            };
 
                             EdgeLivenessSnapshot {
                                 upstream: edge.upstream,
@@ -400,5 +426,9 @@ pub fn spawn_heartbeat(
         }
     });
 
-    HeartbeatHandle { state, cancel, task }
+    HeartbeatHandle {
+        state,
+        cancel,
+        task,
+    }
 }

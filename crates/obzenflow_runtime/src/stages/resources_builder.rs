@@ -13,8 +13,8 @@ use crate::backpressure::{
 use crate::id_conversions::StageIdExt;
 use crate::message_bus::FsmMessageBus;
 use crate::messaging::upstream_subscription::{ContractsWiring, UpstreamSubscription};
-use crate::stages::common::heartbeat::LivenessRegistry;
 use crate::replay::ReplayArchive;
+use crate::stages::common::heartbeat::LivenessRegistry;
 use obzenflow_core::event::SystemEvent;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{ChainEvent, FlowId, StageId, SystemId};
