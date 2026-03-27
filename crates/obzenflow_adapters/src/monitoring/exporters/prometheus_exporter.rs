@@ -1358,6 +1358,62 @@ impl PrometheusExporter {
             writeln!(output)?;
         }
 
+        // Edge liveness (FLOWIP-063e)
+        if !snapshot.edge_liveness_state.is_empty() {
+            writeln!(
+                output,
+                "# HELP obzenflow_edge_liveness_state Edge liveness state per edge (upstream->downstream)"
+            )?;
+            writeln!(output, "# TYPE obzenflow_edge_liveness_state gauge")?;
+
+            for ((upstream, downstream), value) in &snapshot.edge_liveness_state {
+                let upstream_id = upstream.to_string();
+                let downstream_id = downstream.to_string();
+
+                let upstream_meta = snapshot.stage_metadata.get(upstream);
+                let downstream_meta = snapshot.stage_metadata.get(downstream);
+
+                let flow_name = upstream_meta
+                    .map(|m| m.flow_name.as_str())
+                    .or_else(|| downstream_meta.map(|m| m.flow_name.as_str()))
+                    .unwrap_or("unknown");
+                let flow_id = upstream_meta
+                    .and_then(|m| m.flow_id)
+                    .or_else(|| downstream_meta.and_then(|m| m.flow_id));
+
+                let upstream_name = upstream_meta.map(|m| m.name.as_str()).unwrap_or("unknown");
+                let downstream_name = downstream_meta
+                    .map(|m| m.name.as_str())
+                    .unwrap_or("unknown");
+
+                if let Some(flow_id) = flow_id {
+                    writeln!(
+                        output,
+                        "obzenflow_edge_liveness_state{{flow=\"{}\",flow_id=\"{}\",upstream_stage_id=\"{}\",downstream_stage_id=\"{}\",upstream=\"{}\",downstream=\"{}\"}} {}",
+                        escape_label(flow_name),
+                        escape_label(&flow_id.to_string()),
+                        escape_label(&upstream_id),
+                        escape_label(&downstream_id),
+                        escape_label(upstream_name),
+                        escape_label(downstream_name),
+                        value
+                    )?;
+                } else {
+                    writeln!(
+                        output,
+                        "obzenflow_edge_liveness_state{{flow=\"{}\",upstream_stage_id=\"{}\",downstream_stage_id=\"{}\",upstream=\"{}\",downstream=\"{}\"}} {}",
+                        escape_label(flow_name),
+                        escape_label(&upstream_id),
+                        escape_label(&downstream_id),
+                        escape_label(upstream_name),
+                        escape_label(downstream_name),
+                        value
+                    )?;
+                }
+            }
+            writeln!(output)?;
+        }
+
         // Contract metrics (FLOWIP-059a)
         if !snapshot.contract_metrics.results_total.is_empty() {
             writeln!(

@@ -7,6 +7,7 @@
 use crate::messaging::PollResult;
 use crate::metrics::instrumentation::process_with_instrumentation;
 use crate::stages::common::handlers::transform::traits::UnifiedTransformHandler;
+use crate::stages::common::heartbeat::HeartbeatProcessingGuard;
 use crate::stages::common::supervision::backpressure_drain::{drain_one_pending, DrainOutcome};
 use crate::stages::common::supervision::error_routing::route_to_error_journal;
 use crate::stages::common::supervision::flow_context_factory::make_flow_context;
@@ -119,6 +120,13 @@ async fn dispatch_draining_inner<
                 .subscription
                 .as_ref()
                 .and_then(|subscription| subscription.last_delivered_upstream_stage());
+
+            if let (Some(heartbeat), Some(upstream)) = (&ctx.heartbeat, upstream_stage) {
+                if envelope.event.is_data() {
+                    heartbeat.state.record_data_read(upstream, envelope.event.id);
+                }
+            }
+
             let suppress_event = sup
                 .check_cycle_guard_data_event(
                     ctx,
@@ -150,23 +158,40 @@ async fn dispatch_draining_inner<
             // Process data events (or pass through error-marked events).
             let envelope_clone = envelope.clone();
             let handler = &ctx.handler;
+            let heartbeat_state = ctx.heartbeat.as_ref().map(|h| h.state.clone());
 
             let transformed_events =
                 process_with_instrumentation(&ctx.instrumentation, || async move {
                     let event = envelope_clone.event.clone();
+                    let event_id = event.id;
 
                     if matches!(event.processing_info.status, ProcessingStatus::Error { .. }) {
+                        if let Some(state) = &heartbeat_state {
+                            state.record_last_consumed(event_id);
+                        }
                         return Ok(vec![event]);
                     }
 
+                    let _processing = heartbeat_state
+                        .as_ref()
+                        .map(|state| HeartbeatProcessingGuard::new(state.clone(), event_id));
+
                     match handler.process(event).await {
-                        Ok(outputs) => Ok(outputs),
+                        Ok(outputs) => {
+                            if let Some(state) = &heartbeat_state {
+                                state.record_last_consumed(event_id);
+                            }
+                            Ok(outputs)
+                        }
                         Err(err) => {
                             let reason = format!("Transform handler error during drain: {err:?}");
                             let error_event = envelope_clone
                                 .event
                                 .clone()
                                 .mark_as_error(reason, err.kind());
+                            if let Some(state) = &heartbeat_state {
+                                state.record_last_consumed(event_id);
+                            }
                             Ok(vec![error_event])
                         }
                     }

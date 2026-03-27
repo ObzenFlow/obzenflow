@@ -158,6 +158,12 @@ pub struct AppMetricsSnapshot {
     /// Total time spent blocked waiting for downstream credits by stage (seconds; monotonic) (FLOWIP-086k).
     pub backpressure_wait_seconds_total: HashMap<StageId, f64>,
 
+    /// Edge liveness state per edge (upstream, downstream) (FLOWIP-063e).
+    ///
+    /// This is a transition-derived gauge from `SystemEventType::EdgeLiveness`:
+    /// 1=Healthy, 0.5=Idle, 0.25=Suspect, 0=Stalled.
+    pub edge_liveness_state: HashMap<(StageId, StageId), f64>,
+
     /// Contract verification metrics per edge (upstream/downstream)
     pub contract_metrics: ContractMetricsSnapshot,
 
@@ -461,6 +467,7 @@ impl Default for AppMetricsSnapshot {
             backpressure_min_reader_seq: HashMap::new(),
             backpressure_writer_seq: HashMap::new(),
             backpressure_wait_seconds_total: HashMap::new(),
+            edge_liveness_state: HashMap::new(),
             contract_metrics: ContractMetricsSnapshot::default(),
             http_surface_metrics: Vec::new(),
             http_pull_metrics: HashMap::new(),

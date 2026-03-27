@@ -13,13 +13,14 @@ use crate::backpressure::{
 use crate::id_conversions::StageIdExt;
 use crate::message_bus::FsmMessageBus;
 use crate::messaging::upstream_subscription::{ContractsWiring, UpstreamSubscription};
+use crate::stages::common::heartbeat::LivenessRegistry;
 use crate::replay::ReplayArchive;
 use obzenflow_core::event::SystemEvent;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{ChainEvent, FlowId, StageId, SystemId};
 use obzenflow_topology::Topology;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 /// Factory for creating subscriptions with pre-computed metadata
 /// This allows deferred subscription creation with the correct journal subsets
@@ -177,6 +178,12 @@ pub struct StageResources {
     /// Used by cycle entry points to evaluate SCC quiescence (FLOWIP-051n).
     pub backpressure_registry: Arc<BackpressureRegistry>,
 
+    /// Flow-scoped liveness registry (FLOWIP-063e).
+    ///
+    /// Heartbeat tasks update this on every tick. Exporting it via `/metrics`
+    /// is a follow-up (see FLOWIP-063e section 8).
+    pub liveness_registry: LivenessRegistry,
+
     /// Optional replay archive injection (FLOWIP-095a). Sources use this to
     /// read archived journals instead of calling external systems.
     pub replay_archive: Option<Arc<dyn ReplayArchive>>,
@@ -240,6 +247,8 @@ impl StageResourcesBuilder {
             self.topology.as_ref(),
             &backpressure_plan,
         ));
+
+        let liveness_registry: LivenessRegistry = Arc::new(RwLock::new(HashMap::new()));
 
         // Build stage resources for each stage
         let mut stage_resources = HashMap::new();
@@ -408,6 +417,7 @@ impl StageResourcesBuilder {
                 backpressure_writer,
                 backpressure_readers,
                 backpressure_registry: backpressure_registry.clone(),
+                liveness_registry: liveness_registry.clone(),
                 replay_archive: self.replay_archive.clone(),
             };
 

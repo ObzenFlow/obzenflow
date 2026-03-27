@@ -6,7 +6,7 @@
 
 use crate::event::observability::HttpSurfaceMetricsSnapshot;
 use crate::event::payloads::observability_payload::MiddlewareLifecycle;
-use crate::event::types::{EventId, WriterId};
+use crate::event::types::{EventId, SeqNo, WriterId};
 use crate::event::vector_clock::VectorClock;
 use crate::id::{StageId, SystemId};
 use crate::journal::{ArchiveStatus, StatusDerivation};
@@ -61,6 +61,44 @@ pub enum SystemEventType {
     /// Metrics subsystem coordination
     #[serde(rename = "metrics_coordination")]
     MetricsCoordination(MetricsCoordinationEvent),
+
+    /// Periodic heartbeat from a stage supervisor.
+    ///
+    /// FLOWIP-063e: Under the resolved design, this is retained for future use
+    /// (e.g. broadcast SSE) but is not journalled in v1.
+    #[serde(rename = "stage_heartbeat")]
+    StageHeartbeat {
+        stage_id: StageId,
+        stage_name: String,
+        /// Monotonically increasing counter per stage, so consumers can detect gaps.
+        heartbeat_seq: u64,
+        /// What the supervisor is currently doing.
+        activity: StageActivity,
+        /// Last event the handler consumed (if any).
+        last_consumed_event_id: Option<EventId>,
+        /// Last event the stage emitted (if any).
+        last_output_event_id: Option<EventId>,
+        /// Wall-clock duration the handler has been blocked (if currently processing).
+        handler_blocked_ms: Option<u64>,
+    },
+
+    /// Per-edge liveness verdict derived from heartbeats and/or stall detection.
+    ///
+    /// FLOWIP-063e: non-gating, system journal only.
+    #[serde(rename = "edge_liveness")]
+    EdgeLiveness {
+        upstream: StageId,
+        reader: StageId,
+        state: EdgeLivenessState,
+        /// Milliseconds since last observed progress on this edge.
+        idle_ms: u64,
+        /// Reader sequence observed on this edge (if known).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        last_reader_seq: Option<SeqNo>,
+        /// Last event ID observed on this edge (if known).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        last_event_id: Option<EventId>,
+    },
 
     /// Middleware lifecycle events mirrored into `system.log` (FLOWIP-059c).
     ///
@@ -289,6 +327,34 @@ pub enum MetricsCoordinationEvent {
     Drained,
     Shutdown,
     Exported { watermark: VectorClock },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum StageActivity {
+    /// Supervisor is polling for events (dispatch loop is running normally).
+    Polling,
+    /// Handler is processing an event.
+    Processing { event_id: EventId, elapsed_ms: u64 },
+    /// Stage is draining.
+    Draining,
+    /// Stage has completed.
+    Completed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EdgeLivenessState {
+    /// Edge is healthy: data is flowing or the edge is idle within expected bounds.
+    Healthy,
+    /// Edge is idle: no data observed recently, but the stage is alive.
+    Idle,
+    /// Edge is suspect: no data and no heartbeat response within the warning threshold.
+    Suspect,
+    /// Edge appears stalled: handler may be hung or upstream may be down.
+    Stalled,
+    /// Edge has recovered from a previous non-healthy state.
+    Recovered,
 }
 
 impl SystemEvent {
@@ -712,6 +778,8 @@ impl JournalEvent for SystemEvent {
                 MetricsCoordinationEvent::Shutdown => "system.metrics.shutdown",
                 MetricsCoordinationEvent::Exported { .. } => "system.metrics.exported",
             },
+            SystemEventType::StageHeartbeat { .. } => "system.stage.heartbeat",
+            SystemEventType::EdgeLiveness { .. } => "system.edge.liveness",
             SystemEventType::MiddlewareLifecycle { .. } => "system.middleware.lifecycle",
             SystemEventType::ContractStatus { pass, .. } => {
                 if *pass {

@@ -26,6 +26,7 @@ use crate::messaging::UpstreamSubscription;
 use crate::metrics::instrumentation::StageInstrumentation;
 use crate::pipeline::config::CycleGuardConfig;
 use crate::stages::common::backpressure_activity_pulse::BackpressureActivityPulse;
+use crate::stages::common::heartbeat::HeartbeatHandle;
 use crate::stages::common::control_strategies::ControlEventStrategy;
 use crate::stages::common::handlers::transform::traits::UnifiedTransformHandler;
 use crate::stages::common::supervision::lifecycle_actions;
@@ -342,6 +343,9 @@ pub(crate) struct TransformContext<H: UnifiedTransformHandler> {
 
     /// Buffered terminal envelope (EOF or Drain) held by SCC entry points until quiescence (FLOWIP-051n).
     pub(crate) buffered_terminal_envelope: Option<EventEnvelope<ChainEvent>>,
+
+    /// Optional per-stage heartbeat task (FLOWIP-063e).
+    pub(crate) heartbeat: Option<HeartbeatHandle>,
 }
 
 impl<H: UnifiedTransformHandler + 'static> FsmContext for TransformContext<H> {}
@@ -526,6 +530,10 @@ impl<H: UnifiedTransformHandler + Send + Sync + 'static> FsmAction for Transform
             }
 
             TransformAction::Cleanup => {
+                if let Some(heartbeat) = ctx.heartbeat.take() {
+                    heartbeat.cancel();
+                }
+
                 lifecycle_actions::cleanup_best_effort("Transform", &ctx.stage_name, || async {
                     Ok::<(), ()>(())
                 })

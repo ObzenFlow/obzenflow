@@ -137,6 +137,7 @@ async fn build_cycle_entry_harness<
         external_eofs_received: std::collections::HashSet::new(),
         drain_received: false,
         buffered_terminal_envelope: None,
+        heartbeat: None,
     };
 
     TransformAction::AllocateResources
@@ -419,6 +420,7 @@ async fn build_transform_harness<
         external_eofs_received: std::collections::HashSet::new(),
         drain_received: false,
         buffered_terminal_envelope: None,
+        heartbeat: None,
     };
 
     TransformAction::AllocateResources

@@ -2104,6 +2104,7 @@ mod tests {
             backpressure_writer: Default::default(),
             backpressure_readers: Default::default(),
             backpressure_registry,
+            liveness_registry: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
             replay_archive: None,
         };
 

@@ -10,6 +10,7 @@ use std::sync::Arc;
 use crate::metrics::instrumentation::StageInstrumentation;
 use crate::stages::common::control_strategies::{ControlEventStrategy, JonestownStrategy};
 use crate::stages::common::cycle_guard::CycleGuard;
+use crate::stages::common::heartbeat::{spawn_heartbeat, HeartbeatConfig, HeartbeatState};
 use crate::stages::common::handlers::{AsyncTransformHandler, TransformHandler};
 use crate::stages::resources_builder::StageResources;
 use crate::supervised_base::{
@@ -29,6 +30,7 @@ pub struct TransformBuilder<H: TransformHandler + Clone + std::fmt::Debug + Send
     config: TransformConfig,
     resources: StageResources,
     instrumentation: Option<Arc<StageInstrumentation>>,
+    heartbeat_config: HeartbeatConfig,
 }
 
 impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> TransformBuilder<H> {
@@ -39,6 +41,7 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Tran
             config,
             resources,
             instrumentation: None,
+            heartbeat_config: HeartbeatConfig::default(),
         }
     }
 
@@ -51,6 +54,11 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Tran
     /// Set a custom control strategy (defaults to JonestownStrategy)
     pub fn with_control_strategy(mut self, strategy: Arc<dyn ControlEventStrategy>) -> Self {
         self.config.control_strategy = Some(strategy);
+        self
+    }
+
+    pub fn with_heartbeat(mut self, heartbeat_config: HeartbeatConfig) -> Self {
+        self.heartbeat_config = heartbeat_config;
         self
     }
 }
@@ -79,6 +87,22 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Supe
             .unwrap_or_else(|| Arc::new(StageInstrumentation::new()));
 
         let cycle_guard_config = self.config.cycle_guard.clone();
+        let heartbeat_config = self.heartbeat_config.clone();
+
+        let heartbeat = if self.resources.replay_archive.is_some() || !heartbeat_config.enabled {
+            None
+        } else {
+            let heartbeat_state = HeartbeatState::new(self.resources.upstream_stages.clone());
+            Some(spawn_heartbeat(
+                self.config.stage_id,
+                self.config.stage_name.clone(),
+                self.resources.system_journal.clone(),
+                self.resources.liveness_registry.clone(),
+                heartbeat_state,
+                heartbeat_config,
+                /* is_replay */ false,
+            ))
+        };
 
         // Create context with bound subscription factory from resources
         let context = TransformContext {
@@ -115,6 +139,7 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Supe
             external_eofs_received: HashSet::new(),
             drain_received: false,
             buffered_terminal_envelope: None,
+            heartbeat,
         };
 
         // Create supervisor (private - not exposed)
@@ -179,6 +204,7 @@ pub struct AsyncTransformBuilder<
     config: TransformConfig,
     resources: StageResources,
     instrumentation: Option<Arc<StageInstrumentation>>,
+    heartbeat_config: HeartbeatConfig,
 }
 
 impl<H: AsyncTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
@@ -190,6 +216,7 @@ impl<H: AsyncTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
             config,
             resources,
             instrumentation: None,
+            heartbeat_config: HeartbeatConfig::default(),
         }
     }
 
@@ -200,6 +227,11 @@ impl<H: AsyncTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
 
     pub fn with_control_strategy(mut self, strategy: Arc<dyn ControlEventStrategy>) -> Self {
         self.config.control_strategy = Some(strategy);
+        self
+    }
+
+    pub fn with_heartbeat(mut self, heartbeat_config: HeartbeatConfig) -> Self {
+        self.heartbeat_config = heartbeat_config;
         self
     }
 }
@@ -230,6 +262,22 @@ impl<H: AsyncTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
             .unwrap_or_else(|| Arc::new(StageInstrumentation::new()));
 
         let cycle_guard_config = self.config.cycle_guard.clone();
+        let heartbeat_config = self.heartbeat_config.clone();
+
+        let heartbeat = if self.resources.replay_archive.is_some() || !heartbeat_config.enabled {
+            None
+        } else {
+            let heartbeat_state = HeartbeatState::new(self.resources.upstream_stages.clone());
+            Some(spawn_heartbeat(
+                self.config.stage_id,
+                self.config.stage_name.clone(),
+                self.resources.system_journal.clone(),
+                self.resources.liveness_registry.clone(),
+                heartbeat_state,
+                heartbeat_config,
+                /* is_replay */ false,
+            ))
+        };
 
         // Create context with bound subscription factory from resources
         let context = TransformContext {
@@ -266,6 +314,7 @@ impl<H: AsyncTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
             external_eofs_received: HashSet::new(),
             drain_received: false,
             buffered_terminal_envelope: None,
+            heartbeat,
         };
 
         // Create supervisor (private - not exposed)

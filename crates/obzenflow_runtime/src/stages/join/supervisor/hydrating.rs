@@ -4,6 +4,7 @@
 
 use crate::messaging::PollResult;
 use crate::stages::common::handlers::JoinHandler;
+use crate::stages::common::heartbeat::HeartbeatProcessingGuard;
 use crate::stages::common::supervision::control_resolution::{
     resolve_control_event, resolve_forward_control_event, ControlResolution,
 };
@@ -161,19 +162,32 @@ pub(super) async fn dispatch_hydrating<
                 }
                 obzenflow_core::event::ChainEventContent::Data { .. } => {
                     let event = envelope.event.clone();
+                    let event_id = event.id;
                     let reference_stage_id = ctx.reference_stage_id;
                     let writer_id = ctx.writer_id.ok_or("No writer ID available")?;
+                    let upstream_stage = subscription.last_delivered_upstream_stage();
+
+                    if let (Some(heartbeat), Some(upstream)) = (&ctx.heartbeat, upstream_stage) {
+                        heartbeat.state.record_data_read(upstream, event_id);
+                    }
+                    let heartbeat_state = ctx.heartbeat.as_ref().map(|h| h.state.clone());
 
                     ctx.instrumentation
                         .in_flight_count
                         .fetch_add(1, Ordering::Relaxed);
                     let start = Instant::now();
+                    let _processing = heartbeat_state
+                        .as_ref()
+                        .map(|state| HeartbeatProcessingGuard::new(state.clone(), event_id));
                     let result = ctx.handler.process_event(
                         &mut ctx.handler_state,
                         event,
                         reference_stage_id,
                         writer_id,
                     );
+                    if let Some(state) = &heartbeat_state {
+                        state.record_last_consumed(event_id);
+                    }
                     let duration = start.elapsed();
                     ctx.instrumentation
                         .in_flight_count

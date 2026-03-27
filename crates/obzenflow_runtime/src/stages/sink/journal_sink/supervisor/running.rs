@@ -7,6 +7,7 @@
 use crate::messaging::PollResult;
 use crate::metrics::instrumentation::process_with_instrumentation;
 use crate::stages::common::handlers::SinkHandler;
+use crate::stages::common::heartbeat::HeartbeatProcessingGuard;
 use crate::stages::common::supervision::control_resolution::{
     resolve_control_event, resolve_forward_control_event, ControlResolution,
 };
@@ -210,6 +211,13 @@ async fn dispatch_event<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync +
 ) -> Result<EventLoopDirective<JournalSinkEvent<H>>, Box<dyn std::error::Error + Send + Sync>> {
     tracing::trace!(stage_name = %ctx.stage_name, "Sink processing event");
 
+    let upstream_stage = subscription.last_delivered_upstream_stage();
+    if let (Some(heartbeat), Some(upstream)) = (&ctx.heartbeat, upstream_stage) {
+        if envelope.event.is_data() {
+            heartbeat.state.record_data_read(upstream, envelope.event.id);
+        }
+    }
+
     match &envelope.event.content {
         obzenflow_core::event::ChainEventContent::FlowControl(signal) => {
             dispatch_control_event(ctx, subscription, envelope, signal).await
@@ -220,12 +228,17 @@ async fn dispatch_event<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync +
         _ => {
             // For other content types, just consume without instrumentation.
             let envelope_event = envelope.event.clone();
+            let event_id = envelope_event.id;
+            let heartbeat_state = ctx.heartbeat.as_ref().map(|h| h.state.clone());
             if let Err(e) = ctx.handler.consume(envelope_event).await {
                 tracing::error!(
                     stage_name = %ctx.stage_name,
                     error = ?e,
                     "Failed to consume control/system event"
                 );
+            }
+            if let Some(state) = &heartbeat_state {
+                state.record_last_consumed(event_id);
             }
             Ok(EventLoopDirective::Continue)
         }
@@ -414,11 +427,17 @@ async fn dispatch_data_event<H: SinkHandler + Clone + std::fmt::Debug + Send + S
     envelope: &EventEnvelope<ChainEvent>,
 ) -> Result<EventLoopDirective<JournalSinkEvent<H>>, Box<dyn std::error::Error + Send + Sync>> {
     let envelope_event = envelope.event.clone();
+    let event_id = envelope_event.id;
     let stage_name = ctx.stage_name.clone();
+    let heartbeat_state = ctx.heartbeat.as_ref().map(|h| h.state.clone());
 
     // Use instrumentation wrapper but keep handler-level failures as per-record
     // outcomes instead of stage-fatal errors.
     let ack_result = process_with_instrumentation(&ctx.instrumentation, || async {
+        let _processing = heartbeat_state
+            .as_ref()
+            .map(|state| HeartbeatProcessingGuard::new(state.clone(), event_id));
+
         let result = AssertUnwindSafe(ctx.handler.consume_report(envelope_event))
             .catch_unwind()
             .await;
@@ -428,6 +447,9 @@ async fn dispatch_data_event<H: SinkHandler + Clone + std::fmt::Debug + Send + S
                 report.primary.destination = stage_name.clone();
                 for commit in &mut report.commit_receipts {
                     commit.payload.destination = stage_name.clone();
+                }
+                if let Some(state) = &heartbeat_state {
+                    state.record_last_consumed(event_id);
                 }
                 Ok((report, None, false))
             }
@@ -439,6 +461,9 @@ async fn dispatch_data_event<H: SinkHandler + Clone + std::fmt::Debug + Send + S
                     err.to_string(),
                     /* final_attempt */ false,
                 );
+                if let Some(state) = &heartbeat_state {
+                    state.record_last_consumed(event_id);
+                }
                 Ok((
                     crate::stages::common::handlers::SinkConsumeReport::new(fail_payload),
                     Some(err),
@@ -465,6 +490,9 @@ async fn dispatch_data_event<H: SinkHandler + Clone + std::fmt::Debug + Send + S
                     msg,
                     /* final_attempt */ true,
                 );
+                if let Some(state) = &heartbeat_state {
+                    state.record_last_consumed(event_id);
+                }
                 Ok((
                     crate::stages::common::handlers::SinkConsumeReport::new(fail_payload),
                     None,

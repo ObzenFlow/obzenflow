@@ -27,6 +27,7 @@ use crate::messaging::upstream_subscription::{ContractConfig, ContractsWiring, R
 use crate::messaging::UpstreamSubscription;
 use crate::metrics::instrumentation::StageInstrumentation;
 use crate::stages::common::backpressure_activity_pulse::BackpressureActivityPulse;
+use crate::stages::common::heartbeat::HeartbeatHandle;
 use crate::stages::common::control_strategies::ControlEventStrategy;
 use crate::stages::common::handlers::StatefulHandler;
 use crate::stages::common::supervision::lifecycle_actions;
@@ -396,6 +397,9 @@ pub struct StatefulContext<H: StatefulHandler> {
 
     /// Backoff for blocked output writes (1ms → … → 50ms cap).
     pub(crate) backpressure_backoff: IdleBackoff,
+
+    /// Optional per-stage heartbeat task (FLOWIP-063e).
+    pub(crate) heartbeat: Option<HeartbeatHandle>,
 }
 
 impl<H: StatefulHandler + 'static> FsmContext for StatefulContext<H> {}
@@ -608,6 +612,10 @@ impl<H: StatefulHandler + Send + Sync + 'static> FsmAction for StatefulAction<H>
             }
 
             StatefulAction::Cleanup => {
+                if let Some(heartbeat) = ctx.heartbeat.take() {
+                    heartbeat.cancel();
+                }
+
                 lifecycle_actions::cleanup_best_effort("Stateful", &ctx.stage_name, || async {
                     Ok::<(), ()>(())
                 })

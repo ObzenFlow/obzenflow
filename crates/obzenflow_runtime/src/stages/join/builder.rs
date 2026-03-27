@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use crate::metrics::instrumentation::StageInstrumentation;
 use crate::stages::common::handlers::JoinHandler;
+use crate::stages::common::heartbeat::{spawn_heartbeat, HeartbeatConfig, HeartbeatState};
 use crate::stages::resources_builder::StageResources;
 use crate::supervised_base::{
     BuilderError, ChannelBuilder, HandleBuilder, HandlerSupervisedExt,
@@ -38,6 +39,7 @@ pub struct JoinBuilder<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 
     stream_journals: Vec<(StageId, Arc<dyn Journal<ChainEvent>>)>,
     control_strategy: Arc<dyn crate::stages::common::control_strategies::ControlEventStrategy>,
     instrumentation: Option<Arc<StageInstrumentation>>,
+    heartbeat_config: HeartbeatConfig,
 }
 
 impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> JoinBuilder<H> {
@@ -64,12 +66,18 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> JoinBuild
             stream_journals,
             control_strategy,
             instrumentation: None,
+            heartbeat_config: HeartbeatConfig::default(),
         })
     }
 
     /// Set the instrumentation for this join
     pub fn with_instrumentation(mut self, instrumentation: Arc<StageInstrumentation>) -> Self {
         self.instrumentation = Some(instrumentation);
+        self
+    }
+
+    pub fn with_heartbeat(mut self, heartbeat_config: HeartbeatConfig) -> Self {
+        self.heartbeat_config = heartbeat_config;
         self
     }
 }
@@ -101,6 +109,22 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
             .resources
             .subscription_factory
             .bind(&self.stream_journals);
+
+        let heartbeat_config = self.heartbeat_config.clone();
+        let heartbeat = if self.resources.replay_archive.is_some() || !heartbeat_config.enabled {
+            None
+        } else {
+            let heartbeat_state = HeartbeatState::new(self.resources.upstream_stages.clone());
+            Some(spawn_heartbeat(
+                self.config.stage_id,
+                self.config.stage_name.clone(),
+                self.resources.system_journal.clone(),
+                self.resources.liveness_registry.clone(),
+                heartbeat_state,
+                heartbeat_config,
+                /* is_replay */ false,
+            ))
+        };
 
         // Create context with subscription factory from resources
         let handler = self.handler;
@@ -148,6 +172,7 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
                     std::time::Duration::from_millis(1),
                     std::time::Duration::from_millis(50),
                 ),
+            heartbeat,
         };
 
         // Create supervisor

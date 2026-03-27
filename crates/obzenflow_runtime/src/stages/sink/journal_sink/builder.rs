@@ -12,6 +12,7 @@ use super::handle::JournalSinkHandle;
 use super::supervisor::JournalSinkSupervisor;
 use crate::metrics::instrumentation::StageInstrumentation;
 use crate::stages::common::control_strategies::{ControlEventStrategy, JonestownStrategy};
+use crate::stages::common::heartbeat::{spawn_heartbeat, HeartbeatConfig, HeartbeatState};
 use crate::stages::common::handlers::SinkHandler;
 use crate::stages::resources_builder::StageResources;
 use crate::supervised_base::{
@@ -25,6 +26,7 @@ pub struct JournalSinkBuilder<H: SinkHandler + Clone + std::fmt::Debug + Send + 
     config: JournalSinkConfig,
     resources: StageResources,
     instrumentation: Option<Arc<StageInstrumentation>>,
+    heartbeat_config: HeartbeatConfig,
 }
 
 impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> JournalSinkBuilder<H> {
@@ -35,12 +37,18 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> JournalSi
             config,
             resources,
             instrumentation: None,
+            heartbeat_config: HeartbeatConfig::default(),
         }
     }
 
     /// Set the instrumentation for this sink
     pub fn with_instrumentation(mut self, instrumentation: Arc<StageInstrumentation>) -> Self {
         self.instrumentation = Some(instrumentation);
+        self
+    }
+
+    pub fn with_heartbeat(mut self, heartbeat_config: HeartbeatConfig) -> Self {
+        self.heartbeat_config = heartbeat_config;
         self
     }
 }
@@ -68,6 +76,22 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
             .control_strategy
             .unwrap_or_else(|| Arc::new(JonestownStrategy));
 
+        let heartbeat_config = self.heartbeat_config.clone();
+        let heartbeat = if self.resources.replay_archive.is_some() || !heartbeat_config.enabled {
+            None
+        } else {
+            let heartbeat_state = HeartbeatState::new(self.resources.upstream_stages.clone());
+            Some(spawn_heartbeat(
+                self.config.stage_id,
+                self.config.stage_name.clone(),
+                self.resources.system_journal.clone(),
+                self.resources.liveness_registry.clone(),
+                heartbeat_state,
+                heartbeat_config,
+                /* is_replay */ false,
+            ))
+        };
+
         let context = JournalSinkContext {
             handler: self.handler,
             stage_id: self.config.stage_id,
@@ -87,6 +111,7 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
             control_strategy,
             backpressure_writer: self.resources.backpressure_writer.clone(),
             backpressure_readers: self.resources.backpressure_readers.clone(),
+            heartbeat,
         };
 
         // Create supervisor (private - not exposed)
