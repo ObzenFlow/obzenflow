@@ -8,6 +8,7 @@ use obzenflow::ai::{ModelConfig, TokenCount};
 use obzenflow::env::{env_bool_or, env_var, env_var_or};
 use obzenflow::sources::Url;
 
+const DEFAULT_HN_MAX_STORIES: usize = 60;
 const DEFAULT_HN_SOURCE_RATE_LIMIT: f64 = 10.0;
 
 pub struct DemoConfig {
@@ -26,7 +27,7 @@ pub struct DemoConfig {
 
 impl DemoConfig {
     pub async fn from_env() -> Result<Self> {
-        let max_stories = env_var_or::<usize>("HN_MAX_STORIES", 30)?;
+        let max_stories = env_var_or::<usize>("HN_MAX_STORIES", DEFAULT_HN_MAX_STORIES)?;
         let poll_timeout_secs = env_var_or::<usize>("HN_POLL_TIMEOUT_SECS", 120)?;
         let live = env_bool_or("HN_LIVE", false)?;
         let source_rate_limit =
