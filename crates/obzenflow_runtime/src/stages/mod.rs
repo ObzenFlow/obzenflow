@@ -14,6 +14,7 @@ pub mod transform;
 
 // Re-export commonly used types from common
 pub use common::handlers::source::SourceError;
+pub use common::{new_liveness_snapshots, LivenessSnapshots};
 pub use common::{
     ControlEventAction, ControlEventStrategy, FiniteSourceHandler, HeartbeatConfig,
     InfiniteSourceHandler, ObserverHandler, ProcessingContext, ResourceManaged, SinkHandler,

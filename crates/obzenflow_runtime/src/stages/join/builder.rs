@@ -119,7 +119,7 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
                 self.config.stage_id,
                 self.config.stage_name.clone(),
                 self.resources.system_journal.clone(),
-                self.resources.liveness_registry.clone(),
+                self.resources.liveness_snapshots.clone(),
                 heartbeat_state,
                 heartbeat_config,
                 /* is_replay */ false,

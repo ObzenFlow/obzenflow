@@ -296,7 +296,43 @@ pub struct StageLivenessSnapshot {
     pub edges: Vec<EdgeLivenessSnapshot>,
 }
 
-pub type LivenessRegistry = Arc<RwLock<HashMap<StageId, StageLivenessSnapshot>>>;
+#[derive(Clone, Debug)]
+pub struct LivenessSnapshots {
+    inner: Arc<RwLock<HashMap<StageId, StageLivenessSnapshot>>>,
+}
+
+impl Default for LivenessSnapshots {
+    fn default() -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+}
+
+impl LivenessSnapshots {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn upsert(&self, stage_id: StageId, snapshot: StageLivenessSnapshot) {
+        let mut guard = self.inner.write().expect("liveness snapshots lock");
+        guard.insert(stage_id, snapshot);
+    }
+
+    pub fn get(&self, stage_id: StageId) -> Option<StageLivenessSnapshot> {
+        let guard = self.inner.read().expect("liveness snapshots lock");
+        guard.get(&stage_id).cloned()
+    }
+
+    pub fn with_read<R>(&self, f: impl FnOnce(&HashMap<StageId, StageLivenessSnapshot>) -> R) -> R {
+        let guard = self.inner.read().expect("liveness snapshots lock");
+        f(&guard)
+    }
+}
+
+pub fn new_liveness_snapshots() -> LivenessSnapshots {
+    LivenessSnapshots::new()
+}
 
 pub struct HeartbeatHandle {
     pub state: Arc<HeartbeatState>,
@@ -315,7 +351,7 @@ pub fn spawn_heartbeat(
     stage_id: StageId,
     stage_name: String,
     system_journal: Arc<dyn Journal<SystemEvent>>,
-    registry: LivenessRegistry,
+    liveness_snapshots: LivenessSnapshots,
     state: Arc<HeartbeatState>,
     config: HeartbeatConfig,
     is_replay: bool,
@@ -377,11 +413,11 @@ pub fn spawn_heartbeat(
                             let last_reader_seq = state_for_task.edge_reader_seq(index);
                             let last_event_id = state_for_task.edge_last_event_id(index);
 
-                                let state_for_registry = if let Some(state) = stable_state_for_tick {
-                                    state
-                                } else if processing_below_warn
-                                    && processing_upstream.is_some_and(|u| u == edge.upstream)
-                                {
+                            let state_for_registry = if let Some(state) = stable_state_for_tick {
+                                state
+                            } else if processing_below_warn
+                                && processing_upstream.is_some_and(|u| u == edge.upstream)
+                            {
                                 // Keep the active upstream edge healthy while an event is in-flight.
                                 EdgeLivenessState::Healthy
                             } else if idle_ms >= config.idle_threshold.as_millis() as u64 {
@@ -401,36 +437,33 @@ pub fn spawn_heartbeat(
                         })
                         .collect();
 
-                    {
-                        let mut guard = registry.write().expect("liveness registry lock");
-                        guard.insert(
+                    liveness_snapshots.upsert(
+                        stage_id,
+                        StageLivenessSnapshot {
                             stage_id,
-                            StageLivenessSnapshot {
-                                stage_id,
-                                stage_name: stage_name.clone(),
-                                heartbeat_seq,
-                                    activity,
-                                    handler_blocked_ms,
-                                    edges: edges_snapshot.clone(),
-                                },
-                            );
-                        }
+                            stage_name: stage_name.clone(),
+                            heartbeat_seq,
+                            activity,
+                            handler_blocked_ms,
+                            edges: edges_snapshot.clone(),
+                        },
+                    );
 
                     // Journal only EdgeLiveness transitions (FLOWIP-063e).
-                        for (index, edge_snapshot) in edges_snapshot.iter().enumerate() {
-                            let stable_state = edge_snapshot.state;
+                    for (index, edge_snapshot) in edges_snapshot.iter().enumerate() {
+                        let stable_state = edge_snapshot.state;
 
                         if prev_stable_states[index] == stable_state {
                             continue;
                         }
 
-                            let emitted_state = if stable_state == EdgeLivenessState::Healthy
-                                && prev_stable_states[index] != EdgeLivenessState::Healthy
-                            {
-                                EdgeLivenessState::Recovered
-                            } else {
-                                stable_state
-                            };
+                        let emitted_state = if stable_state == EdgeLivenessState::Healthy
+                            && prev_stable_states[index] != EdgeLivenessState::Healthy
+                        {
+                            EdgeLivenessState::Recovered
+                        } else {
+                            stable_state
+                        };
 
                         let system_event = SystemEvent::new(
                             writer_id,
@@ -642,7 +675,7 @@ mod tests {
         let stage_id = StageId::new();
 
         let state = HeartbeatState::new(vec![upstream]);
-        let registry: LivenessRegistry = Arc::new(RwLock::new(HashMap::new()));
+        let liveness_snapshots: LivenessSnapshots = new_liveness_snapshots();
         let system_journal: Arc<dyn Journal<SystemEvent>> =
             Arc::new(TestJournal::new(JournalOwner::system(SystemId::new())));
 
@@ -658,7 +691,7 @@ mod tests {
             stage_id,
             "test_stage".to_string(),
             system_journal,
-            registry.clone(),
+            liveness_snapshots.clone(),
             state.clone(),
             config,
             /* is_replay */ false,
@@ -676,11 +709,7 @@ mod tests {
 
         let mut snapshot = None;
         for _ in 0..3 {
-            snapshot = registry
-                .read()
-                .expect("liveness registry lock")
-                .get(&stage_id)
-                .cloned();
+            snapshot = liveness_snapshots.get(stage_id);
             if snapshot.is_some() {
                 break;
             }
@@ -711,7 +740,7 @@ mod tests {
         let stage_id = StageId::new();
 
         let state = HeartbeatState::new(vec![upstream]);
-        let registry: LivenessRegistry = Arc::new(RwLock::new(HashMap::new()));
+        let liveness_snapshots: LivenessSnapshots = new_liveness_snapshots();
         let system_journal: Arc<dyn Journal<SystemEvent>> =
             Arc::new(TestJournal::new(JournalOwner::system(SystemId::new())));
 
@@ -727,7 +756,7 @@ mod tests {
             stage_id,
             "test_stage".to_string(),
             system_journal,
-            registry.clone(),
+            liveness_snapshots.clone(),
             state.clone(),
             config,
             /* is_replay */ false,
@@ -740,11 +769,7 @@ mod tests {
         for _ in 0..3 {
             tokio::time::advance(Duration::from_secs(1)).await;
             tokio::task::yield_now().await;
-            snapshot = registry
-                .read()
-                .expect("liveness registry lock")
-                .get(&stage_id)
-                .cloned();
+            snapshot = liveness_snapshots.get(stage_id);
             if snapshot.is_some() {
                 break;
             }

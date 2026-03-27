@@ -15,7 +15,7 @@ use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
     AsyncFiniteSourceHandler, JoinHandler, SinkHandler,
 };
-use obzenflow_runtime::stages::common::LivenessRegistry;
+use obzenflow_runtime::stages::LivenessSnapshots;
 use obzenflow_runtime::stages::SourceError;
 use serde_json::json;
 use std::collections::HashSet;
@@ -148,25 +148,26 @@ impl SinkHandler for NoopSink {
     }
 }
 
-fn stage_id_by_name(registry: &LivenessRegistry, name: &str) -> StageId {
-    let guard = registry.read().expect("liveness registry lock");
-    guard
-        .iter()
-        .find_map(|(stage_id, snapshot)| {
-            if snapshot.stage_name == name {
-                Some(*stage_id)
-            } else {
-                None
-            }
-        })
-        .unwrap_or_else(|| panic!("expected stage '{name}' in liveness registry"))
+fn stage_id_by_name(registry: &LivenessSnapshots, name: &str) -> StageId {
+    registry.with_read(|guard| {
+        guard
+            .iter()
+            .find_map(|(stage_id, snapshot)| {
+                if snapshot.stage_name == name {
+                    Some(*stage_id)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| panic!("expected stage '{name}' in liveness snapshots"))
+    })
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn flowip_063e_join_keeps_active_edge_healthy_while_other_edge_idles() {
     let system_journal_slot: Arc<Mutex<Option<Arc<dyn Journal<SystemEvent>>>>> =
         Arc::new(Mutex::new(None));
-    let registry_slot: Arc<Mutex<Option<LivenessRegistry>>> = Arc::new(Mutex::new(None));
+    let registry_slot: Arc<Mutex<Option<LivenessSnapshots>>> = Arc::new(Mutex::new(None));
     let system_journal_slot_hook = system_journal_slot.clone();
     let registry_slot_hook = registry_slot.clone();
 
@@ -176,8 +177,8 @@ async fn flowip_063e_join_keeps_active_edge_healthy_while_other_edge_idles() {
             .lock()
             .expect("system_journal_slot lock") = Some(system_journal);
         let registry = handle
-            .liveness_registry()
-            .expect("liveness registry available");
+            .liveness_snapshots()
+            .expect("liveness snapshots available");
         *registry_slot_hook.lock().expect("registry_slot lock") = Some(registry);
         tokio::spawn(async {})
     });

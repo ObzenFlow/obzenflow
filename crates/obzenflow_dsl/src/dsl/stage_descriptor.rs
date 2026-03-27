@@ -1827,6 +1827,7 @@ mod tests {
     use obzenflow_core::{ChainEvent, EventEnvelope, FlowId};
     use obzenflow_runtime::message_bus::FsmMessageBus;
     use obzenflow_runtime::stages::resources_builder::SubscriptionFactory;
+    use obzenflow_runtime::stages::LivenessSnapshots;
 
     #[derive(Clone, Debug)]
     struct DummyFiniteSource;
@@ -2104,7 +2105,7 @@ mod tests {
             backpressure_writer: Default::default(),
             backpressure_readers: Default::default(),
             backpressure_registry,
-            liveness_registry: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
+            liveness_snapshots: LivenessSnapshots::new(),
             replay_archive: None,
         };
 

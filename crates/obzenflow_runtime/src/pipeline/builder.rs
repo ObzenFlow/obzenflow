@@ -17,7 +17,7 @@ use crate::{
     id_conversions::StageIdExt,
     message_bus::FsmMessageBus,
     stages::common::stage_handle::BoxedStageHandle,
-    stages::common::LivenessRegistry,
+    stages::LivenessSnapshots,
     supervised_base::{
         BuilderError, ChannelBuilder, HandleBuilder, SelfSupervisedExt,
         SelfSupervisedWithExternalEvents, SupervisorBuilder, SupervisorTaskBuilder,
@@ -56,7 +56,7 @@ pub struct PipelineBuilder {
     subgraph_membership: Option<HashMap<StageId, StageSubgraphMembership>>,
     subgraphs: Option<Vec<TopologySubgraphInfo>>,
     backpressure_registry: Option<Arc<BackpressureRegistry>>,
-    liveness_registry: Option<LivenessRegistry>,
+    liveness_snapshots: Option<LivenessSnapshots>,
 }
 
 impl PipelineBuilder {
@@ -82,7 +82,7 @@ impl PipelineBuilder {
             subgraph_membership: None,
             subgraphs: None,
             backpressure_registry: None,
-            liveness_registry: None,
+            liveness_snapshots: None,
         }
     }
 
@@ -166,9 +166,9 @@ impl PipelineBuilder {
         self
     }
 
-    /// Add flow-scoped liveness registry for continuous heartbeat metrics (FLOWIP-063e).
-    pub fn with_liveness_registry(mut self, registry: LivenessRegistry) -> Self {
-        self.liveness_registry = Some(registry);
+    /// Add flow-scoped stage liveness snapshots for continuous heartbeat metrics (FLOWIP-063e).
+    pub fn with_liveness_snapshots(mut self, snapshots: LivenessSnapshots) -> Self {
+        self.liveness_snapshots = Some(snapshots);
         self
     }
 }
@@ -492,7 +492,7 @@ impl SupervisorBuilder for PipelineBuilder {
                 subgraph_membership,
                 subgraphs,
                 system_journal: Some(self.system_journal.clone()),
-                liveness_registry: self.liveness_registry.clone(),
+                liveness_snapshots: self.liveness_snapshots.clone(),
             },
         ))
     }
