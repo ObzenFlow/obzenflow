@@ -72,6 +72,7 @@ pub(super) async fn flush_pending_outputs<
             pending,
             &flow_context,
             ctx.stage_id,
+            ctx.heartbeat.as_ref().map(|h| h.state.clone()),
             &ctx.data_journal,
             &ctx.system_journal,
             ctx.pending_parent.as_ref(),

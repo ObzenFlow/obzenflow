@@ -387,6 +387,7 @@ async fn write_stage_outputs_and_ack<H: JoinHandler>(
             event,
             &flow_context,
             ctx.stage_id,
+            ctx.heartbeat.as_ref().map(|h| h.state.clone()),
             &ctx.data_journal,
             &ctx.system_journal,
             pending_parent,

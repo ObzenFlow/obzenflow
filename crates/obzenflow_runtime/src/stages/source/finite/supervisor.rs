@@ -357,6 +357,7 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> H
                     &mut ctx.pending_outputs,
                     &stage_flow_context,
                     self.stage_id,
+                    None,
                     &ctx.data_journal,
                     &ctx.error_journal,
                     &ctx.system_journal,

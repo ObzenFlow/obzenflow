@@ -21,6 +21,7 @@ use std::sync::Arc;
 
 use crate::backpressure::BackpressureWriter;
 use crate::metrics::instrumentation::StageInstrumentation;
+use crate::stages::common::heartbeat::HeartbeatState;
 
 /// Outcome of attempting to drain a single pending event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,6 +66,7 @@ pub(crate) async fn drain_one_pending(
     pending: ChainEvent,
     flow_context: &FlowContext,
     stage_id: StageId,
+    heartbeat_state: Option<Arc<HeartbeatState>>,
     data_journal: &Arc<dyn Journal<ChainEvent>>,
     system_journal: &Arc<dyn Journal<obzenflow_core::event::SystemEvent>>,
     pending_parent: Option<&EventEnvelope<ChainEvent>>,
@@ -78,6 +80,7 @@ pub(crate) async fn drain_one_pending(
         pending,
         flow_context,
         stage_id,
+        heartbeat_state,
         data_journal,
         system_journal,
         pending_parent,
@@ -109,6 +112,7 @@ pub(crate) async fn drain_one_pending_resolve(
     pending: ChainEvent,
     flow_context: &FlowContext,
     stage_id: StageId,
+    heartbeat_state: Option<Arc<HeartbeatState>>,
     data_journal: &Arc<dyn Journal<ChainEvent>>,
     system_journal: &Arc<dyn Journal<obzenflow_core::event::SystemEvent>>,
     pending_parent: Option<&EventEnvelope<ChainEvent>>,
@@ -164,6 +168,9 @@ pub(crate) async fn drain_one_pending_resolve(
             .append(enriched, pending_parent)
             .await
             .map_err(|e| format!("Failed to write pending output: {e}"))?;
+        if let Some(state) = &heartbeat_state {
+            state.record_last_output(written.event.id);
+        }
         reservation.commit(1);
         backpressure_backoff.reset();
         crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
@@ -183,6 +190,9 @@ pub(crate) async fn drain_one_pending_resolve(
             .append(enriched, pending_parent)
             .await
             .map_err(|e| format!("Failed to write pending output: {e}"))?;
+        if let Some(state) = &heartbeat_state {
+            state.record_last_output(written.event.id);
+        }
         crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
             &written,
             system_journal,

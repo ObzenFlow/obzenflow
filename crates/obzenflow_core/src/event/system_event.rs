@@ -329,7 +329,7 @@ pub enum MetricsCoordinationEvent {
     Exported { watermark: VectorClock },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum StageActivity {
     /// Supervisor is polling for events (dispatch loop is running normally).
@@ -342,7 +342,7 @@ pub enum StageActivity {
     Completed,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EdgeLivenessState {
     /// Edge is healthy: data is flowing or the edge is idle within expected bounds.

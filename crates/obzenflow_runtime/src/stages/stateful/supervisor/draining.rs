@@ -52,6 +52,7 @@ pub(super) async fn dispatch_draining<
             pending,
             &flow_context,
             sup.stage_id,
+            ctx.heartbeat.as_ref().map(|h| h.state.clone()),
             &ctx.data_journal,
             &ctx.system_journal,
             ctx.last_consumed_envelope.as_ref(),

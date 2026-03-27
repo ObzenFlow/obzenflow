@@ -81,6 +81,7 @@ pub struct HeartbeatState {
     processing_event_id: Mutex<Option<EventId>>,
     processing_upstream: Mutex<Option<StageId>>,
     last_consumed_event_id: Mutex<Option<EventId>>,
+    last_output_event_id: Mutex<Option<EventId>>,
     edges: Vec<EdgeProgress>,
     edge_index: HashMap<StageId, usize>,
 }
@@ -103,6 +104,7 @@ impl HeartbeatState {
             processing_event_id: Mutex::new(None),
             processing_upstream: Mutex::new(None),
             last_consumed_event_id: Mutex::new(None),
+            last_output_event_id: Mutex::new(None),
             edges,
             edge_index,
         })
@@ -168,6 +170,13 @@ impl HeartbeatState {
             .last_consumed_event_id
             .lock()
             .expect("last_consumed_event_id lock") = Some(event_id);
+    }
+
+    pub fn record_last_output(&self, event_id: EventId) {
+        *self
+            .last_output_event_id
+            .lock()
+            .expect("last_output_event_id lock") = Some(event_id);
     }
 
     fn now_offset_ms(&self) -> u64 {
@@ -368,11 +377,11 @@ pub fn spawn_heartbeat(
                             let last_reader_seq = state_for_task.edge_reader_seq(index);
                             let last_event_id = state_for_task.edge_last_event_id(index);
 
-                            let state_for_registry = if let Some(state) = &stable_state_for_tick {
-                                state.clone()
-                            } else if processing_below_warn
-                                && processing_upstream.is_some_and(|u| u == edge.upstream)
-                            {
+                                let state_for_registry = if let Some(state) = stable_state_for_tick {
+                                    state
+                                } else if processing_below_warn
+                                    && processing_upstream.is_some_and(|u| u == edge.upstream)
+                                {
                                 // Keep the active upstream edge healthy while an event is in-flight.
                                 EdgeLivenessState::Healthy
                             } else if idle_ms >= config.idle_threshold.as_millis() as u64 {
@@ -400,28 +409,28 @@ pub fn spawn_heartbeat(
                                 stage_id,
                                 stage_name: stage_name.clone(),
                                 heartbeat_seq,
-                                activity: activity.clone(),
-                                handler_blocked_ms,
-                                edges: edges_snapshot.clone(),
-                            },
-                        );
-                    }
+                                    activity,
+                                    handler_blocked_ms,
+                                    edges: edges_snapshot.clone(),
+                                },
+                            );
+                        }
 
                     // Journal only EdgeLiveness transitions (FLOWIP-063e).
-                    for (index, edge_snapshot) in edges_snapshot.iter().enumerate() {
-                        let stable_state = edge_snapshot.state.clone();
+                        for (index, edge_snapshot) in edges_snapshot.iter().enumerate() {
+                            let stable_state = edge_snapshot.state;
 
                         if prev_stable_states[index] == stable_state {
                             continue;
                         }
 
-                        let emitted_state = if stable_state == EdgeLivenessState::Healthy
-                            && prev_stable_states[index] != EdgeLivenessState::Healthy
-                        {
-                            EdgeLivenessState::Recovered
-                        } else {
-                            stable_state.clone()
-                        };
+                            let emitted_state = if stable_state == EdgeLivenessState::Healthy
+                                && prev_stable_states[index] != EdgeLivenessState::Healthy
+                            {
+                                EdgeLivenessState::Recovered
+                            } else {
+                                stable_state
+                            };
 
                         let system_event = SystemEvent::new(
                             writer_id,
