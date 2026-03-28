@@ -1068,7 +1068,7 @@ impl FlowApplication {
                             *stage_id,
                             stage
                                 .handler_blocked_ms
-                                .map(|ms| ms as f64 / 1000.0)
+                                .map(|ms| ms.0 as f64 / 1000.0)
                                 .unwrap_or(0.0),
                         );
 
@@ -1089,7 +1089,7 @@ impl FlowApplication {
                         snapshot
                             .liveness_metrics
                             .edge_idle_seconds
-                            .insert((edge.upstream, edge.reader), edge.idle_ms as f64 / 1000.0);
+                            .insert((edge.upstream, edge.reader), edge.idle_ms.0 as f64 / 1000.0);
                     }
                 }
             });

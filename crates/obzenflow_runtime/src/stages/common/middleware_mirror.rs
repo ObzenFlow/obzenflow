@@ -6,6 +6,7 @@ use obzenflow_core::event::payloads::observability_payload::{
     BackpressureEvent, CircuitBreakerEvent, MiddlewareLifecycle, ObservabilityPayload,
     RateLimiterEvent,
 };
+use obzenflow_core::event::types::SeqNo;
 use obzenflow_core::event::{ChainEventContent, SystemEvent, SystemEventType, WriterId};
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{ChainEvent, EventEnvelope};
@@ -59,7 +60,7 @@ pub async fn mirror_middleware_event_to_system_journal(
     let origin = obzenflow_core::event::system_event::MiddlewareEventOrigin {
         event_id: envelope.event.id,
         writer_key: writer_key.clone(),
-        seq: envelope.vector_clock.get(&writer_key),
+        seq: SeqNo(envelope.vector_clock.get(&writer_key)),
     };
 
     let event = SystemEvent::new(

@@ -3,7 +3,7 @@
 // https://obzenflow.dev
 
 use obzenflow_core::event::system_event::{EdgeLivenessState, StageActivity, SystemEvent};
-use obzenflow_core::event::types::SeqNo;
+use obzenflow_core::event::types::{DurationMs, SeqNo};
 use obzenflow_core::event::{EventId, SystemEventType, WriterId};
 use obzenflow_core::journal::Journal;
 use obzenflow_core::StageId;
@@ -187,7 +187,7 @@ impl HeartbeatState {
             .unwrap_or(u64::MAX)
     }
 
-    fn handler_blocked_ms(&self) -> Option<u64> {
+    fn handler_blocked_ms(&self) -> Option<DurationMs> {
         if self.handler_activity.load(Ordering::Acquire) != HANDLER_ACTIVITY_PROCESSING {
             return None;
         }
@@ -197,13 +197,13 @@ impl HeartbeatState {
             .lock()
             .expect("handler_entered_at lock");
         let entered_at = (*entered_at)?;
-        Some(
+        Some(DurationMs(
             Instant::now()
                 .duration_since(entered_at)
                 .as_millis()
                 .try_into()
                 .unwrap_or(u64::MAX),
-        )
+        ))
     }
 
     fn current_activity(&self) -> StageActivity {
@@ -223,7 +223,7 @@ impl HeartbeatState {
                     .lock()
                     .expect("processing_event_id lock")
                     .unwrap_or_default();
-                let elapsed_ms = self.handler_blocked_ms().unwrap_or(0);
+                let elapsed_ms = self.handler_blocked_ms().unwrap_or(DurationMs(0));
                 StageActivity::Processing {
                     event_id,
                     elapsed_ms,
@@ -240,15 +240,15 @@ impl HeartbeatState {
             .expect("processing_upstream lock")
     }
 
-    fn edge_idle_ms(&self, index: usize) -> u64 {
+    fn edge_idle_ms(&self, index: usize) -> DurationMs {
         let last = self.edges[index]
             .last_read_offset_ms
             .load(Ordering::Relaxed);
-        self.now_offset_ms().saturating_sub(last)
+        DurationMs(self.now_offset_ms().saturating_sub(last))
     }
 
-    fn edge_reader_seq(&self, index: usize) -> u64 {
-        self.edges[index].reader_seq.load(Ordering::Relaxed)
+    fn edge_reader_seq(&self, index: usize) -> SeqNo {
+        SeqNo(self.edges[index].reader_seq.load(Ordering::Relaxed))
     }
 
     fn edge_last_event_id(&self, index: usize) -> Option<EventId> {
@@ -281,8 +281,8 @@ pub struct EdgeLivenessSnapshot {
     pub upstream: StageId,
     pub reader: StageId,
     pub state: EdgeLivenessState,
-    pub idle_ms: u64,
-    pub last_reader_seq: u64,
+    pub idle_ms: DurationMs,
+    pub last_reader_seq: SeqNo,
     pub last_event_id: Option<EventId>,
 }
 
@@ -290,9 +290,9 @@ pub struct EdgeLivenessSnapshot {
 pub struct StageLivenessSnapshot {
     pub stage_id: StageId,
     pub stage_name: String,
-    pub heartbeat_seq: u64,
+    pub heartbeat_seq: SeqNo,
     pub activity: StageActivity,
-    pub handler_blocked_ms: Option<u64>,
+    pub handler_blocked_ms: Option<DurationMs>,
     pub edges: Vec<EdgeLivenessSnapshot>,
 }
 
@@ -373,14 +373,14 @@ pub fn spawn_heartbeat(
             return;
         }
 
-        let mut heartbeat_seq: u64 = 0;
+        let mut heartbeat_seq = SeqNo(0);
         let mut prev_stable_states: Vec<EdgeLivenessState> =
             vec![EdgeLivenessState::Healthy; state_for_task.edges.len()];
 
         loop {
             tokio::select! {
                 _ = tokio::time::sleep(config.interval) => {
-                    heartbeat_seq = heartbeat_seq.saturating_add(1);
+                    heartbeat_seq.0 = heartbeat_seq.0.saturating_add(1);
 
                     let activity = state_for_task.current_activity();
                     let handler_blocked_ms = state_for_task.handler_blocked_ms();
@@ -391,9 +391,9 @@ pub fn spawn_heartbeat(
                         Some(ms) => {
                             let warn_ms = config.handler_warn_threshold.as_millis() as u64;
                             let stall_ms = config.handler_stall_threshold.as_millis() as u64;
-                            if ms >= stall_ms {
+                            if ms.0 >= stall_ms {
                                 Some(EdgeLivenessState::Stalled)
-                            } else if ms >= warn_ms {
+                            } else if ms.0 >= warn_ms {
                                 Some(EdgeLivenessState::Suspect)
                             } else {
                                 None
@@ -420,7 +420,7 @@ pub fn spawn_heartbeat(
                             {
                                 // Keep the active upstream edge healthy while an event is in-flight.
                                 EdgeLivenessState::Healthy
-                            } else if idle_ms >= config.idle_threshold.as_millis() as u64 {
+                            } else if idle_ms.0 >= config.idle_threshold.as_millis() as u64 {
                                 EdgeLivenessState::Idle
                             } else {
                                 EdgeLivenessState::Healthy
@@ -472,7 +472,7 @@ pub fn spawn_heartbeat(
                                 reader: stage_id,
                                 state: emitted_state,
                                 idle_ms: edge_snapshot.idle_ms,
-                                last_reader_seq: Some(SeqNo(edge_snapshot.last_reader_seq)),
+                                last_reader_seq: Some(edge_snapshot.last_reader_seq),
                                 last_event_id: edge_snapshot.last_event_id,
                             },
                         );

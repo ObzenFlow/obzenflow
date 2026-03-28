@@ -12,6 +12,7 @@ use crate::messaging::system_subscription::SystemSubscription;
 use crate::metrics::MetricsHandle;
 use crate::stages::common::stage_handle::{StageError, STOP_REASON_TIMEOUT, STOP_REASON_USER_STOP};
 use crate::supervised_base::SupervisorHandle;
+use obzenflow_core::event::types::DurationMs;
 use obzenflow_core::event::{
     ChainEvent, ChainEventFactory, SystemEvent, SystemEventFactory, WriterId,
 };
@@ -577,9 +578,10 @@ impl FsmAction for PipelineAction {
 
                 let (mode_label, timeout_ms) = match mode {
                     FlowStopMode::Cancel => ("cancel".to_string(), None),
-                    FlowStopMode::Graceful { timeout } => {
-                        ("graceful".to_string(), Some(timeout.as_millis() as u64))
-                    }
+                    FlowStopMode::Graceful { timeout } => (
+                        "graceful".to_string(),
+                        Some(DurationMs(timeout.as_millis() as u64)),
+                    ),
                 };
 
                 let stop_requested =

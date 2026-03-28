@@ -6,6 +6,7 @@ use chrono::Utc;
 use crc32fast::Hasher;
 use obzenflow_core::build_info::OBZENFLOW_VERSION;
 use obzenflow_core::event::context::StageType;
+use obzenflow_core::event::types::DurationMs;
 use obzenflow_core::event::vector_clock::VectorClock;
 use obzenflow_core::event::{PipelineLifecycleEvent, SystemEvent, SystemEventType};
 use obzenflow_core::id::{JournalId, SystemId};
@@ -58,7 +59,7 @@ fn write_system_log_completed(dir: &Path) {
     let event = SystemEvent::new(
         writer_id,
         SystemEventType::PipelineLifecycle(PipelineLifecycleEvent::Completed {
-            duration_ms: 1,
+            duration_ms: DurationMs(1),
             metrics: obzenflow_core::metrics::FlowLifecycleMetricsSnapshot {
                 events_in_total: 0,
                 events_out_total: 0,
@@ -129,7 +130,7 @@ async fn open_requires_completed_status_by_default() {
         writer_id,
         SystemEventType::PipelineLifecycle(PipelineLifecycleEvent::Failed {
             reason: "boom".to_string(),
-            duration_ms: 1,
+            duration_ms: DurationMs(1),
             metrics: None,
             failure_cause: None,
         }),

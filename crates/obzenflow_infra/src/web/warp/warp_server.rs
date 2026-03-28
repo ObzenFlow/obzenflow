@@ -2866,7 +2866,7 @@ fn map_system_event_to_sse(
             }
 
             if let Some(payload) =
-                middleware_state.project_middleware_event(*stage_id, origin.seq, middleware)
+                middleware_state.project_middleware_event(*stage_id, origin.seq.0, middleware)
             {
                 if let Some(payload_obj) = payload.as_object() {
                     for (key, value) in payload_obj {
@@ -3368,7 +3368,7 @@ impl MiddlewareSseState {
             flow_name.as_deref(),
             None,
         );
-        self.apply_middleware_event(*stage_id, origin.seq, middleware);
+        self.apply_middleware_event(*stage_id, origin.seq.0, middleware);
     }
 
     fn observe_middleware_metadata(
